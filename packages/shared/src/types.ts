@@ -138,6 +138,7 @@ export interface ServerToClientEvents {
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => void;
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;
   'voice:signal': (data: { from: string; signal: unknown }) => void;
+  'pong:latency': (timestamp: number) => void;
   'typing:start': (data: { channelId: string; userId: string; username: string }) => void;
   'typing:stop': (data: { channelId: string; userId: string }) => void;
 }
@@ -151,6 +152,7 @@ export interface ClientToServerEvents {
   'voice:deaf': (deafened: boolean) => void;
   'voice:speaking': (speaking: boolean) => void;
   'voice:signal': (data: { to: string; signal: unknown }) => void;
+  'ping:latency': (timestamp: number) => void;
   'typing:start': (channelId: string) => void;
   'typing:stop': (channelId: string) => void;
 }

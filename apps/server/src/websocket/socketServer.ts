@@ -106,6 +106,11 @@ export function initSocketServer(httpServer: HttpServer) {
       socket.to(`channel:${channelId}`).emit('typing:stop', { channelId, userId });
     });
 
+    // ─── Latency measurement ────────────────────────────────────────
+    socket.on('ping:latency', (ts) => {
+      socket.emit('pong:latency', ts);
+    });
+
     // ─── Voice events ───────────────────────────────────────────────
     handleVoiceEvents(io, socket);
 

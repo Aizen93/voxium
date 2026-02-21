@@ -3,6 +3,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { Hash, Volume2, Plus, ChevronDown, Settings, MicOff, UserPlus } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { clsx } from 'clsx';
@@ -189,7 +190,11 @@ export function ChannelSidebar() {
           <p className="truncate text-xs font-medium text-vox-text-primary">{user?.displayName || 'User'}</p>
           <p className="truncate text-[10px] text-vox-text-muted">Online</p>
         </div>
-        <button className="text-vox-text-muted hover:text-vox-text-primary transition-colors">
+        <button
+          onClick={() => useSettingsStore.getState().openSettings()}
+          className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
+          title="Audio Settings"
+        >
           <Settings size={14} />
         </button>
       </div>

@@ -9,10 +9,13 @@ import { ChannelSidebar } from '../channel/ChannelSidebar';
 import { ChatArea } from '../chat/ChatArea';
 import { MemberSidebar } from '../server/MemberSidebar';
 import { VoicePanel } from '../voice/VoicePanel';
+import { SettingsModal } from '../settings/SettingsModal';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 export function MainLayout() {
   const { fetchServers, activeServerId } = useServerStore();
   const { user } = useAuthStore();
+  const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
   const listenersSetUp = useRef(false);
 
   // Set local user ID in voice store
@@ -131,6 +134,7 @@ export function MainLayout() {
       </div>
       {activeServerId && <MemberSidebar />}
       <VoicePanel />
+      {isSettingsOpen && <SettingsModal />}
     </div>
   );
 }

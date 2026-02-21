@@ -1,24 +1,41 @@
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useServerStore } from '../../stores/serverStore';
-import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Signal } from 'lucide-react';
+import { useAuthStore } from '../../stores/authStore';
+import { useLocalAudioLevel } from '../../hooks/useLocalAudioLevel';
+import { ConnectionQuality } from './ConnectionQuality';
+import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export function VoicePanel() {
-  const { activeChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf, leaveChannel } = useVoiceStore();
+  const { activeChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf, leaveChannel, latency } = useVoiceStore();
   const { channels } = useServerStore();
+  const { user } = useAuthStore();
+  const localAudioLevel = useLocalAudioLevel();
 
   if (!activeChannelId) return null;
 
   const channel = channels.find((c) => c.id === activeChannelId);
   const users = channelUsers.get(activeChannelId) || [];
 
+  const latencyColor = latency === null ? 'text-vox-text-muted' :
+    latency < 100 ? 'text-vox-voice-connected' :
+    latency < 200 ? 'text-vox-accent-warning' :
+    'text-vox-accent-danger';
+
   return (
     <div className="fixed bottom-0 left-[72px] w-60 border-t border-vox-border bg-vox-sidebar">
       {/* Voice Connected Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-vox-border">
-        <Signal size={14} className="text-vox-voice-connected" />
+        <ConnectionQuality latency={latency} />
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-semibold text-vox-voice-connected">Voice Connected</p>
+          <div className="flex items-center gap-1.5">
+            <p className="text-xs font-semibold text-vox-voice-connected">Voice Connected</p>
+            {latency !== null && (
+              <span className={clsx('text-[10px] font-medium', latencyColor)}>
+                {latency}ms
+              </span>
+            )}
+          </div>
           <p className="truncate text-[10px] text-vox-text-muted">
             {channel?.name || 'Voice Channel'}
           </p>
@@ -35,26 +52,31 @@ export function VoicePanel() {
       {/* Voice Users */}
       {users.length > 0 && (
         <div className="max-h-32 overflow-y-auto px-2 py-1">
-          {users.map((user) => (
-            <div key={user.id} className="flex items-center gap-2 rounded px-2 py-1">
-              <div className={clsx(
-                'h-6 w-6 rounded-full flex items-center justify-center text-[10px] font-semibold text-white ring-2',
-                user.speaking ? 'ring-vox-voice-speaking bg-vox-voice-speaking' :
-                user.selfMute ? 'ring-vox-voice-muted bg-vox-bg-hover' :
-                'ring-transparent bg-vox-accent-primary'
-              )}>
-                {user.displayName?.[0]?.toUpperCase() || '?'}
+          {users.map((voiceUser) => {
+            const isLocal = voiceUser.id === user?.id;
+            const isSpeaking = isLocal ? (localAudioLevel > 0.05 && !selfMute) : voiceUser.speaking;
+
+            return (
+              <div key={voiceUser.id} className="flex items-center gap-2 rounded px-2 py-1">
+                <div className={clsx(
+                  'h-6 w-6 rounded-full flex items-center justify-center text-[10px] font-semibold text-white ring-2 transition-all',
+                  isSpeaking ? 'ring-vox-voice-speaking bg-vox-voice-speaking' :
+                  voiceUser.selfMute ? 'ring-vox-voice-muted bg-vox-bg-hover' :
+                  'ring-transparent bg-vox-accent-primary'
+                )}>
+                  {voiceUser.displayName?.[0]?.toUpperCase() || '?'}
+                </div>
+                <span className={clsx(
+                  'text-xs truncate flex-1',
+                  voiceUser.selfMute ? 'text-vox-text-muted' : 'text-vox-text-primary'
+                )}>
+                  {voiceUser.displayName}
+                </span>
+                {voiceUser.selfMute && <MicOff size={12} className="text-vox-voice-muted" />}
+                {voiceUser.selfDeaf && <HeadphoneOff size={12} className="text-vox-voice-muted" />}
               </div>
-              <span className={clsx(
-                'text-xs truncate flex-1',
-                user.selfMute ? 'text-vox-text-muted' : 'text-vox-text-primary'
-              )}>
-                {user.displayName}
-              </span>
-              {user.selfMute && <MicOff size={12} className="text-vox-voice-muted" />}
-              {user.selfDeaf && <HeadphoneOff size={12} className="text-vox-voice-muted" />}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

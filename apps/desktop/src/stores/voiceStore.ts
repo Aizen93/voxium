@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { getSocket } from '../services/socket';
+import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold } from '../services/audioAnalyser';
+import { useSettingsStore } from './settingsStore';
 import type { VoiceUser } from '@voxium/shared';
 
 const ICE_SERVERS: RTCIceServer[] = [
@@ -18,6 +20,7 @@ interface VoiceState {
   selfMute: boolean;
   selfDeaf: boolean;
   localStream: MediaStream | null;
+  latency: number | null;
 
   channelUsers: Map<string, VoiceUser[]>;
 
@@ -40,7 +43,13 @@ interface VoiceState {
   createPeer: (targetUserId: string, initiator: boolean) => void;
   destroyPeer: (userId: string) => void;
   destroyAllPeers: () => void;
+
+  startLatencyMeasurement: () => void;
+  stopLatencyMeasurement: () => void;
 }
+
+let latencyInterval: ReturnType<typeof setInterval> | null = null;
+let pongHandler: ((timestamp: number) => void) | null = null;
 
 function getAudioContainer(): HTMLElement {
   let container = document.getElementById('vox-audio-container');
@@ -53,12 +62,21 @@ function getAudioContainer(): HTMLElement {
   return container;
 }
 
+function applyOutputDevice(audio: HTMLAudioElement, deviceId: string) {
+  if (deviceId && typeof (audio as any).setSinkId === 'function') {
+    (audio as any).setSinkId(deviceId).catch((err: Error) => {
+      console.warn('[Voice] Failed to set output device:', err);
+    });
+  }
+}
+
 export const useVoiceStore = create<VoiceState>((set, get) => ({
   localUserId: null,
   activeChannelId: null,
   selfMute: false,
   selfDeaf: false,
   localStream: null,
+  latency: null,
   channelUsers: new Map(),
   peers: new Map(),
   remoteAudios: new Map(),
@@ -73,16 +91,21 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       get().leaveChannel();
     }
 
+    const settings = useSettingsStore.getState();
+    setNoiseGateThreshold(settings.noiseGateThreshold);
+
     let stream: MediaStream | null = null;
     try {
       if (navigator.mediaDevices?.getUserMedia) {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
+        const audioConstraints: MediaTrackConstraints = {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        };
+        if (settings.audioInputDeviceId) {
+          audioConstraints.deviceId = { exact: settings.audioInputDeviceId };
+        }
+        stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
         console.log('[Voice] Joined channel, local stream tracks:', stream.getTracks().length);
       } else {
         console.warn('[Voice] getUserMedia not available (insecure context?), joining in listen-only mode');
@@ -91,13 +114,22 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       console.warn('[Voice] Microphone access denied, joining in listen-only mode:', err);
     }
 
+    if (stream) {
+      startSpeakingDetection(stream);
+    }
+
     set({ activeChannelId: channelId, localStream: stream, selfMute: !stream });
     socket.emit('voice:join', channelId);
+
+    get().startLatencyMeasurement();
   },
 
   leaveChannel: () => {
     const socket = getSocket();
     const { localStream, activeChannelId, localUserId } = get();
+
+    get().stopLatencyMeasurement();
+    stopSpeakingDetection();
 
     // Immediately remove local user from channelUsers (don't wait for server event)
     if (activeChannelId && localUserId) {
@@ -119,6 +151,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       localStream: null,
       selfMute: false,
       selfDeaf: false,
+      latency: null,
     });
   },
 
@@ -131,6 +164,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       localStream.getAudioTracks().forEach((track) => {
         track.enabled = !newMute;
       });
+
+      if (newMute) {
+        stopSpeakingDetection();
+      } else {
+        const settings = useSettingsStore.getState();
+        setNoiseGateThreshold(settings.noiseGateThreshold);
+        startSpeakingDetection(localStream);
+      }
     }
 
     if (socket) {
@@ -154,6 +195,39 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     set({ selfDeaf: newDeaf });
+  },
+
+  startLatencyMeasurement: () => {
+    get().stopLatencyMeasurement();
+
+    const socket = getSocket();
+    if (!socket) return;
+
+    pongHandler = (timestamp: number) => {
+      const rtt = Date.now() - timestamp;
+      set({ latency: rtt });
+    };
+    socket.on('pong:latency', pongHandler);
+
+    // Send initial ping immediately
+    socket.emit('ping:latency', Date.now());
+
+    latencyInterval = setInterval(() => {
+      const s = getSocket();
+      if (s) s.emit('ping:latency', Date.now());
+    }, 5000);
+  },
+
+  stopLatencyMeasurement: () => {
+    if (latencyInterval !== null) {
+      clearInterval(latencyInterval);
+      latencyInterval = null;
+    }
+    if (pongHandler) {
+      const socket = getSocket();
+      if (socket) socket.off('pong:latency', pongHandler);
+      pongHandler = null;
+    }
   },
 
   setChannelUsers: (channelId: string, users: VoiceUser[]) => {
@@ -230,7 +304,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const data = signal as { type: string; sdp?: string; candidate?: RTCIceCandidateInit };
     console.log(`[Voice] handleSignal from ${from}:`, data.type || 'ice-candidate');
 
-    const { peers, localStream } = get();
+    const { peers } = get();
     let peerConn = peers.get(from);
 
     // If we get an offer and have no peer, create a non-initiator peer
@@ -278,6 +352,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   createPeer: (targetUserId: string, initiator: boolean) => {
     const { localStream, peers, selfDeaf } = get();
+    const outputDeviceId = useSettingsStore.getState().audioOutputDeviceId;
 
     if (peers.has(targetUserId)) {
       console.log('[Voice] createPeer: destroying existing peer for', targetUserId);
@@ -349,6 +424,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       audio.srcObject = remoteStream;
       container.appendChild(audio);
 
+      applyOutputDevice(audio, outputDeviceId);
+
       const newAudios = new Map(remoteAudios);
       newAudios.set(targetUserId, audio);
       set({ remoteAudios: newAudios });
@@ -419,3 +496,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({ peers: new Map(), remoteAudios: new Map() });
   },
 }));
+
+// Subscribe to output device changes and update all existing remote audio elements
+useSettingsStore.subscribe((state, prevState) => {
+  if (state.audioOutputDeviceId !== prevState.audioOutputDeviceId) {
+    const { remoteAudios } = useVoiceStore.getState();
+    remoteAudios.forEach((audio) => {
+      applyOutputDevice(audio, state.audioOutputDeviceId);
+    });
+  }
+});

@@ -34,7 +34,7 @@ export default {
           border: '#2a2a4a',
           voice: {
             connected: '#3eba68',
-            speaking: '#5b5bf7',
+            speaking: '#3eba68',
             muted: '#ed4245',
           },
         },
