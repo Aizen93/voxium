@@ -1,0 +1,666 @@
+# Voxium - Architecture Document
+
+## Table of Contents
+
+1. [System Overview](#system-overview)
+2. [High-Level Architecture](#high-level-architecture)
+3. [Technology Stack](#technology-stack)
+4. [Backend Architecture](#backend-architecture)
+5. [Frontend Architecture](#frontend-architecture)
+6. [Database Design](#database-design)
+7. [Real-Time Communication](#real-time-communication)
+8. [Voice Architecture](#voice-architecture)
+9. [Authentication & Security](#authentication--security)
+10. [Scalability Strategy](#scalability-strategy)
+11. [Deployment Architecture](#deployment-architecture)
+12. [Future Architecture](#future-architecture)
+
+---
+
+## System Overview
+
+Voxium is a real-time communication platform enabling users to create communities (servers), organize conversations into channels, and communicate via text messages and voice chat. The system is designed to handle 1,000+ concurrent users in V1, with a clear path to scale to millions.
+
+### Core Principles
+
+- **Real-time first:** All interactions are immediately reflected across connected clients
+- **Low latency:** Voice and messaging prioritize sub-100ms delivery
+- **Horizontal scalability:** Stateless services behind load balancers
+- **Cross-platform:** Single codebase serves Windows, macOS, Linux (and future mobile)
+- **Security:** JWT auth, input validation, rate limiting, CORS protection
+
+---
+
+## High-Level Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                           CLIENTS                                    │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────────────┐  │
+│  │ Windows  │  │  macOS   │  │  Linux   │  │ Web (future)       │  │
+│  │ (Tauri)  │  │ (Tauri)  │  │ (Tauri)  │  │ (same React app)  │  │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬───────────┘  │
+│       │              │              │                  │              │
+│       └──────────────┴──────────────┴──────────────────┘              │
+│                              │                                        │
+│               ┌──────────────┴──────────────┐                        │
+│               │    HTTPS + WebSocket        │                        │
+│               │    (REST API + Socket.IO)   │                        │
+│               └──────────────┬──────────────┘                        │
+└──────────────────────────────┼───────────────────────────────────────┘
+                               │
+┌──────────────────────────────┼───────────────────────────────────────┐
+│                         BACKEND                                       │
+│               ┌──────────────┴──────────────┐                        │
+│               │      Load Balancer          │                        │
+│               │   (nginx / Cloudflare)      │                        │
+│               └──────┬───────────┬──────────┘                        │
+│                      │           │                                    │
+│            ┌─────────┴──┐  ┌────┴──────────┐                        │
+│            │  API Node  │  │  API Node     │  ← Horizontally        │
+│            │  (Express) │  │  (Express)    │    scalable             │
+│            │  Socket.IO │  │  Socket.IO    │                        │
+│            └─────┬──────┘  └────┬──────────┘                        │
+│                  │              │                                     │
+│           ┌──────┴──────────────┴───────┐                            │
+│           │     Redis (Pub/Sub +        │                            │
+│           │     Presence + Cache)       │                            │
+│           └──────┬──────────────────────┘                            │
+│                  │                                                    │
+│           ┌──────┴──────────────────────┐                            │
+│           │     PostgreSQL              │                            │
+│           │     (Primary data store)    │                            │
+│           └─────────────────────────────┘                            │
+│                                                                       │
+│           ┌─────────────────────────────┐                            │
+│           │     SFU Media Server        │  ← mediasoup (future)     │
+│           │     (Voice/Video routing)   │                            │
+│           └─────────────────────────────┘                            │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Technology Stack
+
+### Backend
+| Layer | Technology | Version |
+|-------|-----------|---------|
+| Runtime | Node.js | 20+ |
+| Language | TypeScript | 5.6+ |
+| HTTP Framework | Express.js | 4.x |
+| WebSocket | Socket.IO | 4.8 |
+| ORM | Prisma | 6.x |
+| Database | PostgreSQL | 16 |
+| Cache / Pub/Sub | Redis | 7 |
+| Voice (future) | mediasoup | 3.x |
+| Auth | JWT (jsonwebtoken) | 9.x |
+| Validation | Zod + custom validators | — |
+| Password Hashing | bcryptjs | — |
+
+### Frontend
+| Layer | Technology | Version |
+|-------|-----------|---------|
+| Framework | React | 19 |
+| Language | TypeScript | 5.6+ |
+| Build Tool | Vite | 6.x |
+| Desktop Shell | Tauri | 2.x |
+| Styling | Tailwind CSS | 3.4 |
+| State | Zustand | 5.x |
+| Routing | React Router | 7.x |
+| HTTP Client | Axios | 1.x |
+| WebSocket Client | socket.io-client | 4.8 |
+| WebRTC | simple-peer | 9.x |
+| Icons | Lucide React | — |
+
+### Infrastructure
+| Component | Technology |
+|-----------|-----------|
+| Containers | Docker + Docker Compose |
+| Orchestration (future) | Kubernetes |
+| CI/CD (future) | GitHub Actions |
+| Monitoring (future) | Prometheus + Grafana |
+
+---
+
+## Backend Architecture
+
+### Directory Structure
+
+```
+apps/server/
+├── prisma/
+│   ├── schema.prisma       # Database schema
+│   └── seed.ts             # Demo data seeder
+├── src/
+│   ├── index.ts            # Entry point, server bootstrap
+│   ├── app.ts              # Express app configuration, middleware, routes
+│   ├── routes/
+│   │   ├── auth.ts         # Register, login, refresh, me
+│   │   ├── servers.ts      # CRUD servers, join/leave, members
+│   │   ├── channels.ts     # CRUD channels
+│   │   ├── messages.ts     # CRUD messages with pagination
+│   │   ├── users.ts        # User profiles
+│   │   └── invites.ts      # Create/use/preview invites
+│   ├── services/
+│   │   └── authService.ts  # Auth business logic
+│   ├── middleware/
+│   │   ├── auth.ts         # JWT authentication middleware
+│   │   └── errorHandler.ts # Global error handler
+│   ├── websocket/
+│   │   ├── socketServer.ts # Socket.IO setup, connection handler
+│   │   └── voiceHandler.ts # Voice channel state management
+│   └── utils/
+│       ├── prisma.ts       # Prisma client singleton
+│       ├── redis.ts        # Redis client + presence helpers
+│       └── errors.ts       # Custom error classes
+```
+
+### Request Flow
+
+```
+Client Request
+    │
+    ▼
+Express Middleware Pipeline
+    │
+    ├── helmet()          → Security headers
+    ├── cors()            → CORS validation
+    ├── morgan()          → Request logging
+    ├── express.json()    → Body parsing
+    ├── cookieParser()    → Cookie parsing
+    │
+    ▼
+Route Handler
+    │
+    ├── authenticate()    → JWT verification (protected routes)
+    ├── Business Logic    → Database queries via Prisma
+    │
+    ▼
+Response / Error Handler
+```
+
+### Error Handling
+
+Custom error classes provide structured HTTP error responses:
+
+```typescript
+AppError (base)
+├── BadRequestError     (400)
+├── UnauthorizedError   (401)
+├── ForbiddenError      (403)
+├── NotFoundError       (404)
+└── ConflictError       (409)
+```
+
+All unhandled errors return a generic 500 response without leaking internals.
+
+---
+
+## Frontend Architecture
+
+### Directory Structure
+
+```
+apps/desktop/
+├── src/
+│   ├── main.tsx              # React entry point
+│   ├── App.tsx               # Root component with routing
+│   ├── pages/
+│   │   ├── LoginPage.tsx     # Login form
+│   │   └── RegisterPage.tsx  # Registration form
+│   ├── components/
+│   │   ├── layout/
+│   │   │   └── MainLayout.tsx    # 3-panel Discord-like layout
+│   │   ├── server/
+│   │   │   ├── ServerSidebar.tsx  # Server icon strip (far left)
+│   │   │   ├── CreateServerModal.tsx
+│   │   │   └── MemberSidebar.tsx  # Member list (far right)
+│   │   ├── channel/
+│   │   │   └── ChannelSidebar.tsx # Channel list (left panel)
+│   │   ├── chat/
+│   │   │   ├── ChatArea.tsx       # Chat container
+│   │   │   ├── MessageList.tsx    # Scrollable message list
+│   │   │   └── MessageInput.tsx   # Message composer
+│   │   └── voice/
+│   │       └── VoicePanel.tsx     # Voice connection controls
+│   ├── stores/
+│   │   ├── authStore.ts      # Auth state (user, tokens)
+│   │   ├── serverStore.ts    # Server/channel state
+│   │   ├── chatStore.ts      # Messages and typing
+│   │   └── voiceStore.ts     # Voice connection state
+│   ├── services/
+│   │   ├── api.ts            # Axios instance with interceptors
+│   │   └── socket.ts         # Socket.IO client manager
+│   └── styles/
+│       └── globals.css       # Tailwind + custom utilities
+├── src-tauri/                # Tauri Rust backend
+│   ├── src/
+│   │   ├── main.rs           # Desktop entry point
+│   │   └── lib.rs            # Tauri setup
+│   ├── Cargo.toml
+│   └── tauri.conf.json       # Tauri configuration
+```
+
+### UI Layout
+
+```
+┌─────┬──────────┬─────────────────────────────┬──────────┐
+│     │          │  # channel-name              │          │
+│  S  │ Channels │─────────────────────────────│ Members  │
+│  e  │          │                              │          │
+│  r  │ # general│  [Avatar] Username    12:30  │ ─ Owner  │
+│  v  │ # random │  Message content here...    │   Alice  │
+│  e  │          │                              │          │
+│  r  │ 🔊 Voice │  [Avatar] Username    12:31  │ ─ Admins │
+│  s  │   General│  Another message...         │   Bob    │
+│     │   Gaming │                              │          │
+│  +  │          │                              │ ─ Members│
+│     │          │                              │   Charlie│
+│     │──────────│                              │          │
+│     │ User ⚙  │  [Message input box]         │          │
+└─────┴──────────┴─────────────────────────────┴──────────┘
+│72px │  240px   │        flex-1               │  240px   │
+```
+
+### State Management (Zustand)
+
+Four independent stores, each managing a domain:
+
+| Store | Responsibilities |
+|-------|-----------------|
+| `authStore` | User session, login/register/logout, token management |
+| `serverStore` | Server list, active server, channels, members |
+| `chatStore` | Messages for active channel, typing indicators, pagination |
+| `voiceStore` | Voice channel connection, mute/deaf state, connected users |
+
+### Data Flow
+
+```
+User Action → Zustand Store → API Call (Axios) → Backend Response → Store Update → React Re-render
+                    │                                                    ▲
+                    │          WebSocket Event ──────────────────────────┘
+                    └──────── Socket.IO Emit
+```
+
+---
+
+## Database Design
+
+### Entity-Relationship Diagram
+
+```
+┌──────────┐    ┌────────────────┐    ┌──────────┐
+│   User   │───<│ ServerMember   │>───│  Server  │
+│          │    │                │    │          │
+│ id       │    │ userId (PK,FK)│    │ id       │
+│ username │    │ serverId(PK,FK)│    │ name     │
+│ email    │    │ role           │    │ ownerId  │
+│ password │    │ joinedAt       │    │ iconUrl  │
+│ display  │    └────────────────┘    └────┬─────┘
+│ avatarUrl│                               │
+│ bio      │    ┌────────────────┐         │
+│ status   │    │    Channel     │─────────┘
+└────┬─────┘    │                │
+     │          │ id             │
+     │          │ name           │
+     │          │ type           │
+     │          │ serverId (FK)  │
+     │          │ position       │
+     │          └────────┬───────┘
+     │                   │
+     │    ┌──────────────┴───────┐
+     └───>│      Message         │
+          │                      │
+          │ id                   │
+          │ content              │
+          │ channelId (FK)       │
+          │ authorId  (FK)       │
+          │ editedAt             │
+          │ createdAt            │
+          └──────────────────────┘
+
+┌──────────────────┐
+│     Invite       │
+│                  │
+│ code (PK)        │
+│ serverId (FK)    │
+│ createdBy (FK)   │
+│ maxUses          │
+│ uses             │
+│ expiresAt        │
+└──────────────────┘
+```
+
+### Key Indexes
+
+- `messages(channelId, createdAt)` — Fast message pagination per channel
+- `users(username)` UNIQUE — Username lookup
+- `users(email)` UNIQUE — Email lookup
+- `server_members(userId, serverId)` COMPOSITE PK — Membership checks
+- `invites(code)` PK — Invite lookup
+
+### Scaling Considerations
+
+- Messages use cursor-based pagination (`createdAt < ?`) instead of offset-based for consistent performance
+- The `ServerMember` junction table allows efficient membership queries in both directions
+- Channel positions are integer-based for simple reordering
+
+---
+
+## Real-Time Communication
+
+### Socket.IO Architecture
+
+```
+Client                          Server
+  │                               │
+  │── connect (with JWT) ────────>│
+  │                               │── verify JWT
+  │                               │── setUserOnline(Redis)
+  │                               │── join server rooms
+  │                               │── broadcast presence:update
+  │<── connected ─────────────────│
+  │                               │
+  │── channel:join ──────────────>│── socket.join(room)
+  │── typing:start ──────────────>│── broadcast to room
+  │── typing:stop ───────────────>│── broadcast to room
+  │                               │
+  │<── message:new ──────────────<│  (after HTTP POST creates message,
+  │<── presence:update ──────────<│   server broadcasts via Socket.IO)
+  │                               │
+  │── voice:join ────────────────>│── track voice state
+  │                               │── broadcast voice:user_joined
+  │── voice:signal ──────────────>│── relay to target peer
+  │<── voice:signal ─────────────<│── (from another peer)
+  │                               │
+  │── disconnect ────────────────>│── setUserOffline(Redis)
+  │                               │── broadcast presence:update
+```
+
+### Room Strategy
+
+| Room Pattern | Purpose |
+|-------------|---------|
+| `server:{id}` | Server-wide events (member join/leave, presence) |
+| `channel:{id}` | Channel-specific events (messages, typing) |
+| `voice:{id}` | Voice channel (voice state, signaling) |
+
+### Event Types
+
+**Server → Client:**
+- `message:new` / `message:update` / `message:delete`
+- `channel:created` / `channel:deleted`
+- `member:joined` / `member:left`
+- `presence:update`
+- `voice:user_joined` / `voice:user_left` / `voice:state_update` / `voice:speaking`
+- `voice:signal` (WebRTC signaling relay)
+- `typing:start` / `typing:stop`
+
+**Client → Server:**
+- `channel:join` / `channel:leave`
+- `voice:join` / `voice:leave` / `voice:mute` / `voice:deaf` / `voice:speaking`
+- `voice:signal` (WebRTC signaling relay)
+- `typing:start` / `typing:stop`
+
+---
+
+## Voice Architecture
+
+### Current Implementation (V0.1 - Mesh)
+
+```
+            ┌────────┐
+   ┌────────│ Server │────────┐
+   │        │(Signal)│        │
+   │        └───┬────┘        │
+   │            │             │
+┌──┴──┐    ┌───┴───┐    ┌────┴──┐
+│User A│<──>│User B │<──>│User C │
+│      │    │       │    │       │
+└──────┘    └───────┘    └───────┘
+  P2P WebRTC connections (mesh)
+```
+
+- Server acts as signaling relay only (ICE candidates, SDP offers/answers)
+- Peers connect directly via WebRTC
+- Works well for up to ~6-8 users per channel
+- State tracked in-memory on the server
+
+### Future Implementation (V0.4+ - SFU)
+
+```
+┌────────┐  ┌────────┐  ┌────────┐
+│ User A │  │ User B │  │ User C │
+└───┬────┘  └───┬────┘  └───┬────┘
+    │           │           │
+    │     ┌─────┴─────┐    │
+    └────>│ mediasoup  │<───┘
+          │   SFU      │
+          │            │
+          │ Selective  │
+          │ Forwarding │
+          │ Unit       │
+          └────────────┘
+```
+
+- Each client sends one upstream to the SFU
+- SFU selectively forwards streams to recipients
+- Scales to 99+ users per channel
+- Supports simulcast for bandwidth adaptation
+- mediasoup workers distribute across CPU cores
+
+### Voice State Management
+
+Voice state is tracked per-channel in memory:
+
+```typescript
+Map<channelId, Map<userId, {
+  socketId: string;
+  selfMute: boolean;
+  selfDeaf: boolean;
+}>>
+```
+
+For multi-node deployment, this will migrate to Redis with pub/sub for cross-node synchronization.
+
+---
+
+## Authentication & Security
+
+### JWT Token Flow
+
+```
+Register/Login
+    │
+    ▼
+Server generates:
+├── Access Token  (15min expiry, signed with JWT_SECRET)
+└── Refresh Token (7 day expiry, signed with JWT_REFRESH_SECRET)
+    │
+    ▼
+Client stores in localStorage
+    │
+    ▼
+Every API request:
+├── Authorization: Bearer <access_token>
+│
+├── If 401 → Try refresh:
+│   POST /auth/refresh { refreshToken }
+│   ├── Success → New tokens, retry request
+│   └── Failure → Redirect to login
+```
+
+### Security Measures
+
+| Layer | Protection |
+|-------|-----------|
+| Transport | HTTPS in production |
+| Headers | Helmet.js (CSP, HSTS, X-Frame, etc.) |
+| Auth | JWT with short expiry + refresh rotation |
+| Passwords | bcrypt with 12 salt rounds |
+| CORS | Explicit origin whitelist |
+| Input | Server-side validation on all endpoints |
+| SQL Injection | Prisma parameterized queries |
+| WebSocket | JWT verification on connection |
+| Rate Limiting | rate-limiter-flexible (infrastructure ready) |
+
+### Permission Model
+
+```
+Owner  → Full server control (delete server, manage all)
+Admin  → Create/delete channels, manage messages
+Member → Send messages, join voice, use invites
+```
+
+Checked server-side on every request via `ServerMember.role`.
+
+---
+
+## Scalability Strategy
+
+### Phase 1: Single Node (1K users)
+- Single Node.js process
+- PostgreSQL + Redis on same machine or nearby
+- In-memory voice state
+- Simple deployment
+
+### Phase 2: Multi-Node (10K users)
+```
+                    ┌─────────────┐
+                    │   nginx     │
+                    │ (LB + SSL) │
+                    └──────┬──────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+         ┌────┴────┐  ┌───┴─────┐  ┌──┴──────┐
+         │ Node 1  │  │ Node 2  │  │ Node 3  │
+         │ API+WS  │  │ API+WS  │  │ API+WS  │
+         └────┬────┘  └───┬─────┘  └──┬──────┘
+              │            │           │
+              └────────────┼───────────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+         ┌────┴────┐  ┌───┴─────┐     │
+         │ Redis   │  │ Redis   │     │
+         │ Primary │  │ Replica │     │
+         └─────────┘  └─────────┘     │
+                                       │
+                              ┌────────┴────────┐
+                              │   PostgreSQL    │
+                              │ Primary+Replica │
+                              └─────────────────┘
+```
+
+Key changes:
+- Socket.IO with Redis adapter for cross-node event distribution
+- Voice state in Redis
+- Sticky sessions for WebSocket connections (IP hash or cookie)
+- Connection pooling for PostgreSQL
+
+### Phase 3: Microservices (100K+ users)
+
+```
+┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│   API    │  │ Message  │  │  Voice   │  │ Presence │
+│ Gateway  │  │ Service  │  │ Service  │  │ Service  │
+└──────────┘  └──────────┘  └──────────┘  └──────────┘
+     │              │              │              │
+     └──────────────┴──────────────┴──────────────┘
+                         │
+                    ┌────┴────┐
+                    │  NATS / │
+                    │  Kafka  │
+                    └─────────┘
+```
+
+- Break into domain microservices
+- Event-driven architecture with message broker
+- Independent scaling of voice vs. text vs. API
+- Dedicated media servers for voice/video
+
+### Phase 4: Discord-Scale (Millions)
+
+- Global edge network (CDN + edge compute)
+- Regional data centers
+- Database sharding by server_id
+- Dedicated media infrastructure
+- Global service mesh
+- Multi-region Redis clusters
+
+---
+
+## Deployment Architecture
+
+### Development
+```bash
+docker compose up -d     # PostgreSQL + Redis
+pnpm dev                 # Backend + Frontend
+```
+
+### Production (Docker)
+
+```dockerfile
+# apps/server/Dockerfile (future)
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prod
+COPY dist/ ./dist/
+COPY prisma/ ./prisma/
+RUN npx prisma generate
+CMD ["node", "dist/index.js"]
+```
+
+### Production (Kubernetes) — Future
+
+```yaml
+# Simplified deployment structure
+API Deployment (3+ replicas)
+  └── Service (ClusterIP)
+      └── Ingress (nginx)
+
+PostgreSQL StatefulSet
+  └── PersistentVolumeClaim
+
+Redis Deployment
+  └── Service (ClusterIP)
+
+mediasoup Deployment (autoscaling)
+  └── Service (NodePort for UDP)
+```
+
+---
+
+## Future Architecture
+
+### Planned Features & Their Architectural Impact
+
+| Feature | Architecture Change |
+|---------|-------------------|
+| **Video calls** | mediasoup SFU with video codecs (VP8/VP9/H264) |
+| **Screen sharing** | mediasoup producer for screen capture |
+| **Direct Messages** | New DM channel type, conversation model |
+| **File uploads** | S3-compatible object storage, presigned URLs |
+| **Push notifications** | FCM/APNs integration service |
+| **Message search** | Elasticsearch / PostgreSQL full-text search |
+| **Mobile app** | React Native sharing stores/services with web |
+| **Bot API** | Gateway API for third-party integrations |
+| **End-to-end encryption** | Signal Protocol for DMs |
+| **CDN** | CloudFront/Cloudflare for static assets + media |
+
+### Mobile Strategy
+
+The frontend architecture is designed for code sharing:
+
+```
+packages/shared/     → Types, validators, constants (shared)
+packages/ui/         → UI components (future, shared)
+apps/desktop/        → Tauri + React (desktop)
+apps/mobile/         → React Native (future)
+apps/web/            → React SPA (future, same code as desktop minus Tauri)
+```
+
+Zustand stores and service layer (API + Socket) are framework-agnostic and can be reused across all platforms.

@@ -1,0 +1,157 @@
+import { useEffect, useRef, useCallback } from 'react';
+import { useChatStore } from '../../stores/chatStore';
+import { useServerStore } from '../../stores/serverStore';
+import { useAuthStore } from '../../stores/authStore';
+import { format, isToday, isYesterday } from 'date-fns';
+import { clsx } from 'clsx';
+
+export function MessageList() {
+  const { messages, hasMore, isLoading, fetchMessages, typingUsers } = useChatStore();
+  const { activeChannelId } = useServerStore();
+  const { user } = useAuthStore();
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
+
+  // Auto-scroll to bottom on new messages if near bottom
+  useEffect(() => {
+    if (isNearBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages]);
+
+  // Scroll to bottom on channel change
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView();
+  }, [activeChannelId]);
+
+  const handleScroll = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+
+    // Check if near bottom
+    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+
+    // Load more when scrolled to top
+    if (el.scrollTop < 50 && hasMore && !isLoading && activeChannelId && messages.length > 0) {
+      const oldestMessage = messages[0];
+      fetchMessages(activeChannelId, oldestMessage.createdAt);
+    }
+  }, [hasMore, isLoading, activeChannelId, messages, fetchMessages]);
+
+  const formatMessageTime = (dateStr: string) => {
+    const date = new Date(dateStr);
+    if (isToday(date)) return `Today at ${format(date, 'h:mm a')}`;
+    if (isYesterday(date)) return `Yesterday at ${format(date, 'h:mm a')}`;
+    return format(date, 'MM/dd/yyyy h:mm a');
+  };
+
+  // Group messages by author for compact display
+  const shouldShowHeader = (index: number) => {
+    if (index === 0) return true;
+    const prev = messages[index - 1];
+    const curr = messages[index];
+    if (prev.author.id !== curr.author.id) return true;
+    // Show header if more than 5 minutes apart
+    const timeDiff = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();
+    return timeDiff > 5 * 60 * 1000;
+  };
+
+  const typingText = (() => {
+    const names = Array.from(typingUsers.values());
+    if (names.length === 0) return null;
+    if (names.length === 1) return `${names[0]} is typing...`;
+    if (names.length === 2) return `${names[0]} and ${names[1]} are typing...`;
+    return `${names[0]} and ${names.length - 1} others are typing...`;
+  })();
+
+  return (
+    <div
+      ref={listRef}
+      className="flex-1 overflow-y-auto px-4 py-4"
+      onScroll={handleScroll}
+    >
+      {isLoading && messages.length === 0 && (
+        <div className="flex items-center justify-center py-8">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-vox-accent-primary border-t-transparent" />
+        </div>
+      )}
+
+      {!hasMore && messages.length > 0 && (
+        <div className="mb-6 border-b border-vox-border pb-4">
+          <h4 className="text-2xl font-bold text-vox-text-primary">Welcome to the channel!</h4>
+          <p className="text-sm text-vox-text-secondary">This is the beginning of the conversation.</p>
+        </div>
+      )}
+
+      {messages.map((message, index) => {
+        const showHeader = shouldShowHeader(index);
+        const isOwn = message.author.id === user?.id;
+
+        return (
+          <div
+            key={message.id}
+            className={clsx(
+              'group relative px-2 py-0.5 hover:bg-vox-bg-hover/50 rounded transition-colors',
+              showHeader && index > 0 && 'mt-4'
+            )}
+          >
+            {showHeader ? (
+              <div className="flex items-start gap-3">
+                {/* Avatar */}
+                <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-vox-accent-primary text-sm font-semibold text-white">
+                  {message.author.displayName?.[0]?.toUpperCase() || '?'}
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className={clsx(
+                      'text-sm font-semibold',
+                      isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary'
+                    )}>
+                      {message.author.displayName}
+                    </span>
+                    <span className="text-xs text-vox-text-muted">
+                      {formatMessageTime(message.createdAt)}
+                    </span>
+                    {message.updatedAt && (
+                      <span className="text-[10px] text-vox-text-muted">(edited)</span>
+                    )}
+                  </div>
+                  <p className="text-sm text-vox-text-primary leading-relaxed break-words">
+                    {message.content}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-start gap-3">
+                <div className="w-10 shrink-0 text-center">
+                  <span className="hidden group-hover:inline text-[10px] text-vox-text-muted">
+                    {format(new Date(message.createdAt), 'h:mm')}
+                  </span>
+                </div>
+                <p className="min-w-0 flex-1 text-sm text-vox-text-primary leading-relaxed break-words">
+                  {message.content}
+                </p>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Typing indicator */}
+      {typingText && (
+        <div className="flex items-center gap-2 px-4 py-1">
+          <div className="flex gap-0.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
+            <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
+            <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
+          </div>
+          <span className="text-xs text-vox-text-muted">{typingText}</span>
+        </div>
+      )}
+
+      <div ref={bottomRef} />
+    </div>
+  );
+}

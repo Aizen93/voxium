@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html, body, #root {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2a2a4a;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3a5a;
+  }
+
+  /* Selection */
+  ::selection {
+    background: rgba(91, 91, 247, 0.3);
+    color: #e4e6eb;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium
+           transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-vox-accent-primary
+           focus:ring-offset-2 focus:ring-offset-vox-bg-primary disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply btn bg-vox-accent-primary text-white hover:bg-vox-accent-hover;
+  }
+
+  .btn-secondary {
+    @apply btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover;
+  }
+
+  .btn-danger {
+    @apply btn bg-vox-accent-danger text-white hover:bg-red-600;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent text-vox-text-secondary hover:bg-vox-bg-hover hover:text-vox-text-primary;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-vox-border bg-vox-bg-floating px-3 py-2 text-sm
+           text-vox-text-primary placeholder:text-vox-text-muted
+           focus:border-vox-accent-primary focus:outline-none focus:ring-1 focus:ring-vox-accent-primary
+           transition-colors duration-150;
+  }
+
+  .tooltip {
+    @apply absolute z-50 rounded-md bg-vox-bg-floating px-2 py-1 text-xs text-vox-text-primary
+           shadow-lg border border-vox-border animate-fade-in pointer-events-none;
+  }
+}

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+Thumbs.db
+target/
+*.rs.bk
+*.pdb
+.turbo
+coverage/
+.nyc_output/

@@ -1,0 +1,114 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Users ───────────────────────────────────────────────────────────────────
+
+model User {
+  id          String   @id @default(cuid())
+  username    String   @unique
+  email       String   @unique
+  displayName String   @map("display_name")
+  password    String
+  avatarUrl   String?  @map("avatar_url")
+  bio         String?
+  status      String   @default("offline")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  ownedServers Server[]        @relation("ServerOwner")
+  memberships  ServerMember[]
+  messages     Message[]
+  invites      Invite[]
+
+  @@map("users")
+}
+
+// ─── Servers ─────────────────────────────────────────────────────────────────
+
+model Server {
+  id        String   @id @default(cuid())
+  name      String
+  iconUrl   String?  @map("icon_url")
+  ownerId   String   @map("owner_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  owner    User           @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  channels Channel[]
+  members  ServerMember[]
+  invites  Invite[]
+
+  @@map("servers")
+}
+
+// ─── Server Members ──────────────────────────────────────────────────────────
+
+model ServerMember {
+  userId   String   @map("user_id")
+  serverId String   @map("server_id")
+  role     String   @default("member")
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@id([userId, serverId])
+  @@map("server_members")
+}
+
+// ─── Channels ────────────────────────────────────────────────────────────────
+
+model Channel {
+  id        String   @id @default(cuid())
+  name      String
+  type      String   @default("text")
+  serverId  String   @map("server_id")
+  position  Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  server   Server    @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@map("channels")
+}
+
+// ─── Messages ────────────────────────────────────────────────────────────────
+
+model Message {
+  id        String    @id @default(cuid())
+  content   String
+  channelId String    @map("channel_id")
+  authorId  String    @map("author_id")
+  editedAt  DateTime? @map("edited_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  author  User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, createdAt])
+  @@map("messages")
+}
+
+// ─── Invites ─────────────────────────────────────────────────────────────────
+
+model Invite {
+  code      String    @id
+  serverId  String    @map("server_id")
+  createdBy String    @map("created_by")
+  maxUses   Int?      @map("max_uses")
+  uses      Int       @default(0)
+  expiresAt DateTime? @map("expires_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  server  Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  creator User   @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@map("invites")
+}

@@ -1,0 +1,23 @@
+{
+  "name": "voxium",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voxium - Modern voice & text communication platform",
+  "scripts": {
+    "dev:server": "pnpm --filter @voxium/server dev",
+    "dev:desktop": "pnpm --filter @voxium/desktop dev",
+    "dev": "pnpm run dev:server & pnpm run dev:desktop",
+    "build:shared": "pnpm --filter @voxium/shared build",
+    "build:server": "pnpm --filter @voxium/server build",
+    "build:desktop": "pnpm --filter @voxium/desktop build",
+    "build": "pnpm run build:shared && pnpm run build:server & pnpm run build:desktop",
+    "lint": "pnpm run --parallel -r lint",
+    "db:migrate": "pnpm --filter @voxium/server db:migrate",
+    "db:seed": "pnpm --filter @voxium/server db:seed",
+    "db:studio": "pnpm --filter @voxium/server db:studio"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}
