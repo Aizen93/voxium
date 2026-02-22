@@ -1,3 +1,12 @@
+# What is Voxium ?
+Tired of handing over your phone number, ID, and personal data just to chat with friends? Voxium is a free, open-source communication platform built for people who believe privacy isn't a premium feature, it's a right. No phone verification, no identity checks, no data harvesting. Just real-time voice and text chat that works. If you've been looking for a Discord alternative that respects your anonymity and puts you back in control of your digital identity, Voxium is built for you. Self-host it, audit the code, and own your conversations. No corporation sitting between you and your community.
+
+Voxium will initially be deployed on a small server and made freely available for public use. Due to infrastructure limitations, it will support up to approximately 1,000 concurrent users.
+
+At this stage, message encryption has not yet been implemented, and security is not the primary focus during early development. If you choose to deploy Voxium on your own infrastructure, you are responsible for securing your server and ensuring that network traffic is properly protected.
+
+Additional security layers, including encryption and hardening measures, will be introduced after the core features are completed.
+
 # Voxium - Setup Guide
 
 ## Prerequisites
