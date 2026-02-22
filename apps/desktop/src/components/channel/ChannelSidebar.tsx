@@ -4,13 +4,13 @@ import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { Hash, Volume2, Plus, ChevronDown, Settings, MicOff, UserPlus } from 'lucide-react';
+import { Hash, Volume2, Plus, ChevronDown, Settings, Mic, MicOff, Headphones, HeadphoneOff, UserPlus } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { clsx } from 'clsx';
 
 export function ChannelSidebar() {
   const { channels, activeChannelId, setActiveChannel, activeServerId, servers, createChannel } = useServerStore();
-  const { joinChannel, activeChannelId: voiceChannelId, channelUsers } = useVoiceStore();
+  const { joinChannel, activeChannelId: voiceChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
   const [showInviteModal, setShowInviteModal] = useState(false);
@@ -190,6 +190,30 @@ export function ChannelSidebar() {
           <p className="truncate text-xs font-medium text-vox-text-primary">{user?.displayName || 'User'}</p>
           <p className="truncate text-[10px] text-vox-text-muted">Online</p>
         </div>
+        <button
+          onClick={toggleMute}
+          className={clsx(
+            'rounded p-1 transition-colors',
+            selfMute
+              ? 'text-vox-accent-danger hover:bg-vox-accent-danger/20'
+              : 'text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover'
+          )}
+          title={selfMute ? 'Unmute' : 'Mute'}
+        >
+          {selfMute ? <MicOff size={14} /> : <Mic size={14} />}
+        </button>
+        <button
+          onClick={toggleDeaf}
+          className={clsx(
+            'rounded p-1 transition-colors',
+            selfDeaf
+              ? 'text-vox-accent-danger hover:bg-vox-accent-danger/20'
+              : 'text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover'
+          )}
+          title={selfDeaf ? 'Undeafen' : 'Deafen'}
+        >
+          {selfDeaf ? <HeadphoneOff size={14} /> : <Headphones size={14} />}
+        </button>
         <button
           onClick={() => useSettingsStore.getState().openSettings()}
           className="text-vox-text-muted hover:text-vox-text-primary transition-colors"

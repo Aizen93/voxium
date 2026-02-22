@@ -107,6 +107,7 @@ Full voice chat quality-of-life features:
 - **Latency measurement:** Client sends `ping:latency` every 5s, server echoes `pong:latency`; RTT displayed next to "Voice Connected" with color coding (green <100ms, yellow <200ms, red >200ms)
 - **Connection quality bars:** `ConnectionQuality` component renders 3 signal-strength bars color-coded by latency
 - **Audio device settings:** `SettingsModal` with input/output device dropdowns (via `enumerateDevices`), live mic level meter, noise gate sensitivity slider; persisted to localStorage via `settingsStore`
+- **Persistent mute/deaf controls:** Mute and deaf state persisted to localStorage (`voxium_voice_prefs`) via `voiceStore`. On voice join, persisted state is sent to the server as an optional `state` parameter on `voice:join`. Controls are always visible in the `ChannelSidebar` user area (not gated by active voice channel), so users can pre-mute before joining. State survives app restarts and socket reconnections.
 - **Device application:** Selected input device passed as `deviceId` constraint to `getUserMedia`; output device applied via `setSinkId` on remote audio elements (guarded for browser support)
 
 ### 5. Stability & Error Handling (v0.2)
@@ -252,8 +253,23 @@ All socket event handlers (`channel:join`, `channel:leave`, typing, voice, etc.)
 - `apps/server/src/utils/memberBroadcast.ts` — Centralized member join/leave/room-join helpers
 - `apps/desktop/src/pages/InvitePage.tsx` — Invite preview page with server card and join button
 
+### Global & Persistent Mute/Deaf Controls (v0.2.4)
+
+**Changes across 4 files:**
+1. `packages/shared/src/types.ts` -- `voice:join` in `ClientToServerEvents` now accepts an optional second parameter `{ selfMute, selfDeaf }` so the client can send persisted state on join. Also fixed `voice:leave` signature from `(channelId: string)` to `()` to match actual server/client usage.
+2. `apps/desktop/src/stores/voiceStore.ts` -- Added `VoicePrefs` interface, `loadPersistedVoicePrefs()`, and `persistVoicePrefs()` functions. Initial store state reads from localStorage. `toggleMute`/`toggleDeaf` persist after each toggle. `joinChannel` applies persisted mute state to audio tracks and sends it to the server. Reconnect handler also sends persisted state.
+3. `apps/server/src/websocket/voiceHandler.ts` -- `voice:join` handler accepts optional `state` parameter, uses it (with `?? false` defaults) when creating the in-memory voice state entry and when broadcasting `voice:user_joined`.
+4. `apps/desktop/src/components/channel/ChannelSidebar.tsx` -- Mute/deaf buttons moved from inside `VoicePanel` (only visible during active voice) to the user area at the bottom of `ChannelSidebar` (always visible). Both locations share the same `toggleMute`/`toggleDeaf` store actions.
+
+### ServerSidebar Tooltip Fix (v0.2.4)
+
+**Problem:** Server icon tooltips appeared as empty boxes at the bottom of the screen. The tooltip used `absolute` positioning inside the server list container which has `overflow-y: auto`. CSS automatically clips `overflow-x` when `overflow-y` is non-`visible`, so the tooltip content extending beyond the 72px sidebar was clipped.
+
+**Fix:** Switched from `absolute` to `fixed` positioning. On `mouseEnter`, `getBoundingClientRect()` captures the button's viewport coordinates. The tooltip renders as a sibling outside the sidebar `div` with `fixed` position and `transform: translateY(-50%)` for vertical centering, 8px to the right of the button. Fixed positioning is relative to the viewport and unaffected by parent overflow.
+
 ### Known Issues / Suggestions
-- `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId → socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.
+- `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.
 - The `member:joined` event sends `email: ''` to satisfy the `User` type in `ServerToClientEvents`. Consider a `PublicUser` type that omits `email`.
 - Prisma `Invite` model still has `maxUses` and `uses` columns that are no longer used. Cleanup migration pending.
 - `SaveAndRedirect` in `App.tsx` performs `localStorage.setItem` during render (not in `useEffect`). Functionally correct since `Navigate` redirects immediately, but technically impure.
+- `toggleMute`/`toggleDeaf` in `voiceStore.ts` emit `voice:mute`/`voice:deaf` socket events even when not in a voice channel. The server guards against this (checks `socket.data.voiceChannelId`), so no functional impact, but the emit is wasteful. Consider guarding with `if (get().activeChannelId)` before emitting.

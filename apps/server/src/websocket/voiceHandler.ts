@@ -13,7 +13,7 @@ export function handleVoiceEvents(
 ) {
   const userId = socket.data.userId as string;
 
-  socket.on('voice:join', async (channelId: string) => {
+  socket.on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
     console.log(`[Voice] User ${userId} requesting to join channel ${channelId}`);
 
     const channel = await prisma.channel.findUnique({
@@ -45,10 +45,13 @@ export function handleVoiceEvents(
       voiceChannelUsers.set(channelId, new Map());
     }
 
+    const initialMute = state?.selfMute ?? false;
+    const initialDeaf = state?.selfDeaf ?? false;
+
     voiceChannelUsers.get(channelId)!.set(userId, {
       socketId: socket.id,
-      selfMute: false,
-      selfDeaf: false,
+      selfMute: initialMute,
+      selfDeaf: initialDeaf,
     });
 
     socket.data.voiceChannelId = channelId;
@@ -73,11 +76,11 @@ export function handleVoiceEvents(
         });
 
         const voiceUsers = existingUserInfos.map((u) => {
-          const state = existingUsers.get(u.id);
+          const userState = existingUsers.get(u.id);
           return {
             ...u,
-            selfMute: state?.selfMute ?? false,
-            selfDeaf: state?.selfDeaf ?? false,
+            selfMute: userState?.selfMute ?? false,
+            selfDeaf: userState?.selfDeaf ?? false,
             speaking: false,
           };
         });
@@ -87,7 +90,7 @@ export function handleVoiceEvents(
       }
 
       // Broadcast to the ENTIRE SERVER so all members can see who's in voice
-      const voiceUser = { ...user, selfMute: false, selfDeaf: false, speaking: false };
+      const voiceUser = { ...user, selfMute: initialMute, selfDeaf: initialDeaf, speaking: false };
       console.log(`[Voice] Broadcasting user_joined to server:${channel.serverId}`);
       io.to(`server:${channel.serverId}`).emit('voice:user_joined', {
         channelId,

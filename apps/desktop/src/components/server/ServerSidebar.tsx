@@ -10,6 +10,7 @@ export function ServerSidebar() {
   const { logout, user } = useAuthStore();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{ top: number; left: number } | null>(null);
 
   return (
     <>
@@ -42,8 +43,12 @@ export function ServerSidebar() {
                   : 'bg-vox-bg-secondary text-vox-text-secondary hover:rounded-xl hover:bg-vox-accent-primary hover:text-white'
               )}
               onClick={() => setActiveServer(server.id)}
-              onMouseEnter={() => setHoveredId(server.id)}
-              onMouseLeave={() => setHoveredId(null)}
+              onMouseEnter={(e) => {
+                setHoveredId(server.id);
+                const rect = e.currentTarget.getBoundingClientRect();
+                setTooltipPos({ top: rect.top + rect.height / 2, left: rect.right + 8 });
+              }}
+              onMouseLeave={() => { setHoveredId(null); setTooltipPos(null); }}
             >
               {server.iconUrl ? (
                 <img src={server.iconUrl} alt={server.name} className="h-full w-full rounded-inherit object-cover" />
@@ -63,12 +68,6 @@ export function ServerSidebar() {
                 <div className="absolute -left-1 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-white transition-all" />
               )}
 
-              {/* Tooltip */}
-              {hoveredId === server.id && (
-                <div className="tooltip left-16 top-1/2 -translate-y-1/2 whitespace-nowrap">
-                  {server.name}
-                </div>
-              )}
             </button>
           ))}
 
@@ -96,6 +95,16 @@ export function ServerSidebar() {
           </button>
         </div>
       </div>
+
+      {/* Server name tooltip — fixed position so it's never clipped by overflow */}
+      {hoveredId && tooltipPos && (
+        <div
+          className="fixed z-50 rounded-md bg-vox-bg-floating px-3 py-1.5 text-sm font-medium text-vox-text-primary shadow-lg border border-vox-border pointer-events-none whitespace-nowrap"
+          style={{ top: tooltipPos.top, left: tooltipPos.left, transform: 'translateY(-50%)' }}
+        >
+          {servers.find((s) => s.id === hoveredId)?.name}
+        </div>
+      )}
 
       {showCreateModal && <CreateServerModal onClose={() => setShowCreateModal(false)} />}
     </>

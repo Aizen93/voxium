@@ -4,6 +4,42 @@ import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold } 
 import { useSettingsStore } from './settingsStore';
 import type { VoiceUser } from '@voxium/shared';
 
+const VOICE_PREFS_KEY = 'voxium_voice_prefs';
+
+interface VoicePrefs {
+  selfMute: boolean;
+  selfDeaf: boolean;
+}
+
+function loadPersistedVoicePrefs(): VoicePrefs {
+  try {
+    const raw = localStorage.getItem(VOICE_PREFS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        selfMute: typeof parsed.selfMute === 'boolean' ? parsed.selfMute : false,
+        selfDeaf: typeof parsed.selfDeaf === 'boolean' ? parsed.selfDeaf : false,
+      };
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return { selfMute: false, selfDeaf: false };
+}
+
+function persistVoicePrefs(prefs: VoicePrefs) {
+  try {
+    localStorage.setItem(VOICE_PREFS_KEY, JSON.stringify({
+      selfMute: prefs.selfMute,
+      selfDeaf: prefs.selfDeaf,
+    }));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+const initialVoicePrefs = loadPersistedVoicePrefs();
+
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -79,8 +115,8 @@ function applyOutputDevice(audio: HTMLAudioElement, deviceId: string) {
 export const useVoiceStore = create<VoiceState>((set, get) => ({
   localUserId: null,
   activeChannelId: null,
-  selfMute: false,
-  selfDeaf: false,
+  selfMute: initialVoicePrefs.selfMute,
+  selfDeaf: initialVoicePrefs.selfDeaf,
   localStream: null,
   latency: null,
   channelUsers: new Map(),
@@ -120,12 +156,25 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       console.warn('[Voice] Microphone access denied, joining in listen-only mode:', err);
     }
 
+    const { selfMute, selfDeaf } = get();
+
     if (stream) {
-      startSpeakingDetection(stream);
+      // Apply persisted mute state to audio tracks
+      if (selfMute) {
+        stream.getAudioTracks().forEach((track) => { track.enabled = false; });
+      }
+      // Only start speaking detection if not muted
+      if (!selfMute) {
+        startSpeakingDetection(stream);
+      }
     }
 
-    set({ activeChannelId: channelId, localStream: stream, selfMute: !stream });
-    socket.emit('voice:join', channelId);
+    // If no stream available, force mute
+    const effectiveMute = stream ? selfMute : true;
+    set({ activeChannelId: channelId, localStream: stream, selfMute: effectiveMute });
+
+    // Send persisted mute/deaf state to server on join
+    socket.emit('voice:join', channelId, { selfMute: effectiveMute, selfDeaf });
 
     get().startLatencyMeasurement();
   },
@@ -159,8 +208,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({
       activeChannelId: null,
       localStream: null,
-      selfMute: false,
-      selfDeaf: false,
       latency: null,
     });
   },
@@ -189,6 +236,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     set({ selfMute: newMute });
+    persistVoicePrefs({ selfMute: newMute, selfDeaf: get().selfDeaf });
   },
 
   toggleDeaf: () => {
@@ -205,6 +253,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     set({ selfDeaf: newDeaf });
+    persistVoicePrefs({ selfMute: get().selfMute, selfDeaf: newDeaf });
   },
 
   startLatencyMeasurement: () => {
@@ -603,7 +652,8 @@ onSocketReconnect(() => {
 
   // Re-join voice on the server — it will re-broadcast our presence
   // and send us the updated user list, which triggers peer creation
-  socket.emit('voice:join', activeChannelId);
+  const { selfMute, selfDeaf } = useVoiceStore.getState();
+  socket.emit('voice:join', activeChannelId, { selfMute, selfDeaf });
 
   // Re-start latency measurement with new socket
   useVoiceStore.getState().startLatencyMeasurement();

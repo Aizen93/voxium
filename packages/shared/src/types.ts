@@ -146,8 +146,8 @@ export interface ServerToClientEvents {
 export interface ClientToServerEvents {
   'channel:join': (channelId: string) => void;
   'channel:leave': (channelId: string) => void;
-  'voice:join': (channelId: string) => void;
-  'voice:leave': (channelId: string) => void;
+  'voice:join': (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => void;
+  'voice:leave': () => void;
   'voice:mute': (muted: boolean) => void;
   'voice:deaf': (deafened: boolean) => void;
   'voice:speaking': (speaking: boolean) => void;
