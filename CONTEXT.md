@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.1.0 (Foundation)
-**Date:** 2026-02-20
-**Stage:** Initial architecture and codebase setup complete
+**Version:** 0.2.0 (Voice Features & Stability)
+**Date:** 2026-02-22
+**Stage:** Voice features implemented, real-time stability hardening in progress
 
 ## What Has Been Done
 
@@ -92,17 +92,47 @@ A complete React + TypeScript frontend with Tauri 2 desktop wrapper:
   - `VoicePanel` — Voice connection panel with mute/deaf controls, user list with speaking indicators
   - `CreateServerModal` — Dual-mode (create new / join via invite)
 - **Services:**
-  - Axios HTTP client with token interceptor and auto-refresh
-  - Socket.IO client with typed events
+  - Axios HTTP client with token interceptor, auto-refresh queue pattern (concurrent 401s wait for a single refresh)
+  - Socket.IO client with typed events, observable connection status, generation tracking
+  - Audio analyser service for speaking detection via AudioContext + AnalyserNode
 
-### 4. Shared Package (`packages/shared`)
+### 4. Voice Features (v0.2)
 
-- All TypeScript interfaces and types for the entire platform
+Full voice chat quality-of-life features:
+
+- **Speaking detection:** AudioContext + AnalyserNode computes RMS audio levels every 50ms; emits `voice:speaking` events to the server with 300ms silence debounce to prevent flicker
+- **Speaking indicator color:** Green (`#3eba68`) ring around the speaker's avatar in both `VoicePanel` and `ChannelSidebar`
+- **Local voice activity:** `useLocalAudioLevel` hook drives instant green ring on the local user's avatar (no server roundtrip) via `requestAnimationFrame`
+- **Latency measurement:** Client sends `ping:latency` every 5s, server echoes `pong:latency`; RTT displayed next to "Voice Connected" with color coding (green <100ms, yellow <200ms, red >200ms)
+- **Connection quality bars:** `ConnectionQuality` component renders 3 signal-strength bars color-coded by latency
+- **Audio device settings:** `SettingsModal` with input/output device dropdowns (via `enumerateDevices`), live mic level meter, noise gate sensitivity slider; persisted to localStorage via `settingsStore`
+- **Device application:** Selected input device passed as `deviceId` constraint to `getUserMedia`; output device applied via `setSinkId` on remote audio elements (guarded for browser support)
+
+### 5. Stability & Error Handling (v0.2)
+
+Comprehensive hardening of real-time features:
+
+- **Socket reconnection:**
+  - `connectSocket()` protects auto-reconnecting sockets from teardown (`explicitlyDisconnected` flag)
+  - Socket generation counter tracks instance replacements
+  - Auth token refreshed from localStorage on every reconnect attempt
+  - Dual-mechanism reconnect detection in MainLayout and ChatArea: direct `socket.on('connect')` + `onConnectionStatusChange` (Set-based), with deduplication by `socket.id`
+  - `onAny`/`onAnyOutgoing` debug listeners log all WebSocket traffic for diagnostics
+- **Server-side race condition fix:** All socket event handlers (`channel:join`, `channel:leave`, typing, voice, etc.) registered SYNCHRONOUSLY before any `await` in the connection handler — prevents early events from being silently dropped
+- **Server-side diagnostics:** `channel:join`/`channel:leave` logged with userId and socketId; message broadcasts log room membership count and user IDs
+- **Chat store:** AbortController cancels stale fetches on rapid channel switching; typing timers tracked per-user with proper cleanup; fetch deduplication by key
+- **API interceptor:** Token refresh queue pattern — concurrent 401 responses wait for a single refresh call instead of stampeding
+- **Voice store:** ICE restart on peer connection failure with retry timers; proper `pc.on*` handler nullification in peer cleanup; deferred peer creation with `setTimeout(0)`; auto voice re-join on socket reconnect
+- **UI resilience:** `ConnectionBanner` shows yellow reconnecting/disconnected status; `ErrorBoundary` wraps the app with recover/reload UI
+
+### 6. Shared Package (`packages/shared`)
+
+- All TypeScript interfaces and types for the entire platform (including `ping:latency`/`pong:latency` events)
 - Input validators (username, email, password, server name, channel name, message content)
 - Constants (limits, event names, etc.)
 - Used by both server and desktop packages
 
-### 5. Infrastructure
+### 7. Infrastructure
 
 - `docker-compose.yml` for PostgreSQL 16 + Redis 7
 - Prisma migrations ready
@@ -110,26 +140,32 @@ A complete React + TypeScript frontend with Tauri 2 desktop wrapper:
 
 ## What Is NOT Yet Done (Planned for Next Iterations)
 
-### V0.2 - Polish & Stability
-- [ ] WebRTC audio peer connections (actual audio streaming via simple-peer/mediasoup)
-- [ ] Message editing/deletion UI
-- [ ] Server settings panel
-- [ ] User settings/profile editing
-- [ ] File/image upload support
-- [ ] Emoji picker integration
-- [ ] Notification system (desktop notifications)
-- [ ] Error boundary and toast notifications in UI
+### V0.2 - Polish & Stability (in progress)
+- [x] Speaking detection via AudioContext
+- [x] Latency measurement and connection quality display
+- [x] Audio device selection and settings modal
+- [x] Error boundary and connection status banner
+- [x] Socket reconnection hardening
+- [ ] Ongoing: real-time message delivery reliability after reconnects (diagnostics added, investigation in progress)
+- [ ] Push-to-talk mode
+- [ ] Notification sounds
+- [ ] Unread message indicators
+- [ ] Toast notifications in UI
 
 ### V0.3 - Enhanced Features
-- [ ] Video calls
-- [ ] Screen sharing
+- [ ] Message editing/deletion UI
+- [ ] File/image upload support
+- [ ] Message reactions
 - [ ] Direct messages (DMs)
 - [ ] Friend system
+- [ ] Server settings panel
+- [ ] User settings/profile editing
 - [ ] Role/permission management
 - [ ] Channel categories
-- [ ] Message reactions
+- [ ] Emoji picker integration
 - [ ] Rich text / markdown in messages
 - [ ] Message search
+- [ ] Screen sharing
 
 ### V0.4 - Scalability
 - [ ] mediasoup SFU for production-grade voice/video
@@ -164,3 +200,26 @@ A complete React + TypeScript frontend with Tauri 2 desktop wrapper:
 | Desktop wrapper | Tauri 2 | 10x smaller than Electron, Rust security, cross-platform |
 | Styling | Tailwind CSS | Utility-first, fast iteration, consistent design system |
 | Build tool | Vite | Fast HMR, ESM-native, excellent Tauri integration |
+| Audio analysis | Web Audio API (AudioContext + AnalyserNode) | Browser-native, no dependencies, real-time RMS computation |
+| Latency measurement | Custom ping/pong over Socket.IO | Simple, accurate RTT, no external dependencies |
+
+## Key Architecture Notes
+
+### Socket Reconnection Strategy
+The client uses a **dual-mechanism** approach for handling socket reconnections:
+1. **Direct `socket.on('connect')` listener** — attached to the socket instance; most reliable for auto-reconnect (same instance)
+2. **`onConnectionStatusChange` (Set-based)** — fires on every status transition; catches socket replacement and initial connect
+
+Both mechanisms are deduplicated by `socket.id` to prevent double-processing. This defense-in-depth approach ensures channel rooms are re-joined and event listeners are re-attached regardless of how the reconnection occurs (auto-reconnect, token refresh, page reload).
+
+### Server Event Handler Registration
+All socket event handlers (`channel:join`, `channel:leave`, typing, voice, etc.) are registered **synchronously** at the top of the `connection` handler, before any `await` calls. This prevents a race condition where early client events (sent immediately after connect) would be silently dropped if handlers hadn't been registered yet.
+
+### New Files Added in v0.2
+- `apps/desktop/src/services/audioAnalyser.ts` — Speaking detection via AudioContext
+- `apps/desktop/src/stores/settingsStore.ts` — Audio device preferences with localStorage persistence
+- `apps/desktop/src/components/settings/SettingsModal.tsx` — Audio device selection UI
+- `apps/desktop/src/components/voice/ConnectionQuality.tsx` — Signal strength bars
+- `apps/desktop/src/components/layout/ConnectionBanner.tsx` — Reconnecting/disconnected banner
+- `apps/desktop/src/components/layout/ErrorBoundary.tsx` — React error boundary with recover UI
+- `apps/desktop/src/hooks/useLocalAudioLevel.ts` — Real-time mic level for local avatar indicator

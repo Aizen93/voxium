@@ -12,6 +12,7 @@ export function MessageList() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
+  const fetchingRef = useRef(false); // local guard against concurrent scroll fetches
 
   // Auto-scroll to bottom on new messages if near bottom
   useEffect(() => {
@@ -23,6 +24,7 @@ export function MessageList() {
   // Scroll to bottom on channel change
   useEffect(() => {
     bottomRef.current?.scrollIntoView();
+    fetchingRef.current = false;
   }, [activeChannelId]);
 
   const handleScroll = useCallback(() => {
@@ -32,10 +34,29 @@ export function MessageList() {
     // Check if near bottom
     isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
 
-    // Load more when scrolled to top
-    if (el.scrollTop < 50 && hasMore && !isLoading && activeChannelId && messages.length > 0) {
+    // Load more when scrolled to top — use local ref to prevent concurrent requests
+    if (
+      el.scrollTop < 50 &&
+      hasMore &&
+      !isLoading &&
+      !fetchingRef.current &&
+      activeChannelId &&
+      messages.length > 0
+    ) {
+      fetchingRef.current = true;
       const oldestMessage = messages[0];
-      fetchMessages(activeChannelId, oldestMessage.createdAt);
+      const scrollHeightBefore = el.scrollHeight;
+
+      fetchMessages(activeChannelId, oldestMessage.createdAt).finally(() => {
+        fetchingRef.current = false;
+        // Preserve scroll position after prepending messages
+        requestAnimationFrame(() => {
+          if (listRef.current) {
+            const scrollHeightAfter = listRef.current.scrollHeight;
+            listRef.current.scrollTop += scrollHeightAfter - scrollHeightBefore;
+          }
+        });
+      });
     }
   }, [hasMore, isLoading, activeChannelId, messages, fetchMessages]);
 

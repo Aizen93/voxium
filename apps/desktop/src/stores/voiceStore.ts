@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { getSocket } from '../services/socket';
+import { getSocket, onSocketReconnect } from '../services/socket';
 import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold } from '../services/audioAnalyser';
 import { useSettingsStore } from './settingsStore';
 import type { VoiceUser } from '@voxium/shared';
@@ -8,6 +8,9 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
+
+// Retry delay for ICE restart (exponential backoff cap)
+const ICE_RESTART_DELAY_MS = 3000;
 
 interface PeerConnection {
   pc: RTCPeerConnection;
@@ -50,6 +53,9 @@ interface VoiceState {
 
 let latencyInterval: ReturnType<typeof setInterval> | null = null;
 let pongHandler: ((timestamp: number) => void) | null = null;
+
+// Track ICE restart timers per peer so we can cancel them
+const iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function getAudioContainer(): HTMLElement {
   let container = document.getElementById('vox-audio-container');
@@ -130,6 +136,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     get().stopLatencyMeasurement();
     stopSpeakingDetection();
+
+    // Clear all ICE restart timers
+    iceRestartTimers.forEach((timer) => clearTimeout(timer));
+    iceRestartTimers.clear();
 
     // Immediately remove local user from channelUsers (don't wait for server event)
     if (activeChannelId && localUserId) {
@@ -214,7 +224,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     latencyInterval = setInterval(() => {
       const s = getSocket();
-      if (s) s.emit('ping:latency', Date.now());
+      if (s?.connected) s.emit('ping:latency', Date.now());
     }, 5000);
   },
 
@@ -228,6 +238,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       if (socket) socket.off('pong:latency', pongHandler);
       pongHandler = null;
     }
+    set({ latency: null });
   },
 
   setChannelUsers: (channelId: string, users: VoiceUser[]) => {
@@ -241,24 +252,39 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   addUserToChannel: (channelId: string, user: VoiceUser) => {
     console.log('[Voice] addUserToChannel:', channelId, user.displayName);
+
+    // Dedup: check BEFORE the set call returns
+    const existing = get().channelUsers.get(channelId) || [];
+    if (existing.some((u) => u.id === user.id)) return;
+
     set((state) => {
       const newMap = new Map(state.channelUsers);
-      const existing = newMap.get(channelId) || [];
-      if (existing.some((u) => u.id === user.id)) return state;
-      newMap.set(channelId, [...existing, user]);
+      const current = newMap.get(channelId) || [];
+      if (current.some((u) => u.id === user.id)) return state;
+      newMap.set(channelId, [...current, user]);
       return { channelUsers: newMap };
     });
 
     // If WE are in this voice channel, create a peer connection to the new user
-    const { activeChannelId, localStream, localUserId } = get();
-    if (activeChannelId === channelId && localStream && user.id !== localUserId) {
-      console.log('[Voice] Creating initiator peer to', user.id);
-      get().createPeer(user.id, true);
-    }
+    // Use setTimeout(0) to ensure the state has settled before reading
+    setTimeout(() => {
+      const { activeChannelId, localStream, localUserId, peers } = get();
+      if (activeChannelId === channelId && localStream && user.id !== localUserId && !peers.has(user.id)) {
+        console.log('[Voice] Creating initiator peer to', user.id);
+        get().createPeer(user.id, true);
+      }
+    }, 0);
   },
 
   removeUserFromChannel: (channelId: string, userId: string) => {
     console.log('[Voice] removeUserFromChannel:', channelId, userId);
+
+    // Cancel any pending ICE restart for this peer
+    const restartTimer = iceRestartTimers.get(userId);
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      iceRestartTimers.delete(userId);
+    }
 
     const { activeChannelId } = get();
     if (activeChannelId === channelId) {
@@ -315,7 +341,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     if (!peerConn) {
-      // Could be an ICE candidate arriving before the offer — queue or ignore
       if (data.type === 'ice-candidate') {
         console.log(`[Voice] ICE candidate from ${from} but no peer yet, creating responder`);
         get().createPeer(from, false);
@@ -346,7 +371,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         .catch((err) => console.error(`[Voice] Error handling answer from ${from}:`, err));
     } else if (data.type === 'ice-candidate' && data.candidate) {
       pc.addIceCandidate(new RTCIceCandidate(data.candidate))
-        .catch((err) => console.error(`[Voice] Error adding ICE candidate from ${from}:`, err));
+        .catch((err) => {
+          // Ignore "no remote description" errors — candidate will be applied later
+          if (!String(err).includes('remote description')) {
+            console.error(`[Voice] Error adding ICE candidate from ${from}:`, err);
+          }
+        });
     }
   },
 
@@ -383,7 +413,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // Handle ICE candidates
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log(`[Voice] ICE candidate for ${targetUserId}`);
         socket.emit('voice:signal', {
           to: targetUserId,
           signal: { type: 'ice-candidate', candidate: event.candidate.toJSON() },
@@ -393,13 +422,49 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     pc.oniceconnectionstatechange = () => {
       console.log(`[Voice] ICE state with ${targetUserId}: ${pc.iceConnectionState}`);
-      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-        console.warn(`[Voice] ICE connection ${pc.iceConnectionState} with ${targetUserId}`);
+
+      if (pc.iceConnectionState === 'failed') {
+        // Attempt ICE restart instead of giving up
+        console.warn(`[Voice] ICE failed with ${targetUserId}, attempting ICE restart`);
+
+        // Clear any existing restart timer
+        const existingTimer = iceRestartTimers.get(targetUserId);
+        if (existingTimer) clearTimeout(existingTimer);
+
+        const timer = setTimeout(() => {
+          iceRestartTimers.delete(targetUserId);
+          const currentPeer = get().peers.get(targetUserId);
+          if (!currentPeer || currentPeer.pc !== pc) return; // peer was replaced
+
+          pc.createOffer({ iceRestart: true })
+            .then((offer) => pc.setLocalDescription(offer))
+            .then(() => {
+              const s = getSocket();
+              if (s && pc.localDescription) {
+                s.emit('voice:signal', {
+                  to: targetUserId,
+                  signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
+                });
+              }
+            })
+            .catch((err) => console.error(`[Voice] ICE restart failed for ${targetUserId}:`, err));
+        }, ICE_RESTART_DELAY_MS);
+        iceRestartTimers.set(targetUserId, timer);
+      }
+
+      if (pc.iceConnectionState === 'disconnected') {
+        console.warn(`[Voice] ICE disconnected with ${targetUserId} — waiting for recovery`);
       }
     };
 
     pc.onconnectionstatechange = () => {
       console.log(`[Voice] Connection state with ${targetUserId}: ${pc.connectionState}`);
+
+      // If connection completely failed after ICE restart, clean up
+      if (pc.connectionState === 'failed') {
+        console.error(`[Voice] Connection failed permanently with ${targetUserId}`);
+        get().destroyPeer(targetUserId);
+      }
     };
 
     // Handle remote audio stream
@@ -464,8 +529,19 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   destroyPeer: (userId: string) => {
     const { peers, remoteAudios } = get();
 
+    // Cancel any pending ICE restart
+    const restartTimer = iceRestartTimers.get(userId);
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      iceRestartTimers.delete(userId);
+    }
+
     const peerConn = peers.get(userId);
     if (peerConn) {
+      peerConn.pc.onicecandidate = null;
+      peerConn.pc.oniceconnectionstatechange = null;
+      peerConn.pc.onconnectionstatechange = null;
+      peerConn.pc.ontrack = null;
       peerConn.pc.close();
       const newPeers = new Map(peers);
       newPeers.delete(userId);
@@ -485,7 +561,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   destroyAllPeers: () => {
     const { peers, remoteAudios } = get();
-    peers.forEach((peerConn) => peerConn.pc.close());
+    peers.forEach((peerConn) => {
+      peerConn.pc.onicecandidate = null;
+      peerConn.pc.oniceconnectionstatechange = null;
+      peerConn.pc.onconnectionstatechange = null;
+      peerConn.pc.ontrack = null;
+      peerConn.pc.close();
+    });
     remoteAudios.forEach((audio) => {
       audio.pause();
       audio.srcObject = null;
@@ -504,5 +586,32 @@ useSettingsStore.subscribe((state, prevState) => {
     remoteAudios.forEach((audio) => {
       applyOutputDevice(audio, state.audioOutputDeviceId);
     });
+  }
+});
+
+// On socket reconnect while in a voice channel: re-join and re-establish peers
+onSocketReconnect(() => {
+  const { activeChannelId, localStream } = useVoiceStore.getState();
+  if (!activeChannelId) return;
+
+  console.log('[Voice] Socket reconnected — re-joining voice channel', activeChannelId);
+  const socket = getSocket();
+  if (!socket) return;
+
+  // Destroy stale peers (they used the old socket)
+  useVoiceStore.getState().destroyAllPeers();
+
+  // Re-join voice on the server — it will re-broadcast our presence
+  // and send us the updated user list, which triggers peer creation
+  socket.emit('voice:join', activeChannelId);
+
+  // Re-start latency measurement with new socket
+  useVoiceStore.getState().startLatencyMeasurement();
+
+  // Re-start speaking detection if unmuted
+  if (localStream && !useVoiceStore.getState().selfMute) {
+    const settings = useSettingsStore.getState();
+    setNoiseGateThreshold(settings.noiseGateThreshold);
+    startSpeakingDetection(localStream);
   }
 });

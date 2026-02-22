@@ -1,0 +1,29 @@
+import { useState, useEffect } from 'react';
+import { getConnectionStatus, onConnectionStatusChange } from '../../services/socket';
+import { Wifi, WifiOff, Loader2 } from 'lucide-react';
+
+export function ConnectionBanner() {
+  const [status, setStatus] = useState(getConnectionStatus);
+
+  useEffect(() => {
+    return onConnectionStatusChange(setStatus);
+  }, []);
+
+  if (status === 'connected') return null;
+
+  return (
+    <div className="flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-medium bg-vox-accent-warning/15 text-vox-accent-warning border-b border-vox-accent-warning/20">
+      {status === 'connecting' ? (
+        <>
+          <Loader2 size={14} className="animate-spin" />
+          <span>Reconnecting to Voxium...</span>
+        </>
+      ) : (
+        <>
+          <WifiOff size={14} />
+          <span>Connection lost. Attempting to reconnect...</span>
+        </>
+      )}
+    </div>
+  );
+}

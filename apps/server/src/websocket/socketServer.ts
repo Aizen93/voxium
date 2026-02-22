@@ -46,51 +46,23 @@ export function initSocketServer(httpServer: HttpServer) {
     const userId = socket.data.userId as string;
     console.log(`[WS] User connected: ${userId} (${socket.id})`);
 
-    // Track online presence
-    await setUserOnline(userId, socket.id);
-
-    // Join rooms for all servers the user is a member of
-    const memberships = await prisma.serverMember.findMany({
-      where: { userId },
-      select: { serverId: true },
-    });
-    for (const m of memberships) {
-      socket.join(`server:${m.serverId}`);
-    }
-
-    // Broadcast online status to all servers
-    for (const m of memberships) {
-      socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
-    }
-
-    // Send existing voice channel users for all servers
-    for (const m of memberships) {
-      const voiceState = getVoiceStateForServer(m.serverId);
-      for (const { channelId, userIds } of voiceState) {
-        const userInfos = await prisma.user.findMany({
-          where: { id: { in: userIds } },
-          select: { id: true, username: true, displayName: true, avatarUrl: true },
-        });
-        const voiceUsers = userInfos.map((u) => ({
-          ...u,
-          selfMute: false,
-          selfDeaf: false,
-          speaking: false,
-        }));
-        socket.emit('voice:channel_users', { channelId, users: voiceUsers });
-      }
-    }
-
-    // Update DB status
-    await prisma.user.update({ where: { id: userId }, data: { status: 'online' } });
+    // ═══════════════════════════════════════════════════════════════════
+    // CRITICAL: Register ALL event handlers SYNCHRONOUSLY before any
+    // async work. The client may send events (channel:join, voice:join,
+    // etc.) immediately after connecting. If handlers are registered
+    // after awaits, those early events are silently lost — causing
+    // broken real-time messaging after reconnects.
+    // ═══════════════════════════════════════════════════════════════════
 
     // ─── Channel subscription ───────────────────────────────────────
     socket.on('channel:join', (channelId: string) => {
       socket.join(`channel:${channelId}`);
+      console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
     });
 
     socket.on('channel:leave', (channelId: string) => {
       socket.leave(`channel:${channelId}`);
+      console.log(`[WS] ${userId} (${socket.id}) left room channel:${channelId}`);
     });
 
     // ─── Typing indicators ──────────────────────────────────────────
@@ -115,16 +87,76 @@ export function initSocketServer(httpServer: HttpServer) {
     handleVoiceEvents(io, socket);
 
     // ─── Disconnect ─────────────────────────────────────────────────
-    // Use 'disconnecting' so the socket is still in rooms when we broadcast
     socket.on('disconnecting', async () => {
       console.log(`[WS] User disconnecting: ${userId}`);
-      await setUserOffline(socket.id);
-      await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
 
-      for (const m of memberships) {
-        socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
+      // Fetch memberships needed for presence broadcast (can't rely on
+      // the variable from the outer scope — it may not be set yet if
+      // the connection handler's async work hasn't finished)
+      try {
+        const membershipList = await prisma.serverMember.findMany({
+          where: { userId },
+          select: { serverId: true },
+        });
+
+        await setUserOffline(socket.id);
+        await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
+
+        for (const m of membershipList) {
+          socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
+        }
+      } catch (err) {
+        console.error(`[WS] Error during disconnect cleanup for ${userId}:`, err);
       }
     });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Now do async initialization (server room joins, presence, etc.)
+    // Events arriving during this work will be handled by the
+    // synchronously-registered handlers above.
+    // ═══════════════════════════════════════════════════════════════════
+
+    try {
+      // Track online presence
+      await setUserOnline(userId, socket.id);
+
+      // Join rooms for all servers the user is a member of
+      const memberships = await prisma.serverMember.findMany({
+        where: { userId },
+        select: { serverId: true },
+      });
+      for (const m of memberships) {
+        socket.join(`server:${m.serverId}`);
+      }
+
+      // Broadcast online status to all servers
+      for (const m of memberships) {
+        socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
+      }
+
+      // Send existing voice channel users for all servers
+      for (const m of memberships) {
+        const voiceState = getVoiceStateForServer(m.serverId);
+        for (const { channelId, userIds } of voiceState) {
+          const userInfos = await prisma.user.findMany({
+            where: { id: { in: userIds } },
+            select: { id: true, username: true, displayName: true, avatarUrl: true },
+          });
+          const voiceUsers = userInfos.map((u) => ({
+            ...u,
+            selfMute: false,
+            selfDeaf: false,
+            speaking: false,
+          }));
+          socket.emit('voice:channel_users', { channelId, users: voiceUsers });
+        }
+      }
+
+      // Update DB status
+      await prisma.user.update({ where: { id: userId }, data: { status: 'online' } });
+    } catch (err) {
+      console.error(`[WS] Error during connection setup for ${userId}:`, err);
+    }
   });
 
   return io;

@@ -91,7 +91,10 @@ messageRouter.post('/', async (req: Request, res: Response, next: NextFunction) 
     });
 
     // Broadcast to all users subscribed to this channel
-    getIO().to(`channel:${channelId}`).emit('message:new', message);
+    const room = `channel:${channelId}`;
+    const socketsInRoom = await getIO().in(room).fetchSockets();
+    console.log(`[MSG] Broadcasting message:new to ${room} — ${socketsInRoom.length} socket(s) in room: [${socketsInRoom.map(s => s.data.userId).join(', ')}]`);
+    getIO().to(room).emit('message:new', message);
 
     res.status(201).json({ success: true, data: message });
   } catch (err) {

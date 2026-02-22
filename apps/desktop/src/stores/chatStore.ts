@@ -3,6 +3,13 @@ import { api } from '../services/api';
 import { getSocket } from '../services/socket';
 import type { Message } from '@voxium/shared';
 
+// Track typing timers per user to prevent leaks
+const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// Track current fetch to prevent duplicate requests
+let activeFetchController: AbortController | null = null;
+let lastFetchKey = '';
+
 interface ChatState {
   messages: Message[];
   hasMore: boolean;
@@ -26,27 +33,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
   typingUsers: new Map(),
 
   fetchMessages: async (channelId: string, before?: string) => {
+    // Deduplicate: skip if same request is already in-flight
+    const fetchKey = `${channelId}:${before || 'initial'}`;
+    if (fetchKey === lastFetchKey && get().isLoading) return;
+
+    // Abort any previous pending fetch (e.g. rapid channel switching)
+    if (activeFetchController) {
+      activeFetchController.abort();
+    }
+
+    const controller = new AbortController();
+    activeFetchController = controller;
+    lastFetchKey = fetchKey;
+
     set({ isLoading: true });
     try {
       const params = new URLSearchParams();
       if (before) params.set('before', before);
 
-      const { data } = await api.get(`/channels/${channelId}/messages?${params}`);
+      const { data } = await api.get(`/channels/${channelId}/messages?${params}`, {
+        signal: controller.signal,
+      });
       const newMessages = data.data;
 
+      // Check if this fetch is still relevant (channel may have changed)
+      if (controller.signal.aborted) return;
+
       if (before) {
-        // Prepend older messages
-        set((state) => ({
-          messages: [...newMessages, ...state.messages],
-          hasMore: data.hasMore,
-          isLoading: false,
-        }));
+        // Prepend older messages, dedup by ID
+        set((state) => {
+          const existingIds = new Set(state.messages.map((m) => m.id));
+          const uniqueNew = newMessages.filter((m: Message) => !existingIds.has(m.id));
+          return {
+            messages: [...uniqueNew, ...state.messages],
+            hasMore: data.hasMore,
+            isLoading: false,
+          };
+        });
       } else {
         set({ messages: newMessages, hasMore: data.hasMore, isLoading: false });
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
       console.error('Failed to fetch messages:', err);
       set({ isLoading: false });
+    } finally {
+      if (activeFetchController === controller) {
+        activeFetchController = null;
+      }
     }
   },
 
@@ -59,7 +93,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((state) => ({ messages: [...state.messages, data.data] }));
       }
 
-      // Emit via WebSocket for real-time delivery to others
       const socket = getSocket();
       if (socket) {
         socket.emit('typing:stop', channelId);
@@ -90,10 +123,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   clearMessages: () => {
-    set({ messages: [], hasMore: false, typingUsers: new Map() });
+    // Abort any in-flight fetch when switching channels
+    if (activeFetchController) {
+      activeFetchController.abort();
+      activeFetchController = null;
+    }
+    lastFetchKey = '';
+
+    // Clear all typing timers
+    typingTimers.forEach((timer) => clearTimeout(timer));
+    typingTimers.clear();
+
+    set({ messages: [], hasMore: false, isLoading: false, typingUsers: new Map() });
   },
 
   setTypingUser: (userId: string, username: string) => {
+    // Clear existing timer for this user to prevent accumulation
+    const existingTimer = typingTimers.get(userId);
+    if (existingTimer) clearTimeout(existingTimer);
+
     set((state) => {
       const newMap = new Map(state.typingUsers);
       newMap.set(userId, username);
@@ -101,13 +149,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     // Auto-remove after 3 seconds
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      typingTimers.delete(userId);
       get().removeTypingUser(userId);
     }, 3000);
+    typingTimers.set(userId, timer);
   },
 
   removeTypingUser: (userId: string) => {
+    // Clear the timer if it exists
+    const timer = typingTimers.get(userId);
+    if (timer) {
+      clearTimeout(timer);
+      typingTimers.delete(userId);
+    }
+
     set((state) => {
+      if (!state.typingUsers.has(userId)) return state;
       const newMap = new Map(state.typingUsers);
       newMap.delete(userId);
       return { typingUsers: newMap };

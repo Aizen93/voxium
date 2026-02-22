@@ -1,7 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
-import { getSocket } from '../../services/socket';
+import { getSocket, onConnectionStatusChange } from '../../services/socket';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { Hash } from 'lucide-react';
@@ -13,6 +13,22 @@ export function ChatArea() {
 
   const activeChannel = channels.find((c) => c.id === activeChannelId);
 
+  /**
+   * Ensure the current channel room is joined and messages are loaded.
+   * Called on channel switch, socket reconnect, and initial ready.
+   */
+  const joinAndFetch = useCallback(
+    (channelId: string) => {
+      const socket = getSocket();
+      if (socket) {
+        socket.emit('channel:join', channelId);
+      }
+      clearMessages();
+      fetchMessages(channelId);
+    },
+    [clearMessages, fetchMessages]
+  );
+
   // Join/leave socket channel rooms and fetch messages when channel changes
   useEffect(() => {
     if (!activeChannelId || activeChannelId === prevChannelRef.current) return;
@@ -21,37 +37,78 @@ export function ChatArea() {
 
     // Leave previous channel room
     if (prevChannelRef.current && socket) {
-      console.log('[Chat] Leaving channel room:', prevChannelRef.current);
       socket.emit('channel:leave', prevChannelRef.current);
     }
 
     prevChannelRef.current = activeChannelId;
 
-    // Join new channel room
-    if (socket) {
-      console.log('[Chat] Joining channel room:', activeChannelId);
-      socket.emit('channel:join', activeChannelId);
+    // Join new channel room and fetch messages
+    joinAndFetch(activeChannelId);
+  }, [activeChannelId, joinAndFetch]);
+
+  // On any (re)connection: re-join channel room and re-fetch messages.
+  // Uses DUAL mechanism for maximum reliability:
+  //  1. Direct socket.on('connect') listener (most reliable for same socket instance)
+  //  2. onConnectionStatusChange (catches socket replacement and initial connect)
+  // Deduplication via handledSocketId prevents double-fetch.
+  useEffect(() => {
+    let handledSocketId: string | undefined;
+
+    function handleReconnect() {
+      const socket = getSocket();
+      if (!socket?.connected) return;
+      // Deduplicate: only process each connection once (both mechanisms may fire)
+      if (socket.id === handledSocketId) return;
+      handledSocketId = socket.id;
+
+      const channelId = prevChannelRef.current;
+      if (!channelId) return;
+
+      console.log(`[Chat] Socket (re)connected (id=${socket.id}) — re-joining channel: ${channelId}`);
+      joinAndFetch(channelId);
     }
 
-    clearMessages();
-    fetchMessages(activeChannelId);
-  }, [activeChannelId, clearMessages, fetchMessages]);
-
-  // Re-join channel room on socket reconnection
-  useEffect(() => {
+    // Mechanism 1: Direct listener on the socket object
     const socket = getSocket();
-    if (!socket) return;
+    if (socket) {
+      socket.on('connect', handleReconnect);
 
-    const handleReconnect = () => {
-      if (prevChannelRef.current) {
-        console.log('[Chat] Reconnected, re-joining channel room:', prevChannelRef.current);
-        socket.emit('channel:join', prevChannelRef.current);
+      if (socket.connected) {
+        // Already connected — mark as handled, ensure room is joined
+        handledSocketId = socket.id;
+        if (prevChannelRef.current) {
+          console.log('[Chat] Socket already connected on mount — ensuring channel:join');
+          socket.emit('channel:join', prevChannelRef.current);
+        }
       }
-    };
+    }
 
-    socket.on('connect', handleReconnect);
+    // Mechanism 2: Status change listener (fires even if socket object was replaced)
+    const unsubStatus = onConnectionStatusChange((status) => {
+      if (status !== 'connected') return;
+
+      // Also ensure direct listener is on the current socket
+      const currentSocket = getSocket();
+      if (currentSocket && currentSocket !== socket) {
+        currentSocket.on('connect', handleReconnect);
+      }
+
+      handleReconnect();
+    });
+
     return () => {
-      socket.off('connect', handleReconnect);
+      // Clean up direct listener from any socket we attached to
+      const s = getSocket();
+      if (s) s.off('connect', handleReconnect);
+      if (socket && socket !== s) socket.off('connect', handleReconnect);
+      unsubStatus();
+    };
+  }, [joinAndFetch]);
+
+  // Clean up channel room on unmount
+  useEffect(() => {
+    return () => {
+      const socket = getSocket();
       if (prevChannelRef.current && socket) {
         socket.emit('channel:leave', prevChannelRef.current);
       }
