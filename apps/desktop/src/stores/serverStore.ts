@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
-import type { Server, Channel, ServerMember, UserStatus } from '@voxium/shared';
+import type { Server, Channel, ServerMember, User, UserStatus } from '@voxium/shared';
 
 interface ServerState {
   servers: Server[];
@@ -19,6 +19,8 @@ interface ServerState {
   joinServer: (inviteCode: string) => Promise<void>;
   leaveServer: (serverId: string) => Promise<void>;
   updateMemberStatus: (userId: string, status: UserStatus) => void;
+  addMember: (serverId: string, user: User) => void;
+  removeMember: (serverId: string, userId: string) => void;
   fetchMembers: (serverId: string) => Promise<void>;
 }
 
@@ -102,6 +104,36 @@ export const useServerStore = create<ServerState>((set, get) => ({
       members: state.members.map((m) =>
         m.userId === userId ? { ...m, user: { ...m.user, status } } : m
       ),
+    }));
+  },
+
+  addMember: (serverId: string, user: User) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => {
+      if (state.members.some((m) => m.userId === user.id)) return state;
+      const newMember: ServerMember = {
+        userId: user.id,
+        serverId,
+        role: 'member',
+        joinedAt: new Date().toISOString(),
+        user: {
+          id: user.id,
+          username: user.username,
+          displayName: user.displayName,
+          email: user.email,
+          avatarUrl: user.avatarUrl,
+          status: user.status || 'online',
+          createdAt: user.createdAt,
+        },
+      };
+      return { members: [...state.members, newMember] };
+    });
+  },
+
+  removeMember: (serverId: string, userId: string) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      members: state.members.filter((m) => m.userId !== userId),
     }));
   },
 

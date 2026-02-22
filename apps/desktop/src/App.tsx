@@ -1,10 +1,30 @@
-import { useEffect } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
+import { InvitePage } from './pages/InvitePage';
 import { MainLayout } from './components/layout/MainLayout';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
+
+const PENDING_REDIRECT_KEY = 'voxium_pending_redirect';
+
+/** Redirects to the pending invite path (if any) or "/" after login. */
+function AuthRedirect() {
+  const [target] = useState(() => {
+    const path = localStorage.getItem(PENDING_REDIRECT_KEY);
+    if (path) localStorage.removeItem(PENDING_REDIRECT_KEY);
+    return path || '/';
+  });
+  return <Navigate to={target} replace />;
+}
+
+/** Saves the current path before redirecting unauthenticated users to /login. */
+function SaveAndRedirect() {
+  const location = useLocation();
+  localStorage.setItem(PENDING_REDIRECT_KEY, location.pathname);
+  return <Navigate to="/login" replace />;
+}
 
 export function App() {
   const { isAuthenticated, checkAuth, isLoading } = useAuthStore();
@@ -29,11 +49,15 @@ export function App() {
       <Routes>
         <Route
           path="/login"
-          element={isAuthenticated ? <Navigate to="/" replace /> : <LoginPage />}
+          element={isAuthenticated ? <AuthRedirect /> : <LoginPage />}
         />
         <Route
           path="/register"
-          element={isAuthenticated ? <Navigate to="/" replace /> : <RegisterPage />}
+          element={isAuthenticated ? <AuthRedirect /> : <RegisterPage />}
+        />
+        <Route
+          path="/invite/:code"
+          element={isAuthenticated ? <InvitePage /> : <SaveAndRedirect />}
         />
         <Route
           path="/*"

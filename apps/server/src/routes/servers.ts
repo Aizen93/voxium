@@ -3,6 +3,7 @@ import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateServerName, LIMITS } from '@voxium/shared';
+import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
 
 export const serverRouter = Router();
 
@@ -65,6 +66,9 @@ serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
         _count: { select: { members: true } },
       },
     });
+
+    // Add creator's socket to the new server room so server-scoped events work
+    await joinServerRoom(req.user!.userId, server.id);
 
     res.status(201).json({
       success: true,
@@ -161,6 +165,9 @@ serverRouter.post('/:serverId/join', async (req: Request, res: Response, next: N
       data: { userId: req.user!.userId, serverId },
     });
 
+    // Notify all members and add the joiner's socket(s) to the server room
+    await broadcastMemberJoined(req.user!.userId, serverId);
+
     res.json({ success: true, data: server });
   } catch (err) {
     next(err);
@@ -181,6 +188,9 @@ serverRouter.post('/:serverId/leave', async (req: Request, res: Response, next: 
     await prisma.serverMember.delete({
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
     });
+
+    // Remove the leaver's socket(s) from the server room and notify remaining members
+    await broadcastMemberLeft(req.user!.userId, serverId);
 
     res.json({ success: true, message: 'Left server' });
   } catch (err) {

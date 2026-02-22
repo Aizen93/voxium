@@ -4,6 +4,7 @@ import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { nanoid } from 'nanoid';
 import { INVITE_CODE_LENGTH } from '@voxium/shared';
+import { broadcastMemberJoined } from '../utils/memberBroadcast';
 
 export const inviteRouter = Router();
 
@@ -13,24 +14,17 @@ inviteRouter.use(authenticate);
 inviteRouter.post('/servers/:serverId', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
-    const { maxUses, expiresInHours } = req.body;
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
     });
     if (!membership) throw new ForbiddenError('Not a member of this server');
 
-    const expiresAt = expiresInHours
-      ? new Date(Date.now() + expiresInHours * 60 * 60 * 1000)
-      : null;
-
     const invite = await prisma.invite.create({
       data: {
         code: nanoid(INVITE_CODE_LENGTH),
         serverId,
         createdBy: req.user!.userId,
-        maxUses: maxUses || null,
-        expiresAt,
       },
     });
 
@@ -53,11 +47,8 @@ inviteRouter.post('/:code/join', async (req: Request, res: Response, next: NextF
     if (!invite) throw new NotFoundError('Invite');
 
     if (invite.expiresAt && invite.expiresAt < new Date()) {
+      await prisma.invite.delete({ where: { code } });
       throw new BadRequestError('This invite has expired');
-    }
-
-    if (invite.maxUses && invite.uses >= invite.maxUses) {
-      throw new BadRequestError('This invite has reached its max uses');
     }
 
     const existing = await prisma.serverMember.findUnique({
@@ -69,11 +60,11 @@ inviteRouter.post('/:code/join', async (req: Request, res: Response, next: NextF
       prisma.serverMember.create({
         data: { userId: req.user!.userId, serverId: invite.serverId },
       }),
-      prisma.invite.update({
-        where: { code },
-        data: { uses: { increment: 1 } },
-      }),
+      prisma.invite.delete({ where: { code } }),
     ]);
+
+    // Notify all members and add the joiner's socket(s) to the server room
+    await broadcastMemberJoined(req.user!.userId, invite.serverId);
 
     res.json({ success: true, data: invite.server });
   } catch (err) {
@@ -96,6 +87,11 @@ inviteRouter.get('/:code', async (req: Request, res: Response, next: NextFunctio
     });
 
     if (!invite) throw new NotFoundError('Invite');
+
+    if (invite.expiresAt && invite.expiresAt < new Date()) {
+      await prisma.invite.delete({ where: { code } });
+      throw new BadRequestError('This invite has expired');
+    }
 
     res.json({
       success: true,

@@ -137,17 +137,20 @@ export function initSocketServer(httpServer: HttpServer) {
       // Send existing voice channel users for all servers
       for (const m of memberships) {
         const voiceState = getVoiceStateForServer(m.serverId);
-        for (const { channelId, userIds } of voiceState) {
+        for (const { channelId, userIds, userStates } of voiceState) {
           const userInfos = await prisma.user.findMany({
             where: { id: { in: userIds } },
             select: { id: true, username: true, displayName: true, avatarUrl: true },
           });
-          const voiceUsers = userInfos.map((u) => ({
-            ...u,
-            selfMute: false,
-            selfDeaf: false,
-            speaking: false,
-          }));
+          const voiceUsers = userInfos.map((u) => {
+            const state = userStates.get(u.id);
+            return {
+              ...u,
+              selfMute: state?.selfMute ?? false,
+              selfDeaf: state?.selfDeaf ?? false,
+              speaking: false,
+            };
+          });
           socket.emit('voice:channel_users', { channelId, users: voiceUsers });
         }
       }

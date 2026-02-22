@@ -65,6 +65,12 @@ export function MainLayout() {
       voiceSignal: ({ from, signal }: any) => {
         useVoiceStore.getState().handleSignal(from, signal);
       },
+      memberJoined: ({ serverId, user }: any) => {
+        useServerStore.getState().addMember(serverId, user);
+      },
+      memberLeft: ({ serverId, userId }: any) => {
+        useServerStore.getState().removeMember(serverId, userId);
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -80,6 +86,8 @@ export function MainLayout() {
       ['voice:state_update', handlers.voiceStateUpdate],
       ['voice:speaking', handlers.voiceSpeaking],
       ['voice:signal', handlers.voiceSignal],
+      ['member:joined', handlers.memberJoined],
+      ['member:left', handlers.memberLeft],
     ];
 
     /**

@@ -215,13 +215,17 @@ export function getVoiceChannelUsers(channelId: string): string[] {
 }
 
 /** Returns all channelIds that belong to a given server and have active voice users */
-export function getVoiceStateForServer(serverId: string): { channelId: string; userIds: string[] }[] {
-  const result: { channelId: string; userIds: string[] }[] = [];
+export function getVoiceStateForServer(serverId: string): { channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean }> }[] {
+  const result: { channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean }> }[] = [];
   for (const [channelId, serverIdForChannel] of channelServerMap.entries()) {
     if (serverIdForChannel === serverId) {
       const users = voiceChannelUsers.get(channelId);
       if (users && users.size > 0) {
-        result.push({ channelId, userIds: Array.from(users.keys()) });
+        const userStates = new Map<string, { selfMute: boolean; selfDeaf: boolean }>();
+        for (const [uid, state] of users.entries()) {
+          userStates.set(uid, { selfMute: state.selfMute, selfDeaf: state.selfDeaf });
+        }
+        result.push({ channelId, userIds: Array.from(users.keys()), userStates });
       }
     }
   }

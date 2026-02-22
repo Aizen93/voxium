@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.2.0 (Voice Features & Stability)
+**Version:** 0.2.3 (Real-Time Fixes & Invite Links)
 **Date:** 2026-02-22
-**Stage:** Voice features implemented, real-time stability hardening in progress
+**Stage:** Real-time member/voice features fixed, invite link flow implemented, invite lifecycle simplified
 
 ## What Has Been Done
 
@@ -82,6 +82,7 @@ A complete React + TypeScript frontend with Tauri 2 desktop wrapper:
 - **Pages:**
   - Login page with email/password
   - Registration page
+  - Invite page (`/invite/:code`) — server preview card with member count, join button
   - Main app layout (3-panel Discord-like design)
 - **Components:**
   - `ServerSidebar` — Icon strip of servers with tooltips, active indicators, create/join modal
@@ -90,7 +91,7 @@ A complete React + TypeScript frontend with Tauri 2 desktop wrapper:
   - `MessageInput` — Auto-resizing textarea with typing emission
   - `MemberSidebar` — Member list grouped by role with presence indicators
   - `VoicePanel` — Voice connection panel with mute/deaf controls, user list with speaking indicators
-  - `CreateServerModal` — Dual-mode (create new / join via invite)
+  - `CreateServerModal` — Dual-mode (create new / join via invite); auto-extracts invite code from full URLs
 - **Services:**
   - Axios HTTP client with token interceptor, auto-refresh queue pattern (concurrent 401s wait for a single refresh)
   - Socket.IO client with typed events, observable connection status, generation tracking
@@ -146,7 +147,8 @@ Comprehensive hardening of real-time features:
 - [x] Audio device selection and settings modal
 - [x] Error boundary and connection status banner
 - [x] Socket reconnection hardening
-- [ ] Ongoing: real-time message delivery reliability after reconnects (diagnostics added, investigation in progress)
+- [x] Ongoing: real-time message delivery reliability after reconnects
+- [x] Real-time member join/leave notifications (member:joined / member:left events)
 - [ ] Push-to-talk mode
 - [ ] Notification sounds
 - [ ] Unread message indicators
@@ -215,7 +217,31 @@ Both mechanisms are deduplicated by `socket.id` to prevent double-processing. Th
 ### Server Event Handler Registration
 All socket event handlers (`channel:join`, `channel:leave`, typing, voice, etc.) are registered **synchronously** at the top of the `connection` handler, before any `await` calls. This prevents a race condition where early client events (sent immediately after connect) would be silently dropped if handlers hadn't been registered yet.
 
-### New Files Added in v0.2
+### Dynamic Server Room Management (v0.2.1–v0.2.3)
+
+**Problem:** Socket.IO server rooms (`server:{id}`) were only joined during the initial socket connection handler. When a user created or joined a server mid-session, their socket was never added to the new server's room, breaking all server-scoped real-time features (voice user lists, speaking indicators, presence, member updates). Text messages still worked because they use `channel:{id}` rooms which are joined explicitly.
+
+**Fix — critical invariant:** Every code path that makes a user a server member must also add their socket(s) to the `server:{id}` room. This is now handled in three places:
+1. **Socket connect** (`socketServer.ts`) — joins rooms for all existing memberships (unchanged)
+2. **Server join** (invite or direct) — `broadcastMemberJoined()` in `utils/memberBroadcast.ts` adds socket to room + emits `member:joined`
+3. **Server create** (`servers.ts`) — `joinServerRoom()` adds socket to room (no broadcast needed, creator is the only member)
+
+**Server-side changes:**
+- `utils/memberBroadcast.ts` — centralized helpers: `broadcastMemberJoined`, `broadcastMemberLeft`, `joinServerRoom`. Uses `io.fetchSockets()` to find user's active sockets.
+- `member:joined` / `member:left` events are now emitted (types existed but were never used before)
+- `getVoiceStateForServer` in `voiceHandler.ts` now returns actual `selfMute`/`selfDeaf` state (previously hardcoded to `false`)
+
+**Client-side changes:**
+- `MainLayout.tsx` listens for `member:joined` and `member:left`, calls `serverStore.addMember` / `removeMember`
+- `serverStore.ts` — new `addMember(serverId, user)` and `removeMember(serverId, userId)` methods with deduplication
+
+### Invite Link Flow (v0.2.2)
+
+- **Route:** `/invite/:code` renders `InvitePage` for authenticated users. Unauthenticated users are redirected to `/login` with the invite path saved to `localStorage` (`voxium_pending_redirect`). After login, `AuthRedirect` reads the saved path and navigates there automatically.
+- **Invite lifecycle:** Invites are single-use. The join endpoint (`POST /invites/:code/join`) deletes the invite in a Prisma `$transaction` alongside member creation. Expired invites are also cleaned up on access (both preview and join). The `maxUses`/`uses` columns in the schema are no longer set by application code (cleanup migration pending).
+- **URL extraction:** `CreateServerModal` extracts the invite code from full URLs (e.g., `http://localhost:1420/invite/UsLnacI8`) using a regex match on `/invite/([^\s/]+)`.
+
+### New Files Added in v0.2–v0.2.3
 - `apps/desktop/src/services/audioAnalyser.ts` — Speaking detection via AudioContext
 - `apps/desktop/src/stores/settingsStore.ts` — Audio device preferences with localStorage persistence
 - `apps/desktop/src/components/settings/SettingsModal.tsx` — Audio device selection UI
@@ -223,3 +249,11 @@ All socket event handlers (`channel:join`, `channel:leave`, typing, voice, etc.)
 - `apps/desktop/src/components/layout/ConnectionBanner.tsx` — Reconnecting/disconnected banner
 - `apps/desktop/src/components/layout/ErrorBoundary.tsx` — React error boundary with recover UI
 - `apps/desktop/src/hooks/useLocalAudioLevel.ts` — Real-time mic level for local avatar indicator
+- `apps/server/src/utils/memberBroadcast.ts` — Centralized member join/leave/room-join helpers
+- `apps/desktop/src/pages/InvitePage.tsx` — Invite preview page with server card and join button
+
+### Known Issues / Suggestions
+- `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId → socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.
+- The `member:joined` event sends `email: ''` to satisfy the `User` type in `ServerToClientEvents`. Consider a `PublicUser` type that omits `email`.
+- Prisma `Invite` model still has `maxUses` and `uses` columns that are no longer used. Cleanup migration pending.
+- `SaveAndRedirect` in `App.tsx` performs `localStorage.setItem` during render (not in `useEffect`). Functionally correct since `Navigate` redirects immediately, but technically impure.

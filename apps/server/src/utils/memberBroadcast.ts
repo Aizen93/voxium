@@ -1,0 +1,71 @@
+import { getIO } from '../websocket/socketServer';
+import { prisma } from './prisma';
+
+/**
+ * After a user joins a server:
+ * 1. Makes their active socket(s) join the `server:<id>` room.
+ * 2. Broadcasts `member:joined` with safe user fields (no email) to all
+ *    members in the server room.
+ */
+export async function broadcastMemberJoined(userId: string, serverId: string): Promise<void> {
+  const io = getIO();
+
+  // Add the new member's socket(s) to the server room
+  const sockets = await io.fetchSockets();
+  for (const s of sockets) {
+    if (s.data.userId === userId) {
+      s.join(`server:${serverId}`);
+    }
+  }
+
+  // Fetch only the fields needed for the broadcast (no email)
+  const joinedUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, username: true, displayName: true, avatarUrl: true, status: true, createdAt: true },
+  });
+
+  if (joinedUser) {
+    io.to(`server:${serverId}`).emit('member:joined', {
+      serverId,
+      user: {
+        ...joinedUser,
+        email: '',
+        status: joinedUser.status as any,
+        createdAt: joinedUser.createdAt.toISOString(),
+      },
+    });
+  }
+}
+
+/**
+ * Makes a user's active socket(s) join the `server:<id>` room without
+ * broadcasting.  Used when the user is the server creator (no one else
+ * to notify).
+ */
+export async function joinServerRoom(userId: string, serverId: string): Promise<void> {
+  const io = getIO();
+  const sockets = await io.fetchSockets();
+  for (const s of sockets) {
+    if (s.data.userId === userId) {
+      s.join(`server:${serverId}`);
+    }
+  }
+}
+
+/**
+ * After a user leaves a server:
+ * 1. Removes their socket(s) from the `server:<id>` room.
+ * 2. Broadcasts `member:left` to remaining members.
+ */
+export async function broadcastMemberLeft(userId: string, serverId: string): Promise<void> {
+  const io = getIO();
+
+  const sockets = await io.fetchSockets();
+  for (const s of sockets) {
+    if (s.data.userId === userId) {
+      s.leave(`server:${serverId}`);
+    }
+  }
+
+  io.to(`server:${serverId}`).emit('member:left', { serverId, userId });
+}

@@ -151,9 +151,10 @@ apps/server/
 │   │   ├── socketServer.ts # Socket.IO setup, connection handler
 │   │   └── voiceHandler.ts # Voice channel state management
 │   └── utils/
-│       ├── prisma.ts       # Prisma client singleton
-│       ├── redis.ts        # Redis client + presence helpers
-│       └── errors.ts       # Custom error classes
+│       ├── prisma.ts            # Prisma client singleton
+│       ├── redis.ts             # Redis client + presence helpers
+│       ├── errors.ts            # Custom error classes
+│       └── memberBroadcast.ts   # Server room join + member event broadcast
 ```
 
 ### Request Flow
@@ -208,7 +209,8 @@ apps/desktop/
 │   ├── App.tsx               # Root component with routing
 │   ├── pages/
 │   │   ├── LoginPage.tsx     # Login form
-│   │   └── RegisterPage.tsx  # Registration form
+│   │   ├── RegisterPage.tsx  # Registration form
+│   │   └── InvitePage.tsx    # Invite preview + join
 │   ├── components/
 │   │   ├── layout/
 │   │   │   └── MainLayout.tsx    # 3-panel Discord-like layout
@@ -326,10 +328,9 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 │ code (PK)        │
 │ serverId (FK)    │
 │ createdBy (FK)   │
-│ maxUses          │
-│ uses             │
 │ expiresAt        │
 └──────────────────┘
+  Single-use: deleted after join
 ```
 
 ### Key Indexes
@@ -380,11 +381,13 @@ Client                          Server
 
 ### Room Strategy
 
-| Room Pattern | Purpose |
-|-------------|---------|
-| `server:{id}` | Server-wide events (member join/leave, presence) |
-| `channel:{id}` | Channel-specific events (messages, typing) |
-| `voice:{id}` | Voice channel (voice state, signaling) |
+| Room Pattern | Purpose | When Joined |
+|-------------|---------|-------------|
+| `server:{id}` | Server-wide events (member join/leave, presence, voice) | On socket connect (all memberships) + dynamically on server create/join via `memberBroadcast.ts` |
+| `channel:{id}` | Channel-specific events (messages, typing) | Client emits `channel:join` when selecting a channel |
+| `voice:{id}` | Voice channel (voice state, signaling) | Client emits `voice:join` when joining voice |
+
+**Critical invariant:** Every code path that makes a user a server member (create, join, invite) must also add their socket(s) to the `server:{id}` room. Failure to do so breaks all server-scoped real-time features for that user.
 
 ### Event Types
 

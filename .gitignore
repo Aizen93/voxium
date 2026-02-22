@@ -13,3 +13,5 @@ target/
 .turbo
 coverage/
 .nyc_output/
+CLAUDE.md
+.claude/

@@ -34,7 +34,12 @@ export function CreateServerModal({ onClose }: Props) {
     setLoading(true);
     setError('');
     try {
-      await joinServer(inviteCode);
+      // Extract code from a full invite URL if pasted (e.g. http://localhost:1420/invite/UsLnacI8)
+      let code = inviteCode.trim();
+      const urlMatch = code.match(/\/invite\/([^\s/]+)/);
+      if (urlMatch) code = urlMatch[1];
+
+      await joinServer(code);
       onClose();
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to join server');
@@ -117,7 +122,7 @@ export function CreateServerModal({ onClose }: Props) {
                 className="input"
                 value={inviteCode}
                 onChange={(e) => setInviteCode(e.target.value)}
-                placeholder="Enter an invite code"
+                placeholder="Enter an invite code or link"
                 required
                 autoFocus
               />

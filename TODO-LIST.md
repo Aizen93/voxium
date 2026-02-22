@@ -3,7 +3,8 @@
   - [] Push-to-talk — alternative to voice activity; just a keybind that mutes/unmutes, easy to add alongside the existing mute logic
   - [] Notification sounds — play a tone on join/leave/message; the audio infrastructure is already there
   - [] Unread indicators / mention badges — channel list currently has no unread state, which makes multi-channel usage painful
-  - [] When a new User joins the server, the members list is not updating in real time and needs a page refresh to see the new user in the members list (Right side panel)
+  - [x] When a new User joins the server, the members list is not updating in real time and needs a page refresh to see the new user in the members list (Right side panel)
+  - [] When a user (Alice) creates a new server, and joins a channel, she can't see her name in the channel list (Though she can speak and hear just fine)
 
 ## Core chat features (medium effort):
   - [] File & image uploads — drag-and-drop or paste images into chat, preview inline. Needs a storage backend (S3/local) and a new message type
