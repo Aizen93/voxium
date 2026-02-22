@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useServerStore } from '../stores/serverStore';
 import { api } from '../services/api';
-import { MessageCircle, Users } from 'lucide-react';
+import { Users } from 'lucide-react';
 
 interface InvitePreview {
   code: string;
@@ -58,9 +58,7 @@ export function InvitePage() {
         <div className="rounded-2xl border border-vox-border bg-vox-bg-secondary p-8 shadow-2xl">
           {/* Logo */}
           <div className="mb-6 flex flex-col items-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-vox-accent-primary shadow-lg shadow-vox-accent-primary/20">
-              <MessageCircle className="h-8 w-8 text-white" />
-            </div>
+            <img src="/logo.svg" alt="Voxium" className="h-16 w-16 rounded-2xl shadow-lg shadow-vox-accent-primary/20" />
             <h1 className="mt-4 text-xl font-bold text-vox-text-primary">You've been invited!</h1>
           </div>
 

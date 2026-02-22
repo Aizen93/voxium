@@ -87,7 +87,7 @@ export interface Message {
   channelId: string;
   author: MessageAuthor;
   createdAt: string;
-  updatedAt: string | null;
+  editedAt: string | null;
 }
 
 export interface MessageAuthor {

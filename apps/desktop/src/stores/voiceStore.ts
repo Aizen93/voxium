@@ -231,7 +231,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
     }
 
-    if (socket) {
+    if (socket && get().activeChannelId) {
       socket.emit('voice:mute', newMute);
     }
 
@@ -248,7 +248,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       audio.muted = newDeaf;
     });
 
-    if (socket) {
+    if (socket && get().activeChannelId) {
       socket.emit('voice:deaf', newDeaf);
     }
 

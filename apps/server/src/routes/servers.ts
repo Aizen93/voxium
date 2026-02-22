@@ -80,7 +80,7 @@ serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
 });
 
 // Get server details
-serverRouter.get('/:serverId', async (req: Request, res: Response, next: NextFunction) => {
+serverRouter.get('/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
 
@@ -109,7 +109,7 @@ serverRouter.get('/:serverId', async (req: Request, res: Response, next: NextFun
 });
 
 // Get server members
-serverRouter.get('/:serverId/members', async (req: Request, res: Response, next: NextFunction) => {
+serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
     const page = parseInt(req.query.page as string) || 1;
@@ -149,7 +149,7 @@ serverRouter.get('/:serverId/members', async (req: Request, res: Response, next:
 });
 
 // Join a server (via invite code - simplified)
-serverRouter.post('/:serverId/join', async (req: Request, res: Response, next: NextFunction) => {
+serverRouter.post('/:serverId/join', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
 
@@ -175,7 +175,7 @@ serverRouter.post('/:serverId/join', async (req: Request, res: Response, next: N
 });
 
 // Leave a server
-serverRouter.post('/:serverId/leave', async (req: Request, res: Response, next: NextFunction) => {
+serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
 
@@ -199,7 +199,7 @@ serverRouter.post('/:serverId/leave', async (req: Request, res: Response, next: 
 });
 
 // Delete a server (owner only)
-serverRouter.delete('/:serverId', async (req: Request, res: Response, next: NextFunction) => {
+serverRouter.delete('/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
 

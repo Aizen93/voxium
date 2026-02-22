@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateMessageContent, LIMITS } from '@voxium/shared';
+import { validateMessageContent, LIMITS, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 
 export const messageRouter = Router({ mergeParams: true });
@@ -10,7 +10,7 @@ export const messageRouter = Router({ mergeParams: true });
 messageRouter.use(authenticate);
 
 // Get messages in a channel (paginated, newest first)
-messageRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
+messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId } = req.params;
     const limit = Math.min(parseInt(req.query.limit as string) || 50, LIMITS.MESSAGES_PER_PAGE);
@@ -57,7 +57,7 @@ messageRouter.get('/', async (req: Request, res: Response, next: NextFunction) =
 });
 
 // Send a message
-messageRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
+messageRouter.post('/', async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId } = req.params;
     const { content } = req.body;
@@ -94,7 +94,8 @@ messageRouter.post('/', async (req: Request, res: Response, next: NextFunction) 
     const room = `channel:${channelId}`;
     const socketsInRoom = await getIO().in(room).fetchSockets();
     console.log(`[MSG] Broadcasting message:new to ${room} — ${socketsInRoom.length} socket(s) in room: [${socketsInRoom.map(s => s.data.userId).join(', ')}]`);
-    getIO().to(room).emit('message:new', message);
+    // Prisma returns Date objects; Socket.IO serializes them to ISO strings over the wire
+    getIO().to(room).emit('message:new', message as unknown as Message);
 
     res.status(201).json({ success: true, data: message });
   } catch (err) {
@@ -103,7 +104,7 @@ messageRouter.post('/', async (req: Request, res: Response, next: NextFunction) 
 });
 
 // Edit a message
-messageRouter.patch('/:messageId', async (req: Request, res: Response, next: NextFunction) => {
+messageRouter.patch('/:messageId', async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { messageId } = req.params;
     const { content } = req.body;
@@ -125,7 +126,7 @@ messageRouter.patch('/:messageId', async (req: Request, res: Response, next: Nex
       },
     });
 
-    getIO().to(`channel:${message.channelId}`).emit('message:update', updated);
+    getIO().to(`channel:${message.channelId}`).emit('message:update', updated as unknown as Message);
 
     res.json({ success: true, data: updated });
   } catch (err) {
@@ -134,7 +135,7 @@ messageRouter.patch('/:messageId', async (req: Request, res: Response, next: Nex
 });
 
 // Delete a message
-messageRouter.delete('/:messageId', async (req: Request, res: Response, next: NextFunction) => {
+messageRouter.delete('/:messageId', async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { messageId } = req.params;
 

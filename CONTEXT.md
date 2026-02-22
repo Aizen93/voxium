@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.2.3 (Real-Time Fixes & Invite Links)
+**Version:** 0.2.5 (Type Safety & Regression Prevention)
 **Date:** 2026-02-22
-**Stage:** Real-time member/voice features fixed, invite link flow implemented, invite lifecycle simplified
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate
 
 ## What Has Been Done
 
@@ -267,9 +267,34 @@ All socket event handlers (`channel:join`, `channel:leave`, typing, voice, etc.)
 
 **Fix:** Switched from `absolute` to `fixed` positioning. On `mouseEnter`, `getBoundingClientRect()` captures the button's viewport coordinates. The tooltip renders as a sibling outside the sidebar `div` with `fixed` position and `transform: translateY(-50%)` for vertical centering, 8px to the right of the button. Fixed positioning is relative to the viewport and unaffected by parent overflow.
 
+### TypeScript Type Safety Hardening (v0.2.5)
+
+Eliminated all TypeScript compilation errors across both server and desktop. Both `pnpm build:server` and `pnpm build:desktop` now pass with zero errors.
+
+**Server fixes (5 categories, ~50 errors):**
+1. **Express route params** — All 15 route handlers across `channels.ts`, `invites.ts`, `messages.ts`, `servers.ts`, `users.ts` now use typed `Request<{ paramName: string }>` generics instead of bare `Request`. Previously, `req.params` values typed as `string | string[]` caused cascading failures in Prisma queries (TS couldn't infer return types including relations like `server` and `_count`).
+2. **JWT `expiresIn` type** — `authService.ts` `generateTokens()` now casts options `as jwt.SignOptions`. Newer `jsonwebtoken` types use a branded `StringValue` type from the `ms` package; generic `string` from env vars doesn't match without a cast.
+3. **Message type alignment** — Shared `Message` type renamed `updatedAt` to `editedAt` to match Prisma schema field name. Frontend reference in `MessageList.tsx` updated accordingly.
+4. **Socket.IO Date serialization** — `message:new` and `message:update` emits in `messages.ts` now cast Prisma results `as unknown as Message` at the serialization boundary. Prisma returns `Date` objects; Socket.IO serializes them to ISO strings over the wire, so the runtime behavior was always correct — this is a compile-time-only fix.
+5. **`voice:leave` signature** — Fixed from `(channelId: string) => void` to `() => void` in shared types. Neither client nor server ever passed a channelId (the server tracks it via `socket.data.voiceChannelId`).
+
+**Desktop fixes (3 errors):**
+1. **`useRef()` in MessageInput.tsx** — Changed to `useRef<... | null>(null)`. React 19 types require an explicit initial value.
+2. **`import.meta.env` unrecognized** — Created `apps/desktop/src/vite-env.d.ts` with `/// <reference types="vite/client" />`. The tsconfig `include: ["src"]` picks it up.
+3. **`message.updatedAt`** — Updated to `message.editedAt` to match the shared type rename.
+
+**Voice store guard** — `toggleMute`/`toggleDeaf` now only emit `voice:mute`/`voice:deaf` to the server when `activeChannelId` is set, avoiding unnecessary network traffic when toggling outside a voice channel.
+
+### Regression Prevention Tooling (v0.2.5)
+
+- **`pnpm typecheck`** — New root script. Runs `build:shared` then `tsc --noEmit` on both server and desktop. Catches all type errors without producing output files.
+- **Git pre-commit hook** (`.git/hooks/pre-commit`) — Runs the full type-check pipeline (shared → server → desktop) before every commit. Blocks commits with type errors and prints which stage failed.
+
+### New Files Added in v0.2.4–v0.2.5
+- `apps/desktop/src/vite-env.d.ts` — Vite client type declarations (`/// <reference types="vite/client" />`)
+
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.
 - The `member:joined` event sends `email: ''` to satisfy the `User` type in `ServerToClientEvents`. Consider a `PublicUser` type that omits `email`.
 - Prisma `Invite` model still has `maxUses` and `uses` columns that are no longer used. Cleanup migration pending.
 - `SaveAndRedirect` in `App.tsx` performs `localStorage.setItem` during render (not in `useEffect`). Functionally correct since `Navigate` redirects immediately, but technically impure.
-- `toggleMute`/`toggleDeaf` in `voiceStore.ts` emit `voice:mute`/`voice:deaf` socket events even when not in a voice channel. The server guards against this (checks `socket.data.voiceChannelId`), so no functional impact, but the emit is wasteful. Consider guarding with `if (get().activeChannelId)` before emitting.

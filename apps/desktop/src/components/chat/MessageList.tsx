@@ -135,7 +135,7 @@ export function MessageList() {
                     <span className="text-xs text-vox-text-muted">
                       {formatMessageTime(message.createdAt)}
                     </span>
-                    {message.updatedAt && (
+                    {message.editedAt && (
                       <span className="text-[10px] text-vox-text-muted">(edited)</span>
                     )}
                   </div>

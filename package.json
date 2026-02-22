@@ -11,6 +11,7 @@
     "build:server": "pnpm --filter @voxium/server build",
     "build:desktop": "pnpm --filter @voxium/desktop build",
     "build": "pnpm run build:shared && pnpm run build:server & pnpm run build:desktop",
+    "typecheck": "pnpm run build:shared && pnpm --filter @voxium/server exec tsc --noEmit && pnpm --filter @voxium/desktop exec tsc --noEmit",
     "lint": "pnpm run --parallel -r lint",
     "db:migrate": "pnpm --filter @voxium/server db:migrate",
     "db:seed": "pnpm --filter @voxium/server db:seed",

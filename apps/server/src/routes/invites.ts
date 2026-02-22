@@ -11,7 +11,7 @@ export const inviteRouter = Router();
 inviteRouter.use(authenticate);
 
 // Create an invite for a server
-inviteRouter.post('/servers/:serverId', async (req: Request, res: Response, next: NextFunction) => {
+inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
 
@@ -35,7 +35,7 @@ inviteRouter.post('/servers/:serverId', async (req: Request, res: Response, next
 });
 
 // Use an invite to join a server
-inviteRouter.post('/:code/join', async (req: Request, res: Response, next: NextFunction) => {
+inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Response, next: NextFunction) => {
   try {
     const { code } = req.params;
 
@@ -73,7 +73,7 @@ inviteRouter.post('/:code/join', async (req: Request, res: Response, next: NextF
 });
 
 // Get invite info (preview)
-inviteRouter.get('/:code', async (req: Request, res: Response, next: NextFunction) => {
+inviteRouter.get('/:code', async (req: Request<{ code: string }>, res: Response, next: NextFunction) => {
   try {
     const { code } = req.params;
 

@@ -9,7 +9,7 @@ export const channelRouter = Router({ mergeParams: true });
 channelRouter.use(authenticate);
 
 // List channels in a server
-channelRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
+channelRouter.get('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
 
@@ -30,7 +30,7 @@ channelRouter.get('/', async (req: Request, res: Response, next: NextFunction) =
 });
 
 // Create a channel
-channelRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
+channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
     const { name, type = 'text' } = req.body;
@@ -65,7 +65,7 @@ channelRouter.post('/', async (req: Request, res: Response, next: NextFunction) 
 });
 
 // Delete a channel
-channelRouter.delete('/:channelId', async (req: Request, res: Response, next: NextFunction) => {
+channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId, channelId } = req.params;
 

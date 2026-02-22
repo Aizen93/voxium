@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Plus, LogOut, MessageCircle } from 'lucide-react';
+import { Plus, LogOut } from 'lucide-react';
 import { clsx } from 'clsx';
 import { CreateServerModal } from './CreateServerModal';
 
@@ -25,7 +25,7 @@ export function ServerSidebar() {
           )}
           onClick={() => useServerStore.setState({ activeServerId: null })}
         >
-          <MessageCircle size={24} />
+          <img src="/logo.svg" alt="Voxium" className="h-7 w-7" />
         </button>
 
         {/* Separator */}

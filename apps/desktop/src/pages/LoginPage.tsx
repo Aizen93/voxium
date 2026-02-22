@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
-import { Eye, EyeOff, MessageCircle } from 'lucide-react';
+import { Eye, EyeOff } from 'lucide-react';
 
 export function LoginPage() {
   const { login, error, clearError, isLoading } = useAuthStore();
@@ -24,9 +24,7 @@ export function LoginPage() {
         <div className="rounded-2xl border border-vox-border bg-vox-bg-secondary p-8 shadow-2xl">
           {/* Logo */}
           <div className="mb-8 flex flex-col items-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-vox-accent-primary shadow-lg shadow-vox-accent-primary/20">
-              <MessageCircle className="h-8 w-8 text-white" />
-            </div>
+            <img src="/logo.svg" alt="Voxium" className="h-16 w-16 rounded-2xl shadow-lg shadow-vox-accent-primary/20" />
             <h1 className="mt-4 text-2xl font-bold text-vox-text-primary">Welcome back!</h1>
             <p className="mt-1 text-vox-text-secondary">Sign in to continue to Voxium</p>
           </div>

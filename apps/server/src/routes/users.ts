@@ -8,7 +8,7 @@ export const userRouter = Router();
 userRouter.use(authenticate);
 
 // Get user profile
-userRouter.get('/:userId', async (req: Request, res: Response, next: NextFunction) => {
+userRouter.get('/:userId', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
   try {
     const { userId } = req.params;
 

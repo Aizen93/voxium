@@ -12,7 +12,7 @@ export function MessageInput({ channelId, channelName }: Props) {
   const { sendMessage } = useChatStore();
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = useRef(false);
 
   const handleTyping = () => {
