@@ -1,10 +1,79 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { X } from 'lucide-react';
+import { X, Keyboard } from 'lucide-react';
 
 interface DeviceInfo {
   deviceId: string;
   label: string;
+}
+
+function formatKeyCode(code: string): string {
+  const map: Record<string, string> = {
+    Backquote: '` (Backtick)',
+    Space: 'Space',
+    Tab: 'Tab',
+    CapsLock: 'Caps Lock',
+    ShiftLeft: 'Left Shift',
+    ShiftRight: 'Right Shift',
+    ControlLeft: 'Left Ctrl',
+    ControlRight: 'Right Ctrl',
+    AltLeft: 'Left Alt',
+    AltRight: 'Right Alt',
+    MetaLeft: 'Left Meta',
+    MetaRight: 'Right Meta',
+    Backslash: '\\',
+    BracketLeft: '[',
+    BracketRight: ']',
+    Minus: '-',
+    Equal: '=',
+    Semicolon: ';',
+    Quote: "'",
+    Comma: ',',
+    Period: '.',
+    Slash: '/',
+  };
+  if (map[code]) return map[code];
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return 'Numpad ' + code.slice(6);
+  return code;
+}
+
+function KeyBindingPicker({ value, onChange }: { value: string; onChange: (code: string) => void }) {
+  const [listening, setListening] = useState(false);
+
+  useEffect(() => {
+    if (!listening) return;
+
+    function onKeyDown(e: KeyboardEvent) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.code === 'Escape') {
+        setListening(false);
+        return;
+      }
+      onChange(e.code);
+      setListening(false);
+    }
+
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [listening, onChange]);
+
+  return (
+    <button
+      type="button"
+      onClick={() => setListening(true)}
+      className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+        listening
+          ? 'border-vox-accent-primary bg-vox-accent-primary/10 text-vox-accent-primary animate-pulse'
+          : 'border-vox-border bg-vox-bg-secondary text-vox-text-primary hover:border-vox-accent-primary'
+      }`}
+    >
+      <Keyboard size={14} />
+      {listening ? 'Press a key...' : formatKeyCode(value)}
+    </button>
+  );
 }
 
 export function SettingsModal() {
@@ -12,10 +81,14 @@ export function SettingsModal() {
     audioInputDeviceId,
     audioOutputDeviceId,
     noiseGateThreshold,
+    voiceMode,
+    pushToTalkKey,
     closeSettings,
     setAudioInputDeviceId,
     setAudioOutputDeviceId,
     setNoiseGateThreshold,
+    setVoiceMode,
+    setPushToTalkKey,
   } = useSettingsStore();
 
   const [inputDevices, setInputDevices] = useState<DeviceInfo[]>([]);
@@ -189,8 +262,52 @@ export function SettingsModal() {
           </select>
         </div>
 
-        {/* Mic Sensitivity */}
-        <div className="mb-2">
+        {/* Voice Mode */}
+        <div className="mb-5">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
+            Input Mode
+          </label>
+          <div className="flex rounded-lg border border-vox-border overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setVoiceMode('voice_activity')}
+              className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                voiceMode === 'voice_activity'
+                  ? 'bg-vox-accent-primary text-white'
+                  : 'bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary'
+              }`}
+            >
+              Voice Activity
+            </button>
+            <button
+              type="button"
+              onClick={() => setVoiceMode('push_to_talk')}
+              className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                voiceMode === 'push_to_talk'
+                  ? 'bg-vox-accent-primary text-white'
+                  : 'bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary'
+              }`}
+            >
+              Push to Talk
+            </button>
+          </div>
+        </div>
+
+        {/* PTT Key Picker */}
+        {voiceMode === 'push_to_talk' && (
+          <div className="mb-5">
+            <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
+              Push to Talk Key
+            </label>
+            <KeyBindingPicker value={pushToTalkKey} onChange={setPushToTalkKey} />
+            <p className="mt-1 text-[10px] text-vox-text-muted">
+              Hold this key to transmit audio
+            </p>
+          </div>
+        )}
+
+        {/* Mic Sensitivity (only relevant for Voice Activity mode) */}
+        {voiceMode === 'voice_activity' && <div className="mb-2">
           <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
             Mic Sensitivity
           </label>
@@ -211,7 +328,7 @@ export function SettingsModal() {
           <p className="mt-1 text-[10px] text-vox-text-muted">
             Lower = more sensitive (picks up quieter sounds)
           </p>
-        </div>
+        </div>}
       </div>
     </div>
   );

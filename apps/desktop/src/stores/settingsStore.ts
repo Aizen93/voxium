@@ -2,10 +2,14 @@ import { create } from 'zustand';
 
 const STORAGE_KEY = 'voxium_settings';
 
+type VoiceMode = 'voice_activity' | 'push_to_talk';
+
 interface PersistedSettings {
   audioInputDeviceId: string;
   audioOutputDeviceId: string;
   noiseGateThreshold: number;
+  voiceMode: VoiceMode;
+  pushToTalkKey: string;
 }
 
 interface SettingsState extends PersistedSettings {
@@ -15,6 +19,8 @@ interface SettingsState extends PersistedSettings {
   setAudioInputDeviceId: (deviceId: string) => void;
   setAudioOutputDeviceId: (deviceId: string) => void;
   setNoiseGateThreshold: (threshold: number) => void;
+  setVoiceMode: (mode: VoiceMode) => void;
+  setPushToTalkKey: (key: string) => void;
 }
 
 function loadPersistedSettings(): PersistedSettings {
@@ -26,12 +32,14 @@ function loadPersistedSettings(): PersistedSettings {
         audioInputDeviceId: parsed.audioInputDeviceId || '',
         audioOutputDeviceId: parsed.audioOutputDeviceId || '',
         noiseGateThreshold: typeof parsed.noiseGateThreshold === 'number' ? parsed.noiseGateThreshold : 0.015,
+        voiceMode: parsed.voiceMode === 'push_to_talk' ? 'push_to_talk' : 'voice_activity',
+        pushToTalkKey: typeof parsed.pushToTalkKey === 'string' ? parsed.pushToTalkKey : 'Backquote',
       };
     }
   } catch {
     // ignore parse errors
   }
-  return { audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.015 };
+  return { audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.015, voiceMode: 'voice_activity', pushToTalkKey: 'Backquote' };
 }
 
 function persistSettings(state: PersistedSettings) {
@@ -40,6 +48,8 @@ function persistSettings(state: PersistedSettings) {
       audioInputDeviceId: state.audioInputDeviceId,
       audioOutputDeviceId: state.audioOutputDeviceId,
       noiseGateThreshold: state.noiseGateThreshold,
+      voiceMode: state.voiceMode,
+      pushToTalkKey: state.pushToTalkKey,
     }));
   } catch {
     // ignore storage errors
@@ -67,6 +77,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setNoiseGateThreshold: (threshold: number) => {
     set({ noiseGateThreshold: threshold });
+    persistSettings(get());
+  },
+
+  setVoiceMode: (mode: VoiceMode) => {
+    set({ voiceMode: mode });
+    persistSettings(get());
+  },
+
+  setPushToTalkKey: (key: string) => {
+    set({ pushToTalkKey: key });
     persistSettings(get());
   },
 }));

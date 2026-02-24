@@ -157,24 +157,32 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     const { selfMute, selfDeaf } = get();
+    const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      // Apply persisted mute state to audio tracks
-      if (selfMute) {
+      if (isPTT) {
+        // PTT mode: always start with tracks disabled; the PTT key enables them
         stream.getAudioTracks().forEach((track) => { track.enabled = false; });
-      }
-      // Only start speaking detection if not muted
-      if (!selfMute) {
-        startSpeakingDetection(stream);
+      } else {
+        // VAD mode: apply persisted mute state
+        if (selfMute) {
+          stream.getAudioTracks().forEach((track) => { track.enabled = false; });
+        }
+        // Only start speaking detection if not muted
+        if (!selfMute) {
+          startSpeakingDetection(stream);
+        }
       }
     }
 
     // If no stream available, force mute
     const effectiveMute = stream ? selfMute : true;
+    // In PTT mode, always tell the server we start muted (PTT key will unmute)
+    const serverMute = isPTT ? true : effectiveMute;
     set({ activeChannelId: channelId, localStream: stream, selfMute: effectiveMute });
 
-    // Send persisted mute/deaf state to server on join
-    socket.emit('voice:join', channelId, { selfMute: effectiveMute, selfDeaf });
+    // Send mute/deaf state to server on join
+    socket.emit('voice:join', channelId, { selfMute: serverMute, selfDeaf });
 
     get().startLatencyMeasurement();
   },
@@ -216,18 +224,29 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const socket = getSocket();
     const { selfMute, localStream } = get();
     const newMute = !selfMute;
+    const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
 
     if (localStream) {
-      localStream.getAudioTracks().forEach((track) => {
-        track.enabled = !newMute;
-      });
-
-      if (newMute) {
-        stopSpeakingDetection();
+      if (isPTT) {
+        // PTT mode: only handle muting (disable tracks + stop detection).
+        // When unmuting, do NOT enable tracks — the PTT key press handles that.
+        if (newMute) {
+          localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
+          stopSpeakingDetection();
+        }
       } else {
-        const settings = useSettingsStore.getState();
-        setNoiseGateThreshold(settings.noiseGateThreshold);
-        startSpeakingDetection(localStream);
+        // VAD mode: existing behavior
+        localStream.getAudioTracks().forEach((track) => {
+          track.enabled = !newMute;
+        });
+
+        if (newMute) {
+          stopSpeakingDetection();
+        } else {
+          const settings = useSettingsStore.getState();
+          setNoiseGateThreshold(settings.noiseGateThreshold);
+          startSpeakingDetection(localStream);
+        }
       }
     }
 
@@ -638,6 +657,31 @@ useSettingsStore.subscribe((state, prevState) => {
   }
 });
 
+// Handle live voice mode switching while in a voice channel
+useSettingsStore.subscribe((state, prevState) => {
+  if (state.voiceMode === prevState.voiceMode) return;
+
+  const { activeChannelId, localStream, selfMute } = useVoiceStore.getState();
+  if (!activeChannelId || !localStream) return;
+
+  const socket = getSocket();
+
+  if (state.voiceMode === 'push_to_talk') {
+    // Switching to PTT: disable tracks, stop detection, tell server we're muted
+    localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
+    stopSpeakingDetection();
+    if (socket) socket.emit('voice:mute', true);
+  } else {
+    // Switching to VAD: if not selfMuted, re-enable tracks and start detection
+    if (!selfMute) {
+      localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
+      setNoiseGateThreshold(state.noiseGateThreshold);
+      startSpeakingDetection(localStream);
+      if (socket) socket.emit('voice:mute', false);
+    }
+  }
+});
+
 // On socket reconnect while in a voice channel: re-join and re-establish peers
 onSocketReconnect(() => {
   const { activeChannelId, localStream } = useVoiceStore.getState();
@@ -653,14 +697,16 @@ onSocketReconnect(() => {
   // Re-join voice on the server — it will re-broadcast our presence
   // and send us the updated user list, which triggers peer creation
   const { selfMute, selfDeaf } = useVoiceStore.getState();
-  socket.emit('voice:join', activeChannelId, { selfMute, selfDeaf });
+  const settings = useSettingsStore.getState();
+  const isPTT = settings.voiceMode === 'push_to_talk';
+  // In PTT mode, always tell the server we start muted (PTT key will unmute)
+  socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
 
   // Re-start latency measurement with new socket
   useVoiceStore.getState().startLatencyMeasurement();
 
-  // Re-start speaking detection if unmuted
-  if (localStream && !useVoiceStore.getState().selfMute) {
-    const settings = useSettingsStore.getState();
+  // Re-start speaking detection if unmuted and in VAD mode (PTT key handles PTT mode)
+  if (localStream && !useVoiceStore.getState().selfMute && settings.voiceMode !== 'push_to_talk') {
     setNoiseGateThreshold(settings.noiseGateThreshold);
     startSpeakingDetection(localStream);
   }

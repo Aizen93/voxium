@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.2.6 (Real-Time Channel Management)
-**Date:** 2026-02-23
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD
+**Version:** 0.2.7 (Push-to-Talk)
+**Date:** 2026-02-24
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode
 
 ## What Has Been Done
 
@@ -152,7 +152,7 @@ Comprehensive hardening of real-time features:
 - [x] Real-time member join/leave notifications (member:joined / member:left events)
 - [x] Real-time channel create/delete notifications (channel:created / channel:deleted events)
 - [x] Role-based channel management UI (create/delete buttons visible to owner/admin only)
-- [ ] Push-to-talk mode
+- [x] Push-to-talk mode
 - [ ] Notification sounds
 - [ ] Unread message indicators
 - [ ] Toast notifications in UI
@@ -317,8 +317,39 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 
 **Key pattern:** Both `createChannel` and `deleteChannel` in the store do NOT update local state — the socket broadcast is the single source of truth for all clients (including the caller). This eliminates race conditions and duplication.
 
+### Push-to-Talk Mode (v0.2.7)
+
+**New feature:** Users can switch between Voice Activity Detection (VAD) and Push-to-Talk (PTT) input modes via the Settings modal.
+
+**Settings (`settingsStore.ts`):**
+- `voiceMode: 'voice_activity' | 'push_to_talk'` — persisted to localStorage alongside existing audio settings
+- `pushToTalkKey: string` — keyboard code (default: `Backquote` / backtick), configurable via key picker in the Settings modal
+
+**PTT Hook (`hooks/usePushToTalk.ts`):**
+- Global `keydown`/`keyup`/`blur` listeners on `window`, active only when `voiceMode === 'push_to_talk'`
+- On key press: enables audio tracks, starts speaking detection, emits `voice:mute false`
+- On key release (or window blur): disables audio tracks, stops speaking detection, emits `voice:mute true`
+- Guards: `e.repeat` (prevents key repeat), `isTextInput()` (prevents activation in chat input), `selfMute` check (manual mute overrides PTT)
+- Cleanup releases PTT on mode change or unmount
+
+**Voice Store changes (`voiceStore.ts`):**
+- `joinChannel`: In PTT mode, tracks start disabled and the server receives `selfMute: true` (not the user's persisted preference)
+- `toggleMute`: In PTT mode, muting disables tracks and stops detection; unmuting does NOT enable tracks (PTT key handles that)
+- Mode-switch subscription: switching to PTT disables tracks and emits server mute; switching to VAD re-enables tracks if not manually muted
+- Reconnect handler: sends `selfMute: true` to server in PTT mode
+
+**Settings UI (`SettingsModal.tsx`):**
+- Toggle buttons for Voice Activity / Push to Talk modes
+- `KeyBindingPicker` component: click to start listening, press any key to bind (Escape cancels). Captures via `useCapture: true` to override all handlers
+- Mic sensitivity slider only shown in Voice Activity mode
+- `formatKeyCode()` maps `KeyboardEvent.code` values to human-readable labels
+
+**New file:** `apps/desktop/src/hooks/usePushToTalk.ts`
+
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.
 - The `member:joined` event sends `email: ''` to satisfy the `User` type in `ServerToClientEvents`. Consider a `PublicUser` type that omits `email`.
 - Prisma `Invite` model still has `maxUses` and `uses` columns that are no longer used. Cleanup migration pending.
 - `SaveAndRedirect` in `App.tsx` performs `localStorage.setItem` during render (not in `useEffect`). Functionally correct since `Navigate` redirects immediately, but technically impure.
+- PTT key press/release emits `voice:mute` on every toggle, which triggers a `voice:state_update` broadcast to the entire `server:{id}` room. For rapid PTT toggling, consider debouncing or rate-limiting these emissions.
+- The PTT mode-switch subscription emits `voice:mute true` to the server but does not update `selfMute` in the voice store. This is intentional (`selfMute` represents the user's manual mute preference, not PTT transient state), but the mute icon in `VoicePanel`/`ChannelSidebar` may show "unmuted" while PTT is active and the key is not held.

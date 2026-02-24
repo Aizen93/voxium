@@ -12,11 +12,13 @@ import { VoicePanel } from '../voice/VoicePanel';
 import { SettingsModal } from '../settings/SettingsModal';
 import { ConnectionBanner } from './ConnectionBanner';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { usePushToTalk } from '../../hooks/usePushToTalk';
 
 export function MainLayout() {
   const { fetchServers, activeServerId } = useServerStore();
   const { user } = useAuthStore();
   const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
+  usePushToTalk();
   const attachedGeneration = useRef(-1);
   const cleanupRef = useRef<(() => void) | null>(null);
 
