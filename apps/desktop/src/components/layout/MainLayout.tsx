@@ -71,6 +71,12 @@ export function MainLayout() {
       memberLeft: ({ serverId, userId }: any) => {
         useServerStore.getState().removeMember(serverId, userId);
       },
+      channelCreated: (channel: any) => {
+        useServerStore.getState().addChannel(channel);
+      },
+      channelDeleted: ({ channelId, serverId }: any) => {
+        useServerStore.getState().removeChannel(channelId, serverId);
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -88,6 +94,8 @@ export function MainLayout() {
       ['voice:signal', handlers.voiceSignal],
       ['member:joined', handlers.memberJoined],
       ['member:left', handlers.memberLeft],
+      ['channel:created', handlers.channelCreated],
+      ['channel:deleted', handlers.channelDeleted],
     ];
 
     /**

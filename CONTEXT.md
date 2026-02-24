@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.2.5 (Type Safety & Regression Prevention)
-**Date:** 2026-02-22
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate
+**Version:** 0.2.6 (Real-Time Channel Management)
+**Date:** 2026-02-23
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD
 
 ## What Has Been Done
 
@@ -150,6 +150,8 @@ Comprehensive hardening of real-time features:
 - [x] Socket reconnection hardening
 - [x] Ongoing: real-time message delivery reliability after reconnects
 - [x] Real-time member join/leave notifications (member:joined / member:left events)
+- [x] Real-time channel create/delete notifications (channel:created / channel:deleted events)
+- [x] Role-based channel management UI (create/delete buttons visible to owner/admin only)
 - [ ] Push-to-talk mode
 - [ ] Notification sounds
 - [ ] Unread message indicators
@@ -292,6 +294,28 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 
 ### New Files Added in v0.2.4–v0.2.5
 - `apps/desktop/src/vite-env.d.ts` — Vite client type declarations (`/// <reference types="vite/client" />`)
+
+### Real-Time Channel Create/Delete (v0.2.6)
+
+**Problem:** When a user created or deleted a channel, other server members didn't see the change until they refreshed the page. The `channel:created` and `channel:deleted` socket events were defined in shared types/constants but never wired up.
+
+**Server-side fix (`apps/server/src/routes/channels.ts`):**
+- Imported `getIO()` from the socket server
+- After `prisma.channel.create()`, emits `channel:created` to the `server:{serverId}` room with the full channel object
+- After `prisma.channel.delete()`, emits `channel:deleted` to the `server:{serverId}` room with `{ channelId, serverId }`
+
+**Client-side fix:**
+- `stores/serverStore.ts` — Added `addChannel(channel)` (with dedup by `channel.id`, scoped to active server) and `removeChannel(channelId, serverId)` (clears `activeChannelId` if the deleted channel was selected). Added `deleteChannel(serverId, channelId)` API method.
+- `stores/serverStore.ts` — `createChannel()` no longer updates local state; the socket `channel:created` event is the sole source of truth for all users (including the creator), preventing duplicate entries.
+- `components/layout/MainLayout.tsx` — Added `channel:created` and `channel:deleted` to the socket event map, calling `addChannel` and `removeChannel` respectively.
+
+**UI changes (`components/channel/ChannelSidebar.tsx`):**
+- Added role-based visibility: `isAdmin` derived from current user's membership role in the members list
+- Channel create (`+`) buttons only visible to owners/admins
+- Delete button (trash icon) appears on hover for each text and voice channel, only for owners/admins
+- Channel rows restructured: outer `<div>` with `group` class for hover state, inner click-to-select/join `<button>` + separate delete `<button>`
+
+**Key pattern:** Both `createChannel` and `deleteChannel` in the store do NOT update local state — the socket broadcast is the single source of truth for all clients (including the caller). This eliminates race conditions and duplication.
 
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.

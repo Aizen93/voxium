@@ -4,12 +4,12 @@ import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { Hash, Volume2, Plus, ChevronDown, Settings, Mic, MicOff, Headphones, HeadphoneOff, UserPlus } from 'lucide-react';
+import { Hash, Volume2, Plus, ChevronDown, Settings, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2 } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { clsx } from 'clsx';
 
 export function ChannelSidebar() {
-  const { channels, activeChannelId, setActiveChannel, activeServerId, servers, createChannel } = useServerStore();
+  const { channels, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, members } = useServerStore();
   const { joinChannel, activeChannelId: voiceChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
@@ -21,6 +21,8 @@ export function ChannelSidebar() {
   const activeServer = servers.find((s) => s.id === activeServerId);
   const textChannels = channels.filter((c) => c.type === 'text');
   const voiceChannels = channels.filter((c) => c.type === 'voice');
+  const currentMember = members.find((m) => m.userId === user?.id);
+  const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
 
   const handleSelectTextChannel = (channelId: string) => {
     setActiveChannel(channelId);
@@ -40,6 +42,15 @@ export function ChannelSidebar() {
       setShowCreateChannel(false);
     } catch (err) {
       console.error('Failed to create channel:', err);
+    }
+  };
+
+  const handleDeleteChannel = async (channelId: string) => {
+    if (!activeServerId) return;
+    try {
+      await deleteChannel(activeServerId, channelId);
+    } catch (err) {
+      console.error('Failed to delete channel:', err);
     }
   };
 
@@ -72,28 +83,43 @@ export function ChannelSidebar() {
             <span className="text-xs font-semibold uppercase tracking-wide text-vox-text-muted">
               Text Channels
             </span>
-            <button
-              onClick={() => { setShowCreateChannel(true); setNewChannelType('text'); }}
-              className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
-            >
-              <Plus size={14} />
-            </button>
+            {isAdmin && (
+              <button
+                onClick={() => { setShowCreateChannel(true); setNewChannelType('text'); }}
+                className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
+              >
+                <Plus size={14} />
+              </button>
+            )}
           </div>
 
           {textChannels.map((channel) => (
-            <button
+            <div
               key={channel.id}
-              onClick={() => handleSelectTextChannel(channel.id)}
               className={clsx(
-                'flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors',
+                'group flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors',
                 activeChannelId === channel.id
                   ? 'bg-vox-bg-active text-vox-text-primary font-medium'
                   : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
               )}
             >
-              <Hash size={16} className="shrink-0 opacity-60" />
-              <span className="truncate">{channel.name}</span>
-            </button>
+              <button
+                onClick={() => handleSelectTextChannel(channel.id)}
+                className="flex min-w-0 flex-1 items-center gap-1.5"
+              >
+                <Hash size={16} className="shrink-0 opacity-60" />
+                <span className="truncate">{channel.name}</span>
+              </button>
+              {isAdmin && (
+                <button
+                  onClick={() => handleDeleteChannel(channel.id)}
+                  className="shrink-0 opacity-0 group-hover:opacity-100 text-vox-text-muted hover:text-vox-accent-danger transition-all"
+                  title="Delete channel"
+                >
+                  <Trash2 size={12} />
+                </button>
+              )}
+            </div>
           ))}
         </div>
 
@@ -103,12 +129,14 @@ export function ChannelSidebar() {
             <span className="text-xs font-semibold uppercase tracking-wide text-vox-text-muted">
               Voice Channels
             </span>
-            <button
-              onClick={() => { setShowCreateChannel(true); setNewChannelType('voice'); }}
-              className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
-            >
-              <Plus size={14} />
-            </button>
+            {isAdmin && (
+              <button
+                onClick={() => { setShowCreateChannel(true); setNewChannelType('voice'); }}
+                className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
+              >
+                <Plus size={14} />
+              </button>
+            )}
           </div>
 
           {voiceChannels.map((channel) => {
@@ -116,18 +144,31 @@ export function ChannelSidebar() {
 
             return (
               <div key={channel.id}>
-                <button
-                  onClick={() => handleJoinVoice(channel.id)}
+                <div
                   className={clsx(
-                    'flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors',
+                    'group flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors',
                     voiceChannelId === channel.id
                       ? 'bg-vox-bg-active text-vox-voice-connected font-medium'
                       : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
                   )}
                 >
-                  <Volume2 size={16} className="shrink-0 opacity-60" />
-                  <span className="truncate">{channel.name}</span>
-                </button>
+                  <button
+                    onClick={() => handleJoinVoice(channel.id)}
+                    className="flex min-w-0 flex-1 items-center gap-1.5"
+                  >
+                    <Volume2 size={16} className="shrink-0 opacity-60" />
+                    <span className="truncate">{channel.name}</span>
+                  </button>
+                  {isAdmin && (
+                    <button
+                      onClick={() => handleDeleteChannel(channel.id)}
+                      className="shrink-0 opacity-0 group-hover:opacity-100 text-vox-text-muted hover:text-vox-accent-danger transition-all"
+                      title="Delete channel"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
 
                 {/* Show ALL connected voice users (visible to everyone) */}
                 {usersInChannel.length > 0 && (

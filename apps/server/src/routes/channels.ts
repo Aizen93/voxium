@@ -2,7 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateChannelName, LIMITS } from '@voxium/shared';
+import { validateChannelName, LIMITS, type Channel } from '@voxium/shared';
+import { getIO } from '../websocket/socketServer';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -58,6 +59,8 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
       data: { name, type, serverId, position: channelCount },
     });
 
+    getIO().to(`server:${serverId}`).emit('channel:created', channel as unknown as Channel);
+
     res.status(201).json({ success: true, data: channel });
   } catch (err) {
     next(err);
@@ -82,6 +85,8 @@ channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; chan
     if (!channel) throw new NotFoundError('Channel');
 
     await prisma.channel.delete({ where: { id: channelId } });
+
+    getIO().to(`server:${serverId}`).emit('channel:deleted', { channelId, serverId });
 
     res.json({ success: true, message: 'Channel deleted' });
   } catch (err) {

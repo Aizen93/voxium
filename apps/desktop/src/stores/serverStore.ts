@@ -15,12 +15,15 @@ interface ServerState {
   setActiveChannel: (channelId: string) => void;
   createServer: (name: string) => Promise<Server>;
   createChannel: (serverId: string, name: string, type: 'text' | 'voice') => Promise<Channel>;
+  deleteChannel: (serverId: string, channelId: string) => Promise<void>;
   createInvite: (serverId: string) => Promise<string>;
   joinServer: (inviteCode: string) => Promise<void>;
   leaveServer: (serverId: string) => Promise<void>;
   updateMemberStatus: (userId: string, status: UserStatus) => void;
   addMember: (serverId: string, user: User) => void;
   removeMember: (serverId: string, userId: string) => void;
+  addChannel: (channel: Channel) => void;
+  removeChannel: (channelId: string, serverId: string) => void;
   fetchMembers: (serverId: string) => Promise<void>;
 }
 
@@ -75,9 +78,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   createChannel: async (serverId: string, name: string, type: 'text' | 'voice') => {
     const { data } = await api.post(`/servers/${serverId}/channels`, { name, type });
-    const channel = data.data;
-    set((state) => ({ channels: [...state.channels, channel] }));
-    return channel;
+    return data.data;
+  },
+
+  deleteChannel: async (serverId: string, channelId: string) => {
+    await api.delete(`/servers/${serverId}/channels/${channelId}`);
   },
 
   createInvite: async (serverId: string) => {
@@ -134,6 +139,22 @@ export const useServerStore = create<ServerState>((set, get) => ({
     if (get().activeServerId !== serverId) return;
     set((state) => ({
       members: state.members.filter((m) => m.userId !== userId),
+    }));
+  },
+
+  addChannel: (channel: Channel) => {
+    if (get().activeServerId !== channel.serverId) return;
+    set((state) => {
+      if (state.channels.some((c) => c.id === channel.id)) return state;
+      return { channels: [...state.channels, channel] };
+    });
+  },
+
+  removeChannel: (channelId: string, serverId: string) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      channels: state.channels.filter((c) => c.id !== channelId),
+      activeChannelId: state.activeChannelId === channelId ? null : state.activeChannelId,
     }));
   },
 

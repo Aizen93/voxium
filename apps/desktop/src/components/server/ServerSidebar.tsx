@@ -4,6 +4,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { Plus, LogOut } from 'lucide-react';
 import { clsx } from 'clsx';
 import { CreateServerModal } from './CreateServerModal';
+import { APP_VERSION } from '@voxium/shared';
 
 export function ServerSidebar() {
   const { servers, activeServerId, setActiveServer } = useServerStore();
@@ -93,6 +94,7 @@ export function ServerSidebar() {
           >
             <LogOut size={16} />
           </button>
+          <span className="text-[9px] text-vox-text-muted select-none">v{APP_VERSION}</span>
         </div>
       </div>
 
