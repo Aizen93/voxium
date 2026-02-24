@@ -67,7 +67,7 @@ messageRouter.post('/', async (req: Request<{ channelId: string }>, res: Respons
 
     const channel = await prisma.channel.findUnique({
       where: { id: channelId },
-      select: { serverId: true, type: true },
+      select: { serverId: true, type: true, name: true, server: { select: { name: true } } },
     });
     if (!channel) throw new NotFoundError('Channel');
     if (channel.type !== 'text') throw new BadRequestError('Cannot send messages to a voice channel');
@@ -95,7 +95,9 @@ messageRouter.post('/', async (req: Request<{ channelId: string }>, res: Respons
     const socketsInRoom = await getIO().in(room).fetchSockets();
     console.log(`[MSG] Broadcasting message:new to ${room} — ${socketsInRoom.length} socket(s) in room: [${socketsInRoom.map(s => s.data.userId).join(', ')}]`);
     // Prisma returns Date objects; Socket.IO serializes them to ISO strings over the wire
-    getIO().to(room).emit('message:new', message as unknown as Message);
+    // Attach channel/server names for desktop notification context
+    const payload = { ...message, channelName: channel.name, serverName: channel.server.name };
+    getIO().to(room).emit('message:new', payload as unknown as Message);
 
     res.status(201).json({ success: true, data: message });
   } catch (err) {

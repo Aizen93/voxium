@@ -129,6 +129,15 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.join(`server:${m.serverId}`);
       }
 
+      // Auto-join all text channel rooms so message:new events reach all members
+      const textChannels = await prisma.channel.findMany({
+        where: { serverId: { in: memberships.map((m) => m.serverId) }, type: 'text' },
+        select: { id: true },
+      });
+      for (const ch of textChannels) {
+        socket.join(`channel:${ch.id}`);
+      }
+
       // Broadcast online status to all servers
       for (const m of memberships) {
         socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });

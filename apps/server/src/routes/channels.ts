@@ -61,6 +61,14 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
 
     getIO().to(`server:${serverId}`).emit('channel:created', channel as unknown as Channel);
 
+    // Auto-subscribe all server members' sockets to the new text channel room
+    if (type === 'text') {
+      const socketsInServer = await getIO().in(`server:${serverId}`).fetchSockets();
+      for (const s of socketsInServer) {
+        s.join(`channel:${channel.id}`);
+      }
+    }
+
     res.status(201).json({ success: true, data: channel });
   } catch (err) {
     next(err);

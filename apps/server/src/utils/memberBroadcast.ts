@@ -10,11 +10,18 @@ import { prisma } from './prisma';
 export async function broadcastMemberJoined(userId: string, serverId: string): Promise<void> {
   const io = getIO();
 
-  // Add the new member's socket(s) to the server room
+  // Add the new member's socket(s) to the server room + all text channel rooms
+  const textChannels = await prisma.channel.findMany({
+    where: { serverId, type: 'text' },
+    select: { id: true },
+  });
   const sockets = await io.fetchSockets();
   for (const s of sockets) {
     if (s.data.userId === userId) {
       s.join(`server:${serverId}`);
+      for (const ch of textChannels) {
+        s.join(`channel:${ch.id}`);
+      }
     }
   }
 
@@ -44,10 +51,17 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
  */
 export async function joinServerRoom(userId: string, serverId: string): Promise<void> {
   const io = getIO();
+  const textChannels = await prisma.channel.findMany({
+    where: { serverId, type: 'text' },
+    select: { id: true },
+  });
   const sockets = await io.fetchSockets();
   for (const s of sockets) {
     if (s.data.userId === userId) {
       s.join(`server:${serverId}`);
+      for (const ch of textChannels) {
+        s.join(`channel:${ch.id}`);
+      }
     }
   }
 }
@@ -60,10 +74,17 @@ export async function joinServerRoom(userId: string, serverId: string): Promise<
 export async function broadcastMemberLeft(userId: string, serverId: string): Promise<void> {
   const io = getIO();
 
+  const textChannels = await prisma.channel.findMany({
+    where: { serverId, type: 'text' },
+    select: { id: true },
+  });
   const sockets = await io.fetchSockets();
   for (const s of sockets) {
     if (s.data.userId === userId) {
       s.leave(`server:${serverId}`);
+      for (const ch of textChannels) {
+        s.leave(`channel:${ch.id}`);
+      }
     }
   }
 

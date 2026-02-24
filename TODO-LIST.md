@@ -1,7 +1,7 @@
 ## Quality-of-life (low effort, high polish):
   - [x] Stabilizing the code, with better error handling and exception management. User friendly and smoother UI.  
   - [x] Push-to-talk — alternative to voice activity; just a keybind that mutes/unmutes, easy to add alongside the existing mute logic
-  - [] Notification sounds — play a tone on join/leave/message; the audio infrastructure is already there
+  - [x] Notification sounds — play a tone on join/leave/message; the audio infrastructure is already there
   - [] Unread indicators / mention badges — channel list currently has no unread state, which makes multi-channel usage painful
   - [x] When a new User joins the server, the members list is not updating in real time and needs a page refresh to see the new user in the members list (Right side panel)
   - [x] When a user (Alice) creates a new server, and joins a channel, she can't see her name in the channel list (Though she can speak and hear just fine)

@@ -13,6 +13,7 @@ import { SettingsModal } from '../settings/SettingsModal';
 import { ConnectionBanner } from './ConnectionBanner';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
+import { playJoinSound, playLeaveSound, playMessageSound } from '../../services/notificationSounds';
 
 export function MainLayout() {
   const { fetchServers, activeServerId } = useServerStore();
@@ -29,6 +30,13 @@ export function MainLayout() {
     }
   }, [user?.id]);
 
+  // Request notification permission on mount
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
   // Fetch servers on mount
   useEffect(() => {
     fetchServers();
@@ -38,7 +46,21 @@ export function MainLayout() {
   useEffect(() => {
     // Store function references so cleanup actually works
     const handlers = {
-      messageNew: (message: any) => useChatStore.getState().addMessage(message),
+      messageNew: (message: any) => {
+        useChatStore.getState().addMessage(message);
+        const currentUser = useAuthStore.getState().user;
+        if (message.author?.id === currentUser?.id) return;
+        if (message.channelId === useServerStore.getState().activeChannelId) return;
+        const settings = useSettingsStore.getState();
+        if (settings.enableNotificationSounds) playMessageSound();
+        if (settings.enableDesktopNotifications && 'Notification' in window && Notification.permission === 'granted') {
+          const authorName = message.author?.displayName || message.author?.username || 'Someone';
+          const serverName = message.serverName || 'Unknown Server';
+          const channelName = message.channelName || 'unknown';
+          const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
+          new Notification(`${serverName} — #${channelName}`, { body: `${authorName}: ${body}`, silent: true });
+        }
+      },
       messageUpdate: (message: any) => useChatStore.getState().updateMessage(message),
       messageDelete: ({ messageId }: any) => useChatStore.getState().deleteMessage(messageId),
       typingStart: ({ userId, username }: any) => {
@@ -54,9 +76,19 @@ export function MainLayout() {
       },
       voiceUserJoined: ({ channelId, user: voiceUser }: any) => {
         useVoiceStore.getState().addUserToChannel(channelId, voiceUser);
+        const currentUser = useAuthStore.getState().user;
+        if (voiceUser.id === currentUser?.id) return;
+        if (useVoiceStore.getState().activeChannelId !== channelId) return;
+        if (useSettingsStore.getState().enableNotificationSounds) playJoinSound();
       },
       voiceUserLeft: ({ channelId, userId }: any) => {
-        useVoiceStore.getState().removeUserFromChannel(channelId, userId);
+        const currentUser = useAuthStore.getState().user;
+        const voiceState = useVoiceStore.getState();
+        const leavingUser = voiceState.channelUsers.get(channelId)?.find((u: any) => u.id === userId);
+        voiceState.removeUserFromChannel(channelId, userId);
+        if (userId === currentUser?.id) return;
+        if (voiceState.activeChannelId !== channelId) return;
+        if (useSettingsStore.getState().enableNotificationSounds) playLeaveSound();
       },
       voiceStateUpdate: ({ channelId, userId, selfMute, selfDeaf }: any) => {
         useVoiceStore.getState().updateUserState(channelId, userId, selfMute, selfDeaf);

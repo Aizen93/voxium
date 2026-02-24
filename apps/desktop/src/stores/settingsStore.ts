@@ -10,6 +10,8 @@ interface PersistedSettings {
   noiseGateThreshold: number;
   voiceMode: VoiceMode;
   pushToTalkKey: string;
+  enableNotificationSounds: boolean;
+  enableDesktopNotifications: boolean;
 }
 
 interface SettingsState extends PersistedSettings {
@@ -21,6 +23,8 @@ interface SettingsState extends PersistedSettings {
   setNoiseGateThreshold: (threshold: number) => void;
   setVoiceMode: (mode: VoiceMode) => void;
   setPushToTalkKey: (key: string) => void;
+  setEnableNotificationSounds: (enabled: boolean) => void;
+  setEnableDesktopNotifications: (enabled: boolean) => void;
 }
 
 function loadPersistedSettings(): PersistedSettings {
@@ -34,12 +38,14 @@ function loadPersistedSettings(): PersistedSettings {
         noiseGateThreshold: typeof parsed.noiseGateThreshold === 'number' ? parsed.noiseGateThreshold : 0.015,
         voiceMode: parsed.voiceMode === 'push_to_talk' ? 'push_to_talk' : 'voice_activity',
         pushToTalkKey: typeof parsed.pushToTalkKey === 'string' ? parsed.pushToTalkKey : 'Backquote',
+        enableNotificationSounds: parsed.enableNotificationSounds !== false,
+        enableDesktopNotifications: parsed.enableDesktopNotifications !== false,
       };
     }
   } catch {
     // ignore parse errors
   }
-  return { audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.015, voiceMode: 'voice_activity', pushToTalkKey: 'Backquote' };
+  return { audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.015, voiceMode: 'voice_activity', pushToTalkKey: 'Backquote', enableNotificationSounds: true, enableDesktopNotifications: true };
 }
 
 function persistSettings(state: PersistedSettings) {
@@ -50,6 +56,8 @@ function persistSettings(state: PersistedSettings) {
       noiseGateThreshold: state.noiseGateThreshold,
       voiceMode: state.voiceMode,
       pushToTalkKey: state.pushToTalkKey,
+      enableNotificationSounds: state.enableNotificationSounds,
+      enableDesktopNotifications: state.enableDesktopNotifications,
     }));
   } catch {
     // ignore storage errors
@@ -87,6 +95,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setPushToTalkKey: (key: string) => {
     set({ pushToTalkKey: key });
+    persistSettings(get());
+  },
+
+  setEnableNotificationSounds: (enabled: boolean) => {
+    set({ enableNotificationSounds: enabled });
+    persistSettings(get());
+  },
+
+  setEnableDesktopNotifications: (enabled: boolean) => {
+    set({ enableDesktopNotifications: enabled });
     persistSettings(get());
   },
 }));

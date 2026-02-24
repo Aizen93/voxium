@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { X, Keyboard } from 'lucide-react';
+import { X, Keyboard, Volume2, Bell } from 'lucide-react';
 
 interface DeviceInfo {
   deviceId: string;
@@ -83,12 +83,16 @@ export function SettingsModal() {
     noiseGateThreshold,
     voiceMode,
     pushToTalkKey,
+    enableNotificationSounds,
+    enableDesktopNotifications,
     closeSettings,
     setAudioInputDeviceId,
     setAudioOutputDeviceId,
     setNoiseGateThreshold,
     setVoiceMode,
     setPushToTalkKey,
+    setEnableNotificationSounds,
+    setEnableDesktopNotifications,
   } = useSettingsStore();
 
   const [inputDevices, setInputDevices] = useState<DeviceInfo[]>([]);
@@ -329,6 +333,63 @@ export function SettingsModal() {
             Lower = more sensitive (picks up quieter sounds)
           </p>
         </div>}
+
+        {/* Notifications */}
+        <div className="border-t border-vox-border pt-5 mt-5">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-3">
+            Notifications
+          </h3>
+
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Volume2 size={16} className="text-vox-text-muted" />
+              <div>
+                <p className="text-sm text-vox-text-primary">Notification Sounds</p>
+                <p className="text-[10px] text-vox-text-muted">Play sounds for voice join/leave and new messages</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={enableNotificationSounds}
+              onClick={() => setEnableNotificationSounds(!enableNotificationSounds)}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+                enableNotificationSounds ? 'bg-vox-accent-primary' : 'bg-vox-bg-secondary'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform mt-0.5 ${
+                  enableNotificationSounds ? 'translate-x-[22px]' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Bell size={16} className="text-vox-text-muted" />
+              <div>
+                <p className="text-sm text-vox-text-primary">Desktop Notifications</p>
+                <p className="text-[10px] text-vox-text-muted">Show Windows notifications for messages and voice events</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={enableDesktopNotifications}
+              onClick={() => setEnableDesktopNotifications(!enableDesktopNotifications)}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+                enableDesktopNotifications ? 'bg-vox-accent-primary' : 'bg-vox-bg-secondary'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform mt-0.5 ${
+                  enableDesktopNotifications ? 'translate-x-[22px]' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
