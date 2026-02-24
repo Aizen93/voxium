@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Plus, LogOut } from 'lucide-react';
+import { Plus, LogOut, Settings } from 'lucide-react';
 import { clsx } from 'clsx';
 import { CreateServerModal } from './CreateServerModal';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { APP_VERSION } from '@voxium/shared';
 
 export function ServerSidebar() {
@@ -87,6 +88,13 @@ export function ServerSidebar() {
           <div className="flex h-10 w-10 items-center justify-center rounded-full bg-vox-accent-primary text-xs font-bold text-white">
             {user?.displayName?.[0]?.toUpperCase() || '?'}
           </div>
+          <button
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
+            onClick={() => useSettingsStore.getState().openSettings()}
+            title="Settings"
+          >
+            <Settings size={16} />
+          </button>
           <button
             className="flex h-8 w-8 items-center justify-center rounded-lg text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-accent-danger transition-colors"
             onClick={logout}

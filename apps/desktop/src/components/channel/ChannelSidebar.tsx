@@ -3,8 +3,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
-import { useSettingsStore } from '../../stores/settingsStore';
-import { Hash, Volume2, Plus, ChevronDown, Settings, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2 } from 'lucide-react';
+import { Hash, Volume2, Plus, ChevronDown, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2 } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { clsx } from 'clsx';
 
@@ -254,13 +253,6 @@ export function ChannelSidebar() {
           title={selfDeaf ? 'Undeafen' : 'Deafen'}
         >
           {selfDeaf ? <HeadphoneOff size={14} /> : <Headphones size={14} />}
-        </button>
-        <button
-          onClick={() => useSettingsStore.getState().openSettings()}
-          className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
-          title="Audio Settings"
-        >
-          <Settings size={14} />
         </button>
       </div>
 
