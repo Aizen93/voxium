@@ -29,20 +29,15 @@ export function ChatArea() {
     [clearMessages, fetchMessages]
   );
 
-  // Join/leave socket channel rooms and fetch messages when channel changes
+  // Join socket channel room and fetch messages when channel changes
   useEffect(() => {
     if (!activeChannelId || activeChannelId === prevChannelRef.current) return;
-
-    const socket = getSocket();
-
-    // Leave previous channel room
-    if (prevChannelRef.current && socket) {
-      socket.emit('channel:leave', prevChannelRef.current);
-    }
 
     prevChannelRef.current = activeChannelId;
 
     // Join new channel room and fetch messages
+    // (auto-subscription on connect covers existing channels; this handles
+    // channels created after the socket connected)
     joinAndFetch(activeChannelId);
   }, [activeChannelId, joinAndFetch]);
 
@@ -105,13 +100,10 @@ export function ChatArea() {
     };
   }, [joinAndFetch]);
 
-  // Clean up channel room on unmount
+  // Track channel ref on unmount (no room leave needed — auto-subscription persists)
   useEffect(() => {
     return () => {
-      const socket = getSocket();
-      if (prevChannelRef.current && socket) {
-        socket.emit('channel:leave', prevChannelRef.current);
-      }
+      prevChannelRef.current = null;
     };
   }, []);
 

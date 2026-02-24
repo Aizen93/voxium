@@ -8,7 +8,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { APP_VERSION } from '@voxium/shared';
 
 export function ServerSidebar() {
-  const { servers, activeServerId, setActiveServer } = useServerStore();
+  const { servers, activeServerId, setActiveServer, serverUnreadCounts } = useServerStore();
   const { logout, user } = useAuthStore();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -68,6 +68,11 @@ export function ServerSidebar() {
               {/* Hover indicator */}
               {hoveredId === server.id && activeServerId !== server.id && (
                 <div className="absolute -left-1 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-white transition-all" />
+              )}
+
+              {/* Unread indicator */}
+              {activeServerId !== server.id && hoveredId !== server.id && (serverUnreadCounts[server.id] || 0) > 0 && (
+                <div className="absolute -left-1 top-1/2 h-2 w-1 -translate-y-1/2 rounded-r-full bg-white" />
               )}
 
             </button>

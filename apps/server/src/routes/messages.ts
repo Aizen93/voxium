@@ -96,7 +96,7 @@ messageRouter.post('/', async (req: Request<{ channelId: string }>, res: Respons
     console.log(`[MSG] Broadcasting message:new to ${room} — ${socketsInRoom.length} socket(s) in room: [${socketsInRoom.map(s => s.data.userId).join(', ')}]`);
     // Prisma returns Date objects; Socket.IO serializes them to ISO strings over the wire
     // Attach channel/server names for desktop notification context
-    const payload = { ...message, channelName: channel.name, serverName: channel.server.name };
+    const payload = { ...message, channelName: channel.name, serverName: channel.server.name, serverId: channel.serverId };
     getIO().to(room).emit('message:new', payload as unknown as Message);
 
     res.status(201).json({ success: true, data: message });

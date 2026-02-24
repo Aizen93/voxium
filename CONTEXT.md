@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.2.7 (Push-to-Talk)
-**Date:** 2026-02-24
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode
+**Version:** 0.2.8 (Unread Indicators)
+**Date:** 2026-02-25
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators
 
 ## What Has Been Done
 
@@ -153,8 +153,8 @@ Comprehensive hardening of real-time features:
 - [x] Real-time channel create/delete notifications (channel:created / channel:deleted events)
 - [x] Role-based channel management UI (create/delete buttons visible to owner/admin only)
 - [x] Push-to-talk mode
-- [ ] Notification sounds
-- [ ] Unread message indicators
+- [x] Notification sounds + desktop notifications
+- [x] Unread message indicators
 - [ ] Toast notifications in UI
 
 ### V0.3 - Enhanced Features
@@ -345,6 +345,49 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 - `formatKeyCode()` maps `KeyboardEvent.code` values to human-readable labels
 
 **New file:** `apps/desktop/src/hooks/usePushToTalk.ts`
+
+### Notification Sounds & Desktop Notifications (v0.2.7)
+
+- **Notification sounds:** `services/notificationSounds.ts` provides `playMessageSound()`, `playJoinSound()`, `playLeaveSound()` using the Web Audio API. Sounds are triggered in MainLayout's socket event handlers for `message:new`, `voice:user_joined`, and `voice:user_left` (only for non-active channels / other users).
+- **Desktop notifications:** When a `message:new` event arrives for a non-active channel from another user, a native `Notification` is shown with the server name, channel name, author, and truncated content. Permission is requested on mount.
+- **Settings:** `settingsStore` has `enableNotificationSounds` and `enableDesktopNotifications` toggles (persisted to localStorage). The settings button is global (in `ServerSidebar`).
+
+### Unread Message Indicators (v0.2.8)
+
+**Feature:** Channel-level unread badges and server-level unread dot indicators, providing visual feedback when messages arrive in channels the user isn't viewing.
+
+**Server-side change (`routes/messages.ts`):**
+- `message:new` broadcast payload now includes `serverId: channel.serverId` so the client can track which server an unread message belongs to.
+
+**Server Store (`stores/serverStore.ts`):**
+- New state: `unreadCounts: Record<string, number>` (keyed by channelId), `serverUnreadCounts: Record<string, number>` (keyed by serverId)
+- `incrementUnread(channelId, serverId)` — bumps both maps by 1
+- `clearUnread(channelId)` — resets channel count to 0, decrements the server count accordingly, removes zero entries
+- `setActiveChannel()` — auto-calls `clearUnread()` (natural "mark as read" trigger)
+
+**MainLayout (`components/layout/MainLayout.tsx`):**
+- `messageNew` handler only calls `addMessage()` when the message belongs to the active channel (prevents cross-channel message leakage — see bug fix below)
+- Calls `incrementUnread()` for messages that are not from the current user and not in the active channel (same guard as notifications)
+- Typing event handlers (`typingStart`/`typingStop`) now filter by `channelId === activeChannelId` (required after removing `channel:leave` — see below)
+
+**ChannelSidebar (`components/channel/ChannelSidebar.tsx`):**
+- Text channels with unreads show **bold white text** (`text-vox-text-primary font-semibold`) + a pill badge with the count (`bg-vox-accent-primary`, 18px round pill)
+- Active channel never shows a badge
+
+**ServerSidebar (`components/server/ServerSidebar.tsx`):**
+- Server icons with unreads show a small white dot indicator on the left (`h-2 w-1` rounded pill), smaller than the hover indicator (`h-5`) and active indicator (`h-10`)
+- Hidden when the server is active or hovered
+
+### Channel Room Subscription Fix (v0.2.8)
+
+**Problem:** After a user visited a channel and switched away, they stopped receiving `message:new` events for that channel. The socket was auto-subscribed to all text channel rooms on connect (`socketServer.ts` line 132–139), but `ChatArea.tsx` emitted `channel:leave` when switching channels, which removed the socket from the room — permanently undoing the auto-subscription.
+
+**Fix:**
+1. **Removed `channel:leave` emits from `ChatArea.tsx`** — both on channel switch and on component unmount. Auto-subscription persists for the socket's lifetime.
+2. **Kept `channel:join` in `ChatArea.tsx`** — still needed for channels created after the socket connected (auto-subscription only covers channels that exist at connect time).
+3. **Added `channelId` filtering to typing handlers in `MainLayout.tsx`** — since the socket stays in all channel rooms, `typing:start`/`typing:stop` events from other channels would leak into the current chat's typing indicator without this filter. The server already includes `channelId` in the typing event payload.
+
+**Secondary bug fix (message leakage):** `chatStore.addMessage()` was called for every `message:new` event regardless of channel, causing messages from other servers/channels to appear in the current chat area. Fixed by guarding `addMessage()` with `message.channelId === activeChannelId` in the MainLayout handler.
 
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.

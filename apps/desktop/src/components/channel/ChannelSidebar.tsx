@@ -8,7 +8,7 @@ import { InviteModal } from '../server/InviteModal';
 import { clsx } from 'clsx';
 
 export function ChannelSidebar() {
-  const { channels, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, members } = useServerStore();
+  const { channels, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, members, unreadCounts } = useServerStore();
   const { joinChannel, activeChannelId: voiceChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
@@ -92,34 +92,44 @@ export function ChannelSidebar() {
             )}
           </div>
 
-          {textChannels.map((channel) => (
-            <div
-              key={channel.id}
-              className={clsx(
-                'group flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors',
-                activeChannelId === channel.id
-                  ? 'bg-vox-bg-active text-vox-text-primary font-medium'
-                  : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
-              )}
-            >
-              <button
-                onClick={() => handleSelectTextChannel(channel.id)}
-                className="flex min-w-0 flex-1 items-center gap-1.5"
+          {textChannels.map((channel) => {
+            const unread = activeChannelId !== channel.id ? (unreadCounts[channel.id] || 0) : 0;
+            return (
+              <div
+                key={channel.id}
+                className={clsx(
+                  'group flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors',
+                  activeChannelId === channel.id
+                    ? 'bg-vox-bg-active text-vox-text-primary font-medium'
+                    : unread > 0
+                      ? 'text-vox-text-primary font-semibold hover:bg-vox-bg-hover'
+                      : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
+                )}
               >
-                <Hash size={16} className="shrink-0 opacity-60" />
-                <span className="truncate">{channel.name}</span>
-              </button>
-              {isAdmin && (
                 <button
-                  onClick={() => handleDeleteChannel(channel.id)}
-                  className="shrink-0 opacity-0 group-hover:opacity-100 text-vox-text-muted hover:text-vox-accent-danger transition-all"
-                  title="Delete channel"
+                  onClick={() => handleSelectTextChannel(channel.id)}
+                  className="flex min-w-0 flex-1 items-center gap-1.5"
                 >
-                  <Trash2 size={12} />
+                  <Hash size={16} className="shrink-0 opacity-60" />
+                  <span className="truncate">{channel.name}</span>
                 </button>
-              )}
-            </div>
-          ))}
+                {unread > 0 && (
+                  <span className="bg-vox-accent-primary text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 shrink-0">
+                    {unread}
+                  </span>
+                )}
+                {isAdmin && (
+                  <button
+                    onClick={() => handleDeleteChannel(channel.id)}
+                    className="shrink-0 opacity-0 group-hover:opacity-100 text-vox-text-muted hover:text-vox-accent-danger transition-all"
+                    title="Delete channel"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
 
         {/* Voice Channels */}

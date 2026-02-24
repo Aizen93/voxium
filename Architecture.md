@@ -359,13 +359,14 @@ Client                          Server
   │── connect (with JWT) ────────>│
   │                               │── verify JWT
   │                               │── setUserOnline(Redis)
-  │                               │── join server rooms
+  │                               │── join server:{id} rooms
+  │                               │── join channel:{id} rooms (all text channels)
   │                               │── broadcast presence:update
   │<── connected ─────────────────│
   │                               │
-  │── channel:join ──────────────>│── socket.join(room)
-  │── typing:start ──────────────>│── broadcast to room
-  │── typing:stop ───────────────>│── broadcast to room
+  │── channel:join ──────────────>│── socket.join(room) (for newly created channels)
+  │── typing:start ──────────────>│── broadcast to channel room
+  │── typing:stop ───────────────>│── broadcast to channel room
   │                               │
   │<── message:new ──────────────<│  (after HTTP POST creates message,
   │<── presence:update ──────────<│   server broadcasts via Socket.IO)
@@ -384,10 +385,12 @@ Client                          Server
 | Room Pattern | Purpose | When Joined |
 |-------------|---------|-------------|
 | `server:{id}` | Server-wide events (member join/leave, presence, voice) | On socket connect (all memberships) + dynamically on server create/join via `memberBroadcast.ts` |
-| `channel:{id}` | Channel-specific events (messages, typing) | Client emits `channel:join` when selecting a channel |
+| `channel:{id}` | Channel-specific events (messages, typing) | Auto-joined on socket connect for all text channels the user is a member of. Client also emits `channel:join` when selecting a channel (needed for channels created after connect). **Never left** — the socket stays subscribed for the connection's lifetime so `message:new` events reach the client for unread tracking. |
 | `voice:{id}` | Voice channel (voice state, signaling) | Client emits `voice:join` when joining voice |
 
-**Critical invariant:** Every code path that makes a user a server member (create, join, invite) must also add their socket(s) to the `server:{id}` room. Failure to do so breaks all server-scoped real-time features for that user.
+**Critical invariants:**
+- Every code path that makes a user a server member (create, join, invite) must also add their socket(s) to the `server:{id}` room. Failure to do so breaks all server-scoped real-time features for that user.
+- `channel:leave` must NOT be emitted by the client — it undoes the server's auto-subscription, breaking `message:new` delivery for that channel. Since the socket stays in all channel rooms, typing events are filtered by `channelId` on the frontend.
 
 ### Event Types
 
@@ -401,7 +404,7 @@ Client                          Server
 - `typing:start` / `typing:stop`
 
 **Client → Server:**
-- `channel:join` / `channel:leave`
+- `channel:join` (for newly created channels only; `channel:leave` is NOT used — auto-subscription persists)
 - `voice:join` / `voice:leave` / `voice:mute` / `voice:deaf` / `voice:speaking`
 - `voice:signal` (WebRTC signaling relay)
 - `typing:start` / `typing:stop`

@@ -9,6 +9,8 @@ interface ServerState {
   activeChannelId: string | null;
   members: ServerMember[];
   isLoading: boolean;
+  unreadCounts: Record<string, number>;
+  serverUnreadCounts: Record<string, number>;
 
   fetchServers: () => Promise<void>;
   setActiveServer: (serverId: string) => Promise<void>;
@@ -25,6 +27,8 @@ interface ServerState {
   addChannel: (channel: Channel) => void;
   removeChannel: (channelId: string, serverId: string) => void;
   fetchMembers: (serverId: string) => Promise<void>;
+  incrementUnread: (channelId: string, serverId: string) => void;
+  clearUnread: (channelId: string) => void;
 }
 
 export const useServerStore = create<ServerState>((set, get) => ({
@@ -34,6 +38,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
   activeChannelId: null,
   members: [],
   isLoading: false,
+  unreadCounts: {},
+  serverUnreadCounts: {},
 
   fetchServers: async () => {
     try {
@@ -67,6 +73,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   setActiveChannel: (channelId: string) => {
     set({ activeChannelId: channelId });
+    get().clearUnread(channelId);
   },
 
   createServer: async (name: string) => {
@@ -165,5 +172,35 @@ export const useServerStore = create<ServerState>((set, get) => ({
     } catch (err) {
       console.error('Failed to fetch members:', err);
     }
+  },
+
+  incrementUnread: (channelId: string, serverId: string) => {
+    set((state) => ({
+      unreadCounts: {
+        ...state.unreadCounts,
+        [channelId]: (state.unreadCounts[channelId] || 0) + 1,
+      },
+      serverUnreadCounts: {
+        ...state.serverUnreadCounts,
+        [serverId]: (state.serverUnreadCounts[serverId] || 0) + 1,
+      },
+    }));
+  },
+
+  clearUnread: (channelId: string) => {
+    const count = get().unreadCounts[channelId];
+    if (!count) return;
+    // Find which server this channel belongs to
+    const channel = get().channels.find((c) => c.id === channelId);
+    set((state) => {
+      const { [channelId]: _, ...restUnread } = state.unreadCounts;
+      const newServerUnread = { ...state.serverUnreadCounts };
+      const sid = channel?.serverId || state.activeServerId;
+      if (sid && newServerUnread[sid]) {
+        newServerUnread[sid] = Math.max(0, newServerUnread[sid] - count);
+        if (newServerUnread[sid] === 0) delete newServerUnread[sid];
+      }
+      return { unreadCounts: restUnread, serverUnreadCounts: newServerUnread };
+    });
   },
 }));

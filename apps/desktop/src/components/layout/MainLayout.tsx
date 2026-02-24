@@ -47,10 +47,13 @@ export function MainLayout() {
     // Store function references so cleanup actually works
     const handlers = {
       messageNew: (message: any) => {
-        useChatStore.getState().addMessage(message);
+        if (message.channelId === useServerStore.getState().activeChannelId) {
+          useChatStore.getState().addMessage(message);
+        }
         const currentUser = useAuthStore.getState().user;
         if (message.author?.id === currentUser?.id) return;
         if (message.channelId === useServerStore.getState().activeChannelId) return;
+        useServerStore.getState().incrementUnread(message.channelId, message.serverId);
         const settings = useSettingsStore.getState();
         if (settings.enableNotificationSounds) playMessageSound();
         if (settings.enableDesktopNotifications && 'Notification' in window && Notification.permission === 'granted') {
@@ -63,13 +66,17 @@ export function MainLayout() {
       },
       messageUpdate: (message: any) => useChatStore.getState().updateMessage(message),
       messageDelete: ({ messageId }: any) => useChatStore.getState().deleteMessage(messageId),
-      typingStart: ({ userId, username }: any) => {
+      typingStart: ({ channelId, userId, username }: any) => {
         const currentUser = useAuthStore.getState().user;
-        if (userId !== currentUser?.id) {
+        if (userId !== currentUser?.id && channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().setTypingUser(userId, username);
         }
       },
-      typingStop: ({ userId }: any) => useChatStore.getState().removeTypingUser(userId),
+      typingStop: ({ channelId, userId }: any) => {
+        if (channelId === useServerStore.getState().activeChannelId) {
+          useChatStore.getState().removeTypingUser(userId);
+        }
+      },
       presenceUpdate: ({ userId, status }: any) => useServerStore.getState().updateMemberStatus(userId, status),
       voiceChannelUsers: ({ channelId, users: voiceUsers }: any) => {
         useVoiceStore.getState().setChannelUsers(channelId, voiceUsers);
