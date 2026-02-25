@@ -1,6 +1,7 @@
 import { useState, useRef, type KeyboardEvent } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { getSocket } from '../../services/socket';
+import { toast } from '../../stores/toastStore';
 import { PlusCircle, Smile, Send } from 'lucide-react';
 
 interface Props {
@@ -41,8 +42,8 @@ export function MessageInput({ channelId, channelName }: Props) {
       await sendMessage(channelId, trimmed);
       setContent('');
       isTypingRef.current = false;
-    } catch (err) {
-      console.error('Failed to send message:', err);
+    } catch {
+      toast.error('Failed to send message');
     } finally {
       setIsSending(false);
     }

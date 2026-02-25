@@ -6,6 +6,7 @@ import { RegisterPage } from './pages/RegisterPage';
 import { InvitePage } from './pages/InvitePage';
 import { MainLayout } from './components/layout/MainLayout';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
+import { ToastContainer } from './components/layout/ToastContainer';
 
 const PENDING_REDIRECT_KEY = 'voxium_pending_redirect';
 
@@ -45,25 +46,28 @@ export function App() {
   }
 
   return (
-    <ErrorBoundary>
-      <Routes>
-        <Route
-          path="/login"
-          element={isAuthenticated ? <AuthRedirect /> : <LoginPage />}
-        />
-        <Route
-          path="/register"
-          element={isAuthenticated ? <AuthRedirect /> : <RegisterPage />}
-        />
-        <Route
-          path="/invite/:code"
-          element={isAuthenticated ? <InvitePage /> : <SaveAndRedirect />}
-        />
-        <Route
-          path="/*"
-          element={isAuthenticated ? <MainLayout /> : <Navigate to="/login" replace />}
-        />
-      </Routes>
-    </ErrorBoundary>
+    <>
+      <ErrorBoundary>
+        <Routes>
+          <Route
+            path="/login"
+            element={isAuthenticated ? <AuthRedirect /> : <LoginPage />}
+          />
+          <Route
+            path="/register"
+            element={isAuthenticated ? <AuthRedirect /> : <RegisterPage />}
+          />
+          <Route
+            path="/invite/:code"
+            element={isAuthenticated ? <InvitePage /> : <SaveAndRedirect />}
+          />
+          <Route
+            path="/*"
+            element={isAuthenticated ? <MainLayout /> : <Navigate to="/login" replace />}
+          />
+        </Routes>
+      </ErrorBoundary>
+      <ToastContainer />
+    </>
   );
 }

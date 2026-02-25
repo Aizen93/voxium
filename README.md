@@ -7,6 +7,28 @@ At this stage, message encryption has not yet been implemented, and security is 
 
 Additional security layers, including encryption and hardening measures, will be introduced after the core features are completed.
 
+## Features
+
+- **Servers & Channels** — Create servers, organize them with text and voice channels, invite others via single-use invite links
+- **Real-Time Messaging** — Instant message delivery, typing indicators, cursor-based pagination, unread badges per channel and server
+- **Voice Chat** — WebRTC peer-to-peer voice (mesh, up to ~8 users per channel), speaking indicators, latency display, connection quality bars
+- **Push-to-Talk & Voice Activity** — Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode
+- **Audio Settings** — Input/output device selection, live mic level meter, persisted preferences
+- **Mute/Deaf Controls** — Always-visible controls that persist across channel switches, server switches, and app restarts
+- **Presence** — Online/offline status for all server members
+- **Notifications** — In-app toast notifications for actions and errors, notification sounds for voice join/leave and new messages, native desktop notifications
+- **Cross-Platform Desktop** — Tauri 2 (Windows, macOS, Linux) with a Discord-inspired dark UI
+- **Role-Based Permissions** — Owner/Admin/Member roles; admins can create and delete channels
+
+## Tech Stack
+
+| Layer | Technologies |
+|-------|-------------|
+| Backend | Node.js, Express, Socket.IO, Prisma, PostgreSQL, Redis |
+| Frontend | React 19, TypeScript, Vite, Zustand, Tailwind CSS |
+| Desktop | Tauri 2 (Rust) |
+| Voice | WebRTC (mesh P2P) |
+
 # Voxium - Setup Guide
 
 ## Prerequisites

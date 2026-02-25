@@ -213,7 +213,8 @@ apps/desktop/
 │   │   └── InvitePage.tsx    # Invite preview + join
 │   ├── components/
 │   │   ├── layout/
-│   │   │   └── MainLayout.tsx    # 3-panel Discord-like layout
+│   │   │   ├── MainLayout.tsx    # 3-panel Discord-like layout
+│   │   │   └── ToastContainer.tsx # Fixed-position toast notification overlay
 │   │   ├── server/
 │   │   │   ├── ServerSidebar.tsx  # Server icon strip (far left)
 │   │   │   ├── CreateServerModal.tsx
@@ -230,7 +231,8 @@ apps/desktop/
 │   │   ├── authStore.ts      # Auth state (user, tokens)
 │   │   ├── serverStore.ts    # Server/channel state
 │   │   ├── chatStore.ts      # Messages and typing
-│   │   └── voiceStore.ts     # Voice connection state
+│   │   ├── voiceStore.ts     # Voice connection state
+│   │   └── toastStore.ts    # Toast notification queue + convenience helpers
 │   ├── services/
 │   │   ├── api.ts            # Axios instance with interceptors
 │   │   └── socket.ts         # Socket.IO client manager
@@ -275,6 +277,7 @@ Four independent stores, each managing a domain:
 | `serverStore` | Server list, active server, channels, members |
 | `chatStore` | Messages for active channel, typing indicators, pagination |
 | `voiceStore` | Voice channel connection, mute/deaf state, connected users |
+| `toastStore` | Toast notification queue, auto-dismiss timers, convenience helpers |
 
 ### Data Flow
 

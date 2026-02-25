@@ -5,6 +5,7 @@ import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
 import { Hash, Volume2, Plus, ChevronDown, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2 } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
+import { toast } from '../../stores/toastStore';
 import { clsx } from 'clsx';
 
 export function ChannelSidebar() {
@@ -37,10 +38,11 @@ export function ChannelSidebar() {
     if (!activeServerId || !newChannelName.trim()) return;
     try {
       await createChannel(activeServerId, newChannelName.trim(), newChannelType);
+      toast.success('Channel created');
       setNewChannelName('');
       setShowCreateChannel(false);
-    } catch (err) {
-      console.error('Failed to create channel:', err);
+    } catch {
+      toast.error('Failed to create channel');
     }
   };
 
@@ -48,8 +50,9 @@ export function ChannelSidebar() {
     if (!activeServerId) return;
     try {
       await deleteChannel(activeServerId, channelId);
-    } catch (err) {
-      console.error('Failed to delete channel:', err);
+      toast.success('Channel deleted');
+    } catch {
+      toast.error('Failed to delete channel');
     }
   };
 

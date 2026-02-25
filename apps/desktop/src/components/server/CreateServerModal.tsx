@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { useServerStore } from '../../stores/serverStore';
+import { toast } from '../../stores/toastStore';
 import { X } from 'lucide-react';
 
 interface Props {
@@ -21,6 +22,7 @@ export function CreateServerModal({ onClose }: Props) {
     try {
       const server = await createServer(name);
       await setActiveServer(server.id);
+      toast.success('Server created!');
       onClose();
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to create server');
@@ -40,6 +42,7 @@ export function CreateServerModal({ onClose }: Props) {
       if (urlMatch) code = urlMatch[1];
 
       await joinServer(code);
+      toast.success('Joined server!');
       onClose();
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to join server');

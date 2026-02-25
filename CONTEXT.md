@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.2.8 (Unread Indicators)
+**Version:** 0.2.9 (Toast Notifications)
 **Date:** 2026-02-25
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators, toast notification system
 
 ## What Has Been Done
 
@@ -155,7 +155,7 @@ Comprehensive hardening of real-time features:
 - [x] Push-to-talk mode
 - [x] Notification sounds + desktop notifications
 - [x] Unread message indicators
-- [ ] Toast notifications in UI
+- [x] Toast notifications in UI
 
 ### V0.3 - Enhanced Features
 - [ ] Message editing/deletion UI
@@ -388,6 +388,32 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 3. **Added `channelId` filtering to typing handlers in `MainLayout.tsx`** — since the socket stays in all channel rooms, `typing:start`/`typing:stop` events from other channels would leak into the current chat's typing indicator without this filter. The server already includes `channelId` in the typing event payload.
 
 **Secondary bug fix (message leakage):** `chatStore.addMessage()` was called for every `message:new` event regardless of channel, causing messages from other servers/channels to appear in the current chat area. Fixed by guarding `addMessage()` with `message.channelId === activeChannelId` in the MainLayout handler.
+
+### Toast Notification System (v0.2.9)
+
+**New feature:** Global toast notifications for user-facing feedback on async operations (success/error/warning/info).
+
+**Store (`stores/toastStore.ts`):**
+- Zustand store managing a queue of up to 5 toasts with auto-dismiss via `setTimeout`
+- Timer IDs tracked in a `Map<string, ReturnType<typeof setTimeout>>` outside the store; cleared on eviction (MAX_TOASTS overflow) and manual dismiss to prevent orphaned timers
+- Convenience `toast.success()` / `toast.error()` / `toast.warning()` / `toast.info()` functions callable from anywhere (non-hook contexts) via `useToastStore.getState()`
+
+**UI (`components/layout/ToastContainer.tsx`):**
+- Fixed overlay in bottom-right corner, z-index 100, 320px wide
+- Each toast has a colored accent bar, typed icon (lucide-react), message text, and dismiss button
+- Slide-in-right animation on entry (keyframe in tailwind.config.js)
+- ARIA `role="status"` and `aria-live="polite"` for screen reader accessibility
+
+**Integration points (modified files):**
+- `App.tsx` — `ToastContainer` mounted outside `ErrorBoundary` so toasts survive error states
+- `ChannelSidebar.tsx` — `toast.success()` on channel create/delete success; `toast.error()` on channel create/delete failure
+- `CreateServerModal.tsx` — `toast.success()` on server create/join success
+- `MessageInput.tsx` — `toast.error()` on message send failure
+- `SettingsModal.tsx` — `toast.error()` on microphone access failure
+
+**New files:**
+- `apps/desktop/src/stores/toastStore.ts`
+- `apps/desktop/src/components/layout/ToastContainer.tsx`
 
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.

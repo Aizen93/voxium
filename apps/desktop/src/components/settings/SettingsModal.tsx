@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { toast } from '../../stores/toastStore';
 import { X, Keyboard, Volume2, Bell } from 'lucide-react';
 
 interface DeviceInfo {
@@ -156,8 +157,8 @@ export function SettingsModal() {
       }
       rafRef.current = requestAnimationFrame(tick);
       setError(null);
-    } catch (err) {
-      console.warn('[Settings] Mic preview failed:', err);
+    } catch {
+      toast.error('Could not access microphone');
       setError('Could not access microphone');
     }
   }, [stopMicPreview]);

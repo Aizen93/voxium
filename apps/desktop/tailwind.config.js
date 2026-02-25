@@ -47,6 +47,7 @@ export default {
         'pulse-ring': 'pulse-ring 1.5s ease-out infinite',
         'fade-in': 'fade-in 0.2s ease-out',
         'slide-up': 'slide-up 0.2s ease-out',
+        'slide-in-right': 'slide-in-right 0.3s ease-out',
       },
       keyframes: {
         'pulse-ring': {
@@ -60,6 +61,10 @@ export default {
         'slide-up': {
           '0%': { opacity: '0', transform: 'translateY(8px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        'slide-in-right': {
+          '0%': { opacity: '0', transform: 'translateX(100%)' },
+          '100%': { opacity: '1', transform: 'translateX(0)' },
         },
       },
     },
