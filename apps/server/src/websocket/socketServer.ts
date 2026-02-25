@@ -17,7 +17,7 @@ export function getIO(): SocketServer<ClientToServerEvents, ServerToClientEvents
 export function initSocketServer(httpServer: HttpServer) {
   io = new SocketServer<ClientToServerEvents, ServerToClientEvents>(httpServer, {
     cors: {
-      origin: (process.env.CORS_ORIGIN || 'http://localhost:1420')
+      origin: (process.env.CORS_ORIGIN || 'http://localhost:8080')
         .split(',')
         .map((o) => o.trim()),
       credentials: true,

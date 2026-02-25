@@ -36,7 +36,7 @@ export function CreateServerModal({ onClose }: Props) {
     setLoading(true);
     setError('');
     try {
-      // Extract code from a full invite URL if pasted (e.g. http://localhost:1420/invite/UsLnacI8)
+      // Extract code from a full invite URL if pasted (e.g. http://localhost:8080/invite/UsLnacI8)
       let code = inviteCode.trim();
       const urlMatch = code.match(/\/invite\/([^\s/]+)/);
       if (urlMatch) code = urlMatch[1];

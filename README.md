@@ -148,7 +148,7 @@ Terminal 2 — Frontend:
 pnpm run dev:desktop
 ```
 
-The backend runs on `http://localhost:3001` and the frontend on `http://localhost:1420`.
+The backend runs on `http://localhost:3001` and the frontend on `http://localhost:8080`.
 
 ---
 
@@ -266,7 +266,7 @@ curl http://localhost:3001/api/v1/servers \
 | `JWT_REFRESH_EXPIRES_IN` | `7d` | Refresh token expiry |
 | `PORT` | `3001` | HTTP server port |
 | `NODE_ENV` | `development` | Environment (`development` / `production`) |
-| `CORS_ORIGIN` | `http://localhost:1420` | Allowed CORS origin |
+| `CORS_ORIGIN` | `http://localhost:8080` | Allowed CORS origin |
 | `MEDIASOUP_LISTEN_IP` | `0.0.0.0` | WebRTC listening IP |
 | `MEDIASOUP_ANNOUNCED_IP` | `127.0.0.1` | WebRTC public IP |
 

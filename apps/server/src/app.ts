@@ -16,7 +16,7 @@ export const app = express();
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
 app.use(helmet());
-const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:1420')
+const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:8080')
   .split(',')
   .map((o) => o.trim());
 

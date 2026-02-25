@@ -242,7 +242,7 @@ All socket event handlers (`channel:join`, `channel:leave`, typing, voice, etc.)
 
 - **Route:** `/invite/:code` renders `InvitePage` for authenticated users. Unauthenticated users are redirected to `/login` with the invite path saved to `localStorage` (`voxium_pending_redirect`). After login, `AuthRedirect` reads the saved path and navigates there automatically.
 - **Invite lifecycle:** Invites are single-use. The join endpoint (`POST /invites/:code/join`) deletes the invite in a Prisma `$transaction` alongside member creation. Expired invites are also cleaned up on access (both preview and join). The `maxUses`/`uses` columns in the schema are no longer set by application code (cleanup migration pending).
-- **URL extraction:** `CreateServerModal` extracts the invite code from full URLs (e.g., `http://localhost:1420/invite/UsLnacI8`) using a regex match on `/invite/([^\s/]+)`.
+- **URL extraction:** `CreateServerModal` extracts the invite code from full URLs (e.g., `http://localhost:8080/invite/UsLnacI8`) using a regex match on `/invite/([^\s/]+)`.
 
 ### New Files Added in v0.2–v0.2.3
 - `apps/desktop/src/services/audioAnalyser.ts` — Speaking detection via AudioContext
