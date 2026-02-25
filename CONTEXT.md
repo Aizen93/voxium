@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.2.9 (Toast Notifications)
+**Version:** 0.3.0 (Message Editing & Deletion UI)
 **Date:** 2026-02-25
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators, toast notification system
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators, toast notification system, message editing and deletion UI
 
 ## What Has Been Done
 
@@ -158,7 +158,7 @@ Comprehensive hardening of real-time features:
 - [x] Toast notifications in UI
 
 ### V0.3 - Enhanced Features
-- [ ] Message editing/deletion UI
+- [x] Message editing/deletion UI
 - [ ] File/image upload support
 - [ ] Message reactions
 - [ ] Direct messages (DMs)
@@ -414,6 +414,45 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 **New files:**
 - `apps/desktop/src/stores/toastStore.ts`
 - `apps/desktop/src/components/layout/ToastContainer.tsx`
+
+### Message Editing & Deletion UI (v0.3.0)
+
+**New feature:** Users can edit and delete their own messages inline in the chat. Server admins/owners can delete any message via a confirmation modal.
+
+**Chat Store (`stores/chatStore.ts`):**
+- `editMessage(channelId, messageId, content)` — PATCH API call; error propagated to caller
+- `requestDeleteMessage(channelId, messageId)` — DELETE API call; error propagated to caller
+- `updateMessage(message)` and `deleteMessage(messageId)` — local state mutators driven by socket events (already existed, now exercised by the UI)
+
+**MessageItem (`components/chat/MessageItem.tsx`):**
+- Extracted from `MessageList.tsx` into its own component for single responsibility
+- Hover action toolbar: edit (pencil) and delete (trash) icons appear on hover in an absolute-positioned bar above the message
+- Edit button shown only to message author (`isOwn`); delete button shown to author and admins (`canDelete`)
+- Inline edit mode: textarea replaces message content, auto-resizes up to 200px, Escape to cancel, Enter to save
+- Shared `editArea` JSX variable eliminates duplication between header and compact message layouts
+- `(edited)` indicator shown in both header and compact message views when `editedAt` is set
+- `isSaving` state disables textarea during API call; `toast.error()` on failure
+
+**DeleteConfirmModal (`components/chat/DeleteConfirmModal.tsx`):**
+- Fixed-position modal with backdrop click and Escape key to close
+- Shows message preview (author, timestamp, content truncated to 3 lines)
+- Delete button with loading state; toast on failure
+- Uses existing `btn-secondary` and `btn-danger` CSS component classes
+
+**MessageList (`components/chat/MessageList.tsx`):**
+- Refactored to delegate rendering to `MessageItem`
+- Computes `isOwn` and `canDelete` (owner/admin) per message and passes as props
+- `shouldShowHeader` grouping logic unchanged
+
+**MainLayout socket handler fix (`components/layout/MainLayout.tsx`):**
+- `messageUpdate` handler now filters by `message.channelId === activeChannelId` before calling `updateMessage()`, consistent with the `messageNew` handler pattern
+- `messageDelete` handler now filters by `channelId === activeChannelId` before calling `deleteMessage()`, using the `channelId` field included in the server's `message:delete` payload
+
+**Key pattern:** `editMessage` and `requestDeleteMessage` in the store only perform the API call. Local state is NOT updated from the API response -- the server emits `message:update` / `message:delete` socket events which are the sole source of truth, consistent with the existing convention for server-mutating operations.
+
+**New files:**
+- `apps/desktop/src/components/chat/MessageItem.tsx`
+- `apps/desktop/src/components/chat/DeleteConfirmModal.tsx`
 
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.

@@ -64,8 +64,16 @@ export function MainLayout() {
           new Notification(`${serverName} — #${channelName}`, { body: `${authorName}: ${body}`, silent: true });
         }
       },
-      messageUpdate: (message: any) => useChatStore.getState().updateMessage(message),
-      messageDelete: ({ messageId }: any) => useChatStore.getState().deleteMessage(messageId),
+      messageUpdate: (message: any) => {
+        if (message.channelId === useServerStore.getState().activeChannelId) {
+          useChatStore.getState().updateMessage(message);
+        }
+      },
+      messageDelete: ({ messageId, channelId }: any) => {
+        if (channelId === useServerStore.getState().activeChannelId) {
+          useChatStore.getState().deleteMessage(messageId);
+        }
+      },
       typingStart: ({ channelId, userId, username }: any) => {
         const currentUser = useAuthStore.getState().user;
         if (userId !== currentUser?.id && channelId === useServerStore.getState().activeChannelId) {

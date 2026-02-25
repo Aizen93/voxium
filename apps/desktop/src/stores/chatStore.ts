@@ -18,6 +18,8 @@ interface ChatState {
 
   fetchMessages: (channelId: string, before?: string) => Promise<void>;
   sendMessage: (channelId: string, content: string) => Promise<void>;
+  editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
+  requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   addMessage: (message: Message) => void;
   updateMessage: (message: Message) => void;
   deleteMessage: (messageId: string) => void;
@@ -101,6 +103,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.error('Failed to send message:', err);
       throw err;
     }
+  },
+
+  editMessage: async (channelId: string, messageId: string, content: string) => {
+    await api.patch(`/channels/${channelId}/messages/${messageId}`, { content });
+  },
+
+  requestDeleteMessage: async (channelId: string, messageId: string) => {
+    await api.delete(`/channels/${channelId}/messages/${messageId}`);
   },
 
   addMessage: (message: Message) => {

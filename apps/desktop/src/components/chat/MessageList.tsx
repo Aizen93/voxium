@@ -2,17 +2,19 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
-import { format, isToday, isYesterday } from 'date-fns';
-import { clsx } from 'clsx';
+import { MessageItem } from './MessageItem';
 
 export function MessageList() {
   const { messages, hasMore, isLoading, fetchMessages, typingUsers } = useChatStore();
-  const { activeChannelId } = useServerStore();
+  const { activeChannelId, members } = useServerStore();
   const { user } = useAuthStore();
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const fetchingRef = useRef(false); // local guard against concurrent scroll fetches
+
+  const currentMember = members.find((m) => m.userId === user?.id);
+  const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
 
   // Auto-scroll to bottom on new messages if near bottom
   useEffect(() => {
@@ -60,13 +62,6 @@ export function MessageList() {
     }
   }, [hasMore, isLoading, activeChannelId, messages, fetchMessages]);
 
-  const formatMessageTime = (dateStr: string) => {
-    const date = new Date(dateStr);
-    if (isToday(date)) return `Today at ${format(date, 'h:mm a')}`;
-    if (isYesterday(date)) return `Yesterday at ${format(date, 'h:mm a')}`;
-    return format(date, 'MM/dd/yyyy h:mm a');
-  };
-
   // Group messages by author for compact display
   const shouldShowHeader = (index: number) => {
     if (index === 0) return true;
@@ -110,53 +105,15 @@ export function MessageList() {
         const isOwn = message.author.id === user?.id;
 
         return (
-          <div
+          <MessageItem
             key={message.id}
-            className={clsx(
-              'group relative px-2 py-0.5 hover:bg-vox-bg-hover/50 rounded transition-colors',
-              showHeader && index > 0 && 'mt-4'
-            )}
-          >
-            {showHeader ? (
-              <div className="flex items-start gap-3">
-                {/* Avatar */}
-                <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-vox-accent-primary text-sm font-semibold text-white">
-                  {message.author.displayName?.[0]?.toUpperCase() || '?'}
-                </div>
-
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline gap-2">
-                    <span className={clsx(
-                      'text-sm font-semibold',
-                      isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary'
-                    )}>
-                      {message.author.displayName}
-                    </span>
-                    <span className="text-xs text-vox-text-muted">
-                      {formatMessageTime(message.createdAt)}
-                    </span>
-                    {message.editedAt && (
-                      <span className="text-[10px] text-vox-text-muted">(edited)</span>
-                    )}
-                  </div>
-                  <p className="text-sm text-vox-text-primary leading-relaxed break-words">
-                    {message.content}
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-start gap-3">
-                <div className="w-10 shrink-0 text-center">
-                  <span className="hidden group-hover:inline text-[10px] text-vox-text-muted">
-                    {format(new Date(message.createdAt), 'h:mm')}
-                  </span>
-                </div>
-                <p className="min-w-0 flex-1 text-sm text-vox-text-primary leading-relaxed break-words">
-                  {message.content}
-                </p>
-              </div>
-            )}
-          </div>
+            message={message}
+            showHeader={showHeader}
+            addTopMargin={showHeader && index > 0}
+            isOwn={isOwn}
+            canDelete={isOwn || isAdmin}
+            channelId={activeChannelId!}
+          />
         );
       })}
 

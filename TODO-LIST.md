@@ -6,11 +6,12 @@
   - [x] When a new User joins the server, the members list is not updating in real time and needs a page refresh to see the new user in the members list (Right side panel)
   - [x] When a user (Alice) creates a new server, and joins a channel, she can't see her name in the channel list (Though she can speak and hear just fine)
   - [x] When creating a new voice channel or a new text channel, the other users does not see it in real time and require a page refresh
+  - [] Tauri client does not receive windows notifications, how do we activate them by default, or prompt the user to activate notifications. Our apps Settings has notifications enabled.
 
 ## Core chat features (medium effort):
   - [] File & image uploads — drag-and-drop or paste images into chat, preview inline. Needs a storage backend (S3/local) and a new message type
   - [] Message reactions — emoji reactions on messages; very common expectation for a chat app
-  - [] Message editing & deletion UI — the server events (message:update, message:delete) are already wired, but I didn't see an edit/delete UI in the chat bubbles
+  - [x] Message editing & deletion UI — the server events (message:update, message:delete) are already wired, but I didn't see an edit/delete UI in the chat bubbles
 
 ## Bigger features (high effort, high value):
   - [] Direct messages (DMs) — 1:1 and group DMs outside of servers; this is a significant architecture addition but is probably the most-expected missing feature
