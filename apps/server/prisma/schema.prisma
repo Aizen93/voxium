@@ -25,6 +25,7 @@ model User {
   memberships  ServerMember[]
   messages     Message[]
   invites      Invite[]
+  reactions    MessageReaction[]
 
   @@map("users")
 }
@@ -89,11 +90,29 @@ model Message {
   editedAt  DateTime? @map("edited_at")
   createdAt DateTime  @default(now()) @map("created_at")
 
-  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  author  User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  channel   Channel            @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  author    User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  reactions MessageReaction[]
 
   @@index([channelId, createdAt])
   @@map("messages")
+}
+
+// ─── Message Reactions ──────────────────────────────────────────────────────
+
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String   @map("message_id")
+  userId    String   @map("user_id")
+  emoji     String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@map("message_reactions")
 }
 
 // ─── Invites ─────────────────────────────────────────────────────────────────

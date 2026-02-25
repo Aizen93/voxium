@@ -37,3 +37,10 @@ export function validateMessageContent(content: string): string | null {
   if (content.length > LIMITS.MESSAGE_MAX) return `Message must be at most ${LIMITS.MESSAGE_MAX} characters`;
   return null;
 }
+
+export function validateEmoji(emoji: string): string | null {
+  if (!emoji || emoji.trim().length === 0) return 'Emoji cannot be empty';
+  if (emoji.length > LIMITS.MAX_EMOJI_LENGTH) return 'Emoji is too long';
+  if (/^[\x20-\x7E]+$/.test(emoji)) return 'Invalid emoji';
+  return null;
+}

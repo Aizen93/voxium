@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket } from '../services/socket';
-import type { Message } from '@voxium/shared';
+import type { Message, ReactionGroup } from '@voxium/shared';
 
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -20,8 +20,10 @@ interface ChatState {
   sendMessage: (channelId: string, content: string) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
+  toggleReaction: (channelId: string, messageId: string, emoji: string) => Promise<void>;
   addMessage: (message: Message) => void;
   updateMessage: (message: Message) => void;
+  updateMessageReactions: (messageId: string, reactions: ReactionGroup[]) => void;
   deleteMessage: (messageId: string) => void;
   clearMessages: () => void;
   setTypingUser: (userId: string, username: string) => void;
@@ -113,6 +115,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await api.delete(`/channels/${channelId}/messages/${messageId}`);
   },
 
+  toggleReaction: async (channelId: string, messageId: string, emoji: string) => {
+    try {
+      await api.put(`/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+    } catch (err) {
+      console.error('Failed to toggle reaction:', err);
+      throw err;
+    }
+  },
+
   addMessage: (message: Message) => {
     set((state) => {
       if (state.messages.some((m) => m.id === message.id)) return state;
@@ -123,6 +134,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   updateMessage: (message: Message) => {
     set((state) => ({
       messages: state.messages.map((m) => (m.id === message.id ? message : m)),
+    }));
+  },
+
+  updateMessageReactions: (messageId: string, reactions: ReactionGroup[]) => {
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.id === messageId ? { ...m, reactions } : m
+      ),
     }));
   },
 

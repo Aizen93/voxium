@@ -126,6 +126,11 @@ export function MainLayout() {
       channelDeleted: ({ channelId, serverId }: any) => {
         useServerStore.getState().removeChannel(channelId, serverId);
       },
+      messageReactionUpdate: ({ messageId, channelId, reactions }: any) => {
+        if (channelId === useServerStore.getState().activeChannelId) {
+          useChatStore.getState().updateMessageReactions(messageId, reactions);
+        }
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -145,6 +150,7 @@ export function MainLayout() {
       ['member:left', handlers.memberLeft],
       ['channel:created', handlers.channelCreated],
       ['channel:deleted', handlers.channelDeleted],
+      ['message:reaction_update', handlers.messageReactionUpdate],
     ];
 
     /**

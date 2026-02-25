@@ -10,7 +10,7 @@
 
 ## Core chat features (medium effort):
   - [] File & image uploads — drag-and-drop or paste images into chat, preview inline. Needs a storage backend (S3/local) and a new message type
-  - [] Message reactions — emoji reactions on messages; very common expectation for a chat app
+  - [x] Message reactions — emoji reactions on messages; very common expectation for a chat app
   - [x] Message editing & deletion UI — the server events (message:update, message:delete) are already wired, but I didn't see an edit/delete UI in the chat bubbles
 
 ## Bigger features (high effort, high value):

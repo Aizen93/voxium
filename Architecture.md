@@ -221,10 +221,15 @@ apps/desktop/
 │   │   │   └── MemberSidebar.tsx  # Member list (far right)
 │   │   ├── channel/
 │   │   │   └── ChannelSidebar.tsx # Channel list (left panel)
+│   │   ├── common/
+│   │   │   └── EmojiPicker.tsx    # Portal-based emoji picker (shared)
 │   │   ├── chat/
 │   │   │   ├── ChatArea.tsx       # Chat container
 │   │   │   ├── MessageList.tsx    # Scrollable message list
-│   │   │   └── MessageInput.tsx   # Message composer
+│   │   │   ├── MessageItem.tsx    # Single message with edit/delete/reactions
+│   │   │   ├── MessageInput.tsx   # Message composer with emoji picker
+│   │   │   ├── ReactionDisplay.tsx # Reaction chips below messages
+│   │   │   └── DeleteConfirmModal.tsx # Message delete confirmation
 │   │   └── voice/
 │   │       └── VoicePanel.tsx     # Voice connection controls
 │   ├── stores/
@@ -323,6 +328,19 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
           │ authorId  (FK)       │
           │ editedAt             │
           │ createdAt            │
+          └──────────┬───────────┘
+                     │
+          ┌──────────┴───────────┐
+          │  MessageReaction     │
+          │                      │
+          │ id                   │
+          │ messageId (FK)       │
+          │ userId    (FK)       │
+          │ emoji                │
+          │ createdAt            │
+          │                      │
+          │ @@unique(messageId,  │
+          │   userId, emoji)     │
           └──────────────────────┘
 
 ┌──────────────────┐
@@ -339,6 +357,8 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 ### Key Indexes
 
 - `messages(channelId, createdAt)` — Fast message pagination per channel
+- `message_reactions(messageId)` — Reaction aggregation per message
+- `message_reactions(messageId, userId, emoji)` UNIQUE — One reaction per user per emoji
 - `users(username)` UNIQUE — Username lookup
 - `users(email)` UNIQUE — Email lookup
 - `server_members(userId, serverId)` COMPOSITE PK — Membership checks
@@ -398,7 +418,7 @@ Client                          Server
 ### Event Types
 
 **Server → Client:**
-- `message:new` / `message:update` / `message:delete`
+- `message:new` / `message:update` / `message:delete` / `message:reaction_update`
 - `channel:created` / `channel:deleted`
 - `member:joined` / `member:left`
 - `presence:update`

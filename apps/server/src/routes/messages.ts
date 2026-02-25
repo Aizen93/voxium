@@ -2,8 +2,25 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateMessageContent, LIMITS, type Message } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, type Message, type ReactionGroup } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
+
+function aggregateReactions(raw: { emoji: string; userId: string }[]): ReactionGroup[] {
+  const groups = new Map<string, string[]>();
+  for (const r of raw) {
+    const arr = groups.get(r.emoji) || [];
+    arr.push(r.userId);
+    groups.set(r.emoji, arr);
+  }
+  return Array.from(groups.entries()).map(([emoji, userIds]) => ({
+    emoji, count: userIds.length, userIds,
+  }));
+}
+
+const reactionInclude = {
+  select: { emoji: true, userId: true },
+  orderBy: { createdAt: 'asc' as const },
+};
 
 export const messageRouter = Router({ mergeParams: true });
 
@@ -38,6 +55,7 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
         author: {
           select: { id: true, username: true, displayName: true, avatarUrl: true },
         },
+        reactions: reactionInclude,
       },
       orderBy: { createdAt: 'desc' },
       take: limit + 1,
@@ -46,9 +64,14 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
     const hasMore = messages.length > limit;
     if (hasMore) messages.pop();
 
+    const data = messages.reverse().map((m) => ({
+      ...m,
+      reactions: aggregateReactions(m.reactions),
+    }));
+
     res.json({
       success: true,
-      data: messages.reverse(),
+      data,
       hasMore,
     });
   } catch (err) {
@@ -96,7 +119,7 @@ messageRouter.post('/', async (req: Request<{ channelId: string }>, res: Respons
     console.log(`[MSG] Broadcasting message:new to ${room} — ${socketsInRoom.length} socket(s) in room: [${socketsInRoom.map(s => s.data.userId).join(', ')}]`);
     // Prisma returns Date objects; Socket.IO serializes them to ISO strings over the wire
     // Attach channel/server names for desktop notification context
-    const payload = { ...message, channelName: channel.name, serverName: channel.server.name, serverId: channel.serverId };
+    const payload = { ...message, reactions: [], channelName: channel.name, serverName: channel.server.name, serverId: channel.serverId };
     getIO().to(room).emit('message:new', payload as unknown as Message);
 
     res.status(201).json({ success: true, data: message });
@@ -125,12 +148,73 @@ messageRouter.patch('/:messageId', async (req: Request<{ channelId: string; mess
         author: {
           select: { id: true, username: true, displayName: true, avatarUrl: true },
         },
+        reactions: reactionInclude,
       },
     });
 
-    getIO().to(`channel:${message.channelId}`).emit('message:update', updated as unknown as Message);
+    const payload = { ...updated, reactions: aggregateReactions(updated.reactions) };
+    getIO().to(`channel:${message.channelId}`).emit('message:update', payload as unknown as Message);
 
     res.json({ success: true, data: updated });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Toggle reaction on a message
+messageRouter.put('/:messageId/reactions/:emoji', async (req: Request<{ channelId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { channelId, messageId } = req.params;
+    const emoji = decodeURIComponent(req.params.emoji);
+    const userId = req.user!.userId;
+
+    const emojiErr = validateEmoji(emoji);
+    if (emojiErr) throw new BadRequestError(emojiErr);
+
+    const message = await prisma.message.findUnique({
+      where: { id: messageId },
+      select: { id: true, channelId: true, channel: { select: { serverId: true } } },
+    });
+    if (!message || message.channelId !== channelId) throw new NotFoundError('Message');
+
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId, serverId: message.channel.serverId } },
+    });
+    if (!membership) throw new ForbiddenError('Not a member of this server');
+
+    const existing = await prisma.messageReaction.findUnique({
+      where: { messageId_userId_emoji: { messageId, userId, emoji } },
+    });
+
+    let action: 'add' | 'remove';
+    if (existing) {
+      await prisma.messageReaction.delete({ where: { id: existing.id } });
+      action = 'remove';
+    } else {
+      // Check distinct emoji count limit
+      const distinctCount = await prisma.messageReaction.groupBy({
+        by: ['emoji'],
+        where: { messageId },
+      });
+      if (distinctCount.length >= LIMITS.MAX_REACTIONS_PER_MESSAGE) {
+        throw new BadRequestError(`Maximum of ${LIMITS.MAX_REACTIONS_PER_MESSAGE} different reactions per message`);
+      }
+      await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
+      action = 'add';
+    }
+
+    const rawReactions = await prisma.messageReaction.findMany({
+      where: { messageId },
+      select: { emoji: true, userId: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    const reactions = aggregateReactions(rawReactions);
+
+    getIO().to(`channel:${channelId}`).emit('message:reaction_update', {
+      messageId, channelId, emoji, userId, action, reactions,
+    });
+
+    res.json({ success: true, data: { action, reactions } });
   } catch (err) {
     next(err);
   }

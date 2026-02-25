@@ -20,6 +20,8 @@ export const LIMITS = {
   MAX_SERVERS_PER_USER: 100,
   MAX_CHANNELS_PER_SERVER: 500,
   MAX_VOICE_USERS_PER_CHANNEL: 99,
+  MAX_REACTIONS_PER_MESSAGE: 20,
+  MAX_EMOJI_LENGTH: 32,
 } as const;
 
 export const INVITE_CODE_LENGTH = 8;
@@ -46,4 +48,5 @@ export const WS_EVENTS = {
   VOICE_LEAVE: 'voice:leave',
   VOICE_MUTE: 'voice:mute',
   VOICE_DEAF: 'voice:deaf',
+  MESSAGE_REACTION_UPDATE: 'message:reaction_update',
 } as const;

@@ -2,6 +2,7 @@ import { useState, useRef, type KeyboardEvent } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
+import { EmojiPicker } from '../common/EmojiPicker';
 import { PlusCircle, Smile, Send } from 'lucide-react';
 
 interface Props {
@@ -13,6 +14,8 @@ export function MessageInput({ channelId, channelName }: Props) {
   const { sendMessage } = useChatStore();
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const emojiBtnRef = useRef<HTMLButtonElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = useRef(false);
 
@@ -78,9 +81,23 @@ export function MessageInput({ channelId, channelName }: Props) {
           }}
         />
 
-        <button className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors">
+        <button
+          ref={emojiBtnRef}
+          onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+          className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
+        >
           <Smile size={20} />
         </button>
+        {showEmojiPicker && (
+          <EmojiPicker
+            anchorRef={emojiBtnRef}
+            onEmojiSelect={(emoji) => {
+              setContent((prev) => prev + emoji);
+              setShowEmojiPicker(false);
+            }}
+            onClose={() => setShowEmojiPicker(false)}
+          />
+        )}
 
         {content.trim() && (
           <button

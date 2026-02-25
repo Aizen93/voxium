@@ -81,6 +81,12 @@ export interface CreateChannelRequest {
 
 // ─── Message ─────────────────────────────────────────────────────────────────
 
+export interface ReactionGroup {
+  emoji: string;
+  count: number;
+  userIds: string[];
+}
+
 export interface Message {
   id: string;
   content: string;
@@ -88,6 +94,7 @@ export interface Message {
   author: MessageAuthor;
   createdAt: string;
   editedAt: string | null;
+  reactions: ReactionGroup[];
 }
 
 export interface MessageAuthor {
@@ -141,6 +148,14 @@ export interface ServerToClientEvents {
   'pong:latency': (timestamp: number) => void;
   'typing:start': (data: { channelId: string; userId: string; username: string }) => void;
   'typing:stop': (data: { channelId: string; userId: string }) => void;
+  'message:reaction_update': (data: {
+    messageId: string;
+    channelId: string;
+    emoji: string;
+    userId: string;
+    action: 'add' | 'remove';
+    reactions: ReactionGroup[];
+  }) => void;
 }
 
 export interface ClientToServerEvents {

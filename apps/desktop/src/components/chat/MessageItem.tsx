@@ -2,7 +2,9 @@ import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { toast } from '../../stores/toastStore';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
-import { Pencil, Trash2 } from 'lucide-react';
+import { ReactionDisplay } from './ReactionDisplay';
+import { EmojiPicker } from '../common/EmojiPicker';
+import { Pencil, Trash2, SmilePlus } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
@@ -29,7 +31,9 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
   const [editContent, setEditContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [showReactionPicker, setShowReactionPicker] = useState(false);
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const reactionBtnRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (isEditing && editRef.current) {
@@ -80,7 +84,14 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
     }
   };
 
-  const showActions = isOwn || canDelete;
+  const handleReactionSelect = async (emoji: string) => {
+    setShowReactionPicker(false);
+    try {
+      await useChatStore.getState().toggleReaction(channelId, message.id, emoji);
+    } catch {
+      toast.error('Failed to toggle reaction');
+    }
+  };
 
   const editArea = (
     <div className="min-w-0 flex-1">
@@ -113,8 +124,26 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
         )}
       >
         {/* Hover action buttons */}
-        {showActions && !isEditing && (
-          <div className="absolute -top-3 right-2 z-10 hidden group-hover:flex items-center gap-0.5 rounded-md border border-vox-border bg-vox-bg-secondary px-1 py-0.5 shadow-lg">
+        {!isEditing && (
+          <div className={clsx(
+            'absolute -top-3 right-2 z-10 items-center gap-0.5 rounded-md border border-vox-border bg-vox-bg-secondary px-1 py-0.5 shadow-lg',
+            showReactionPicker ? 'flex' : 'hidden group-hover:flex'
+          )}>
+            <button
+              ref={reactionBtnRef}
+              onClick={() => setShowReactionPicker(!showReactionPicker)}
+              className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+              title="Add reaction"
+            >
+              <SmilePlus size={14} />
+            </button>
+            {showReactionPicker && (
+              <EmojiPicker
+                anchorRef={reactionBtnRef}
+                onEmojiSelect={handleReactionSelect}
+                onClose={() => setShowReactionPicker(false)}
+              />
+            )}
             {isOwn && (
               <button
                 onClick={handleStartEdit}
@@ -137,56 +166,62 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
         )}
 
         {showHeader ? (
-          <div className="flex items-start gap-3">
-            {/* Avatar */}
-            <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-vox-accent-primary text-sm font-semibold text-white">
-              {message.author.displayName?.[0]?.toUpperCase() || '?'}
-            </div>
-
-            <div className="min-w-0 flex-1">
-              <div className="flex items-baseline gap-2">
-                <span className={clsx(
-                  'text-sm font-semibold',
-                  isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary'
-                )}>
-                  {message.author.displayName}
-                </span>
-                <span className="text-xs text-vox-text-muted">
-                  {formatMessageTime(message.createdAt)}
-                </span>
-                {message.editedAt && !isEditing && (
-                  <span className="text-[10px] text-vox-text-muted">(edited)</span>
-                )}
+          <>
+            <div className="flex items-start gap-3">
+              {/* Avatar */}
+              <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-vox-accent-primary text-sm font-semibold text-white">
+                {message.author.displayName?.[0]?.toUpperCase() || '?'}
               </div>
 
-              {isEditing ? (
-                <div className="mt-1">{editArea}</div>
-              ) : (
-                <p className="text-sm text-vox-text-primary leading-relaxed break-words">
-                  {message.content}
-                </p>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline gap-2">
+                  <span className={clsx(
+                    'text-sm font-semibold',
+                    isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary'
+                  )}>
+                    {message.author.displayName}
+                  </span>
+                  <span className="text-xs text-vox-text-muted">
+                    {formatMessageTime(message.createdAt)}
+                  </span>
+                  {message.editedAt && !isEditing && (
+                    <span className="text-[10px] text-vox-text-muted">(edited)</span>
+                  )}
+                </div>
+
+                {isEditing ? (
+                  <div className="mt-1">{editArea}</div>
+                ) : (
+                  <p className="text-sm text-vox-text-primary leading-relaxed break-words">
+                    {message.content}
+                  </p>
+                )}
+              </div>
+            </div>
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} />
+          </>
+        ) : (
+          <>
+            <div className="flex items-start gap-3">
+              <div className="w-10 shrink-0 text-center">
+                <span className="hidden group-hover:inline text-[10px] text-vox-text-muted">
+                  {format(new Date(message.createdAt), 'h:mm')}
+                </span>
+              </div>
+
+              {isEditing ? editArea : (
+                <div className="min-w-0 flex-1">
+                  <p className="inline text-sm text-vox-text-primary leading-relaxed break-words">
+                    {message.content}
+                  </p>
+                  {message.editedAt && (
+                    <span className="ml-1 text-[10px] text-vox-text-muted">(edited)</span>
+                  )}
+                </div>
               )}
             </div>
-          </div>
-        ) : (
-          <div className="flex items-start gap-3">
-            <div className="w-10 shrink-0 text-center">
-              <span className="hidden group-hover:inline text-[10px] text-vox-text-muted">
-                {format(new Date(message.createdAt), 'h:mm')}
-              </span>
-            </div>
-
-            {isEditing ? editArea : (
-              <div className="min-w-0 flex-1">
-                <p className="inline text-sm text-vox-text-primary leading-relaxed break-words">
-                  {message.content}
-                </p>
-                {message.editedAt && (
-                  <span className="ml-1 text-[10px] text-vox-text-muted">(edited)</span>
-                )}
-              </div>
-            )}
-          </div>
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} />
+          </>
         )}
       </div>
 

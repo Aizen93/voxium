@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.3.0 (Message Editing & Deletion UI)
+**Version:** 0.3.1 (Message Reactions & Emoji Picker)
 **Date:** 2026-02-25
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators, toast notification system, message editing and deletion UI
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators, toast notification system, message editing and deletion UI, message reactions with emoji picker
 
 ## What Has Been Done
 
@@ -64,6 +64,7 @@ A full Node.js + TypeScript backend has been implemented with:
   - `POST /api/v1/channels/:id/messages` — Send message
   - `PATCH /api/v1/channels/:id/messages/:mid` — Edit message (author only)
   - `DELETE /api/v1/channels/:id/messages/:mid` — Delete message (author or admin)
+  - `PUT /api/v1/channels/:id/messages/:mid/reactions/:emoji` — Toggle reaction on message (server members)
   - `POST /api/v1/invites/servers/:id` — Create invite
   - `POST /api/v1/invites/:code/join` — Use invite
   - `GET /api/v1/invites/:code` — Preview invite
@@ -159,15 +160,15 @@ Comprehensive hardening of real-time features:
 
 ### V0.3 - Enhanced Features
 - [x] Message editing/deletion UI
+- [x] Message reactions with emoji picker
 - [ ] File/image upload support
-- [ ] Message reactions
 - [ ] Direct messages (DMs)
 - [ ] Friend system
 - [ ] Server settings panel
 - [ ] User settings/profile editing
 - [ ] Role/permission management
 - [ ] Channel categories
-- [ ] Emoji picker integration
+- [x] Emoji picker integration
 - [ ] Rich text / markdown in messages
 - [ ] Message search
 - [ ] Screen sharing
@@ -454,6 +455,58 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 - `apps/desktop/src/components/chat/MessageItem.tsx`
 - `apps/desktop/src/components/chat/DeleteConfirmModal.tsx`
 
+### Message Reactions & Emoji Picker (v0.3.1)
+
+**New feature:** Users can react to messages with emoji. Reactions display as grouped chips below messages, and an emoji picker is shared between the message input (for inserting emoji into text) and the reaction system.
+
+**Database (`apps/server/prisma/schema.prisma`):**
+- New `MessageReaction` model with composite unique constraint on `(messageId, userId, emoji)` to enforce one reaction per user per emoji
+- Index on `messageId` for efficient aggregation queries
+- Cascade deletes from both `Message` and `User`
+
+**Shared package (`packages/shared`):**
+- `ReactionGroup` type: `{ emoji, count, userIds }` for aggregated reaction data
+- `Message` type updated with `reactions: ReactionGroup[]`
+- `ServerToClientEvents` — new `message:reaction_update` event carrying `{ messageId, channelId, emoji, userId, action, reactions }`
+- `LIMITS.MAX_REACTIONS_PER_MESSAGE` (20) and `LIMITS.MAX_EMOJI_LENGTH` (32) constants
+- `validateEmoji()` validator rejects empty strings, overly long strings, and purely ASCII strings (ensures emoji content)
+
+**Backend (`apps/server/src/routes/messages.ts`):**
+- `PUT /:messageId/reactions/:emoji` — toggle endpoint: creates or deletes the reaction (idempotent toggle). Validates emoji, checks server membership, enforces distinct-emoji-per-message limit (20). After mutation, re-queries all reactions and broadcasts `message:reaction_update` to the channel room.
+- `aggregateReactions()` helper groups raw `{ emoji, userId }` rows into `ReactionGroup[]`
+- GET (messages list), PATCH (edit), and POST (send) now include reactions in their response/broadcast payloads
+
+**Frontend store (`stores/chatStore.ts`):**
+- `toggleReaction(channelId, messageId, emoji)` — PUT API call with error handling
+- `updateMessageReactions(messageId, reactions)` — immutable state update replacing just the reactions array on the matched message
+
+**Socket handler (`components/layout/MainLayout.tsx`):**
+- `message:reaction_update` handler filters by `activeChannelId` before calling `updateMessageReactions()`, consistent with other message event handlers
+
+**EmojiPicker (`components/common/EmojiPicker.tsx`):**
+- Shared wrapper around `emoji-picker-react` (new dependency)
+- **Portal-based rendering** via `createPortal` to `document.body` with `position: fixed` — avoids clipping by parent `overflow: hidden` containers
+- Accepts `anchorRef` (ref to trigger button); computes position from `getBoundingClientRect()` with viewport-aware auto-flip (prefers below, falls back to above, clamps to edges)
+- Repositions on window `resize` only — does NOT listen to `scroll` events (internal picker scrolling would cause stale anchor rect reads, snapping the picker to 0,0 when the anchor is in a hover-gated toolbar)
+- Dark theme, click-outside and Escape to close
+- Used in both `MessageInput` (insert emoji into text) and `MessageItem`/`ReactionDisplay` (add reaction)
+
+**ReactionDisplay (`components/chat/ReactionDisplay.tsx`):**
+- Renders grouped reaction chips below messages with count and highlight for user's own reactions
+- "+" button opens inline emoji picker for adding new reactions
+- Clicking an existing chip toggles the reaction (add/remove)
+
+**MessageItem (`components/chat/MessageItem.tsx`):**
+- SmilePlus button added to hover action toolbar (visible for all users, not just author/admin)
+- Hover toolbar forced visible (`flex` instead of `hidden group-hover:flex`) while the reaction picker is open — prevents the toolbar from hiding when the mouse moves into the portaled picker, which would collapse the anchor button and break positioning
+
+**New dependency:** `emoji-picker-react@^4.18.0`
+
+**New files:**
+- `apps/desktop/src/components/common/EmojiPicker.tsx`
+- `apps/desktop/src/components/chat/ReactionDisplay.tsx`
+- `apps/server/prisma/migrations/20260225153215_add_message_reactions/migration.sql`
+
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.
 - The `member:joined` event sends `email: ''` to satisfy the `User` type in `ServerToClientEvents`. Consider a `PublicUser` type that omits `email`.
@@ -461,3 +514,6 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 - `SaveAndRedirect` in `App.tsx` performs `localStorage.setItem` during render (not in `useEffect`). Functionally correct since `Navigate` redirects immediately, but technically impure.
 - PTT key press/release emits `voice:mute` on every toggle, which triggers a `voice:state_update` broadcast to the entire `server:{id}` room. For rapid PTT toggling, consider debouncing or rate-limiting these emissions.
 - The PTT mode-switch subscription emits `voice:mute true` to the server but does not update `selfMute` in the voice store. This is intentional (`selfMute` represents the user's manual mute preference, not PTT transient state), but the mute icon in `VoicePanel`/`ChannelSidebar` may show "unmuted" while PTT is active and the key is not held.
+- The `validateEmoji()` function accepts mixed strings containing at least one non-ASCII character (e.g., text+emoji). The 32-character length limit and React's JSX escaping mitigate risk, but a stricter validator could use Unicode emoji property matching.
+- The `MAX_REACTIONS_PER_MESSAGE` limit check in the reaction toggle endpoint has a TOCTOU race: between the `groupBy` count and the `create`, another request could add a new distinct emoji, exceeding the limit. The unique constraint prevents true duplicates, but the soft limit can be exceeded by 1 under concurrent requests to different emoji. Acceptable for current scale.
+- Pre-existing: `leavingUser` variable in `MainLayout.tsx` line 102 is assigned but never read (dead code from voice user left handler).
