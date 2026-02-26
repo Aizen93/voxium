@@ -138,6 +138,16 @@ export function MainLayout() {
           useChatStore.getState().updateMessageReactions(messageId, reactions);
         }
       },
+      unreadInit: ({ unreads }: any) => {
+        const store = useServerStore.getState();
+        store.initUnreadCounts(unreads);
+        // If the user is already viewing a channel, clear its unread and mark as read
+        const activeChannelId = store.activeChannelId;
+        if (activeChannelId) {
+          store.clearUnread(activeChannelId);
+          store.markChannelRead(activeChannelId);
+        }
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -160,6 +170,7 @@ export function MainLayout() {
       ['server:updated', handlers.serverUpdated],
       ['user:updated', handlers.userUpdated],
       ['message:reaction_update', handlers.messageReactionUpdate],
+      ['unread:init', handlers.unreadInit],
     ];
 
     /**

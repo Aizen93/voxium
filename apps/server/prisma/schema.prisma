@@ -29,6 +29,7 @@ model User {
   messages     Message[]
   invites      Invite[]
   reactions    MessageReaction[]
+  channelReads ChannelRead[]
 
   @@map("users")
 }
@@ -79,6 +80,7 @@ model Channel {
 
   server   Server    @relation(fields: [serverId], references: [id], onDelete: Cascade)
   messages Message[]
+  reads    ChannelRead[]
 
   @@map("channels")
 }
@@ -116,6 +118,20 @@ model MessageReaction {
   @@unique([messageId, userId, emoji])
   @@index([messageId])
   @@map("message_reactions")
+}
+
+// ─── Channel Reads ──────────────────────────────────────────────────────────
+
+model ChannelRead {
+  userId     String   @map("user_id")
+  channelId  String   @map("channel_id")
+  lastReadAt DateTime @map("last_read_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@id([userId, channelId])
+  @@map("channel_reads")
 }
 
 // ─── Invites ─────────────────────────────────────────────────────────────────

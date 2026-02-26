@@ -142,7 +142,7 @@ apps/server/
 │   ├── routes/
 │   │   ├── auth.ts         # Register, login, refresh, me, forgot/reset/change password
 │   │   ├── servers.ts      # CRUD servers, join/leave, members, settings
-│   │   ├── channels.ts     # CRUD channels
+│   │   ├── channels.ts     # CRUD channels, mark-as-read
 │   │   ├── messages.ts     # CRUD messages with pagination, reactions
 │   │   ├── users.ts        # User profiles, profile update with real-time broadcast
 │   │   ├── invites.ts      # Create/use/preview invites
@@ -290,7 +290,7 @@ Four independent stores, each managing a domain:
 | Store | Responsibilities |
 |-------|-----------------|
 | `authStore` | User session, login/register/logout, token management, avatar upload, profile editing, forgot/reset/change password |
-| `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync |
+| `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync, persistent unread tracking (via `ChannelRead` DB table + `unread:init` socket event) |
 | `chatStore` | Messages for active channel, typing indicators, pagination, author profile sync |
 | `voiceStore` | Voice channel connection, mute/deaf state, connected users |
 | `settingsStore` | Audio devices, noise gate, notification prefs, PTT key (persisted to localStorage) |
@@ -357,15 +357,16 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
           │   userId, emoji)     │
           └──────────────────────┘
 
-┌──────────────────┐
-│     Invite       │
-│                  │
-│ code (PK)        │
-│ serverId (FK)    │
-│ createdBy (FK)   │
-│ expiresAt        │
-└──────────────────┘
-  Single-use: deleted after join
+┌──────────────────┐    ┌──────────────────────┐
+│     Invite       │    │    ChannelRead        │
+│                  │    │                      │
+│ code (PK)        │    │ userId (PK,FK)       │
+│ serverId (FK)    │    │ channelId (PK,FK)    │
+│ createdBy (FK)   │    │ lastReadAt           │
+│ expiresAt        │    └──────────────────────┘
+└──────────────────┘      Tracks per-user per-channel
+  Single-use: deleted       read position for persistent
+  after join                unread counts
 ```
 
 ### Key Indexes
@@ -377,6 +378,7 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 - `users(email)` UNIQUE — Email lookup
 - `users(reset_token)` UNIQUE — Password reset token lookup
 - `server_members(userId, serverId)` COMPOSITE PK — Membership checks
+- `channel_reads(userId, channelId)` COMPOSITE PK — Read position lookups
 - `invites(code)` PK — Invite lookup
 
 ### Scaling Considerations
@@ -384,6 +386,7 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 - Messages use cursor-based pagination (`createdAt < ?`) instead of offset-based for consistent performance
 - The `ServerMember` junction table allows efficient membership queries in both directions
 - Channel positions are integer-based for simple reordering
+- Unread counts computed via a single raw SQL query on connect, leveraging the existing `messages(channelId, createdAt)` index. `ChannelRead` table stores per-user read positions for persistence across sessions.
 
 ---
 
@@ -399,6 +402,8 @@ Client                          Server
   │                               │── setUserOnline(Redis)
   │                               │── join server:{id} rooms
   │                               │── join channel:{id} rooms (all text channels)
+  │                               │── compute unread counts (SQL)
+  │<── unread:init ──────────────<│── emit unreads (if any)
   │                               │── broadcast presence:update
   │<── connected ─────────────────│
   │                               │
@@ -427,7 +432,7 @@ Client                          Server
 | `voice:{id}` | Voice channel (voice state, signaling) | Client emits `voice:join` when joining voice |
 
 **Critical invariants:**
-- Every code path that makes a user a server member (create, join, invite) must also add their socket(s) to the `server:{id}` room. Failure to do so breaks all server-scoped real-time features for that user.
+- Every code path that makes a user a server member (create, join, invite) must also add their socket(s) to the `server:{id}` room and seed `ChannelRead` records for all text channels (`lastReadAt = now()`). Failure to join the room breaks all server-scoped real-time features; missing ChannelRead records cause existing message history to show as unread.
 - `channel:leave` must NOT be emitted by the client — it undoes the server's auto-subscription, breaking `message:new` delivery for that channel. Since the socket stays in all channel rooms, typing events are filtered by `channelId` on the frontend.
 
 ### Event Types
@@ -442,6 +447,7 @@ Client                          Server
 - `typing:start` / `typing:stop`
 - `server:updated` (server name/icon changed)
 - `user:updated` (user displayName/avatar changed)
+- `unread:init` (persistent unread counts on connect/reconnect)
 
 **Client → Server:**
 - `channel:join` (for newly created channels only; `channel:leave` is NOT used — auto-subscription persists)

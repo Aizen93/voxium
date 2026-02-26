@@ -71,6 +71,14 @@ serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
     // Add creator's socket to the new server room so server-scoped events work
     await joinServerRoom(req.user!.userId, server.id);
 
+    // Seed ChannelRead for the default text channel so existing messages don't show as unread
+    const generalChannel = server.channels.find((c) => c.type === 'text');
+    if (generalChannel) {
+      await prisma.channelRead.create({
+        data: { userId: req.user!.userId, channelId: generalChannel.id, lastReadAt: new Date() },
+      });
+    }
+
     res.status(201).json({
       success: true,
       data: { ...server, memberCount: server._count.members },
@@ -168,6 +176,22 @@ serverRouter.post('/:serverId/join', async (req: Request<{ serverId: string }>, 
 
     // Notify all members and add the joiner's socket(s) to the server room
     await broadcastMemberJoined(req.user!.userId, serverId);
+
+    // Seed ChannelRead for all text channels so existing history doesn't show as unread
+    const textChannels = await prisma.channel.findMany({
+      where: { serverId, type: 'text' },
+      select: { id: true },
+    });
+    if (textChannels.length > 0) {
+      const now = new Date();
+      await prisma.channelRead.createMany({
+        data: textChannels.map((ch) => ({
+          userId: req.user!.userId,
+          channelId: ch.id,
+          lastReadAt: now,
+        })),
+      });
+    }
 
     res.json({ success: true, data: server });
   } catch (err) {

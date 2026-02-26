@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.4.0 (Password Reset & Change + Unread Badge)
+**Version:** 0.4.1 (Persistent Unread Tracking)
 **Date:** 2026-02-26
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges, toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation
 
 ## What Has Been Done
 
@@ -33,7 +33,7 @@ Voxium/
 A full Node.js + TypeScript backend has been implemented with:
 
 - **HTTP API Framework:** Express.js with structured routing
-- **Database:** PostgreSQL via Prisma ORM with full schema for users, servers, channels, messages, invites, and server members
+- **Database:** PostgreSQL via Prisma ORM with full schema for users, servers, channels, messages, invites, server members, and channel read tracking
 - **Authentication:** JWT-based (access + refresh tokens) with bcrypt password hashing
 - **Real-time:** Socket.IO for WebSocket connections handling:
   - Channel subscription/unsubscription
@@ -63,6 +63,7 @@ A full Node.js + TypeScript backend has been implemented with:
   - `GET /api/v1/servers/:id/channels` — List channels
   - `POST /api/v1/servers/:id/channels` — Create channel (admin+)
   - `DELETE /api/v1/servers/:id/channels/:cid` — Delete channel (admin+)
+  - `POST /api/v1/servers/:id/channels/:cid/read` — Mark channel as read (upserts ChannelRead timestamp)
   - `GET /api/v1/channels/:id/messages` — Paginated messages (cursor-based)
   - `POST /api/v1/channels/:id/messages` — Send message
   - `PATCH /api/v1/channels/:id/messages/:mid` — Edit message (author only)
@@ -695,6 +696,55 @@ Enhanced unread indicators on the server sidebar:
 
 **Files changed:**
 - `apps/desktop/src/components/server/ServerSidebar.tsx` — unread border color + count badge
+
+### 17. Persistent Unread Tracking (v0.4.1)
+
+**Problem:** Unread message counts were stored only in Zustand in-memory state. When the user refreshed the page or disconnected/reconnected, all unread information was lost.
+
+**Solution:** Server-side read tracking via a `ChannelRead` table storing `lastReadAt` per user per channel. On socket connect, unread counts are computed via a single SQL query and emitted to the client. The existing live `incrementUnread`/`clearUnread` logic stays unchanged for real-time responsiveness.
+
+**Database (`apps/server/prisma/schema.prisma`):**
+- New `ChannelRead` model with composite PK `(userId, channelId)`, `lastReadAt` timestamp, cascade deletes from User and Channel
+- Reverse relations added: `channelReads` on User, `reads` on Channel
+
+**Shared package:**
+- `UnreadCount` interface: `{ channelId, serverId, count }`
+- `unread:init` event added to `ServerToClientEvents`
+- `UNREAD_INIT` constant added to `WS_EVENTS`
+
+**Backend — Socket handler (`apps/server/src/websocket/socketServer.ts`):**
+- After auto-joining text channel rooms, executes a single raw SQL query computing unread counts across all channels in one DB round trip (messages after `COALESCE(lastReadAt, '1970-01-01')`)
+- Emits `unread:init` with `{ unreads: UnreadCount[] }` only if there are unreads
+- Uses existing `[channelId, createdAt]` index on messages table
+
+**Backend — Channel route (`apps/server/src/routes/channels.ts`):**
+- `POST /:channelId/read` — authenticated, membership-checked; upserts `ChannelRead` with `lastReadAt = now()`
+
+**Backend — Server create/join seeding:**
+- `routes/servers.ts` (create): Seeds `ChannelRead` for the creator on the default `#general` text channel
+- `routes/servers.ts` (join): Seeds `ChannelRead` for all text channels in the joined server
+- `routes/invites.ts` (invite join): Seeds `ChannelRead` for all text channels via `createMany`
+- This prevents existing message history from showing as unread for new members
+
+**Frontend — Server store (`stores/serverStore.ts`):**
+- `initUnreadCounts(unreads)` — Full replace of `unreadCounts` and `serverUnreadCounts` from server data
+- `markChannelRead(channelId)` — Fire-and-forget `api.post(/.../channels/:id/read)`
+- `setActiveChannel()` — Now calls `markChannelRead()` after `clearUnread()` to persist read state
+
+**Frontend — MainLayout (`components/layout/MainLayout.tsx`):**
+- `unread:init` handler calls `initUnreadCounts(unreads)`, then clears/marks the active channel if the user is already viewing one
+
+**Files changed:**
+- `apps/server/prisma/schema.prisma` — `ChannelRead` model + reverse relations
+- `apps/server/prisma/migrations/20260226170434_add_channel_reads/migration.sql`
+- `packages/shared/src/types.ts` — `UnreadCount` interface, `unread:init` event
+- `packages/shared/src/constants.ts` — `UNREAD_INIT` constant
+- `apps/server/src/websocket/socketServer.ts` — unread count SQL query + emit
+- `apps/server/src/routes/channels.ts` — `POST /:channelId/read` endpoint
+- `apps/server/src/routes/servers.ts` — ChannelRead seeding on create and join
+- `apps/server/src/routes/invites.ts` — ChannelRead seeding on invite join
+- `apps/desktop/src/stores/serverStore.ts` — `initUnreadCounts`, `markChannelRead` methods
+- `apps/desktop/src/components/layout/MainLayout.tsx` — `unread:init` handler
 
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.

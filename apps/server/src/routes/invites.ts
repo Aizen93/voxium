@@ -66,6 +66,22 @@ inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Res
     // Notify all members and add the joiner's socket(s) to the server room
     await broadcastMemberJoined(req.user!.userId, invite.serverId);
 
+    // Seed ChannelRead for all text channels so existing history doesn't show as unread
+    const textChannels = await prisma.channel.findMany({
+      where: { serverId: invite.serverId, type: 'text' },
+      select: { id: true },
+    });
+    if (textChannels.length > 0) {
+      const now = new Date();
+      await prisma.channelRead.createMany({
+        data: textChannels.map((ch) => ({
+          userId: req.user!.userId,
+          channelId: ch.id,
+          lastReadAt: now,
+        })),
+      });
+    }
+
     res.json({ success: true, data: invite.server });
   } catch (err) {
     next(err);

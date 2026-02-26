@@ -129,6 +129,14 @@ export interface VoiceUser {
   speaking: boolean;
 }
 
+// ─── Unread ─────────────────────────────────────────────────────────────────
+
+export interface UnreadCount {
+  channelId: string;
+  serverId: string;
+  count: number;
+}
+
 // ─── WebSocket Events ────────────────────────────────────────────────────────
 
 export interface ServerToClientEvents {
@@ -159,6 +167,7 @@ export interface ServerToClientEvents {
   }) => void;
   'server:updated': (server: Server) => void;
   'user:updated': (data: { userId: string; displayName: string; avatarUrl: string | null }) => void;
+  'unread:init': (data: { unreads: UnreadCount[] }) => void;
 }
 
 export interface ClientToServerEvents {

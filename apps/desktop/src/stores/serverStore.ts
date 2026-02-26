@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
-import type { Server, Channel, ServerMember, User, UserStatus } from '@voxium/shared';
+import type { Server, Channel, ServerMember, User, UserStatus, UnreadCount } from '@voxium/shared';
 
 interface ServerState {
   servers: Server[];
@@ -29,6 +29,8 @@ interface ServerState {
   fetchMembers: (serverId: string) => Promise<void>;
   incrementUnread: (channelId: string, serverId: string) => void;
   clearUnread: (channelId: string) => void;
+  initUnreadCounts: (unreads: UnreadCount[]) => void;
+  markChannelRead: (channelId: string) => void;
   uploadServerIcon: (serverId: string, file: File) => Promise<void>;
   updateServer: (serverId: string, fields: { name?: string }) => Promise<void>;
   updateServerData: (server: Server) => void;
@@ -79,6 +81,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   setActiveChannel: (channelId: string) => {
     set({ activeChannelId: channelId });
     get().clearUnread(channelId);
+    get().markChannelRead(channelId);
   },
 
   createServer: async (name: string) => {
@@ -208,6 +211,25 @@ export const useServerStore = create<ServerState>((set, get) => ({
       }
       return { unreadCounts: restUnread, serverUnreadCounts: newServerUnread };
     });
+  },
+
+  initUnreadCounts: (unreads: UnreadCount[]) => {
+    const unreadCounts: Record<string, number> = {};
+    const serverUnreadCounts: Record<string, number> = {};
+    for (const u of unreads) {
+      unreadCounts[u.channelId] = u.count;
+      serverUnreadCounts[u.serverId] = (serverUnreadCounts[u.serverId] || 0) + u.count;
+    }
+    set({ unreadCounts, serverUnreadCounts });
+  },
+
+  markChannelRead: (channelId: string) => {
+    // Find the serverId for this channel
+    const channel = get().channels.find((c) => c.id === channelId);
+    const serverId = channel?.serverId || get().activeServerId;
+    if (!serverId) return;
+    // Fire-and-forget
+    api.post(`/servers/${serverId}/channels/${channelId}/read`).catch(() => {});
   },
 
   uploadServerIcon: async (serverId: string, file: File) => {

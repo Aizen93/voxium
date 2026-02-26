@@ -132,10 +132,39 @@ export function initSocketServer(httpServer: HttpServer) {
       // Auto-join all text channel rooms so message:new events reach all members
       const textChannels = await prisma.channel.findMany({
         where: { serverId: { in: memberships.map((m) => m.serverId) }, type: 'text' },
-        select: { id: true },
+        select: { id: true, serverId: true },
       });
       for (const ch of textChannels) {
         socket.join(`channel:${ch.id}`);
+      }
+
+      // Compute unread counts across all text channels in a single query
+      if (textChannels.length > 0) {
+        const textChannelIds = textChannels.map((ch) => ch.id);
+        const unreads = await prisma.$queryRawUnsafe<
+          Array<{ channel_id: string; server_id: string; cnt: bigint }>
+        >(
+          `SELECT c.id AS channel_id, c.server_id, COUNT(m.id) AS cnt
+           FROM channels c
+           LEFT JOIN channel_reads cr ON cr.channel_id = c.id AND cr.user_id = $1
+           INNER JOIN messages m ON m.channel_id = c.id
+             AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
+           WHERE c.id = ANY($2::text[])
+           GROUP BY c.id, c.server_id
+           HAVING COUNT(m.id) > 0`,
+          userId,
+          textChannelIds
+        );
+
+        if (unreads.length > 0) {
+          socket.emit('unread:init', {
+            unreads: unreads.map((r) => ({
+              channelId: r.channel_id,
+              serverId: r.server_id,
+              count: Number(r.cnt),
+            })),
+          });
+        }
       }
 
       // Broadcast online status to all servers

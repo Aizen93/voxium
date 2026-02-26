@@ -75,6 +75,33 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
   }
 });
 
+// Mark a channel as read
+channelRouter.post('/:channelId/read', async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId, channelId } = req.params;
+
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId: req.user!.userId, serverId } },
+    });
+    if (!membership) throw new ForbiddenError('Not a member of this server');
+
+    const channel = await prisma.channel.findFirst({
+      where: { id: channelId, serverId },
+    });
+    if (!channel) throw new NotFoundError('Channel');
+
+    await prisma.channelRead.upsert({
+      where: { userId_channelId: { userId: req.user!.userId, channelId } },
+      update: { lastReadAt: new Date() },
+      create: { userId: req.user!.userId, channelId, lastReadAt: new Date() },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Delete a channel
 channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
   try {

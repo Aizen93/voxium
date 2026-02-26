@@ -51,4 +51,5 @@ export const WS_EVENTS = {
   MESSAGE_REACTION_UPDATE: 'message:reaction_update',
   SERVER_UPDATED: 'server:updated',
   USER_UPDATED: 'user:updated',
+  UNREAD_INIT: 'unread:init',
 } as const;
