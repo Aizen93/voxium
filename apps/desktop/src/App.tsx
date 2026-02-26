@@ -3,6 +3,8 @@ import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { InvitePage } from './pages/InvitePage';
 import { MainLayout } from './components/layout/MainLayout';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
@@ -56,6 +58,14 @@ export function App() {
           <Route
             path="/register"
             element={isAuthenticated ? <AuthRedirect /> : <RegisterPage />}
+          />
+          <Route
+            path="/forgot-password"
+            element={isAuthenticated ? <AuthRedirect /> : <ForgotPasswordPage />}
+          />
+          <Route
+            path="/reset-password/:token"
+            element={isAuthenticated ? <AuthRedirect /> : <ResetPasswordPage />}
           />
           <Route
             path="/invite/:code"

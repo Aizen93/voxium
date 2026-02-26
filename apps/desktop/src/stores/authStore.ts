@@ -18,6 +18,9 @@ interface AuthState {
   clearError: () => void;
   uploadAvatar: (file: File) => Promise<void>;
   updateProfile: (fields: { displayName?: string; bio?: string }) => Promise<void>;
+  forgotPassword: (email: string) => Promise<string>;
+  resetPassword: (token: string, password: string) => Promise<string>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<string>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -114,5 +117,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   updateProfile: async (fields) => {
     const { data } = await api.patch('/users/me/profile', fields);
     set({ user: data.data });
+  },
+
+  forgotPassword: async (email) => {
+    const { data } = await api.post('/auth/forgot-password', { email });
+    return data.message;
+  },
+
+  resetPassword: async (token, password) => {
+    const { data } = await api.post('/auth/reset-password', { token, password });
+    return data.message;
+  },
+
+  changePassword: async (currentPassword, newPassword) => {
+    const { data } = await api.post('/auth/change-password', { currentPassword, newPassword });
+    // Store fresh tokens so the current session survives the tokenVersion bump
+    if (data.data?.accessToken) {
+      localStorage.setItem('voxium_access_token', data.data.accessToken);
+    }
+    if (data.data?.refreshToken) {
+      localStorage.setItem('voxium_refresh_token', data.data.refreshToken);
+    }
+    return data.message;
   },
 }));

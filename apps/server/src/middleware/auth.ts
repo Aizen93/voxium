@@ -5,6 +5,7 @@ import { UnauthorizedError } from '../utils/errors';
 export interface AuthPayload {
   userId: string;
   username: string;
+  tokenVersion: number;
 }
 
 declare global {

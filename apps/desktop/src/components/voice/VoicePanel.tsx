@@ -3,6 +3,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useLocalAudioLevel } from '../../hooks/useLocalAudioLevel';
 import { ConnectionQuality } from './ConnectionQuality';
+import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff } from 'lucide-react';
 import { clsx } from 'clsx';
 
@@ -57,24 +58,26 @@ export function VoicePanel() {
             const isSpeaking = isLocal ? (localAudioLevel > 0.05 && !selfMute) : voiceUser.speaking;
 
             return (
-              <div key={voiceUser.id} className="flex items-center gap-2 rounded px-2 py-1">
-                <div className={clsx(
-                  'h-6 w-6 rounded-full flex items-center justify-center text-[10px] font-semibold text-white ring-2 transition-all',
-                  isSpeaking ? 'ring-vox-voice-speaking bg-vox-voice-speaking' :
-                  voiceUser.selfMute ? 'ring-vox-voice-muted bg-vox-bg-hover' :
-                  'ring-transparent bg-vox-accent-primary'
-                )}>
-                  {voiceUser.displayName?.[0]?.toUpperCase() || '?'}
+              <UserHoverTarget key={voiceUser.id} userId={voiceUser.id}>
+                <div className="flex items-center gap-2 rounded px-2 py-1">
+                  <div className={clsx(
+                    'h-6 w-6 rounded-full flex items-center justify-center text-[10px] font-semibold text-white ring-2 transition-all',
+                    isSpeaking ? 'ring-vox-voice-speaking bg-vox-voice-speaking' :
+                    voiceUser.selfMute ? 'ring-vox-voice-muted bg-vox-bg-hover' :
+                    'ring-transparent bg-vox-accent-primary'
+                  )}>
+                    {voiceUser.displayName?.[0]?.toUpperCase() || '?'}
+                  </div>
+                  <span className={clsx(
+                    'text-xs truncate flex-1',
+                    voiceUser.selfMute ? 'text-vox-text-muted' : 'text-vox-text-primary'
+                  )}>
+                    {voiceUser.displayName}
+                  </span>
+                  {voiceUser.selfMute && <MicOff size={12} className="text-vox-voice-muted" />}
+                  {voiceUser.selfDeaf && <HeadphoneOff size={12} className="text-vox-voice-muted" />}
                 </div>
-                <span className={clsx(
-                  'text-xs truncate flex-1',
-                  voiceUser.selfMute ? 'text-vox-text-muted' : 'text-vox-text-primary'
-                )}>
-                  {voiceUser.displayName}
-                </span>
-                {voiceUser.selfMute && <MicOff size={12} className="text-vox-voice-muted" />}
-                {voiceUser.selfDeaf && <HeadphoneOff size={12} className="text-vox-voice-muted" />}
-              </div>
+              </UserHoverTarget>
             );
           })}
         </div>

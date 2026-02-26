@@ -1,9 +1,11 @@
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
 import { BadRequestError, ConflictError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, validateUsername } from '@voxium/shared';
+import { sendPasswordResetEmail } from '../utils/email';
 
 export async function registerUser(username: string, email: string, password: string, displayName?: string) {
   const usernameErr = validateUsername(username);
@@ -41,13 +43,15 @@ export async function registerUser(username: string, email: string, password: st
       avatarUrl: true,
       bio: true,
       status: true,
+      tokenVersion: true,
       createdAt: true,
     },
   });
 
-  const tokens = generateTokens({ userId: user.id, username: user.username });
+  const tokens = generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion });
+  const { tokenVersion: _, ...safeUser } = user;
 
-  return { user, ...tokens };
+  return { user: safeUser, ...tokens };
 }
 
 export async function loginUser(email: string, password: string) {
@@ -58,9 +62,9 @@ export async function loginUser(email: string, password: string) {
   const validPassword = await bcrypt.compare(password, user.password);
   if (!validPassword) throw new UnauthorizedError('Invalid credentials');
 
-  const tokens = generateTokens({ userId: user.id, username: user.username });
+  const tokens = generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion });
 
-  const { password: _, ...safeUser } = user;
+  const { password: _, tokenVersion: _tv, ...safeUser } = user;
 
   return { user: safeUser, ...tokens };
 }
@@ -83,13 +87,107 @@ export async function refreshTokens(token: string) {
 
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },
-      select: { id: true, username: true },
+      select: { id: true, username: true, tokenVersion: true },
     });
 
     if (!user) throw new UnauthorizedError('User not found');
 
-    return generateTokens({ userId: user.id, username: user.username });
-  } catch {
+    // Tokens issued before the tokenVersion migration have no tokenVersion field;
+    // treat undefined/missing as version 0 so pre-existing refresh tokens remain valid.
+    const payloadVersion = payload.tokenVersion ?? 0;
+    if (user.tokenVersion !== payloadVersion) {
+      throw new UnauthorizedError('Token has been revoked');
+    }
+
+    return generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion });
+  } catch (err) {
+    if (err instanceof UnauthorizedError) throw err;
     throw new UnauthorizedError('Invalid refresh token');
   }
+}
+
+export async function requestPasswordReset(email: string) {
+  const emailErr = validateEmail(email);
+  if (emailErr) throw new BadRequestError(emailErr);
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) return; // Silent return to prevent email enumeration
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      resetToken: hashedToken,
+      resetTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+    },
+  });
+
+  try {
+    await sendPasswordResetEmail(user.email, rawToken);
+  } catch (err) {
+    console.error('[Auth] Failed to send password reset email:', err);
+  }
+}
+
+export async function resetPassword(token: string, newPassword: string) {
+  if (!token) throw new BadRequestError('Reset token is required');
+
+  const passwordErr = validatePassword(newPassword);
+  if (passwordErr) throw new BadRequestError(passwordErr);
+
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+  const user = await prisma.user.findUnique({
+    where: { resetToken: hashedToken },
+  });
+
+  if (!user) throw new BadRequestError('Invalid or expired reset token');
+
+  if (user.resetTokenExpiresAt && user.resetTokenExpiresAt < new Date()) {
+    // Token exists but has expired -- clear it and reject
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { resetToken: null, resetTokenExpiresAt: null },
+    });
+    throw new BadRequestError('Invalid or expired reset token');
+  }
+
+  const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      password: hashedPassword,
+      resetToken: null,
+      resetTokenExpiresAt: null,
+      tokenVersion: { increment: 1 },
+    },
+  });
+}
+
+export async function changePassword(userId: string, currentPassword: string, newPassword: string) {
+  const passwordErr = validatePassword(newPassword);
+  if (passwordErr) throw new BadRequestError(passwordErr);
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) throw new UnauthorizedError('User not found');
+
+  const valid = await bcrypt.compare(currentPassword, user.password);
+  if (!valid) throw new BadRequestError('Current password is incorrect');
+
+  const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+  const updated = await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      password: hashedPassword,
+      tokenVersion: { increment: 1 },
+    },
+    select: { id: true, username: true, tokenVersion: true },
+  });
+
+  // Return fresh tokens so the current session survives the version bump
+  return generateTokens({ userId: updated.id, username: updated.username, tokenVersion: updated.tokenVersion });
 }

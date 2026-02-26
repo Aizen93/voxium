@@ -1,5 +1,6 @@
 import { useServerStore } from '../../stores/serverStore';
 import { Avatar } from '../common/Avatar';
+import { UserHoverTarget } from '../common/UserHoverTarget';
 import { clsx } from 'clsx';
 
 export function MemberSidebar() {
@@ -33,33 +34,34 @@ function MemberGroup({ title, members }: { title: string; members: any[] }) {
         {title}
       </h3>
       {members.map((member) => (
-        <button
-          key={member.userId}
-          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-vox-bg-hover transition-colors"
-        >
-          {/* Avatar */}
-          <div className="relative">
-            <Avatar avatarUrl={member.user.avatarUrl} displayName={member.user.displayName} size="sm" />
-            <div
-              className={clsx(
-                'absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-vox-bg-secondary',
-                member.user.status === 'online' ? 'bg-vox-accent-success' :
-                member.user.status === 'idle' ? 'bg-vox-accent-warning' :
-                member.user.status === 'dnd' ? 'bg-vox-accent-danger' :
-                'bg-vox-text-muted'
-              )}
-            />
-          </div>
+        <UserHoverTarget key={member.userId} userId={member.userId}>
+          <button
+            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-vox-bg-hover transition-colors"
+          >
+            {/* Avatar */}
+            <div className="relative">
+              <Avatar avatarUrl={member.user.avatarUrl} displayName={member.user.displayName} size="sm" />
+              <div
+                className={clsx(
+                  'absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-vox-bg-secondary',
+                  member.user.status === 'online' ? 'bg-vox-accent-success' :
+                  member.user.status === 'idle' ? 'bg-vox-accent-warning' :
+                  member.user.status === 'dnd' ? 'bg-vox-accent-danger' :
+                  'bg-vox-text-muted'
+                )}
+              />
+            </div>
 
-          <div className="min-w-0 flex-1">
-            <p className={clsx(
-              'truncate text-sm font-medium',
-              member.user.status === 'offline' ? 'text-vox-text-muted' : 'text-vox-text-primary'
-            )}>
-              {member.user.displayName}
-            </p>
-          </div>
-        </button>
+            <div className="min-w-0 flex-1">
+              <p className={clsx(
+                'truncate text-sm font-medium',
+                member.user.status === 'offline' ? 'text-vox-text-muted' : 'text-vox-text-primary'
+              )}>
+                {member.user.displayName}
+              </p>
+            </div>
+          </button>
+        </UserHoverTarget>
       ))}
     </div>
   );

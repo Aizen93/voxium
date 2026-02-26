@@ -7,6 +7,7 @@ import { Hash, Volume2, Plus, ChevronDown, Mic, MicOff, Headphones, HeadphoneOff
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
 import { Avatar } from '../common/Avatar';
+import { UserHoverTarget } from '../common/UserHoverTarget';
 import { toast } from '../../stores/toastStore';
 import { clsx } from 'clsx';
 
@@ -195,22 +196,24 @@ export function ChannelSidebar() {
                 {usersInChannel.length > 0 && (
                   <div className="ml-4 mt-0.5 space-y-0.5">
                     {usersInChannel.map((vu) => (
-                      <div key={vu.id} className="flex items-center gap-1.5 rounded px-2 py-1">
-                        <Avatar
-                          avatarUrl={vu.avatarUrl}
-                          displayName={vu.displayName}
-                          size="xs"
-                          speaking={vu.speaking}
-                        />
-                        <span className={clsx(
-                          'text-xs truncate',
-                          vu.id === user?.id ? 'text-vox-text-primary font-medium' : 'text-vox-text-secondary'
-                        )}>
-                          {vu.displayName}
-                          {vu.id === user?.id && ' (you)'}
-                        </span>
-                        {vu.selfMute && <MicOff size={10} className="text-vox-voice-muted shrink-0" />}
-                      </div>
+                      <UserHoverTarget key={vu.id} userId={vu.id}>
+                        <div className="flex items-center gap-1.5 rounded px-2 py-1">
+                          <Avatar
+                            avatarUrl={vu.avatarUrl}
+                            displayName={vu.displayName}
+                            size="xs"
+                            speaking={vu.speaking}
+                          />
+                          <span className={clsx(
+                            'text-xs truncate',
+                            vu.id === user?.id ? 'text-vox-text-primary font-medium' : 'text-vox-text-secondary'
+                          )}>
+                            {vu.displayName}
+                            {vu.id === user?.id && ' (you)'}
+                          </span>
+                          {vu.selfMute && <MicOff size={10} className="text-vox-voice-muted shrink-0" />}
+                        </div>
+                      </UserHoverTarget>
                     ))}
                   </div>
                 )}

@@ -3,7 +3,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Keyboard, Volume2, Bell, User, Headphones } from 'lucide-react';
+import { X, Keyboard, Volume2, Bell, User, Headphones, Lock, Eye, EyeOff } from 'lucide-react';
 import { LIMITS } from '@voxium/shared';
 
 interface DeviceInfo {
@@ -79,6 +79,118 @@ function KeyBindingPicker({ value, onChange }: { value: string; onChange: (code:
       <Keyboard size={14} />
       {listening ? 'Press a key...' : formatKeyCode(value)}
     </button>
+  );
+}
+
+// ─── Change Password Form ────────────────────────────────────────────────────
+
+function ChangePasswordForm() {
+  const { changePassword } = useAuthStore();
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [showPasswords, setShowPasswords] = useState(false);
+
+  const handleChangePassword = async () => {
+    setPasswordError(null);
+
+    if (newPassword.length < LIMITS.PASSWORD_MIN) {
+      setPasswordError(`New password must be at least ${LIMITS.PASSWORD_MIN} characters.`);
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      setPasswordError('New passwords do not match.');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      await changePassword(currentPassword, newPassword);
+      toast.success('Password changed successfully');
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+    } catch (err: any) {
+      setPasswordError(err.response?.data?.error || 'Failed to change password');
+    } finally {
+      setChangingPassword(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-vox-border pt-5">
+      <div className="flex items-center gap-2 mb-4">
+        <Lock size={16} className="text-vox-text-muted" />
+        <h3 className="text-sm font-semibold text-vox-text-primary">Change Password</h3>
+      </div>
+
+      {passwordError && (
+        <div className="mb-3 rounded-lg bg-vox-accent-danger/10 border border-vox-accent-danger/20 px-3 py-2 text-xs text-vox-accent-danger">
+          {passwordError}
+        </div>
+      )}
+
+      <div className="space-y-3">
+        <div>
+          <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
+            Current Password
+          </label>
+          <div className="relative">
+            <input
+              type={showPasswords ? 'text' : 'password'}
+              value={currentPassword}
+              onChange={(e) => { setCurrentPassword(e.target.value); setPasswordError(null); }}
+              className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 pr-10 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
+              placeholder="Current password"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPasswords(!showPasswords)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-vox-text-muted hover:text-vox-text-secondary"
+            >
+              {showPasswords ? <EyeOff size={14} /> : <Eye size={14} />}
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
+            New Password
+          </label>
+          <input
+            type={showPasswords ? 'text' : 'password'}
+            value={newPassword}
+            onChange={(e) => { setNewPassword(e.target.value); setPasswordError(null); }}
+            className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
+            placeholder="New password"
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
+            Confirm New Password
+          </label>
+          <input
+            type={showPasswords ? 'text' : 'password'}
+            value={confirmNewPassword}
+            onChange={(e) => { setConfirmNewPassword(e.target.value); setPasswordError(null); }}
+            className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
+            placeholder="Confirm new password"
+          />
+        </div>
+
+        <button
+          onClick={handleChangePassword}
+          disabled={changingPassword || !currentPassword || !newPassword || !confirmNewPassword}
+          className="btn-primary w-full disabled:opacity-50"
+        >
+          {changingPassword ? 'Changing...' : 'Change Password'}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -204,6 +316,8 @@ function ProfileTab() {
       >
         {saving ? 'Saving...' : 'Save Changes'}
       </button>
+
+      <ChangePasswordForm />
     </div>
   );
 }

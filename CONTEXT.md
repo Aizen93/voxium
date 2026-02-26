@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.3.3 (Real-Time Avatar & Profile Sync)
+**Version:** 0.4.0 (Password Reset & Change + Unread Badge)
 **Date:** 2026-02-26
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators, toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges, toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation
 
 ## What Has Been Done
 
@@ -50,6 +50,9 @@ A full Node.js + TypeScript backend has been implemented with:
   - `POST /api/v1/auth/login` — User login
   - `POST /api/v1/auth/refresh` — Token refresh
   - `GET /api/v1/auth/me` — Current user profile
+  - `POST /api/v1/auth/forgot-password` — Request password reset email (silent on unknown emails to prevent enumeration)
+  - `POST /api/v1/auth/reset-password` — Reset password via token from email link
+  - `POST /api/v1/auth/change-password` — Change password for authenticated user (requires current password)
   - `GET /api/v1/servers` — List user's servers
   - `POST /api/v1/servers` — Create server (auto-creates #general text + General voice channels)
   - `GET /api/v1/servers/:id` — Server details with channels
@@ -379,8 +382,8 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 - Active channel never shows a badge
 
 **ServerSidebar (`components/server/ServerSidebar.tsx`):**
-- Server icons with unreads show a small white dot indicator on the left (`h-2 w-1` rounded pill), smaller than the hover indicator (`h-5`) and active indicator (`h-10`)
-- Hidden when the server is active or hovered
+- Server icons with unreads show an **orange left border** (`border-l-[3px] border-orange-500`) and a **red/orange count badge** on the bottom-right corner (`bg-orange-500`, rounded-full, `ring-2 ring-vox-sidebar`). Count displays as number up to 99, then `99+`.
+- Badge and border hidden when the server is active
 
 ### Channel Room Subscription Fix (v0.2.8)
 
@@ -622,6 +625,77 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 - `apps/desktop/src/components/settings/SettingsModal.tsx` — Tab restructure with Profile tab
 - `apps/desktop/src/components/layout/MainLayout.tsx` — `userUpdated` handler
 
+### 15. Password Reset & Change (v0.4.0)
+
+Full "forgot password" flow and authenticated password change:
+
+**Backend:**
+- Prisma schema: `resetToken` (unique, SHA-256 hashed) and `resetTokenExpiresAt` fields on User model, with migration
+- `utils/email.ts`: Nodemailer transporter with configurable SMTP (defaults to local Mailhog on port 1025)
+- `services/authService.ts`: `requestPasswordReset()` (generates 32-byte token, hashes with SHA-256 before storing, emails raw token to user; silent return on unknown email to prevent enumeration), `resetPassword()` (validates token, checks expiry, clears expired tokens, hashes new password), `changePassword()` (verifies current password, validates new password via shared validator)
+- `routes/auth.ts`: Three new endpoints with input type guards (`/forgot-password`, `/reset-password`, `/change-password`)
+- New env vars: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `CLIENT_URL`
+- New dependency: `nodemailer` + `@types/nodemailer`
+
+**Frontend:**
+- `pages/ForgotPasswordPage.tsx`: Email submission form with success/error states
+- `pages/ResetPasswordPage.tsx`: New password form with confirmation, password visibility toggle, shared `LIMITS.PASSWORD_MIN` validation
+- `App.tsx`: Routes for `/forgot-password` and `/reset-password/:token` (redirects to main if authenticated)
+- `pages/LoginPage.tsx`: "Forgot password?" link
+- `components/settings/SettingsModal.tsx`: Password change section in ProfileTab with current/new/confirm fields
+- `stores/authStore.ts`: `forgotPassword()`, `resetPassword()`, `changePassword()` methods
+
+**Files changed:**
+- `apps/server/prisma/schema.prisma` — `resetToken` (unique) and `resetTokenExpiresAt` fields
+- `apps/server/prisma/migrations/20260226154713_add_password_reset_fields/migration.sql`
+- `apps/server/src/utils/email.ts` (new)
+- `apps/server/src/services/authService.ts` — three new exported functions
+- `apps/server/src/routes/auth.ts` — three new route handlers
+- `apps/server/.env.example` — SMTP and CLIENT_URL vars
+- `apps/desktop/src/stores/authStore.ts` — three new store methods
+- `apps/desktop/src/pages/ForgotPasswordPage.tsx` (new)
+- `apps/desktop/src/pages/ResetPasswordPage.tsx` (new)
+- `apps/desktop/src/App.tsx` — two new routes
+- `apps/desktop/src/pages/LoginPage.tsx` — forgot password link
+- `apps/desktop/src/components/settings/SettingsModal.tsx` — password change section
+
+### 15a. Token Version & Security Hardening (v0.4.0 follow-up)
+
+Security hardening for the password reset/change feature:
+
+**Token version-based refresh token invalidation:**
+- Prisma schema: `tokenVersion Int @default(0)` on User model, with migration
+- `generateTokens()` now embeds `tokenVersion` in both access and refresh JWTs
+- `refreshTokens()` checks `tokenVersion` in JWT matches DB value; rejects mismatches with "Token has been revoked". Pre-migration tokens (missing `tokenVersion`) are treated as version 0 for backward compatibility.
+- `resetPassword()` and `changePassword()` both increment `tokenVersion`, invalidating all existing refresh tokens across all devices/sessions
+- `changePassword()` returns fresh tokens so the current session survives the version bump; frontend stores them in localStorage
+
+**Other fixes:**
+- `requestPasswordReset()` wraps `sendPasswordResetEmail` in try/catch to prevent SMTP failures from revealing email existence via 500 errors
+- `resetPassword()` uses `findUnique` instead of `findFirst` on the `@unique` `resetToken` field
+- `ChangePasswordForm` extracted as standalone component from `ProfileTab`
+- `AuthPayload` interface includes `tokenVersion: number`
+- `refreshTokens()` error handling re-throws `UnauthorizedError` instances (revoked tokens, user not found) while wrapping unexpected errors (DB failures) generically
+
+**Files changed:**
+- `apps/server/prisma/schema.prisma` — `tokenVersion` field
+- `apps/server/src/middleware/auth.ts` — `tokenVersion` in `AuthPayload`
+- `apps/server/src/services/authService.ts` — tokenVersion threading in all auth functions
+- `apps/server/src/routes/auth.ts` — `change-password` route returns tokens
+- `apps/desktop/src/stores/authStore.ts` — `changePassword` stores fresh tokens
+- `apps/desktop/src/components/settings/SettingsModal.tsx` — `ChangePasswordForm` extraction
+
+### 16. Server Sidebar Unread Badge (v0.4.0)
+
+Enhanced unread indicators on the server sidebar:
+
+- **Orange left border:** Servers with unread messages show `border-orange-500` instead of the previous barely-visible `border-white/30`
+- **Count badge:** A rounded orange badge (`bg-orange-500`) appears at the bottom-right of the server icon displaying the unread message count. Capped at `99+` for overflow. Uses `ring-2 ring-vox-sidebar` for clean separation from the icon.
+- Badge is hidden when the server is the active server
+
+**Files changed:**
+- `apps/desktop/src/components/server/ServerSidebar.tsx` — unread border color + count badge
+
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.
 - The `member:joined` event sends `email: ''` to satisfy the `User` type in `ServerToClientEvents`. Consider a `PublicUser` type that omits `email`.
@@ -637,3 +711,5 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 - The `multer` file filter checks both MIME type and file extension, but MIME types from `Content-Type` headers are client-controlled and can be spoofed. The sharp processing pipeline implicitly validates the actual image data (it will throw on non-image input), which provides defense in depth.
 - The `PATCH /users/me/profile` route still accepts `avatarUrl` in the body, which could be used to set an arbitrary S3 key (same concern removed from server PATCH). Consider restricting profile avatar changes to the upload endpoint only.
 - `ServerSettingsModal` and `CreateServerModal` duplicate the icon selection/preview/cleanup logic. Consider extracting a shared `ImageUploadButton` component.
+- The `/forgot-password` endpoint has no rate limiting. An attacker could trigger mass emails to a valid address. Consider adding per-IP or per-email rate limiting when rate limiter infrastructure is implemented.
+- Socket.IO authentication middleware validates the JWT signature at handshake time but does not check `tokenVersion` against the database. After a password change or reset, a revoked access token can maintain an existing WebSocket connection for its remaining lifetime. This is the standard JWT trade-off -- access tokens are stateless and short-lived (15 min). Periodic re-authentication on the socket would require architectural changes (middleware on every socket event or periodic disconnect/reconnect).

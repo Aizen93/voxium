@@ -46,7 +46,7 @@ export function ServerSidebar() {
                     : hoveredId === server.id
                       ? 'bg-vox-bg-secondary text-vox-text-secondary hover:rounded-xl hover:bg-vox-accent-primary hover:text-white border-l-[3px] border-white/50'
                       : (serverUnreadCounts[server.id] || 0) > 0
-                        ? 'bg-vox-bg-secondary text-vox-text-secondary hover:rounded-xl hover:bg-vox-accent-primary hover:text-white border-l-[3px] border-white/30'
+                        ? 'bg-vox-bg-secondary text-vox-text-secondary hover:rounded-xl hover:bg-vox-accent-primary hover:text-white border-l-[3px] border-orange-500'
                         : 'bg-vox-bg-secondary text-vox-text-secondary hover:rounded-xl hover:bg-vox-accent-primary hover:text-white border-l-[3px] border-transparent'
                 )}
                 onClick={() => setActiveServer(server.id)}
@@ -69,6 +69,11 @@ export function ServerSidebar() {
                   </span>
                 )}
               </button>
+              {activeServerId !== server.id && (serverUnreadCounts[server.id] || 0) > 0 && (
+                <span className="absolute -bottom-1 -right-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-orange-500 px-1 text-[10px] font-bold text-white ring-2 ring-vox-sidebar">
+                  {serverUnreadCounts[server.id] > 99 ? '99+' : serverUnreadCounts[server.id]}
+                </span>
+              )}
             </div>
           ))}
 

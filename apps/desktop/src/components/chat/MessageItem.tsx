@@ -5,6 +5,7 @@ import { DeleteConfirmModal } from './DeleteConfirmModal';
 import { ReactionDisplay } from './ReactionDisplay';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { Avatar } from '../common/Avatar';
+import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Pencil, Trash2, SmilePlus } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import { clsx } from 'clsx';
@@ -169,19 +170,21 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
         {showHeader ? (
           <>
             <div className="flex items-start gap-3">
-              {/* Avatar */}
-              <div className="mt-0.5 shrink-0">
+              {/* Avatar + Name hover target */}
+              <UserHoverTarget userId={message.author.id} className="mt-0.5 shrink-0 cursor-pointer">
                 <Avatar avatarUrl={message.author.avatarUrl} displayName={message.author.displayName} size="md" />
-              </div>
+              </UserHoverTarget>
 
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
-                  <span className={clsx(
-                    'text-sm font-semibold',
-                    isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary'
-                  )}>
-                    {message.author.displayName}
-                  </span>
+                  <UserHoverTarget userId={message.author.id} className="inline">
+                    <span className={clsx(
+                      'text-sm font-semibold cursor-pointer hover:underline',
+                      isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary'
+                    )}>
+                      {message.author.displayName}
+                    </span>
+                  </UserHoverTarget>
                   <span className="text-xs text-vox-text-muted">
                     {formatMessageTime(message.createdAt)}
                   </span>

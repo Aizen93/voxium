@@ -100,6 +100,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 | File Storage | S3-compatible (OVH) | — |
 | Image Processing | sharp | — |
 | File Upload | multer | — |
+| Email | Nodemailer | 8.x |
 
 ### Frontend
 | Layer | Technology | Version |
@@ -139,7 +140,7 @@ apps/server/
 │   ├── index.ts            # Entry point, server bootstrap
 │   ├── app.ts              # Express app configuration, middleware, routes
 │   ├── routes/
-│   │   ├── auth.ts         # Register, login, refresh, me
+│   │   ├── auth.ts         # Register, login, refresh, me, forgot/reset/change password
 │   │   ├── servers.ts      # CRUD servers, join/leave, members, settings
 │   │   ├── channels.ts     # CRUD channels
 │   │   ├── messages.ts     # CRUD messages with pagination, reactions
@@ -159,6 +160,7 @@ apps/server/
 │       ├── redis.ts             # Redis client + presence helpers
 │       ├── errors.ts            # Custom error classes
 │       ├── s3.ts                # S3 client + upload/stream/delete helpers
+│       ├── email.ts              # Nodemailer transporter + password reset email
 │       └── memberBroadcast.ts   # Server room join + member event broadcast
 ```
 
@@ -213,9 +215,11 @@ apps/desktop/
 │   ├── main.tsx              # React entry point
 │   ├── App.tsx               # Root component with routing
 │   ├── pages/
-│   │   ├── LoginPage.tsx     # Login form
-│   │   ├── RegisterPage.tsx  # Registration form
-│   │   └── InvitePage.tsx    # Invite preview + join
+│   │   ├── LoginPage.tsx          # Login form + forgot password link
+│   │   ├── RegisterPage.tsx       # Registration form
+│   │   ├── ForgotPasswordPage.tsx # Email input → sends reset link
+│   │   ├── ResetPasswordPage.tsx  # Token-based new password form
+│   │   └── InvitePage.tsx         # Invite preview + join
 │   ├── components/
 │   │   ├── layout/
 │   │   │   ├── MainLayout.tsx    # 3-panel Discord-like layout
@@ -285,7 +289,7 @@ Four independent stores, each managing a domain:
 
 | Store | Responsibilities |
 |-------|-----------------|
-| `authStore` | User session, login/register/logout, token management, avatar upload, profile editing |
+| `authStore` | User session, login/register/logout, token management, avatar upload, profile editing, forgot/reset/change password |
 | `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync |
 | `chatStore` | Messages for active channel, typing indicators, pagination, author profile sync |
 | `voiceStore` | Voice channel connection, mute/deaf state, connected users |
@@ -319,6 +323,8 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 │ avatarUrl│                               │
 │ bio      │    ┌────────────────┐         │
 │ status   │    │    Channel     │─────────┘
+│ tokenVer │
+│ resetTkn │
 └────┬─────┘    │                │
      │          │ id             │
      │          │ name           │
@@ -369,6 +375,7 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 - `message_reactions(messageId, userId, emoji)` UNIQUE — One reaction per user per emoji
 - `users(username)` UNIQUE — Username lookup
 - `users(email)` UNIQUE — Email lookup
+- `users(reset_token)` UNIQUE — Password reset token lookup
 - `server_members(userId, serverId)` COMPOSITE PK — Membership checks
 - `invites(code)` PK — Invite lookup
 
@@ -516,7 +523,7 @@ Register/Login
 Server generates:
 ├── Access Token  (15min expiry, signed with JWT_SECRET)
 └── Refresh Token (7 day expiry, signed with JWT_REFRESH_SECRET)
-    │
+    │                Both embed tokenVersion from User model
     ▼
 Client stores in localStorage
     │
@@ -526,8 +533,31 @@ Every API request:
 │
 ├── If 401 → Try refresh:
 │   POST /auth/refresh { refreshToken }
+│   ├── Check tokenVersion matches DB → reject if mismatched (revoked)
 │   ├── Success → New tokens, retry request
 │   └── Failure → Redirect to login
+```
+
+### Password Reset Flow
+
+```
+Forgot Password (unauthenticated):
+  POST /auth/forgot-password { email }
+    → Find user (silent return if not found — prevents enumeration)
+    → Generate crypto.randomBytes(32), store SHA-256 hash + 1hr expiry in DB
+    → Send raw token via email (Nodemailer → MailHog locally / OVH SMTP in prod)
+    → Always returns same success message
+
+  POST /auth/reset-password { token, password }
+    → SHA-256 hash incoming token → findUnique by resetToken (@@unique)
+    → Check expiry, clear expired tokens
+    → Hash new password, clear reset fields, increment tokenVersion
+
+Change Password (authenticated):
+  POST /auth/change-password { currentPassword, newPassword }
+    → Verify current password via bcrypt
+    → Hash new password, increment tokenVersion
+    → Return fresh tokens (current session survives)
 ```
 
 ### Security Measures
@@ -536,8 +566,9 @@ Every API request:
 |-------|-----------|
 | Transport | HTTPS in production |
 | Headers | Helmet.js (CSP, HSTS, X-Frame, etc.) |
-| Auth | JWT with short expiry + refresh rotation |
+| Auth | JWT with short expiry + refresh rotation + tokenVersion invalidation |
 | Passwords | bcrypt with 12 salt rounds |
+| Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
 | CORS | Explicit origin whitelist |
 | Input | Server-side validation on all endpoints |
 | SQL Injection | Prisma parameterized queries |
@@ -683,6 +714,7 @@ mediasoup Deployment (autoscaling)
 | **Screen sharing** | mediasoup producer for screen capture |
 | **Direct Messages** | New DM channel type, conversation model |
 | **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2)** — server-proxied S3 uploads for avatars/icons via sharp + multer |
+| **~~Password reset~~** | ~~Email-based reset flow~~ **Implemented (v0.4.0)** — Nodemailer + SHA-256 hashed tokens + tokenVersion-based session invalidation |
 | **Push notifications** | FCM/APNs integration service |
 | **Message search** | Elasticsearch / PostgreSQL full-text search |
 | **Mobile app** | React Native sharing stores/services with web |
