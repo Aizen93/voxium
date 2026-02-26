@@ -5,6 +5,8 @@ import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
 import { Hash, Volume2, Plus, ChevronDown, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2 } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
+import { ServerSettingsModal } from '../server/ServerSettingsModal';
+import { Avatar } from '../common/Avatar';
 import { toast } from '../../stores/toastStore';
 import { clsx } from 'clsx';
 
@@ -14,6 +16,7 @@ export function ChannelSidebar() {
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const [showServerSettings, setShowServerSettings] = useState(false);
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [newChannelName, setNewChannelName] = useState('');
   const [newChannelType, setNewChannelType] = useState<'text' | 'voice'>('text');
@@ -71,9 +74,15 @@ export function ChannelSidebar() {
           >
             <UserPlus size={16} />
           </button>
-          <button className="text-vox-text-muted hover:text-vox-text-primary transition-colors">
-            <ChevronDown size={16} />
-          </button>
+          {isAdmin && (
+            <button
+              onClick={() => setShowServerSettings(true)}
+              className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
+              title="Server Settings"
+            >
+              <ChevronDown size={16} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -187,12 +196,12 @@ export function ChannelSidebar() {
                   <div className="ml-4 mt-0.5 space-y-0.5">
                     {usersInChannel.map((vu) => (
                       <div key={vu.id} className="flex items-center gap-1.5 rounded px-2 py-1">
-                        <div className={clsx(
-                          'h-5 w-5 rounded-full flex items-center justify-center text-[9px] font-semibold text-white',
-                          vu.speaking ? 'ring-2 ring-vox-voice-speaking bg-vox-voice-speaking' : 'bg-vox-accent-primary'
-                        )}>
-                          {vu.displayName?.[0]?.toUpperCase() || '?'}
-                        </div>
+                        <Avatar
+                          avatarUrl={vu.avatarUrl}
+                          displayName={vu.displayName}
+                          size="xs"
+                          speaking={vu.speaking}
+                        />
                         <span className={clsx(
                           'text-xs truncate',
                           vu.id === user?.id ? 'text-vox-text-primary font-medium' : 'text-vox-text-secondary'
@@ -236,9 +245,7 @@ export function ChannelSidebar() {
 
       {/* User area at bottom */}
       <div className="flex items-center gap-2 border-t border-vox-border bg-vox-sidebar px-2 py-2">
-        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-vox-accent-primary text-xs font-bold text-white">
-          {user?.displayName?.[0]?.toUpperCase() || 'V'}
-        </div>
+        <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="sm" />
         <div className="min-w-0 flex-1">
           <p className="truncate text-xs font-medium text-vox-text-primary">{user?.displayName || 'User'}</p>
           <p className="truncate text-[10px] text-vox-text-muted">Online</p>
@@ -271,6 +278,9 @@ export function ChannelSidebar() {
 
       {showInviteModal && activeServerId && (
         <InviteModal serverId={activeServerId} onClose={() => setShowInviteModal(false)} />
+      )}
+      {showServerSettings && activeServerId && (
+        <ServerSettingsModal serverId={activeServerId} onClose={() => setShowServerSettings(false)} />
       )}
     </div>
   );

@@ -126,6 +126,13 @@ export function MainLayout() {
       channelDeleted: ({ channelId, serverId }: any) => {
         useServerStore.getState().removeChannel(channelId, serverId);
       },
+      serverUpdated: (server: any) => {
+        useServerStore.getState().updateServerData(server);
+      },
+      userUpdated: ({ userId, displayName, avatarUrl }: any) => {
+        useServerStore.getState().updateMemberProfile(userId, { displayName, avatarUrl });
+        useChatStore.getState().updateAuthorProfile(userId, { displayName, avatarUrl });
+      },
       messageReactionUpdate: ({ messageId, channelId, reactions }: any) => {
         if (channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().updateMessageReactions(messageId, reactions);
@@ -150,6 +157,8 @@ export function MainLayout() {
       ['member:left', handlers.memberLeft],
       ['channel:created', handlers.channelCreated],
       ['channel:deleted', handlers.channelDeleted],
+      ['server:updated', handlers.serverUpdated],
+      ['user:updated', handlers.userUpdated],
       ['message:reaction_update', handlers.messageReactionUpdate],
     ];
 

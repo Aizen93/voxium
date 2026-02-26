@@ -1,19 +1,39 @@
-import { useState, type FormEvent } from 'react';
+import { useState, useRef, useEffect, type FormEvent } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
-import { X } from 'lucide-react';
+import { X, Camera } from 'lucide-react';
 
 interface Props {
   onClose: () => void;
 }
 
 export function CreateServerModal({ onClose }: Props) {
-  const { createServer, setActiveServer, joinServer } = useServerStore();
+  const { createServer, setActiveServer, joinServer, uploadServerIcon } = useServerStore();
   const [mode, setMode] = useState<'create' | 'join'>('create');
   const [name, setName] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [iconFile, setIconFile] = useState<File | null>(null);
+  const [iconPreview, setIconPreview] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Cleanup object URL on unmount
+  useEffect(() => {
+    return () => {
+      if (iconPreview) URL.revokeObjectURL(iconPreview);
+    };
+  }, [iconPreview]);
+
+  const handleIconSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+
+    if (iconPreview) URL.revokeObjectURL(iconPreview);
+    setIconFile(file);
+    setIconPreview(URL.createObjectURL(file));
+  };
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
@@ -21,6 +41,14 @@ export function CreateServerModal({ onClose }: Props) {
     setError('');
     try {
       const server = await createServer(name);
+      if (iconFile) {
+        try {
+          await uploadServerIcon(server.id, iconFile);
+        } catch {
+          // Server was created but icon upload failed — not critical
+          toast.warning('Server created but icon upload failed');
+        }
+      }
       await setActiveServer(server.id);
       toast.success('Server created!');
       onClose();
@@ -96,6 +124,31 @@ export function CreateServerModal({ onClose }: Props) {
 
         {mode === 'create' ? (
           <form onSubmit={handleCreate} className="space-y-4">
+            {/* Icon Picker */}
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="group relative flex h-20 w-20 items-center justify-center rounded-full border-2 border-dashed border-vox-border hover:border-vox-accent-primary transition-colors overflow-hidden"
+              >
+                {iconPreview ? (
+                  <img src={iconPreview} alt="Preview" className="h-full w-full object-cover" />
+                ) : (
+                  <div className="flex flex-col items-center gap-1 text-vox-text-muted group-hover:text-vox-accent-primary transition-colors">
+                    <Camera size={24} />
+                    <span className="text-[10px]">Icon</span>
+                  </div>
+                )}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/gif"
+                onChange={handleIconSelect}
+                className="hidden"
+              />
+            </div>
+
             <div>
               <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
                 Server Name

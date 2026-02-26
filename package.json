@@ -17,6 +17,16 @@
     "db:seed": "pnpm --filter @voxium/server db:seed",
     "db:studio": "pnpm --filter @voxium/server db:studio"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "esbuild",
+      "mediasoup",
+      "prisma",
+      "sharp"
+    ]
+  },
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=9.0.0"

@@ -28,6 +28,8 @@ interface ChatState {
   clearMessages: () => void;
   setTypingUser: (userId: string, username: string) => void;
   removeTypingUser: (userId: string) => void;
+  updateAuthorAvatar: (userId: string, avatarUrl: string | null) => void;
+  updateAuthorProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -199,5 +201,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       newMap.delete(userId);
       return { typingUsers: newMap };
     });
+  },
+
+  updateAuthorAvatar: (userId: string, avatarUrl: string | null) => {
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.author.id === userId ? { ...m, author: { ...m.author, avatarUrl } } : m
+      ),
+    }));
+  },
+
+  updateAuthorProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => {
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.author.id === userId ? { ...m, author: { ...m.author, ...fields } } : m
+      ),
+    }));
   },
 }));

@@ -1,5 +1,5 @@
 export const APP_NAME = 'Voxium';
-export const APP_VERSION = '0.2.8';
+export const APP_VERSION = '0.3.3';
 
 export const API_VERSION = 'v1';
 
@@ -49,4 +49,6 @@ export const WS_EVENTS = {
   VOICE_MUTE: 'voice:mute',
   VOICE_DEAF: 'voice:deaf',
   MESSAGE_REACTION_UPDATE: 'message:reaction_update',
+  SERVER_UPDATED: 'server:updated',
+  USER_UPDATED: 'user:updated',
 } as const;

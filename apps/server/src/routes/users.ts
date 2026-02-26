@@ -2,6 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { NotFoundError } from '../utils/errors';
+import { getIO } from '../websocket/socketServer';
+import { WS_EVENTS } from '@voxium/shared';
 
 export const userRouter = Router();
 
@@ -56,6 +58,19 @@ userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFu
         createdAt: true,
       },
     });
+
+    // Broadcast profile change to all servers the user is in
+    if (displayName !== undefined || avatarUrl !== undefined) {
+      const memberships = await prisma.serverMember.findMany({
+        where: { userId: req.user!.userId },
+        select: { serverId: true },
+      });
+      const io = getIO();
+      const payload = { userId: updated.id, displayName: updated.displayName, avatarUrl: updated.avatarUrl };
+      for (const { serverId } of memberships) {
+        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED as any, payload);
+      }
+    }
 
     res.json({ success: true, data: updated });
   } catch (err) {

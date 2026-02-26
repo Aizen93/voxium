@@ -9,16 +9,30 @@ import { channelRouter } from './routes/channels';
 import { messageRouter } from './routes/messages';
 import { userRouter } from './routes/users';
 import { inviteRouter } from './routes/invites';
+import { uploadRouter } from './routes/uploads';
 import { errorHandler } from './middleware/errorHandler';
 
 export const app = express();
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
-app.use(helmet());
 const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:8080')
   .split(',')
   .map((o) => o.trim());
+
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:', ...allowedOrigins],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", 'https:', "'unsafe-inline'"],
+      fontSrc: ["'self'", 'https:', 'data:'],
+      connectSrc: ["'self'", ...allowedOrigins],
+    },
+  },
+}));
 
 app.use(cors({
   origin: allowedOrigins,
@@ -43,6 +57,7 @@ api.use('/servers', serverRouter);
 api.use('/servers/:serverId/channels', channelRouter);
 api.use('/channels/:channelId/messages', messageRouter);
 api.use('/invites', inviteRouter);
+api.use('/uploads', uploadRouter);
 
 app.use('/api/v1', api);
 

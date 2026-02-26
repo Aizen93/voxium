@@ -39,6 +39,7 @@ export async function registerUser(username: string, email: string, password: st
       displayName: true,
       email: true,
       avatarUrl: true,
+      bio: true,
       status: true,
       createdAt: true,
     },

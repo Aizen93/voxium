@@ -4,6 +4,7 @@ import { toast } from '../../stores/toastStore';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
 import { ReactionDisplay } from './ReactionDisplay';
 import { EmojiPicker } from '../common/EmojiPicker';
+import { Avatar } from '../common/Avatar';
 import { Pencil, Trash2, SmilePlus } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import { clsx } from 'clsx';
@@ -169,8 +170,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
           <>
             <div className="flex items-start gap-3">
               {/* Avatar */}
-              <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-vox-accent-primary text-sm font-semibold text-white">
-                {message.author.displayName?.[0]?.toUpperCase() || '?'}
+              <div className="mt-0.5 shrink-0">
+                <Avatar avatarUrl={message.author.avatarUrl} displayName={message.author.displayName} size="md" />
               </div>
 
               <div className="min-w-0 flex-1">

@@ -97,6 +97,9 @@ Voxium is a real-time communication platform enabling users to create communitie
 | Auth | JWT (jsonwebtoken) | 9.x |
 | Validation | Zod + custom validators | — |
 | Password Hashing | bcryptjs | — |
+| File Storage | S3-compatible (OVH) | — |
+| Image Processing | sharp | — |
+| File Upload | multer | — |
 
 ### Frontend
 | Layer | Technology | Version |
@@ -137,16 +140,17 @@ apps/server/
 │   ├── app.ts              # Express app configuration, middleware, routes
 │   ├── routes/
 │   │   ├── auth.ts         # Register, login, refresh, me
-│   │   ├── servers.ts      # CRUD servers, join/leave, members
+│   │   ├── servers.ts      # CRUD servers, join/leave, members, settings
 │   │   ├── channels.ts     # CRUD channels
-│   │   ├── messages.ts     # CRUD messages with pagination
-│   │   ├── users.ts        # User profiles
-│   │   └── invites.ts      # Create/use/preview invites
+│   │   ├── messages.ts     # CRUD messages with pagination, reactions
+│   │   ├── users.ts        # User profiles, profile update with real-time broadcast
+│   │   ├── invites.ts      # Create/use/preview invites
+│   │   └── uploads.ts      # Avatar/server icon upload (S3) + file serving proxy
 │   ├── services/
 │   │   └── authService.ts  # Auth business logic
 │   ├── middleware/
 │   │   ├── auth.ts         # JWT authentication middleware
-│   │   └── errorHandler.ts # Global error handler
+│   │   └── errorHandler.ts # Global error handler (incl. multer errors)
 │   ├── websocket/
 │   │   ├── socketServer.ts # Socket.IO setup, connection handler
 │   │   └── voiceHandler.ts # Voice channel state management
@@ -154,6 +158,7 @@ apps/server/
 │       ├── prisma.ts            # Prisma client singleton
 │       ├── redis.ts             # Redis client + presence helpers
 │       ├── errors.ts            # Custom error classes
+│       ├── s3.ts                # S3 client + upload/stream/delete helpers
 │       └── memberBroadcast.ts   # Server room join + member event broadcast
 ```
 
@@ -216,12 +221,14 @@ apps/desktop/
 │   │   │   ├── MainLayout.tsx    # 3-panel Discord-like layout
 │   │   │   └── ToastContainer.tsx # Fixed-position toast notification overlay
 │   │   ├── server/
-│   │   │   ├── ServerSidebar.tsx  # Server icon strip (far left)
-│   │   │   ├── CreateServerModal.tsx
-│   │   │   └── MemberSidebar.tsx  # Member list (far right)
+│   │   │   ├── ServerSidebar.tsx      # Server icon strip (far left)
+│   │   │   ├── CreateServerModal.tsx  # Create/join server with icon upload
+│   │   │   ├── ServerSettingsModal.tsx # Edit server name/icon (owner only)
+│   │   │   └── MemberSidebar.tsx      # Member list (far right)
 │   │   ├── channel/
 │   │   │   └── ChannelSidebar.tsx # Channel list (left panel)
 │   │   ├── common/
+│   │   │   ├── Avatar.tsx         # Shared avatar with img/initials fallback
 │   │   │   └── EmojiPicker.tsx    # Portal-based emoji picker (shared)
 │   │   ├── chat/
 │   │   │   ├── ChatArea.tsx       # Chat container
@@ -278,10 +285,11 @@ Four independent stores, each managing a domain:
 
 | Store | Responsibilities |
 |-------|-----------------|
-| `authStore` | User session, login/register/logout, token management |
-| `serverStore` | Server list, active server, channels, members |
-| `chatStore` | Messages for active channel, typing indicators, pagination |
+| `authStore` | User session, login/register/logout, token management, avatar upload, profile editing |
+| `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync |
+| `chatStore` | Messages for active channel, typing indicators, pagination, author profile sync |
 | `voiceStore` | Voice channel connection, mute/deaf state, connected users |
+| `settingsStore` | Audio devices, noise gate, notification prefs, PTT key (persisted to localStorage) |
 | `toastStore` | Toast notification queue, auto-dismiss timers, convenience helpers |
 
 ### Data Flow
@@ -425,6 +433,8 @@ Client                          Server
 - `voice:user_joined` / `voice:user_left` / `voice:state_update` / `voice:speaking`
 - `voice:signal` (WebRTC signaling relay)
 - `typing:start` / `typing:stop`
+- `server:updated` (server name/icon changed)
+- `user:updated` (user displayName/avatar changed)
 
 **Client → Server:**
 - `channel:join` (for newly created channels only; `channel:leave` is NOT used — auto-subscription persists)
@@ -672,7 +682,7 @@ mediasoup Deployment (autoscaling)
 | **Video calls** | mediasoup SFU with video codecs (VP8/VP9/H264) |
 | **Screen sharing** | mediasoup producer for screen capture |
 | **Direct Messages** | New DM channel type, conversation model |
-| **File uploads** | S3-compatible object storage, presigned URLs |
+| **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2)** — server-proxied S3 uploads for avatars/icons via sharp + multer |
 | **Push notifications** | FCM/APNs integration service |
 | **Message search** | Elasticsearch / PostgreSQL full-text search |
 | **Mobile app** | React Native sharing stores/services with web |

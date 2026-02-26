@@ -29,6 +29,11 @@ interface ServerState {
   fetchMembers: (serverId: string) => Promise<void>;
   incrementUnread: (channelId: string, serverId: string) => void;
   clearUnread: (channelId: string) => void;
+  uploadServerIcon: (serverId: string, file: File) => Promise<void>;
+  updateServer: (serverId: string, fields: { name?: string }) => Promise<void>;
+  updateServerData: (server: Server) => void;
+  updateMemberAvatar: (userId: string, avatarUrl: string | null) => void;
+  updateMemberProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => void;
 }
 
 export const useServerStore = create<ServerState>((set, get) => ({
@@ -134,6 +139,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
           displayName: user.displayName,
           email: user.email,
           avatarUrl: user.avatarUrl,
+          bio: user.bio ?? null,
           status: user.status || 'online',
           createdAt: user.createdAt,
         },
@@ -202,5 +208,39 @@ export const useServerStore = create<ServerState>((set, get) => ({
       }
       return { unreadCounts: restUnread, serverUnreadCounts: newServerUnread };
     });
+  },
+
+  uploadServerIcon: async (serverId: string, file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    await api.post(`/uploads/server-icon/${serverId}`, formData);
+    // Local state updated via server:updated socket event
+  },
+
+  updateServer: async (serverId: string, fields) => {
+    await api.patch(`/servers/${serverId}`, fields);
+    // Local state updated via server:updated socket event
+  },
+
+  updateServerData: (server: Server) => {
+    set((state) => ({
+      servers: state.servers.map((s) => (s.id === server.id ? server : s)),
+    }));
+  },
+
+  updateMemberAvatar: (userId: string, avatarUrl: string | null) => {
+    set((state) => ({
+      members: state.members.map((m) =>
+        m.userId === userId ? { ...m, user: { ...m.user, avatarUrl } } : m
+      ),
+    }));
+  },
+
+  updateMemberProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => {
+    set((state) => ({
+      members: state.members.map((m) =>
+        m.userId === userId ? { ...m, user: { ...m.user, ...fields } } : m
+      ),
+    }));
   },
 }));

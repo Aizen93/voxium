@@ -6,6 +6,7 @@ export interface User {
   displayName: string;
   email: string;
   avatarUrl: string | null;
+  bio: string | null;
   status: UserStatus;
   createdAt: string;
 }
@@ -156,6 +157,8 @@ export interface ServerToClientEvents {
     action: 'add' | 'remove';
     reactions: ReactionGroup[];
   }) => void;
+  'server:updated': (server: Server) => void;
+  'user:updated': (data: { userId: string; displayName: string; avatarUrl: string | null }) => void;
 }
 
 export interface ClientToServerEvents {

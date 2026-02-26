@@ -7,6 +7,8 @@
   - [x] When a user (Alice) creates a new server, and joins a channel, she can't see her name in the channel list (Though she can speak and hear just fine)
   - [x] When creating a new voice channel or a new text channel, the other users does not see it in real time and require a page refresh
   - [] Tauri client does not receive windows notifications, how do we activate them by default, or prompt the user to activate notifications. Our apps Settings has notifications enabled.
+  - [] Security : Throtling, xss, sql injections, and rate limiting, captcha.
+  - [] Password forgot + profile password change
 
 ## Core chat features (medium effort):
   - [] File & image uploads — drag-and-drop or paste images into chat, preview inline. Needs a storage backend (S3/local) and a new message type

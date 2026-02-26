@@ -1,4 +1,5 @@
 import { useServerStore } from '../../stores/serverStore';
+import { Avatar } from '../common/Avatar';
 import { clsx } from 'clsx';
 
 export function MemberSidebar() {
@@ -38,9 +39,7 @@ function MemberGroup({ title, members }: { title: string; members: any[] }) {
         >
           {/* Avatar */}
           <div className="relative">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-vox-accent-primary text-xs font-semibold text-white">
-              {member.user.displayName?.[0]?.toUpperCase() || '?'}
-            </div>
+            <Avatar avatarUrl={member.user.avatarUrl} displayName={member.user.displayName} size="sm" />
             <div
               className={clsx(
                 'absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-vox-bg-secondary',

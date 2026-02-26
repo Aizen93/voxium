@@ -2,8 +2,9 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateServerName, LIMITS } from '@voxium/shared';
+import { validateServerName, LIMITS, WS_EVENTS } from '@voxium/shared';
 import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
+import { getIO } from '../websocket/socketServer';
 
 export const serverRouter = Router();
 
@@ -193,6 +194,42 @@ serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>,
     await broadcastMemberLeft(req.user!.userId, serverId);
 
     res.json({ success: true, message: 'Left server' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Update server settings (owner only)
+serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+
+    const server = await prisma.server.findUnique({ where: { id: serverId } });
+    if (!server) throw new NotFoundError('Server');
+    if (server.ownerId !== req.user!.userId) throw new ForbiddenError('Only the server owner can update settings');
+
+    const { name } = req.body;
+    const updateData: Record<string, unknown> = {};
+
+    if (name !== undefined) {
+      const nameErr = validateServerName(name);
+      if (nameErr) throw new BadRequestError(nameErr);
+      updateData.name = name;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      throw new BadRequestError('No fields to update');
+    }
+
+    const updated = await prisma.server.update({
+      where: { id: serverId },
+      select: { id: true, name: true, iconUrl: true, ownerId: true, createdAt: true },
+      data: updateData,
+    });
+
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updated);
+
+    res.json({ success: true, data: updated });
   } catch (err) {
     next(err);
   }

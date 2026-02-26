@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.3.1 (Message Reactions & Emoji Picker)
-**Date:** 2026-02-25
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators, toast notification system, message editing and deletion UI, message reactions with emoji picker
+**Version:** 0.3.3 (Real-Time Avatar & Profile Sync)
+**Date:** 2026-02-26
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators, toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients
 
 ## What Has Been Done
 
@@ -70,6 +70,9 @@ A full Node.js + TypeScript backend has been implemented with:
   - `GET /api/v1/invites/:code` — Preview invite
   - `GET /api/v1/users/:id` — User profile
   - `PATCH /api/v1/users/me/profile` — Update own profile
+  - `POST /api/v1/uploads/avatar` — Upload user avatar (S3)
+  - `POST /api/v1/uploads/server-icon/:serverId` — Upload server icon (S3, owner only)
+  - `GET /api/v1/uploads/*` — Stream file from S3 (unauthenticated, key-validated)
 
 ### 3. Frontend Desktop App (`apps/desktop`)
 
@@ -161,11 +164,11 @@ Comprehensive hardening of real-time features:
 ### V0.3 - Enhanced Features
 - [x] Message editing/deletion UI
 - [x] Message reactions with emoji picker
-- [ ] File/image upload support
+- [x] File/image upload support (S3 avatars and server icons)
 - [ ] Direct messages (DMs)
 - [ ] Friend system
-- [ ] Server settings panel
-- [ ] User settings/profile editing
+- [x] Server settings panel
+- [x] User settings/profile editing
 - [ ] Role/permission management
 - [ ] Channel categories
 - [x] Emoji picker integration
@@ -178,7 +181,7 @@ Comprehensive hardening of real-time features:
 - [ ] Redis-based voice state for multi-node deployment
 - [ ] Horizontal scaling with sticky sessions
 - [ ] CDN for static assets
-- [ ] File storage (S3-compatible)
+- [x] File storage (S3-compatible) — implemented in v0.3.2
 - [ ] Rate limiting per endpoint
 
 ### V1.0 - Production
@@ -507,6 +510,118 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 - `apps/desktop/src/components/chat/ReactionDisplay.tsx`
 - `apps/server/prisma/migrations/20260225153215_add_message_reactions/migration.sql`
 
+### S3 File Uploads, Avatars & Server Icons (v0.3.2)
+
+**New feature:** Users can upload avatars and server owners can upload server icons. Images are stored in S3-compatible object storage, processed via sharp, and served through a streaming proxy endpoint.
+
+**Backend — S3 utility (`apps/server/src/utils/s3.ts`):**
+- New module wrapping `@aws-sdk/client-s3` with three functions: `uploadToS3(folder, entityId, buffer)`, `streamFromS3(key)`, `deleteFromS3(key)`
+- S3 client configured via env vars: `S3_ASSETS_ENDPOINT`, `S3_ASSETS_REGION`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_ASSETS_BUCKET`
+- Uses `forcePathStyle: true` for MinIO/local S3 compatibility
+- Key format: `{folder}/{entityId}-{timestamp}.webp` (immutable — timestamp makes keys unique for cache busting)
+
+**Backend — Upload routes (`apps/server/src/routes/uploads.ts`):**
+- `POST /uploads/avatar` — authenticated; multer memory storage (5 MB limit); file filter validates MIME + extension; sharp resizes to 256x256 webp; uploads to S3 under `avatars/` folder; updates `User.avatarUrl` in DB
+- `POST /uploads/server-icon/:serverId` — authenticated + owner check; same image pipeline; uploads under `server-icons/` folder; updates `Server.iconUrl`; emits `server:updated` socket event for real-time sync
+- `GET /uploads/*key` — unauthenticated streaming proxy; validates key against regex whitelist (`^(avatars|server-icons)/[\w-]+\.webp$`); sets aggressive cache headers (`immutable, max-age=31536000`); pipes S3 stream to response with client-disconnect cleanup
+- Multer errors (file too large, unexpected field) handled in global `errorHandler.ts` middleware
+
+**Backend — Server settings route (`apps/server/src/routes/servers.ts`):**
+- `PATCH /:serverId` — now only accepts `name` field (removed `iconUrl` from body to prevent arbitrary S3 key injection; icon updates go through the dedicated upload endpoint)
+
+**Backend — Auth service (`apps/server/src/services/authService.ts`):**
+- `registerUser` select now includes `avatarUrl` in the returned user object
+
+**Backend — Member broadcast (`apps/server/src/utils/memberBroadcast.ts`):**
+- `broadcastMemberJoined` now includes `avatarUrl` in the user select for `member:joined` events
+
+**Frontend — Avatar component (`apps/desktop/src/components/common/Avatar.tsx`):**
+- Reusable `Avatar` component with four sizes (xs/sm/md/lg), fallback to initial letter, image error state, optional speaking ring indicator
+- Constructs image URL from `avatarUrl` (S3 key) prefixed with `VITE_API_URL/uploads/`
+- Used across: `ChannelSidebar` (user area, voice users), `ServerSidebar` (user section), `MemberSidebar` (member list), `MessageItem` (message author), `SettingsModal` (profile tab), `ServerSettingsModal` (icon preview)
+
+**Frontend — Server settings modal (`apps/desktop/src/components/server/ServerSettingsModal.tsx`):**
+- New modal for server owners: editable server name + icon upload with preview
+- Object URL cleanup on unmount via `useEffect` return
+- Calls `uploadServerIcon` then `updateServer` with proper error isolation
+
+**Frontend — Create server modal (`apps/desktop/src/components/server/CreateServerModal.tsx`):**
+- Icon picker added to server creation form; uploads icon after server creation succeeds
+- Non-critical icon upload failure handled gracefully with `toast.warning`
+
+**Frontend — Settings modal (`apps/desktop/src/components/settings/SettingsModal.tsx`):**
+- Profile tab now shows clickable Avatar with upload overlay; calls `authStore.uploadAvatar`
+
+**Frontend — Server sidebar (`apps/desktop/src/components/server/ServerSidebar.tsx`):**
+- Server icons rendered from S3 URL when `iconUrl` is set; falls back to initials
+
+**Frontend — Stores:**
+- `authStore.ts` — new `uploadAvatar(file)` action: FormData POST to `/uploads/avatar`, updates local user state with returned key
+- `serverStore.ts` — new `uploadServerIcon(serverId, file)`, `updateServer(serverId, fields)`, and `updateServerData(server)` methods; local state updated via `server:updated` socket event (single source of truth pattern)
+
+**Shared package:**
+- `Server` type already had `iconUrl: string | null`; `MessageAuthor` already had `avatarUrl: string | null`
+- `ServerToClientEvents` already had `server:updated`; `WS_EVENTS.SERVER_UPDATED` constant already defined
+- No shared package changes required for this feature
+
+**Review fixes applied:**
+1. Upload route now emits `server:updated` after icon upload (was missing -- other users would not see icon changes in real-time)
+2. Removed `iconUrl` from `PATCH /servers/:serverId` body to prevent arbitrary S3 key injection (icon updates must go through the upload endpoint)
+3. S3 file-serving key validation strengthened from `!key.includes('..')` to a regex whitelist matching only known folder/filename patterns
+4. Upload-then-delete ordering: new file is uploaded and DB updated before deleting the old file, preventing data loss on upload failure
+5. S3 stream cleanup on client disconnect to prevent resource leaks
+
+**New files:**
+- `apps/server/src/utils/s3.ts`
+- `apps/server/src/routes/uploads.ts`
+- `apps/desktop/src/components/common/Avatar.tsx`
+- `apps/desktop/src/components/server/ServerSettingsModal.tsx`
+
+**New dependencies:** `@aws-sdk/client-s3`, `sharp`, `multer`, `@types/multer`
+
+### Real-Time Avatar & Profile Sync (v0.3.3)
+
+**Problem 1 — Broken images after upload:** Avatar and server icon uploads succeeded (S3 key stored in DB) but rendered as broken images in the browser.
+
+**Root cause (Express route pattern):** The upload serve route used `/*key` which is Express 5 syntax. In Express 4, this means a wildcard followed by a literal "key" suffix, so no requests matched. Fixed by changing the route pattern to `/*` and accessing the key via `req.params[0]`.
+
+**Root cause (Helmet CORS):** Even after the route fix, cross-origin `<img>` loads failed. Helmet's default `Cross-Origin-Resource-Policy: same-origin` header blocked the browser from loading images cross-origin (frontend on `:8080`, API on `:3001`). Additionally, CSP `img-src 'self' data:` blocked cross-origin image sources. Fixed by configuring Helmet with `crossOriginResourcePolicy: { policy: 'cross-origin' }` and adding frontend origins to `imgSrc` and `connectSrc` directives.
+
+**Problem 2 — Avatar change requires page refresh for current user:** `authStore.uploadAvatar` only updated the auth store. The member sidebar reads from `serverStore` and messages read from `chatStore`, so the UI was stale.
+
+**Fix:** Cross-store propagation — `uploadAvatar` now also calls `serverStore.updateMemberAvatar(userId, key)` and `chatStore.updateAuthorAvatar(userId, key)` for immediate local UI updates. New store methods:
+- `serverStore.updateMemberAvatar(userId, avatarUrl)` — updates the member's avatar in the member list
+- `chatStore.updateAuthorAvatar(userId, avatarUrl)` — updates all messages from that author
+
+**Problem 3 — Avatar/profile changes not visible to other users in real-time:** No socket event was emitted when a user changed their avatar or display name.
+
+**Fix — `user:updated` event:**
+- **Shared package:** Added `user:updated` event to `ServerToClientEvents` carrying `{ userId, displayName, avatarUrl }`. Added `USER_UPDATED` to `WS_EVENTS` constants.
+- **Server (`routes/uploads.ts`):** After avatar upload, broadcasts `user:updated` to all `server:{id}` rooms the user belongs to.
+- **Server (`routes/users.ts`):** After profile update (displayName/avatarUrl), broadcasts `user:updated` to all `server:{id}` rooms.
+- **Frontend (`MainLayout.tsx`):** New `userUpdated` handler calls `serverStore.updateMemberProfile(userId, { displayName, avatarUrl })` and `chatStore.updateAuthorProfile(userId, { displayName, avatarUrl })` for real-time updates across all UI components.
+- **Frontend stores:** New `serverStore.updateMemberProfile()` and `chatStore.updateAuthorProfile()` methods for batch-updating user fields across member lists and message histories.
+
+**Additional changes:**
+- **`bio` field in User type:** Added `bio: string | null` to the shared `User` interface (already existed in DB, now exposed in types). Added to `authService.ts` register select, `memberBroadcast.ts` select, and `serverStore.addMember` user construction.
+- **Settings modal restructured:** Two-tab layout (My Account | Audio & Video) with left-nav. Profile tab has clickable avatar upload, displayName input, bio textarea, and Save button. Audio settings moved to second tab.
+- **Avatar component fix:** Added `useEffect` to reset `imgError` state when `avatarUrl` prop changes (prevents stale broken-image state when a new avatar is uploaded).
+
+**Files modified:**
+- `packages/shared/src/types.ts` — `bio` on User, `user:updated` event on ServerToClientEvents
+- `packages/shared/src/constants.ts` — `USER_UPDATED` in WS_EVENTS
+- `apps/server/src/app.ts` — Helmet CORS configuration
+- `apps/server/src/routes/uploads.ts` — Route pattern fix (`/*`), `user:updated` emit on avatar upload
+- `apps/server/src/routes/users.ts` — `user:updated` emit on profile update
+- `apps/server/src/services/authService.ts` — `bio` in register select
+- `apps/server/src/utils/memberBroadcast.ts` — `bio` in select and emitted object
+- `apps/desktop/src/stores/authStore.ts` — Cross-store propagation in `uploadAvatar`, new `updateProfile` method
+- `apps/desktop/src/stores/serverStore.ts` — `updateMemberAvatar`, `updateMemberProfile` methods, `bio` in `addMember`
+- `apps/desktop/src/stores/chatStore.ts` — `updateAuthorAvatar`, `updateAuthorProfile` methods
+- `apps/desktop/src/components/common/Avatar.tsx` — `imgError` reset on prop change
+- `apps/desktop/src/components/settings/SettingsModal.tsx` — Tab restructure with Profile tab
+- `apps/desktop/src/components/layout/MainLayout.tsx` — `userUpdated` handler
+
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.
 - The `member:joined` event sends `email: ''` to satisfy the `User` type in `ServerToClientEvents`. Consider a `PublicUser` type that omits `email`.
@@ -517,3 +632,8 @@ Eliminated all TypeScript compilation errors across both server and desktop. Bot
 - The `validateEmoji()` function accepts mixed strings containing at least one non-ASCII character (e.g., text+emoji). The 32-character length limit and React's JSX escaping mitigate risk, but a stricter validator could use Unicode emoji property matching.
 - The `MAX_REACTIONS_PER_MESSAGE` limit check in the reaction toggle endpoint has a TOCTOU race: between the `groupBy` count and the `create`, another request could add a new distinct emoji, exceeding the limit. The unique constraint prevents true duplicates, but the soft limit can be exceeded by 1 under concurrent requests to different emoji. Acceptable for current scale.
 - Pre-existing: `leavingUser` variable in `MainLayout.tsx` line 102 is assigned but never read (dead code from voice user left handler).
+- The S3 utility (`s3.ts`) uses non-null assertions (`!`) on all env vars. If any are missing, the error surfaces as a cryptic AWS SDK error at runtime rather than a clear startup failure. Consider validating env vars at startup.
+- The `GET /uploads/*key` route is unauthenticated, relying on key unguessability (CUID + timestamp). For truly private content, consider signed URLs or auth middleware on the serve route.
+- The `multer` file filter checks both MIME type and file extension, but MIME types from `Content-Type` headers are client-controlled and can be spoofed. The sharp processing pipeline implicitly validates the actual image data (it will throw on non-image input), which provides defense in depth.
+- The `PATCH /users/me/profile` route still accepts `avatarUrl` in the body, which could be used to set an arbitrary S3 key (same concern removed from server PATCH). Consider restricting profile avatar changes to the upload endpoint only.
+- `ServerSettingsModal` and `CreateServerModal` duplicate the icon selection/preview/cleanup logic. Consider extracting a shared `ImageUploadButton` component.

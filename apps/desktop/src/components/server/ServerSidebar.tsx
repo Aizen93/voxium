@@ -4,6 +4,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { Plus, LogOut, Settings } from 'lucide-react';
 import { clsx } from 'clsx';
 import { CreateServerModal } from './CreateServerModal';
+import { Avatar } from '../common/Avatar';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { APP_VERSION } from '@voxium/shared';
 
@@ -36,46 +37,39 @@ export function ServerSidebar() {
         {/* Server List */}
         <div className="flex flex-1 flex-col items-center gap-2 overflow-y-auto scrollbar-none">
           {servers.map((server) => (
-            <button
-              key={server.id}
-              className={clsx(
-                'group relative flex h-12 w-12 items-center justify-center rounded-2xl transition-all duration-200',
-                activeServerId === server.id
-                  ? 'rounded-xl bg-vox-accent-primary text-white'
-                  : 'bg-vox-bg-secondary text-vox-text-secondary hover:rounded-xl hover:bg-vox-accent-primary hover:text-white'
-              )}
-              onClick={() => setActiveServer(server.id)}
-              onMouseEnter={(e) => {
-                setHoveredId(server.id);
-                const rect = e.currentTarget.getBoundingClientRect();
-                setTooltipPos({ top: rect.top + rect.height / 2, left: rect.right + 8 });
-              }}
-              onMouseLeave={() => { setHoveredId(null); setTooltipPos(null); }}
-            >
-              {server.iconUrl ? (
-                <img src={server.iconUrl} alt={server.name} className="h-full w-full rounded-inherit object-cover" />
-              ) : (
-                <span className="text-sm font-semibold">
-                  {server.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
-                </span>
-              )}
-
-              {/* Active indicator */}
-              {activeServerId === server.id && (
-                <div className="absolute -left-1 top-1/2 h-10 w-1 -translate-y-1/2 rounded-r-full bg-white" />
-              )}
-
-              {/* Hover indicator */}
-              {hoveredId === server.id && activeServerId !== server.id && (
-                <div className="absolute -left-1 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-white transition-all" />
-              )}
-
-              {/* Unread indicator */}
-              {activeServerId !== server.id && hoveredId !== server.id && (serverUnreadCounts[server.id] || 0) > 0 && (
-                <div className="absolute -left-1 top-1/2 h-2 w-1 -translate-y-1/2 rounded-r-full bg-white" />
-              )}
-
-            </button>
+            <div key={server.id} className="relative flex w-full items-center justify-center">
+              <button
+                className={clsx(
+                  'group flex h-12 w-12 items-center justify-center rounded-2xl transition-all duration-200',
+                  activeServerId === server.id
+                    ? 'rounded-xl bg-vox-accent-primary text-white border-l-[3px] border-white'
+                    : hoveredId === server.id
+                      ? 'bg-vox-bg-secondary text-vox-text-secondary hover:rounded-xl hover:bg-vox-accent-primary hover:text-white border-l-[3px] border-white/50'
+                      : (serverUnreadCounts[server.id] || 0) > 0
+                        ? 'bg-vox-bg-secondary text-vox-text-secondary hover:rounded-xl hover:bg-vox-accent-primary hover:text-white border-l-[3px] border-white/30'
+                        : 'bg-vox-bg-secondary text-vox-text-secondary hover:rounded-xl hover:bg-vox-accent-primary hover:text-white border-l-[3px] border-transparent'
+                )}
+                onClick={() => setActiveServer(server.id)}
+                onMouseEnter={(e) => {
+                  setHoveredId(server.id);
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setTooltipPos({ top: rect.top + rect.height / 2, left: rect.right + 8 });
+                }}
+                onMouseLeave={() => { setHoveredId(null); setTooltipPos(null); }}
+              >
+                {server.iconUrl ? (
+                  <img
+                    src={`${import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1'}/uploads/${server.iconUrl}`}
+                    alt={server.name}
+                    className="h-full w-full rounded-[inherit] object-cover"
+                  />
+                ) : (
+                  <span className="text-sm font-semibold">
+                    {server.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+                  </span>
+                )}
+              </button>
+            </div>
           ))}
 
           {/* Add Server Button */}
@@ -90,9 +84,7 @@ export function ServerSidebar() {
 
         {/* User section at bottom */}
         <div className="flex flex-col items-center gap-2 pt-2 border-t border-vox-border">
-          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-vox-accent-primary text-xs font-bold text-white">
-            {user?.displayName?.[0]?.toUpperCase() || '?'}
-          </div>
+          <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="md" />
           <button
             className="flex h-8 w-8 items-center justify-center rounded-lg text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
             onClick={() => useSettingsStore.getState().openSettings()}
