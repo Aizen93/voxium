@@ -17,7 +17,8 @@ interface Props {
   addTopMargin: boolean;
   isOwn: boolean;
   canDelete: boolean;
-  channelId: string;
+  channelId?: string;
+  conversationId?: string;
 }
 
 function formatMessageTime(dateStr: string) {
@@ -27,8 +28,8 @@ function formatMessageTime(dateStr: string) {
   return format(date, 'MM/dd/yyyy h:mm a');
 }
 
-export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId }: Props) {
-  const { editMessage } = useChatStore();
+export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId }: Props) {
+  const { editMessage, editDMMessage } = useChatStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -66,7 +67,11 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
 
     setIsSaving(true);
     try {
-      await editMessage(channelId, message.id, trimmed);
+      if (conversationId) {
+        await editDMMessage(conversationId, message.id, trimmed);
+      } else if (channelId) {
+        await editMessage(channelId, message.id, trimmed);
+      }
       setIsEditing(false);
       setEditContent('');
     } catch {
@@ -89,7 +94,11 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
   const handleReactionSelect = async (emoji: string) => {
     setShowReactionPicker(false);
     try {
-      await useChatStore.getState().toggleReaction(channelId, message.id, emoji);
+      if (conversationId) {
+        await useChatStore.getState().toggleDMReaction(conversationId, message.id, emoji);
+      } else if (channelId) {
+        await useChatStore.getState().toggleReaction(channelId, message.id, emoji);
+      }
     } catch {
       toast.error('Failed to toggle reaction');
     }
@@ -202,7 +211,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                 )}
               </div>
             </div>
-            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} />
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} />
           </>
         ) : (
           <>
@@ -224,7 +233,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                 </div>
               )}
             </div>
-            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} />
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} />
           </>
         )}
       </div>
@@ -233,6 +242,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
         <DeleteConfirmModal
           message={message}
           channelId={channelId}
+          conversationId={conversationId}
           onClose={() => setShowDeleteModal(false)}
         />
       )}

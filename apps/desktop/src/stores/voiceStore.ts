@@ -54,37 +54,56 @@ interface PeerConnection {
 }
 
 interface VoiceState {
+  // ─── Shared State ──────────────────────────────────────────────────
   localUserId: string | null;
-  activeChannelId: string | null;
   selfMute: boolean;
   selfDeaf: boolean;
   localStream: MediaStream | null;
   latency: number | null;
-
-  channelUsers: Map<string, VoiceUser[]>;
-
   peers: Map<string, PeerConnection>;
   remoteAudios: Map<string, HTMLAudioElement>;
 
+  // ─── Server Voice State ────────────────────────────────────────────
+  activeChannelId: string | null;
+  channelUsers: Map<string, VoiceUser[]>;
+
+  // ─── DM Call State ─────────────────────────────────────────────────
+  dmCallConversationId: string | null;
+  dmCallUsers: VoiceUser[];
+  incomingCall: { conversationId: string; from: VoiceUser } | null;
+
+  // ─── Shared Actions ────────────────────────────────────────────────
   setLocalUserId: (userId: string) => void;
-  joinChannel: (channelId: string) => Promise<void>;
-  leaveChannel: () => void;
   toggleMute: () => void;
   toggleDeaf: () => void;
+  startLatencyMeasurement: () => void;
+  stopLatencyMeasurement: () => void;
+  destroyPeer: (userId: string) => void;
+  destroyAllPeers: () => void;
 
+  // ─── Server Voice Actions ──────────────────────────────────────────
+  joinChannel: (channelId: string) => Promise<void>;
+  leaveChannel: () => void;
   setChannelUsers: (channelId: string, users: VoiceUser[]) => void;
   addUserToChannel: (channelId: string, user: VoiceUser) => void;
   removeUserFromChannel: (channelId: string, userId: string) => void;
-
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean) => void;
   setUserSpeaking: (channelId: string, userId: string, speaking: boolean) => void;
   handleSignal: (from: string, signal: unknown) => void;
   createPeer: (targetUserId: string, initiator: boolean) => void;
-  destroyPeer: (userId: string) => void;
-  destroyAllPeers: () => void;
 
-  startLatencyMeasurement: () => void;
-  stopLatencyMeasurement: () => void;
+  // ─── DM Call Actions ───────────────────────────────────────────────
+  joinDMCall: (conversationId: string) => Promise<void>;
+  leaveDMCall: () => void;
+  acceptCall: () => Promise<void>;
+  declineCall: () => void;
+  setIncomingCall: (data: { conversationId: string; from: VoiceUser } | null) => void;
+  addDMCallUser: (user: VoiceUser) => void;
+  removeDMCallUser: (userId: string) => void;
+  updateDMCallUserState: (userId: string, selfMute: boolean, selfDeaf: boolean) => void;
+  setDMCallUserSpeaking: (userId: string, speaking: boolean) => void;
+  handleDMSignal: (from: string, signal: unknown) => void;
+  createDMPeer: (targetUserId: string, initiator: boolean) => void;
 }
 
 let latencyInterval: ReturnType<typeof setInterval> | null = null;
@@ -112,6 +131,231 @@ function applyOutputDevice(audio: HTMLAudioElement, deviceId: string) {
   }
 }
 
+type SignalEvent = 'voice:signal' | 'dm:voice:signal';
+
+/** Acquire a mic audio stream using the user's preferred input device. */
+async function acquireAudioStream(): Promise<MediaStream | null> {
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      console.warn('[Voice] getUserMedia not available (insecure context?), joining in listen-only mode');
+      return null;
+    }
+    const settings = useSettingsStore.getState();
+    const audioConstraints: MediaTrackConstraints = {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
+    if (settings.audioInputDeviceId) {
+      audioConstraints.deviceId = { exact: settings.audioInputDeviceId };
+    }
+    return await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+  } catch (err) {
+    console.warn('[Voice] Microphone access denied, joining in listen-only mode:', err);
+    return null;
+  }
+}
+
+/**
+ * Shared RTCPeerConnection factory. Both server-voice `createPeer` and DM
+ * `createDMPeer` delegate here — only the signal event name and log prefix differ.
+ */
+function createPeerInternal(
+  signalEvent: SignalEvent,
+  logPrefix: string,
+  targetUserId: string,
+  initiator: boolean,
+  stateAccessors: { get: () => VoiceState; set: (partial: Partial<VoiceState>) => void },
+) {
+  const { get: getState, set: setState } = stateAccessors;
+  const { localStream, peers, selfDeaf } = getState();
+  const outputDeviceId = useSettingsStore.getState().audioOutputDeviceId;
+
+  if (peers.has(targetUserId)) {
+    getState().destroyPeer(targetUserId);
+  }
+
+  const socket = getSocket();
+  if (!socket) return;
+
+  console.log(`${logPrefix} Creating RTCPeerConnection to ${targetUserId} (initiator: ${initiator})`);
+
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const peerConn: PeerConnection = { pc, makingOffer: false };
+
+  if (localStream) {
+    localStream.getTracks().forEach((track) => {
+      pc.addTrack(track, localStream);
+    });
+  }
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit(signalEvent as any, {
+        to: targetUserId,
+        signal: { type: 'ice-candidate', candidate: event.candidate.toJSON() },
+      });
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    console.log(`${logPrefix} ICE state with ${targetUserId}: ${pc.iceConnectionState}`);
+    if (pc.iceConnectionState === 'failed') {
+      console.warn(`${logPrefix} ICE failed with ${targetUserId}, attempting ICE restart`);
+      const existingTimer = iceRestartTimers.get(targetUserId);
+      if (existingTimer) clearTimeout(existingTimer);
+
+      const timer = setTimeout(() => {
+        iceRestartTimers.delete(targetUserId);
+        const currentPeer = getState().peers.get(targetUserId);
+        if (!currentPeer || currentPeer.pc !== pc) return;
+
+        pc.createOffer({ iceRestart: true })
+          .then((offer) => pc.setLocalDescription(offer))
+          .then(() => {
+            const s = getSocket();
+            if (s && pc.localDescription) {
+              s.emit(signalEvent as any, {
+                to: targetUserId,
+                signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
+              });
+            }
+          })
+          .catch((err) => console.error(`${logPrefix} ICE restart failed for ${targetUserId}:`, err));
+      }, ICE_RESTART_DELAY_MS);
+      iceRestartTimers.set(targetUserId, timer);
+    }
+    if (pc.iceConnectionState === 'disconnected') {
+      console.warn(`${logPrefix} ICE disconnected with ${targetUserId} — waiting for recovery`);
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log(`${logPrefix} Connection state with ${targetUserId}: ${pc.connectionState}`);
+    if (pc.connectionState === 'failed') {
+      console.error(`${logPrefix} Connection failed permanently with ${targetUserId}`);
+      getState().destroyPeer(targetUserId);
+    }
+  };
+
+  pc.ontrack = (event) => {
+    console.log(`${logPrefix} Got remote track from ${targetUserId}:`, event.track.kind);
+    const remoteStream = event.streams[0];
+    if (!remoteStream) return;
+
+    const container = getAudioContainer();
+    const { remoteAudios } = getState();
+    const oldAudio = remoteAudios.get(targetUserId);
+    if (oldAudio) {
+      oldAudio.pause();
+      oldAudio.srcObject = null;
+      oldAudio.remove();
+    }
+
+    const audio = document.createElement('audio');
+    audio.id = `vox-audio-${targetUserId}`;
+    audio.autoplay = true;
+    audio.muted = selfDeaf;
+    audio.srcObject = remoteStream;
+    container.appendChild(audio);
+
+    applyOutputDevice(audio, outputDeviceId);
+
+    const newAudios = new Map(remoteAudios);
+    newAudios.set(targetUserId, audio);
+    setState({ remoteAudios: newAudios });
+
+    audio.play()
+      .then(() => console.log(`${logPrefix} Audio playing for ${targetUserId}`))
+      .catch((err) => console.warn(`${logPrefix} Audio autoplay blocked for ${targetUserId}:`, err));
+  };
+
+  const newPeers = new Map(peers);
+  newPeers.set(targetUserId, peerConn);
+  setState({ peers: newPeers });
+
+  if (initiator) {
+    peerConn.makingOffer = true;
+    pc.createOffer()
+      .then((offer) => pc.setLocalDescription(offer))
+      .then(() => {
+        if (pc.localDescription) {
+          console.log(`${logPrefix} Sending offer to ${targetUserId}`);
+          socket.emit(signalEvent as any, {
+            to: targetUserId,
+            signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
+          });
+        }
+      })
+      .catch((err) => console.error(`${logPrefix} Error creating offer for ${targetUserId}:`, err))
+      .finally(() => { peerConn.makingOffer = false; });
+  }
+}
+
+/**
+ * Shared signal handler. Both `handleSignal` and `handleDMSignal` delegate
+ * here — only the signal event name and peer-creation function differ.
+ */
+function handleSignalInternal(
+  signalEvent: SignalEvent,
+  logPrefix: string,
+  createPeerFn: (targetUserId: string, initiator: boolean) => void,
+  from: string,
+  signal: unknown,
+  stateAccessors: { get: () => VoiceState },
+) {
+  const { get: getState } = stateAccessors;
+  const data = signal as { type: string; sdp?: string; candidate?: RTCIceCandidateInit };
+  console.log(`${logPrefix} handleSignal from ${from}:`, data.type || 'ice-candidate');
+
+  const { peers } = getState();
+  let peerConn = peers.get(from);
+
+  if (!peerConn && data.type === 'offer') {
+    console.log(`${logPrefix} No peer for ${from}, creating responder peer`);
+    createPeerFn(from, false);
+    peerConn = getState().peers.get(from);
+  }
+
+  if (!peerConn) {
+    if (data.type === 'ice-candidate') {
+      console.log(`${logPrefix} ICE candidate from ${from} but no peer yet, creating responder`);
+      createPeerFn(from, false);
+      peerConn = getState().peers.get(from);
+    }
+    if (!peerConn) return;
+  }
+
+  const { pc } = peerConn;
+
+  if (data.type === 'offer') {
+    pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }))
+      .then(() => pc.createAnswer())
+      .then((answer) => pc.setLocalDescription(answer))
+      .then(() => {
+        const socket = getSocket();
+        if (socket && pc.localDescription) {
+          console.log(`${logPrefix} Sending answer to ${from}`);
+          socket.emit(signalEvent as any, {
+            to: from,
+            signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
+          });
+        }
+      })
+      .catch((err) => console.error(`${logPrefix} Error handling offer from ${from}:`, err));
+  } else if (data.type === 'answer') {
+    pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }))
+      .catch((err) => console.error(`${logPrefix} Error handling answer from ${from}:`, err));
+  } else if (data.type === 'ice-candidate' && data.candidate) {
+    pc.addIceCandidate(new RTCIceCandidate(data.candidate))
+      .catch((err) => {
+        if (!String(err).includes('remote description')) {
+          console.error(`${logPrefix} Error adding ICE candidate from ${from}:`, err);
+        }
+      });
+  }
+}
+
 export const useVoiceStore = create<VoiceState>((set, get) => ({
   localUserId: null,
   activeChannelId: null,
@@ -123,11 +367,21 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   peers: new Map(),
   remoteAudios: new Map(),
 
+  // DM call state
+  dmCallConversationId: null,
+  dmCallUsers: [],
+  incomingCall: null,
+
   setLocalUserId: (userId: string) => set({ localUserId: userId }),
 
   joinChannel: async (channelId: string) => {
     const socket = getSocket();
     if (!socket) return;
+
+    // Leave DM call if active (cross-cleanup)
+    if (get().dmCallConversationId) {
+      get().leaveDMCall();
+    }
 
     if (get().activeChannelId) {
       get().leaveChannel();
@@ -136,25 +390,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const settings = useSettingsStore.getState();
     setNoiseGateThreshold(settings.noiseGateThreshold);
 
-    let stream: MediaStream | null = null;
-    try {
-      if (navigator.mediaDevices?.getUserMedia) {
-        const audioConstraints: MediaTrackConstraints = {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        };
-        if (settings.audioInputDeviceId) {
-          audioConstraints.deviceId = { exact: settings.audioInputDeviceId };
-        }
-        stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-        console.log('[Voice] Joined channel, local stream tracks:', stream.getTracks().length);
-      } else {
-        console.warn('[Voice] getUserMedia not available (insecure context?), joining in listen-only mode');
-      }
-    } catch (err) {
-      console.warn('[Voice] Microphone access denied, joining in listen-only mode:', err);
-    }
+    const stream = await acquireAudioStream();
 
     const { selfMute, selfDeaf } = get();
     const isPTT = settings.voiceMode === 'push_to_talk';
@@ -193,10 +429,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     get().stopLatencyMeasurement();
     stopSpeakingDetection();
-
-    // Clear all ICE restart timers
-    iceRestartTimers.forEach((timer) => clearTimeout(timer));
-    iceRestartTimers.clear();
 
     // Immediately remove local user from channelUsers (don't wait for server event)
     if (activeChannelId && localUserId) {
@@ -245,13 +477,17 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         } else {
           const settings = useSettingsStore.getState();
           setNoiseGateThreshold(settings.noiseGateThreshold);
-          startSpeakingDetection(localStream);
+          startSpeakingDetection(localStream, get().dmCallConversationId ? 'dm' : 'server');
         }
       }
     }
 
-    if (socket && get().activeChannelId) {
-      socket.emit('voice:mute', newMute);
+    if (socket) {
+      if (get().activeChannelId) {
+        socket.emit('voice:mute', newMute);
+      } else if (get().dmCallConversationId) {
+        socket.emit('dm:voice:mute', newMute);
+      }
     }
 
     set({ selfMute: newMute });
@@ -267,8 +503,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       audio.muted = newDeaf;
     });
 
-    if (socket && get().activeChannelId) {
-      socket.emit('voice:deaf', newDeaf);
+    if (socket) {
+      if (get().activeChannelId) {
+        socket.emit('voice:deaf', newDeaf);
+      } else if (get().dmCallConversationId) {
+        socket.emit('dm:voice:deaf', newDeaf);
+      }
     }
 
     set({ selfDeaf: newDeaf });
@@ -395,203 +635,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   handleSignal: (from: string, signal: unknown) => {
-    const data = signal as { type: string; sdp?: string; candidate?: RTCIceCandidateInit };
-    console.log(`[Voice] handleSignal from ${from}:`, data.type || 'ice-candidate');
-
-    const { peers } = get();
-    let peerConn = peers.get(from);
-
-    // If we get an offer and have no peer, create a non-initiator peer
-    if (!peerConn && data.type === 'offer') {
-      console.log(`[Voice] No peer for ${from}, creating responder peer`);
-      get().createPeer(from, false);
-      peerConn = get().peers.get(from);
-    }
-
-    if (!peerConn) {
-      if (data.type === 'ice-candidate') {
-        console.log(`[Voice] ICE candidate from ${from} but no peer yet, creating responder`);
-        get().createPeer(from, false);
-        peerConn = get().peers.get(from);
-      }
-      if (!peerConn) return;
-    }
-
-    const { pc } = peerConn;
-
-    if (data.type === 'offer') {
-      pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }))
-        .then(() => pc.createAnswer())
-        .then((answer) => pc.setLocalDescription(answer))
-        .then(() => {
-          const socket = getSocket();
-          if (socket && pc.localDescription) {
-            console.log(`[Voice] Sending answer to ${from}`);
-            socket.emit('voice:signal', {
-              to: from,
-              signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
-            });
-          }
-        })
-        .catch((err) => console.error(`[Voice] Error handling offer from ${from}:`, err));
-    } else if (data.type === 'answer') {
-      pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }))
-        .catch((err) => console.error(`[Voice] Error handling answer from ${from}:`, err));
-    } else if (data.type === 'ice-candidate' && data.candidate) {
-      pc.addIceCandidate(new RTCIceCandidate(data.candidate))
-        .catch((err) => {
-          // Ignore "no remote description" errors — candidate will be applied later
-          if (!String(err).includes('remote description')) {
-            console.error(`[Voice] Error adding ICE candidate from ${from}:`, err);
-          }
-        });
-    }
+    handleSignalInternal('voice:signal', '[Voice]', get().createPeer, from, signal, { get });
   },
 
   createPeer: (targetUserId: string, initiator: boolean) => {
-    const { localStream, peers, selfDeaf } = get();
-    const outputDeviceId = useSettingsStore.getState().audioOutputDeviceId;
-
-    if (peers.has(targetUserId)) {
-      console.log('[Voice] createPeer: destroying existing peer for', targetUserId);
-      get().destroyPeer(targetUserId);
-    }
-
-    const socket = getSocket();
-    if (!socket) {
-      console.log('[Voice] createPeer: no socket');
-      return;
-    }
-
-    console.log(`[Voice] Creating RTCPeerConnection to ${targetUserId} (initiator: ${initiator})`);
-
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    const peerConn: PeerConnection = { pc, makingOffer: false };
-
-    // Add local audio tracks to the connection (if available)
-    if (localStream) {
-      localStream.getTracks().forEach((track) => {
-        pc.addTrack(track, localStream);
-      });
-      console.log(`[Voice] Added ${localStream.getTracks().length} local tracks`);
-    } else {
-      console.log('[Voice] No local stream (listen-only mode)');
-    }
-
-    // Handle ICE candidates
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit('voice:signal', {
-          to: targetUserId,
-          signal: { type: 'ice-candidate', candidate: event.candidate.toJSON() },
-        });
-      }
-    };
-
-    pc.oniceconnectionstatechange = () => {
-      console.log(`[Voice] ICE state with ${targetUserId}: ${pc.iceConnectionState}`);
-
-      if (pc.iceConnectionState === 'failed') {
-        // Attempt ICE restart instead of giving up
-        console.warn(`[Voice] ICE failed with ${targetUserId}, attempting ICE restart`);
-
-        // Clear any existing restart timer
-        const existingTimer = iceRestartTimers.get(targetUserId);
-        if (existingTimer) clearTimeout(existingTimer);
-
-        const timer = setTimeout(() => {
-          iceRestartTimers.delete(targetUserId);
-          const currentPeer = get().peers.get(targetUserId);
-          if (!currentPeer || currentPeer.pc !== pc) return; // peer was replaced
-
-          pc.createOffer({ iceRestart: true })
-            .then((offer) => pc.setLocalDescription(offer))
-            .then(() => {
-              const s = getSocket();
-              if (s && pc.localDescription) {
-                s.emit('voice:signal', {
-                  to: targetUserId,
-                  signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
-                });
-              }
-            })
-            .catch((err) => console.error(`[Voice] ICE restart failed for ${targetUserId}:`, err));
-        }, ICE_RESTART_DELAY_MS);
-        iceRestartTimers.set(targetUserId, timer);
-      }
-
-      if (pc.iceConnectionState === 'disconnected') {
-        console.warn(`[Voice] ICE disconnected with ${targetUserId} — waiting for recovery`);
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log(`[Voice] Connection state with ${targetUserId}: ${pc.connectionState}`);
-
-      // If connection completely failed after ICE restart, clean up
-      if (pc.connectionState === 'failed') {
-        console.error(`[Voice] Connection failed permanently with ${targetUserId}`);
-        get().destroyPeer(targetUserId);
-      }
-    };
-
-    // Handle remote audio stream
-    pc.ontrack = (event) => {
-      console.log(`[Voice] Got remote track from ${targetUserId}:`, event.track.kind);
-      const remoteStream = event.streams[0];
-      if (!remoteStream) return;
-
-      const container = getAudioContainer();
-      const { remoteAudios } = get();
-      const oldAudio = remoteAudios.get(targetUserId);
-      if (oldAudio) {
-        oldAudio.pause();
-        oldAudio.srcObject = null;
-        oldAudio.remove();
-      }
-
-      const audio = document.createElement('audio');
-      audio.id = `vox-audio-${targetUserId}`;
-      audio.autoplay = true;
-      audio.muted = selfDeaf;
-      audio.srcObject = remoteStream;
-      container.appendChild(audio);
-
-      applyOutputDevice(audio, outputDeviceId);
-
-      const newAudios = new Map(remoteAudios);
-      newAudios.set(targetUserId, audio);
-      set({ remoteAudios: newAudios });
-
-      audio.play()
-        .then(() => console.log(`[Voice] Audio playing for ${targetUserId}`))
-        .catch((err) => console.warn(`[Voice] Audio autoplay blocked for ${targetUserId}:`, err));
-    };
-
-    // Store the peer BEFORE creating the offer (so handleSignal can find it)
-    const newPeers = new Map(peers);
-    newPeers.set(targetUserId, peerConn);
-    set({ peers: newPeers });
-
-    // If initiator, create and send the offer
-    if (initiator) {
-      peerConn.makingOffer = true;
-      pc.createOffer()
-        .then((offer) => pc.setLocalDescription(offer))
-        .then(() => {
-          if (pc.localDescription) {
-            console.log(`[Voice] Sending offer to ${targetUserId}`);
-            socket.emit('voice:signal', {
-              to: targetUserId,
-              signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
-            });
-          }
-        })
-        .catch((err) => console.error(`[Voice] Error creating offer for ${targetUserId}:`, err))
-        .finally(() => {
-          peerConn.makingOffer = false;
-        });
-    }
+    createPeerInternal('voice:signal', '[Voice]', targetUserId, initiator, { get, set });
   },
 
   destroyPeer: (userId: string) => {
@@ -629,6 +677,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   destroyAllPeers: () => {
     const { peers, remoteAudios } = get();
+
+    // Cancel all pending ICE restart timers
+    iceRestartTimers.forEach((timer) => clearTimeout(timer));
+    iceRestartTimers.clear();
+
     peers.forEach((peerConn) => {
       peerConn.pc.onicecandidate = null;
       peerConn.pc.oniceconnectionstatechange = null;
@@ -645,6 +698,149 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     if (container) container.innerHTML = '';
     set({ peers: new Map(), remoteAudios: new Map() });
   },
+
+  // ─── DM Call Methods ──────────────────────────────────────────────
+
+  setIncomingCall: (data) => set({ incomingCall: data }),
+
+  joinDMCall: async (conversationId: string) => {
+    const socket = getSocket();
+    if (!socket) return;
+
+    // Leave server voice channel if active (cross-cleanup)
+    if (get().activeChannelId) {
+      get().leaveChannel();
+    }
+
+    // Leave existing DM call if any
+    if (get().dmCallConversationId) {
+      get().leaveDMCall();
+    }
+
+    const settings = useSettingsStore.getState();
+    setNoiseGateThreshold(settings.noiseGateThreshold);
+
+    const stream = await acquireAudioStream();
+
+    const { selfMute, selfDeaf } = get();
+    const isPTT = settings.voiceMode === 'push_to_talk';
+
+    if (stream) {
+      if (isPTT) {
+        stream.getAudioTracks().forEach((track) => { track.enabled = false; });
+      } else {
+        if (selfMute) {
+          stream.getAudioTracks().forEach((track) => { track.enabled = false; });
+        }
+        if (!selfMute) {
+          startSpeakingDetection(stream, 'dm');
+        }
+      }
+    }
+
+    const effectiveMute = stream ? selfMute : true;
+    const serverMute = isPTT ? true : effectiveMute;
+
+    set({
+      dmCallConversationId: conversationId,
+      dmCallUsers: [],
+      localStream: stream,
+      selfMute: effectiveMute,
+      incomingCall: null,
+    });
+
+    socket.emit('dm:voice:join', conversationId, { selfMute: serverMute, selfDeaf });
+    get().startLatencyMeasurement();
+  },
+
+  leaveDMCall: () => {
+    const socket = getSocket();
+    const { localStream, dmCallConversationId } = get();
+
+    get().stopLatencyMeasurement();
+    stopSpeakingDetection();
+
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+    }
+
+    get().destroyAllPeers();
+
+    if (socket && dmCallConversationId) {
+      socket.emit('dm:voice:leave', dmCallConversationId);
+    }
+
+    set({
+      dmCallConversationId: null,
+      dmCallUsers: [],
+      localStream: null,
+      latency: null,
+    });
+  },
+
+  acceptCall: async () => {
+    const { incomingCall } = get();
+    if (!incomingCall) return;
+    await get().joinDMCall(incomingCall.conversationId);
+  },
+
+  declineCall: () => {
+    set({ incomingCall: null });
+  },
+
+  addDMCallUser: (user: VoiceUser) => {
+    const { dmCallUsers } = get();
+    if (dmCallUsers.some((u) => u.id === user.id)) return;
+
+    set({ dmCallUsers: [...dmCallUsers, user] });
+
+    // Create peer connection to new user if we're in this DM call
+    setTimeout(() => {
+      const state = get();
+      if (state.dmCallConversationId && state.localStream && user.id !== state.localUserId && !state.peers.has(user.id)) {
+        console.log('[DMVoice] Creating initiator peer to', user.id);
+        get().createDMPeer(user.id, true);
+      }
+    }, 0);
+  },
+
+  removeDMCallUser: (userId: string) => {
+    const restartTimer = iceRestartTimers.get(userId);
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      iceRestartTimers.delete(userId);
+    }
+
+    get().destroyPeer(userId);
+
+    set((state) => ({
+      dmCallUsers: state.dmCallUsers.filter((u) => u.id !== userId),
+    }));
+  },
+
+  updateDMCallUserState: (userId: string, selfMute: boolean, selfDeaf: boolean) => {
+    set((state) => ({
+      dmCallUsers: state.dmCallUsers.map((u) =>
+        u.id === userId ? { ...u, selfMute, selfDeaf } : u
+      ),
+    }));
+  },
+
+  setDMCallUserSpeaking: (userId: string, speaking: boolean) => {
+    set((state) => ({
+      dmCallUsers: state.dmCallUsers.map((u) =>
+        u.id === userId ? { ...u, speaking } : u
+      ),
+    }));
+  },
+
+  createDMPeer: (targetUserId: string, initiator: boolean) => {
+    createPeerInternal('dm:voice:signal', '[DMVoice]', targetUserId, initiator, { get, set });
+  },
+
+  handleDMSignal: (from: string, signal: unknown) => {
+    handleSignalInternal('dm:voice:signal', '[DMVoice]', get().createDMPeer, from, signal, { get });
+  },
 }));
 
 // Subscribe to output device changes and update all existing remote audio elements
@@ -657,57 +853,60 @@ useSettingsStore.subscribe((state, prevState) => {
   }
 });
 
-// Handle live voice mode switching while in a voice channel
+// Handle live voice mode switching while in a voice channel or DM call
 useSettingsStore.subscribe((state, prevState) => {
   if (state.voiceMode === prevState.voiceMode) return;
 
-  const { activeChannelId, localStream, selfMute } = useVoiceStore.getState();
-  if (!activeChannelId || !localStream) return;
+  const { activeChannelId, dmCallConversationId, localStream, selfMute } = useVoiceStore.getState();
+  if ((!activeChannelId && !dmCallConversationId) || !localStream) return;
 
   const socket = getSocket();
+  const muteEvent = activeChannelId ? 'voice:mute' : 'dm:voice:mute';
 
   if (state.voiceMode === 'push_to_talk') {
-    // Switching to PTT: disable tracks, stop detection, tell server we're muted
     localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
     stopSpeakingDetection();
-    if (socket) socket.emit('voice:mute', true);
+    if (socket) socket.emit(muteEvent as any, true);
   } else {
-    // Switching to VAD: if not selfMuted, re-enable tracks and start detection
     if (!selfMute) {
       localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
       setNoiseGateThreshold(state.noiseGateThreshold);
-      startSpeakingDetection(localStream);
-      if (socket) socket.emit('voice:mute', false);
+      startSpeakingDetection(localStream, dmCallConversationId ? 'dm' : 'server');
+      if (socket) socket.emit(muteEvent as any, false);
     }
   }
 });
 
 // On socket reconnect while in a voice channel: re-join and re-establish peers
 onSocketReconnect(() => {
-  const { activeChannelId, localStream } = useVoiceStore.getState();
-  if (!activeChannelId) return;
+  const { activeChannelId, dmCallConversationId, localStream } = useVoiceStore.getState();
 
-  console.log('[Voice] Socket reconnected — re-joining voice channel', activeChannelId);
   const socket = getSocket();
   if (!socket) return;
 
   // Destroy stale peers (they used the old socket)
   useVoiceStore.getState().destroyAllPeers();
 
-  // Re-join voice on the server — it will re-broadcast our presence
-  // and send us the updated user list, which triggers peer creation
   const { selfMute, selfDeaf } = useVoiceStore.getState();
   const settings = useSettingsStore.getState();
   const isPTT = settings.voiceMode === 'push_to_talk';
-  // In PTT mode, always tell the server we start muted (PTT key will unmute)
-  socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+
+  if (activeChannelId) {
+    console.log('[Voice] Socket reconnected — re-joining voice channel', activeChannelId);
+    socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+  } else if (dmCallConversationId) {
+    console.log('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
+    socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+  } else {
+    return;
+  }
 
   // Re-start latency measurement with new socket
   useVoiceStore.getState().startLatencyMeasurement();
 
-  // Re-start speaking detection if unmuted and in VAD mode (PTT key handles PTT mode)
+  // Re-start speaking detection if unmuted and in VAD mode
   if (localStream && !useVoiceStore.getState().selfMute && settings.voiceMode !== 'push_to_talk') {
     setNoiseGateThreshold(settings.noiseGateThreshold);
-    startSpeakingDetection(localStream);
+    startSpeakingDetection(localStream, dmCallConversationId ? 'dm' : 'server');
   }
 });

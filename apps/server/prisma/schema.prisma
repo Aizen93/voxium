@@ -30,6 +30,9 @@ model User {
   invites      Invite[]
   reactions    MessageReaction[]
   channelReads ChannelRead[]
+  conversationsAsUser1 Conversation[] @relation("ConversationUser1")
+  conversationsAsUser2 Conversation[] @relation("ConversationUser2")
+  conversationReads    ConversationRead[]
 
   @@map("users")
 }
@@ -88,18 +91,22 @@ model Channel {
 // ─── Messages ────────────────────────────────────────────────────────────────
 
 model Message {
-  id        String    @id @default(cuid())
-  content   String
-  channelId String    @map("channel_id")
-  authorId  String    @map("author_id")
-  editedAt  DateTime? @map("edited_at")
-  createdAt DateTime  @default(now()) @map("created_at")
+  id             String    @id @default(cuid())
+  content        String
+  type           String    @default("user")
+  channelId      String?   @map("channel_id")
+  conversationId String?   @map("conversation_id")
+  authorId       String    @map("author_id")
+  editedAt       DateTime? @map("edited_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
-  channel   Channel            @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  author    User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  reactions MessageReaction[]
+  channel      Channel?           @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  conversation Conversation?      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author       User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  reactions    MessageReaction[]
 
   @@index([channelId, createdAt])
+  @@index([conversationId, createdAt])
   @@map("messages")
 }
 
@@ -132,6 +139,36 @@ model ChannelRead {
 
   @@id([userId, channelId])
   @@map("channel_reads")
+}
+
+// ─── Conversations (Direct Messages) ────────────────────────────────────────
+
+model Conversation {
+  id        String   @id @default(cuid())
+  user1Id   String   @map("user1_id")
+  user2Id   String   @map("user2_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user1    User      @relation("ConversationUser1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2    User      @relation("ConversationUser2", fields: [user2Id], references: [id], onDelete: Cascade)
+  messages Message[]
+  reads    ConversationRead[]
+
+  @@unique([user1Id, user2Id])
+  @@map("conversations")
+}
+
+model ConversationRead {
+  userId         String   @map("user_id")
+  conversationId String   @map("conversation_id")
+  lastReadAt     DateTime @map("last_read_at")
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, conversationId])
+  @@map("conversation_reads")
 }
 
 // ─── Invites ─────────────────────────────────────────────────────────────────

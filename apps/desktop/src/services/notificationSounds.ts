@@ -80,3 +80,15 @@ export function playLeaveSound(): void {
 export function playMessageSound(): void {
   playTone([{ freq: 880, duration: 0.15 }], 0.2);
 }
+
+/** Ringtone: repeating ascending pattern */
+export function playCallSound(): void {
+  playTone(
+    [
+      { freq: 523, duration: 0.12 },
+      { freq: 659, duration: 0.12 },
+      { freq: 784, duration: 0.15 },
+    ],
+    0.35,
+  );
+}

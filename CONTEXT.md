@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.4.1 (Persistent Unread Tracking)
-**Date:** 2026-02-26
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation
+**Version:** 0.5.1 (DM Voice Calls)
+**Date:** 2026-02-27
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, and 1-on-1 DM voice calls with WebRTC P2P audio
 
 ## What Has Been Done
 
@@ -150,7 +150,7 @@ Comprehensive hardening of real-time features:
 
 ## What Is NOT Yet Done (Planned for Next Iterations)
 
-### V0.2 - Polish & Stability (in progress)
+### V0.2 - Polish & Stability (complete)
 - [x] Speaking detection via AudioContext
 - [x] Latency measurement and connection quality display
 - [x] Audio device selection and settings modal
@@ -169,7 +169,7 @@ Comprehensive hardening of real-time features:
 - [x] Message editing/deletion UI
 - [x] Message reactions with emoji picker
 - [x] File/image upload support (S3 avatars and server icons)
-- [ ] Direct messages (DMs)
+- [x] Direct messages (DMs) -- text + voice calls
 - [ ] Friend system
 - [x] Server settings panel
 - [x] User settings/profile editing
@@ -746,6 +746,91 @@ Enhanced unread indicators on the server sidebar:
 - `apps/desktop/src/stores/serverStore.ts` — `initUnreadCounts`, `markChannelRead` methods
 - `apps/desktop/src/components/layout/MainLayout.tsx` — `unread:init` handler
 
+### 18. Direct Messages (DM) Feature
+
+**Summary:** Full 1-on-1 direct messaging between users, with real-time delivery, typing indicators, reactions, unread tracking, and persistent read state.
+
+**Database (`apps/server/prisma/schema.prisma`):**
+- `Conversation` model: composite unique `(user1Id, user2Id)` with `user1Id < user2Id` invariant for deduplication
+- `ConversationRead` model: composite PK `(userId, conversationId)`, `lastReadAt` timestamp, cascade deletes
+- `Message` model: `channelId` made nullable, new nullable `conversationId` foreign key; index on `[conversationId, createdAt]`
+- Reverse relations added on `User` for both conversation sides and reads
+
+**Shared package (`packages/shared`):**
+- `Conversation` interface with `participant` (the other user), `lastMessage` preview
+- `DMUnreadCount` interface
+- DM socket events added to `ServerToClientEvents` and `ClientToServerEvents`: `dm:message:new`, `dm:message:update`, `dm:message:delete`, `dm:typing:start/stop`, `dm:message:reaction_update`, `dm:unread:init`, `dm:join`
+- `WS_EVENTS` constants for all DM events
+
+**Backend — DM routes (`apps/server/src/routes/dm.ts`):**
+- `GET /dm` — list conversations with last message preview, sorted by `updatedAt`
+- `POST /dm` — create-or-get conversation (upsert pattern with `sortUserIds` for uniqueness)
+- `GET /dm/:conversationId/messages` — cursor-paginated messages with reaction aggregation
+- `POST /dm/:conversationId/messages` — send DM, emits `dm:message:new` to room
+- `PATCH /dm/:conversationId/messages/:messageId` — edit own DM message
+- `DELETE /dm/:conversationId/messages/:messageId` — delete own DM message
+- `PUT /dm/:conversationId/messages/:messageId/reactions/:emoji` — toggle reaction
+- `POST /dm/:conversationId/read` — mark conversation as read (upsert)
+- All routes check conversation participation via `getConversationOrThrow()`
+
+**Backend — Extracted utility (`apps/server/src/utils/reactions.ts`):**
+- `aggregateReactions()` and `reactionInclude` extracted from messages route, shared by DM and channel message routes
+
+**Backend — Socket handler (`apps/server/src/websocket/socketServer.ts`):**
+- `dm:join` handler with authorization check (verifies conversation membership via DB query before joining room)
+- `dm:typing:start/stop` handlers with `socket.rooms.has()` guard to prevent unauthorized emission
+- Auto-join all conversation rooms on socket connect
+- DM unread count computed via raw SQL query and emitted as `dm:unread:init`
+
+**Frontend — DM store (`stores/dmStore.ts`):**
+- Zustand store managing conversations list, active conversation, DM unread counts
+- `fetchConversations()`, `openDM(userId)`, `setActiveConversation()`, `markConversationRead()`
+- Unread tracking: `incrementDMUnread()`, `clearDMUnread()`, `initDMUnreadCounts()`, `totalDMUnread()`
+
+**Frontend — DM components:**
+- `DMList` — conversation list with unread badges, participant avatars, last message preview
+- `DMChatArea` — DM chat view with header, message list, input; handles room join/reconnect
+- `DMMessageList` — scrollable message list with cursor pagination, typing indicator, beginning-of-conversation marker
+
+**Frontend — Modified components:**
+- `MainLayout` — DM socket event handlers (message new/update/delete, typing, reactions, unread init); DM view rendering when no server is active
+- `ServerSidebar` — DM unread badge on Voxium home button
+- `MessageInput` — DM typing/send support via `conversationId` prop
+- `MessageItem` — DM edit/delete/reaction support via `conversationId` prop
+- `ReactionDisplay` — DM reaction toggle via `conversationId` prop
+- `DeleteConfirmModal` — DM delete support via `conversationId` prop
+- `UserProfilePopup` — "Message" button to open DM conversation
+
+**Files added:**
+- `apps/server/src/routes/dm.ts`
+- `apps/server/src/utils/reactions.ts`
+- `apps/desktop/src/stores/dmStore.ts`
+- `apps/desktop/src/components/dm/DMList.tsx`
+- `apps/desktop/src/components/dm/DMChatArea.tsx`
+- `apps/desktop/src/components/dm/DMMessageList.tsx`
+
+**Files modified:**
+- `apps/server/prisma/schema.prisma`
+- `packages/shared/src/types.ts`
+- `packages/shared/src/constants.ts`
+- `apps/server/src/app.ts`
+- `apps/server/src/websocket/socketServer.ts`
+- `apps/server/src/routes/messages.ts`
+- `apps/desktop/src/stores/chatStore.ts`
+- `apps/desktop/src/components/layout/MainLayout.tsx`
+- `apps/desktop/src/components/server/ServerSidebar.tsx`
+- `apps/desktop/src/components/chat/MessageInput.tsx`
+- `apps/desktop/src/components/chat/MessageItem.tsx`
+- `apps/desktop/src/components/chat/ReactionDisplay.tsx`
+- `apps/desktop/src/components/chat/DeleteConfirmModal.tsx`
+- `apps/desktop/src/components/common/UserProfilePopup.tsx`
+
+**Review fixes applied:**
+- CRITICAL: `dm:join` socket handler now verifies conversation membership via DB query before joining the room (was previously unauthenticated, allowing any user to eavesdrop on DM events)
+- CRITICAL: `dm:typing:start/stop` handlers now check `socket.rooms.has()` to prevent unauthorized typing indicator injection
+- Removed unused `currentUser` DB query in `POST /dm` route (fetched but never used)
+- Fixed copy-paste bug in `DMMessageList` typing indicator text (multi-user branch was identical to single-user branch)
+
 ### Known Issues / Suggestions
 - `io.fetchSockets()` in `memberBroadcast.ts` retrieves ALL connected sockets. Fine for small deployments but at scale, use a `userId -> socketId[]` index or Redis adapter's `remoteJoin`/`remoteLeave`.
 - The `member:joined` event sends `email: ''` to satisfy the `User` type in `ServerToClientEvents`. Consider a `PublicUser` type that omits `email`.
@@ -755,7 +840,7 @@ Enhanced unread indicators on the server sidebar:
 - The PTT mode-switch subscription emits `voice:mute true` to the server but does not update `selfMute` in the voice store. This is intentional (`selfMute` represents the user's manual mute preference, not PTT transient state), but the mute icon in `VoicePanel`/`ChannelSidebar` may show "unmuted" while PTT is active and the key is not held.
 - The `validateEmoji()` function accepts mixed strings containing at least one non-ASCII character (e.g., text+emoji). The 32-character length limit and React's JSX escaping mitigate risk, but a stricter validator could use Unicode emoji property matching.
 - The `MAX_REACTIONS_PER_MESSAGE` limit check in the reaction toggle endpoint has a TOCTOU race: between the `groupBy` count and the `create`, another request could add a new distinct emoji, exceeding the limit. The unique constraint prevents true duplicates, but the soft limit can be exceeded by 1 under concurrent requests to different emoji. Acceptable for current scale.
-- Pre-existing: `leavingUser` variable in `MainLayout.tsx` line 102 is assigned but never read (dead code from voice user left handler).
+- ~~Pre-existing: `leavingUser` variable in `MainLayout.tsx` line 102 is assigned but never read (dead code from voice user left handler).~~ Fixed in DM voice bug fix review (2026-02-27).
 - The S3 utility (`s3.ts`) uses non-null assertions (`!`) on all env vars. If any are missing, the error surfaces as a cryptic AWS SDK error at runtime rather than a clear startup failure. Consider validating env vars at startup.
 - The `GET /uploads/*key` route is unauthenticated, relying on key unguessability (CUID + timestamp). For truly private content, consider signed URLs or auth middleware on the serve route.
 - The `multer` file filter checks both MIME type and file extension, but MIME types from `Content-Type` headers are client-controlled and can be spoofed. The sharp processing pipeline implicitly validates the actual image data (it will throw on non-image input), which provides defense in depth.
@@ -763,3 +848,112 @@ Enhanced unread indicators on the server sidebar:
 - `ServerSettingsModal` and `CreateServerModal` duplicate the icon selection/preview/cleanup logic. Consider extracting a shared `ImageUploadButton` component.
 - The `/forgot-password` endpoint has no rate limiting. An attacker could trigger mass emails to a valid address. Consider adding per-IP or per-email rate limiting when rate limiter infrastructure is implemented.
 - Socket.IO authentication middleware validates the JWT signature at handshake time but does not check `tokenVersion` against the database. After a password change or reset, a revoked access token can maintain an existing WebSocket connection for its remaining lifetime. This is the standard JWT trade-off -- access tokens are stateless and short-lived (15 min). Periodic re-authentication on the socket would require architectural changes (middleware on every socket event or periodic disconnect/reconnect).
+- `io.fetchSockets()` in `routes/dm.ts` (POST /dm, conversation creation) iterates ALL connected sockets to find the two participants' sockets to join them to the new DM room. Same scalability concern as `memberBroadcast.ts`. Consider a `userId -> socketId[]` index.
+- The `chatStore` uses module-level `activeFetchController` and `lastFetchKey` singletons shared between channel messages and DM messages. This works because only one view (channel chat or DM chat) is active at a time, but it's fragile -- if the UI ever renders both simultaneously, they would interfere with each other. Consider scoping these per-context.
+- DM `before` query parameter (cursor pagination) uses `new Date(before)` without validating the date string. An invalid date string like `"foo"` produces `Invalid Date`, which Prisma passes to PostgreSQL where it will throw. The existing channel messages route has the same pattern. Consider adding date validation.
+- `chatStore.sendDMMessage` has a fallback pattern that adds the sent message locally if not yet received via WebSocket. This can cause brief duplicates (the addMessage dedup check prevents permanent duplicates). The same pattern exists for channel messages and is acceptable.
+- The `UserProfilePopup` "Message" button only works when the user is viewing a server (it depends on `member` being found in the server store's member list). If the user is already in the DM view and opens a profile popup for someone not in the current server's member list, the popup renders `null`. Consider a fallback that fetches user data directly.
+- DM conversations cannot currently be deleted or archived by users. The `Conversation` model has no soft-delete mechanism.
+
+---
+
+### Review: DM Voice Calls Implementation (2026-02-27)
+
+**New files:**
+- `apps/server/src/websocket/dmVoiceHandler.ts` -- Server-side DM voice signaling (in-memory state, conversation participant verification, cross-cleanup with server voice)
+- `apps/desktop/src/components/dm/IncomingCallModal.tsx` -- Incoming call UI with accept/decline buttons
+- `apps/desktop/src/services/notificationSounds.ts` -- `playCallSound()` added (ascending 3-tone pattern)
+
+**Modified files:**
+- `packages/shared/src/types.ts` -- Added 7 DM voice events to `ServerToClientEvents`, 6 to `ClientToServerEvents`
+- `packages/shared/src/constants.ts` -- Added `DM_VOICE_*` constants to `WS_EVENTS`
+- `apps/server/src/websocket/socketServer.ts` -- Registered `handleDMVoiceEvents` handler
+- `apps/server/src/websocket/voiceHandler.ts` -- Exported `leaveCurrentVoiceChannel`, added `leaveCurrentDMVoiceChannel` cross-cleanup on `voice:join`
+- `apps/desktop/src/stores/voiceStore.ts` -- Added DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`) and methods (`joinDMCall`, `leaveDMCall`, `acceptCall`, `declineCall`, `handleDMSignal`, `createDMPeer`)
+- `apps/desktop/src/components/layout/MainLayout.tsx` -- Added 7 DM voice socket event handlers + `IncomingCallModal` render
+- `apps/desktop/src/components/dm/DMChatArea.tsx` -- Added call/end-call button in header + active call banner
+- `apps/desktop/src/components/voice/VoicePanel.tsx` -- Extended to render for DM calls (shows "DM Call" header, DM participant name, DM call users)
+
+**Architecture decisions:**
+- DM voice uses the same mesh P2P WebRTC approach as server voice channels
+- Server and DM voice are mutually exclusive (joining one leaves the other via cross-cleanup on both server and client)
+- DM voice state is in-memory on server (`dmVoiceUsers` Map + `userDMCall` reverse lookup), same approach as server voice
+- Shared `peers` and `remoteAudios` maps in `voiceStore` are reused across server/DM voice (safe due to mutual exclusivity)
+- Call offer broadcasts to `dm:{conversationId}` room (both participants are auto-joined on connect); ringing is a single sound, not a repeating ringtone
+- Three `disconnecting` handlers are registered per socket (socketServer, voiceHandler, dmVoiceHandler) -- Socket.IO supports multiple handlers, all fire correctly
+
+**Review fixes applied:**
+- CRITICAL: Added `conversationId` guards to `dmVoiceJoined`, `dmVoiceLeft`, `dmVoiceStateUpdate`, `dmVoiceSpeaking`, and `dmVoiceSignal` handlers in `MainLayout.tsx`. Without these, DM voice events for conversations the user is not in a call for would leak through (since the socket is in `dm:{id}` rooms for ALL conversations for message delivery), causing phantom users in `dmCallUsers` and spurious peer connections.
+- WARNING: Reordered `dm:voice:left` and `dm:voice:ended` emission in `dmVoiceHandler.ts` so `left` fires before `ended` when the last user departs. Previously `ended` fired first, which caused `leaveDMCall()` to clear all state before the `left` event arrived.
+- WARNING: Added guard in `dmVoiceOffer` handler to ignore incoming calls when the user is already in a server voice channel or DM call, preventing the incoming call modal from overwriting state mid-call.
+
+**Known issues / suggestions from this review:**
+- The call sound (`playCallSound`) plays once on offer receipt. For a real ringing experience, it should loop until accepted/declined/timed out. Consider a repeating interval with auto-cancel.
+- There is no call timeout. If User A calls User B and B never answers, the `incomingCall` modal persists indefinitely and User A sits in a solo call forever. Consider a server-side or client-side timeout (e.g., 30s) that auto-cancels the offer.
+- The `declineCall` method only clears `incomingCall` locally -- it does not notify the caller that the call was declined. The caller will remain in the call alone with no feedback. Consider emitting a `dm:voice:decline` event.
+- The `createDMPeer` method is largely a copy-paste of `createPeer` with `dm:voice:signal` instead of `voice:signal`. The two methods share 90%+ identical code. Consider extracting a shared `createPeerConnection(targetUserId, initiator, signalEvent)` factory to reduce duplication and ensure bug fixes apply to both paths.
+- The `joinDMCall` method duplicates the audio setup logic from `joinChannel` (getUserMedia, PTT handling, speaking detection). Consider extracting a shared `acquireAudioStream()` helper.
+- `handleDMSignal` is also a near-exact duplicate of `handleSignal` with different emit events. Same refactoring opportunity as `createDMPeer`.
+- DM voice `disconnecting` handlers fire in all three places (socketServer, voiceHandler, dmVoiceHandler). The dmVoiceHandler's own `disconnecting` handler is redundant since `leaveCurrentDMVoiceChannel` is idempotent (checks `userDMCall.get(userId)` first). Not a bug, but unnecessary registration.
+- Server-side `dm:voice:join` handler has an `await` for conversation verification, meaning a brief window where early signals could arrive before the user is fully registered. In practice, the other party hasn't received `dm:voice:joined` yet so they won't send signals, but worth noting for robustness.
+
+---
+
+### Review: DM Voice Bug Fixes & UI Update (2026-02-27)
+
+**Modified files:**
+- `apps/server/src/websocket/dmVoiceHandler.ts` -- Fixed join flow (emit both offer AND joined for first user) and leave flow (always end 1-on-1 calls, clean up remaining user state)
+- `apps/desktop/src/components/layout/MainLayout.tsx` -- Fixed `dmVoiceEnded` handler to do inline cleanup instead of calling `leaveDMCall()` (avoids emitting `dm:voice:leave` back to server); removed unused `leavingUser` variable
+- `apps/desktop/src/components/voice/VoicePanel.tsx` -- Reverted to server-voice-only (removed DM call rendering)
+- `apps/desktop/src/components/dm/DMChatArea.tsx` -- Replaced small "In call" banner with `DMCallPanel` component
+
+**New files:**
+- `apps/desktop/src/components/dm/DMCallPanel.tsx` -- Discord-style call UI with large avatars, speaking indicators, mute/deaf/hangup controls
+
+**Architecture decisions:**
+- DM call UI is now rendered inline in `DMChatArea` (via `DMCallPanel`) rather than in the fixed-position `VoicePanel`. This separates concerns: `VoicePanel` handles server voice only, `DMCallPanel` handles DM calls only.
+- `dmVoiceEnded` handler in `MainLayout.tsx` performs inline cleanup (stop latency, stop speaking detection, stop tracks, destroy peers, reset state) instead of calling `leaveDMCall()` to prevent emitting `dm:voice:leave` back to the server when the call was already ended server-side.
+
+**Review fixes applied:**
+- CRITICAL: `destroyAllPeers()` in `voiceStore.ts` now clears ICE restart timers (`iceRestartTimers.forEach/clear`). Previously, the inline `dmVoiceEnded` cleanup called `destroyAllPeers()` but did not clear ICE restart timers (they were module-private). A pending timer could fire after cleanup and act on destroyed peers or emit signals on a dead call. Redundant timer clears removed from `leaveChannel()` and `leaveDMCall()` since `destroyAllPeers()` now handles it centrally.
+- CRITICAL: `leaveCurrentDMVoiceChannel()` in `dmVoiceHandler.ts` now removes the remaining user's socket from the `dm:voice:{conversationId}` room. Previously, only the leaving user's socket was removed; the other participant's socket stayed in the voice room indefinitely, causing a resource leak and potential issues on subsequent calls.
+- WARNING: Removed unused `leavingUser` variable in `MainLayout.tsx` `voiceUserLeft` handler (dead code).
+
+**Known issues / suggestions from this review:**
+- The redundant `callUsers.size === 0` check in `leaveCurrentDMVoiceChannel` (after the loop that deletes remaining users) is a harmless safety net but makes the code harder to follow. Consider consolidating the cleanup logic.
+- `createDMPeer` and `createPeer` remain near-identical code (flagged in previous review). The new `DMCallPanel` increases the surface area relying on this duplicated WebRTC logic.
+
+---
+
+### Review: DM Voice System Messages & Participant Status (2026-02-27)
+
+**Modified files:**
+- `apps/server/prisma/schema.prisma` -- Added `type String @default("user")` to Message model for distinguishing system vs user messages
+- `apps/server/src/websocket/dmVoiceHandler.ts` -- Added `createSystemMessage()` helper to persist "Voice call started" / "Voice call ended" system messages to DB and broadcast via `dm:message:new`
+- `packages/shared/src/types.ts` -- Added optional `type?: string` to Message interface
+- `apps/desktop/src/stores/chatStore.ts` -- Removed ephemeral `addSystemMessage` and `SYSTEM_AUTHOR_ID` (system messages now come from server as persisted DB records)
+- `apps/desktop/src/stores/dmStore.ts` -- Added `participantStatuses` map and `updateParticipantStatus` method for tracking DM partner online/offline status
+- `apps/desktop/src/stores/voiceStore.ts` -- ICE timer cleanup centralized in `destroyAllPeers`, speaking detection mode parameter propagated correctly
+- `apps/desktop/src/services/audioAnalyser.ts` -- Added `mode` parameter to `startSpeakingDetection` for dm vs server speaking events
+- `apps/desktop/src/components/layout/MainLayout.tsx` -- `presenceUpdate` handler now also calls `useDMStore.getState().updateParticipantStatus()` for real-time status dot updates; added `stopSpeakingDetection` import for inline `dmVoiceEnded` cleanup
+- `apps/desktop/src/components/dm/DMChatArea.tsx` -- Added `UserHoverTarget` on header avatar/name, status dot indicator using `participantStatuses`, initial status fetch via API
+- `apps/desktop/src/components/dm/DMCallPanel.tsx` -- Simplified to avatar-only layout with speaking ring indicators
+- `apps/desktop/src/components/dm/DMMessageList.tsx` -- System message rendering for `message.type === 'system'` with phone icon pill and formatted timestamp
+- `apps/desktop/src/components/voice/VoicePanel.tsx` -- Reverted to server-voice-only rendering
+
+**Database changes:**
+- Migration `20260227020932_add_message_type` adds `type TEXT NOT NULL DEFAULT 'user'` column to `messages` table
+
+**Architecture decisions:**
+- System messages are now server-authoritative (persisted in DB with `type: 'system'`) rather than client-side ephemeral. This means call history is visible across sessions and to both participants.
+- The `createSystemMessage` helper is fire-and-forget (errors logged but not propagated), ensuring voice flow is never blocked by message persistence failures.
+- Participant presence status is tracked in `dmStore.participantStatuses` map, seeded on mount via API call and kept current via `presence:update` socket events.
+
+**Review fixes applied:**
+- Cleaned up unused destructured variables (`dmCallConversationId`, `localStream`, `localUserId`, `peers`) in `addDMCallUser` method of `voiceStore.ts`. The `setTimeout` callback correctly reads fresh state via `get()`, making the outer destructuring dead code.
+
+**Known issues / suggestions from this review:**
+- The `as unknown as Message` double cast in `createSystemMessage` (dmVoiceHandler.ts line 33) works but is fragile. A shared type assertion helper or Prisma return type mapping would be cleaner.
+- The `VoiceState` interface in `voiceStore.ts` has grown to 38 members, mixing server voice, DM voice, and peer management concerns. While acceptable for Zustand's flat store pattern, this could benefit from logical grouping via nested objects in the future.
+- `createDMPeer` and `createPeer` remain near-identical (flagged in two previous reviews). Consider extracting a shared `createPeerConnection(targetUserId, initiator, signalEvent)` function.
+- `joinDMCall` and `joinChannel` share duplicated audio setup logic (getUserMedia, PTT handling, noise gate, speaking detection). A shared `acquireAudioStream()` helper would reduce duplication.

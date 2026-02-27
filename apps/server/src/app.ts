@@ -10,6 +10,7 @@ import { messageRouter } from './routes/messages';
 import { userRouter } from './routes/users';
 import { inviteRouter } from './routes/invites';
 import { uploadRouter } from './routes/uploads';
+import { dmRouter } from './routes/dm';
 import { errorHandler } from './middleware/errorHandler';
 
 export const app = express();
@@ -58,6 +59,7 @@ api.use('/servers/:serverId/channels', channelRouter);
 api.use('/channels/:channelId/messages', messageRouter);
 api.use('/invites', inviteRouter);
 api.use('/uploads', uploadRouter);
+api.use('/dm', dmRouter);
 
 app.use('/api/v1', api);
 

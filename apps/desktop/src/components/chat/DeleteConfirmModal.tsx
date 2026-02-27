@@ -7,12 +7,13 @@ import type { Message } from '@voxium/shared';
 
 interface Props {
   message: Message;
-  channelId: string;
+  channelId?: string;
+  conversationId?: string;
   onClose: () => void;
 }
 
-export function DeleteConfirmModal({ message, channelId, onClose }: Props) {
-  const { requestDeleteMessage } = useChatStore();
+export function DeleteConfirmModal({ message, channelId, conversationId, onClose }: Props) {
+  const { requestDeleteMessage, requestDeleteDMMessage } = useChatStore();
   const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
@@ -26,7 +27,11 @@ export function DeleteConfirmModal({ message, channelId, onClose }: Props) {
   const handleDelete = async () => {
     setIsDeleting(true);
     try {
-      await requestDeleteMessage(channelId, message.id);
+      if (conversationId) {
+        await requestDeleteDMMessage(conversationId, message.id);
+      } else if (channelId) {
+        await requestDeleteMessage(channelId, message.id);
+      }
       onClose();
     } catch {
       toast.error('Failed to delete message');

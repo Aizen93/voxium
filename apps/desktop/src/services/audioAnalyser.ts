@@ -10,6 +10,7 @@ let currentLevel = 0;
 
 const SILENCE_DELAY_MS = 300;
 let threshold = 0.015;
+let speakingEvent: 'voice:speaking' | 'dm:voice:speaking' = 'voice:speaking';
 
 export function setNoiseGateThreshold(value: number) {
   threshold = value;
@@ -19,7 +20,8 @@ export function getAudioLevel(): number {
   return currentLevel;
 }
 
-export function startSpeakingDetection(stream: MediaStream) {
+export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm' = 'server') {
+  speakingEvent = mode === 'dm' ? 'dm:voice:speaking' : 'voice:speaking';
   stopSpeakingDetection();
 
   try {
@@ -55,7 +57,7 @@ export function startSpeakingDetection(stream: MediaStream) {
       silenceStart = 0;
       if (!isSpeaking) {
         isSpeaking = true;
-        socket?.emit('voice:speaking', true);
+        socket?.emit(speakingEvent as any, true);
       }
     } else {
       if (isSpeaking) {
@@ -63,7 +65,7 @@ export function startSpeakingDetection(stream: MediaStream) {
           silenceStart = now;
         } else if (now - silenceStart > SILENCE_DELAY_MS) {
           isSpeaking = false;
-          socket?.emit('voice:speaking', false);
+          socket?.emit(speakingEvent as any, false);
         }
       }
     }
@@ -84,7 +86,7 @@ export function stopSpeakingDetection() {
   if (isSpeaking) {
     isSpeaking = false;
     const socket = getSocket();
-    socket?.emit('voice:speaking', false);
+    socket?.emit(speakingEvent as any, false);
   }
 
   if (sourceNode) {

@@ -3,6 +3,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
+import { useDMStore } from '../../stores/dmStore';
 import { getSocket, getSocketGeneration, onConnectionStatusChange } from '../../services/socket';
 import { ServerSidebar } from '../server/ServerSidebar';
 import { ChannelSidebar } from '../channel/ChannelSidebar';
@@ -11,13 +12,18 @@ import { MemberSidebar } from '../server/MemberSidebar';
 import { VoicePanel } from '../voice/VoicePanel';
 import { SettingsModal } from '../settings/SettingsModal';
 import { ConnectionBanner } from './ConnectionBanner';
+import { DMList } from '../dm/DMList';
+import { DMChatArea } from '../dm/DMChatArea';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
-import { playJoinSound, playLeaveSound, playMessageSound } from '../../services/notificationSounds';
+import { playJoinSound, playLeaveSound, playMessageSound, playCallSound } from '../../services/notificationSounds';
+import { stopSpeakingDetection } from '../../services/audioAnalyser';
+import { IncomingCallModal } from '../dm/IncomingCallModal';
 
 export function MainLayout() {
   const { fetchServers, activeServerId } = useServerStore();
   const { user } = useAuthStore();
+  const activeConversationId = useDMStore((s) => s.activeConversationId);
   const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
   usePushToTalk();
   const attachedGeneration = useRef(-1);
@@ -85,7 +91,10 @@ export function MainLayout() {
           useChatStore.getState().removeTypingUser(userId);
         }
       },
-      presenceUpdate: ({ userId, status }: any) => useServerStore.getState().updateMemberStatus(userId, status),
+      presenceUpdate: ({ userId, status }: any) => {
+        useServerStore.getState().updateMemberStatus(userId, status);
+        useDMStore.getState().updateParticipantStatus(userId, status);
+      },
       voiceChannelUsers: ({ channelId, users: voiceUsers }: any) => {
         useVoiceStore.getState().setChannelUsers(channelId, voiceUsers);
       },
@@ -99,7 +108,6 @@ export function MainLayout() {
       voiceUserLeft: ({ channelId, userId }: any) => {
         const currentUser = useAuthStore.getState().user;
         const voiceState = useVoiceStore.getState();
-        const leavingUser = voiceState.channelUsers.get(channelId)?.find((u: any) => u.id === userId);
         voiceState.removeUserFromChannel(channelId, userId);
         if (userId === currentUser?.id) return;
         if (voiceState.activeChannelId !== channelId) return;
@@ -148,6 +156,120 @@ export function MainLayout() {
           store.markChannelRead(activeChannelId);
         }
       },
+      dmMessageNew: (message: any) => {
+        const dmStore = useDMStore.getState();
+        const activeConvId = dmStore.activeConversationId;
+
+        // Update last message in conversation list
+        if (message.conversationId) {
+          dmStore.updateLastMessage(message.conversationId, {
+            content: message.content,
+            createdAt: message.createdAt,
+            authorId: message.author?.id || message.authorId,
+          });
+        }
+
+        if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
+          useChatStore.getState().addMessage(message);
+        } else if (message.conversationId) {
+          const currentUser = useAuthStore.getState().user;
+          if (message.author?.id !== currentUser?.id) {
+            dmStore.incrementDMUnread(message.conversationId);
+            if (useSettingsStore.getState().enableNotificationSounds) playMessageSound();
+          }
+        }
+      },
+      dmMessageUpdate: (message: any) => {
+        const activeConvId = useDMStore.getState().activeConversationId;
+        if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
+          useChatStore.getState().updateMessage(message);
+        }
+      },
+      dmMessageDelete: ({ messageId, conversationId }: any) => {
+        const activeConvId = useDMStore.getState().activeConversationId;
+        if (conversationId === activeConvId && !useServerStore.getState().activeServerId) {
+          useChatStore.getState().deleteMessage(messageId);
+        }
+      },
+      dmTypingStart: ({ conversationId, userId, username }: any) => {
+        const currentUser = useAuthStore.getState().user;
+        const activeConvId = useDMStore.getState().activeConversationId;
+        if (userId !== currentUser?.id && conversationId === activeConvId && !useServerStore.getState().activeServerId) {
+          useChatStore.getState().setTypingUser(userId, username);
+        }
+      },
+      dmTypingStop: ({ conversationId, userId }: any) => {
+        const activeConvId = useDMStore.getState().activeConversationId;
+        if (conversationId === activeConvId && !useServerStore.getState().activeServerId) {
+          useChatStore.getState().removeTypingUser(userId);
+        }
+      },
+      dmReactionUpdate: ({ messageId, conversationId, reactions }: any) => {
+        const activeConvId = useDMStore.getState().activeConversationId;
+        if (conversationId === activeConvId && !useServerStore.getState().activeServerId) {
+          useChatStore.getState().updateMessageReactions(messageId, reactions);
+        }
+      },
+      dmUnreadInit: ({ unreads }: any) => {
+        const dmStore = useDMStore.getState();
+        dmStore.initDMUnreadCounts(unreads);
+        const activeConvId = dmStore.activeConversationId;
+        if (activeConvId) {
+          dmStore.clearDMUnread(activeConvId);
+          dmStore.markConversationRead(activeConvId);
+        }
+      },
+      dmVoiceOffer: ({ conversationId, from }: any) => {
+        const currentUser = useAuthStore.getState().user;
+        if (from.id === currentUser?.id) return;
+        // Don't show incoming call if already in a voice channel or DM call
+        const voiceState = useVoiceStore.getState();
+        if (voiceState.activeChannelId || voiceState.dmCallConversationId) return;
+        voiceState.setIncomingCall({ conversationId, from });
+        if (useSettingsStore.getState().enableNotificationSounds) playCallSound();
+      },
+      dmVoiceJoined: ({ conversationId, user: voiceUser }: any) => {
+        if (useVoiceStore.getState().dmCallConversationId !== conversationId) return;
+        useVoiceStore.getState().addDMCallUser(voiceUser);
+      },
+      dmVoiceLeft: ({ conversationId, userId }: any) => {
+        if (useVoiceStore.getState().dmCallConversationId !== conversationId) return;
+        useVoiceStore.getState().removeDMCallUser(userId);
+      },
+      dmVoiceStateUpdate: ({ conversationId, userId, selfMute, selfDeaf }: any) => {
+        if (useVoiceStore.getState().dmCallConversationId !== conversationId) return;
+        useVoiceStore.getState().updateDMCallUserState(userId, selfMute, selfDeaf);
+      },
+      dmVoiceSpeaking: ({ conversationId, userId, speaking }: any) => {
+        if (useVoiceStore.getState().dmCallConversationId !== conversationId) return;
+        useVoiceStore.getState().setDMCallUserSpeaking(userId, speaking);
+      },
+      dmVoiceSignal: ({ from, signal }: any) => {
+        if (!useVoiceStore.getState().dmCallConversationId) return;
+        useVoiceStore.getState().handleDMSignal(from, signal);
+      },
+      dmVoiceEnded: ({ conversationId }: any) => {
+        const voiceState = useVoiceStore.getState();
+        if (voiceState.dmCallConversationId === conversationId) {
+          // Inline cleanup instead of leaveDMCall() to avoid emitting dm:voice:leave
+          // back to the server (call was already ended server-side)
+          voiceState.stopLatencyMeasurement();
+          stopSpeakingDetection();
+          if (voiceState.localStream) {
+            voiceState.localStream.getTracks().forEach((track) => track.stop());
+          }
+          voiceState.destroyAllPeers();
+          useVoiceStore.setState({
+            dmCallConversationId: null,
+            dmCallUsers: [],
+            localStream: null,
+            latency: null,
+          });
+        }
+        if (voiceState.incomingCall?.conversationId === conversationId) {
+          voiceState.setIncomingCall(null);
+        }
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -171,6 +293,20 @@ export function MainLayout() {
       ['user:updated', handlers.userUpdated],
       ['message:reaction_update', handlers.messageReactionUpdate],
       ['unread:init', handlers.unreadInit],
+      ['dm:message:new', handlers.dmMessageNew],
+      ['dm:message:update', handlers.dmMessageUpdate],
+      ['dm:message:delete', handlers.dmMessageDelete],
+      ['dm:typing:start', handlers.dmTypingStart],
+      ['dm:typing:stop', handlers.dmTypingStop],
+      ['dm:message:reaction_update', handlers.dmReactionUpdate],
+      ['dm:unread:init', handlers.dmUnreadInit],
+      ['dm:voice:offer', handlers.dmVoiceOffer],
+      ['dm:voice:joined', handlers.dmVoiceJoined],
+      ['dm:voice:left', handlers.dmVoiceLeft],
+      ['dm:voice:state_update', handlers.dmVoiceStateUpdate],
+      ['dm:voice:speaking', handlers.dmVoiceSpeaking],
+      ['dm:voice:signal', handlers.dmVoiceSignal],
+      ['dm:voice:ended', handlers.dmVoiceEnded],
     ];
 
     /**
@@ -224,6 +360,8 @@ export function MainLayout() {
       if (serverId) {
         useServerStore.getState().fetchMembers(serverId);
       }
+      // Re-fetch DM conversations
+      useDMStore.getState().fetchConversations();
     }
 
     // Mechanism 1: Direct listener on the socket object
@@ -271,19 +409,26 @@ export function MainLayout() {
       <ConnectionBanner />
       <div className="flex flex-1 min-h-0">
         <ServerSidebar />
-        {activeServerId && <ChannelSidebar />}
+        {activeServerId ? <ChannelSidebar /> : <DMList />}
         <div className="flex flex-1 flex-col overflow-hidden">
-          {activeServerId ? <ChatArea /> : <WelcomeScreen />}
+          {activeServerId ? (
+            <ChatArea />
+          ) : activeConversationId ? (
+            <DMChatArea />
+          ) : (
+            <DMWelcome />
+          )}
         </div>
         {activeServerId && <MemberSidebar />}
         <VoicePanel />
         {isSettingsOpen && <SettingsModal />}
+        <IncomingCallModal />
       </div>
     </div>
   );
 }
 
-function WelcomeScreen() {
+function DMWelcome() {
   return (
     <div className="flex h-full flex-col items-center justify-center bg-vox-bg-primary">
       <div className="flex flex-col items-center gap-4 text-center animate-fade-in">
@@ -294,9 +439,9 @@ function WelcomeScreen() {
             />
           </svg>
         </div>
-        <h2 className="text-2xl font-bold text-vox-text-primary">Welcome to Voxium</h2>
+        <h2 className="text-2xl font-bold text-vox-text-primary">Direct Messages</h2>
         <p className="max-w-md text-vox-text-secondary">
-          Select a server from the sidebar to start chatting, or create a new one to get started.
+          Select a conversation from the sidebar, or click on a member in any server to start a new one.
         </p>
       </div>
     </div>

@@ -2,25 +2,9 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, type Message, type ReactionGroup } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
-
-function aggregateReactions(raw: { emoji: string; userId: string }[]): ReactionGroup[] {
-  const groups = new Map<string, string[]>();
-  for (const r of raw) {
-    const arr = groups.get(r.emoji) || [];
-    arr.push(r.userId);
-    groups.set(r.emoji, arr);
-  }
-  return Array.from(groups.entries()).map(([emoji, userIds]) => ({
-    emoji, count: userIds.length, userIds,
-  }));
-}
-
-const reactionInclude = {
-  select: { emoji: true, userId: true },
-  orderBy: { createdAt: 'asc' as const },
-};
+import { aggregateReactions, reactionInclude } from '../utils/reactions';
 
 export const messageRouter = Router({ mergeParams: true });
 
@@ -153,7 +137,7 @@ messageRouter.patch('/:messageId', async (req: Request<{ channelId: string; mess
     });
 
     const payload = { ...updated, reactions: aggregateReactions(updated.reactions) };
-    getIO().to(`channel:${message.channelId}`).emit('message:update', payload as unknown as Message);
+    getIO().to(`channel:${message.channelId!}`).emit('message:update', payload as unknown as Message);
 
     res.json({ success: true, data: updated });
   } catch (err) {
@@ -175,7 +159,7 @@ messageRouter.put('/:messageId/reactions/:emoji', async (req: Request<{ channelI
       where: { id: messageId },
       select: { id: true, channelId: true, channel: { select: { serverId: true } } },
     });
-    if (!message || message.channelId !== channelId) throw new NotFoundError('Message');
+    if (!message || message.channelId !== channelId || !message.channel) throw new NotFoundError('Message');
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId, serverId: message.channel.serverId } },
@@ -229,7 +213,7 @@ messageRouter.delete('/:messageId', async (req: Request<{ channelId: string; mes
       where: { id: messageId },
       include: { channel: { select: { serverId: true } } },
     });
-    if (!message) throw new NotFoundError('Message');
+    if (!message || !message.channel) throw new NotFoundError('Message');
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId: req.user!.userId, serverId: message.channel.serverId } },
@@ -244,9 +228,9 @@ messageRouter.delete('/:messageId', async (req: Request<{ channelId: string; mes
 
     await prisma.message.delete({ where: { id: messageId } });
 
-    getIO().to(`channel:${message.channelId}`).emit('message:delete', {
+    getIO().to(`channel:${message.channelId!}`).emit('message:delete', {
       messageId,
-      channelId: message.channelId,
+      channelId: message.channelId!,
     });
 
     res.json({ success: true, message: 'Message deleted' });

@@ -2,8 +2,12 @@ import { useRef, useState, useCallback, useLayoutEffect, useEffect } from 'react
 import { createPortal } from 'react-dom';
 import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
+import { useAuthStore } from '../../stores/authStore';
+import { useDMStore } from '../../stores/dmStore';
+import { useChatStore } from '../../stores/chatStore';
 import { Avatar } from './Avatar';
-import { Volume2, Crown, Shield } from 'lucide-react';
+import { Volume2, Crown, Shield, MessageSquare } from 'lucide-react';
+import { toast } from '../../stores/toastStore';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
 
@@ -110,6 +114,21 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
+  const currentUser = useAuthStore((s) => s.user);
+  const isOwnProfile = currentUser?.id === userId;
+
+  const handleOpenDM = async () => {
+    try {
+      const conversationId = await useDMStore.getState().openDM(userId);
+      useServerStore.setState({ activeServerId: null, activeChannelId: null });
+      useChatStore.getState().clearMessages();
+      useDMStore.getState().setActiveConversation(conversationId);
+      onClose();
+    } catch {
+      toast.error('Failed to open conversation');
+    }
+  };
+
   if (!member) return null;
 
   const { user, role, joinedAt } = member;
@@ -168,6 +187,19 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
             </span>
           </div>
         </div>
+
+        {/* Message button */}
+        {!isOwnProfile && (
+          <div className="px-4 pb-2">
+            <button
+              onClick={handleOpenDM}
+              className="flex w-full items-center justify-center gap-1.5 rounded-md bg-vox-accent-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors"
+            >
+              <MessageSquare size={12} />
+              Message
+            </button>
+          </div>
+        )}
 
         {/* Divider + details */}
         <div className="border-t border-vox-border mx-3" />

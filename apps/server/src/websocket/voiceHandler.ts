@@ -1,6 +1,7 @@
 import type { Server as SocketServer, Socket } from 'socket.io';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { prisma } from '../utils/prisma';
+import { leaveCurrentDMVoiceChannel } from './dmVoiceHandler';
 
 // In-memory voice state tracking
 const voiceChannelUsers = new Map<string, Map<string, { socketId: string; selfMute: boolean; selfDeaf: boolean }>>();
@@ -33,6 +34,9 @@ export function handleVoiceEvents(
       console.log(`[Voice] User ${userId} not a member of server`);
       return;
     }
+
+    // Leave any current DM voice call first (cross-cleanup)
+    leaveCurrentDMVoiceChannel(io, socket, userId);
 
     // Leave any current voice channel first
     leaveCurrentVoiceChannel(io, socket, userId);
@@ -183,7 +187,7 @@ export function handleVoiceEvents(
   });
 }
 
-function leaveCurrentVoiceChannel(
+export function leaveCurrentVoiceChannel(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   socket: Socket<ClientToServerEvents, ServerToClientEvents>,
   userId: string

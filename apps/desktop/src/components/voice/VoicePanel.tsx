@@ -30,7 +30,9 @@ export function VoicePanel() {
         <ConnectionQuality latency={latency} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <p className="text-xs font-semibold text-vox-voice-connected">Voice Connected</p>
+            <p className="text-xs font-semibold text-vox-voice-connected">
+              Voice Connected
+            </p>
             {latency !== null && (
               <span className={clsx('text-[10px] font-medium', latencyColor)}>
                 {latency}ms

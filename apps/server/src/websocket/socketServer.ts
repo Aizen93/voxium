@@ -5,6 +5,7 @@ import type { AuthPayload } from '../middleware/auth';
 import { setUserOnline, setUserOffline } from '../utils/redis';
 import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, getVoiceStateForServer } from './voiceHandler';
+import { handleDMVoiceEvents } from './dmVoiceHandler';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
@@ -78,6 +79,35 @@ export function initSocketServer(httpServer: HttpServer) {
       socket.to(`channel:${channelId}`).emit('typing:stop', { channelId, userId });
     });
 
+    // ─── DM subscription ────────────────────────────────────────────
+    socket.on('dm:join', async (conversationId: string) => {
+      try {
+        const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { user1Id: true, user2Id: true } });
+        if (!conv || (conv.user1Id !== userId && conv.user2Id !== userId)) return;
+        socket.join(`dm:${conversationId}`);
+      } catch (err) {
+        console.error(`[WS] dm:join auth check failed for ${userId}:`, err);
+      }
+    });
+
+    socket.on('dm:typing:start', (conversationId: string) => {
+      // Only emit if this socket is actually in the DM room (joined via authorized dm:join)
+      if (!socket.rooms.has(`dm:${conversationId}`)) return;
+      socket.to(`dm:${conversationId}`).emit('dm:typing:start', {
+        conversationId,
+        userId,
+        username: socket.data.username as string,
+      });
+    });
+
+    socket.on('dm:typing:stop', (conversationId: string) => {
+      if (!socket.rooms.has(`dm:${conversationId}`)) return;
+      socket.to(`dm:${conversationId}`).emit('dm:typing:stop', {
+        conversationId,
+        userId,
+      });
+    });
+
     // ─── Latency measurement ────────────────────────────────────────
     socket.on('ping:latency', (ts) => {
       socket.emit('pong:latency', ts);
@@ -85,6 +115,9 @@ export function initSocketServer(httpServer: HttpServer) {
 
     // ─── Voice events ───────────────────────────────────────────────
     handleVoiceEvents(io, socket);
+
+    // ─── DM Voice events ─────────────────────────────────────────────
+    handleDMVoiceEvents(io, socket);
 
     // ─── Disconnect ─────────────────────────────────────────────────
     socket.on('disconnecting', async () => {
@@ -161,6 +194,43 @@ export function initSocketServer(httpServer: HttpServer) {
             unreads: unreads.map((r) => ({
               channelId: r.channel_id,
               serverId: r.server_id,
+              count: Number(r.cnt),
+            })),
+          });
+        }
+      }
+
+      // Auto-join all conversation rooms for DMs
+      const conversations = await prisma.conversation.findMany({
+        where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
+        select: { id: true },
+      });
+      for (const conv of conversations) {
+        socket.join(`dm:${conv.id}`);
+      }
+
+      // Compute DM unread counts
+      if (conversations.length > 0) {
+        const convIds = conversations.map((c) => c.id);
+        const dmUnreads = await prisma.$queryRawUnsafe<
+          Array<{ conversation_id: string; cnt: bigint }>
+        >(
+          `SELECT m.conversation_id, COUNT(m.id) AS cnt
+           FROM messages m
+           LEFT JOIN conversation_reads cr ON cr.conversation_id = m.conversation_id AND cr.user_id = $1
+           WHERE m.conversation_id = ANY($2::text[])
+             AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
+             AND m.author_id != $1
+           GROUP BY m.conversation_id
+           HAVING COUNT(m.id) > 0`,
+          userId,
+          convIds
+        );
+
+        if (dmUnreads.length > 0) {
+          socket.emit('dm:unread:init', {
+            unreads: dmUnreads.map((r) => ({
+              conversationId: r.conversation_id,
               count: Number(r.cnt),
             })),
           });

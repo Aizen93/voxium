@@ -21,6 +21,11 @@ interface ChatState {
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   toggleReaction: (channelId: string, messageId: string, emoji: string) => Promise<void>;
+  fetchDMMessages: (conversationId: string, before?: string) => Promise<void>;
+  sendDMMessage: (conversationId: string, content: string) => Promise<void>;
+  editDMMessage: (conversationId: string, messageId: string, content: string) => Promise<void>;
+  requestDeleteDMMessage: (conversationId: string, messageId: string) => Promise<void>;
+  toggleDMReaction: (conversationId: string, messageId: string, emoji: string) => Promise<void>;
   addMessage: (message: Message) => void;
   updateMessage: (message: Message) => void;
   updateMessageReactions: (messageId: string, reactions: ReactionGroup[]) => void;
@@ -122,6 +127,89 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.put(`/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
     } catch (err) {
       console.error('Failed to toggle reaction:', err);
+      throw err;
+    }
+  },
+
+  fetchDMMessages: async (conversationId: string, before?: string) => {
+    const fetchKey = `dm:${conversationId}:${before || 'initial'}`;
+    if (fetchKey === lastFetchKey && get().isLoading) return;
+
+    if (activeFetchController) {
+      activeFetchController.abort();
+    }
+
+    const controller = new AbortController();
+    activeFetchController = controller;
+    lastFetchKey = fetchKey;
+
+    set({ isLoading: true });
+    try {
+      const params = new URLSearchParams();
+      if (before) params.set('before', before);
+
+      const { data } = await api.get(`/dm/${conversationId}/messages?${params}`, {
+        signal: controller.signal,
+      });
+      const newMessages = data.data;
+
+      if (controller.signal.aborted) return;
+
+      if (before) {
+        set((state) => {
+          const existingIds = new Set(state.messages.map((m) => m.id));
+          const uniqueNew = newMessages.filter((m: Message) => !existingIds.has(m.id));
+          return {
+            messages: [...uniqueNew, ...state.messages],
+            hasMore: data.hasMore,
+            isLoading: false,
+          };
+        });
+      } else {
+        set({ messages: newMessages, hasMore: data.hasMore, isLoading: false });
+      }
+    } catch (err: any) {
+      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+      console.error('Failed to fetch DM messages:', err);
+      set({ isLoading: false });
+    } finally {
+      if (activeFetchController === controller) {
+        activeFetchController = null;
+      }
+    }
+  },
+
+  sendDMMessage: async (conversationId: string, content: string) => {
+    try {
+      const { data } = await api.post(`/dm/${conversationId}/messages`, { content });
+      const exists = get().messages.some((m) => m.id === data.data.id);
+      if (!exists) {
+        set((state) => ({ messages: [...state.messages, data.data] }));
+      }
+
+      const socket = getSocket();
+      if (socket) {
+        socket.emit('dm:typing:stop', conversationId);
+      }
+    } catch (err) {
+      console.error('Failed to send DM:', err);
+      throw err;
+    }
+  },
+
+  editDMMessage: async (conversationId: string, messageId: string, content: string) => {
+    await api.patch(`/dm/${conversationId}/messages/${messageId}`, { content });
+  },
+
+  requestDeleteDMMessage: async (conversationId: string, messageId: string) => {
+    await api.delete(`/dm/${conversationId}/messages/${messageId}`);
+  },
+
+  toggleDMReaction: async (conversationId: string, messageId: string, emoji: string) => {
+    try {
+      await api.put(`/dm/${conversationId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+    } catch (err) {
+      console.error('Failed to toggle DM reaction:', err);
       throw err;
     }
   },

@@ -144,6 +144,7 @@ apps/server/
 │   │   ├── servers.ts      # CRUD servers, join/leave, members, settings
 │   │   ├── channels.ts     # CRUD channels, mark-as-read
 │   │   ├── messages.ts     # CRUD messages with pagination, reactions
+│   │   ├── dm.ts           # DM conversations, messages, reactions, read tracking
 │   │   ├── users.ts        # User profiles, profile update with real-time broadcast
 │   │   ├── invites.ts      # Create/use/preview invites
 │   │   └── uploads.ts      # Avatar/server icon upload (S3) + file serving proxy
@@ -153,14 +154,16 @@ apps/server/
 │   │   ├── auth.ts         # JWT authentication middleware
 │   │   └── errorHandler.ts # Global error handler (incl. multer errors)
 │   ├── websocket/
-│   │   ├── socketServer.ts # Socket.IO setup, connection handler
-│   │   └── voiceHandler.ts # Voice channel state management
+│   │   ├── socketServer.ts  # Socket.IO setup, connection handler
+│   │   ├── voiceHandler.ts  # Voice channel state management
+│   │   └── dmVoiceHandler.ts # DM call signaling + system messages
 │   └── utils/
 │       ├── prisma.ts            # Prisma client singleton
 │       ├── redis.ts             # Redis client + presence helpers
 │       ├── errors.ts            # Custom error classes
 │       ├── s3.ts                # S3 client + upload/stream/delete helpers
-│       ├── email.ts              # Nodemailer transporter + password reset email
+│       ├── email.ts             # Nodemailer transporter + password reset email
+│       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
 │       └── memberBroadcast.ts   # Server room join + member event broadcast
 ```
 
@@ -232,26 +235,38 @@ apps/desktop/
 │   │   ├── channel/
 │   │   │   └── ChannelSidebar.tsx # Channel list (left panel)
 │   │   ├── common/
-│   │   │   ├── Avatar.tsx         # Shared avatar with img/initials fallback
-│   │   │   └── EmojiPicker.tsx    # Portal-based emoji picker (shared)
+│   │   │   ├── Avatar.tsx           # Shared avatar with img/initials fallback
+│   │   │   ├── EmojiPicker.tsx      # Portal-based emoji picker (shared)
+│   │   │   ├── UserHoverTarget.tsx  # Hover wrapper → UserProfilePopup
+│   │   │   └── UserProfilePopup.tsx # User profile card with "Message" DM button
 │   │   ├── chat/
-│   │   │   ├── ChatArea.tsx       # Chat container
-│   │   │   ├── MessageList.tsx    # Scrollable message list
-│   │   │   ├── MessageItem.tsx    # Single message with edit/delete/reactions
-│   │   │   ├── MessageInput.tsx   # Message composer with emoji picker
-│   │   │   ├── ReactionDisplay.tsx # Reaction chips below messages
+│   │   │   ├── ChatArea.tsx         # Server chat container
+│   │   │   ├── MessageList.tsx      # Scrollable message list
+│   │   │   ├── MessageItem.tsx      # Single message with edit/delete/reactions
+│   │   │   ├── MessageInput.tsx     # Message composer (channels + DMs)
+│   │   │   ├── ReactionDisplay.tsx  # Reaction chips (channels + DMs)
 │   │   │   └── DeleteConfirmModal.tsx # Message delete confirmation
+│   │   ├── dm/
+│   │   │   ├── DMList.tsx           # Conversation list with unread badges
+│   │   │   ├── DMChatArea.tsx       # DM chat view + call UI
+│   │   │   ├── DMMessageList.tsx    # DM scrollable messages with system msgs
+│   │   │   ├── DMCallPanel.tsx      # Discord-style call UI (avatars, controls)
+│   │   │   └── IncomingCallModal.tsx # Incoming call accept/decline
 │   │   └── voice/
-│   │       └── VoicePanel.tsx     # Voice connection controls
+│   │       └── VoicePanel.tsx       # Server voice connection controls
 │   ├── stores/
 │   │   ├── authStore.ts      # Auth state (user, tokens)
 │   │   ├── serverStore.ts    # Server/channel state
-│   │   ├── chatStore.ts      # Messages and typing
-│   │   ├── voiceStore.ts     # Voice connection state
-│   │   └── toastStore.ts    # Toast notification queue + convenience helpers
+│   │   ├── chatStore.ts      # Messages and typing (channels + DMs)
+│   │   ├── voiceStore.ts     # Voice connection state (server + DM calls)
+│   │   ├── dmStore.ts        # DM conversations, unread tracking
+│   │   ├── settingsStore.ts  # Audio devices, notifications, PTT (localStorage)
+│   │   └── toastStore.ts     # Toast notification queue + convenience helpers
 │   ├── services/
-│   │   ├── api.ts            # Axios instance with interceptors
-│   │   └── socket.ts         # Socket.IO client manager
+│   │   ├── api.ts               # Axios instance with interceptors
+│   │   ├── socket.ts            # Socket.IO client manager
+│   │   ├── audioAnalyser.ts     # Speaking detection (server + DM mode)
+│   │   └── notificationSounds.ts # Sound effects (message, join, leave, call)
 │   └── styles/
 │       └── globals.css       # Tailwind + custom utilities
 ├── src-tauri/                # Tauri Rust backend
@@ -283,16 +298,37 @@ apps/desktop/
 │72px │  240px   │        flex-1               │  240px   │
 ```
 
+**DM View** (when no server is active):
+
+```
+┌─────┬──────────┬─────────────────────────────┐
+│     │          │  @ Username        📞  🔊   │
+│  S  │ DMs      │─────────────────────────────│
+│  e  │          │                              │
+│  r  │ 🟢 Alice │  [Avatar] Alice      12:30  │
+│  v  │  Last msg│  Hey, how are you?          │
+│  e  │          │                              │
+│  r  │ ⚫ Bob   │  [📞 Voice call ended]      │
+│  s  │  Hi!     │                              │
+│     │          │  [Avatar] You        12:31  │
+│  +  │ 🟢 Char  │  I'm good, thanks!          │
+│     │          │                              │
+│     │          │  [Message input box]         │
+└─────┴──────────┴─────────────────────────────┘
+│72px │  240px   │        flex-1               │
+```
+
 ### State Management (Zustand)
 
-Four independent stores, each managing a domain:
+Seven independent stores, each managing a domain:
 
 | Store | Responsibilities |
 |-------|-----------------|
 | `authStore` | User session, login/register/logout, token management, avatar upload, profile editing, forgot/reset/change password |
 | `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync, persistent unread tracking (via `ChannelRead` DB table + `unread:init` socket event) |
-| `chatStore` | Messages for active channel, typing indicators, pagination, author profile sync |
-| `voiceStore` | Voice channel connection, mute/deaf state, connected users |
+| `chatStore` | Messages for active channel/conversation, typing indicators, pagination, author profile sync (shared by server channels and DMs) |
+| `voiceStore` | Server voice channel connection, DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`), mute/deaf, peer management (WebRTC). Server and DM voice are mutually exclusive. |
+| `dmStore` | DM conversation list, active conversation, participant online/offline status, DM unread counts (persisted via `ConversationRead` + `dm:unread:init`) |
 | `settingsStore` | Audio devices, noise gate, notification prefs, PTT key (persisted to localStorage) |
 | `toastStore` | Toast notification queue, auto-dismiss timers, convenience helpers |
 
@@ -338,7 +374,9 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
           │                      │
           │ id                   │
           │ content              │
-          │ channelId (FK)       │
+          │ type (user/system)   │
+          │ channelId (FK, null) │
+          │ conversationId (null)│
           │ authorId  (FK)       │
           │ editedAt             │
           │ createdAt            │
@@ -364,14 +402,25 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 │ serverId (FK)    │    │ channelId (PK,FK)    │
 │ createdBy (FK)   │    │ lastReadAt           │
 │ expiresAt        │    └──────────────────────┘
-└──────────────────┘      Tracks per-user per-channel
-  Single-use: deleted       read position for persistent
-  after join                unread counts
+└──────────────────┘
+
+┌──────────────────────┐    ┌──────────────────────┐
+│   Conversation       │    │  ConversationRead    │
+│                      │    │                      │
+│ id                   │    │ userId (PK,FK)       │
+│ user1Id (FK)         │    │ conversationId(PK,FK)│
+│ user2Id (FK)         │    │ lastReadAt           │
+│ updatedAt            │    └──────────────────────┘
+│                      │
+│ @@unique(user1Id,    │    user1Id < user2Id invariant
+│   user2Id)           │    for deduplication
+└──────────────────────┘
 ```
 
 ### Key Indexes
 
 - `messages(channelId, createdAt)` — Fast message pagination per channel
+- `messages(conversationId, createdAt)` — Fast message pagination per DM conversation
 - `message_reactions(messageId)` — Reaction aggregation per message
 - `message_reactions(messageId, userId, emoji)` UNIQUE — One reaction per user per emoji
 - `users(username)` UNIQUE — Username lookup
@@ -379,6 +428,8 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 - `users(reset_token)` UNIQUE — Password reset token lookup
 - `server_members(userId, serverId)` COMPOSITE PK — Membership checks
 - `channel_reads(userId, channelId)` COMPOSITE PK — Read position lookups
+- `conversations(user1Id, user2Id)` UNIQUE — Conversation dedup
+- `conversation_reads(userId, conversationId)` COMPOSITE PK — DM read positions
 - `invites(code)` PK — Invite lookup
 
 ### Scaling Considerations
@@ -419,8 +470,21 @@ Client                          Server
   │── voice:signal ──────────────>│── relay to target peer
   │<── voice:signal ─────────────<│── (from another peer)
   │                               │
+  │                               │
+  │── dm:join ──────────────────>│── verify membership (DB)
+  │                               │── socket.join(dm:{id})
+  │── dm:typing:start ──────────>│── broadcast to dm room
+  │                               │
+  │<── dm:message:new ──────────<│  (after HTTP POST)
+  │<── dm:unread:init ──────────<│  (on connect, persistent DM unreads)
+  │                               │
+  │── dm:voice:join ────────────>│── verify participant, track state
+  │                               │── broadcast dm:voice:offer/joined
+  │── dm:voice:signal ──────────>│── relay to other participant
+  │                               │
   │── disconnect ────────────────>│── setUserOffline(Redis)
   │                               │── broadcast presence:update
+  │                               │── cleanup DM voice state
 ```
 
 ### Room Strategy
@@ -430,10 +494,15 @@ Client                          Server
 | `server:{id}` | Server-wide events (member join/leave, presence, voice) | On socket connect (all memberships) + dynamically on server create/join via `memberBroadcast.ts` |
 | `channel:{id}` | Channel-specific events (messages, typing) | Auto-joined on socket connect for all text channels the user is a member of. Client also emits `channel:join` when selecting a channel (needed for channels created after connect). **Never left** — the socket stays subscribed for the connection's lifetime so `message:new` events reach the client for unread tracking. |
 | `voice:{id}` | Voice channel (voice state, signaling) | Client emits `voice:join` when joining voice |
+| `dm:{id}` | DM messages, typing, reactions | Auto-joined on socket connect for all conversations; `dm:join` emitted for new conversations. Authorization verified via DB query before joining. |
+| `dm:voice:{id}` | DM call signaling | Joined on `dm:voice:join`, left on call end |
 
 **Critical invariants:**
 - Every code path that makes a user a server member (create, join, invite) must also add their socket(s) to the `server:{id}` room and seed `ChannelRead` records for all text channels (`lastReadAt = now()`). Failure to join the room breaks all server-scoped real-time features; missing ChannelRead records cause existing message history to show as unread.
 - `channel:leave` must NOT be emitted by the client — it undoes the server's auto-subscription, breaking `message:new` delivery for that channel. Since the socket stays in all channel rooms, typing events are filtered by `channelId` on the frontend.
+- `dm:join` must verify conversation membership via DB query before adding the socket to the room — prevents eavesdropping. `dm:typing` handlers must check `socket.rooms.has()` to prevent unauthorized emission.
+- DM voice event handlers on the frontend must guard by `conversationId === dmCallConversationId` — the socket receives events for ALL conversations it's subscribed to, so unguarded handlers would leak voice events from other conversations into the active call state.
+- Server voice and DM voice are mutually exclusive: `voice:join` on server triggers `leaveCurrentDMVoiceChannel()`, and `dm:voice:join` triggers `leaveCurrentVoiceChannel()`. Both server and client enforce this.
 
 ### Event Types
 
@@ -448,12 +517,21 @@ Client                          Server
 - `server:updated` (server name/icon changed)
 - `user:updated` (user displayName/avatar changed)
 - `unread:init` (persistent unread counts on connect/reconnect)
+- `dm:message:new` / `dm:message:update` / `dm:message:delete` / `dm:message:reaction_update`
+- `dm:typing:start` / `dm:typing:stop`
+- `dm:unread:init` (persistent DM unread counts)
+- `dm:voice:offer` / `dm:voice:joined` / `dm:voice:left` / `dm:voice:ended`
+- `dm:voice:state_update` / `dm:voice:speaking` / `dm:voice:signal`
 
 **Client → Server:**
 - `channel:join` (for newly created channels only; `channel:leave` is NOT used — auto-subscription persists)
 - `voice:join` / `voice:leave` / `voice:mute` / `voice:deaf` / `voice:speaking`
 - `voice:signal` (WebRTC signaling relay)
 - `typing:start` / `typing:stop`
+- `dm:join` (join DM room for new conversation, with authorization check)
+- `dm:typing:start` / `dm:typing:stop`
+- `dm:voice:join` / `dm:voice:leave` / `dm:voice:mute` / `dm:voice:deaf` / `dm:voice:speaking`
+- `dm:voice:signal` (WebRTC signaling relay for DM calls)
 
 ---
 
@@ -515,6 +593,29 @@ Map<channelId, Map<userId, {
 ```
 
 For multi-node deployment, this will migrate to Redis with pub/sub for cross-node synchronization.
+
+### DM Voice Calls (V0.5 - 1-on-1)
+
+```
+┌────────┐         ┌────────┐
+│ User A │<──P2P──>│ User B │
+└───┬────┘         └───┬────┘
+    │                   │
+    └───────┬───────────┘
+            │
+       ┌────┴─────┐
+       │  Server   │
+       │ (Signal + │
+       │  State)   │
+       └──────────┘
+```
+
+- Same WebRTC mesh approach as server voice (1-on-1 only)
+- **Mutually exclusive** with server voice — joining one leaves the other (cross-cleanup on both server and client)
+- In-memory state: `dmVoiceUsers` Map (conversationId → Map of userId → socketId) + `userDMCall` reverse lookup
+- System messages ("Voice call started" / "Voice call ended") persisted to DB as `type: 'system'`
+- Call offer broadcasts to `dm:{conversationId}` room; incoming call shown via `IncomingCallModal`
+- DM call UI rendered inline in `DMChatArea` via `DMCallPanel` (separate from server `VoicePanel`)
 
 ---
 
@@ -718,7 +819,7 @@ mediasoup Deployment (autoscaling)
 |---------|-------------------|
 | **Video calls** | mediasoup SFU with video codecs (VP8/VP9/H264) |
 | **Screen sharing** | mediasoup producer for screen capture |
-| **Direct Messages** | New DM channel type, conversation model |
+| **~~Direct Messages~~** | ~~New DM channel type, conversation model~~ **Implemented (v0.5.0)** — 1-on-1 text + voice with `Conversation` model, real-time delivery, typing, reactions, unread tracking, WebRTC P2P calls |
 | **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2)** — server-proxied S3 uploads for avatars/icons via sharp + multer |
 | **~~Password reset~~** | ~~Email-based reset flow~~ **Implemented (v0.4.0)** — Nodemailer + SHA-256 hashed tokens + tokenVersion-based session invalidation |
 | **Push notifications** | FCM/APNs integration service |

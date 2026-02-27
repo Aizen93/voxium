@@ -6,12 +6,14 @@ import { EmojiPicker } from '../common/EmojiPicker';
 import { PlusCircle, Smile, Send } from 'lucide-react';
 
 interface Props {
-  channelId: string;
-  channelName: string;
+  channelId?: string;
+  conversationId?: string;
+  channelName?: string;
+  placeholderName?: string;
 }
 
-export function MessageInput({ channelId, channelName }: Props) {
-  const { sendMessage } = useChatStore();
+export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
+  const { sendMessage, sendDMMessage } = useChatStore();
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -25,14 +27,22 @@ export function MessageInput({ channelId, channelName }: Props) {
 
     if (!isTypingRef.current) {
       isTypingRef.current = true;
-      socket.emit('typing:start', channelId);
+      if (conversationId) {
+        socket.emit('dm:typing:start', conversationId);
+      } else if (channelId) {
+        socket.emit('typing:start', channelId);
+      }
     }
 
     // Reset the typing timeout
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     typingTimeoutRef.current = setTimeout(() => {
       isTypingRef.current = false;
-      socket.emit('typing:stop', channelId);
+      if (conversationId) {
+        socket.emit('dm:typing:stop', conversationId);
+      } else if (channelId) {
+        socket.emit('typing:stop', channelId);
+      }
     }, 2000);
   };
 
@@ -42,7 +52,11 @@ export function MessageInput({ channelId, channelName }: Props) {
 
     setIsSending(true);
     try {
-      await sendMessage(channelId, trimmed);
+      if (conversationId) {
+        await sendDMMessage(conversationId, trimmed);
+      } else if (channelId) {
+        await sendMessage(channelId, trimmed);
+      }
       setContent('');
       isTypingRef.current = false;
     } catch {
@@ -70,7 +84,7 @@ export function MessageInput({ channelId, channelName }: Props) {
           value={content}
           onChange={(e) => { setContent(e.target.value); handleTyping(); }}
           onKeyDown={handleKeyDown}
-          placeholder={`Message #${channelName}`}
+          placeholder={conversationId ? `Message @${placeholderName}` : `Message #${channelName}`}
           className="max-h-36 min-h-[24px] flex-1 resize-none bg-transparent text-sm text-vox-text-primary
                      placeholder:text-vox-text-muted focus:outline-none"
           rows={1}

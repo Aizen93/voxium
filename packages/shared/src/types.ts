@@ -91,7 +91,9 @@ export interface ReactionGroup {
 export interface Message {
   id: string;
   content: string;
-  channelId: string;
+  type?: string;
+  channelId: string | null;
+  conversationId?: string | null;
   author: MessageAuthor;
   createdAt: string;
   editedAt: string | null;
@@ -137,6 +139,22 @@ export interface UnreadCount {
   count: number;
 }
 
+// ─── Direct Messages ────────────────────────────────────────────────────────
+
+export interface Conversation {
+  id: string;
+  user1Id: string;
+  user2Id: string;
+  participant: MessageAuthor; // the OTHER user (populated at query time)
+  lastMessage: { content: string; createdAt: string; authorId: string } | null;
+  createdAt: string;
+}
+
+export interface DMUnreadCount {
+  conversationId: string;
+  count: number;
+}
+
 // ─── WebSocket Events ────────────────────────────────────────────────────────
 
 export interface ServerToClientEvents {
@@ -168,6 +186,27 @@ export interface ServerToClientEvents {
   'server:updated': (server: Server) => void;
   'user:updated': (data: { userId: string; displayName: string; avatarUrl: string | null }) => void;
   'unread:init': (data: { unreads: UnreadCount[] }) => void;
+  'dm:message:new': (message: Message) => void;
+  'dm:message:update': (message: Message) => void;
+  'dm:message:delete': (data: { messageId: string; conversationId: string }) => void;
+  'dm:typing:start': (data: { conversationId: string; userId: string; username: string }) => void;
+  'dm:typing:stop': (data: { conversationId: string; userId: string }) => void;
+  'dm:message:reaction_update': (data: {
+    messageId: string;
+    conversationId: string;
+    emoji: string;
+    userId: string;
+    action: 'add' | 'remove';
+    reactions: ReactionGroup[];
+  }) => void;
+  'dm:unread:init': (data: { unreads: DMUnreadCount[] }) => void;
+  'dm:voice:offer': (data: { conversationId: string; from: VoiceUser }) => void;
+  'dm:voice:joined': (data: { conversationId: string; user: VoiceUser }) => void;
+  'dm:voice:left': (data: { conversationId: string; userId: string }) => void;
+  'dm:voice:state_update': (data: { conversationId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => void;
+  'dm:voice:speaking': (data: { conversationId: string; userId: string; speaking: boolean }) => void;
+  'dm:voice:signal': (data: { from: string; signal: unknown }) => void;
+  'dm:voice:ended': (data: { conversationId: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -182,6 +221,15 @@ export interface ClientToServerEvents {
   'ping:latency': (timestamp: number) => void;
   'typing:start': (channelId: string) => void;
   'typing:stop': (channelId: string) => void;
+  'dm:join': (conversationId: string) => void;
+  'dm:typing:start': (conversationId: string) => void;
+  'dm:typing:stop': (conversationId: string) => void;
+  'dm:voice:join': (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => void;
+  'dm:voice:leave': (conversationId: string) => void;
+  'dm:voice:mute': (muted: boolean) => void;
+  'dm:voice:deaf': (deafened: boolean) => void;
+  'dm:voice:speaking': (speaking: boolean) => void;
+  'dm:voice:signal': (data: { to: string; signal: unknown }) => void;
 }
 
 // ─── API Response ────────────────────────────────────────────────────────────

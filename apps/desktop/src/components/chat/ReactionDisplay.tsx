@@ -9,10 +9,11 @@ import type { ReactionGroup } from '@voxium/shared';
 interface Props {
   reactions: ReactionGroup[];
   messageId: string;
-  channelId: string;
+  channelId?: string;
+  conversationId?: string;
 }
 
-export function ReactionDisplay({ reactions, messageId, channelId }: Props) {
+export function ReactionDisplay({ reactions, messageId, channelId, conversationId }: Props) {
   const [showPicker, setShowPicker] = useState(false);
   const userId = useAuthStore((s) => s.user?.id);
   const addBtnRef = useRef<HTMLButtonElement>(null);
@@ -21,7 +22,11 @@ export function ReactionDisplay({ reactions, messageId, channelId }: Props) {
 
   const handleToggle = async (emoji: string) => {
     try {
-      await useChatStore.getState().toggleReaction(channelId, messageId, emoji);
+      if (conversationId) {
+        await useChatStore.getState().toggleDMReaction(conversationId, messageId, emoji);
+      } else if (channelId) {
+        await useChatStore.getState().toggleReaction(channelId, messageId, emoji);
+      }
     } catch {
       toast.error('Failed to toggle reaction');
     }
