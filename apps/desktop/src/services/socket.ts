@@ -49,7 +49,10 @@ export function onConnectionStatusChange(listener: StatusListener): () => void {
  */
 export function connectSocket(token: string): VoxSocket {
   // Already connected with a live socket
-  if (socket?.connected) return socket;
+  if (socket?.connected) {
+    setStatus('connected');
+    return socket;
+  }
 
   // Already in the process of connecting — return existing socket instance
   if (socket && connecting) return socket;

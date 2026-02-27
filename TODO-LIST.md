@@ -7,7 +7,7 @@
   - [x] When a user (Alice) creates a new server, and joins a channel, she can't see her name in the channel list (Though she can speak and hear just fine)
   - [x] When creating a new voice channel or a new text channel, the other users does not see it in real time and require a page refresh
   - [] Tauri client does not receive windows notifications, how do we activate them by default, or prompt the user to activate notifications. Our apps Settings has notifications enabled.
-  - [] Security : Throtling, xss, sql injections, and rate limiting, captcha. Rate limiting — rate-limiter-flexible is installed but not wired up. Protect auth, uploads, message send, and forgot-password endpoints.
+  - [x] Security : Throtling, xss, sql injections, and rate limiting, captcha. Rate limiting — rate-limiter-flexible is installed but not wired up. Protect auth, uploads, message send, and forgot-password endpoints.
   - [x] Password forgot + profile password change
 
 ## Core chat features (medium effort):
@@ -25,10 +25,10 @@
 
 Quick Wins (high impact, low effort)
 
-  1. Server startup env var validation — S3 env vars use ! assertions; missing vars cause cryptic AWS errors. Add validation at boot.
-  2. PublicUser type — member:joined sends email: '' to satisfy the User type. A PublicUser (omitting email) fixes this properly.
-  3. Debounce PTT state broadcasts — Rapid PTT toggles flood the server:{id} room with voice:state_update. A 100ms debounce would cut traffic significantly.
-  4. Cleanup stale Prisma columns — Invite.maxUses and Invite.uses are unused. Quick migration to drop them.
+  1. [x] Server startup env var validation — S3 env vars use ! assertions; missing vars cause cryptic AWS errors. Add validation at boot.
+  2. [x] PublicUser type — member:joined sends email: '' to satisfy the User type. A PublicUser (omitting email) fixes this properly.
+  3. [x] Debounce PTT state broadcasts — Rapid PTT toggles flood the server:{id} room with voice:state_update. A 100ms debounce would cut traffic significantly.
+  4. [x] Cleanup stale Prisma columns — Invite.maxUses and Invite.uses are unused. Quick migration to drop them.
 
   High-Value Features (medium effort)
 
@@ -37,7 +37,7 @@ Quick Wins (high impact, low effort)
   8. Rich text / Markdown — Discord-style formatting (bold, italics, code blocks, links). Store raw markdown, render with react-markdown.
 
   Security (should ship before any public release)
-  10. Input sanitization — Currently relying on JSX escaping alone. Add explicit sanitization for messages, bios, and server names.
+  10. [x] sanitization — Currently relying on JSX escaping alone. Add explicit sanitization for messages, bios, and server names.
 
   Strategic / Longer-Term
 

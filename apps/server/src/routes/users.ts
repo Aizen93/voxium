@@ -1,9 +1,11 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { NotFoundError } from '../utils/errors';
+import { BadRequestError, NotFoundError } from '../utils/errors';
+import { validateDisplayName, validateBio, WS_EVENTS } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
-import { WS_EVENTS } from '@voxium/shared';
+import { sanitizeText } from '../utils/sanitize';
+import { VALID_S3_KEY_RE } from '../utils/s3';
 
 export const userRouter = Router();
 
@@ -38,7 +40,29 @@ userRouter.get('/:userId', async (req: Request<{ userId: string }>, res: Respons
 // Update own profile
 userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { displayName, bio, avatarUrl } = req.body;
+    const { avatarUrl } = req.body;
+    let { displayName, bio } = req.body;
+
+    // avatarUrl must be null (to clear) or a valid S3 key
+    if (avatarUrl !== undefined && avatarUrl !== null) {
+      if (typeof avatarUrl !== 'string' || !VALID_S3_KEY_RE.test(avatarUrl)) {
+        throw new BadRequestError('Invalid avatar key');
+      }
+    }
+
+    if (displayName !== undefined) {
+      if (typeof displayName !== 'string') throw new BadRequestError('displayName must be a string');
+      displayName = sanitizeText(displayName);
+      const err = validateDisplayName(displayName);
+      if (err) throw new BadRequestError(err);
+    }
+
+    if (bio !== undefined) {
+      if (typeof bio !== 'string') throw new BadRequestError('bio must be a string');
+      bio = sanitizeText(bio);
+      const err = validateBio(bio);
+      if (err) throw new BadRequestError(err);
+    }
 
     const updated = await prisma.user.update({
       where: { id: req.user!.userId },

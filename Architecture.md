@@ -153,6 +153,7 @@ apps/server/
 │   │   └── authService.ts  # Auth business logic
 │   ├── middleware/
 │   │   ├── auth.ts         # JWT authentication middleware
+│   │   ├── rateLimiter.ts  # Per-endpoint + per-socket rate limiting (Redis + memory fallback)
 │   │   └── errorHandler.ts # Global error handler (incl. multer errors)
 │   ├── websocket/
 │   │   ├── socketServer.ts  # Socket.IO setup, connection handler
@@ -162,7 +163,8 @@ apps/server/
 │       ├── prisma.ts            # Prisma client singleton
 │       ├── redis.ts             # Redis client + presence helpers
 │       ├── errors.ts            # Custom error classes
-│       ├── s3.ts                # S3 client + upload/stream/delete helpers
+│       ├── sanitize.ts          # HTML stripping + text sanitization utility
+│       ├── s3.ts                # S3 client + upload/stream/delete helpers + VALID_S3_KEY_RE
 │       ├── email.ts             # Nodemailer transporter + password reset email
 │       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
 │       └── memberBroadcast.ts   # Server room join + member event broadcast
@@ -185,7 +187,9 @@ Express Middleware Pipeline
     ▼
 Route Handler
     │
+    ├── rateLimiter()     → Per-endpoint rate limiting (Redis + memory fallback)
     ├── authenticate()    → JWT verification (protected routes)
+    ├── sanitizeText()    → HTML tag stripping on user input (messages, names, bios)
     ├── Business Logic    → Database queries via Prisma
     │
     ▼
@@ -620,6 +624,7 @@ For multi-node deployment, this will migrate to Redis with pub/sub for cross-nod
 ```
 
 - Same WebRTC mesh approach as server voice (1-on-1 only)
+- **Perfect Negotiation pattern** — resolves offer glare (both peers sending offers simultaneously) via polite/impolite roles based on userId comparison
 - **Mutually exclusive** with server voice — joining one leaves the other (cross-cleanup on both server and client)
 - In-memory state: `dmVoiceUsers` Map (conversationId → Map of userId → socketId) + `userDMCall` reverse lookup
 - System messages ("Voice call started" / "Voice call ended") persisted to DB as `type: 'system'`
@@ -689,7 +694,8 @@ Change Password (authenticated):
 | Input | Server-side validation on all endpoints |
 | SQL Injection | Prisma parameterized queries |
 | WebSocket | JWT verification on connection |
-| Rate Limiting | rate-limiter-flexible (infrastructure ready) |
+| Input Sanitization | HTML tag stripping + trim on all user-generated text (defense-in-depth) |
+| Rate Limiting | rate-limiter-flexible with Redis (per-endpoint + per-socket), fail-open with in-memory fallback |
 
 ### Permission Model
 

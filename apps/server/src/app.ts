@@ -13,8 +13,12 @@ import { uploadRouter } from './routes/uploads';
 import { dmRouter } from './routes/dm';
 import { friendRouter } from './routes/friends';
 import { errorHandler } from './middleware/errorHandler';
+import { rateLimitGeneral } from './middleware/rateLimiter';
 
 export const app = express();
+
+// Enable trust proxy so req.ip reflects the real client IP behind reverse proxies
+app.set('trust proxy', 1);
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
@@ -41,7 +45,7 @@ app.use(cors({
   credentials: true,
 }));
 app.use(morgan('dev'));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
 // ─── Health Check ────────────────────────────────────────────────────────────
@@ -53,6 +57,7 @@ app.get('/health', (_req, res) => {
 // ─── API Routes ──────────────────────────────────────────────────────────────
 
 const api = express.Router();
+api.use(rateLimitGeneral);
 api.use('/auth', authRouter);
 api.use('/users', userRouter);
 api.use('/servers', serverRouter);

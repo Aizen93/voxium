@@ -5,6 +5,7 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 import { validateServerName, LIMITS, WS_EVENTS } from '@voxium/shared';
 import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
+import { sanitizeText } from '../utils/sanitize';
 
 export const serverRouter = Router();
 
@@ -35,7 +36,7 @@ serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) =>
 // Create a new server
 serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { name } = req.body;
+    const name = sanitizeText(req.body.name ?? '');
     const nameErr = validateServerName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
@@ -232,10 +233,11 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
     if (!server) throw new NotFoundError('Server');
     if (server.ownerId !== req.user!.userId) throw new ForbiddenError('Only the server owner can update settings');
 
-    const { name } = req.body;
     const updateData: Record<string, unknown> = {};
 
-    if (name !== undefined) {
+    if (req.body.name !== undefined) {
+      if (typeof req.body.name !== 'string') throw new BadRequestError('name must be a string');
+      const name = sanitizeText(req.body.name);
       const nameErr = validateServerName(name);
       if (nameErr) throw new BadRequestError(nameErr);
       updateData.name = name;

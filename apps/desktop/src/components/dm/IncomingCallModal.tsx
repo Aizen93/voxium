@@ -1,4 +1,7 @@
 import { useVoiceStore } from '../../stores/voiceStore';
+import { useServerStore } from '../../stores/serverStore';
+import { useDMStore } from '../../stores/dmStore';
+import { useFriendStore } from '../../stores/friendStore';
 import { Avatar } from '../common/Avatar';
 import { Phone, PhoneOff } from 'lucide-react';
 
@@ -8,6 +11,15 @@ export function IncomingCallModal() {
   const declineCall = useVoiceStore((s) => s.declineCall);
 
   if (!incomingCall) return null;
+
+  const handleAccept = async () => {
+    const { conversationId } = incomingCall;
+    await acceptCall();
+    // Navigate to the DM conversation so the user sees the call UI
+    useServerStore.setState({ activeServerId: null, activeChannelId: null });
+    useFriendStore.getState().setShowFriendsView(false);
+    useDMStore.getState().setActiveConversation(conversationId);
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -33,7 +45,7 @@ export function IncomingCallModal() {
             <PhoneOff size={20} />
           </button>
           <button
-            onClick={acceptCall}
+            onClick={handleAccept}
             className="flex h-12 w-12 items-center justify-center rounded-full bg-vox-voice-connected text-white transition-colors hover:bg-vox-voice-connected/80"
             title="Accept"
           >

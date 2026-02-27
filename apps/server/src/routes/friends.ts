@@ -1,5 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate } from '../middleware/auth';
+import { rateLimitFriendRequest } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { getIO } from '../websocket/socketServer';
@@ -56,7 +57,7 @@ friendRouter.get('/', async (req: Request, res: Response, next: NextFunction) =>
 
 // ─── Send friend request ─────────────────────────────────────────────────────
 
-friendRouter.post('/request', async (req: Request, res: Response, next: NextFunction) => {
+friendRouter.post('/request', rateLimitFriendRequest, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
     const { username } = req.body;

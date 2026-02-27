@@ -18,6 +18,9 @@ const s3 = new S3Client({
 
 const BUCKET = process.env.S3_ASSETS_BUCKET!;
 
+/** Regex matching valid S3 asset keys produced by uploadToS3 */
+export const VALID_S3_KEY_RE = /^(avatars|server-icons)\/[\w-]+\.webp$/;
+
 /**
  * Upload a buffer to S3 and return the object key.
  * Key format: `{folder}/{entityId}-{timestamp}.webp`

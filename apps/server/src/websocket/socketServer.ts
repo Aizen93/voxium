@@ -6,6 +6,7 @@ import { setUserOnline, setUserOffline } from '../utils/redis';
 import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, getVoiceStateForServer } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
+import { socketRateLimit } from '../middleware/rateLimiter';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
@@ -57,17 +58,20 @@ export function initSocketServer(httpServer: HttpServer) {
 
     // ─── Channel subscription ───────────────────────────────────────
     socket.on('channel:join', (channelId: string) => {
+      if (!socketRateLimit(socket, 'channel:join', 60)) return;
       socket.join(`channel:${channelId}`);
       console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
     });
 
     socket.on('channel:leave', (channelId: string) => {
+      if (!socketRateLimit(socket, 'channel:leave', 60)) return;
       socket.leave(`channel:${channelId}`);
       console.log(`[WS] ${userId} (${socket.id}) left room channel:${channelId}`);
     });
 
     // ─── Typing indicators ──────────────────────────────────────────
     socket.on('typing:start', (channelId: string) => {
+      if (!socketRateLimit(socket, 'typing', 30)) return;
       socket.to(`channel:${channelId}`).emit('typing:start', {
         channelId,
         userId,
@@ -76,11 +80,13 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     socket.on('typing:stop', (channelId: string) => {
+      if (!socketRateLimit(socket, 'typing', 30)) return;
       socket.to(`channel:${channelId}`).emit('typing:stop', { channelId, userId });
     });
 
     // ─── DM subscription ────────────────────────────────────────────
     socket.on('dm:join', async (conversationId: string) => {
+      if (!socketRateLimit(socket, 'dm:join', 60)) return;
       try {
         const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { user1Id: true, user2Id: true } });
         if (!conv || (conv.user1Id !== userId && conv.user2Id !== userId)) return;
@@ -91,6 +97,7 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     socket.on('dm:typing:start', (conversationId: string) => {
+      if (!socketRateLimit(socket, 'dm:typing', 30)) return;
       // Only emit if this socket is actually in the DM room (joined via authorized dm:join)
       if (!socket.rooms.has(`dm:${conversationId}`)) return;
       socket.to(`dm:${conversationId}`).emit('dm:typing:start', {
@@ -101,6 +108,7 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     socket.on('dm:typing:stop', (conversationId: string) => {
+      if (!socketRateLimit(socket, 'dm:typing', 30)) return;
       if (!socket.rooms.has(`dm:${conversationId}`)) return;
       socket.to(`dm:${conversationId}`).emit('dm:typing:stop', {
         conversationId,

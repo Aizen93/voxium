@@ -2,6 +2,7 @@ import type { Server as SocketServer, Socket } from 'socket.io';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { prisma } from '../utils/prisma';
 import { leaveCurrentDMVoiceChannel } from './dmVoiceHandler';
+import { socketRateLimit } from '../middleware/rateLimiter';
 
 // In-memory voice state tracking
 const voiceChannelUsers = new Map<string, Map<string, { socketId: string; selfMute: boolean; selfDeaf: boolean }>>();
@@ -166,6 +167,7 @@ export function handleVoiceEvents(
 
   // WebRTC signaling relay
   socket.on('voice:signal', (data: { to: string; signal: unknown }) => {
+    if (!socketRateLimit(socket, 'voice:signal', 300)) return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 

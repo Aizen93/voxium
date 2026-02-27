@@ -1,10 +1,12 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate } from '../middleware/auth';
+import { rateLimitMessageSend } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateMessageContent, validateEmoji, LIMITS, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
+import { sanitizeText } from '../utils/sanitize';
 
 export const dmRouter = Router();
 
@@ -180,11 +182,11 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
 
 // ─── Send DM ─────────────────────────────────────────────────────────────────
 
-dmRouter.post('/:conversationId/messages', async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
+dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;
-    const { content } = req.body;
+    const content = sanitizeText(req.body.content ?? '');
 
     const contentErr = validateMessageContent(content);
     if (contentErr) throw new BadRequestError(contentErr);
@@ -223,7 +225,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', async (req: Request<{ con
   try {
     const { conversationId, messageId } = req.params;
     const userId = req.user!.userId;
-    const { content } = req.body;
+    const content = sanitizeText(req.body.content ?? '');
 
     const contentErr = validateMessageContent(content);
     if (contentErr) throw new BadRequestError(contentErr);

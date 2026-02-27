@@ -44,3 +44,14 @@ export function validateEmoji(emoji: string): string | null {
   if (/^[\x20-\x7E]+$/.test(emoji)) return 'Invalid emoji';
   return null;
 }
+
+export function validateDisplayName(displayName: string): string | null {
+  if (displayName.trim().length === 0) return 'Display name cannot be empty';
+  if (displayName.length > LIMITS.DISPLAY_NAME_MAX) return `Display name must be at most ${LIMITS.DISPLAY_NAME_MAX} characters`;
+  return null;
+}
+
+export function validateBio(bio: string): string | null {
+  if (bio.length > LIMITS.BIO_MAX) return `Bio must be at most ${LIMITS.BIO_MAX} characters`;
+  return null;
+}

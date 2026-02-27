@@ -308,7 +308,7 @@ function handleSignalInternal(
   const data = signal as { type: string; sdp?: string; candidate?: RTCIceCandidateInit };
   console.log(`${logPrefix} handleSignal from ${from}:`, data.type || 'ice-candidate');
 
-  const { peers } = getState();
+  const { peers, localUserId } = getState();
   let peerConn = peers.get(from);
 
   if (!peerConn && data.type === 'offer') {
@@ -329,7 +329,28 @@ function handleSignalInternal(
   const { pc } = peerConn;
 
   if (data.type === 'offer') {
-    pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }))
+    // ── Perfect negotiation: detect offer collision ──────────────────
+    // Collision = we're currently making our own offer OR we already have
+    // a local offer set (signaling state is not stable).
+    const offerCollision = peerConn.makingOffer || pc.signalingState !== 'stable';
+
+    // The "polite" peer yields on collision; "impolite" ignores the remote offer.
+    // Use lexicographic userId comparison to assign stable roles.
+    const isPolite = (localUserId ?? '') < from;
+
+    if (offerCollision && !isPolite) {
+      console.log(`${logPrefix} Ignoring colliding offer from ${from} (we are impolite)`);
+      return;
+    }
+
+    // Polite peer (or no collision): accept the incoming offer.
+    // If we had a pending local offer, rollback first.
+    const acceptOffer = offerCollision
+      ? pc.setLocalDescription({ type: 'rollback' })
+          .then(() => pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp })))
+      : pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }));
+
+    acceptOffer
       .then(() => pc.createAnswer())
       .then((answer) => pc.setLocalDescription(answer))
       .then(() => {
@@ -344,6 +365,11 @@ function handleSignalInternal(
       })
       .catch((err) => console.error(`${logPrefix} Error handling offer from ${from}:`, err));
   } else if (data.type === 'answer') {
+    // Only accept an answer if we're actually waiting for one
+    if (pc.signalingState !== 'have-local-offer') {
+      console.log(`${logPrefix} Ignoring stale answer from ${from} (state: ${pc.signalingState})`);
+      return;
+    }
     pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }))
       .catch((err) => console.error(`${logPrefix} Error handling answer from ${from}:`, err));
   } else if (data.type === 'ice-candidate' && data.candidate) {

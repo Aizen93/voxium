@@ -2,6 +2,7 @@ import type { Server as SocketServer, Socket } from 'socket.io';
 import type { ServerToClientEvents, ClientToServerEvents, Message } from '@voxium/shared';
 import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
+import { socketRateLimit } from '../middleware/rateLimiter';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -238,6 +239,7 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:signal', (data: { to: string; signal: unknown }) => {
+    if (!socketRateLimit(socket, 'dm:voice:signal', 300)) return;
     const conversationId = userDMCall.get(userId);
     if (!conversationId) return;
 

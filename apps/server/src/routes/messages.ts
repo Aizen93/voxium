@@ -1,10 +1,12 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate } from '../middleware/auth';
+import { rateLimitMessageSend } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateMessageContent, validateEmoji, LIMITS, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
+import { sanitizeText } from '../utils/sanitize';
 
 export const messageRouter = Router({ mergeParams: true });
 
@@ -64,10 +66,10 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
 });
 
 // Send a message
-messageRouter.post('/', async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {
+messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId } = req.params;
-    const { content } = req.body;
+    const content = sanitizeText(req.body.content ?? '');
 
     const contentErr = validateMessageContent(content);
     if (contentErr) throw new BadRequestError(contentErr);
@@ -116,7 +118,7 @@ messageRouter.post('/', async (req: Request<{ channelId: string }>, res: Respons
 messageRouter.patch('/:messageId', async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { messageId } = req.params;
-    const { content } = req.body;
+    const content = sanitizeText(req.body.content ?? '');
 
     const contentErr = validateMessageContent(content);
     if (contentErr) throw new BadRequestError(contentErr);

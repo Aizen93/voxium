@@ -1,11 +1,12 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { registerUser, loginUser, refreshTokens, requestPasswordReset, resetPassword, changePassword } from '../services/authService';
 import { authenticate } from '../middleware/auth';
+import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 
 export const authRouter = Router();
 
-authRouter.post('/register', async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/register', rateLimitRegister, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { username, email, password, displayName } = req.body;
     const result = await registerUser(username, email, password, displayName);
@@ -19,7 +20,7 @@ authRouter.post('/register', async (req: Request, res: Response, next: NextFunct
   }
 });
 
-authRouter.post('/login', async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email, password } = req.body;
     const result = await loginUser(email, password);
@@ -33,7 +34,7 @@ authRouter.post('/login', async (req: Request, res: Response, next: NextFunction
   }
 });
 
-authRouter.post('/refresh', async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/refresh', rateLimitRefresh, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { refreshToken } = req.body;
     const tokens = await refreshTokens(refreshToken);
@@ -69,7 +70,7 @@ authRouter.get('/me', authenticate, async (req: Request, res: Response, next: Ne
   }
 });
 
-authRouter.post('/forgot-password', async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/forgot-password', rateLimitForgotPassword, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email } = req.body;
     if (!email || typeof email !== 'string') {
@@ -83,7 +84,7 @@ authRouter.post('/forgot-password', async (req: Request, res: Response, next: Ne
   }
 });
 
-authRouter.post('/reset-password', async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/reset-password', rateLimitResetPassword, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { token, password } = req.body;
     if (!token || typeof token !== 'string') {
@@ -101,7 +102,7 @@ authRouter.post('/reset-password', async (req: Request, res: Response, next: Nex
   }
 });
 
-authRouter.post('/change-password', authenticate, async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/change-password', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { currentPassword, newPassword } = req.body;
     if (!currentPassword || typeof currentPassword !== 'string') {

@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.7.0 (Delete DM Conversation + DM Chat Loading Fix)
+**Version:** 0.8.0 (Security Hardening + WebRTC Perfect Negotiation + UX Fixes)
 **Date:** 2026-02-27
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, and friend request system with real-time notifications
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, and Tauri desktop icon integration
 
 ## What Has Been Done
 
@@ -186,7 +186,7 @@ Comprehensive hardening of real-time features:
 - [ ] Horizontal scaling with sticky sessions
 - [ ] CDN for static assets
 - [x] File storage (S3-compatible) — implemented in v0.3.2
-- [ ] Rate limiting per endpoint
+- [x] Rate limiting per endpoint — implemented in v0.7.1
 
 ### V1.0 - Production
 - [ ] End-to-end testing
@@ -1069,3 +1069,156 @@ Enhanced unread indicators on the server sidebar:
 - `apps/desktop/src/components/server/ServerSidebar.tsx` — removed `clearMessages()` from home button click
 
 **Design principle established:** `clearMessages()` should only be called by the store that owns the view transition (`dmStore.setActiveConversation` / `clearActiveConversation`), never by UI components directly. This prevents the "clear without refetch" race condition.
+
+### Security Hardening (Input Validation, Sanitization, Rate Limiting)
+
+**New shared validators** (`packages/shared/src/validators.ts`):
+- `validateDisplayName()` — enforces non-empty after trim, max `LIMITS.DISPLAY_NAME_MAX` (64) characters
+- `validateBio()` — enforces max `LIMITS.BIO_MAX` (500) characters
+
+**New sanitize utility** (`apps/server/src/utils/sanitize.ts`):
+- `stripHtml()` — regex-based HTML tag removal (defense-in-depth, since React escapes by default)
+- `sanitizeText()` — strips HTML + trims whitespace; safely handles non-string inputs by returning empty string
+
+**New rate limiter middleware** (`apps/server/src/middleware/rateLimiter.ts`):
+- 8 rate limiters using `RateLimiterRedis` with lazy initialization
+- In-memory `insuranceLimiter` fallback (100 req/60s) if Redis is unavailable
+- Fail-open design: unexpected errors pass through to avoid blocking legitimate users
+- Limiters: login (5/60s, 300s block), register (3/60s, 600s block), forgot-password (3/900s), reset-password (5/900s), message-send (30/60s), upload (10/60s), friend-request (20/60s), general (100/60s)
+- Key strategies: `byIp` for unauthenticated routes, `byUserId` (falls back to IP) for authenticated routes
+
+**Wiring into routes:**
+- `auth.ts` — `rateLimitRegister` on POST /register, `rateLimitLogin` on POST /login, `rateLimitForgotPassword` on POST /forgot-password, `rateLimitResetPassword` on POST /reset-password
+- `messages.ts` — `rateLimitMessageSend` on POST (send) + `sanitizeText` on POST (send) and PATCH (edit)
+- `dm.ts` — `rateLimitMessageSend` on POST send DM + `sanitizeText` on POST (send) and PATCH (edit)
+- `uploads.ts` — `rateLimitUpload` on POST avatar and POST server-icon
+- `friends.ts` — `rateLimitFriendRequest` on POST /request
+- `app.ts` — `rateLimitGeneral` on all `/api/v1` routes + JSON body limit reduced to 100kb
+
+**Profile validation/sanitization** (`users.ts`):
+- PATCH /me/profile validates `displayName` and `bio` with type guards, sanitization, and shared validators
+
+**Server name sanitization** (`servers.ts`):
+- POST / and PATCH /:serverId sanitize server name via `sanitizeText` + `validateServerName`
+
+**Files created:**
+- `apps/server/src/middleware/rateLimiter.ts`
+- `apps/server/src/utils/sanitize.ts`
+
+**Files modified:**
+- `packages/shared/src/validators.ts` — added `validateDisplayName`, `validateBio`
+- `apps/server/src/app.ts` — added `rateLimitGeneral`, reduced JSON limit to 100kb
+- `apps/server/src/routes/auth.ts` — wired rate limiters
+- `apps/server/src/routes/messages.ts` — wired rate limiter + sanitization
+- `apps/server/src/routes/dm.ts` — wired rate limiter + sanitization
+- `apps/server/src/routes/uploads.ts` — wired rate limiter
+- `apps/server/src/routes/friends.ts` — wired rate limiter
+- `apps/server/src/routes/users.ts` — added validation + sanitization for profile fields
+- `apps/server/src/routes/servers.ts` — added sanitization for server name
+
+### Rate Limiting Hardening & Avatar Validation (v0.7.1)
+
+**Improvements from code quality review follow-up -- five warning-level issues addressed:**
+
+**1. Trust proxy (`apps/server/src/app.ts`):**
+- Added `app.set('trust proxy', 1)` so `req.ip` returns the real client IP behind reverse proxies instead of the proxy's IP. Without this, all rate limiting was keyed to a single IP when behind nginx/load balancers.
+
+**2. Per-limiter memory fallbacks (`apps/server/src/middleware/rateLimiter.ts`):**
+- Rewrote rate limiter module from a single shared insurance limiter to per-limiter fallbacks. Each `RateLimiterRedis` now has its own `RateLimiterMemory` with matching `points`, `duration`, and `blockDuration`. Previously, if Redis went down, all endpoints fell back to a single memory limiter with generic settings.
+- Added `rateLimitRefresh` (10 requests/min by IP) for token refresh endpoint.
+- Added `rateLimitChangePassword` (5 requests/min by IP, 5-minute block on exhaustion) for password change endpoint.
+
+**3. Token refresh rate limiting (`apps/server/src/routes/auth.ts`):**
+- Wired `rateLimitRefresh` on POST /refresh.
+- Wired `rateLimitChangePassword` on POST /change-password (after `authenticate` middleware).
+
+**4. Avatar URL validation (`apps/server/src/routes/users.ts`):**
+- PATCH /me/profile now validates `avatarUrl`: must be `null` (to clear) or match the regex `^(avatars|server-icons)\/[\w-]+\.webp$` (matching the S3 key format from `uploadToS3`). This prevents arbitrary S3 key injection via the profile update endpoint.
+
+**5. Socket.IO rate limiting (`apps/server/src/middleware/rateLimiter.ts` + `apps/server/src/websocket/socketServer.ts`):**
+- New `socketRateLimit(socket, event, maxPerMinute)` function using a WeakMap keyed by socket objects. Each socket gets a Map of event-name to `{ count, resetAt }` buckets (fixed-window approach). When a socket disconnects and is garbage-collected, all its rate limit state is automatically cleaned up via WeakMap semantics.
+- Applied to: `channel:join` (60/min), `channel:leave` (60/min), `typing:start`/`typing:stop` (shared `typing` key, 30/min), `dm:join` (60/min), `dm:typing:start`/`dm:typing:stop` (shared `dm:typing` key, 30/min).
+- Voice events intentionally not rate-limited (high-frequency by nature).
+
+### S3 Key Regex Extraction & Voice Signal Rate Limiting (v0.7.2)
+
+**S3 key regex deduplication:**
+- Extracted `VALID_S3_KEY_RE = /^(avatars|server-icons)\/[\w-]+\.webp$/` to `apps/server/src/utils/s3.ts` as a shared constant
+- Replaced inline regex in `routes/uploads.ts` and `routes/users.ts` with the shared constant
+
+**Voice signal rate limiting:**
+- Added `socketRateLimit` on `voice:signal` (300/min) in `websocket/voiceHandler.ts`
+- Added `socketRateLimit` on `dm:voice:signal` (300/min) in `websocket/dmVoiceHandler.ts`
+- 300/min is generous for WebRTC signaling (ICE candidates, SDP) but prevents flood abuse
+
+**Files modified:**
+- `apps/server/src/utils/s3.ts` — added `VALID_S3_KEY_RE` export
+- `apps/server/src/routes/uploads.ts` — imported shared regex
+- `apps/server/src/routes/users.ts` — imported shared regex
+- `apps/server/src/websocket/voiceHandler.ts` — added voice signal rate limiting
+- `apps/server/src/websocket/dmVoiceHandler.ts` — added DM voice signal rate limiting
+
+### WebRTC Perfect Negotiation for DM Calls (v0.8.0)
+
+**Bug:** DM voice calls intermittently failed with `InvalidStateError: Failed to execute 'setRemoteDescription' on 'RTCPeerConnection': Failed to set remote answer sdp: Called in wrong state: stable`. This was an **offer glare** condition — both peers simultaneously created offers when initiating a DM call.
+
+**Root cause:** When user A calls user B, the `dm:voice:offer` event causes B to call `acceptCall()` → `createDMPeer(A, true)` (as initiator). Meanwhile, A already called `createDMPeer(B, true)` (also as initiator). Both peers send offers; when one receives an answer while in `stable` state (having already processed the other's offer), the `setRemoteDescription` fails.
+
+**Fix — WebRTC Perfect Negotiation pattern** (`apps/desktop/src/stores/voiceStore.ts`):
+- Assigns **polite/impolite roles** based on userId comparison: `isPolite = localUserId < remoteUserId`
+- On incoming offer, detects **collision** (`makingOffer || signalingState !== 'stable'`)
+- **Impolite peer** ignores colliding offers (keeps its own offer)
+- **Polite peer** rolls back its own offer via `setLocalDescription({ type: 'rollback' })`, then accepts the incoming offer
+- On incoming answer, guards `signalingState === 'have-local-offer'` — stale answers from rolled-back offers are safely ignored
+- Added `makingOffer` flag to `PeerConnection` tracking object to detect outgoing offer in-flight
+
+**Files modified:**
+- `apps/desktop/src/stores/voiceStore.ts` — rewrote `handleSignalInternal` with perfect negotiation pattern
+
+### DM Call Accept Navigation (v0.8.0)
+
+**Bug:** When accepting an incoming DM call via `IncomingCallModal`, the user wasn't navigated to the DM conversation — the call connected but the UI stayed on the current view.
+
+**Fix:** `IncomingCallModal.handleAccept` now navigates to the DM conversation after accepting:
+1. Clears active server (`activeServerId = null, activeChannelId = null`)
+2. Closes friends view (`setShowFriendsView(false)`)
+3. Sets active conversation (`setActiveConversation(conversationId)`)
+
+**Files modified:**
+- `apps/desktop/src/components/dm/IncomingCallModal.tsx` — added navigation on accept
+
+### DMList Nested Button HTML Fix (v0.8.0)
+
+**Bug:** Browser console error: `In HTML, <button> cannot be a descendant of <button>`. The DM conversation row was a `<button>` containing a delete `<button>`.
+
+**Fix:** Changed the outer conversation row from `<button>` to `<div role="button" tabIndex={0}>` with `onKeyDown` handler for keyboard accessibility (Enter/Space triggers click).
+
+**Files modified:**
+- `apps/desktop/src/components/dm/DMList.tsx` — changed outer button to div with role="button"
+
+### Tauri Desktop Icon Configuration (v0.8.0)
+
+**Problem:** Tauri desktop client wasn't showing the Voxium logo in the window title bar or Windows taskbar.
+
+**Fix:**
+- Generated proper icon files from `logo_static.svg` using sharp: `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.png` (512x512), `icon.ico` (multi-resolution), `icon.icns`
+- Added `image-png` feature flag to tauri dependency in `Cargo.toml`
+- Set window icon programmatically in `lib.rs` via `tauri::include_image!("icons/icon.png")` macro in the `.setup()` hook
+- Configured bundle icons in `tauri.conf.json`
+
+**Files modified:**
+- `apps/desktop/src-tauri/Cargo.toml` — added `image-png` feature to tauri
+- `apps/desktop/src-tauri/src/lib.rs` — set window icon via `include_image!` macro
+- `apps/desktop/src-tauri/tauri.conf.json` — configured bundle icon list
+- `apps/desktop/src-tauri/icons/` — generated proper icon files from SVG
+
+### Connection Banner "Reconnecting" Stuck Fix (v0.8.0)
+
+**Bug:** After a user disconnects and reconnects, the "Reconnecting to Voxium..." banner at the top of the window stays visible permanently, even though the socket is connected and working fine.
+
+**Root cause:** In `services/socket.ts`, `connectSocket()` has an early return path when the socket is already connected (`socket?.connected` is true). This path returned the socket without calling `setStatus('connected')`. If the status was still `'connecting'` from a prior connection attempt, the `ConnectionBanner` component would remain visible.
+
+**Fix:** Added `setStatus('connected')` to the early return path in `connectSocket()`.
+
+**Files modified:**
+- `apps/desktop/src/services/socket.ts` — added `setStatus('connected')` in already-connected early return

@@ -3,8 +3,9 @@ import multer from 'multer';
 import sharp from 'sharp';
 import path from 'path';
 import { authenticate } from '../middleware/auth';
+import { rateLimitUpload } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { uploadToS3, streamFromS3, deleteFromS3 } from '../utils/s3';
+import { uploadToS3, streamFromS3, deleteFromS3, VALID_S3_KEY_RE } from '../utils/s3';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { getIO } from '../websocket/socketServer';
 import { WS_EVENTS } from '@voxium/shared';
@@ -44,6 +45,7 @@ export const uploadRouter = Router();
 uploadRouter.post(
   '/avatar',
   authenticate,
+  rateLimitUpload,
   upload.single('file'),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -95,6 +97,7 @@ uploadRouter.post(
 uploadRouter.post(
   '/server-icon/:serverId',
   authenticate,
+  rateLimitUpload,
   upload.single('file'),
   async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
     try {
@@ -142,7 +145,7 @@ uploadRouter.get(
     try {
       const key = req.params[0];
       // Reject empty keys, path traversal, and keys outside known folders
-      if (!key || key.includes('..') || !/^(avatars|server-icons)\/[\w-]+\.webp$/.test(key)) {
+      if (!key || key.includes('..') || !VALID_S3_KEY_RE.test(key)) {
         throw new BadRequestError('Invalid key');
       }
 
