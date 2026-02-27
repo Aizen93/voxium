@@ -197,8 +197,6 @@ model Invite {
   code      String    @id
   serverId  String    @map("server_id")
   createdBy String    @map("created_by")
-  maxUses   Int?      @map("max_uses")
-  uses      Int       @default(0)
   expiresAt DateTime? @map("expires_at")
   createdAt DateTime  @default(now()) @map("created_at")
 

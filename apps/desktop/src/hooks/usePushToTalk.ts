@@ -16,6 +16,7 @@ export function usePushToTalk() {
   const voiceMode = useSettingsStore((s) => s.voiceMode);
   const pushToTalkKey = useSettingsStore((s) => s.pushToTalkKey);
   const pressedRef = useRef(false);
+  const muteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (voiceMode !== 'push_to_talk') return;
@@ -30,8 +31,13 @@ export function usePushToTalk() {
       localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
       stopSpeakingDetection();
 
-      const socket = getSocket();
-      if (socket) socket.emit('voice:mute', true);
+      // Debounce the mute emission to avoid flooding on rapid key taps
+      if (muteTimeoutRef.current) clearTimeout(muteTimeoutRef.current);
+      muteTimeoutRef.current = setTimeout(() => {
+        const socket = getSocket();
+        if (socket) socket.emit('voice:mute', true);
+        muteTimeoutRef.current = null;
+      }, 150);
     }
 
     function onKeyDown(e: KeyboardEvent) {
@@ -44,6 +50,12 @@ export function usePushToTalk() {
 
       e.preventDefault();
       pressedRef.current = true;
+
+      // Cancel any pending mute so we don't send mute→unmute back-to-back
+      if (muteTimeoutRef.current) {
+        clearTimeout(muteTimeoutRef.current);
+        muteTimeoutRef.current = null;
+      }
 
       localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
 
@@ -72,6 +84,7 @@ export function usePushToTalk() {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
+      if (muteTimeoutRef.current) clearTimeout(muteTimeoutRef.current);
       // Release on cleanup in case key is held when mode changes
       release();
     };

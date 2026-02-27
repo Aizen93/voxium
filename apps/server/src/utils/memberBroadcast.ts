@@ -36,7 +36,6 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
       serverId,
       user: {
         ...joinedUser,
-        email: '',
         bio: joinedUser.bio ?? null,
         status: joinedUser.status as any,
         createdAt: joinedUser.createdAt.toISOString(),

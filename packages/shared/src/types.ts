@@ -13,6 +13,9 @@ export interface User {
 
 export type UserStatus = 'online' | 'idle' | 'dnd' | 'offline';
 
+/** User without email — safe for broadcasting to other clients */
+export type PublicUser = Omit<User, 'email'>;
+
 export interface UserProfile extends User {
   bio: string | null;
   servers: ServerSummary[];
@@ -184,7 +187,7 @@ export interface ServerToClientEvents {
   'message:delete': (data: { messageId: string; channelId: string }) => void;
   'channel:created': (channel: Channel) => void;
   'channel:deleted': (data: { channelId: string; serverId: string }) => void;
-  'member:joined': (data: { serverId: string; user: User }) => void;
+  'member:joined': (data: { serverId: string; user: PublicUser }) => void;
   'member:left': (data: { serverId: string; userId: string }) => void;
   'presence:update': (data: { userId: string; status: UserStatus }) => void;
   'voice:channel_users': (data: { channelId: string; users: VoiceUser[] }) => void;
@@ -282,7 +285,7 @@ export interface ServerMember {
   serverId: string;
   role: MemberRole;
   joinedAt: string;
-  user: User;
+  user: PublicUser;
 }
 
 // ─── Invite ──────────────────────────────────────────────────────────────────
@@ -292,6 +295,4 @@ export interface Invite {
   serverId: string;
   createdBy: string;
   expiresAt: string | null;
-  maxUses: number | null;
-  uses: number;
 }

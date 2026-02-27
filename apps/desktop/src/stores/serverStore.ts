@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
-import type { Server, Channel, ServerMember, User, UserStatus, UnreadCount } from '@voxium/shared';
+import type { Server, Channel, ServerMember, PublicUser, UserStatus, UnreadCount } from '@voxium/shared';
 
 interface ServerState {
   servers: Server[];
@@ -22,7 +22,7 @@ interface ServerState {
   joinServer: (inviteCode: string) => Promise<void>;
   leaveServer: (serverId: string) => Promise<void>;
   updateMemberStatus: (userId: string, status: UserStatus) => void;
-  addMember: (serverId: string, user: User) => void;
+  addMember: (serverId: string, user: PublicUser) => void;
   removeMember: (serverId: string, userId: string) => void;
   addChannel: (channel: Channel) => void;
   removeChannel: (channelId: string, serverId: string) => void;
@@ -127,7 +127,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     }));
   },
 
-  addMember: (serverId: string, user: User) => {
+  addMember: (serverId: string, user: PublicUser) => {
     if (get().activeServerId !== serverId) return;
     set((state) => {
       if (state.members.some((m) => m.userId === user.id)) return state;
@@ -140,7 +140,6 @@ export const useServerStore = create<ServerState>((set, get) => ({
           id: user.id,
           username: user.username,
           displayName: user.displayName,
-          email: user.email,
           avatarUrl: user.avatarUrl,
           bio: user.bio ?? null,
           status: user.status || 'online',
