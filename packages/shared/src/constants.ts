@@ -1,5 +1,5 @@
 export const APP_NAME = 'Voxium';
-export const APP_VERSION = '0.4.0';
+export const APP_VERSION = '0.7.0';
 
 export const API_VERSION = 'v1';
 
@@ -71,4 +71,8 @@ export const WS_EVENTS = {
   DM_VOICE_MUTE: 'dm:voice:mute',
   DM_VOICE_DEAF: 'dm:voice:deaf',
   DM_VOICE_ENDED: 'dm:voice:ended',
+  FRIEND_REQUEST_RECEIVED: 'friend:request_received',
+  FRIEND_REQUEST_ACCEPTED: 'friend:request_accepted',
+  FRIEND_REMOVED: 'friend:removed',
+  DM_CONVERSATION_DELETED: 'dm:conversation:deleted',
 } as const;

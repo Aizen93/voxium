@@ -4,6 +4,7 @@ import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
+import { useFriendStore } from '../../stores/friendStore';
 import { getSocket, getSocketGeneration, onConnectionStatusChange } from '../../services/socket';
 import { ServerSidebar } from '../server/ServerSidebar';
 import { ChannelSidebar } from '../channel/ChannelSidebar';
@@ -19,11 +20,13 @@ import { usePushToTalk } from '../../hooks/usePushToTalk';
 import { playJoinSound, playLeaveSound, playMessageSound, playCallSound } from '../../services/notificationSounds';
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
+import { FriendsView } from '../friends/FriendsView';
 
 export function MainLayout() {
   const { fetchServers, activeServerId } = useServerStore();
   const { user } = useAuthStore();
   const activeConversationId = useDMStore((s) => s.activeConversationId);
+  const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
   usePushToTalk();
   const attachedGeneration = useRef(-1);
@@ -94,6 +97,7 @@ export function MainLayout() {
       presenceUpdate: ({ userId, status }: any) => {
         useServerStore.getState().updateMemberStatus(userId, status);
         useDMStore.getState().updateParticipantStatus(userId, status);
+        useFriendStore.getState().updateFriendStatus(userId, status);
       },
       voiceChannelUsers: ({ channelId, users: voiceUsers }: any) => {
         useVoiceStore.getState().setChannelUsers(channelId, voiceUsers);
@@ -270,6 +274,18 @@ export function MainLayout() {
           voiceState.setIncomingCall(null);
         }
       },
+      dmConversationDeleted: ({ conversationId }: any) => {
+        useDMStore.getState().handleConversationDeleted(conversationId);
+      },
+      friendRequestReceived: (data: any) => {
+        useFriendStore.getState().handleRequestReceived(data);
+      },
+      friendRequestAccepted: (data: any) => {
+        useFriendStore.getState().handleRequestAccepted(data);
+      },
+      friendRemoved: (data: any) => {
+        useFriendStore.getState().handleFriendRemoved(data);
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -307,6 +323,10 @@ export function MainLayout() {
       ['dm:voice:speaking', handlers.dmVoiceSpeaking],
       ['dm:voice:signal', handlers.dmVoiceSignal],
       ['dm:voice:ended', handlers.dmVoiceEnded],
+      ['dm:conversation:deleted', handlers.dmConversationDeleted],
+      ['friend:request_received', handlers.friendRequestReceived],
+      ['friend:request_accepted', handlers.friendRequestAccepted],
+      ['friend:removed', handlers.friendRemoved],
     ];
 
     /**
@@ -362,6 +382,8 @@ export function MainLayout() {
       }
       // Re-fetch DM conversations
       useDMStore.getState().fetchConversations();
+      // Re-fetch friends
+      useFriendStore.getState().fetchFriends();
     }
 
     // Mechanism 1: Direct listener on the socket object
@@ -413,6 +435,8 @@ export function MainLayout() {
         <div className="flex flex-1 flex-col overflow-hidden">
           {activeServerId ? (
             <ChatArea />
+          ) : showFriendsView ? (
+            <FriendsView />
           ) : activeConversationId ? (
             <DMChatArea />
           ) : (

@@ -23,7 +23,7 @@ const STATUS_COLORS: Record<UserStatus, string> = {
 export function DMChatArea() {
   const { activeConversationId, conversations } = useDMStore();
   const participantStatuses = useDMStore((s) => s.participantStatuses);
-  const { fetchDMMessages, clearMessages } = useChatStore();
+  const fetchDMMessages = useChatStore((s) => s.fetchDMMessages);
   const prevConvRef = useRef<string | null>(null);
 
   const dmCallConversationId = useVoiceStore((s) => s.dmCallConversationId);
@@ -51,10 +51,9 @@ export function DMChatArea() {
       if (socket) {
         socket.emit('dm:join', conversationId);
       }
-      clearMessages();
       fetchDMMessages(conversationId);
     },
-    [clearMessages, fetchDMMessages]
+    [fetchDMMessages]
   );
 
   // Join DM room and fetch messages when conversation changes

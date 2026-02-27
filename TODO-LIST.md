@@ -8,7 +8,7 @@
   - [x] When creating a new voice channel or a new text channel, the other users does not see it in real time and require a page refresh
   - [] Tauri client does not receive windows notifications, how do we activate them by default, or prompt the user to activate notifications. Our apps Settings has notifications enabled.
   - [] Security : Throtling, xss, sql injections, and rate limiting, captcha.
-  - [] Password forgot + profile password change
+  - [x] Password forgot + profile password change
 
 ## Core chat features (medium effort):
   - [] File & image uploads — drag-and-drop or paste images into chat, preview inline. Needs a storage backend (S3/local) and a new message type
@@ -16,6 +16,6 @@
   - [x] Message editing & deletion UI — the server events (message:update, message:delete) are already wired, but I didn't see an edit/delete UI in the chat bubbles
 
 ## Bigger features (high effort, high value):
-  - [] Direct messages (DMs) — 1:1 and group DMs outside of servers; this is a significant architecture addition but is probably the most-expected missing feature
+  - [x] Direct messages (DMs) — 1:1 and group DMs outside of servers; this is a significant architecture addition but is probably the most-expected missing feature
   - [] Screen sharing — the WebRTC peer connections are already set up; adding a video track for screen capture is a natural extension
   - [] Server roles & permissions — the MemberRole type exists (owner/admin/member) but I didn't see permission checks on the client for things like channel creation or member management

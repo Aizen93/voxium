@@ -1,12 +1,12 @@
-import { useRef, useState, useCallback, useLayoutEffect, useEffect } from 'react';
+import { useRef, useState, useCallback, useLayoutEffect, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
-import { useChatStore } from '../../stores/chatStore';
+import { useFriendStore } from '../../stores/friendStore';
 import { Avatar } from './Avatar';
-import { Volume2, Crown, Shield, MessageSquare } from 'lucide-react';
+import { Volume2, Crown, Shield, MessageSquare, UserPlus, UserMinus, Check, X, Clock } from 'lucide-react';
 import { toast } from '../../stores/toastStore';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
@@ -121,11 +121,62 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     try {
       const conversationId = await useDMStore.getState().openDM(userId);
       useServerStore.setState({ activeServerId: null, activeChannelId: null });
-      useChatStore.getState().clearMessages();
       useDMStore.getState().setActiveConversation(conversationId);
       onClose();
     } catch {
       toast.error('Failed to open conversation');
+    }
+  };
+
+  const friends = useFriendStore((s) => s.friends);
+  const pendingIncoming = useFriendStore((s) => s.pendingIncoming);
+  const pendingOutgoing = useFriendStore((s) => s.pendingOutgoing);
+
+  const friendshipInfo = useMemo(() => {
+    const friend = friends.find((f) => f.user.id === userId);
+    if (friend) return { status: 'friends' as const, friendshipId: friend.id };
+    const incoming = pendingIncoming.find((f) => f.user.id === userId);
+    if (incoming) return { status: 'pending_incoming' as const, friendshipId: incoming.id };
+    const outgoing = pendingOutgoing.find((f) => f.user.id === userId);
+    if (outgoing) return { status: 'pending_outgoing' as const, friendshipId: outgoing.id };
+    return { status: 'none' as const, friendshipId: null };
+  }, [friends, pendingIncoming, pendingOutgoing, userId]);
+
+  const handleAddFriend = async () => {
+    if (!member) return;
+    try {
+      await useFriendStore.getState().sendRequest(member.user.username);
+      toast.success('Friend request sent');
+    } catch (err: any) {
+      const msg = err.response?.data?.error || 'Failed to send friend request';
+      toast.error(msg);
+    }
+  };
+
+  const handleAcceptFriend = async () => {
+    if (!friendshipInfo.friendshipId) return;
+    try {
+      await useFriendStore.getState().acceptRequest(friendshipInfo.friendshipId);
+    } catch {
+      toast.error('Failed to accept friend request');
+    }
+  };
+
+  const handleDeclineFriend = async () => {
+    if (!friendshipInfo.friendshipId) return;
+    try {
+      await useFriendStore.getState().removeFriendship(friendshipInfo.friendshipId);
+    } catch {
+      toast.error('Failed to decline friend request');
+    }
+  };
+
+  const handleRemoveFriend = async () => {
+    if (!friendshipInfo.friendshipId) return;
+    try {
+      await useFriendStore.getState().removeFriendship(friendshipInfo.friendshipId);
+    } catch {
+      toast.error('Failed to remove friend');
     }
   };
 
@@ -188,16 +239,60 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
           </div>
         </div>
 
-        {/* Message button */}
+        {/* Action buttons */}
         {!isOwnProfile && (
-          <div className="px-4 pb-2">
+          <div className="px-4 pb-2 flex gap-2">
             <button
               onClick={handleOpenDM}
-              className="flex w-full items-center justify-center gap-1.5 rounded-md bg-vox-accent-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors"
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-accent-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors"
             >
               <MessageSquare size={12} />
               Message
             </button>
+            {friendshipInfo.status === 'none' && (
+              <button
+                onClick={handleAddFriend}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-accent-success px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-success/80 transition-colors"
+              >
+                <UserPlus size={12} />
+                Add Friend
+              </button>
+            )}
+            {friendshipInfo.status === 'pending_outgoing' && (
+              <button
+                disabled
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-bg-hover px-3 py-1.5 text-xs font-medium text-vox-text-muted cursor-not-allowed"
+              >
+                <Clock size={12} />
+                Pending
+              </button>
+            )}
+            {friendshipInfo.status === 'pending_incoming' && (
+              <>
+                <button
+                  onClick={handleAcceptFriend}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-accent-success px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-success/80 transition-colors"
+                >
+                  <Check size={12} />
+                  Accept
+                </button>
+                <button
+                  onClick={handleDeclineFriend}
+                  className="flex items-center justify-center gap-1.5 rounded-md bg-vox-bg-hover px-2 py-1.5 text-xs font-medium text-vox-text-muted hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger transition-colors"
+                >
+                  <X size={12} />
+                </button>
+              </>
+            )}
+            {friendshipInfo.status === 'friends' && (
+              <button
+                onClick={handleRemoveFriend}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-bg-hover px-3 py-1.5 text-xs font-medium text-vox-text-muted hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger transition-colors"
+              >
+                <UserMinus size={12} />
+                Unfriend
+              </button>
+            )}
           </div>
         )}
 

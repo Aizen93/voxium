@@ -33,6 +33,8 @@ model User {
   conversationsAsUser1 Conversation[] @relation("ConversationUser1")
   conversationsAsUser2 Conversation[] @relation("ConversationUser2")
   conversationReads    ConversationRead[]
+  friendshipsRequested Friendship[] @relation("FriendshipRequester")
+  friendshipsReceived  Friendship[] @relation("FriendshipAddressee")
 
   @@map("users")
 }
@@ -169,6 +171,24 @@ model ConversationRead {
 
   @@id([userId, conversationId])
   @@map("conversation_reads")
+}
+
+// ─── Friendships ────────────────────────────────────────────────────────────
+
+model Friendship {
+  id          String   @id @default(cuid())
+  requesterId String   @map("requester_id")
+  addresseeId String   @map("addressee_id")
+  status      String   @default("pending") // "pending" | "accepted"
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  requester User @relation("FriendshipRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  addressee User @relation("FriendshipAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
+
+  @@unique([requesterId, addresseeId])
+  @@index([addresseeId])
+  @@map("friendships")
 }
 
 // ─── Invites ─────────────────────────────────────────────────────────────────

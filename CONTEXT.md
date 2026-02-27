@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.5.1 (DM Voice Calls)
+**Version:** 0.7.0 (Delete DM Conversation + DM Chat Loading Fix)
 **Date:** 2026-02-27
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, and 1-on-1 DM voice calls with WebRTC P2P audio
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, and friend request system with real-time notifications
 
 ## What Has Been Done
 
@@ -170,7 +170,7 @@ Comprehensive hardening of real-time features:
 - [x] Message reactions with emoji picker
 - [x] File/image upload support (S3 avatars and server icons)
 - [x] Direct messages (DMs) -- text + voice calls
-- [ ] Friend system
+- [x] Friend system
 - [x] Server settings panel
 - [x] User settings/profile editing
 - [ ] Role/permission management
@@ -853,7 +853,7 @@ Enhanced unread indicators on the server sidebar:
 - DM `before` query parameter (cursor pagination) uses `new Date(before)` without validating the date string. An invalid date string like `"foo"` produces `Invalid Date`, which Prisma passes to PostgreSQL where it will throw. The existing channel messages route has the same pattern. Consider adding date validation.
 - `chatStore.sendDMMessage` has a fallback pattern that adds the sent message locally if not yet received via WebSocket. This can cause brief duplicates (the addMessage dedup check prevents permanent duplicates). The same pattern exists for channel messages and is acceptable.
 - The `UserProfilePopup` "Message" button only works when the user is viewing a server (it depends on `member` being found in the server store's member list). If the user is already in the DM view and opens a profile popup for someone not in the current server's member list, the popup renders `null`. Consider a fallback that fetches user data directly.
-- DM conversations cannot currently be deleted or archived by users. The `Conversation` model has no soft-delete mechanism.
+- ~~DM conversations cannot currently be deleted or archived by users. The `Conversation` model has no soft-delete mechanism.~~ **Resolved in v0.7.0** — `DELETE /dm/:conversationId` endpoint with cascade delete (messages + reads) and real-time `dm:conversation:deleted` event.
 
 ---
 
@@ -957,3 +957,115 @@ Enhanced unread indicators on the server sidebar:
 - The `VoiceState` interface in `voiceStore.ts` has grown to 38 members, mixing server voice, DM voice, and peer management concerns. While acceptable for Zustand's flat store pattern, this could benefit from logical grouping via nested objects in the future.
 - `createDMPeer` and `createPeer` remain near-identical (flagged in two previous reviews). Consider extracting a shared `createPeerConnection(targetUserId, initiator, signalEvent)` function.
 - `joinDMCall` and `joinChannel` share duplicated audio setup logic (getUserMedia, PTT handling, noise gate, speaking detection). A shared `acquireAudioStream()` helper would reduce duplication.
+
+### Friend Request System (v0.6.0)
+
+**New feature:** Users can send, accept, decline, and remove friend requests. The system supports real-time notifications via Socket.IO, with a dedicated Friends view in the DM panel and friend action buttons in user profile popups.
+
+**Database (`apps/server/prisma/schema.prisma`):**
+- New `Friendship` model with `requesterId`, `addresseeId`, `status` ("pending" | "accepted"), timestamps
+- `@@unique([requesterId, addresseeId])` composite unique constraint (directional -- server code checks both directions via `OR` queries)
+- `@@index([addresseeId])` for efficient lookup of incoming requests
+- Cascade deletes from both `User` relations
+
+**Server routes (`apps/server/src/routes/friends.ts`):**
+- `GET /friends` -- List all friendships (pending + accepted) for the current user
+- `POST /friends/request` -- Send friend request by username (case-insensitive). Auto-accepts if a reverse pending request exists.
+- `POST /friends/:friendshipId/accept` -- Accept incoming request (addressee only)
+- `DELETE /friends/:friendshipId` -- Remove/cancel/decline friendship (either party)
+- `GET /friends/status/:userId` -- Check friendship status with a specific user
+
+**Shared types (`packages/shared/src/types.ts`):**
+- `FriendshipStatus`, `FriendUser`, `Friendship` interfaces
+- `ServerToClientEvents`: `friend:request_received`, `friend:request_accepted`, `friend:removed`
+- `WS_EVENTS` constants for all three friend events
+
+**Frontend store (`apps/desktop/src/stores/friendStore.ts`):**
+- Zustand store managing `friends`, `pendingIncoming`, `pendingOutgoing` arrays
+- API methods: `fetchFriends`, `sendRequest`, `acceptRequest`, `removeFriendship`
+- Socket handlers: `handleRequestReceived`, `handleRequestAccepted`, `handleFriendRemoved`
+- `updateFriendStatus` for presence sync, `getFriendshipStatus` for UI lookups
+- `showFriendsView` flag controls FriendsView rendering in the main layout
+
+**Frontend components:**
+- `FriendsView.tsx` -- Tabbed interface (Online / All / Pending / Add Friend) with count badges
+- `FriendListItem.tsx` -- Row component with avatar, status dot, name, and context-appropriate action buttons (message/accept/decline/cancel/remove)
+- `AddFriendForm.tsx` -- Username input with loading state and toast feedback
+- `DMList.tsx` -- Added "Friends" button with pending count badge
+- `UserProfilePopup.tsx` -- Friend action buttons (Add Friend / Pending / Accept+Decline / Unfriend) based on friendship status
+- `MainLayout.tsx` -- Socket handlers for all three friend events, `fetchFriends` on reconnect, presence update propagation to friend store, FriendsView conditional rendering
+
+**New files:**
+- `apps/server/src/routes/friends.ts`
+- `apps/desktop/src/stores/friendStore.ts`
+- `apps/desktop/src/components/friends/FriendsView.tsx`
+- `apps/desktop/src/components/friends/FriendListItem.tsx`
+- `apps/desktop/src/components/friends/AddFriendForm.tsx`
+- `apps/server/prisma/migrations/20260227151703_add_friendships/migration.sql`
+
+**Review fixes applied:**
+- Removed unused `isUserOnline` import from `friends.ts`
+- Fixed `DELETE /friends/:friendshipId` to emit `friend:removed` to the other user for ALL statuses (pending + accepted), not just accepted friendships. Without this, declining a pending request or cancelling an outgoing request left stale entries in the other user's UI until page refresh.
+
+**Known issues / suggestions from this review:**
+- `AddFriendForm` always toasts "Friend request sent" even when the request was auto-accepted (reverse pending existed). The `sendRequest` store method does not communicate the auto-accept outcome back to the form component. Minor UX issue.
+- The `fetchFriends` filter logic (`f.addresseeId !== f.user.id` / `f.requesterId !== f.user.id`) is correct but unintuitive -- it relies on the fact that `f.user` is always the "other" user. A comment explaining the reasoning or comparing against the current user ID (passed as a parameter) would improve readability.
+- Socket emission in REST routes uses `io.fetchSockets()` + loop to find target user sockets. This is O(n) over all connected sockets. For large deployments, consider using user-specific Socket.IO rooms (e.g., `user:{id}`) for O(1) targeted emission.
+
+### Delete DM Conversation (v0.7.0)
+
+**New feature:** Users can delete a DM conversation from the sidebar. Deleting removes the conversation for both participants (shared `Conversation` row), with Prisma cascade deletes automatically cleaning up all Messages and ConversationRead records. No schema changes were needed.
+
+**Shared package (`packages/shared`):**
+- Added `DM_CONVERSATION_DELETED: 'dm:conversation:deleted'` to `WS_EVENTS`
+- Added `'dm:conversation:deleted'` to `ServerToClientEvents`
+
+**Backend (`apps/server/src/routes/dm.ts`):**
+- `DELETE /dm/:conversationId` — verifies participant via `getConversationOrThrow()`, deletes conversation (cascades messages + reads), emits `dm:conversation:deleted` to the `dm:{conversationId}` room, then removes all sockets from the room
+
+**Frontend store (`apps/desktop/src/stores/dmStore.ts`):**
+- `deleteConversation(conversationId)` — calls `DELETE /dm/:id`, then runs local cleanup
+- `handleConversationDeleted(conversationId)` — removes from `conversations` array, clears `activeConversationId` if it matches, removes unread count entry
+
+**Frontend UI (`apps/desktop/src/components/dm/DMList.tsx`):**
+- X button on each conversation row, visible on hover via `opacity-0 group-hover:opacity-100`
+- `onClick` uses `e.stopPropagation()` to prevent opening the conversation
+
+**Frontend socket wiring (`apps/desktop/src/components/layout/MainLayout.tsx`):**
+- Added `dmConversationDeleted` handler calling `useDMStore.getState().handleConversationDeleted()`
+- Added `['dm:conversation:deleted', handlers.dmConversationDeleted]` to event map
+
+**Files modified:**
+- `packages/shared/src/constants.ts`
+- `packages/shared/src/types.ts`
+- `apps/server/src/routes/dm.ts`
+- `apps/desktop/src/stores/dmStore.ts`
+- `apps/desktop/src/components/dm/DMList.tsx`
+- `apps/desktop/src/components/layout/MainLayout.tsx`
+
+---
+
+### DM Chat Loading Race Condition Fix (v0.7.0)
+
+**Bug:** DM chat sometimes appeared empty (no messages) even when the conversation had messages. The issue was intermittent — a page refresh might or might not fix it.
+
+**Root cause:** `clearMessages()` was called in multiple places (`DMList.handleOpenConversation`, `FriendListItem.handleMessage`, `UserProfilePopup.handleOpenDM`, `ServerSidebar` home button) *before* `setActiveConversation()`, but `DMChatArea`'s fetch effect used a `prevConvRef` guard that skipped refetching when the conversation ID hadn't changed. This created two failure modes:
+1. **Same-conversation re-click:** `clearMessages()` wiped loaded messages, but the effect guard saw the same conversation ID and skipped the refetch — messages stayed empty permanently.
+2. **Reconnect wipe:** `joinAndFetch()` in `DMChatArea` called `clearMessages()` before `fetchDMMessages()` on every reconnect. If the subsequent refetch failed (network timing, auth refresh), messages were gone with no retry mechanism.
+
+**Fix — centralized `clearMessages()` ownership:**
+- `dmStore.setActiveConversation()` now calls `clearMessages()` only when the conversation ID actually changes (guards with `get().activeConversationId !== conversationId`)
+- `dmStore.clearActiveConversation()` now calls `clearMessages()` only when there was an active conversation
+- Removed redundant `clearMessages()` calls from: `DMList.handleOpenConversation`, `DMList.handleOpenFriends`, `FriendListItem.handleMessage`, `UserProfilePopup.handleOpenDM`, `ServerSidebar` home button click
+- Removed `clearMessages()` from `DMChatArea.joinAndFetch` — `fetchDMMessages()` atomically replaces messages on success; on failure, old messages are preserved instead of being wiped
+- Cleaned up unused `useChatStore` imports from `DMList`, `FriendListItem`, `UserProfilePopup`, `ServerSidebar`
+
+**Files modified:**
+- `apps/desktop/src/stores/dmStore.ts` — centralized `clearMessages()` in `setActiveConversation` and `clearActiveConversation`
+- `apps/desktop/src/components/dm/DMChatArea.tsx` — removed `clearMessages` from `joinAndFetch`, switched to selector for `fetchDMMessages`
+- `apps/desktop/src/components/dm/DMList.tsx` — removed `clearMessages()` from `handleOpenConversation` and `handleOpenFriends`
+- `apps/desktop/src/components/friends/FriendListItem.tsx` — removed `clearMessages()` from `handleMessage`
+- `apps/desktop/src/components/common/UserProfilePopup.tsx` — removed `clearMessages()` from `handleOpenDM`
+- `apps/desktop/src/components/server/ServerSidebar.tsx` — removed `clearMessages()` from home button click
+
+**Design principle established:** `clearMessages()` should only be called by the store that owns the view transition (`dmStore.setActiveConversation` / `clearActiveConversation`), never by UI components directly. This prevents the "clear without refetch" race condition.

@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
-import { useChatStore } from '../../stores/chatStore';
 import { Plus, LogOut, Settings } from 'lucide-react';
 import { clsx } from 'clsx';
 import { CreateServerModal } from './CreateServerModal';
@@ -33,7 +32,6 @@ export function ServerSidebar() {
           onClick={() => {
             useServerStore.setState({ activeServerId: null });
             useDMStore.getState().clearActiveConversation();
-            useChatStore.getState().clearMessages();
           }}
         >
           <img src="/logo.svg" alt="Voxium" className="h-7 w-7" />

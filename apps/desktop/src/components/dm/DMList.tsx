@@ -1,21 +1,28 @@
 import { useEffect } from 'react';
 import { useDMStore } from '../../stores/dmStore';
-import { useChatStore } from '../../stores/chatStore';
+import { useFriendStore } from '../../stores/friendStore';
 import { Avatar } from '../common/Avatar';
-import { MessageSquare } from 'lucide-react';
+import { MessageSquare, Users, X } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { clsx } from 'clsx';
 
 export function DMList() {
-  const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts } = useDMStore();
+  const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, deleteConversation } = useDMStore();
+  const showFriendsView = useFriendStore((s) => s.showFriendsView);
+  const pendingIncoming = useFriendStore((s) => s.pendingIncoming);
 
   useEffect(() => {
     fetchConversations();
   }, [fetchConversations]);
 
   const handleOpenConversation = (conversationId: string) => {
-    useChatStore.getState().clearMessages();
+    useFriendStore.getState().setShowFriendsView(false);
     setActiveConversation(conversationId);
+  };
+
+  const handleOpenFriends = () => {
+    useFriendStore.getState().setShowFriendsView(true);
+    useDMStore.getState().clearActiveConversation();
   };
 
   return (
@@ -24,6 +31,27 @@ export function DMList() {
       <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
         <MessageSquare size={16} className="text-vox-text-muted" />
         <h2 className="text-sm font-semibold text-vox-text-primary">Direct Messages</h2>
+      </div>
+
+      {/* Friends button */}
+      <div className="px-2 pt-2">
+        <button
+          onClick={handleOpenFriends}
+          className={clsx(
+            'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
+            showFriendsView
+              ? 'bg-vox-bg-active text-vox-text-primary'
+              : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
+          )}
+        >
+          <Users size={16} />
+          <span className="flex-1 text-sm font-medium">Friends</span>
+          {pendingIncoming.length > 0 && (
+            <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-vox-accent-danger px-1 text-[10px] font-bold text-white">
+              {pendingIncoming.length}
+            </span>
+          )}
+        </button>
       </div>
 
       {/* Conversation list */}
@@ -83,6 +111,16 @@ export function DMList() {
                   {unread > 99 ? '99+' : unread}
                 </span>
               )}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deleteConversation(conv.id);
+                }}
+                className="opacity-0 group-hover:opacity-100 shrink-0 rounded p-0.5 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-active transition-all"
+                title="Delete conversation"
+              >
+                <X size={14} />
+              </button>
             </button>
           );
         })}

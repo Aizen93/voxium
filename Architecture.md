@@ -144,10 +144,11 @@ apps/server/
 │   │   ├── servers.ts      # CRUD servers, join/leave, members, settings
 │   │   ├── channels.ts     # CRUD channels, mark-as-read
 │   │   ├── messages.ts     # CRUD messages with pagination, reactions
-│   │   ├── dm.ts           # DM conversations, messages, reactions, read tracking
+│   │   ├── dm.ts           # DM conversations, messages, reactions, read tracking, deletion
 │   │   ├── users.ts        # User profiles, profile update with real-time broadcast
 │   │   ├── invites.ts      # Create/use/preview invites
-│   │   └── uploads.ts      # Avatar/server icon upload (S3) + file serving proxy
+│   │   ├── uploads.ts      # Avatar/server icon upload (S3) + file serving proxy
+│   │   └── friends.ts      # Friend requests (send/accept/decline/remove), friendship status
 │   ├── services/
 │   │   └── authService.ts  # Auth business logic
 │   ├── middleware/
@@ -252,6 +253,10 @@ apps/desktop/
 │   │   │   ├── DMMessageList.tsx    # DM scrollable messages with system msgs
 │   │   │   ├── DMCallPanel.tsx      # Discord-style call UI (avatars, controls)
 │   │   │   └── IncomingCallModal.tsx # Incoming call accept/decline
+│   │   ├── friends/
+│   │   │   ├── FriendsView.tsx     # Tabbed friends interface (Online/All/Pending/Add)
+│   │   │   ├── FriendListItem.tsx  # Friend row with action buttons
+│   │   │   └── AddFriendForm.tsx   # Send friend request by username
 │   │   └── voice/
 │   │       └── VoicePanel.tsx       # Server voice connection controls
 │   ├── stores/
@@ -259,7 +264,8 @@ apps/desktop/
 │   │   ├── serverStore.ts    # Server/channel state
 │   │   ├── chatStore.ts      # Messages and typing (channels + DMs)
 │   │   ├── voiceStore.ts     # Voice connection state (server + DM calls)
-│   │   ├── dmStore.ts        # DM conversations, unread tracking
+│   │   ├── dmStore.ts        # DM conversations, unread tracking, deletion
+│   │   ├── friendStore.ts    # Friends list, friend requests, real-time events
 │   │   ├── settingsStore.ts  # Audio devices, notifications, PTT (localStorage)
 │   │   └── toastStore.ts     # Toast notification queue + convenience helpers
 │   ├── services/
@@ -320,7 +326,7 @@ apps/desktop/
 
 ### State Management (Zustand)
 
-Seven independent stores, each managing a domain:
+Eight independent stores, each managing a domain:
 
 | Store | Responsibilities |
 |-------|-----------------|
@@ -328,7 +334,8 @@ Seven independent stores, each managing a domain:
 | `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync, persistent unread tracking (via `ChannelRead` DB table + `unread:init` socket event) |
 | `chatStore` | Messages for active channel/conversation, typing indicators, pagination, author profile sync (shared by server channels and DMs) |
 | `voiceStore` | Server voice channel connection, DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`), mute/deaf, peer management (WebRTC). Server and DM voice are mutually exclusive. |
-| `dmStore` | DM conversation list, active conversation, participant online/offline status, DM unread counts (persisted via `ConversationRead` + `dm:unread:init`) |
+| `dmStore` | DM conversation list, active conversation, participant online/offline status, DM unread counts (persisted via `ConversationRead` + `dm:unread:init`), conversation deletion. Owns `clearMessages()` calls for DM view transitions. |
+| `friendStore` | Friends list (accepted/pending incoming/pending outgoing), friend request CRUD, real-time friend event handlers, friendship status lookups, `showFriendsView` toggle |
 | `settingsStore` | Audio devices, noise gate, notification prefs, PTT key (persisted to localStorage) |
 | `toastStore` | Toast notification queue, auto-dismiss timers, convenience helpers |
 
@@ -522,6 +529,8 @@ Client                          Server
 - `dm:unread:init` (persistent DM unread counts)
 - `dm:voice:offer` / `dm:voice:joined` / `dm:voice:left` / `dm:voice:ended`
 - `dm:voice:state_update` / `dm:voice:speaking` / `dm:voice:signal`
+- `dm:conversation:deleted`
+- `friend:request_received` / `friend:request_accepted` / `friend:removed`
 
 **Client → Server:**
 - `channel:join` (for newly created channels only; `channel:leave` is NOT used — auto-subscription persists)
@@ -819,7 +828,7 @@ mediasoup Deployment (autoscaling)
 |---------|-------------------|
 | **Video calls** | mediasoup SFU with video codecs (VP8/VP9/H264) |
 | **Screen sharing** | mediasoup producer for screen capture |
-| **~~Direct Messages~~** | ~~New DM channel type, conversation model~~ **Implemented (v0.5.0)** — 1-on-1 text + voice with `Conversation` model, real-time delivery, typing, reactions, unread tracking, WebRTC P2P calls |
+| **~~Direct Messages~~** | ~~New DM channel type, conversation model~~ **Implemented (v0.5.0–v0.7.0)** — 1-on-1 text + voice with `Conversation` model, real-time delivery, typing, reactions, unread tracking, WebRTC P2P calls, conversation deletion with cascade + real-time sync |
 | **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2)** — server-proxied S3 uploads for avatars/icons via sharp + multer |
 | **~~Password reset~~** | ~~Email-based reset flow~~ **Implemented (v0.4.0)** — Nodemailer + SHA-256 hashed tokens + tokenVersion-based session invalidation |
 | **Push notifications** | FCM/APNs integration service |

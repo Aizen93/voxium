@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
+import { useChatStore } from './chatStore';
 import type { Conversation, DMUnreadCount, UserStatus } from '@voxium/shared';
 
 interface DMState {
@@ -19,6 +20,8 @@ interface DMState {
   clearDMUnread: (conversationId: string) => void;
   initDMUnreadCounts: (unreads: DMUnreadCount[]) => void;
   markConversationRead: (conversationId: string) => void;
+  deleteConversation: (conversationId: string) => Promise<void>;
+  handleConversationDeleted: (conversationId: string) => void;
   totalDMUnread: () => number;
   updateParticipantStatus: (userId: string, status: UserStatus) => void;
 }
@@ -42,12 +45,18 @@ export const useDMStore = create<DMState>((set, get) => ({
   },
 
   setActiveConversation: (conversationId: string) => {
+    if (get().activeConversationId !== conversationId) {
+      useChatStore.getState().clearMessages();
+    }
     set({ activeConversationId: conversationId });
     get().clearDMUnread(conversationId);
     get().markConversationRead(conversationId);
   },
 
   clearActiveConversation: () => {
+    if (get().activeConversationId) {
+      useChatStore.getState().clearMessages();
+    }
     set({ activeConversationId: null });
   },
 
@@ -117,6 +126,27 @@ export const useDMStore = create<DMState>((set, get) => ({
 
   markConversationRead: (conversationId: string) => {
     api.post(`/dm/${conversationId}/read`).catch(() => {});
+  },
+
+  deleteConversation: async (conversationId: string) => {
+    try {
+      await api.delete(`/dm/${conversationId}`);
+      get().handleConversationDeleted(conversationId);
+    } catch (err) {
+      console.error('Failed to delete conversation:', err);
+      throw err;
+    }
+  },
+
+  handleConversationDeleted: (conversationId: string) => {
+    set((state) => {
+      const { [conversationId]: _, ...restUnreads } = state.dmUnreadCounts;
+      return {
+        conversations: state.conversations.filter((c) => c.id !== conversationId),
+        activeConversationId: state.activeConversationId === conversationId ? null : state.activeConversationId,
+        dmUnreadCounts: restUnreads,
+      };
+    });
   },
 
   totalDMUnread: () => {

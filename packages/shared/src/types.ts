@@ -155,6 +155,27 @@ export interface DMUnreadCount {
   count: number;
 }
 
+// ─── Friendships ────────────────────────────────────────────────────────────
+
+export type FriendshipStatus = 'pending' | 'accepted';
+
+export interface FriendUser {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  status: UserStatus;
+}
+
+export interface Friendship {
+  id: string;
+  requesterId: string;
+  addresseeId: string;
+  status: FriendshipStatus;
+  createdAt: string;
+  user: FriendUser; // the OTHER user
+}
+
 // ─── WebSocket Events ────────────────────────────────────────────────────────
 
 export interface ServerToClientEvents {
@@ -207,6 +228,10 @@ export interface ServerToClientEvents {
   'dm:voice:speaking': (data: { conversationId: string; userId: string; speaking: boolean }) => void;
   'dm:voice:signal': (data: { from: string; signal: unknown }) => void;
   'dm:voice:ended': (data: { conversationId: string }) => void;
+  'dm:conversation:deleted': (data: { conversationId: string }) => void;
+  'friend:request_received': (data: { friendship: Friendship }) => void;
+  'friend:request_accepted': (data: { friendship: Friendship }) => void;
+  'friend:removed': (data: { userId: string }) => void;
 }
 
 export interface ClientToServerEvents {

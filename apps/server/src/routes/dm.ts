@@ -331,6 +331,34 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', async (req
   }
 });
 
+// ─── Delete conversation ────────────────────────────────────────────────────
+
+dmRouter.delete('/:conversationId', async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.user!.userId;
+
+    await getConversationOrThrow(conversationId, userId);
+
+    // Delete conversation (cascades messages + conversation reads)
+    await prisma.conversation.delete({ where: { id: conversationId } });
+
+    // Notify the other participant
+    const io = getIO();
+    io.to(`dm:${conversationId}`).emit('dm:conversation:deleted', { conversationId });
+
+    // Remove all sockets from the DM room
+    const sockets = await io.in(`dm:${conversationId}`).fetchSockets();
+    for (const s of sockets) {
+      s.leave(`dm:${conversationId}`);
+    }
+
+    res.json({ success: true, message: 'Conversation deleted' });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── Mark conversation as read ───────────────────────────────────────────────
 
 dmRouter.post('/:conversationId/read', async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
