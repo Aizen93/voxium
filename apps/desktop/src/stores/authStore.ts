@@ -4,6 +4,7 @@ import { connectSocket, disconnectSocket } from '../services/socket';
 import { getAccessToken, setTokens, clearTokens, isRemembered } from '../services/tokenStorage';
 import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
+import { processImage } from '../utils/imageProcessing';
 import type { User } from '@voxium/shared';
 
 interface AuthState {
@@ -96,15 +97,31 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   clearError: () => set({ error: null }),
 
   uploadAvatar: async (file: File) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    const { data } = await api.post('/uploads/avatar', formData);
-    const key = data.data.key;
+    // 1. Get presigned PUT URL
+    const { data: presignData } = await api.post('/uploads/presign/avatar');
+    const { uploadUrl, key } = presignData.data;
+
+    // 2. Client-side resize + WebP conversion
+    const blob = await processImage(file);
+
+    // 3. Direct upload to S3
+    const uploadRes = await fetch(uploadUrl, {
+      method: 'PUT',
+      body: blob,
+      headers: { 'Content-Type': 'image/webp' },
+    });
+    if (!uploadRes.ok) {
+      throw new Error(`S3 upload failed: ${uploadRes.status}`);
+    }
+
+    // 4. Confirm in DB (triggers old avatar cleanup + socket broadcast)
+    await api.patch('/users/me/profile', { avatarUrl: key });
+
+    // 5. Optimistic local state update + cross-store propagation
     const userId = get().user?.id;
     set((state) => ({
       user: state.user ? { ...state.user, avatarUrl: key } : null,
     }));
-    // Propagate to member list and chat messages so avatar updates everywhere
     if (userId) {
       useServerStore.getState().updateMemberAvatar(userId, key);
       useChatStore.getState().updateAuthorAvatar(userId, key);

@@ -5,7 +5,7 @@ import { BadRequestError, NotFoundError } from '../utils/errors';
 import { validateDisplayName, validateBio, WS_EVENTS } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
-import { VALID_S3_KEY_RE } from '../utils/s3';
+import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 
 export const userRouter = Router();
 
@@ -48,6 +48,10 @@ userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFu
       if (typeof avatarUrl !== 'string' || !VALID_S3_KEY_RE.test(avatarUrl)) {
         throw new BadRequestError('Invalid avatar key');
       }
+      // Ownership check: key must belong to this user
+      if (!avatarUrl.startsWith(`avatars/${req.user!.userId}-`)) {
+        throw new BadRequestError('Invalid avatar key');
+      }
     }
 
     if (displayName !== undefined) {
@@ -62,6 +66,16 @@ userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFu
       bio = sanitizeText(bio);
       const err = validateBio(bio);
       if (err) throw new BadRequestError(err);
+    }
+
+    // Fetch old avatar key before updating (for cleanup)
+    let oldAvatarUrl: string | null = null;
+    if (avatarUrl !== undefined) {
+      const current = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: { avatarUrl: true },
+      });
+      oldAvatarUrl = current?.avatarUrl ?? null;
     }
 
     const updated = await prisma.user.update({
@@ -82,6 +96,11 @@ userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFu
         createdAt: true,
       },
     });
+
+    // Delete old avatar from S3 after DB update confirmed
+    if (avatarUrl !== undefined && oldAvatarUrl && oldAvatarUrl !== avatarUrl) {
+      deleteFromS3(oldAvatarUrl).catch(() => {});
+    }
 
     // Broadcast profile change to all servers the user is in
     if (displayName !== undefined || avatarUrl !== undefined) {

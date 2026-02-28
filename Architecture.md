@@ -98,8 +98,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 | Validation | Zod + custom validators | — |
 | Password Hashing | bcryptjs | — |
 | File Storage | S3-compatible (OVH) | — |
-| Image Processing | sharp | — |
-| File Upload | multer | — |
+| S3 Presigning | @aws-sdk/s3-request-presigner | — |
 | Email | Nodemailer | 8.x |
 
 ### Frontend
@@ -147,14 +146,14 @@ apps/server/
 │   │   ├── dm.ts           # DM conversations, messages, reactions, read tracking, deletion
 │   │   ├── users.ts        # User profiles, profile update with real-time broadcast
 │   │   ├── invites.ts      # Create/use/preview invites
-│   │   ├── uploads.ts      # Avatar/server icon upload (S3) + file serving proxy
+│   │   ├── uploads.ts      # Presigned URL generation (S3) + GET redirect proxy
 │   │   └── friends.ts      # Friend requests (send/accept/decline/remove), friendship status
 │   ├── services/
 │   │   └── authService.ts  # Auth business logic
 │   ├── middleware/
 │   │   ├── auth.ts         # JWT authentication middleware
 │   │   ├── rateLimiter.ts  # Per-endpoint + per-socket rate limiting (Redis + memory fallback)
-│   │   └── errorHandler.ts # Global error handler (incl. multer errors)
+│   │   └── errorHandler.ts # Global error handler
 │   ├── websocket/
 │   │   ├── socketServer.ts  # Socket.IO setup, connection handler
 │   │   ├── voiceHandler.ts  # Voice channel state management
@@ -164,7 +163,7 @@ apps/server/
 │       ├── redis.ts             # Redis client + presence helpers
 │       ├── errors.ts            # Custom error classes
 │       ├── sanitize.ts          # HTML stripping + text sanitization utility
-│       ├── s3.ts                # S3 client + upload/stream/delete helpers + VALID_S3_KEY_RE
+│       ├── s3.ts                # S3 client + presigned URL generation + delete helper + VALID_S3_KEY_RE
 │       ├── email.ts             # Nodemailer transporter + password reset email
 │       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
 │       └── memberBroadcast.ts   # Server room join + member event broadcast
@@ -243,7 +242,7 @@ apps/desktop/
 │   │   │   ├── Avatar.tsx           # Shared avatar with img/initials fallback
 │   │   │   ├── EmojiPicker.tsx      # Portal-based emoji picker (shared)
 │   │   │   ├── UserHoverTarget.tsx  # Hover wrapper → UserProfilePopup
-│   │   │   └── UserProfilePopup.tsx # User profile card with "Message" DM button
+│   │   │   └── UserProfilePopup.tsx # User profile card (server members + API fallback for DMs)
 │   │   ├── chat/
 │   │   │   ├── ChatArea.tsx         # Server chat container
 │   │   │   ├── MessageList.tsx      # Scrollable message list
@@ -256,7 +255,7 @@ apps/desktop/
 │   │   │   ├── DMChatArea.tsx       # DM chat view + call UI
 │   │   │   ├── DMMessageList.tsx    # DM scrollable messages with system msgs
 │   │   │   ├── DMCallPanel.tsx      # Discord-style call UI (avatars, controls)
-│   │   │   └── IncomingCallModal.tsx # Incoming call accept/decline
+│   │   │   └── IncomingCallModal.tsx # Incoming call accept/decline + looping ringtone
 │   │   ├── friends/
 │   │   │   ├── FriendsView.tsx     # Tabbed friends interface (Online/All/Pending/Add)
 │   │   │   ├── FriendListItem.tsx  # Friend row with action buttons
@@ -276,7 +275,9 @@ apps/desktop/
 │   │   ├── api.ts               # Axios instance with interceptors
 │   │   ├── socket.ts            # Socket.IO client manager
 │   │   ├── audioAnalyser.ts     # Speaking detection (server + DM mode)
-│   │   └── notificationSounds.ts # Sound effects (message, join, leave, call)
+│   │   └── notificationSounds.ts # Sound effects (message, join, leave, looping call ringtone)
+│   ├── utils/
+│   │   └── imageProcessing.ts   # Client-side image resize + WebP via Canvas API
 │   └── styles/
 │       └── globals.css       # Tailwind + custom utilities
 ├── src-tauri/                # Tauri Rust backend
@@ -334,7 +335,7 @@ Eight independent stores, each managing a domain:
 
 | Store | Responsibilities |
 |-------|-----------------|
-| `authStore` | User session, login/register/logout, token management, avatar upload, profile editing, forgot/reset/change password |
+| `authStore` | User session, login/register/logout, token management, avatar upload (presigned URL + client-side processing), profile editing, forgot/reset/change password |
 | `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync, persistent unread tracking (via `ChannelRead` DB table + `unread:init` socket event) |
 | `chatStore` | Messages for active channel/conversation, typing indicators, pagination, author profile sync, reply-to-message state (shared by server channels and DMs) |
 | `voiceStore` | Server voice channel connection, DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`), mute/deaf, peer management (WebRTC). Server and DM voice are mutually exclusive. |
@@ -629,7 +630,7 @@ For multi-node deployment, this will migrate to Redis with pub/sub for cross-nod
 - **Mutually exclusive** with server voice — joining one leaves the other (cross-cleanup on both server and client)
 - In-memory state: `dmVoiceUsers` Map (conversationId → Map of userId → socketId) + `userDMCall` reverse lookup
 - System messages ("Voice call started" / "Voice call ended") persisted to DB as `type: 'system'`
-- Call offer broadcasts to `dm:{conversationId}` room; incoming call shown via `IncomingCallModal`
+- Call offer broadcasts to `dm:{conversationId}` room; incoming call shown via `IncomingCallModal` with looping ringtone (stops on accept/decline/cancel)
 - DM call UI rendered inline in `DMChatArea` via `DMCallPanel` (separate from server `VoicePanel`)
 
 ---
@@ -836,7 +837,7 @@ mediasoup Deployment (autoscaling)
 | **Video calls** | mediasoup SFU with video codecs (VP8/VP9/H264) |
 | **Screen sharing** | mediasoup producer for screen capture |
 | **~~Direct Messages~~** | ~~New DM channel type, conversation model~~ **Implemented (v0.5.0–v0.7.0)** — 1-on-1 text + voice with `Conversation` model, real-time delivery, typing, reactions, unread tracking, WebRTC P2P calls, conversation deletion with cascade + real-time sync |
-| **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2)** — server-proxied S3 uploads for avatars/icons via sharp + multer |
+| **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2, migrated v0.9.1)** — presigned URL direct-to-S3 uploads with client-side Canvas image processing; server generates presigned PUT/GET URLs, no file bytes touch the backend |
 | **~~Password reset~~** | ~~Email-based reset flow~~ **Implemented (v0.4.0)** — Nodemailer + SHA-256 hashed tokens + tokenVersion-based session invalidation |
 | **Push notifications** | FCM/APNs integration service |
 | **Message search** | Elasticsearch / PostgreSQL full-text search |

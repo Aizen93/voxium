@@ -8,6 +8,7 @@ import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../u
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage } from '../middleware/rateLimiter';
+import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { outranks, isAdminOrOwner } from '../utils/permissions';
 import { leaveCurrentVoiceChannel } from '../websocket/voiceHandler';
 
@@ -259,15 +260,35 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
       updateData.name = name;
     }
 
+    if (req.body.iconUrl !== undefined) {
+      const { iconUrl } = req.body;
+      if (iconUrl !== null) {
+        if (typeof iconUrl !== 'string' || !VALID_S3_KEY_RE.test(iconUrl)) {
+          throw new BadRequestError('Invalid icon key');
+        }
+        if (!iconUrl.startsWith(`server-icons/${serverId}-`)) {
+          throw new BadRequestError('Invalid icon key');
+        }
+      }
+      updateData.iconUrl = iconUrl;
+    }
+
     if (Object.keys(updateData).length === 0) {
       throw new BadRequestError('No fields to update');
     }
+
+    const oldIconUrl = server.iconUrl;
 
     const updated = await prisma.server.update({
       where: { id: serverId },
       select: { id: true, name: true, iconUrl: true, ownerId: true, createdAt: true },
       data: updateData,
     });
+
+    // Delete old icon from S3 after DB update confirmed
+    if (updateData.iconUrl !== undefined && oldIconUrl && oldIconUrl !== updateData.iconUrl) {
+      deleteFromS3(oldIconUrl).catch(() => {});
+    }
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updated);
 

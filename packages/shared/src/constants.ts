@@ -1,5 +1,5 @@
 export const APP_NAME = 'Voxium';
-export const APP_VERSION = '0.8.0';
+export const APP_VERSION = '0.9.2';
 
 export const API_VERSION = 'v1';
 

@@ -10,6 +10,7 @@ import { Volume2, Crown, Shield, MessageSquare, UserPlus, UserMinus, Check, X, C
 import { toast } from '../../stores/toastStore';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
+import { api } from '../../services/api';
 
 const POPUP_WIDTH = 300;
 const GAP = 8;
@@ -52,6 +53,19 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   const member = useServerStore((s) => s.members.find((m) => m.userId === userId));
   const channels = useServerStore((s) => s.channels);
   const channelUsers = useVoiceStore((s) => s.channelUsers);
+
+  // Fallback: fetch user profile from API when not in server members list (e.g. DM context)
+  const [fetchedUser, setFetchedUser] = useState<{
+    id: string; username: string; displayName: string;
+    avatarUrl: string | null; bio?: string | null; status?: string; createdAt?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (member) return;
+    api.get(`/users/${userId}`).then((res: any) => {
+      if (res.data?.data) setFetchedUser(res.data.data);
+    }).catch(() => {});
+  }, [userId, member]);
 
   // Find voice channel this user is in
   let voiceChannelName: string | null = null;
@@ -143,9 +157,10 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   }, [friends, pendingIncoming, pendingOutgoing, userId]);
 
   const handleAddFriend = async () => {
-    if (!member) return;
+    const username = member?.user.username ?? fetchedUser?.username;
+    if (!username) return;
     try {
-      await useFriendStore.getState().sendRequest(member.user.username);
+      await useFriendStore.getState().sendRequest(username);
       toast.success('Friend request sent');
     } catch (err: any) {
       const msg = err.response?.data?.error || 'Failed to send friend request';
@@ -180,9 +195,12 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     }
   };
 
-  if (!member) return null;
+  // Resolve user data from server member or fallback API fetch
+  const user = member?.user ?? fetchedUser;
+  if (!user) return null;
 
-  const { user, role, joinedAt } = member;
+  const role = member?.role ?? null;
+  const joinedAt = member?.joinedAt ?? null;
   const status = user.status || 'offline';
 
   return createPortal(

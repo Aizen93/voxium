@@ -1,24 +1,38 @@
+import { useEffect } from 'react';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useFriendStore } from '../../stores/friendStore';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { startCallRingtone, stopCallRingtone } from '../../services/notificationSounds';
 import { Avatar } from '../common/Avatar';
 import { Phone, PhoneOff } from 'lucide-react';
 
-export function IncomingCallModal() {
-  const incomingCall = useVoiceStore((s) => s.incomingCall);
+function IncomingCallContent({ incomingCall }: { incomingCall: { conversationId: string; from: { id: string; avatarUrl?: string | null; displayName: string } } }) {
   const acceptCall = useVoiceStore((s) => s.acceptCall);
   const declineCall = useVoiceStore((s) => s.declineCall);
 
-  if (!incomingCall) return null;
+  useEffect(() => {
+    if (useSettingsStore.getState().enableNotificationSounds) {
+      startCallRingtone();
+    }
+    return () => stopCallRingtone();
+  }, []);
 
   const handleAccept = async () => {
     const { conversationId } = incomingCall;
     await acceptCall();
+
+    // Ensure the conversation is in the local store (it may not be if this is a new DM)
+    const dmStore = useDMStore.getState();
+    if (!dmStore.conversations.some((c) => c.id === conversationId)) {
+      await dmStore.fetchConversations();
+    }
+
     // Navigate to the DM conversation so the user sees the call UI
     useServerStore.setState({ activeServerId: null, activeChannelId: null });
     useFriendStore.getState().setShowFriendsView(false);
-    useDMStore.getState().setActiveConversation(conversationId);
+    dmStore.setActiveConversation(conversationId);
   };
 
   return (
@@ -55,4 +69,10 @@ export function IncomingCallModal() {
       </div>
     </div>
   );
+}
+
+export function IncomingCallModal() {
+  const incomingCall = useVoiceStore((s) => s.incomingCall);
+  if (!incomingCall) return null;
+  return <IncomingCallContent incomingCall={incomingCall} />;
 }

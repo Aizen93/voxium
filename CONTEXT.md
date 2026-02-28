@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.9.0 (Message Replies)
+**Version:** 0.9.2 (DM Bug Fixes + Looping Ringtone)
 **Date:** 2026-02-28
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, and message replies with reply preview and scroll-to-original
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, and DM call conversation hydration for brand-new conversations
 
 ## What Has Been Done
 
@@ -74,9 +74,9 @@ A full Node.js + TypeScript backend has been implemented with:
   - `GET /api/v1/invites/:code` — Preview invite
   - `GET /api/v1/users/:id` — User profile
   - `PATCH /api/v1/users/me/profile` — Update own profile
-  - `POST /api/v1/uploads/avatar` — Upload user avatar (S3)
-  - `POST /api/v1/uploads/server-icon/:serverId` — Upload server icon (S3, owner only)
-  - `GET /api/v1/uploads/*` — Stream file from S3 (unauthenticated, key-validated)
+  - `POST /api/v1/uploads/presign/avatar` — Get presigned PUT URL for avatar upload (S3)
+  - `POST /api/v1/uploads/presign/server-icon/:serverId` — Get presigned PUT URL for server icon upload (S3, owner only)
+  - `GET /api/v1/uploads/*` — Redirect to presigned S3 GET URL (unauthenticated, key-validated)
 
 ### 3. Frontend Desktop App (`apps/desktop`)
 
@@ -176,7 +176,7 @@ Comprehensive hardening of real-time features:
 - [x] Role/permission management
 - [ ] Channel categories
 - [x] Emoji picker integration
-- [ ] Rich text / markdown in messages
+- [x] Rich text / markdown in messages
 - [ ] Message search
 - [ ] Screen sharing
 
@@ -842,9 +842,9 @@ Enhanced unread indicators on the server sidebar:
 - The `MAX_REACTIONS_PER_MESSAGE` limit check in the reaction toggle endpoint has a TOCTOU race: between the `groupBy` count and the `create`, another request could add a new distinct emoji, exceeding the limit. The unique constraint prevents true duplicates, but the soft limit can be exceeded by 1 under concurrent requests to different emoji. Acceptable for current scale.
 - ~~Pre-existing: `leavingUser` variable in `MainLayout.tsx` line 102 is assigned but never read (dead code from voice user left handler).~~ Fixed in DM voice bug fix review (2026-02-27).
 - The S3 utility (`s3.ts`) uses non-null assertions (`!`) on all env vars. If any are missing, the error surfaces as a cryptic AWS SDK error at runtime rather than a clear startup failure. Consider validating env vars at startup.
-- The `GET /uploads/*key` route is unauthenticated, relying on key unguessability (CUID + timestamp). For truly private content, consider signed URLs or auth middleware on the serve route.
-- The `multer` file filter checks both MIME type and file extension, but MIME types from `Content-Type` headers are client-controlled and can be spoofed. The sharp processing pipeline implicitly validates the actual image data (it will throw on non-image input), which provides defense in depth.
-- The `PATCH /users/me/profile` route still accepts `avatarUrl` in the body, which could be used to set an arbitrary S3 key (same concern removed from server PATCH). Consider restricting profile avatar changes to the upload endpoint only.
+- The `GET /uploads/*key` route is unauthenticated, relying on key unguessability (userId/serverId + timestamp) and regex validation. It now redirects (302) to presigned S3 GET URLs rather than streaming. The presigned URLs have a 1-hour expiry, limiting exposure of direct S3 access.
+- ~~The `multer` file filter checks both MIME type and file extension, but MIME types from `Content-Type` headers are client-controlled and can be spoofed.~~ **Resolved in presigned URL migration** -- multer and server-side sharp removed; image processing moved to client, server no longer handles file bytes.
+- ~~The `PATCH /users/me/profile` route still accepts `avatarUrl` in the body, which could be used to set an arbitrary S3 key.~~ **Resolved in presigned URL migration** -- ownership check added (`avatarUrl` must start with `avatars/{userId}-`), S3 key regex validation retained.
 - `ServerSettingsModal` and `CreateServerModal` duplicate the icon selection/preview/cleanup logic. Consider extracting a shared `ImageUploadButton` component.
 - The `/forgot-password` endpoint has no rate limiting. An attacker could trigger mass emails to a valid address. Consider adding per-IP or per-email rate limiting when rate limiter infrastructure is implemented.
 - Socket.IO authentication middleware validates the JWT signature at handshake time but does not check `tokenVersion` against the database. After a password change or reset, a revoked access token can maintain an existing WebSocket connection for its remaining lifetime. This is the standard JWT trade-off -- access tokens are stateless and short-lived (15 min). Periodic re-authentication on the socket would require architectural changes (middleware on every socket event or periodic disconnect/reconnect).
@@ -1392,3 +1392,82 @@ Server members now have roles (`owner`, `admin`, `member`) with hierarchical per
 - `apps/desktop/src/components/chat/MessageInput.tsx` — Reply bar + auto-focus + Escape cancel
 - `apps/desktop/src/components/chat/MessageList.tsx` — grouping break for replies
 - `apps/desktop/src/components/dm/DMMessageList.tsx` — grouping break for replies
+
+---
+
+### Presigned URL Migration (v0.9.1)
+
+**What changed:** File upload architecture migrated from server-proxied uploads (multer + sharp on server) to presigned S3 URLs with client-side image processing. The server no longer handles file bytes -- it generates presigned PUT URLs for uploads and presigned GET URLs for downloads.
+
+**Backend changes:**
+- `apps/server/src/utils/s3.ts` -- Removed `uploadToS3()` and `streamFromS3()`. Added `generatePresignedPutUrl()` and `generatePresignedGetUrl()`. `deleteFromS3()` retained for old-asset cleanup. New dependency: `@aws-sdk/s3-request-presigner`.
+- `apps/server/src/routes/uploads.ts` -- Replaced multer upload routes with presign endpoints (`POST /presign/avatar`, `POST /presign/server-icon/:serverId`). GET route now does 302 redirect to presigned S3 GET URL instead of streaming.
+- `apps/server/src/routes/users.ts` -- Added ownership check on `avatarUrl` (must start with `avatars/{userId}-`). Added old avatar S3 cleanup after DB update.
+- `apps/server/src/routes/servers.ts` -- Added `iconUrl` to PATCH endpoint with ownership check (must start with `server-icons/{serverId}-`). Added old icon S3 cleanup after DB update.
+- `apps/server/src/middleware/errorHandler.ts` -- Removed multer error handling (no longer needed).
+- `apps/server/package.json` -- Removed `multer` and `sharp` dependencies; added `@aws-sdk/s3-request-presigner`.
+
+**Frontend changes:**
+- `apps/desktop/src/utils/imageProcessing.ts` -- New utility: Canvas-based image resize (256x256 cover fit) and WebP conversion at 0.85 quality. Uses `OffscreenCanvas` and `createImageBitmap` APIs.
+- `apps/desktop/src/stores/authStore.ts` -- `uploadAvatar()` now: (1) gets presigned PUT URL, (2) processes image client-side, (3) uploads directly to S3, (4) confirms key in DB via PATCH /users/me/profile.
+- `apps/desktop/src/stores/serverStore.ts` -- `uploadServerIcon()` now follows same presigned URL flow.
+
+**Architecture decisions:**
+- Server no longer processes file bytes, reducing CPU/memory load and eliminating the `sharp` native dependency
+- Image validation moved to client-side Canvas API (rejects non-image input implicitly via `createImageBitmap`)
+- S3 key ownership enforced server-side: avatar keys must match `avatars/{userId}-*`, server icon keys must match `server-icons/{serverId}-*`
+- Old assets cleaned up fire-and-forget after DB update confirmed (`.catch(() => {})`)
+- GET /uploads/* is unauthenticated (same as before) but now returns a 302 redirect instead of streaming -- reduces server bandwidth to zero for file serving
+
+**Review fixes applied:**
+- CRITICAL: Added S3 upload response status check in `authStore.ts` and `serverStore.ts` -- `fetch()` does not throw on HTTP errors; without `if (!uploadRes.ok)` check, a failed S3 upload (403 expired URL, 500 error) would silently proceed to save the orphan key in the DB
+- WARNING: Removed dead `NoSuchKey` error handling in GET /uploads/* route -- `generatePresignedGetUrl()` only signs locally and never contacts S3, so `NoSuchKey` could never be thrown here; S3 404s now surface directly to the client after the 302 redirect
+- WARNING: Fixed stale JSDoc comment in `s3.ts` that still referenced the removed `uploadToS3` function
+- Updated CONTEXT.md: marked 3 stale known issues as resolved, updated API endpoint descriptions
+
+**Remaining suggestions (not acted upon):**
+- The presigned PUT URL ContentType constraint (`image/webp`) in the `PutObjectCommand` may not be enforced by all S3-compatible providers. The client sends the correct Content-Type header, but a malicious actor with the presigned URL could potentially upload non-WebP content. The ownership check and regex validation on the key mitigate this (only `.webp` extensions allowed), but the actual file content is not validated server-side. For defense in depth, consider a Lambda/webhook trigger that validates uploaded objects.
+- The GET /uploads/* presigned GET URL has a 1-hour default expiry. If the client caches the 302 redirect location (some browsers do for images in `<img>` tags), stale presigned URLs will return 403 from S3 after expiry. Consider using `Cache-Control: no-cache` on the 302 response itself (not on the S3 object), or increasing the presigned URL expiry.
+- `OffscreenCanvas.convertToBlob({ type: 'image/webp' })` may fall back to PNG in browsers/WebView engines that lack WebP encoding support. Chromium (used by Tauri's WebView2 on Windows and WKWebView on macOS) supports WebP encoding, but this is not checked at runtime.
+
+---
+
+### Bug Fixes & Improvements (v0.9.2)
+
+#### 1. Looping Incoming Call Ringtone
+
+**Problem:** The incoming DM call sound played only once (a single ascending 3-tone chime), making it easy to miss if the user wasn't looking at the screen.
+
+**Fix:**
+- `apps/desktop/src/services/notificationSounds.ts` -- Replaced one-shot `playCallSound()` with `startCallRingtone()` / `stopCallRingtone()`. The ringtone plays the ascending 3-tone chime every 2 seconds via `setInterval` until explicitly stopped.
+- `apps/desktop/src/components/dm/IncomingCallModal.tsx` -- Split into `IncomingCallContent` (inner component, mounts only when there's an active incoming call) and `IncomingCallModal` (thin wrapper with null guard). The inner component uses `useEffect` to start the ringtone on mount and stop on unmount. This covers all exit paths: accept, decline, and caller cancel.
+- `apps/desktop/src/components/layout/MainLayout.tsx` -- Removed one-shot `playCallSound()` from `dmVoiceOffer` handler (ringtone lifecycle now owned by the modal).
+
+#### 2. DM Call Conversation Hydration (Brand-New DM Calls)
+
+**Problem:** When Alice calls Bob but no prior DM conversation exists between them, Bob accepts the call but sees "Select a conversation" instead of the call UI. This happened because `IncomingCallModal.handleAccept` set the active conversation to an ID that wasn't yet in Bob's local `dmStore.conversations` array.
+
+**Fix:**
+- `apps/desktop/src/components/dm/IncomingCallModal.tsx` -- `handleAccept` now checks if the conversation exists in the local store before navigating. If not found (brand-new DM), calls `dmStore.fetchConversations()` first, then sets the active conversation.
+- `apps/desktop/src/components/layout/MainLayout.tsx` -- `dm:message:new` handler now checks if the conversation exists in the local store. If a message arrives for an unknown conversation (e.g. "Voice call started" system message for a brand-new DM), calls `fetchConversations()` to hydrate the store instead of silently dropping the message via `updateLastMessage()`.
+
+#### 3. DM Profile Popup Not Showing
+
+**Problem:** Hovering over a user in DMs showed no profile popup. It only worked after visiting a server first (because `serverStore.members` was populated). The popup returned `null` when the user wasn't found in `serverStore.members`.
+
+**Fix:**
+- `apps/desktop/src/components/common/UserProfilePopup.tsx` -- Added API fallback: when the user isn't in `serverStore.members`, fetches profile from `GET /users/:userId`. Unified user resolution: `const user = member?.user ?? fetchedUser`. Server-specific fields (`role`, `joinedAt`) gracefully become `null` in DM context — role badges and "Joined Server" date simply don't render. `handleAddFriend` updated to work with either data source.
+
+#### 4. Dependency Security Updates
+
+- Added `pnpm.overrides` in root `package.json` for `rollup` (>=4.59.0) and `fast-xml-parser` (>=5.4.1) to resolve dependabot alerts (High and Low severity respectively)
+- Moderate severity `glib` Rust alert cannot be resolved — pinned at 0.18.5 by Tauri's entire GTK bindings ecosystem; requires Tauri upstream update
+
+**Files modified:**
+- `apps/desktop/src/services/notificationSounds.ts` -- Looping ringtone (`startCallRingtone`/`stopCallRingtone`)
+- `apps/desktop/src/components/dm/IncomingCallModal.tsx` -- Ringtone lifecycle via useEffect + conversation hydration on accept
+- `apps/desktop/src/components/layout/MainLayout.tsx` -- Removed one-shot call sound, added conversation hydration in `dm:message:new`
+- `apps/desktop/src/components/common/UserProfilePopup.tsx` -- API fallback for DM context
+- `package.json` (root) -- pnpm overrides for security fixes, version bump
+- All 4 `package.json` files -- Version bumped to 0.9.2
+- `packages/shared/src/constants.ts` -- `APP_VERSION` bumped to 0.9.2

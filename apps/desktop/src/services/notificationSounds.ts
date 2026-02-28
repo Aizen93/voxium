@@ -81,8 +81,8 @@ export function playMessageSound(): void {
   playTone([{ freq: 880, duration: 0.15 }], 0.2);
 }
 
-/** Ringtone: repeating ascending pattern */
-export function playCallSound(): void {
+/** Single call chime (used internally by the ringtone loop) */
+function playCallChime(): void {
   playTone(
     [
       { freq: 523, duration: 0.12 },
@@ -91,4 +91,21 @@ export function playCallSound(): void {
     ],
     0.35,
   );
+}
+
+let callRingtoneInterval: ReturnType<typeof setInterval> | null = null;
+
+/** Start a looping ringtone that plays until stopCallRingtone() is called */
+export function startCallRingtone(): void {
+  stopCallRingtone();
+  playCallChime();
+  callRingtoneInterval = setInterval(playCallChime, 2000);
+}
+
+/** Stop the looping ringtone */
+export function stopCallRingtone(): void {
+  if (callRingtoneInterval !== null) {
+    clearInterval(callRingtoneInterval);
+    callRingtoneInterval = null;
+  }
 }

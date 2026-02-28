@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
+import { processImage } from '../utils/imageProcessing';
 import type { Server, Channel, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole } from '@voxium/shared';
 
 interface ServerState {
@@ -237,9 +238,25 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   uploadServerIcon: async (serverId: string, file: File) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    await api.post(`/uploads/server-icon/${serverId}`, formData);
+    // 1. Get presigned PUT URL
+    const { data: presignData } = await api.post(`/uploads/presign/server-icon/${serverId}`);
+    const { uploadUrl, key } = presignData.data;
+
+    // 2. Client-side resize + WebP conversion
+    const blob = await processImage(file);
+
+    // 3. Direct upload to S3
+    const uploadRes = await fetch(uploadUrl, {
+      method: 'PUT',
+      body: blob,
+      headers: { 'Content-Type': 'image/webp' },
+    });
+    if (!uploadRes.ok) {
+      throw new Error(`S3 upload failed: ${uploadRes.status}`);
+    }
+
+    // 4. Confirm in DB (triggers old icon cleanup + socket broadcast)
+    await api.patch(`/servers/${serverId}`, { iconUrl: key });
     // Local state updated via server:updated socket event
   },
 

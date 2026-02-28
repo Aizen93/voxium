@@ -17,7 +17,7 @@ import { DMList } from '../dm/DMList';
 import { DMChatArea } from '../dm/DMChatArea';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
-import { playJoinSound, playLeaveSound, playMessageSound, playCallSound } from '../../services/notificationSounds';
+import { playJoinSound, playLeaveSound, playMessageSound } from '../../services/notificationSounds';
 import { toast } from '../../stores/toastStore';
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
@@ -160,17 +160,23 @@ export function MainLayout() {
           store.markChannelRead(activeChannelId);
         }
       },
-      dmMessageNew: (message: any) => {
+      dmMessageNew: async (message: any) => {
         const dmStore = useDMStore.getState();
         const activeConvId = dmStore.activeConversationId;
 
         // Update last message in conversation list
         if (message.conversationId) {
-          dmStore.updateLastMessage(message.conversationId, {
-            content: message.content,
-            createdAt: message.createdAt,
-            authorId: message.author?.id || message.authorId,
-          });
+          // If conversation isn't in the local store yet (e.g. brand-new DM), fetch it
+          const exists = dmStore.conversations.some((c) => c.id === message.conversationId);
+          if (!exists) {
+            await dmStore.fetchConversations();
+          } else {
+            dmStore.updateLastMessage(message.conversationId, {
+              content: message.content,
+              createdAt: message.createdAt,
+              authorId: message.author?.id || message.authorId,
+            });
+          }
         }
 
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
@@ -236,7 +242,6 @@ export function MainLayout() {
         const voiceState = useVoiceStore.getState();
         if (voiceState.activeChannelId || voiceState.dmCallConversationId) return;
         voiceState.setIncomingCall({ conversationId, from });
-        if (useSettingsStore.getState().enableNotificationSounds) playCallSound();
       },
       dmVoiceJoined: ({ conversationId, user: voiceUser }: any) => {
         if (useVoiceStore.getState().dmCallConversationId !== conversationId) return;

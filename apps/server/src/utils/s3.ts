@@ -4,7 +4,7 @@ import {
   GetObjectCommand,
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
-import type { Readable } from 'stream';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 const s3 = new S3Client({
   endpoint: process.env.S3_ASSETS_ENDPOINT!,
@@ -18,45 +18,43 @@ const s3 = new S3Client({
 
 const BUCKET = process.env.S3_ASSETS_BUCKET!;
 
-/** Regex matching valid S3 asset keys produced by uploadToS3 */
+/** Regex matching valid S3 asset keys (e.g. avatars/userId-timestamp.webp) */
 export const VALID_S3_KEY_RE = /^(avatars|server-icons)\/[\w-]+\.webp$/;
 
 /**
- * Upload a buffer to S3 and return the object key.
- * Key format: `{folder}/{entityId}-{timestamp}.webp`
+ * Generate a presigned PUT URL for direct client upload to S3.
+ * Sets ContentType and CacheControl as object metadata.
  */
-export async function uploadToS3(folder: string, entityId: string, buffer: Buffer): Promise<string> {
-  const key = `${folder}/${entityId}-${Date.now()}.webp`;
+export async function generatePresignedPutUrl(
+  key: string,
+  contentType: string,
+  expiresIn = 300,
+): Promise<string> {
+  const command = new PutObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
+    ContentType: contentType,
+    CacheControl: 'public, max-age=31536000, immutable',
+  });
 
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: key,
-      Body: buffer,
-      ContentType: 'image/webp',
-    }),
-  );
-
-  return key;
+  return getSignedUrl(s3, command, { expiresIn });
 }
 
 /**
- * Stream an object from S3. Returns the readable stream and metadata.
+ * Generate a presigned GET URL for direct client download from S3.
+ * Sets ResponseCacheControl so S3 returns cache headers.
  */
-export async function streamFromS3(key: string): Promise<{
-  stream: Readable;
-  contentType: string;
-  contentLength: number | undefined;
-}> {
-  const res = await s3.send(
-    new GetObjectCommand({ Bucket: BUCKET, Key: key }),
-  );
+export async function generatePresignedGetUrl(
+  key: string,
+  expiresIn = 3600,
+): Promise<string> {
+  const command = new GetObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
+    ResponseCacheControl: 'public, max-age=31536000, immutable',
+  });
 
-  return {
-    stream: res.Body as Readable,
-    contentType: res.ContentType || 'application/octet-stream',
-    contentLength: res.ContentLength,
-  };
+  return getSignedUrl(s3, command, { expiresIn });
 }
 
 /**
