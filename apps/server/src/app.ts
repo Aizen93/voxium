@@ -12,6 +12,7 @@ import { inviteRouter } from './routes/invites';
 import { uploadRouter } from './routes/uploads';
 import { dmRouter } from './routes/dm';
 import { friendRouter } from './routes/friends';
+import { categoryRouter } from './routes/categories';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 
@@ -62,6 +63,7 @@ api.use('/auth', authRouter);
 api.use('/users', userRouter);
 api.use('/servers', serverRouter);
 api.use('/servers/:serverId/channels', channelRouter);
+api.use('/servers/:serverId/categories', categoryRouter);
 api.use('/channels/:channelId/messages', messageRouter);
 api.use('/invites', inviteRouter);
 api.use('/uploads', uploadRouter);

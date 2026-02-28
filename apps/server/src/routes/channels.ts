@@ -2,12 +2,82 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateChannelName, LIMITS, type Channel } from '@voxium/shared';
+import { validateChannelName, LIMITS, WS_EVENTS, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
+import { rateLimitCategoryManage } from '../middleware/rateLimiter';
+import { sanitizeText } from '../utils/sanitize';
 
 export const channelRouter = Router({ mergeParams: true });
 
 channelRouter.use(authenticate);
+
+// Bulk reorder channels (with optional category reassignment)
+channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId: req.user!.userId, serverId } },
+    });
+    if (!membership || !['owner', 'admin'].includes(membership.role)) {
+      throw new ForbiddenError('Only admins can reorder channels');
+    }
+
+    const { order } = req.body;
+    if (!Array.isArray(order) || order.length === 0) {
+      throw new BadRequestError('order must be a non-empty array');
+    }
+
+    // Validate all channel IDs belong to this server
+    const channelIds = order.map((o: { id: string }) => o.id);
+    const channels = await prisma.channel.findMany({
+      where: { id: { in: channelIds }, serverId },
+      select: { id: true },
+    });
+    if (channels.length !== channelIds.length) {
+      throw new BadRequestError('One or more channel IDs do not belong to this server');
+    }
+
+    // Validate all non-null categoryIds belong to this server
+    const categoryIds = [...new Set(
+      order
+        .map((o: { categoryId?: string | null }) => o.categoryId)
+        .filter((id: string | null | undefined): id is string => id != null)
+    )];
+    if (categoryIds.length > 0) {
+      const categories = await prisma.category.findMany({
+        where: { id: { in: categoryIds }, serverId },
+        select: { id: true },
+      });
+      if (categories.length !== categoryIds.length) {
+        throw new BadRequestError('One or more category IDs do not belong to this server');
+      }
+    }
+
+    // Update positions + categoryId in a transaction
+    await prisma.$transaction(
+      order.map((o: { id: string; position: number; categoryId?: string | null }) =>
+        prisma.channel.update({
+          where: { id: o.id },
+          data: { position: o.position, categoryId: o.categoryId ?? null },
+        })
+      )
+    );
+
+    // Re-read updated channels and emit events
+    const updated = await prisma.channel.findMany({
+      where: { id: { in: channelIds } },
+    });
+    const io = getIO();
+    for (const ch of updated) {
+      io.to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED as any, ch as unknown as Channel);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // List channels in a server
 channelRouter.get('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -34,7 +104,8 @@ channelRouter.get('/', async (req: Request<{ serverId: string }>, res: Response,
 channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
-    const { name, type = 'text' } = req.body;
+    const { type = 'text', categoryId } = req.body;
+    const name = sanitizeText(req.body.name ?? '');
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
@@ -50,13 +121,21 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
       throw new BadRequestError('Channel type must be "text" or "voice"');
     }
 
+    // Validate categoryId if provided
+    if (categoryId) {
+      const category = await prisma.category.findFirst({
+        where: { id: categoryId, serverId },
+      });
+      if (!category) throw new BadRequestError('Category not found in this server');
+    }
+
     const channelCount = await prisma.channel.count({ where: { serverId } });
     if (channelCount >= LIMITS.MAX_CHANNELS_PER_SERVER) {
       throw new BadRequestError(`Server can have at most ${LIMITS.MAX_CHANNELS_PER_SERVER} channels`);
     }
 
     const channel = await prisma.channel.create({
-      data: { name, type, serverId, position: channelCount },
+      data: { name, type, serverId, position: channelCount, categoryId: categoryId || null },
     });
 
     getIO().to(`server:${serverId}`).emit('channel:created', channel as unknown as Channel);
@@ -97,6 +176,47 @@ channelRouter.post('/:channelId/read', async (req: Request<{ serverId: string; c
     });
 
     res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Update a channel (move between categories)
+channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId, channelId } = req.params;
+
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId: req.user!.userId, serverId } },
+    });
+    if (!membership || !['owner', 'admin'].includes(membership.role)) {
+      throw new ForbiddenError('Only admins can update channels');
+    }
+
+    const channel = await prisma.channel.findFirst({
+      where: { id: channelId, serverId },
+    });
+    if (!channel) throw new NotFoundError('Channel');
+
+    const { categoryId } = req.body;
+    if (categoryId === undefined) throw new BadRequestError('categoryId is required');
+
+    // Validate categoryId if not null
+    if (categoryId !== null) {
+      const category = await prisma.category.findFirst({
+        where: { id: categoryId, serverId },
+      });
+      if (!category) throw new BadRequestError('Category not found in this server');
+    }
+
+    const updated = await prisma.channel.update({
+      where: { id: channelId },
+      data: { categoryId },
+    });
+
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED as any, updated as unknown as Channel);
+
+    res.json({ success: true, data: updated });
   } catch (err) {
     next(err);
   }

@@ -52,26 +52,43 @@ serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
       throw new BadRequestError(`You can only be a member of ${LIMITS.MAX_SERVERS_PER_USER} servers`);
     }
 
-    const server = await prisma.server.create({
-      data: {
-        name,
-        ownerId: req.user!.userId,
-        members: {
-          create: { userId: req.user!.userId, role: 'owner' },
-        },
-        channels: {
-          createMany: {
-            data: [
-              { name: 'general', type: 'text', position: 0 },
-              { name: 'General', type: 'voice', position: 1 },
-            ],
+    const server = await prisma.$transaction(async (tx) => {
+      // Create server with member
+      const srv = await tx.server.create({
+        data: {
+          name,
+          ownerId: req.user!.userId,
+          members: {
+            create: { userId: req.user!.userId, role: 'owner' },
           },
         },
-      },
-      include: {
-        channels: true,
-        _count: { select: { members: true } },
-      },
+      });
+
+      // Create default categories
+      const textCategory = await tx.category.create({
+        data: { name: 'Text Channels', serverId: srv.id, position: 0 },
+      });
+      const voiceCategory = await tx.category.create({
+        data: { name: 'Voice Channels', serverId: srv.id, position: 1 },
+      });
+
+      // Create default channels linked to categories
+      await tx.channel.createMany({
+        data: [
+          { name: 'general', type: 'text', serverId: srv.id, categoryId: textCategory.id, position: 0 },
+          { name: 'General', type: 'voice', serverId: srv.id, categoryId: voiceCategory.id, position: 1 },
+        ],
+      });
+
+      // Fetch the full server with includes
+      return tx.server.findUniqueOrThrow({
+        where: { id: srv.id },
+        include: {
+          channels: { orderBy: { position: 'asc' } },
+          categories: { orderBy: { position: 'asc' } },
+          _count: { select: { members: true } },
+        },
+      });
     });
 
     // Add creator's socket to the new server room so server-scoped events work
@@ -108,6 +125,7 @@ serverRouter.get('/:serverId', async (req: Request<{ serverId: string }>, res: R
       where: { id: serverId },
       include: {
         channels: { orderBy: { position: 'asc' } },
+        categories: { orderBy: { position: 'asc' } },
         _count: { select: { members: true } },
       },
     });

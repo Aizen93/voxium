@@ -55,3 +55,9 @@ export function validateBio(bio: string): string | null {
   if (bio.length > LIMITS.BIO_MAX) return `Bio must be at most ${LIMITS.BIO_MAX} characters`;
   return null;
 }
+
+export function validateCategoryName(name: string): string | null {
+  if (name.length < LIMITS.CATEGORY_NAME_MIN) return `Category name must be at least ${LIMITS.CATEGORY_NAME_MIN} character`;
+  if (name.length > LIMITS.CATEGORY_NAME_MAX) return `Category name must be at most ${LIMITS.CATEGORY_NAME_MAX} characters`;
+  return null;
+}

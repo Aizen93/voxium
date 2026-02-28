@@ -49,10 +49,11 @@ model Server {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  owner    User           @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  channels Channel[]
-  members  ServerMember[]
-  invites  Invite[]
+  owner      User           @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  channels   Channel[]
+  categories Category[]
+  members    ServerMember[]
+  invites    Invite[]
 
   @@map("servers")
 }
@@ -72,18 +73,36 @@ model ServerMember {
   @@map("server_members")
 }
 
-// ─── Channels ────────────────────────────────────────────────────────────────
+// ─── Categories ─────────────────────────────────────────────────────────────
 
-model Channel {
+model Category {
   id        String   @id @default(cuid())
   name      String
-  type      String   @default("text")
   serverId  String   @map("server_id")
   position  Int      @default(0)
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   server   Server    @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  channels Channel[]
+
+  @@map("categories")
+}
+
+// ─── Channels ────────────────────────────────────────────────────────────────
+
+model Channel {
+  id         String   @id @default(cuid())
+  name       String
+  type       String   @default("text")
+  serverId   String   @map("server_id")
+  categoryId String?  @map("category_id")
+  position   Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  server   Server       @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  category Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   messages Message[]
   reads    ChannelRead[]
 

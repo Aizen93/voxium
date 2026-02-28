@@ -47,17 +47,6 @@ async function main() {
     data: {
       name: 'Voxium Community',
       ownerId: alice.id,
-      channels: {
-        createMany: {
-          data: [
-            { name: 'general', type: 'text', position: 0 },
-            { name: 'random', type: 'text', position: 1 },
-            { name: 'introductions', type: 'text', position: 2 },
-            { name: 'General', type: 'voice', position: 3 },
-            { name: 'Gaming', type: 'voice', position: 4 },
-          ],
-        },
-      },
       members: {
         createMany: {
           data: [
@@ -68,6 +57,25 @@ async function main() {
         },
       },
     },
+  });
+
+  // Create categories
+  const textCategory = await prisma.category.create({
+    data: { name: 'Text Channels', serverId: server.id, position: 0 },
+  });
+  const voiceCategory = await prisma.category.create({
+    data: { name: 'Voice Channels', serverId: server.id, position: 1 },
+  });
+
+  // Create channels linked to categories
+  await prisma.channel.createMany({
+    data: [
+      { name: 'general', type: 'text', serverId: server.id, categoryId: textCategory.id, position: 0 },
+      { name: 'random', type: 'text', serverId: server.id, categoryId: textCategory.id, position: 1 },
+      { name: 'introductions', type: 'text', serverId: server.id, categoryId: textCategory.id, position: 2 },
+      { name: 'General', type: 'voice', serverId: server.id, categoryId: voiceCategory.id, position: 3 },
+      { name: 'Gaming', type: 'voice', serverId: server.id, categoryId: voiceCategory.id, position: 4 },
+    ],
   });
 
   // Add some demo messages

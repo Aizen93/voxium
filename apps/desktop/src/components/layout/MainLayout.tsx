@@ -135,8 +135,20 @@ export function MainLayout() {
       channelCreated: (channel: any) => {
         useServerStore.getState().addChannel(channel);
       },
+      channelUpdated: (channel: any) => {
+        useServerStore.getState().updateChannelData(channel);
+      },
       channelDeleted: ({ channelId, serverId }: any) => {
         useServerStore.getState().removeChannel(channelId, serverId);
+      },
+      categoryCreated: (category: any) => {
+        useServerStore.getState().addCategory(category);
+      },
+      categoryUpdated: (category: any) => {
+        useServerStore.getState().updateCategory(category);
+      },
+      categoryDeleted: ({ categoryId, serverId }: any) => {
+        useServerStore.getState().removeCategory(categoryId, serverId);
       },
       serverUpdated: (server: any) => {
         useServerStore.getState().updateServerData(server);
@@ -331,7 +343,11 @@ export function MainLayout() {
       ['member:joined', handlers.memberJoined],
       ['member:left', handlers.memberLeft],
       ['channel:created', handlers.channelCreated],
+      ['channel:updated', handlers.channelUpdated],
       ['channel:deleted', handlers.channelDeleted],
+      ['category:created', handlers.categoryCreated],
+      ['category:updated', handlers.categoryUpdated],
+      ['category:deleted', handlers.categoryDeleted],
       ['server:updated', handlers.serverUpdated],
       ['user:updated', handlers.userUpdated],
       ['message:reaction_update', handlers.messageReactionUpdate],

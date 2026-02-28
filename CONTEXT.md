@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.9.2 (DM Bug Fixes + Looping Ringtone)
+**Version:** 0.9.4 (Drag-and-Drop Channel & Category Reordering)
 **Date:** 2026-02-28
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, and DM call conversation hydration for brand-new conversations
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, DM call conversation hydration for brand-new conversations, channel categories with collapsible UI, and drag-and-drop channel/category reordering
 
 ## What Has Been Done
 
@@ -174,7 +174,7 @@ Comprehensive hardening of real-time features:
 - [x] Server settings panel
 - [x] User settings/profile editing
 - [x] Role/permission management
-- [ ] Channel categories
+- [x] Channel categories (with drag-and-drop reordering)
 - [x] Emoji picker integration
 - [x] Rich text / markdown in messages
 - [ ] Message search
@@ -854,6 +854,25 @@ Enhanced unread indicators on the server sidebar:
 - `chatStore.sendDMMessage` has a fallback pattern that adds the sent message locally if not yet received via WebSocket. This can cause brief duplicates (the addMessage dedup check prevents permanent duplicates). The same pattern exists for channel messages and is acceptable.
 - The `UserProfilePopup` "Message" button only works when the user is viewing a server (it depends on `member` being found in the server store's member list). If the user is already in the DM view and opens a profile popup for someone not in the current server's member list, the popup renders `null`. Consider a fallback that fetches user data directly.
 - ~~DM conversations cannot currently be deleted or archived by users. The `Conversation` model has no soft-delete mechanism.~~ **Resolved in v0.7.0** — `DELETE /dm/:conversationId` endpoint with cascade delete (messages + reads) and real-time `dm:conversation:deleted` event.
+- The `ChannelSidebar` `handleSelectTextChannel` calls `clearMessages()` then `fetchMessages()` manually rather than letting `setActiveChannel` drive the flow. If `setActiveChannel` is ever changed to also clear/fetch messages, this would double-fetch. Low risk but worth noting.
+- ~~The channel PATCH endpoint only supports `categoryId` updates. If more fields need updating in the future (e.g., channel name, position reorder), consider expanding the PATCH to accept an update object rather than requiring `categoryId`.~~ **Resolved in v0.9.4** — bulk reorder endpoints (`PUT /reorder`) added for both channels and categories, handling position + categoryId updates in a single transaction.
+- The `validateCategoryName` function only validates length (no character restriction). This is consistent with `validateServerName` but differs from `validateChannelName` which restricts to alphanumeric/underscore/hyphen. Category names may intentionally be more permissive (e.g., "Text Channels" with spaces).
+- New text channels created via the channel POST route (with or without `categoryId`) do not seed `ChannelRead` for existing members. This means existing message history in the channel appears as unread. However, this was a pre-existing behavior before the categories feature.
+
+### Channel Categories Feature (v0.9.3 Review, 2026-02-28)
+
+**What was changed:**
+- New `Category` Prisma model with `id`, `name`, `serverId`, `position`, `createdAt`, `updatedAt`. `Channel.categoryId` (nullable FK, `onDelete: SetNull`).
+- CRUD API at `/api/v1/servers/:serverId/categories` (POST, PATCH, DELETE). Rate-limited with `rateLimitCategoryManage`.
+- Channel POST now accepts optional `categoryId`. New channel PATCH endpoint for moving channels between categories.
+- Frontend `ChannelSidebar` rewritten with collapsible category sections, localStorage-persisted collapse state, inline create/delete UI for categories.
+- Socket events `category:created`, `category:updated`, `category:deleted` with full real-time sync.
+- Default server creation seeds "Text Channels" and "Voice Channels" categories.
+
+**Review fixes applied:**
+- Added missing rate limiter on `PATCH /channels/:channelId` (was unprotected).
+- Added missing `sanitizeText` on channel name in `POST /channels` (pre-existing gap, fixed as part of this change).
+- Fixed category deletion to re-read orphaned channels from DB after delete instead of emitting stale in-memory data with manually spread `categoryId: null`.
 
 ---
 
@@ -1471,3 +1490,43 @@ Server members now have roles (`owner`, `admin`, `member`) with hierarchical per
 - `package.json` (root) -- pnpm overrides for security fixes, version bump
 - All 4 `package.json` files -- Version bumped to 0.9.2
 - `packages/shared/src/constants.ts` -- `APP_VERSION` bumped to 0.9.2
+
+---
+
+### Drag-and-Drop Channel & Category Reordering (v0.9.4)
+
+**New feature:** Admins and owners can reorder channels and categories via drag-and-drop in the `ChannelSidebar`. Channels can be reordered within a category, moved between categories, and moved to/from uncategorized. Categories can be reordered among each other.
+
+**New dependency:** `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` — modern React DnD library (tree-shakeable, accessible, no legacy deps).
+
+**Backend — Bulk reorder endpoints:**
+- `PUT /api/v1/servers/:serverId/categories/reorder` — admin/owner; body: `{ order: [{ id, position }] }`; validates all category IDs belong to the server; updates positions in a Prisma `$transaction`; emits `category:updated` for each changed category
+- `PUT /api/v1/servers/:serverId/channels/reorder` — admin/owner; body: `{ order: [{ id, position, categoryId }] }`; validates all channel IDs and category IDs belong to the server; updates position + categoryId in a Prisma `$transaction`; emits `channel:updated` for each changed channel
+- Both routes registered BEFORE `/:paramId` routes to avoid Express matching "reorder" as a param
+- Both use `rateLimitCategoryManage` (20 pts/60s, userId-based)
+
+**Frontend store (`apps/desktop/src/stores/serverStore.ts`):**
+- `reorderCategories(serverId, order)` — optimistic local update of category positions, PUT to API, revert on failure
+- `reorderChannels(serverId, order)` — optimistic local update of channel positions + categoryIds, PUT to API, revert on failure
+
+**Frontend UI (`apps/desktop/src/components/channel/ChannelSidebar.tsx`):**
+- Refactored from render functions to proper sub-components: `SortableChannelItem`, `SortableCategoryHeader`, `ChannelOverlay`, `CategoryOverlay`
+- `DndContext` wraps the channels list with `closestCenter` collision detection and `PointerSensor` (5px activation distance to prevent accidental drags on clicks)
+- Nested `SortableContext`s: outer for categories (sortable among themselves), inner per-category for channels
+- Uncategorized channels have their own `SortableContext`
+- Sortable IDs prefixed with `ch-` / `cat-` for type differentiation in `onDragEnd`
+- `DragOverlay` renders a styled ghost of the dragged item (no drop animation for snappy feel)
+- `onDragEnd` logic handles three cases: category reorder, same-container channel reorder, cross-container channel move
+- Drag handles (grip icon via lucide `GripVertical`) visible only to admins/owners on hover
+- Non-admin users see the sidebar identically to before (no drag affordances)
+- Channels within each group sorted by position via `useMemo`
+
+**Key pattern:** Reorder operations use the **optimistic update + revert** pattern rather than the "socket is sole source of truth" pattern used by create/delete. This is because reordering is a high-frequency UI interaction where waiting for the server round-trip would feel sluggish. The socket events (`channel:updated`, `category:updated`) still fire and update all other clients in real-time.
+
+**Files modified:**
+- `apps/desktop/package.json` — added `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities`
+- `apps/server/src/routes/categories.ts` — new `PUT /reorder` bulk endpoint
+- `apps/server/src/routes/channels.ts` — new `PUT /reorder` bulk endpoint
+- `apps/desktop/src/stores/serverStore.ts` — `reorderCategories()`, `reorderChannels()` actions
+- `apps/desktop/src/components/channel/ChannelSidebar.tsx` — full DnD refactor with sub-components
+- `packages/shared/src/constants.ts` — `APP_VERSION` bumped to 0.9.4

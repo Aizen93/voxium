@@ -59,11 +59,22 @@ export interface ServerSummary {
 
 export interface ServerDetail extends Server {
   channels: Channel[];
+  categories: Category[];
   memberCount: number;
 }
 
 export interface CreateServerRequest {
   name: string;
+}
+
+// ─── Category ───────────────────────────────────────────────────────────────
+
+export interface Category {
+  id: string;
+  name: string;
+  serverId: string;
+  position: number;
+  createdAt: string;
 }
 
 // ─── Channel ─────────────────────────────────────────────────────────────────
@@ -75,6 +86,7 @@ export interface Channel {
   name: string;
   type: ChannelType;
   serverId: string;
+  categoryId: string | null;
   position: number;
   createdAt: string;
 }
@@ -82,6 +94,7 @@ export interface Channel {
 export interface CreateChannelRequest {
   name: string;
   type: ChannelType;
+  categoryId?: string;
 }
 
 // ─── Message ─────────────────────────────────────────────────────────────────
@@ -193,7 +206,11 @@ export interface ServerToClientEvents {
   'message:update': (message: Message) => void;
   'message:delete': (data: { messageId: string; channelId: string }) => void;
   'channel:created': (channel: Channel) => void;
+  'channel:updated': (channel: Channel) => void;
   'channel:deleted': (data: { channelId: string; serverId: string }) => void;
+  'category:created': (category: Category) => void;
+  'category:updated': (category: Category) => void;
+  'category:deleted': (data: { categoryId: string; serverId: string }) => void;
   'member:joined': (data: { serverId: string; user: PublicUser }) => void;
   'member:left': (data: { serverId: string; userId: string }) => void;
   'presence:update': (data: { userId: string; status: UserStatus }) => void;

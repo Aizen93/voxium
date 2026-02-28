@@ -1,12 +1,13 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
-import type { Server, Channel, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole } from '@voxium/shared';
+import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole } from '@voxium/shared';
 
 interface ServerState {
   servers: Server[];
   activeServerId: string | null;
   channels: Channel[];
+  categories: Category[];
   activeChannelId: string | null;
   members: ServerMember[];
   isLoading: boolean;
@@ -17,7 +18,7 @@ interface ServerState {
   setActiveServer: (serverId: string) => Promise<void>;
   setActiveChannel: (channelId: string) => void;
   createServer: (name: string) => Promise<Server>;
-  createChannel: (serverId: string, name: string, type: 'text' | 'voice') => Promise<Channel>;
+  createChannel: (serverId: string, name: string, type: 'text' | 'voice', categoryId?: string) => Promise<Channel>;
   deleteChannel: (serverId: string, channelId: string) => Promise<void>;
   createInvite: (serverId: string) => Promise<string>;
   joinServer: (inviteCode: string) => Promise<void>;
@@ -27,6 +28,13 @@ interface ServerState {
   removeMember: (serverId: string, userId: string) => void;
   addChannel: (channel: Channel) => void;
   removeChannel: (channelId: string, serverId: string) => void;
+  updateChannelData: (channel: Channel) => void;
+  addCategory: (category: Category) => void;
+  updateCategory: (category: Category) => void;
+  removeCategory: (categoryId: string, serverId: string) => void;
+  createCategory: (serverId: string, name: string) => Promise<Category>;
+  deleteCategory: (serverId: string, categoryId: string) => Promise<void>;
+  renameCategory: (serverId: string, categoryId: string, name: string) => Promise<void>;
   fetchMembers: (serverId: string) => Promise<void>;
   incrementUnread: (channelId: string, serverId: string) => void;
   clearUnread: (channelId: string) => void;
@@ -37,6 +45,8 @@ interface ServerState {
   updateServerData: (server: Server) => void;
   updateMemberAvatar: (userId: string, avatarUrl: string | null) => void;
   updateMemberProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => void;
+  reorderCategories: (serverId: string, order: { id: string; position: number }[]) => Promise<void>;
+  reorderChannels: (serverId: string, order: { id: string; position: number; categoryId: string | null }[]) => Promise<void>;
   updateMemberRole: (serverId: string, memberId: string, role: MemberRole) => Promise<void>;
   kickMember: (serverId: string, memberId: string) => Promise<void>;
   transferOwnership: (serverId: string, targetUserId: string) => Promise<void>;
@@ -48,6 +58,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   activeServerId: null,
   channels: [],
+  categories: [],
   activeChannelId: null,
   members: [],
   isLoading: false,
@@ -68,10 +79,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
     try {
       const { data } = await api.get(`/servers/${serverId}`);
       const channels = data.data.channels || [];
+      const categories = data.data.categories || [];
       const firstTextChannel = channels.find((c: Channel) => c.type === 'text');
 
       set({
         channels,
+        categories,
         activeChannelId: firstTextChannel?.id || null,
         isLoading: false,
       });
@@ -97,8 +110,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
     return server;
   },
 
-  createChannel: async (serverId: string, name: string, type: 'text' | 'voice') => {
-    const { data } = await api.post(`/servers/${serverId}/channels`, { name, type });
+  createChannel: async (serverId: string, name: string, type: 'text' | 'voice', categoryId?: string) => {
+    const { data } = await api.post(`/servers/${serverId}/channels`, { name, type, categoryId });
     return data.data;
   },
 
@@ -177,6 +190,48 @@ export const useServerStore = create<ServerState>((set, get) => ({
       channels: state.channels.filter((c) => c.id !== channelId),
       activeChannelId: state.activeChannelId === channelId ? null : state.activeChannelId,
     }));
+  },
+
+  updateChannelData: (channel: Channel) => {
+    if (get().activeServerId !== channel.serverId) return;
+    set((state) => ({
+      channels: state.channels.map((c) => (c.id === channel.id ? channel : c)),
+    }));
+  },
+
+  addCategory: (category: Category) => {
+    if (get().activeServerId !== category.serverId) return;
+    set((state) => {
+      if (state.categories.some((c) => c.id === category.id)) return state;
+      return { categories: [...state.categories, category] };
+    });
+  },
+
+  updateCategory: (category: Category) => {
+    if (get().activeServerId !== category.serverId) return;
+    set((state) => ({
+      categories: state.categories.map((c) => (c.id === category.id ? category : c)),
+    }));
+  },
+
+  removeCategory: (categoryId: string, serverId: string) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      categories: state.categories.filter((c) => c.id !== categoryId),
+    }));
+  },
+
+  createCategory: async (serverId: string, name: string) => {
+    const { data } = await api.post(`/servers/${serverId}/categories`, { name });
+    return data.data;
+  },
+
+  deleteCategory: async (serverId: string, categoryId: string) => {
+    await api.delete(`/servers/${serverId}/categories/${categoryId}`);
+  },
+
+  renameCategory: async (serverId: string, categoryId: string, name: string) => {
+    await api.patch(`/servers/${serverId}/categories/${categoryId}`, { name });
   },
 
   fetchMembers: async (serverId: string) => {
@@ -287,6 +342,40 @@ export const useServerStore = create<ServerState>((set, get) => ({
     }));
   },
 
+  reorderCategories: async (serverId: string, order: { id: string; position: number }[]) => {
+    const prev = get().categories;
+    // Optimistic update
+    set((state) => ({
+      categories: state.categories.map((c) => {
+        const o = order.find((o) => o.id === c.id);
+        return o ? { ...c, position: o.position } : c;
+      }),
+    }));
+    try {
+      await api.put(`/servers/${serverId}/categories/reorder`, { order });
+    } catch {
+      // Revert on failure
+      set({ categories: prev });
+    }
+  },
+
+  reorderChannels: async (serverId: string, order: { id: string; position: number; categoryId: string | null }[]) => {
+    const prev = get().channels;
+    // Optimistic update
+    set((state) => ({
+      channels: state.channels.map((c) => {
+        const o = order.find((o) => o.id === c.id);
+        return o ? { ...c, position: o.position, categoryId: o.categoryId } : c;
+      }),
+    }));
+    try {
+      await api.put(`/servers/${serverId}/channels/reorder`, { order });
+    } catch {
+      // Revert on failure
+      set({ channels: prev });
+    }
+  },
+
   updateMemberRole: async (serverId: string, memberId: string, role: MemberRole) => {
     await api.patch(`/servers/${serverId}/members/${memberId}/role`, { role });
   },
@@ -313,6 +402,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       servers: state.servers.filter((s) => s.id !== serverId),
       activeServerId: state.activeServerId === serverId ? null : state.activeServerId,
       channels: state.activeServerId === serverId ? [] : state.channels,
+      categories: state.activeServerId === serverId ? [] : state.categories,
       members: state.activeServerId === serverId ? [] : state.members,
       activeChannelId: state.activeServerId === serverId ? null : state.activeChannelId,
     }));

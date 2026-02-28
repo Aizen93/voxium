@@ -190,6 +190,7 @@ export function initSocketServer(httpServer: HttpServer) {
            LEFT JOIN channel_reads cr ON cr.channel_id = c.id AND cr.user_id = $1
            INNER JOIN messages m ON m.channel_id = c.id
              AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
+             AND m.author_id != $1
            WHERE c.id = ANY($2::text[])
            GROUP BY c.id, c.server_id
            HAVING COUNT(m.id) > 0`,

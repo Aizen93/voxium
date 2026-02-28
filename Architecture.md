@@ -141,7 +141,8 @@ apps/server/
 │   ├── routes/
 │   │   ├── auth.ts         # Register, login, refresh, me, forgot/reset/change password
 │   │   ├── servers.ts      # CRUD servers, join/leave, members, settings
-│   │   ├── channels.ts     # CRUD channels, mark-as-read
+│   │   ├── channels.ts     # CRUD channels, mark-as-read, bulk reorder
+│   │   ├── categories.ts   # CRUD categories, bulk reorder
 │   │   ├── messages.ts     # CRUD messages with pagination, reactions
 │   │   ├── dm.ts           # DM conversations, messages, reactions, read tracking, deletion
 │   │   ├── users.ts        # User profiles, profile update with real-time broadcast

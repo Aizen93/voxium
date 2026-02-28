@@ -1,5 +1,5 @@
 export const APP_NAME = 'Voxium';
-export const APP_VERSION = '0.9.2';
+export const APP_VERSION = '0.9.4';
 
 export const API_VERSION = 'v1';
 
@@ -22,6 +22,9 @@ export const LIMITS = {
   MAX_VOICE_USERS_PER_CHANNEL: 99,
   MAX_REACTIONS_PER_MESSAGE: 20,
   MAX_EMOJI_LENGTH: 32,
+  CATEGORY_NAME_MIN: 1,
+  CATEGORY_NAME_MAX: 100,
+  MAX_CATEGORIES_PER_SERVER: 50,
 } as const;
 
 export const INVITE_CODE_LENGTH = 8;
@@ -31,7 +34,11 @@ export const WS_EVENTS = {
   MESSAGE_UPDATE: 'message:update',
   MESSAGE_DELETE: 'message:delete',
   CHANNEL_CREATED: 'channel:created',
+  CHANNEL_UPDATED: 'channel:updated',
   CHANNEL_DELETED: 'channel:deleted',
+  CATEGORY_CREATED: 'category:created',
+  CATEGORY_UPDATED: 'category:updated',
+  CATEGORY_DELETED: 'category:deleted',
   MEMBER_JOINED: 'member:joined',
   MEMBER_LEFT: 'member:left',
   PRESENCE_UPDATE: 'presence:update',
