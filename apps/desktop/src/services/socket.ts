@@ -1,5 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
+import { getAccessToken } from './tokenStorage';
 
 const SOCKET_URL = import.meta.env.VITE_WS_URL || 'http://localhost:3001';
 
@@ -135,9 +136,9 @@ export function connectSocket(token: string): VoxSocket {
     setStatus('connecting');
     console.log(`[WS] Reconnection attempt ${attempt}`);
 
-    // Refresh auth token from localStorage on each reconnect attempt
+    // Refresh auth token on each reconnect attempt
     // so we don't use an expired token
-    const freshToken = localStorage.getItem('voxium_access_token');
+    const freshToken = getAccessToken();
     if (freshToken && socket) {
       socket.auth = { token: freshToken };
     }

@@ -21,6 +21,7 @@ import { playJoinSound, playLeaveSound, playMessageSound, playCallSound } from '
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
+import { initNotifications, notify } from '../../services/notifications';
 
 export function MainLayout() {
   const { fetchServers, activeServerId } = useServerStore();
@@ -41,9 +42,7 @@ export function MainLayout() {
 
   // Request notification permission on mount
   useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
+    initNotifications();
   }, []);
 
   // Fetch servers on mount
@@ -65,12 +64,12 @@ export function MainLayout() {
         useServerStore.getState().incrementUnread(message.channelId, message.serverId);
         const settings = useSettingsStore.getState();
         if (settings.enableNotificationSounds) playMessageSound();
-        if (settings.enableDesktopNotifications && 'Notification' in window && Notification.permission === 'granted') {
+        if (settings.enableDesktopNotifications) {
           const authorName = message.author?.displayName || message.author?.username || 'Someone';
           const serverName = message.serverName || 'Unknown Server';
           const channelName = message.channelName || 'unknown';
           const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
-          new Notification(`${serverName} — #${channelName}`, { body: `${authorName}: ${body}`, silent: true });
+          notify(`${serverName} — #${channelName}`, `${authorName}: ${body}`);
         }
       },
       messageUpdate: (message: any) => {
@@ -179,7 +178,13 @@ export function MainLayout() {
           const currentUser = useAuthStore.getState().user;
           if (message.author?.id !== currentUser?.id) {
             dmStore.incrementDMUnread(message.conversationId);
-            if (useSettingsStore.getState().enableNotificationSounds) playMessageSound();
+            const settings = useSettingsStore.getState();
+            if (settings.enableNotificationSounds) playMessageSound();
+            if (settings.enableDesktopNotifications) {
+              const authorName = message.author?.displayName || message.author?.username || 'Someone';
+              const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
+              notify(`DM — ${authorName}`, body);
+            }
           }
         }
       },

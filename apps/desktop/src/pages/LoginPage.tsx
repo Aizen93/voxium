@@ -8,11 +8,12 @@ export function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     try {
-      await login(email, password);
+      await login(email, password, rememberMe);
     } catch {
       // Error is handled in the store
     }
@@ -75,7 +76,16 @@ export function LoginPage() {
               </div>
             </div>
 
-            <div className="flex justify-end">
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-vox-border bg-vox-bg-tertiary accent-vox-accent-primary"
+                />
+                <span className="text-xs text-vox-text-secondary">Remember me</span>
+              </label>
               <Link to="/forgot-password" className="text-xs text-vox-text-link hover:underline">
                 Forgot password?
               </Link>

@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.8.0 (Security Hardening + WebRTC Perfect Negotiation + UX Fixes)
-**Date:** 2026-02-27
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, and Tauri desktop icon integration
+**Version:** 0.8.1 (Remember Me + Native Notifications + Landing Page)
+**Date:** 2026-02-28
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, and Tauri native desktop notifications
 
 ## What Has Been Done
 
@@ -1222,3 +1222,93 @@ Enhanced unread indicators on the server sidebar:
 
 **Files modified:**
 - `apps/desktop/src/services/socket.ts` — added `setStatus('connected')` in already-connected early return
+
+### Remember Me Feature (v0.8.1)
+
+**Feature:** Users can choose whether to persist their login session across app restarts via a "Remember me" checkbox on the login page.
+
+**Architecture:**
+- **Dual-storage abstraction** (`apps/desktop/src/services/tokenStorage.ts`): New module centralizing all token access. `rememberMe=true` stores in `localStorage` (persists across restart); `rememberMe=false` stores in `sessionStorage` (cleared on window close). Auto-detection logic preserves the original choice during token refresh.
+- **Backend token expiry**: Refresh token expiry varies by `rememberMe` — 30 days (remembered) vs 24 hours (session-only). The `rememberMe` flag is embedded in the refresh token JWT payload so it survives refresh cycles.
+- **Access token is clean**: `rememberMe` is stripped from access tokens since it is only relevant for refresh logic.
+- **Backward compatible**: Existing refresh tokens (without `rememberMe` field) default to `rememberMe=true` via `payload.rememberMe ?? true`.
+
+**Files created:**
+- `apps/desktop/src/services/tokenStorage.ts` — dual-storage token abstraction with `getAccessToken()`, `getRefreshToken()`, `setTokens()`, `isRemembered()`, `clearTokens()`
+
+**Files modified:**
+- `packages/shared/src/types.ts` — added `rememberMe?: boolean` to `LoginRequest`
+- `apps/server/src/middleware/auth.ts` — added `rememberMe?: boolean` to `AuthPayload`
+- `apps/server/src/services/authService.ts` — `generateTokens()` accepts `rememberMe` param, `loginUser()` forwards it, `refreshTokens()` reads it from refresh token payload, `changePassword()` accepts and forwards it
+- `apps/server/src/routes/auth.ts` — login and change-password routes extract `rememberMe` from request body
+- `apps/desktop/src/stores/authStore.ts` — uses `tokenStorage` helpers; `changePassword` sends `isRemembered()` to server
+- `apps/desktop/src/services/api.ts` — uses `tokenStorage` helpers in request/response interceptors
+- `apps/desktop/src/services/socket.ts` — uses `getAccessToken()` for reconnect token refresh
+- `apps/desktop/src/pages/LoginPage.tsx` — added Remember Me checkbox UI (default: checked)
+
+### Native Desktop Notifications (v0.8.1)
+
+**Feature:** Tauri native notification support with Web API fallback for browser dev mode.
+
+**Files created:**
+- `apps/desktop/src/services/notifications.ts` — `initNotifications()` for permission setup, `notify()` for sending with automatic Tauri/Web API fallback
+
+### Landing Page (v0.8.1)
+
+**Feature:** Public-facing landing page for browser visitors at `/`. Tauri desktop clients skip it entirely and go straight to login or the app.
+
+**Routing (`apps/desktop/src/App.tsx`):**
+- Tauri detection via `'__TAURI_INTERNALS__' in window` at module level
+- New `<Route path="/">` before the `/*` catch-all with three-way logic:
+  - Authenticated users (any context) → `MainLayout`
+  - Unauthenticated + Tauri → `Navigate to /login`
+  - Unauthenticated + Browser → `LandingPage`
+
+**CSS (`apps/desktop/src/styles/globals.css`):**
+- `landing-scroll` CSS class overrides the global `overflow: hidden` on `html, body, #root` to enable document scrolling. Toggled via `useEffect` in the landing page component (added on mount, removed on unmount).
+
+**Landing page (`apps/desktop/src/pages/LandingPage.tsx`):**
+- Single-file component (~550 lines) with internal section components
+- Uses only existing dependencies (`react-router-dom`, `lucide-react`, Tailwind theme)
+
+**Sections:**
+1. **Navbar** — Fixed top, blurred background, Voxium logo (`/logo.svg`), Sign In + Get Started links
+2. **Hero** — Full viewport with animated mesh network background (`NetworkMeshSvg`), large logo, headline ("Talk. Connect. Build." with gradient accent), animated waveform decoration, 3 download buttons (placeholder), browser launch link, animated mock UI panel
+3. **Features** — 6-card responsive grid (voice, messaging, privacy, servers, DM calls, performance) with particle separator and hover effects
+4. **Why Voxium** — 3 value prop columns (data ownership, open source, community-driven) + animated shield with checkmark highlights + decorative orbit rings
+5. **Final CTA** — Gradient background with orbit rings, logo, "Ready to experience communication, reimagined?" headline, register + download buttons
+6. **Footer** — 4-column grid (brand, product, legal, community links), copyright bar
+
+**Animated SVG illustrations (inline React components, CSS `@keyframes`):**
+- `NetworkMeshSvg` — 8 floating nodes with connecting lines, nodes drift on independent timing curves, lines pulse opacity
+- `WaveformSvg` — 12 equalizer bars bouncing with staggered timing (audio waveform visualization)
+- `OrbitRingsSvg` — 3 elliptical rings rotating at different speeds with pulsing orbit dots
+- `ParticlesSvg` — 8 particles rising upward with fade in/out (section separator)
+- `ShieldSvg` — Shield with gradient fill, scanning line, glow pulse, and checkmark
+
+**Animated mock UI panel (hero section):**
+- Staggered message timeline: Alice (0.8s) → Bob (1.8s) → reaction pop on Alice's message (3s) → Charlie (4s)
+- Continuous ambient animations: typing indicator (3 bouncing dots), blinking cursor in message input, voice channel speaking rings (staggered), online presence dots (pulsing), active channel glow
+- Voice channel section with connected users (Alice + Bob with speaking ring animations)
+- Message timestamps, emoji reactions, and message input bar
+
+**Uses the actual Voxium logo:**
+- Navbar: `/logo.svg` (animated with pulsing sound waves)
+- Hero: large `/logo.svg` above headline
+- Mock UI panel: `/logo_static.svg` in fake title bar and sidebar
+- CTA section: `/logo.svg`
+- Footer: `/logo_static.svg`
+
+**Responsiveness:**
+- Hero text: `text-4xl sm:text-5xl md:text-7xl`
+- Download buttons: `flex-wrap` for stacking on mobile
+- Features: `grid-cols-1 md:grid-cols-2 lg:grid-cols-3`
+- Mock UI panel: `hidden md:block`
+- Footer: `grid-cols-2 md:grid-cols-4`
+
+**Files created:**
+- `apps/desktop/src/pages/LandingPage.tsx`
+
+**Files modified:**
+- `apps/desktop/src/App.tsx` — `LandingPage` import, `isTauri` constant, new `/` route
+- `apps/desktop/src/styles/globals.css` — `landing-scroll` CSS class override

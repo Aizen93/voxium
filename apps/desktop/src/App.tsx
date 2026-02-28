@@ -6,9 +6,12 @@ import { RegisterPage } from './pages/RegisterPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { InvitePage } from './pages/InvitePage';
+import { LandingPage } from './pages/LandingPage';
 import { MainLayout } from './components/layout/MainLayout';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { ToastContainer } from './components/layout/ToastContainer';
+
+const isTauri = '__TAURI_INTERNALS__' in window;
 
 const PENDING_REDIRECT_KEY = 'voxium_pending_redirect';
 
@@ -70,6 +73,16 @@ export function App() {
           <Route
             path="/invite/:code"
             element={isAuthenticated ? <InvitePage /> : <SaveAndRedirect />}
+          />
+          <Route
+            path="/"
+            element={
+              isAuthenticated
+                ? <MainLayout />
+                : isTauri
+                  ? <Navigate to="/login" replace />
+                  : <LandingPage />
+            }
           />
           <Route
             path="/*"

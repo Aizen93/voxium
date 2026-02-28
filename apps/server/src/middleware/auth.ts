@@ -6,6 +6,7 @@ export interface AuthPayload {
   userId: string;
   username: string;
   tokenVersion: number;
+  rememberMe?: boolean;
 }
 
 declare global {

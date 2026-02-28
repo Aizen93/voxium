@@ -22,8 +22,8 @@ authRouter.post('/register', rateLimitRegister, async (req: Request, res: Respon
 
 authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { email, password } = req.body;
-    const result = await loginUser(email, password);
+    const { email, password, rememberMe } = req.body;
+    const result = await loginUser(email, password, rememberMe ?? true);
 
     res.json({
       success: true,
@@ -104,7 +104,7 @@ authRouter.post('/reset-password', rateLimitResetPassword, async (req: Request, 
 
 authRouter.post('/change-password', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const { currentPassword, newPassword, rememberMe } = req.body;
     if (!currentPassword || typeof currentPassword !== 'string') {
       res.status(400).json({ success: false, error: 'Current password is required' });
       return;
@@ -113,7 +113,7 @@ authRouter.post('/change-password', authenticate, rateLimitChangePassword, async
       res.status(400).json({ success: false, error: 'New password is required' });
       return;
     }
-    const tokens = await changePassword(req.user!.userId, currentPassword, newPassword);
+    const tokens = await changePassword(req.user!.userId, currentPassword, newPassword, rememberMe ?? true);
     res.json({ success: true, message: 'Password changed successfully.', data: tokens });
   } catch (err) {
     next(err);

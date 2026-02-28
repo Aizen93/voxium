@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { connectSocket, disconnectSocket } from '../services/socket';
+import { getAccessToken, setTokens, clearTokens, isRemembered } from '../services/tokenStorage';
 import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
 import type { User } from '@voxium/shared';
@@ -11,7 +12,7 @@ interface AuthState {
   isLoading: boolean;
   error: string | null;
 
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string, rememberMe?: boolean) => Promise<void>;
   register: (username: string, email: string, password: string) => Promise<void>;
   logout: () => void;
   checkAuth: () => Promise<void>;
@@ -29,14 +30,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isLoading: true,
   error: null,
 
-  login: async (email, password) => {
+  login: async (email, password, rememberMe = true) => {
     set({ isLoading: true, error: null });
     try {
-      const { data } = await api.post('/auth/login', { email, password });
+      const { data } = await api.post('/auth/login', { email, password, rememberMe });
       const { user, accessToken, refreshToken } = data.data;
 
-      localStorage.setItem('voxium_access_token', accessToken);
-      localStorage.setItem('voxium_refresh_token', refreshToken);
+      setTokens(accessToken, refreshToken, rememberMe);
 
       connectSocket(accessToken);
 
@@ -56,8 +56,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const { data } = await api.post('/auth/register', { username, email, password });
       const { user, accessToken, refreshToken } = data.data;
 
-      localStorage.setItem('voxium_access_token', accessToken);
-      localStorage.setItem('voxium_refresh_token', refreshToken);
+      setTokens(accessToken, refreshToken, true);
 
       connectSocket(accessToken);
 
@@ -72,14 +71,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: () => {
-    localStorage.removeItem('voxium_access_token');
-    localStorage.removeItem('voxium_refresh_token');
+    clearTokens();
     disconnectSocket();
     set({ user: null, isAuthenticated: false });
   },
 
   checkAuth: async () => {
-    const token = localStorage.getItem('voxium_access_token');
+    const token = getAccessToken();
     if (!token) {
       set({ isLoading: false });
       return;
@@ -90,8 +88,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       connectSocket(token);
       set({ user: data.data, isAuthenticated: true, isLoading: false });
     } catch {
-      localStorage.removeItem('voxium_access_token');
-      localStorage.removeItem('voxium_refresh_token');
+      clearTokens();
       set({ isLoading: false });
     }
   },
@@ -130,13 +127,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   changePassword: async (currentPassword, newPassword) => {
-    const { data } = await api.post('/auth/change-password', { currentPassword, newPassword });
+    const { data } = await api.post('/auth/change-password', { currentPassword, newPassword, rememberMe: isRemembered() });
     // Store fresh tokens so the current session survives the tokenVersion bump
-    if (data.data?.accessToken) {
-      localStorage.setItem('voxium_access_token', data.data.accessToken);
-    }
-    if (data.data?.refreshToken) {
-      localStorage.setItem('voxium_refresh_token', data.data.refreshToken);
+    if (data.data?.accessToken && data.data?.refreshToken) {
+      setTokens(data.data.accessToken, data.data.refreshToken);
     }
     return data.message;
   },

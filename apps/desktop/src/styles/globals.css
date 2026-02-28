@@ -15,6 +15,14 @@
     overflow: hidden;
   }
 
+  html.landing-scroll,
+  html.landing-scroll body,
+  html.landing-scroll #root {
+    overflow: auto;
+    height: auto;
+    scroll-behavior: smooth;
+  }
+
   body {
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;

@@ -6,7 +6,11 @@ export function ConnectionBanner() {
   const [status, setStatus] = useState(getConnectionStatus);
 
   useEffect(() => {
-    return onConnectionStatusChange(setStatus);
+    const unsub = onConnectionStatusChange(setStatus);
+    // Re-sync after subscribing to catch any status change that fired
+    // between the initial useState read and this effect running
+    setStatus(getConnectionStatus());
+    return unsub;
   }, []);
 
   if (status === 'connected') return null;

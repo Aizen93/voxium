@@ -54,7 +54,7 @@ export async function registerUser(username: string, email: string, password: st
   return { user: safeUser, ...tokens };
 }
 
-export async function loginUser(email: string, password: string) {
+export async function loginUser(email: string, password: string, rememberMe = true) {
   const user = await prisma.user.findUnique({ where: { email } });
 
   if (!user) throw new UnauthorizedError('Invalid credentials');
@@ -62,20 +62,23 @@ export async function loginUser(email: string, password: string) {
   const validPassword = await bcrypt.compare(password, user.password);
   if (!validPassword) throw new UnauthorizedError('Invalid credentials');
 
-  const tokens = generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion });
+  const tokens = generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion }, rememberMe);
 
   const { password: _, tokenVersion: _tv, ...safeUser } = user;
 
   return { user: safeUser, ...tokens };
 }
 
-export function generateTokens(payload: AuthPayload) {
-  const accessToken = jwt.sign(payload, process.env.JWT_SECRET!, {
+export function generateTokens(payload: AuthPayload, rememberMe = true) {
+  // Strip rememberMe from access token — it's only relevant for refresh
+  const { rememberMe: _, ...accessPayload } = payload;
+  const accessToken = jwt.sign(accessPayload, process.env.JWT_SECRET!, {
     expiresIn: process.env.JWT_EXPIRES_IN || '15m',
   } as jwt.SignOptions);
 
-  const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET!, {
-    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
+  const refreshExpiry = rememberMe ? '30d' : '24h';
+  const refreshToken = jwt.sign({ ...accessPayload, rememberMe }, process.env.JWT_REFRESH_SECRET!, {
+    expiresIn: refreshExpiry,
   } as jwt.SignOptions);
 
   return { accessToken, refreshToken };
@@ -99,7 +102,8 @@ export async function refreshTokens(token: string) {
       throw new UnauthorizedError('Token has been revoked');
     }
 
-    return generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion });
+    const rememberMe = payload.rememberMe ?? true;
+    return generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion }, rememberMe);
   } catch (err) {
     if (err instanceof UnauthorizedError) throw err;
     throw new UnauthorizedError('Invalid refresh token');
@@ -167,7 +171,7 @@ export async function resetPassword(token: string, newPassword: string) {
   });
 }
 
-export async function changePassword(userId: string, currentPassword: string, newPassword: string) {
+export async function changePassword(userId: string, currentPassword: string, newPassword: string, rememberMe = true) {
   const passwordErr = validatePassword(newPassword);
   if (passwordErr) throw new BadRequestError(passwordErr);
 
@@ -189,5 +193,5 @@ export async function changePassword(userId: string, currentPassword: string, ne
   });
 
   // Return fresh tokens so the current session survives the version bump
-  return generateTokens({ userId: updated.id, username: updated.username, tokenVersion: updated.tokenVersion });
+  return generateTokens({ userId: updated.id, username: updated.username, tokenVersion: updated.tokenVersion }, rememberMe);
 }

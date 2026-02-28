@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { connectSocket } from './socket';
+import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './tokenStorage';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
 
@@ -10,7 +11,7 @@ export const api = axios.create({
 
 // Attach auth token to every request
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('voxium_access_token');
+  const token = getAccessToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -48,19 +49,16 @@ api.interceptors.response.use(
         });
       }
 
-      const refreshToken = localStorage.getItem('voxium_refresh_token');
+      const refreshToken = getRefreshToken();
       if (refreshToken) {
         isRefreshing = true;
         try {
           const { data } = await axios.post(`${API_BASE}/auth/refresh`, { refreshToken });
           const { accessToken, refreshToken: newRefreshToken } = data.data;
 
-          localStorage.setItem('voxium_access_token', accessToken);
-          localStorage.setItem('voxium_refresh_token', newRefreshToken);
+          setTokens(accessToken, newRefreshToken);
 
           // Reconnect socket with fresh token
-          // (socket.ts reads from localStorage on reconnect attempts too,
-          //  but this handles the case where socket hasn't disconnected yet)
           connectSocket(accessToken);
 
           // Resolve all queued requests with the new token
@@ -69,8 +67,7 @@ api.interceptors.response.use(
           originalRequest.headers.Authorization = `Bearer ${accessToken}`;
           return api(originalRequest);
         } catch {
-          localStorage.removeItem('voxium_access_token');
-          localStorage.removeItem('voxium_refresh_token');
+          clearTokens();
           window.location.href = '/login';
         } finally {
           isRefreshing = false;
