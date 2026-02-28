@@ -67,6 +67,8 @@ export function MessageList() {
     if (index === 0) return true;
     const prev = messages[index - 1];
     const curr = messages[index];
+    // Replies always break grouping
+    if (curr.replyToId) return true;
     if (prev.author.id !== curr.author.id) return true;
     // Show header if more than 5 minutes apart
     const timeDiff = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();

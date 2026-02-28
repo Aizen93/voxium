@@ -98,6 +98,12 @@ export interface Message {
   type?: string;
   channelId: string | null;
   conversationId?: string | null;
+  replyToId?: string | null;
+  replyTo?: {
+    id: string;
+    content: string;
+    author: MessageAuthor;
+  } | null;
   author: MessageAuthor;
   createdAt: string;
   editedAt: string | null;

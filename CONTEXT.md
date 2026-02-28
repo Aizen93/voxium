@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.8.2 (Remember Me + Native Notifications + Landing Page + Role/Permission Management)
+**Version:** 0.9.0 (Message Replies)
 **Date:** 2026-02-28
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, and Tauri native desktop notifications
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, and message replies with reply preview and scroll-to-original
 
 ## What Has Been Done
 
@@ -1337,3 +1337,58 @@ Server members now have roles (`owner`, `admin`, `member`) with hierarchical per
 **Shared:**
 - `packages/shared/src/constants.ts` — `MEMBER_ROLE_UPDATED`, `MEMBER_KICKED` event constants
 - `packages/shared/src/types.ts` — `MemberRole` type, `ServerMember` interface, `ServerToClientEvents` for role_updated and kicked
+
+### Message Replies (v0.9.0)
+
+**New feature:** Users can reply to messages in both server channels and DMs. Replies show a compact preview of the referenced message above the reply content, with click-to-scroll navigation to the original message.
+
+**Database (`apps/server/prisma/schema.prisma`):**
+- Added `replyToId String? @map("reply_to_id")` to Message model
+- Self-relation: `replyTo Message? @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)` and `replies Message[] @relation("MessageReply")`
+- `onDelete: SetNull` — deleting the original message nullifies the reference; the reply stays and shows "[Original message was deleted]"
+
+**Shared package (`packages/shared/src/types.ts`):**
+- `Message` interface extended with `replyToId?: string | null` and `replyTo?: { id: string; content: string; author: MessageAuthor } | null`
+- `replyToId` enables distinguishing "never a reply" (`undefined`) from "reply to deleted message" (`replyToId` set but `replyTo` is `null`)
+
+**Backend (`apps/server/src/routes/messages.ts`):**
+- All message queries (GET list, POST create, PATCH edit) include `replyTo` with nested `{ id, content, author }` select
+- POST accepts optional `replyToId` in body; validates that the referenced message exists and belongs to the same channel
+- Created message payload includes `replyTo` data, so socket broadcasts carry the reply preview
+
+**Backend (`apps/server/src/routes/dm.ts`):**
+- Same changes as channel messages: `replyTo` include on GET/POST/PATCH, `replyToId` acceptance on POST with conversation-scoped validation
+- Shared `replyToSelect` constant to avoid duplication
+
+**Frontend store (`apps/desktop/src/stores/chatStore.ts`):**
+- New state: `replyingTo: Message | null`
+- New actions: `setReplyingTo(message)`, `clearReplyingTo()`
+- `sendMessage()` and `sendDMMessage()` include `replyToId` in POST body when `replyingTo` is set; clear reply state after successful send
+- `clearMessages()` resets `replyingTo` to `null` (channel/conversation switches clear reply state)
+
+**Frontend — MessageItem (`apps/desktop/src/components/chat/MessageItem.tsx`):**
+- Reply button (lucide `Reply` icon) added as first button in hover toolbar, hidden for system messages
+- Compact reply preview rendered above message content when `message.replyTo` exists: author name + truncated content (80 chars), left border accent, muted colors
+- Clicking the reply preview scrolls to the original message (via `data-message-id` attribute + `scrollIntoView`) and briefly highlights it with accent background
+- When `message.replyToId` exists but `message.replyTo` is null (parent deleted), shows "[Original message was deleted]" in muted italic
+
+**Frontend — MessageInput (`apps/desktop/src/components/chat/MessageInput.tsx`):**
+- Reply bar rendered above the input container when `replyingTo` is set: "Replying to **{displayName}**" + truncated content + X cancel button
+- Input container border radius adapts (flat top when reply bar is shown)
+- Textarea auto-focuses when reply is set
+- Escape key cancels the active reply
+
+**Frontend — MessageList (`apps/desktop/src/components/chat/MessageList.tsx`) & DMMessageList (`apps/desktop/src/components/dm/DMMessageList.tsx`):**
+- `shouldShowHeader()` now breaks message grouping for messages with `replyToId` (replies always show full header with avatar)
+
+**Files modified:**
+- `apps/server/prisma/schema.prisma` — `replyToId` field + self-relation
+- `apps/server/prisma/migrations/20260228035448_add_message_reply/migration.sql`
+- `packages/shared/src/types.ts` — `replyToId` and `replyTo` on Message
+- `apps/server/src/routes/messages.ts` — replyTo include + replyToId creation
+- `apps/server/src/routes/dm.ts` — replyTo include + replyToId creation + `replyToSelect` constant
+- `apps/desktop/src/stores/chatStore.ts` — reply state + actions + send integration
+- `apps/desktop/src/components/chat/MessageItem.tsx` — Reply button + reply preview + scroll-to-original
+- `apps/desktop/src/components/chat/MessageInput.tsx` — Reply bar + auto-focus + Escape cancel
+- `apps/desktop/src/components/chat/MessageList.tsx` — grouping break for replies
+- `apps/desktop/src/components/dm/DMMessageList.tsx` — grouping break for replies

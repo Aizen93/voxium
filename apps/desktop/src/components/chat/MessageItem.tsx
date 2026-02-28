@@ -6,7 +6,7 @@ import { ReactionDisplay } from './ReactionDisplay';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
-import { Pencil, Trash2, SmilePlus } from 'lucide-react';
+import { Pencil, Trash2, SmilePlus, Reply } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
@@ -126,20 +126,75 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
     </div>
   );
 
+  const isSystemMessage = message.type === 'system';
+
+  const handleReply = () => {
+    useChatStore.getState().setReplyingTo(message);
+  };
+
+  const handleScrollToReply = () => {
+    if (!message.replyTo) return;
+    const el = document.querySelector(`[data-message-id="${message.replyTo.id}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('bg-vox-accent-primary/10');
+      setTimeout(() => el.classList.remove('bg-vox-accent-primary/10'), 1500);
+    }
+  };
+
+  const replyPreview = (() => {
+    if (message.replyTo) {
+      const truncated = message.replyTo.content.length > 80
+        ? message.replyTo.content.slice(0, 80) + '...'
+        : message.replyTo.content;
+      return (
+        <div
+          onClick={handleScrollToReply}
+          className="ml-13 mb-0.5 flex items-center gap-1.5 cursor-pointer text-xs text-vox-text-muted hover:text-vox-text-secondary border-l-2 border-vox-text-muted/40 pl-2"
+        >
+          <Reply size={12} className="shrink-0 rotate-180" />
+          <span className="font-semibold text-vox-text-secondary">{message.replyTo.author.displayName}</span>
+          <span className="truncate">{truncated}</span>
+        </div>
+      );
+    }
+    if (message.replyToId && !message.replyTo) {
+      return (
+        <div className="ml-13 mb-0.5 flex items-center gap-1.5 text-xs text-vox-text-muted italic border-l-2 border-vox-text-muted/40 pl-2">
+          <Reply size={12} className="shrink-0 rotate-180" />
+          <span>Original message was deleted</span>
+        </div>
+      );
+    }
+    return null;
+  })();
+
   return (
     <>
       <div
+        data-message-id={message.id}
         className={clsx(
           'group relative px-2 py-0.5 hover:bg-vox-bg-hover/50 rounded transition-colors',
           addTopMargin && 'mt-4'
         )}
       >
+        {replyPreview}
+
         {/* Hover action buttons */}
         {!isEditing && (
           <div className={clsx(
             'absolute -top-3 right-2 z-10 items-center gap-0.5 rounded-md border border-vox-border bg-vox-bg-secondary px-1 py-0.5 shadow-lg',
             showReactionPicker ? 'flex' : 'hidden group-hover:flex'
           )}>
+            {!isSystemMessage && (
+              <button
+                onClick={handleReply}
+                className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+                title="Reply"
+              >
+                <Reply size={14} />
+              </button>
+            )}
             <button
               ref={reactionBtnRef}
               onClick={() => setShowReactionPicker(!showReactionPicker)}

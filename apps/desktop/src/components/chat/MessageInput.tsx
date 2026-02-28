@@ -1,9 +1,9 @@
-import { useState, useRef, type KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
-import { PlusCircle, Smile, Send } from 'lucide-react';
+import { PlusCircle, Smile, Send, X } from 'lucide-react';
 
 interface Props {
   channelId?: string;
@@ -13,13 +13,21 @@ interface Props {
 }
 
 export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
-  const { sendMessage, sendDMMessage } = useChatStore();
+  const { sendMessage, sendDMMessage, replyingTo, clearReplyingTo } = useChatStore();
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const emojiBtnRef = useRef<HTMLButtonElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = useRef(false);
+
+  // Focus textarea when replying to a message
+  useEffect(() => {
+    if (replyingTo) {
+      textareaRef.current?.focus();
+    }
+  }, [replyingTo]);
 
   const handleTyping = () => {
     const socket = getSocket();
@@ -70,17 +78,39 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    } else if (e.key === 'Escape' && replyingTo) {
+      e.preventDefault();
+      clearReplyingTo();
     }
   };
 
   return (
     <div className="border-t border-vox-border px-4 py-3">
-      <div className="flex items-end gap-2 rounded-xl bg-vox-bg-floating border border-vox-border px-3 py-2">
+      {replyingTo && (
+        <div className="flex items-center justify-between rounded-t-xl border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2">
+          <div className="min-w-0 flex-1 text-xs text-vox-text-secondary">
+            <span className="text-vox-text-muted">Replying to </span>
+            <span className="font-semibold text-vox-text-primary">{replyingTo.author.displayName}</span>
+            <span className="ml-2 truncate text-vox-text-muted">
+              {replyingTo.content.length > 80 ? replyingTo.content.slice(0, 80) + '...' : replyingTo.content}
+            </span>
+          </div>
+          <button
+            onClick={clearReplyingTo}
+            className="ml-2 shrink-0 rounded p-0.5 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+            title="Cancel reply"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+      <div className={`flex items-end gap-2 bg-vox-bg-floating border border-vox-border px-3 py-2 ${replyingTo ? 'rounded-b-xl border-t-0' : 'rounded-xl'}`}>
         <button className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors">
           <PlusCircle size={20} />
         </button>
 
         <textarea
+          ref={textareaRef}
           value={content}
           onChange={(e) => { setContent(e.target.value); handleTyping(); }}
           onKeyDown={handleKeyDown}

@@ -16,6 +16,14 @@ const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
 };
 
+const replyToSelect = {
+  select: {
+    id: true,
+    content: true,
+    author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+  },
+};
+
 /** Ensure user1Id < user2Id for uniqueness constraint */
 function sortUserIds(a: string, b: string): [string, string] {
   return a < b ? [a, b] : [b, a];
@@ -160,6 +168,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
       where,
       include: {
         author: authorSelect,
+        replyTo: replyToSelect,
         reactions: reactionInclude,
       },
       orderBy: { createdAt: 'desc' },
@@ -193,14 +202,23 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
 
     await getConversationOrThrow(conversationId, userId);
 
+    // Validate optional replyToId
+    const replyToId = req.body.replyToId as string | undefined;
+    if (replyToId) {
+      const parent = await prisma.message.findUnique({ where: { id: replyToId }, select: { conversationId: true } });
+      if (!parent || parent.conversationId !== conversationId) throw new BadRequestError('Invalid replyToId');
+    }
+
     const message = await prisma.message.create({
       data: {
         content,
         conversationId,
         authorId: userId,
+        ...(replyToId && { replyToId }),
       },
       include: {
         author: authorSelect,
+        replyTo: replyToSelect,
       },
     });
 
@@ -241,6 +259,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', async (req: Request<{ con
       data: { content, editedAt: new Date() },
       include: {
         author: authorSelect,
+        replyTo: replyToSelect,
         reactions: reactionInclude,
       },
     });

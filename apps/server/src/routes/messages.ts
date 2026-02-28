@@ -41,6 +41,13 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
         author: {
           select: { id: true, username: true, displayName: true, avatarUrl: true },
         },
+        replyTo: {
+          select: {
+            id: true,
+            content: true,
+            author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          },
+        },
         reactions: reactionInclude,
       },
       orderBy: { createdAt: 'desc' },
@@ -86,15 +93,30 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
     });
     if (!membership) throw new ForbiddenError('Not a member of this server');
 
+    // Validate optional replyToId
+    const replyToId = req.body.replyToId as string | undefined;
+    if (replyToId) {
+      const parent = await prisma.message.findUnique({ where: { id: replyToId }, select: { channelId: true } });
+      if (!parent || parent.channelId !== channelId) throw new BadRequestError('Invalid replyToId');
+    }
+
     const message = await prisma.message.create({
       data: {
         content,
         channelId,
         authorId: req.user!.userId,
+        ...(replyToId && { replyToId }),
       },
       include: {
         author: {
           select: { id: true, username: true, displayName: true, avatarUrl: true },
+        },
+        replyTo: {
+          select: {
+            id: true,
+            content: true,
+            author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          },
         },
       },
     });
@@ -133,6 +155,13 @@ messageRouter.patch('/:messageId', async (req: Request<{ channelId: string; mess
       include: {
         author: {
           select: { id: true, username: true, displayName: true, avatarUrl: true },
+        },
+        replyTo: {
+          select: {
+            id: true,
+            content: true,
+            author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          },
         },
         reactions: reactionInclude,
       },

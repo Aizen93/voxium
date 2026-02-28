@@ -336,7 +336,7 @@ Eight independent stores, each managing a domain:
 |-------|-----------------|
 | `authStore` | User session, login/register/logout, token management, avatar upload, profile editing, forgot/reset/change password |
 | `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync, persistent unread tracking (via `ChannelRead` DB table + `unread:init` socket event) |
-| `chatStore` | Messages for active channel/conversation, typing indicators, pagination, author profile sync (shared by server channels and DMs) |
+| `chatStore` | Messages for active channel/conversation, typing indicators, pagination, author profile sync, reply-to-message state (shared by server channels and DMs) |
 | `voiceStore` | Server voice channel connection, DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`), mute/deaf, peer management (WebRTC). Server and DM voice are mutually exclusive. |
 | `dmStore` | DM conversation list, active conversation, participant online/offline status, DM unread counts (persisted via `ConversationRead` + `dm:unread:init`), conversation deletion. Owns `clearMessages()` calls for DM view transitions. |
 | `friendStore` | Friends list (accepted/pending incoming/pending outgoing), friend request CRUD, real-time friend event handlers, friendship status lookups, `showFriendsView` toggle |
@@ -389,7 +389,8 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
           │ channelId (FK, null) │
           │ conversationId (null)│
           │ authorId  (FK)       │
-          │ editedAt             │
+          │ replyToId (FK, null) │──┐ self-relation
+          │ editedAt             │<─┘ (onDelete: SetNull)
           │ createdAt            │
           └──────────┬───────────┘
                      │

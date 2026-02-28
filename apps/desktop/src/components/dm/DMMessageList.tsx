@@ -63,6 +63,8 @@ export function DMMessageList({ conversationId }: Props) {
     const curr = messages[index];
     // System messages always break grouping
     if (curr.type === 'system' || prev.type === 'system') return true;
+    // Replies always break grouping
+    if (curr.replyToId) return true;
     if (prev.author.id !== curr.author.id) return true;
     const timeDiff = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();
     return timeDiff > 5 * 60 * 1000;

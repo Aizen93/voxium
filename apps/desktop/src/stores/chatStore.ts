@@ -15,7 +15,10 @@ interface ChatState {
   hasMore: boolean;
   isLoading: boolean;
   typingUsers: Map<string, string>; // userId -> username
+  replyingTo: Message | null;
 
+  setReplyingTo: (message: Message | null) => void;
+  clearReplyingTo: () => void;
   fetchMessages: (channelId: string, before?: string) => Promise<void>;
   sendMessage: (channelId: string, content: string) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
@@ -42,6 +45,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   hasMore: false,
   isLoading: false,
   typingUsers: new Map(),
+  replyingTo: null,
+
+  setReplyingTo: (message) => set({ replyingTo: message }),
+  clearReplyingTo: () => set({ replyingTo: null }),
 
   fetchMessages: async (channelId: string, before?: string) => {
     // Deduplicate: skip if same request is already in-flight
@@ -97,12 +104,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   sendMessage: async (channelId: string, content: string) => {
     try {
-      const { data } = await api.post(`/channels/${channelId}/messages`, { content });
+      const replyingTo = get().replyingTo;
+      const body: Record<string, string> = { content };
+      if (replyingTo) body.replyToId = replyingTo.id;
+
+      const { data } = await api.post(`/channels/${channelId}/messages`, body);
       // The message will be added via WebSocket, but we also handle it here as fallback
       const exists = get().messages.some((m) => m.id === data.data.id);
       if (!exists) {
         set((state) => ({ messages: [...state.messages, data.data] }));
       }
+
+      if (replyingTo) set({ replyingTo: null });
 
       const socket = getSocket();
       if (socket) {
@@ -181,11 +194,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   sendDMMessage: async (conversationId: string, content: string) => {
     try {
-      const { data } = await api.post(`/dm/${conversationId}/messages`, { content });
+      const replyingTo = get().replyingTo;
+      const body: Record<string, string> = { content };
+      if (replyingTo) body.replyToId = replyingTo.id;
+
+      const { data } = await api.post(`/dm/${conversationId}/messages`, body);
       const exists = get().messages.some((m) => m.id === data.data.id);
       if (!exists) {
         set((state) => ({ messages: [...state.messages, data.data] }));
       }
+
+      if (replyingTo) set({ replyingTo: null });
 
       const socket = getSocket();
       if (socket) {
@@ -253,7 +272,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     typingTimers.forEach((timer) => clearTimeout(timer));
     typingTimers.clear();
 
-    set({ messages: [], hasMore: false, isLoading: false, typingUsers: new Map() });
+    set({ messages: [], hasMore: false, isLoading: false, typingUsers: new Map(), replyingTo: null });
   },
 
   setTypingUser: (userId: string, username: string) => {
