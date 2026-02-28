@@ -79,6 +79,7 @@ inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Res
           channelId: ch.id,
           lastReadAt: now,
         })),
+        skipDuplicates: true,
       });
     }
 

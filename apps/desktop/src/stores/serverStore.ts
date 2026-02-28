@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
-import type { Server, Channel, ServerMember, PublicUser, UserStatus, UnreadCount } from '@voxium/shared';
+import type { Server, Channel, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole } from '@voxium/shared';
 
 interface ServerState {
   servers: Server[];
@@ -36,6 +36,11 @@ interface ServerState {
   updateServerData: (server: Server) => void;
   updateMemberAvatar: (userId: string, avatarUrl: string | null) => void;
   updateMemberProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => void;
+  updateMemberRole: (serverId: string, memberId: string, role: MemberRole) => Promise<void>;
+  kickMember: (serverId: string, memberId: string) => Promise<void>;
+  transferOwnership: (serverId: string, targetUserId: string) => Promise<void>;
+  handleMemberRoleUpdated: (serverId: string, userId: string, role: MemberRole) => void;
+  handleMemberKicked: (serverId: string) => void;
 }
 
 export const useServerStore = create<ServerState>((set, get) => ({
@@ -262,6 +267,37 @@ export const useServerStore = create<ServerState>((set, get) => ({
       members: state.members.map((m) =>
         m.userId === userId ? { ...m, user: { ...m.user, ...fields } } : m
       ),
+    }));
+  },
+
+  updateMemberRole: async (serverId: string, memberId: string, role: MemberRole) => {
+    await api.patch(`/servers/${serverId}/members/${memberId}/role`, { role });
+  },
+
+  kickMember: async (serverId: string, memberId: string) => {
+    await api.post(`/servers/${serverId}/members/${memberId}/kick`);
+  },
+
+  transferOwnership: async (serverId: string, targetUserId: string) => {
+    await api.post(`/servers/${serverId}/transfer-ownership`, { targetUserId });
+  },
+
+  handleMemberRoleUpdated: (serverId: string, userId: string, role: MemberRole) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      members: state.members.map((m) =>
+        m.userId === userId ? { ...m, role } : m
+      ),
+    }));
+  },
+
+  handleMemberKicked: (serverId: string) => {
+    set((state) => ({
+      servers: state.servers.filter((s) => s.id !== serverId),
+      activeServerId: state.activeServerId === serverId ? null : state.activeServerId,
+      channels: state.activeServerId === serverId ? [] : state.channels,
+      members: state.activeServerId === serverId ? [] : state.members,
+      activeChannelId: state.activeServerId === serverId ? null : state.activeChannelId,
     }));
   },
 }));

@@ -18,6 +18,7 @@ import { DMChatArea } from '../dm/DMChatArea';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
 import { playJoinSound, playLeaveSound, playMessageSound, playCallSound } from '../../services/notificationSounds';
+import { toast } from '../../stores/toastStore';
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
@@ -291,6 +292,22 @@ export function MainLayout() {
       friendRemoved: (data: any) => {
         useFriendStore.getState().handleFriendRemoved(data);
       },
+      memberRoleUpdated: ({ serverId, userId, role }: any) => {
+        useServerStore.getState().handleMemberRoleUpdated(serverId, userId, role);
+      },
+      memberKicked: ({ serverId }: any) => {
+        // Leave voice if the active voice channel belongs to the kicked server
+        const voiceState = useVoiceStore.getState();
+        const serverState = useServerStore.getState();
+        if (voiceState.activeChannelId) {
+          const voiceChannel = serverState.channels.find((c) => c.id === voiceState.activeChannelId);
+          if (voiceChannel?.serverId === serverId) {
+            voiceState.leaveChannel();
+          }
+        }
+        serverState.handleMemberKicked(serverId);
+        toast.warning('You were kicked from the server');
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -332,6 +349,8 @@ export function MainLayout() {
       ['friend:request_received', handlers.friendRequestReceived],
       ['friend:request_accepted', handlers.friendRequestAccepted],
       ['friend:removed', handlers.friendRemoved],
+      ['member:role_updated', handlers.memberRoleUpdated],
+      ['member:kicked', handlers.memberKicked],
     ];
 
     /**

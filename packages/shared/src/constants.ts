@@ -75,4 +75,6 @@ export const WS_EVENTS = {
   FRIEND_REQUEST_ACCEPTED: 'friend:request_accepted',
   FRIEND_REMOVED: 'friend:removed',
   DM_CONVERSATION_DELETED: 'dm:conversation:deleted',
+  MEMBER_ROLE_UPDATED: 'member:role_updated',
+  MEMBER_KICKED: 'member:kicked',
 } as const;

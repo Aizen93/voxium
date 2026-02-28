@@ -43,7 +43,7 @@ export function ServerSidebar() {
         </button>
 
         {/* Server List */}
-        <div className="flex flex-1 flex-col items-center gap-2 overflow-y-auto overflow-x-hidden scrollbar-none">
+        <div className="flex flex-1 flex-col items-center gap-2 overflow-y-auto overflow-x-hidden pr-1">
           {servers.map((server) => (
             <div key={server.id} className="relative flex w-full items-center justify-center">
               <button

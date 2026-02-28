@@ -13,6 +13,7 @@ let _changePasswordLimiter: RateLimiterRedis | null = null;
 let _messageSendLimiter: RateLimiterRedis | null = null;
 let _uploadLimiter: RateLimiterRedis | null = null;
 let _friendRequestLimiter: RateLimiterRedis | null = null;
+let _memberManageLimiter: RateLimiterRedis | null = null;
 let _generalLimiter: RateLimiterRedis | null = null;
 
 function createLimiter(opts: {
@@ -84,6 +85,11 @@ function getFriendRequestLimiter() {
   return _friendRequestLimiter;
 }
 
+function getMemberManageLimiter() {
+  if (!_memberManageLimiter) _memberManageLimiter = createLimiter({ keyPrefix: 'rl:member', points: 20, duration: 60 });
+  return _memberManageLimiter;
+}
+
 function getGeneralLimiter() {
   if (!_generalLimiter) _generalLimiter = createLimiter({ keyPrefix: 'rl:general', points: 100, duration: 60 });
   return _generalLimiter;
@@ -126,6 +132,7 @@ export const rateLimitChangePassword = createMiddleware(getChangePasswordLimiter
 export const rateLimitMessageSend = createMiddleware(getMessageSendLimiter, byUserId);
 export const rateLimitUpload = createMiddleware(getUploadLimiter, byUserId);
 export const rateLimitFriendRequest = createMiddleware(getFriendRequestLimiter, byUserId);
+export const rateLimitMemberManage = createMiddleware(getMemberManageLimiter, byUserId);
 export const rateLimitGeneral = createMiddleware(getGeneralLimiter, byIp);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────

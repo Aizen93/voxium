@@ -236,6 +236,8 @@ export interface ServerToClientEvents {
   'friend:request_received': (data: { friendship: Friendship }) => void;
   'friend:request_accepted': (data: { friendship: Friendship }) => void;
   'friend:removed': (data: { userId: string }) => void;
+  'member:role_updated': (data: { serverId: string; userId: string; role: MemberRole }) => void;
+  'member:kicked': (data: { serverId: string; userId: string }) => void;
 }
 
 export interface ClientToServerEvents {

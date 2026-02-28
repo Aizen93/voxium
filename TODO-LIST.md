@@ -40,7 +40,5 @@ Quick Wins (high impact, low effort)
   10. [x] sanitization — Currently relying on JSX escaping alone. Add explicit sanitization for messages, bios, and server names.
 
   Strategic / Longer-Term
-
-  11. Server roles & permissions UI — Role model exists in DB but has no management UI or granular permission enforcement.
   12. Screen sharing — WebRTC peers are already established; adding getDisplayMedia() as a second track is feasible without SFU.
   13. mediasoup SFU — Needed to scale voice beyond ~8 users per channel.

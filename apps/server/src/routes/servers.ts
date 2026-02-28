@@ -3,9 +3,13 @@ import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateServerName, LIMITS, WS_EVENTS } from '@voxium/shared';
+import type { MemberRole } from '@voxium/shared';
 import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
+import { rateLimitMemberManage } from '../middleware/rateLimiter';
+import { outranks, isAdminOrOwner } from '../utils/permissions';
+import { leaveCurrentVoiceChannel } from '../websocket/voiceHandler';
 
 export const serverRouter = Router();
 
@@ -191,6 +195,7 @@ serverRouter.post('/:serverId/join', async (req: Request<{ serverId: string }>, 
           channelId: ch.id,
           lastReadAt: now,
         })),
+        skipDuplicates: true,
       });
     }
 
@@ -210,6 +215,17 @@ serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>,
     });
     if (!membership) throw new NotFoundError('Server membership');
     if (membership.role === 'owner') throw new ForbiddenError('Server owner cannot leave. Transfer ownership first.');
+
+    // Clean up ChannelRead records for this server's channels
+    const textChannelIds = await prisma.channel.findMany({
+      where: { serverId, type: 'text' },
+      select: { id: true },
+    });
+    if (textChannelIds.length > 0) {
+      await prisma.channelRead.deleteMany({
+        where: { userId: req.user!.userId, channelId: { in: textChannelIds.map((c) => c.id) } },
+      });
+    }
 
     await prisma.serverMember.delete({
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
@@ -277,3 +293,186 @@ serverRouter.delete('/:serverId', async (req: Request<{ serverId: string }>, res
     next(err);
   }
 });
+
+// Change member role (owner only)
+serverRouter.patch(
+  '/:serverId/members/:memberId/role',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string; memberId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId, memberId } = req.params;
+      const { role: newRole } = req.body as { role: string };
+
+      if (!newRole || (newRole !== 'admin' && newRole !== 'member')) {
+        throw new BadRequestError('role must be "admin" or "member"');
+      }
+
+      const actorMembership = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId: req.user!.userId, serverId } },
+      });
+      if (!actorMembership) throw new NotFoundError('Server');
+      if (actorMembership.role !== 'owner') throw new ForbiddenError('Only the server owner can change roles');
+
+      if (memberId === req.user!.userId) throw new BadRequestError('Cannot change your own role');
+
+      const targetMembership = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId: memberId, serverId } },
+      });
+      if (!targetMembership) throw new NotFoundError('Member');
+      if (targetMembership.role === 'owner') throw new ForbiddenError('Cannot change the owner\'s role');
+
+      await prisma.serverMember.update({
+        where: { userId_serverId: { userId: memberId, serverId } },
+        data: { role: newRole },
+      });
+
+      getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+        serverId,
+        userId: memberId,
+        role: newRole as MemberRole,
+      });
+
+      res.json({ success: true, message: `Role updated to ${newRole}` });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Kick a member (owner or admin, must outrank target)
+serverRouter.post(
+  '/:serverId/members/:memberId/kick',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string; memberId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId, memberId } = req.params;
+
+      if (memberId === req.user!.userId) throw new BadRequestError('Cannot kick yourself');
+
+      const actorMembership = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId: req.user!.userId, serverId } },
+      });
+      if (!actorMembership) throw new NotFoundError('Server');
+      if (!isAdminOrOwner(actorMembership.role as MemberRole)) throw new ForbiddenError('Only admins and the owner can kick members');
+
+      const targetMembership = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId: memberId, serverId } },
+      });
+      if (!targetMembership) throw new NotFoundError('Member');
+      if (!outranks(actorMembership.role as MemberRole, targetMembership.role as MemberRole)) {
+        throw new ForbiddenError('Cannot kick a member with an equal or higher role');
+      }
+
+      // Force-leave the kicked user from voice if they're in a voice channel on THIS server
+      const io = getIO();
+      const sockets = await io.fetchSockets();
+      for (const s of sockets) {
+        if (s.data.userId === memberId && s.data.voiceChannelId) {
+          // Verify the voice channel belongs to the server the user is being kicked from
+          const voiceChannel = await prisma.channel.findUnique({
+            where: { id: s.data.voiceChannelId as string },
+            select: { serverId: true },
+          });
+          if (voiceChannel?.serverId === serverId) {
+            leaveCurrentVoiceChannel(io as any, s as any, memberId);
+          }
+        }
+      }
+
+      // Clean up ChannelRead records for this server's channels
+      const textChannelIds = await prisma.channel.findMany({
+        where: { serverId, type: 'text' },
+        select: { id: true },
+      });
+      if (textChannelIds.length > 0) {
+        await prisma.channelRead.deleteMany({
+          where: { userId: memberId, channelId: { in: textChannelIds.map((c) => c.id) } },
+        });
+      }
+
+      await prisma.serverMember.delete({
+        where: { userId_serverId: { userId: memberId, serverId } },
+      });
+
+      // Remove kicked user's socket from server room and notify remaining members
+      await broadcastMemberLeft(memberId, serverId);
+
+      // Emit member:kicked directly to the kicked user's sockets (they're already out of the server room)
+      const kickedSockets = await io.fetchSockets();
+      for (const s of kickedSockets) {
+        if (s.data.userId === memberId) {
+          s.emit(WS_EVENTS.MEMBER_KICKED as any, { serverId, userId: memberId });
+        }
+      }
+
+      res.json({ success: true, message: 'Member kicked' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Transfer ownership (owner only)
+serverRouter.post(
+  '/:serverId/transfer-ownership',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId } = req.params;
+      const { targetUserId } = req.body as { targetUserId: string };
+
+      if (!targetUserId) throw new BadRequestError('targetUserId is required');
+      if (targetUserId === req.user!.userId) throw new BadRequestError('Cannot transfer ownership to yourself');
+
+      const actorMembership = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId: req.user!.userId, serverId } },
+      });
+      if (!actorMembership) throw new NotFoundError('Server');
+      if (actorMembership.role !== 'owner') throw new ForbiddenError('Only the server owner can transfer ownership');
+
+      const targetMembership = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId: targetUserId, serverId } },
+      });
+      if (!targetMembership) throw new NotFoundError('Target member');
+
+      await prisma.$transaction([
+        prisma.server.update({ where: { id: serverId }, data: { ownerId: targetUserId } }),
+        prisma.serverMember.update({
+          where: { userId_serverId: { userId: targetUserId, serverId } },
+          data: { role: 'owner' },
+        }),
+        prisma.serverMember.update({
+          where: { userId_serverId: { userId: req.user!.userId, serverId } },
+          data: { role: 'admin' },
+        }),
+      ]);
+
+      const io = getIO();
+
+      // Emit role updates for both users
+      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+        serverId,
+        userId: targetUserId,
+        role: 'owner' as MemberRole,
+      });
+      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+        serverId,
+        userId: req.user!.userId,
+        role: 'admin' as MemberRole,
+      });
+
+      // Emit server:updated with new ownerId
+      const updatedServer = await prisma.server.findUnique({
+        where: { id: serverId },
+        select: { id: true, name: true, iconUrl: true, ownerId: true, createdAt: true },
+      });
+      if (updatedServer) {
+        io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updatedServer);
+      }
+
+      res.json({ success: true, message: 'Ownership transferred' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);

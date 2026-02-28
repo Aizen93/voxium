@@ -6,7 +6,7 @@
 
 ## Project Status
 
-**Version:** 0.8.1 (Remember Me + Native Notifications + Landing Page)
+**Version:** 0.8.2 (Remember Me + Native Notifications + Landing Page + Role/Permission Management)
 **Date:** 2026-02-28
 **Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support, real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, and Tauri native desktop notifications
 
@@ -173,7 +173,7 @@ Comprehensive hardening of real-time features:
 - [x] Friend system
 - [x] Server settings panel
 - [x] User settings/profile editing
-- [ ] Role/permission management
+- [x] Role/permission management
 - [ ] Channel categories
 - [x] Emoji picker integration
 - [ ] Rich text / markdown in messages
@@ -1312,3 +1312,28 @@ Enhanced unread indicators on the server sidebar:
 **Files modified:**
 - `apps/desktop/src/App.tsx` — `LandingPage` import, `isTauri` constant, new `/` route
 - `apps/desktop/src/styles/globals.css` — `landing-scroll` CSS class override
+
+### Role/Permission Management
+
+Server members now have roles (`owner`, `admin`, `member`) with hierarchical permissions. The system supports role changes, member kicks, and ownership transfer.
+
+**Backend:**
+- `apps/server/src/utils/permissions.ts` — Role hierarchy utility (`ROLE_LEVEL`, `outranks()`, `isAdminOrOwner()`)
+- Three new REST endpoints in `apps/server/src/routes/servers.ts`:
+  - `PATCH /:serverId/members/:memberId/role` — Change member role (owner only, cannot change own role or owner's role)
+  - `POST /:serverId/members/:memberId/kick` — Kick a member (admin or owner, must outrank target, force-leaves voice if on same server)
+  - `POST /:serverId/transfer-ownership` — Transfer server ownership (owner only, uses Prisma transaction, emits role updates for both users + server:updated)
+- All three endpoints use `rateLimitMemberManage` (20 req/60s, userId-based)
+- Socket events: `member:role_updated` and `member:kicked` (WS_EVENTS constants in shared package)
+- Kick route verifies voice channel belongs to kicked server before force-disconnecting
+
+**Frontend:**
+- `MemberContextMenu` component — Right-click context menu on members in MemberSidebar with promote/demote/kick/transfer actions, double-click confirmation for destructive actions, portaled via `createPortal` to `document.body`
+- `MemberSidebar` — Grouped by role (Owner / Admins / Members) with context menu integration
+- `ServerSettingsModal` — Converted to tabbed layout (General / Members tabs), Members tab shows all members with inline role management actions
+- `serverStore` — New methods: `updateMemberRole`, `kickMember`, `transferOwnership`, `handleMemberRoleUpdated`, `handleMemberKicked`
+- `MainLayout` — Socket handlers for `member:role_updated` (updates member list) and `member:kicked` (leaves voice if in kicked server, removes server from list, shows toast)
+
+**Shared:**
+- `packages/shared/src/constants.ts` — `MEMBER_ROLE_UPDATED`, `MEMBER_KICKED` event constants
+- `packages/shared/src/types.ts` — `MemberRole` type, `ServerMember` interface, `ServerToClientEvents` for role_updated and kicked
