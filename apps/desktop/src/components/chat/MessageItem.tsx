@@ -5,6 +5,7 @@ import { DeleteConfirmModal } from './DeleteConfirmModal';
 import { ReactionDisplay } from './ReactionDisplay';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { Avatar } from '../common/Avatar';
+import { MessageContent } from './MessageContent';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Pencil, Trash2, SmilePlus, Reply } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
@@ -260,9 +261,9 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                 {isEditing ? (
                   <div className="mt-1">{editArea}</div>
                 ) : (
-                  <p className="text-sm text-vox-text-primary leading-relaxed break-words">
-                    {message.content}
-                  </p>
+                  <div className="text-sm text-vox-text-primary break-words">
+                    <MessageContent content={message.content} />
+                  </div>
                 )}
               </div>
             </div>
@@ -279,12 +280,12 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
 
               {isEditing ? editArea : (
                 <div className="min-w-0 flex-1">
-                  <p className="inline text-sm text-vox-text-primary leading-relaxed break-words">
-                    {message.content}
-                  </p>
-                  {message.editedAt && (
-                    <span className="ml-1 text-[10px] text-vox-text-muted">(edited)</span>
-                  )}
+                  <div className="text-sm text-vox-text-primary break-words">
+                    <MessageContent content={message.content} />
+                    {message.editedAt && (
+                      <span className="text-[10px] text-vox-text-muted">(edited)</span>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

@@ -11,14 +11,25 @@ Additional security layers, including encryption and hardening measures, will be
 
 - **Servers & Channels** — Create servers, organize them with text and voice channels, invite others via single-use invite links
 - **Real-Time Messaging** — Instant message delivery, typing indicators, cursor-based pagination, unread badges per channel and server
-- **Voice Chat** — WebRTC peer-to-peer voice (mesh, up to ~8 users per channel), speaking indicators, latency display, connection quality bars
+- **Message Replies** — Reply to any message with a compact preview of the original; click the preview to scroll to the referenced message; graceful handling of deleted parent messages
+- **Message Editing & Deletion** — Edit your own messages inline, delete with confirmation modal; admins can delete any message
+- **Reactions** — Emoji reactions on messages with grouped display and toggle support (channels and DMs)
+- **Direct Messages** — 1-on-1 text conversations with real-time delivery, typing indicators, reactions, persistent unread tracking, and conversation deletion
+- **DM Voice Calls** — 1-on-1 WebRTC P2P audio calls with incoming call modal, speaking indicators, and call history as system messages
+- **Server Voice Chat** — WebRTC peer-to-peer voice (mesh, up to ~8 users per channel), speaking indicators, latency display, connection quality bars
 - **Push-to-Talk & Voice Activity** — Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode
 - **Audio Settings** — Input/output device selection, live mic level meter, persisted preferences
 - **Mute/Deaf Controls** — Always-visible controls that persist across channel switches, server switches, and app restarts
-- **Presence** — Online/offline status for all server members
-- **Notifications** — In-app toast notifications for actions and errors, notification sounds for voice join/leave and new messages, native desktop notifications
+- **Friend System** — Send, accept, decline, and remove friend requests with real-time notifications
+- **Role & Permission Management** — Owner/Admin/Member hierarchy; role changes, member kicks, ownership transfer
+- **User Profiles** — Avatars, display names, bios with real-time sync across all clients
+- **File Uploads** — S3-compatible storage for user avatars and server icons with image processing
+- **Presence** — Online/offline status for all server members and DM participants
+- **Notifications** — In-app toast notifications, notification sounds for voice join/leave and new messages, native desktop notifications
+- **Authentication** — JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation
+- **Security** — Per-endpoint and per-socket rate limiting, input sanitization, CORS protection
 - **Cross-Platform Desktop** — Tauri 2 (Windows, macOS, Linux) with a Discord-inspired dark UI
-- **Role-Based Permissions** — Owner/Admin/Member roles; admins can create and delete channels
+- **Landing Page** — Public-facing landing page for browser visitors with animated illustrations
 
 ## Tech Stack
 
