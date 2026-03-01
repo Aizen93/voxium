@@ -67,6 +67,13 @@ interface VoiceState {
   activeChannelId: string | null;
   channelUsers: Map<string, VoiceUser[]>;
 
+  // ─── Screen Share State ──────────────────────────────────────────
+  screenStream: MediaStream | null;
+  isScreenSharing: boolean;
+  screenSharingUserId: string | null;
+  remoteScreenStream: MediaStream | null;
+  screenShareViewMode: 'inline' | 'floating';
+
   // ─── DM Call State ─────────────────────────────────────────────────
   dmCallConversationId: string | null;
   dmCallUsers: VoiceUser[];
@@ -92,6 +99,12 @@ interface VoiceState {
   handleSignal: (from: string, signal: unknown) => void;
   createPeer: (targetUserId: string, initiator: boolean) => void;
 
+  // ─── Screen Share Actions ────────────────────────────────────────
+  startScreenShare: () => Promise<void>;
+  stopScreenShare: () => void;
+  setScreenSharingUser: (channelId: string, userId: string | null) => void;
+  setScreenShareViewMode: (mode: 'inline' | 'floating') => void;
+
   // ─── DM Call Actions ───────────────────────────────────────────────
   joinDMCall: (conversationId: string) => Promise<void>;
   leaveDMCall: () => void;
@@ -108,6 +121,9 @@ interface VoiceState {
 
 let latencyInterval: ReturnType<typeof setInterval> | null = null;
 let pongHandler: ((timestamp: number) => void) | null = null;
+
+// Track RTCRtpSenders for screen share tracks so we can removeTrack later
+const currentScreenSenders = new Map<string, RTCRtpSender[]>();
 
 // Track ICE restart timers per peer so we can cancel them
 const iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -189,6 +205,42 @@ function createPeerInternal(
     });
   }
 
+  // Add screen share tracks if we're currently sharing
+  const { isScreenSharing, screenStream } = getState();
+  if (isScreenSharing && screenStream) {
+    const senders: RTCRtpSender[] = [];
+    screenStream.getTracks().forEach((track) => {
+      const sender = pc.addTrack(track, screenStream);
+      senders.push(sender);
+    });
+    currentScreenSenders.set(targetUserId, senders);
+  }
+
+  // onnegotiationneeded: triggers when addTrack/removeTrack changes the session
+  // Skip if this is the initial setup (initiator will create offer below)
+  let initialSetupDone = false;
+  pc.onnegotiationneeded = async () => {
+    if (!initialSetupDone) return; // skip initial negotiation, handled by initiator block below
+    try {
+      peerConn.makingOffer = true;
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      if (pc.localDescription) {
+        const s = getSocket();
+        if (s) {
+          s.emit(signalEvent as any, {
+            to: targetUserId,
+            signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
+          });
+        }
+      }
+    } catch (err) {
+      console.error(`${logPrefix} onnegotiationneeded error for ${targetUserId}:`, err);
+    } finally {
+      peerConn.makingOffer = false;
+    }
+  };
+
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       socket.emit(signalEvent as any, {
@@ -243,6 +295,49 @@ function createPeerInternal(
     const remoteStream = event.streams[0];
     if (!remoteStream) return;
 
+    // Video track = screen share stream
+    if (event.track.kind === 'video') {
+      console.log(`${logPrefix} Got screen share video track from ${targetUserId}`);
+      setState({ remoteScreenStream: remoteStream });
+
+      event.track.onended = () => {
+        console.log(`${logPrefix} Screen share video track ended from ${targetUserId}`);
+        setState({ remoteScreenStream: null });
+      };
+
+      // Check if the screen share stream also has audio tracks (system audio from getDisplayMedia)
+      const screenAudioTracks = remoteStream.getAudioTracks();
+      if (screenAudioTracks.length > 0) {
+        const container = getAudioContainer();
+        const screenAudioKey = `${targetUserId}-screen`;
+        const { remoteAudios } = getState();
+        const oldScreenAudio = remoteAudios.get(screenAudioKey);
+        if (oldScreenAudio) {
+          oldScreenAudio.pause();
+          oldScreenAudio.srcObject = null;
+          oldScreenAudio.remove();
+        }
+
+        const screenAudio = document.createElement('audio');
+        screenAudio.id = `vox-audio-${screenAudioKey}`;
+        screenAudio.autoplay = true;
+        screenAudio.muted = selfDeaf;
+        screenAudio.srcObject = remoteStream;
+        container.appendChild(screenAudio);
+        applyOutputDevice(screenAudio, outputDeviceId);
+
+        const newAudios = new Map(getState().remoteAudios);
+        newAudios.set(screenAudioKey, screenAudio);
+        setState({ remoteAudios: newAudios });
+
+        screenAudio.play().catch((err) =>
+          console.warn(`${logPrefix} Screen audio autoplay blocked for ${targetUserId}:`, err)
+        );
+      }
+      return;
+    }
+
+    // Audio track = microphone stream (existing behavior)
     const container = getAudioContainer();
     const { remoteAudios } = getState();
     const oldAudio = remoteAudios.get(targetUserId);
@@ -288,7 +383,9 @@ function createPeerInternal(
         }
       })
       .catch((err) => console.error(`${logPrefix} Error creating offer for ${targetUserId}:`, err))
-      .finally(() => { peerConn.makingOffer = false; });
+      .finally(() => { peerConn.makingOffer = false; initialSetupDone = true; });
+  } else {
+    initialSetupDone = true;
   }
 }
 
@@ -393,6 +490,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   peers: new Map(),
   remoteAudios: new Map(),
 
+  // Screen share state
+  screenStream: null,
+  isScreenSharing: false,
+  screenSharingUserId: null,
+  remoteScreenStream: null,
+  screenShareViewMode: 'inline',
+
   // DM call state
   dmCallConversationId: null,
   dmCallUsers: [],
@@ -453,6 +557,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const socket = getSocket();
     const { localStream, activeChannelId, localUserId } = get();
 
+    // Stop screen sharing before leaving
+    if (get().isScreenSharing) {
+      get().stopScreenShare();
+    }
+
     get().stopLatencyMeasurement();
     stopSpeakingDetection();
 
@@ -475,6 +584,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       activeChannelId: null,
       localStream: null,
       latency: null,
+      screenStream: null,
+      isScreenSharing: false,
+      screenSharingUserId: null,
+      remoteScreenStream: null,
     });
   },
 
@@ -690,14 +803,30 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       set({ peers: newPeers });
     }
 
+    const newAudios = new Map(remoteAudios);
     const audio = remoteAudios.get(userId);
     if (audio) {
       audio.pause();
       audio.srcObject = null;
       audio.remove();
-      const newAudios = new Map(remoteAudios);
       newAudios.delete(userId);
-      set({ remoteAudios: newAudios });
+    }
+    // Clean up screen share audio element
+    const screenAudio = remoteAudios.get(`${userId}-screen`);
+    if (screenAudio) {
+      screenAudio.pause();
+      screenAudio.srcObject = null;
+      screenAudio.remove();
+      newAudios.delete(`${userId}-screen`);
+    }
+    set({ remoteAudios: newAudios });
+
+    // Clean up screen senders for this peer
+    currentScreenSenders.delete(userId);
+
+    // Clear remote screen stream if this user was the sharer
+    if (get().screenSharingUserId === userId) {
+      set({ remoteScreenStream: null });
     }
   },
 
@@ -722,7 +851,96 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     });
     const container = document.getElementById('vox-audio-container');
     if (container) container.innerHTML = '';
-    set({ peers: new Map(), remoteAudios: new Map() });
+    currentScreenSenders.clear();
+    set({ peers: new Map(), remoteAudios: new Map(), remoteScreenStream: null });
+  },
+
+  // ─── Screen Share Methods ─────────────────────────────────────────
+
+  startScreenShare: async () => {
+    const socket = getSocket();
+    if (!socket || !get().activeChannelId) return;
+
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+      });
+
+      // Add screen tracks to all existing peer connections
+      const { peers } = get();
+      peers.forEach((peerConn, peerId) => {
+        const senders: RTCRtpSender[] = [];
+        stream.getTracks().forEach((track) => {
+          const sender = peerConn.pc.addTrack(track, stream);
+          senders.push(sender);
+        });
+        currentScreenSenders.set(peerId, senders);
+      });
+
+      // Auto-stop when user clicks browser's "Stop sharing" button
+      stream.getVideoTracks().forEach((track) => {
+        track.onended = () => {
+          get().stopScreenShare();
+        };
+      });
+
+      socket.emit('voice:screen_share:start');
+
+      set({
+        screenStream: stream,
+        isScreenSharing: true,
+      });
+    } catch (err) {
+      console.warn('[Voice] Screen share cancelled or failed:', err);
+    }
+  },
+
+  stopScreenShare: () => {
+    const socket = getSocket();
+    const { screenStream, peers } = get();
+
+    // Remove screen tracks from all peer connections
+    peers.forEach((peerConn, peerId) => {
+      const senders = currentScreenSenders.get(peerId);
+      if (senders) {
+        senders.forEach((sender) => {
+          try {
+            peerConn.pc.removeTrack(sender);
+          } catch {
+            // ignore if already removed
+          }
+        });
+      }
+      currentScreenSenders.delete(peerId);
+    });
+
+    // Stop all screen stream tracks
+    if (screenStream) {
+      screenStream.getTracks().forEach((track) => track.stop());
+    }
+
+    if (socket) {
+      socket.emit('voice:screen_share:stop');
+    }
+
+    set({
+      screenStream: null,
+      isScreenSharing: false,
+    });
+  },
+
+  setScreenSharingUser: (channelId: string, userId: string | null) => {
+    const { activeChannelId } = get();
+    if (channelId !== activeChannelId) return;
+    set({
+      screenSharingUserId: userId,
+      ...(userId === null ? { remoteScreenStream: null } : {}),
+    });
+  },
+
+  setScreenShareViewMode: (mode: 'inline' | 'floating') => {
+    set({ screenShareViewMode: mode });
   },
 
   // ─── DM Call Methods ──────────────────────────────────────────────
@@ -914,6 +1132,21 @@ onSocketReconnect(() => {
 
   const socket = getSocket();
   if (!socket) return;
+
+  // Stop screen sharing (stale peers can't receive tracks)
+  if (useVoiceStore.getState().isScreenSharing) {
+    const { screenStream } = useVoiceStore.getState();
+    if (screenStream) {
+      screenStream.getTracks().forEach((track) => track.stop());
+    }
+    currentScreenSenders.clear();
+    useVoiceStore.setState({
+      screenStream: null,
+      isScreenSharing: false,
+      screenSharingUserId: null,
+      remoteScreenStream: null,
+    });
+  }
 
   // Destroy stale peers (they used the old socket)
   useVoiceStore.getState().destroyAllPeers();

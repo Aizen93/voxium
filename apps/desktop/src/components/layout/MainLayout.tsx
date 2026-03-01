@@ -23,6 +23,8 @@ import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
 import { SearchModal } from '../search/SearchModal';
+import { ScreenShareViewer } from '../voice/ScreenShareViewer';
+import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { initNotifications, notify } from '../../services/notifications';
 
 export function MainLayout() {
@@ -32,6 +34,9 @@ export function MainLayout() {
   const conversations = useDMStore((s) => s.conversations);
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
+  const screenSharingUserId = useVoiceStore((s) => s.screenSharingUserId);
+  const screenShareViewMode = useVoiceStore((s) => s.screenShareViewMode);
+  const voiceActiveChannelId = useVoiceStore((s) => s.activeChannelId);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   usePushToTalk();
   const attachedGeneration = useRef(-1);
@@ -324,6 +329,35 @@ export function MainLayout() {
       friendRemoved: (data: any) => {
         useFriendStore.getState().handleFriendRemoved(data);
       },
+      voiceScreenShareStart: ({ channelId, userId }: any) => {
+        useVoiceStore.getState().setScreenSharingUser(channelId, userId);
+        // Mark the user as screenSharing in channelUsers
+        const users = useVoiceStore.getState().channelUsers.get(channelId);
+        if (users) {
+          const updated = users.map((u) => u.id === userId ? { ...u, screenSharing: true } : u);
+          useVoiceStore.getState().setChannelUsers(channelId, updated);
+        }
+      },
+      voiceScreenShareStop: ({ channelId, userId }: any) => {
+        useVoiceStore.getState().setScreenSharingUser(channelId, null);
+        // Clear the screenSharing flag in channelUsers
+        const users = useVoiceStore.getState().channelUsers.get(channelId);
+        if (users) {
+          const updated = users.map((u) => u.id === userId ? { ...u, screenSharing: false } : u);
+          useVoiceStore.getState().setChannelUsers(channelId, updated);
+        }
+      },
+      voiceScreenShareState: ({ channelId, sharingUserId }: any) => {
+        useVoiceStore.getState().setScreenSharingUser(channelId, sharingUserId);
+        // Mark the user as screenSharing in channelUsers
+        if (sharingUserId) {
+          const users = useVoiceStore.getState().channelUsers.get(channelId);
+          if (users) {
+            const updated = users.map((u) => u.id === sharingUserId ? { ...u, screenSharing: true } : u);
+            useVoiceStore.getState().setChannelUsers(channelId, updated);
+          }
+        }
+      },
       memberRoleUpdated: ({ serverId, userId, role }: any) => {
         useServerStore.getState().handleMemberRoleUpdated(serverId, userId, role);
       },
@@ -360,6 +394,10 @@ export function MainLayout() {
               activeChannelId: null,
               localStream: null,
               latency: null,
+              screenStream: null,
+              isScreenSharing: false,
+              screenSharingUserId: null,
+              remoteScreenStream: null,
             });
           }
         }
@@ -399,6 +437,9 @@ export function MainLayout() {
       ['voice:state_update', handlers.voiceStateUpdate],
       ['voice:speaking', handlers.voiceSpeaking],
       ['voice:signal', handlers.voiceSignal],
+      ['voice:screen_share:start', handlers.voiceScreenShareStart],
+      ['voice:screen_share:stop', handlers.voiceScreenShareStop],
+      ['voice:screen_share:state', handlers.voiceScreenShareState],
       ['member:joined', handlers.memberJoined],
       ['member:left', handlers.memberLeft],
       ['channel:created', handlers.channelCreated],
@@ -539,7 +580,18 @@ export function MainLayout() {
         {activeServerId ? <ChannelSidebar /> : <DMList />}
         <div className="flex flex-1 flex-col overflow-hidden">
           {activeServerId ? (
-            <ChatArea />
+            screenSharingUserId && voiceActiveChannelId ? (
+              screenShareViewMode === 'inline' ? (
+                <ScreenShareViewer />
+              ) : (
+                <>
+                  <ChatArea />
+                  <ScreenShareFloating />
+                </>
+              )
+            ) : (
+              <ChatArea />
+            )
           ) : showFriendsView ? (
             <FriendsView />
           ) : activeConversationId ? (

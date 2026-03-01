@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.9.5 (Message Search with Jump-to-Message)
-**Date:** 2026-02-28
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, DM call conversation hydration for brand-new conversations, channel categories with collapsible UI, drag-and-drop channel/category reordering, and message search (server + DM) with jump-to-message navigation
+**Version:** 0.9.6 (Screen Sharing)
+**Date:** 2026-03-01
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, DM call conversation hydration for brand-new conversations, channel categories with collapsible UI, drag-and-drop channel/category reordering, message search (server + DM) with jump-to-message navigation, and screen sharing in server voice channels with inline/floating viewer modes
 
 ## What Has Been Done
 
@@ -178,7 +178,7 @@ Comprehensive hardening of real-time features:
 - [x] Emoji picker integration
 - [x] Rich text / markdown in messages
 - [x] Message search (server + DM, with jump-to-message)
-- [ ] Screen sharing
+- [x] Screen sharing
 
 ### V0.4 - Scalability
 - [ ] mediasoup SFU for production-grade voice/video
@@ -1636,3 +1636,82 @@ Server members now have roles (`owner`, `admin`, `member`) with hierarchical per
 - `apps/desktop/src/stores/serverStore.ts` — added `deleteServer`, `handleServerDeleted` with full unread cleanup
 - `apps/desktop/src/components/layout/MainLayout.tsx` — added `serverDeleted` socket handler with inline voice cleanup and channelUsers Map cleanup
 - `apps/desktop/src/components/server/ServerSettingsModal.tsx` — added danger zone delete UI with name-confirmation gate
+
+---
+
+### 29. Screen Sharing in Server Voice Channels
+
+**Date:** 2026-03-01
+
+Screen sharing allows one user per voice channel to share their screen with all other participants. Uses `getDisplayMedia` for capture and adds video tracks to existing WebRTC peer connections via `addTrack`/`removeTrack` with `onnegotiationneeded` renegotiation.
+
+**Architecture:**
+- **One sharer per channel** — server enforces via `screenSharers` Map (`channelId -> userId`); second `voice:screen_share:start` is silently dropped
+- **Server voice only** — screen sharing is limited to server voice channels (not DM calls)
+- **WebRTC track-based** — screen share video (and optional system audio from `getDisplayMedia({ audio: true })`) added as additional tracks on existing peer connections, triggering `onnegotiationneeded` for SDP renegotiation
+- **Viewer modes** — `inline` (replaces ChatArea) or `floating` (draggable/resizable portal over ChatArea)
+
+**Server (`apps/server/src/websocket/voiceHandler.ts`):**
+- `screenSharers` Map tracks `channelId -> userId` (in-memory, one sharer per channel)
+- `voice:screen_share:start` handler: validates user is in voice channel, checks no existing sharer, registers and broadcasts to `server:{id}` room
+- `voice:screen_share:stop` handler: validates user is the current sharer, cleans up and broadcasts
+- `leaveCurrentVoiceChannel` cleanup: automatically stops screen share if the sharer leaves/disconnects
+- `cleanupServerVoice` cleanup: deletes `screenSharers` entries for deleted server's channels
+- `getScreenShareState(channelId)` export: returns current sharer userId or null (used for hydration)
+- `voice:join` handler: emits `voice:screen_share:state` to the joining user if the channel has an active screen sharer (late-joiner hydration fix — without this, users joining a channel mid-share would not see the stream)
+- Rate limited via `socketRateLimit(socket, 'voice:screen_share', 10)`
+
+**Server (`apps/server/src/websocket/socketServer.ts`):**
+- Connection hydration: after sending `voice:channel_users`, sends `voice:screen_share:state` with `sharingUserId` for any channel with an active screen share
+
+**Shared types (`packages/shared/src/types.ts`):**
+- `VoiceUser.screenSharing?: boolean` — optional flag for UI display (set client-side via socket handlers)
+- S2C events: `voice:screen_share:start`, `voice:screen_share:stop` (both `{ channelId, userId }`), `voice:screen_share:state` (`{ channelId, sharingUserId: string | null }`)
+- C2S events: `voice:screen_share:start`, `voice:screen_share:stop` (both parameterless — server derives channelId from `socket.data.voiceChannelId`)
+
+**Frontend store (`apps/desktop/src/stores/voiceStore.ts`):**
+- State: `screenStream`, `isScreenSharing`, `screenSharingUserId`, `remoteScreenStream`, `screenShareViewMode`
+- `startScreenShare()` — calls `getDisplayMedia`, adds tracks to all peers via `addTrack`, registers `track.onended` for browser stop button, emits `voice:screen_share:start`
+- `stopScreenShare()` — removes tracks from peers via `removeTrack`, stops stream, emits `voice:screen_share:stop`
+- `setScreenSharingUser(channelId, userId)` — guards by `activeChannelId`, clears `remoteScreenStream` when userId is null
+- `setScreenShareViewMode(mode)` — toggles between `'inline'` and `'floating'`
+- `onnegotiationneeded` handler on peer connections: triggers renegotiation when tracks are added/removed (skips initial setup via `initialSetupDone` flag)
+- `pc.ontrack` handler: detects video tracks as screen share, sets `remoteScreenStream`; handles screen share system audio via separate `<audio>` element keyed as `${userId}-screen`
+- `destroyPeer` cleanup: removes screen audio element, clears `currentScreenSenders`, nulls `remoteScreenStream` if sharer
+- `destroyAllPeers` cleanup: clears `currentScreenSenders`, nulls `remoteScreenStream`
+- `leaveChannel` cleanup: calls `stopScreenShare()` if sharing, resets all screen share state
+- Reconnect handler: stops screen sharing (stale peers cannot receive tracks), clears all screen share state
+- `createPeerInternal`: adds screen share tracks to new peer connections if currently sharing
+
+**Frontend socket handlers (`apps/desktop/src/components/layout/MainLayout.tsx`):**
+- `voiceScreenShareStart` — sets sharing user, marks `screenSharing: true` in channelUsers
+- `voiceScreenShareStop` — clears sharing user, marks `screenSharing: false` in channelUsers
+- `voiceScreenShareState` — hydration handler, sets sharing user and marks flag
+- `serverDeleted` handler updated to clear all screen share state in inline voice cleanup
+
+**Frontend UI:**
+- `VoicePanel` — screen share toggle button (Monitor/MonitorOff icons); disabled with visual indicator when another user is sharing
+- `ChannelSidebar` — Monitor icon next to users who are screen sharing in voice channel user list
+- `ScreenShareViewer` (NEW) — inline viewer replacing ChatArea; shows video with fullscreen button, pop-to-floating button, stop-sharing button (own shares only)
+- `ScreenShareFloating` (NEW) — draggable/resizable floating panel via `createPortal` to `document.body`; min 240x180, default 400x300; constrained to viewport on window resize
+
+**Review findings (2026-03-01):**
+- Fixed stale `videoRef.current` in cleanup functions of `ScreenShareViewer` and `ScreenShareFloating` (captured ref at effect setup time instead of reading it during cleanup)
+- Server-side authorization verified: `socket.data.voiceChannelId` is the trusted source set only by server-side `voice:join`; cannot be spoofed
+- Race condition analysis (sharer leaves): both event orderings (`voice:screen_share:stop` before/after `voice:user_left`) are safe; `setScreenSharingUser(null)` and `destroyPeer` both independently clean up `remoteScreenStream`
+- Screen share state hydration ordering verified: `voice:channel_users` (fresh user objects without `screenSharing`) followed by `voice:screen_share:state` (sets the flag) processes correctly due to single-threaded JS event loop
+- `screenShareViewMode` persists between screen share sessions (not reset to `'inline'` when sharing ends) — acceptable UX behavior, rendering is guarded by `screenSharingUserId && voiceActiveChannelId`
+- Memory leak analysis: `currentScreenSenders` Map properly cleaned in `destroyPeer`, `destroyAllPeers`, and `stopScreenShare`; screen audio elements cleaned in `destroyPeer`
+- Rate limiting present: shared `voice:screen_share` key at 10/minute covers both start and stop events
+
+**Files modified:**
+- `packages/shared/src/constants.ts` — added `VOICE_SCREEN_SHARE_START`, `VOICE_SCREEN_SHARE_STOP`, `VOICE_SCREEN_SHARE_STATE` to `WS_EVENTS`
+- `packages/shared/src/types.ts` — added `screenSharing?` to `VoiceUser`, 3 S2C events, 2 C2S events
+- `apps/server/src/websocket/voiceHandler.ts` — added `screenSharers` Map, 2 socket handlers, cleanup in `leaveCurrentVoiceChannel` and `cleanupServerVoice`, `getScreenShareState` export
+- `apps/server/src/websocket/socketServer.ts` — added screen share state hydration after `voice:channel_users`
+- `apps/desktop/src/stores/voiceStore.ts` — added 5 state fields, 4 actions, `onnegotiationneeded` handler, video track detection in `ontrack`, screen track forwarding to new peers, cleanup in `leaveChannel`/`destroyPeer`/`destroyAllPeers`/reconnect
+- `apps/desktop/src/components/layout/MainLayout.tsx` — added 3 socket handlers, conditional inline/floating viewer rendering, screen share state cleanup in `serverDeleted` handler
+- `apps/desktop/src/components/voice/VoicePanel.tsx` — added screen share toggle button with disabled state
+- `apps/desktop/src/components/channel/ChannelSidebar.tsx` — added screen share Monitor icon indicator
+- `apps/desktop/src/components/voice/ScreenShareViewer.tsx` — NEW inline screen share viewer component
+- `apps/desktop/src/components/voice/ScreenShareFloating.tsx` — NEW floating draggable/resizable viewer component

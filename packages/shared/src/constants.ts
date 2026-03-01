@@ -1,5 +1,5 @@
 export const APP_NAME = 'Voxium';
-export const APP_VERSION = '0.9.4';
+export const APP_VERSION = '0.9.6';
 
 export const API_VERSION = 'v1';
 
@@ -89,4 +89,7 @@ export const WS_EVENTS = {
   MEMBER_ROLE_UPDATED: 'member:role_updated',
   MEMBER_KICKED: 'member:kicked',
   SERVER_DELETED: 'server:deleted',
+  VOICE_SCREEN_SHARE_START: 'voice:screen_share:start',
+  VOICE_SCREEN_SHARE_STOP: 'voice:screen_share:stop',
+  VOICE_SCREEN_SHARE_STATE: 'voice:screen_share:state',
 } as const;

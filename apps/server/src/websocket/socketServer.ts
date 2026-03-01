@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
 import { setUserOnline, setUserOffline } from '../utils/redis';
 import { prisma } from '../utils/prisma';
-import { handleVoiceEvents, getVoiceStateForServer } from './voiceHandler';
+import { handleVoiceEvents, getVoiceStateForServer, getScreenShareState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
@@ -269,6 +269,12 @@ export function initSocketServer(httpServer: HttpServer) {
             };
           });
           socket.emit('voice:channel_users', { channelId, users: voiceUsers });
+
+          // Send screen share state if someone is sharing in this channel
+          const sharingUserId = getScreenShareState(channelId);
+          if (sharingUserId) {
+            socket.emit('voice:screen_share:state', { channelId, sharingUserId });
+          }
         }
       }
 

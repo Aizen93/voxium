@@ -113,7 +113,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 | Routing | React Router | 7.x |
 | HTTP Client | Axios | 1.x |
 | WebSocket Client | socket.io-client | 4.8 |
-| WebRTC | simple-peer | 9.x |
+| WebRTC | Native RTCPeerConnection | — |
 | Icons | Lucide React | — |
 
 ### Infrastructure
@@ -148,7 +148,8 @@ apps/server/
 │   │   ├── users.ts        # User profiles, profile update with real-time broadcast
 │   │   ├── invites.ts      # Create/use/preview invites
 │   │   ├── uploads.ts      # Presigned URL generation (S3) + GET redirect proxy
-│   │   └── friends.ts      # Friend requests (send/accept/decline/remove), friendship status
+│   │   ├── friends.ts      # Friend requests (send/accept/decline/remove), friendship status
+│   │   └── search.ts       # Full-text message search (server channels + DM conversations)
 │   ├── services/
 │   │   └── authService.ts  # Auth business logic
 │   ├── middleware/
@@ -261,8 +262,12 @@ apps/desktop/
 │   │   │   ├── FriendsView.tsx     # Tabbed friends interface (Online/All/Pending/Add)
 │   │   │   ├── FriendListItem.tsx  # Friend row with action buttons
 │   │   │   └── AddFriendForm.tsx   # Send friend request by username
-│   │   └── voice/
-│   │       └── VoicePanel.tsx       # Server voice connection controls
+│   │   ├── voice/
+│   │   │   ├── VoicePanel.tsx          # Server voice connection controls
+│   │   │   ├── ScreenShareViewer.tsx   # Inline screen share viewer (replaces ChatArea)
+│   │   │   └── ScreenShareFloating.tsx # Draggable/resizable floating viewer
+│   │   └── search/
+│   │       └── SearchModal.tsx      # Full-text message search (server + DM)
 │   ├── stores/
 │   │   ├── authStore.ts      # Auth state (user, tokens)
 │   │   ├── serverStore.ts    # Server/channel state
@@ -276,7 +281,9 @@ apps/desktop/
 │   │   ├── api.ts               # Axios instance with interceptors
 │   │   ├── socket.ts            # Socket.IO client manager
 │   │   ├── audioAnalyser.ts     # Speaking detection (server + DM mode)
-│   │   └── notificationSounds.ts # Sound effects (message, join, leave, looping call ringtone)
+│   │   ├── notificationSounds.ts # Sound effects (message, join, leave, looping call ringtone)
+│   │   ├── tokenStorage.ts      # Dual-storage token abstraction (localStorage/sessionStorage)
+│   │   └── notifications.ts     # Tauri native notifications with Web API fallback
 │   ├── utils/
 │   │   └── imageProcessing.ts   # Client-side image resize + WebP via Canvas API
 │   └── styles/
@@ -527,6 +534,7 @@ Client                          Server
 - `presence:update`
 - `voice:user_joined` / `voice:user_left` / `voice:state_update` / `voice:speaking`
 - `voice:signal` (WebRTC signaling relay)
+- `voice:screen_share:start` / `voice:screen_share:stop` / `voice:screen_share:state`
 - `typing:start` / `typing:stop`
 - `server:updated` (server name/icon changed)
 - `user:updated` (user displayName/avatar changed)
@@ -538,11 +546,16 @@ Client                          Server
 - `dm:voice:state_update` / `dm:voice:speaking` / `dm:voice:signal`
 - `dm:conversation:deleted`
 - `friend:request_received` / `friend:request_accepted` / `friend:removed`
+- `member:role_updated` / `member:kicked`
+- `server:deleted`
+- `category:created` / `category:updated` / `category:deleted`
+- `channel:updated`
 
 **Client → Server:**
 - `channel:join` (for newly created channels only; `channel:leave` is NOT used — auto-subscription persists)
 - `voice:join` / `voice:leave` / `voice:mute` / `voice:deaf` / `voice:speaking`
 - `voice:signal` (WebRTC signaling relay)
+- `voice:screen_share:start` / `voice:screen_share:stop`
 - `typing:start` / `typing:stop`
 - `dm:join` (join DM room for new conversation, with authorization check)
 - `dm:typing:start` / `dm:typing:stop`
@@ -601,14 +614,29 @@ Client                          Server
 Voice state is tracked per-channel in memory:
 
 ```typescript
+// Voice user state
 Map<channelId, Map<userId, {
   socketId: string;
   selfMute: boolean;
   selfDeaf: boolean;
 }>>
+
+// Screen share state (one sharer per channel)
+Map<channelId, userId>  // screenSharers
 ```
 
 For multi-node deployment, this will migrate to Redis with pub/sub for cross-node synchronization.
+
+### Screen Sharing (V0.9.6)
+
+Screen sharing allows one user per voice channel to share their screen with all other participants using `getDisplayMedia` for capture:
+
+- **Capture:** Browser/WebView2 native `getDisplayMedia()` API (hardware-accelerated, supports video + optional system audio)
+- **Transport:** Video tracks added to existing WebRTC peer connections via `addTrack`/`removeTrack`, triggering `onnegotiationneeded` for SDP renegotiation
+- **One sharer per channel:** Server enforces via `screenSharers` Map; second start request is silently dropped
+- **Late-joiner hydration:** `voice:join` handler emits `voice:screen_share:state` so users joining mid-share see the stream immediately
+- **Viewer modes:** Inline (replaces ChatArea) or floating (draggable/resizable portal)
+- **Cleanup:** Automatic stop on voice leave, disconnect, server deletion, or browser stop button (`track.onended`)
 
 ### DM Voice Calls (V0.5 - 1-on-1)
 
@@ -836,12 +864,12 @@ mediasoup Deployment (autoscaling)
 | Feature | Architecture Change |
 |---------|-------------------|
 | **Video calls** | mediasoup SFU with video codecs (VP8/VP9/H264) |
-| **Screen sharing** | mediasoup producer for screen capture |
+| **~~Screen sharing~~** | ~~mediasoup producer for screen capture~~ **Implemented (v0.9.6)** — `getDisplayMedia()` capture with WebRTC P2P track forwarding; one sharer per channel; inline + floating viewer modes |
 | **~~Direct Messages~~** | ~~New DM channel type, conversation model~~ **Implemented (v0.5.0–v0.7.0)** — 1-on-1 text + voice with `Conversation` model, real-time delivery, typing, reactions, unread tracking, WebRTC P2P calls, conversation deletion with cascade + real-time sync |
 | **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2, migrated v0.9.1)** — presigned URL direct-to-S3 uploads with client-side Canvas image processing; server generates presigned PUT/GET URLs, no file bytes touch the backend |
 | **~~Password reset~~** | ~~Email-based reset flow~~ **Implemented (v0.4.0)** — Nodemailer + SHA-256 hashed tokens + tokenVersion-based session invalidation |
 | **Push notifications** | FCM/APNs integration service |
-| **Message search** | Elasticsearch / PostgreSQL full-text search |
+| **~~Message search~~** | ~~Elasticsearch / PostgreSQL full-text search~~ **Implemented (v0.9.5)** — PostgreSQL case-insensitive `contains` search across server channels and DM conversations; cursor-based pagination; "around" mode for jump-to-message with scroll + highlight |
 | **Mobile app** | React Native sharing stores/services with web |
 | **Bot API** | Gateway API for third-party integrations |
 | **End-to-end encryption** | Signal Protocol for DMs |

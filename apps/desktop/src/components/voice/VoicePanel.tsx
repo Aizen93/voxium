@@ -4,11 +4,11 @@ import { useAuthStore } from '../../stores/authStore';
 import { useLocalAudioLevel } from '../../hooks/useLocalAudioLevel';
 import { ConnectionQuality } from './ConnectionQuality';
 import { UserHoverTarget } from '../common/UserHoverTarget';
-import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff } from 'lucide-react';
+import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export function VoicePanel() {
-  const { activeChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf, leaveChannel, latency } = useVoiceStore();
+  const { activeChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf, leaveChannel, latency, isScreenSharing, screenSharingUserId, startScreenShare, stopScreenShare } = useVoiceStore();
   const { channels } = useServerStore();
   const { user } = useAuthStore();
   const localAudioLevel = useLocalAudioLevel();
@@ -112,6 +112,28 @@ export function VoicePanel() {
         >
           {selfDeaf ? <HeadphoneOff size={18} /> : <Headphones size={18} />}
         </button>
+
+        {/* Screen Share */}
+        {(() => {
+          const otherSharing = screenSharingUserId && screenSharingUserId !== user?.id;
+          return (
+            <button
+              onClick={() => isScreenSharing ? stopScreenShare() : startScreenShare()}
+              disabled={!!otherSharing}
+              className={clsx(
+                'rounded-full p-2 transition-colors',
+                isScreenSharing
+                  ? 'bg-vox-voice-connected/20 text-vox-voice-connected hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger'
+                  : otherSharing
+                    ? 'bg-vox-bg-hover text-vox-text-muted cursor-not-allowed opacity-50'
+                    : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
+              )}
+              title={isScreenSharing ? 'Stop Sharing' : otherSharing ? 'Someone is already sharing' : 'Share Screen'}
+            >
+              {isScreenSharing ? <MonitorOff size={18} /> : <Monitor size={18} />}
+            </button>
+          );
+        })()}
       </div>
     </div>
   );

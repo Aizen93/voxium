@@ -152,6 +152,7 @@ export interface VoiceUser {
   selfMute: boolean;
   selfDeaf: boolean;
   speaking: boolean;
+  screenSharing?: boolean;
 }
 
 // ─── Unread ─────────────────────────────────────────────────────────────────
@@ -262,6 +263,9 @@ export interface ServerToClientEvents {
   'member:role_updated': (data: { serverId: string; userId: string; role: MemberRole }) => void;
   'member:kicked': (data: { serverId: string; userId: string }) => void;
   'server:deleted': (data: { serverId: string }) => void;
+  'voice:screen_share:start': (data: { channelId: string; userId: string }) => void;
+  'voice:screen_share:stop': (data: { channelId: string; userId: string }) => void;
+  'voice:screen_share:state': (data: { channelId: string; sharingUserId: string | null }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -286,6 +290,8 @@ export interface ClientToServerEvents {
   'dm:voice:speaking': (speaking: boolean) => void;
   'dm:voice:signal': (data: { to: string; signal: unknown }) => void;
   'dm:voice:decline': (conversationId: string) => void;
+  'voice:screen_share:start': () => void;
+  'voice:screen_share:stop': () => void;
 }
 
 // ─── API Response ────────────────────────────────────────────────────────────

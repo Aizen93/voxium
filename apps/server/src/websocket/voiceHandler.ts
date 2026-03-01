@@ -8,6 +8,8 @@ import { socketRateLimit } from '../middleware/rateLimiter';
 const voiceChannelUsers = new Map<string, Map<string, { socketId: string; selfMute: boolean; selfDeaf: boolean }>>();
 // Track which server each voice channel belongs to
 const channelServerMap = new Map<string, string>();
+// Track screen sharing: channelId → userId (one sharer per channel)
+const screenSharers = new Map<string, string>();
 
 export function handleVoiceEvents(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
@@ -92,6 +94,12 @@ export function handleVoiceEvents(
 
         console.log(`[Voice] Sending ${voiceUsers.length} existing users to joiner ${userId}`);
         socket.emit('voice:channel_users', { channelId, users: voiceUsers });
+      }
+
+      // Send current screen share state to the joiner
+      const currentSharer = screenSharers.get(channelId);
+      if (currentSharer) {
+        socket.emit('voice:screen_share:state', { channelId, sharingUserId: currentSharer });
       }
 
       // Broadcast to the ENTIRE SERVER so all members can see who's in voice
@@ -183,6 +191,37 @@ export function handleVoiceEvents(
     }
   });
 
+  // ─── Screen sharing ──────────────────────────────────────────────
+  socket.on('voice:screen_share:start', () => {
+    if (!socketRateLimit(socket, 'voice:screen_share', 10)) return;
+    const channelId = socket.data.voiceChannelId as string;
+    if (!channelId) return;
+
+    // Only one sharer per channel
+    if (screenSharers.has(channelId)) return;
+
+    screenSharers.set(channelId, userId);
+    const serverId = channelServerMap.get(channelId);
+    if (serverId) {
+      io.to(`server:${serverId}`).emit('voice:screen_share:start', { channelId, userId });
+    }
+  });
+
+  socket.on('voice:screen_share:stop', () => {
+    if (!socketRateLimit(socket, 'voice:screen_share', 10)) return;
+    const channelId = socket.data.voiceChannelId as string;
+    if (!channelId) return;
+
+    // Only the current sharer can stop
+    if (screenSharers.get(channelId) !== userId) return;
+
+    screenSharers.delete(channelId);
+    const serverId = channelServerMap.get(channelId);
+    if (serverId) {
+      io.to(`server:${serverId}`).emit('voice:screen_share:stop', { channelId, userId });
+    }
+  });
+
   // Clean up on disconnecting (fires while socket is still in rooms, unlike 'disconnect')
   socket.on('disconnecting', () => {
     leaveCurrentVoiceChannel(io, socket, userId);
@@ -200,6 +239,14 @@ export function leaveCurrentVoiceChannel(
   console.log(`[Voice] Removing user ${userId} from channel ${channelId}`);
 
   const serverId = channelServerMap.get(channelId);
+
+  // Clean up screen share if this user was sharing
+  if (screenSharers.get(channelId) === userId) {
+    screenSharers.delete(channelId);
+    if (serverId) {
+      io.to(`server:${serverId}`).emit('voice:screen_share:stop', { channelId, userId });
+    }
+  }
 
   const channelUsers = voiceChannelUsers.get(channelId);
   if (channelUsers) {
@@ -245,8 +292,13 @@ export function cleanupServerVoice(
       }
       voiceChannelUsers.delete(channelId);
     }
+    screenSharers.delete(channelId);
     channelServerMap.delete(channelId);
   }
+}
+
+export function getScreenShareState(channelId: string): string | null {
+  return screenSharers.get(channelId) ?? null;
 }
 
 export function getVoiceChannelUsers(channelId: string): string[] {

@@ -3,7 +3,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical } from 'lucide-react';
+import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
 import { Avatar } from '../common/Avatar';
@@ -65,7 +65,7 @@ function SortableChannelItem({
   isActive: boolean;
   isVoiceActive: boolean;
   unread: number;
-  voiceUsers: { id: string; displayName: string; avatarUrl: string | null; selfMute: boolean; speaking: boolean }[];
+  voiceUsers: { id: string; displayName: string; avatarUrl: string | null; selfMute: boolean; speaking: boolean; screenSharing?: boolean }[];
   currentUserId: string | undefined;
   onSelectText: (id: string) => void;
   onJoinVoice: (id: string) => void;
@@ -159,6 +159,7 @@ function SortableChannelItem({
                   {vu.displayName}
                   {vu.id === currentUserId && ' (you)'}
                 </span>
+                {vu.screenSharing && <Monitor size={10} className="text-vox-voice-connected shrink-0" />}
                 {vu.selfMute && <MicOff size={10} className="text-vox-voice-muted shrink-0" />}
               </div>
             </UserHoverTarget>
