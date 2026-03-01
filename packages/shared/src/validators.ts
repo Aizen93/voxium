@@ -1,4 +1,4 @@
-import { LIMITS } from './constants';
+import { LIMITS } from './constants.js';
 
 export function validateUsername(username: string): string | null {
   if (username.length < LIMITS.USERNAME_MIN) return `Username must be at least ${LIMITS.USERNAME_MIN} characters`;

@@ -1715,3 +1715,27 @@ Screen sharing allows one user per voice channel to share their screen with all 
 - `apps/desktop/src/components/channel/ChannelSidebar.tsx` — added screen share Monitor icon indicator
 - `apps/desktop/src/components/voice/ScreenShareViewer.tsx` — NEW inline screen share viewer component
 - `apps/desktop/src/components/voice/ScreenShareFloating.tsx` — NEW floating draggable/resizable viewer component
+
+### 35. Production Deployment Guide
+
+**Date:** 2026-03-01
+
+Added `DEPLOYMENT.md` — a comprehensive single-server deployment guide targeting an OVH B2-7 VPS (Ubuntu 24.04). Covers 17 sections from infrastructure provisioning through troubleshooting.
+
+**Key details:**
+- Architecture: nginx reverse proxy (ports 80/443) to Node.js :3001 (PM2), PostgreSQL 16, Redis 7, all on one host
+- UFW firewall opens only ports 22, 80, 443
+- PM2 ecosystem uses `NODE_ENV=production` with `dist/index.js` entry point
+- All 8 required server env vars (from `index.ts` validation) present in the .env template
+- Frontend .env uses `https://` URLs for `VITE_API_URL` and `VITE_WS_URL`
+- nginx config includes WebSocket upgrade headers for `/socket.io/` with 86400s timeout
+- PostgreSQL daily backup cron (3:00 AM, 7-day retention) with `.pgpass` setup
+- SSL via Let's Encrypt with auto-renewal
+- SMTP options (Brevo free tier, OVH, Mailgun) for password reset emails
+- Tauri desktop build instructions for platform-specific installers
+- Troubleshooting section covers 502, WebSocket, CORS, SSL, DB, Redis, voice/WebRTC issues
+
+**Review status:** Passed all 8 review criteria. No critical or warning-level issues found.
+
+**Files added:**
+- `DEPLOYMENT.md` — production deployment guide (871 lines)

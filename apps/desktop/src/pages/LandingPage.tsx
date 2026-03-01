@@ -244,6 +244,15 @@ function ShieldSvg({ className }: { className?: string }) {
   );
 }
 
+/* ─── Download URLs ─── */
+
+const DOWNLOAD_URLS = {
+  windows: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.6_x64-setup.exe',
+  macos: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.6_aarch64.dmg',
+  linux: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.6_amd64.deb',
+  releases: 'https://github.com/Aizen93/voxium/releases',
+};
+
 /* ─── Data ─── */
 
 const features = [
@@ -360,23 +369,26 @@ function Hero() {
             style={{ animationDelay: '0.2s', animationFillMode: 'backwards' }}
           >
             <a
-              href="#"
+              href={DOWNLOAD_URLS.windows}
+              target="_blank"
+              rel="noopener noreferrer"
               className="btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover px-5 py-3 text-base"
-              onClick={(e) => e.preventDefault()}
             >
               <Monitor className="mr-2 h-5 w-5" /> Download for Windows
             </a>
             <a
-              href="#"
+              href={DOWNLOAD_URLS.macos}
+              target="_blank"
+              rel="noopener noreferrer"
               className="btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover px-5 py-3 text-base"
-              onClick={(e) => e.preventDefault()}
             >
               <Laptop className="mr-2 h-5 w-5" /> Download for macOS
             </a>
             <a
-              href="#"
+              href={DOWNLOAD_URLS.linux}
+              target="_blank"
+              rel="noopener noreferrer"
               className="btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover px-5 py-3 text-base"
-              onClick={(e) => e.preventDefault()}
             >
               <Terminal className="mr-2 h-5 w-5" /> Download for Linux
             </a>
@@ -702,7 +714,7 @@ function Footer() {
           <div>
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">Product</h4>
             <ul className="space-y-2">
-              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Download</a></li>
+              <li><a href="#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Download</a></li>
               <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Changelog</a></li>
               <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Status</a></li>
             </ul>
