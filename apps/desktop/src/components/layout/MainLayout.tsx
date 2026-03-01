@@ -340,6 +340,50 @@ export function MainLayout() {
         serverState.handleMemberKicked(serverId);
         toast.warning('You were kicked from the server');
       },
+      serverDeleted: ({ serverId }: any) => {
+        const voiceState = useVoiceStore.getState();
+        const serverState = useServerStore.getState();
+
+        // Inline voice cleanup if in a voice channel on this server
+        // (don't call leaveChannel() — it would emit voice:leave back to
+        // the server, but the server already ejected us)
+        if (voiceState.activeChannelId) {
+          const voiceChannel = serverState.channels.find((c) => c.id === voiceState.activeChannelId);
+          if (voiceChannel?.serverId === serverId) {
+            voiceState.stopLatencyMeasurement();
+            stopSpeakingDetection();
+            if (voiceState.localStream) {
+              voiceState.localStream.getTracks().forEach((track) => track.stop());
+            }
+            voiceState.destroyAllPeers();
+            useVoiceStore.setState({
+              activeChannelId: null,
+              localStream: null,
+              latency: null,
+            });
+          }
+        }
+
+        // Clean up orphaned channelUsers entries for the deleted server's voice channels
+        if (serverState.activeServerId === serverId) {
+          const voiceChannelIds = serverState.channels
+            .filter((c) => c.type === 'voice')
+            .map((c) => c.id);
+          if (voiceChannelIds.length > 0) {
+            const newChannelUsers = new Map(voiceState.channelUsers);
+            for (const chId of voiceChannelIds) {
+              newChannelUsers.delete(chId);
+            }
+            useVoiceStore.setState({ channelUsers: newChannelUsers });
+          }
+
+          // Clear messages since the active channel is being removed
+          useChatStore.getState().clearMessages();
+        }
+
+        serverState.handleServerDeleted(serverId);
+        toast.info('Server was deleted');
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -387,6 +431,7 @@ export function MainLayout() {
       ['friend:removed', handlers.friendRemoved],
       ['member:role_updated', handlers.memberRoleUpdated],
       ['member:kicked', handlers.memberKicked],
+      ['server:deleted', handlers.serverDeleted],
     ];
 
     /**

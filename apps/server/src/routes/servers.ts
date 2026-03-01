@@ -10,7 +10,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { outranks, isAdminOrOwner } from '../utils/permissions';
-import { leaveCurrentVoiceChannel } from '../websocket/voiceHandler';
+import { leaveCurrentVoiceChannel, cleanupServerVoice } from '../websocket/voiceHandler';
 
 export const serverRouter = Router();
 
@@ -45,11 +45,11 @@ serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
     const nameErr = validateServerName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
-    const userServerCount = await prisma.serverMember.count({
-      where: { userId: req.user!.userId },
+    const ownedServerCount = await prisma.server.count({
+      where: { ownerId: req.user!.userId },
     });
-    if (userServerCount >= LIMITS.MAX_SERVERS_PER_USER) {
-      throw new BadRequestError(`You can only be a member of ${LIMITS.MAX_SERVERS_PER_USER} servers`);
+    if (ownedServerCount >= LIMITS.MAX_SERVERS_PER_USER) {
+      throw new BadRequestError(`You can only create up to ${LIMITS.MAX_SERVERS_PER_USER} servers`);
     }
 
     const server = await prisma.$transaction(async (tx) => {
@@ -317,7 +317,7 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
 });
 
 // Delete a server (owner only)
-serverRouter.delete('/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
 
@@ -325,7 +325,35 @@ serverRouter.delete('/:serverId', async (req: Request<{ serverId: string }>, res
     if (!server) throw new NotFoundError('Server');
     if (server.ownerId !== req.user!.userId) throw new ForbiddenError('Only the server owner can delete it');
 
+    const io = getIO();
+
+    // 1. Silently eject all users from voice channels (no voice:user_left events — clients handle via server:deleted)
+    cleanupServerVoice(io as any, serverId);
+
+    // 2. Notify all members before removing them from rooms
+    io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_DELETED as any, { serverId });
+
+    // 3. Remove all sockets from server room and channel rooms
+    const channels = await prisma.channel.findMany({
+      where: { serverId },
+      select: { id: true },
+    });
+
+    const roomsToLeave = [`server:${serverId}`, ...channels.map((c) => `channel:${c.id}`)];
+    for (const room of roomsToLeave) {
+      const socketsInRoom = await io.in(room).fetchSockets();
+      for (const s of socketsInRoom) {
+        s.leave(room);
+      }
+    }
+
+    // 4. Delete from DB (Prisma cascade handles channels, members, messages, reactions, reads, categories, invites)
     await prisma.server.delete({ where: { id: serverId } });
+
+    // 5. Clean up S3 icon if exists
+    if (server.iconUrl) {
+      deleteFromS3(server.iconUrl).catch(() => {});
+    }
 
     res.json({ success: true, message: 'Server deleted' });
   } catch (err) {

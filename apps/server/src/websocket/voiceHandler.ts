@@ -218,6 +218,37 @@ export function leaveCurrentVoiceChannel(
   }
 }
 
+/**
+ * Silently clean up all voice state for a server being deleted.
+ * Unlike leaveCurrentVoiceChannel, does NOT emit voice:user_left events
+ * since the server itself is being deleted (clients handle cleanup via server:deleted).
+ * Also cleans up channelServerMap entries to prevent memory leaks.
+ */
+export function cleanupServerVoice(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  serverId: string
+): void {
+  const channelIds: string[] = [];
+  for (const [channelId, sid] of channelServerMap.entries()) {
+    if (sid === serverId) channelIds.push(channelId);
+  }
+
+  for (const channelId of channelIds) {
+    const users = voiceChannelUsers.get(channelId);
+    if (users) {
+      for (const [, state] of users.entries()) {
+        const socket = io.sockets.sockets.get(state.socketId);
+        if (socket) {
+          socket.leave(`voice:${channelId}`);
+          socket.data.voiceChannelId = undefined;
+        }
+      }
+      voiceChannelUsers.delete(channelId);
+    }
+    channelServerMap.delete(channelId);
+  }
+}
+
 export function getVoiceChannelUsers(channelId: string): string[] {
   const users = voiceChannelUsers.get(channelId);
   return users ? Array.from(users.keys()) : [];

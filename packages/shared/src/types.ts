@@ -261,6 +261,7 @@ export interface ServerToClientEvents {
   'friend:removed': (data: { userId: string }) => void;
   'member:role_updated': (data: { serverId: string; userId: string; role: MemberRole }) => void;
   'member:kicked': (data: { serverId: string; userId: string }) => void;
+  'server:deleted': (data: { serverId: string }) => void;
 }
 
 export interface ClientToServerEvents {

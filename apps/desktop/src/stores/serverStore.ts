@@ -50,8 +50,10 @@ interface ServerState {
   updateMemberRole: (serverId: string, memberId: string, role: MemberRole) => Promise<void>;
   kickMember: (serverId: string, memberId: string) => Promise<void>;
   transferOwnership: (serverId: string, targetUserId: string) => Promise<void>;
+  deleteServer: (serverId: string) => Promise<void>;
   handleMemberRoleUpdated: (serverId: string, userId: string, role: MemberRole) => void;
   handleMemberKicked: (serverId: string) => void;
+  handleServerDeleted: (serverId: string) => void;
 }
 
 export const useServerStore = create<ServerState>((set, get) => ({
@@ -388,6 +390,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
     await api.post(`/servers/${serverId}/transfer-ownership`, { targetUserId });
   },
 
+  deleteServer: async (serverId: string) => {
+    await api.delete(`/servers/${serverId}`);
+    // No local state update — socket event is source of truth
+  },
+
   handleMemberRoleUpdated: (serverId: string, userId: string, role: MemberRole) => {
     if (get().activeServerId !== serverId) return;
     set((state) => ({
@@ -406,5 +413,34 @@ export const useServerStore = create<ServerState>((set, get) => ({
       members: state.activeServerId === serverId ? [] : state.members,
       activeChannelId: state.activeServerId === serverId ? null : state.activeChannelId,
     }));
+  },
+
+  handleServerDeleted: (serverId: string) => {
+    set((state) => {
+      const isActive = state.activeServerId === serverId;
+
+      // Clean up server-level unread count
+      const { [serverId]: _, ...restServerUnread } = state.serverUnreadCounts;
+
+      // Clean up channel-level unread counts if this was the active server
+      let newUnreadCounts = state.unreadCounts;
+      if (isActive && state.channels.length > 0) {
+        newUnreadCounts = { ...state.unreadCounts };
+        for (const ch of state.channels) {
+          delete newUnreadCounts[ch.id];
+        }
+      }
+
+      return {
+        servers: state.servers.filter((s) => s.id !== serverId),
+        activeServerId: isActive ? null : state.activeServerId,
+        channels: isActive ? [] : state.channels,
+        categories: isActive ? [] : state.categories,
+        members: isActive ? [] : state.members,
+        activeChannelId: isActive ? null : state.activeChannelId,
+        unreadCounts: newUnreadCounts,
+        serverUnreadCounts: restServerUnread,
+      };
+    });
   },
 }));

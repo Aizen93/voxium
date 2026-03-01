@@ -14,7 +14,9 @@
   - [] File & image uploads — drag-and-drop or paste images into chat, preview inline. Needs a storage backend (S3/local) and a new message — S3 infrastructure already exists. Add attachments to Message model, multer handler in messages route, drag-and-drop + paste in MessageInput, inline previews in
   - [x] Message reactions — emoji reactions on messages; very common expectation for a chat app
   - [x] Message editing & deletion UI — the server events (message:update, message:delete) are already wired, but I didn't see an edit/delete UI in the chat bubbles
-  - [] Message search — PostgreSQL full-text search (tsvector on message.content). Search modal with filters by channel/author/date. High ROI for any server with history.
+  - [x] Message search — PostgreSQL full-text search (tsvector on message.content). Search modal with filters by channel/author/date. High ROI for any server with history.
+  - [x] Channel categories — New ChannelCategory model with collapsible headers in ChannelSidebar. Small effort, big polish for servers with 10+ channels.
+  - [x] Rich text / Markdown — Discord-style formatting (bold, italics, code blocks, links). Store raw markdown, render with react-markdown.
 
 ## Bigger features (high effort, high value):
   - [x] Direct messages (DMs) — 1:1 and group DMs outside of servers; this is a significant architecture addition but is probably the most-expected missing feature
@@ -30,38 +32,11 @@ Quick Wins (high impact, low effort)
   3. [x] Debounce PTT state broadcasts — Rapid PTT toggles flood the server:{id} room with voice:state_update. A 100ms debounce would cut traffic significantly.
   4. [x] Cleanup stale Prisma columns — Invite.maxUses and Invite.uses are unused. Quick migration to drop them.
 
-  High-Value Features (medium effort)
-
-  MessageItem. This is the biggest "expected feature" that's missing.
-  7. [x] Channel categories — New ChannelCategory model with collapsible headers in ChannelSidebar. Small effort, big polish for servers with 10+ channels.
-  8. [x] Rich text / Markdown — Discord-style formatting (bold, italics, code blocks, links). Store raw markdown, render with react-markdown.
-
   Security (should ship before any public release)
   10. [x] sanitization — Currently relying on JSX escaping alone. Add explicit sanitization for messages, bios, and server names.
 
-  
 
-
-  1. Message Search (V0.3 - most impactful remaining feature)
-
-  Full-text search across messages in a server or DM. This would involve:
-  - Backend: A search endpoint (GET /api/v1/servers/:id/search?q=...) using PostgreSQL full-text search (tsvector/tsquery) or ILIKE for simplicity
-  - Frontend: A search UI (modal or sidebar panel) with results showing message previews, author, channel, and timestamp — clicking a result navigates to that message
-
-  2. Screen Sharing (V0.3 - complex, WebRTC extension)
-
-  Adding getDisplayMedia() to the existing WebRTC mesh. Harder and more niche — I'd recommend doing this after message search.
-
-  3. Known issues worth fixing now
-
-  Several low-hanging improvements from the "Known Issues" section:
-  - New text channels don't seed ChannelRead — existing members see all history as unread (line 860)
-  - /forgot-password has no rate limiting (line 849)
-  - S3 env var validation at startup instead of cryptic runtime errors (line 844)
-  - Extract shared ImageUploadButton component from duplicated logic in ServerSettingsModal / CreateServerModal (line 848)
-
-  4. V0.4 Scalability (longer-term)
-
+V0.4 Scalability (longer-term)
   - mediasoup SFU for production voice/video
   - Redis-based voice state
   - Horizontal scaling

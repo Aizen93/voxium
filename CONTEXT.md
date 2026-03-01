@@ -1584,3 +1584,55 @@ Server members now have roles (`owner`, `admin`, `member`) with hierarchical per
 - `packages/shared/src/constants.ts` — search-related limits
 - `packages/shared/src/validators.ts` — `validateSearchQuery`
 - `packages/shared/src/types.ts` — `SearchResult` interface
+
+### Server Deletion (v0.9.6)
+
+**Feature:** Server owners can permanently delete their server. All channels, messages, members, categories, invites, and reactions are cascade-deleted. Voice users are ejected, sockets are removed from rooms, and S3 server icons are cleaned up.
+
+**Backend (`apps/server/src/routes/servers.ts`):**
+- `DELETE /:serverId` endpoint — owner-only authorization, voice user ejection via `leaveCurrentVoiceChannel`, `server:deleted` socket event broadcast to all members, room teardown for server and channel rooms, Prisma cascade delete, S3 icon cleanup
+- Voice state query via `getVoiceStateForServer(serverId)` from `voiceHandler.ts`
+
+**Shared (`packages/shared`):**
+- `WS_EVENTS.SERVER_DELETED: 'server:deleted'` added to `constants.ts`
+- `'server:deleted': (data: { serverId: string }) => void` added to `ServerToClientEvents` in `types.ts`
+
+**Frontend store (`apps/desktop/src/stores/serverStore.ts`):**
+- `deleteServer(serverId)` — API call, no local state update (socket event is source of truth)
+- `handleServerDeleted(serverId)` — removes server from list, clears active server state if it was the deleted one
+
+**Frontend socket handler (`apps/desktop/src/components/layout/MainLayout.tsx`):**
+- `serverDeleted` handler: leaves voice if active voice channel belongs to deleted server, calls `handleServerDeleted`, shows toast
+
+**Frontend UI (`apps/desktop/src/components/server/ServerSettingsModal.tsx`):**
+- Danger zone section in GeneralTab (owner-only), requires typing exact server name to confirm deletion
+
+**First review issues (all fixed):**
+- Hoisted `fetchSockets()` to avoid nested loop calls (performance)
+- Added `rateLimitMemberManage` to DELETE endpoint
+- Added `cleanupServerVoice()` for silent voice ejection + `channelServerMap` cleanup
+- `handleServerDeleted` now cleans up `unreadCounts` and `serverUnreadCounts`
+- `handleServerDeleted` now calls `chatStore.clearMessages()` when active server is deleted
+- Removed duplicate toast (modal no longer shows toast; socket handler shows it for all clients)
+- Inline voice cleanup in MainLayout `serverDeleted` handler (no `voice:leave` emit back)
+- `channelUsers` Map orphan cleanup for deleted server's voice channels
+
+**Second review findings (2026-03-01):**
+- All first-review fixes verified correct
+- Race conditions: emit-before-room-cleanup ordering is sound; socket event reaches all members before rooms are torn down
+- Owner-in-voice edge case: handled on both server (cleanupServerVoice clears socket.data.voiceChannelId) and client (inline cleanup)
+- `io.sockets.sockets.get(socketId)` type-safe: returns `Socket | undefined`, properly null-checked
+- Double-delete scenario: mitigated by rate limiter; second request gets Prisma P2025 error (500 not 404, acceptable)
+- Modal `onClose()` timing: both orderings (socket first or API first) are graceful; modal returns null if server removed from store
+- Non-active server unread: server-level unread cleaned for all servers; channel-level orphans are harmless (overwritten on reconnect)
+- Memory leaks: none found; all Maps (voiceChannelUsers, channelServerMap, channelUsers, peers, remoteAudios) properly cleaned
+- Minor suggestion: `as any` cast on `cleanupServerVoice(io as any, serverId)` is unnecessary (types match exactly)
+
+**Files modified:**
+- `packages/shared/src/constants.ts` — added `SERVER_DELETED` to `WS_EVENTS`
+- `packages/shared/src/types.ts` — added `server:deleted` to `ServerToClientEvents`
+- `apps/server/src/routes/servers.ts` — implemented DELETE `/:serverId` endpoint with rate limiting, voice cleanup, room teardown, S3 icon cleanup
+- `apps/server/src/websocket/voiceHandler.ts` — added `cleanupServerVoice()` export for silent voice state cleanup
+- `apps/desktop/src/stores/serverStore.ts` — added `deleteServer`, `handleServerDeleted` with full unread cleanup
+- `apps/desktop/src/components/layout/MainLayout.tsx` — added `serverDeleted` socket handler with inline voice cleanup and channelUsers Map cleanup
+- `apps/desktop/src/components/server/ServerSettingsModal.tsx` — added danger zone delete UI with name-confirmation gate

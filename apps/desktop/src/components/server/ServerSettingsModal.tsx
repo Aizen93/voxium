@@ -74,15 +74,21 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
 }
 
 function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => void }) {
-  const { servers, uploadServerIcon, updateServer } = useServerStore();
+  const { servers, uploadServerIcon, updateServer, deleteServer } = useServerStore();
+  const currentUser = useAuthStore((s) => s.user);
   const server = servers.find((s) => s.id === serverId);
 
   const [name, setName] = useState(server?.name || '');
   const [iconFile, setIconFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const [deleting, setDeleting] = useState(false);
 
   if (!server) return null;
+
+  const isOwner = server.ownerId === currentUser?.id;
 
   const handleSave = async () => {
     setSaving(true);
@@ -115,6 +121,19 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
   };
 
   const hasChanges = (name.trim() && name.trim() !== server.name) || iconFile !== null;
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      await deleteServer(serverId);
+      onClose();
+      // No toast here — the server:deleted socket event shows one for all clients (including the owner)
+    } catch (err: any) {
+      toast.error(err.response?.data?.error || 'Failed to delete server');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <>
@@ -150,6 +169,53 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
       >
         {saving ? 'Saving...' : 'Save Changes'}
       </button>
+
+      {/* Danger Zone — owner only */}
+      {isOwner && (
+        <div className="mt-8 border-t border-vox-accent-danger/30 pt-6">
+          <h3 className="text-sm font-semibold text-vox-accent-danger mb-1">Danger Zone</h3>
+          <p className="text-xs text-vox-text-muted mb-3">
+            Deleting a server is permanent and cannot be undone. All channels, messages, and members will be removed.
+          </p>
+
+          {!showDeleteConfirm ? (
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              className="rounded-lg border border-vox-accent-danger/50 px-4 py-2 text-sm font-medium text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
+            >
+              Delete Server
+            </button>
+          ) : (
+            <div className="space-y-3 rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/5 p-3">
+              <p className="text-xs text-vox-text-secondary">
+                Type <span className="font-semibold text-vox-text-primary">{server.name}</span> to confirm deletion.
+              </p>
+              <input
+                type="text"
+                value={deleteConfirmName}
+                onChange={(e) => setDeleteConfirmName(e.target.value)}
+                placeholder="Server name"
+                className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-danger"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={handleDelete}
+                  disabled={deleteConfirmName !== server.name || deleting}
+                  className="flex-1 rounded-lg bg-vox-accent-danger px-4 py-2 text-sm font-medium text-white disabled:opacity-50 hover:bg-vox-accent-danger/80 transition-colors"
+                >
+                  {deleting ? 'Deleting...' : 'Confirm Delete'}
+                </button>
+                <button
+                  onClick={() => { setShowDeleteConfirm(false); setDeleteConfirmName(''); }}
+                  className="rounded-lg border border-vox-border px-4 py-2 text-sm font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </>
   );
 }

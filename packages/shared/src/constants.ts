@@ -17,8 +17,8 @@ export const LIMITS = {
   BIO_MAX: 500,
   MESSAGES_PER_PAGE: 50,
   MEMBERS_PER_PAGE: 100,
-  MAX_SERVERS_PER_USER: 100,
-  MAX_CHANNELS_PER_SERVER: 500,
+  MAX_SERVERS_PER_USER: 5,
+  MAX_CHANNELS_PER_SERVER: 100,
   MAX_VOICE_USERS_PER_CHANNEL: 99,
   MAX_REACTIONS_PER_MESSAGE: 20,
   MAX_EMOJI_LENGTH: 32,
@@ -88,4 +88,5 @@ export const WS_EVENTS = {
   DM_CONVERSATION_DELETED: 'dm:conversation:deleted',
   MEMBER_ROLE_UPDATED: 'member:role_updated',
   MEMBER_KICKED: 'member:kicked',
+  SERVER_DELETED: 'server:deleted',
 } as const;
