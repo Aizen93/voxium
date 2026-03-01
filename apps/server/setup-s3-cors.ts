@@ -11,20 +11,24 @@ const s3 = new S3Client({
   forcePathStyle: true,
 });
 
-await s3.send(
-  new PutBucketCorsCommand({
-    Bucket: process.env.S3_ASSETS_BUCKET!,
-    CORSConfiguration: {
-      CORSRules: [
-        {
-          AllowedOrigins: ['http://localhost:8080', 'https://localhost', 'https://voxium.app'],
-          AllowedMethods: ['GET', 'PUT', 'POST', 'HEAD'],
-          AllowedHeaders: ['*'],
-          MaxAgeSeconds: 3600,
-        },
-      ],
-    },
-  }),
-);
+async function main() {
+  await s3.send(
+    new PutBucketCorsCommand({
+      Bucket: process.env.S3_ASSETS_BUCKET!,
+      CORSConfiguration: {
+        CORSRules: [
+          {
+            AllowedOrigins: ['http://localhost:8080', 'https://localhost', 'https://voxium.app'],
+            AllowedMethods: ['GET', 'PUT', 'POST', 'HEAD'],
+            AllowedHeaders: ['*'],
+            MaxAgeSeconds: 3600,
+          },
+        ],
+      },
+    }),
+  );
 
-console.log('S3 CORS configuration updated successfully.');
+  console.log('S3 CORS configuration updated successfully.');
+}
+
+main().catch(console.error);
