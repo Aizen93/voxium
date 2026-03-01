@@ -28,7 +28,9 @@ function AuthRedirect() {
 /** Saves the current path before redirecting unauthenticated users to /login. */
 function SaveAndRedirect() {
   const location = useLocation();
-  localStorage.setItem(PENDING_REDIRECT_KEY, location.pathname);
+  useEffect(() => {
+    localStorage.setItem(PENDING_REDIRECT_KEY, location.pathname);
+  }, [location.pathname]);
   return <Navigate to="/login" replace />;
 }
 

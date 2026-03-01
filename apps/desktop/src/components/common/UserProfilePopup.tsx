@@ -160,8 +160,8 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     const username = member?.user.username ?? fetchedUser?.username;
     if (!username) return;
     try {
-      await useFriendStore.getState().sendRequest(username);
-      toast.success('Friend request sent');
+      const status = await useFriendStore.getState().sendRequest(username);
+      toast.success(status === 'accepted' ? `You and ${username} are now friends!` : 'Friend request sent');
     } catch (err: any) {
       const msg = err.response?.data?.error || 'Failed to send friend request';
       toast.error(msg);

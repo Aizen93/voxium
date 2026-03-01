@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { rateLimitSearch } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
 import { validateSearchQuery, LIMITS } from '@voxium/shared';
 import { sanitizeText } from '../utils/sanitize';
 
@@ -69,7 +69,7 @@ searchRouter.get('/servers/:serverId/messages', async (req: Request<{ serverId: 
       where.authorId = authorId;
     }
     if (before) {
-      where.createdAt = { lt: new Date(before) };
+      where.createdAt = { lt: parseDateParam(before, 'before') };
     }
 
     const messages = await prisma.message.findMany({
@@ -130,7 +130,7 @@ searchRouter.get('/dm/:conversationId/messages', async (req: Request<{ conversat
       type: 'user',
     };
     if (before) {
-      where.createdAt = { lt: new Date(before) };
+      where.createdAt = { lt: parseDateParam(before, 'before') };
     }
 
     const messages = await prisma.message.findMany({

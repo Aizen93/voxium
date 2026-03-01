@@ -15,8 +15,8 @@ export function AddFriendForm() {
 
     setIsLoading(true);
     try {
-      await sendRequest(trimmed);
-      toast.success(`Friend request sent to ${trimmed}`);
+      const status = await sendRequest(trimmed);
+      toast.success(status === 'accepted' ? `You and ${trimmed} are now friends!` : `Friend request sent to ${trimmed}`);
       setUsername('');
     } catch (err: any) {
       const msg = err.response?.data?.error || 'Failed to send friend request';

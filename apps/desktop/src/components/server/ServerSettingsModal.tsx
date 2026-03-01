@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
+import { ImageUploadButton } from '../common/ImageUploadButton';
 import { X } from 'lucide-react';
 import type { ServerMember, MemberRole } from '@voxium/shared';
 
@@ -78,28 +79,10 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
 
   const [name, setName] = useState(server?.name || '');
   const [iconFile, setIconFile] = useState<File | null>(null);
-  const [iconPreview, setIconPreview] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    return () => {
-      if (iconPreview) URL.revokeObjectURL(iconPreview);
-    };
-  }, [iconPreview]);
 
   if (!server) return null;
-
-  const handleIconSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = '';
-
-    if (iconPreview) URL.revokeObjectURL(iconPreview);
-    setIconFile(file);
-    setIconPreview(URL.createObjectURL(file));
-  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -137,35 +120,12 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
     <>
       {/* Icon */}
       <div className="flex flex-col items-center gap-3 mb-6">
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          className="relative group"
-          disabled={uploading}
-        >
-          {iconPreview ? (
-            <img src={iconPreview} alt="Preview" className="h-20 w-20 rounded-full object-cover" />
-          ) : (
-            <Avatar avatarUrl={server.iconUrl} displayName={server.name} size="lg" />
-          )}
-          {uploading ? (
-            <div className="absolute inset-0 flex items-center justify-center rounded-full bg-black/50">
-              <div className="h-6 w-6 animate-spin rounded-full border-2 border-white border-t-transparent" />
-            </div>
-          ) : (
-            <div className="absolute inset-0 flex items-center justify-center rounded-full bg-black/0 group-hover:bg-black/40 transition-colors">
-              <span className="text-xs font-medium text-white opacity-0 group-hover:opacity-100 transition-opacity">
-                Change
-              </span>
-            </div>
-          )}
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp,image/gif"
-          onChange={handleIconSelect}
-          className="hidden"
+        <ImageUploadButton
+          currentImageUrl={server.iconUrl}
+          displayName={server.name}
+          onFileChange={setIconFile}
+          uploading={uploading}
+          variant="edit"
         />
       </div>
 

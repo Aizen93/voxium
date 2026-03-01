@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { rateLimitMessageSend } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
 import { validateMessageContent, validateEmoji, LIMITS, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
@@ -97,7 +97,7 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
     // Standard pagination
     const where: Record<string, unknown> = { channelId };
     if (before) {
-      where.createdAt = { lt: new Date(before) };
+      where.createdAt = { lt: parseDateParam(before, 'before') };
     }
 
     const messages = await prisma.message.findMany({

@@ -53,6 +53,18 @@ const dmVoiceUsers = new Map<string, Map<string, { socketId: string; selfMute: b
 // userId -> conversationId (quick lookup for cleanup)
 const userDMCall = new Map<string, string>();
 
+// conversationId -> timeout (auto-cancel unanswered calls after 30s)
+const DM_CALL_TIMEOUT_MS = 30_000;
+const dmCallTimeouts = new Map<string, NodeJS.Timeout>();
+
+function clearCallTimeout(conversationId: string) {
+  const timeout = dmCallTimeouts.get(conversationId);
+  if (timeout) {
+    clearTimeout(timeout);
+    dmCallTimeouts.delete(conversationId);
+  }
+}
+
 export function leaveCurrentDMVoiceChannel(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   socket: Socket<ClientToServerEvents, ServerToClientEvents>,
@@ -94,6 +106,9 @@ export function leaveCurrentDMVoiceChannel(
   if (callUsers && callUsers.size === 0) {
     dmVoiceUsers.delete(conversationId);
   }
+
+  // Clear any pending call timeout
+  clearCallTimeout(conversationId);
 
   // Emit left then ended — all clients should tear down
   io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId });
@@ -163,7 +178,17 @@ export function handleDMVoiceEvents(
 
       // Persist "call started" system message
       createSystemMessage(io, conversationId, userId, 'Voice call started');
+
+      // Start call timeout — auto-cancel if no one answers within 30s
+      clearCallTimeout(conversationId);
+      dmCallTimeouts.set(conversationId, setTimeout(() => {
+        dmCallTimeouts.delete(conversationId);
+        console.log(`[DMVoice] Call timeout for conversation ${conversationId}`);
+        leaveCurrentDMVoiceChannel(io, socket, userId);
+      }, DM_CALL_TIMEOUT_MS));
     } else {
+      // Second user joined — clear the call timeout
+      clearCallTimeout(conversationId);
       // Second user joined — notify the room
       io.to(`dm:${conversationId}`).emit('dm:voice:joined', { conversationId, user: voiceUser });
 
@@ -189,6 +214,27 @@ export function handleDMVoiceEvents(
   socket.on('dm:voice:leave', (conversationId: string) => {
     console.log(`[DMVoice] User ${userId} leaving DM call ${conversationId}`);
     leaveCurrentDMVoiceChannel(io, socket, userId);
+  });
+
+  socket.on('dm:voice:decline', (conversationId: string) => {
+    console.log(`[DMVoice] User ${userId} declined DM call ${conversationId}`);
+
+    // Find the caller in this conversation and end the call
+    const callUsers = dmVoiceUsers.get(conversationId);
+    if (!callUsers) return;
+
+    // End the call for all participants (the solo caller)
+    const callerIds = Array.from(callUsers.keys());
+    for (const callerId of callerIds) {
+      const callerState = callUsers.get(callerId);
+      if (callerState) {
+        const callerSocket = io.sockets.sockets.get(callerState.socketId);
+        if (callerSocket) {
+          leaveCurrentDMVoiceChannel(io, callerSocket, callerId);
+          break; // 1-on-1 call, only one caller
+        }
+      }
+    }
   });
 
   socket.on('dm:voice:mute', (muted: boolean) => {

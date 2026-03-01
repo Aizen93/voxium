@@ -39,3 +39,10 @@ export class ConflictError extends AppError {
     super(message, 409);
   }
 }
+
+/** Parse a date string query parameter, throwing BadRequestError if invalid. */
+export function parseDateParam(value: string, name = 'date'): Date {
+  const date = new Date(value);
+  if (isNaN(date.getTime())) throw new BadRequestError(`Invalid ${name} parameter`);
+  return date;
+}

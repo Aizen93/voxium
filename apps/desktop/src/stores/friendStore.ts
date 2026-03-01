@@ -13,7 +13,7 @@ interface FriendState {
   showFriendsView: boolean;
 
   fetchFriends: () => Promise<void>;
-  sendRequest: (username: string) => Promise<void>;
+  sendRequest: (username: string) => Promise<'pending' | 'accepted'>;
   acceptRequest: (friendshipId: string) => Promise<void>;
   removeFriendship: (friendshipId: string) => Promise<void>;
   setActiveTab: (tab: FriendTab) => void;
@@ -65,6 +65,7 @@ export const useFriendStore = create<FriendState>((set, get) => ({
         pendingOutgoing: [friendship, ...state.pendingOutgoing],
       }));
     }
+    return friendship.status as 'pending' | 'accepted';
   },
 
   acceptRequest: async (friendshipId: string) => {

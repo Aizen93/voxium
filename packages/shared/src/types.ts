@@ -284,6 +284,7 @@ export interface ClientToServerEvents {
   'dm:voice:deaf': (deafened: boolean) => void;
   'dm:voice:speaking': (speaking: boolean) => void;
   'dm:voice:signal': (data: { to: string; signal: unknown }) => void;
+  'dm:voice:decline': (conversationId: string) => void;
 }
 
 // ─── API Response ────────────────────────────────────────────────────────────

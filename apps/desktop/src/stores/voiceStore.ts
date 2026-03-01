@@ -811,6 +811,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   declineCall: () => {
+    const { incomingCall } = get();
+    if (incomingCall) {
+      const socket = getSocket();
+      socket?.emit('dm:voice:decline', incomingCall.conversationId);
+    }
     set({ incomingCall: null });
   },
 

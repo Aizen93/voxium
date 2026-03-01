@@ -57,6 +57,7 @@ uploadRouter.get(
       }
 
       const url = await generatePresignedGetUrl(key);
+      res.set('Cache-Control', 'no-cache');
       res.redirect(302, url);
     } catch (err) {
       // generatePresignedGetUrl signs locally; S3 errors surface on the client redirect
