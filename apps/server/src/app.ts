@@ -13,6 +13,7 @@ import { uploadRouter } from './routes/uploads';
 import { dmRouter } from './routes/dm';
 import { friendRouter } from './routes/friends';
 import { categoryRouter } from './routes/categories';
+import { searchRouter } from './routes/search';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 
@@ -69,6 +70,7 @@ api.use('/invites', inviteRouter);
 api.use('/uploads', uploadRouter);
 api.use('/dm', dmRouter);
 api.use('/friends', friendRouter);
+api.use('/search', searchRouter);
 
 app.use('/api/v1', api);
 

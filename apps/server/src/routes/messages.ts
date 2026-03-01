@@ -12,12 +12,13 @@ export const messageRouter = Router({ mergeParams: true });
 
 messageRouter.use(authenticate);
 
-// Get messages in a channel (paginated, newest first)
+// Get messages in a channel (paginated, newest first — or around a target message)
 messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId } = req.params;
     const limit = Math.min(parseInt(req.query.limit as string) || 50, LIMITS.MESSAGES_PER_PAGE);
     const before = req.query.before as string | undefined;
+    const around = req.query.around as string | undefined;
 
     const channel = await prisma.channel.findUnique({
       where: { id: channelId },
@@ -30,6 +31,70 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
     });
     if (!membership) throw new ForbiddenError('Not a member of this server');
 
+    const messageInclude = {
+      author: {
+        select: { id: true, username: true, displayName: true, avatarUrl: true },
+      },
+      replyTo: {
+        select: {
+          id: true,
+          content: true,
+          author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+        },
+      },
+      reactions: reactionInclude,
+    };
+
+    // "around" mode: fetch messages surrounding a target message
+    if (around) {
+      const target = await prisma.message.findUnique({
+        where: { id: around },
+        select: { id: true, channelId: true, createdAt: true },
+      });
+      if (!target || target.channelId !== channelId) throw new NotFoundError('Message');
+
+      const half = Math.floor(limit / 2);
+
+      const [olderMessages, newerMessages] = await Promise.all([
+        prisma.message.findMany({
+          where: { channelId, createdAt: { lte: target.createdAt } },
+          include: messageInclude,
+          orderBy: { createdAt: 'desc' },
+          take: half + 1,
+        }),
+        prisma.message.findMany({
+          where: { channelId, createdAt: { gt: target.createdAt } },
+          include: messageInclude,
+          orderBy: { createdAt: 'asc' },
+          take: half + 1,
+        }),
+      ]);
+
+      const hasMore = olderMessages.length > half;
+      const hasMoreAfter = newerMessages.length > half;
+      if (hasMore) olderMessages.pop();
+      if (hasMoreAfter) newerMessages.pop();
+
+      // Combine: older (reversed to chronological) + newer
+      const combined = [...olderMessages.reverse(), ...newerMessages];
+      // Deduplicate by id
+      const seen = new Set<string>();
+      const unique = combined.filter((m) => {
+        if (seen.has(m.id)) return false;
+        seen.add(m.id);
+        return true;
+      });
+
+      const data = unique.map((m) => ({
+        ...m,
+        reactions: aggregateReactions(m.reactions),
+      }));
+
+      res.json({ success: true, data, hasMore, hasMoreAfter, targetMessageId: around });
+      return;
+    }
+
+    // Standard pagination
     const where: Record<string, unknown> = { channelId };
     if (before) {
       where.createdAt = { lt: new Date(before) };
@@ -37,19 +102,7 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
 
     const messages = await prisma.message.findMany({
       where,
-      include: {
-        author: {
-          select: { id: true, username: true, displayName: true, avatarUrl: true },
-        },
-        replyTo: {
-          select: {
-            id: true,
-            content: true,
-            author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
-          },
-        },
-        reactions: reactionInclude,
-      },
+      include: messageInclude,
       orderBy: { createdAt: 'desc' },
       take: limit + 1,
     });

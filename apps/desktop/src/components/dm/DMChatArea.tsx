@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useDMStore } from '../../stores/dmStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore } from '../../stores/voiceStore';
@@ -9,7 +9,8 @@ import { DMCallPanel } from './DMCallPanel';
 import { MessageInput } from '../chat/MessageInput';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
-import { Phone, PhoneOff } from 'lucide-react';
+import { Phone, PhoneOff, Search } from 'lucide-react';
+import { SearchModal } from '../search/SearchModal';
 import { clsx } from 'clsx';
 import type { UserStatus } from '@voxium/shared';
 
@@ -26,6 +27,7 @@ export function DMChatArea() {
   const fetchDMMessages = useChatStore((s) => s.fetchDMMessages);
   const prevConvRef = useRef<string | null>(null);
 
+  const [showSearch, setShowSearch] = useState(false);
   const dmCallConversationId = useVoiceStore((s) => s.dmCallConversationId);
   const conversation = conversations.find((c) => c.id === activeConversationId);
   const isInCall = dmCallConversationId === activeConversationId;
@@ -154,6 +156,13 @@ export function DMChatArea() {
             {conversation.participant.displayName}
           </h3>
         </UserHoverTarget>
+        <button
+          onClick={() => setShowSearch(true)}
+          className="rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
+          title="Search Messages (Ctrl+K)"
+        >
+          <Search size={18} />
+        </button>
         {isInCall ? (
           <button
             onClick={handleEndCall}
@@ -184,6 +193,14 @@ export function DMChatArea() {
         conversationId={conversation.id}
         placeholderName={conversation.participant.displayName}
       />
+
+      {showSearch && (
+        <SearchModal
+          onClose={() => setShowSearch(false)}
+          conversationId={conversation.id}
+          participantName={conversation.participant.displayName}
+        />
+      )}
     </div>
   );
 }

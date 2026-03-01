@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.9.4 (Drag-and-Drop Channel & Category Reordering)
+**Version:** 0.9.5 (Message Search with Jump-to-Message)
 **Date:** 2026-02-28
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, DM call conversation hydration for brand-new conversations, channel categories with collapsible UI, and drag-and-drop channel/category reordering
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, DM call conversation hydration for brand-new conversations, channel categories with collapsible UI, drag-and-drop channel/category reordering, and message search (server + DM) with jump-to-message navigation
 
 ## What Has Been Done
 
@@ -177,7 +177,7 @@ Comprehensive hardening of real-time features:
 - [x] Channel categories (with drag-and-drop reordering)
 - [x] Emoji picker integration
 - [x] Rich text / markdown in messages
-- [ ] Message search
+- [x] Message search (server + DM, with jump-to-message)
 - [ ] Screen sharing
 
 ### V0.4 - Scalability
@@ -1530,3 +1530,57 @@ Server members now have roles (`owner`, `admin`, `member`) with hierarchical per
 - `apps/desktop/src/stores/serverStore.ts` — `reorderCategories()`, `reorderChannels()` actions
 - `apps/desktop/src/components/channel/ChannelSidebar.tsx` — full DnD refactor with sub-components
 - `packages/shared/src/constants.ts` — `APP_VERSION` bumped to 0.9.4
+
+### Message Search with Jump-to-Message (v0.9.5)
+
+**New feature:** Full-text message search across server channels and DM conversations, with the ability to click a search result to jump to that message in context (loads surrounding messages and highlights the target).
+
+**Backend — Search endpoints (`apps/server/src/routes/search.ts`):**
+- `GET /api/v1/search/servers/:serverId/messages` — search across all text channels in a server (or filtered to a specific channel); requires server membership; supports `q`, `channelId`, `authorId`, `before` (cursor pagination), `limit` query params; returns results with `channelName` for display
+- `GET /api/v1/search/dm/:conversationId/messages` — search within a DM conversation; requires conversation participation; supports `q`, `before`, `limit`
+- Both endpoints: rate-limited via `rateLimitSearch` (15 pts/60s, userId-based), sanitize query via `sanitizeText`, validate via `validateSearchQuery`, filter to `type: 'user'` messages only, use case-insensitive `contains` matching, cursor-based pagination via `before` (createdAt)
+
+**Backend — "around" mode on existing message endpoints:**
+- `GET /api/v1/channels/:channelId/messages?around=:messageId` — fetches messages before and after the target message, returns `hasMore`, `hasMoreAfter`, `targetMessageId`
+- `GET /api/v1/dm/:conversationId/messages?around=:messageId` — same for DM conversations
+- Both use a `half = floor(limit/2)` split, dedup by ID, and maintain chronological order
+
+**Shared package (`packages/shared`):**
+- `constants.ts` — `LIMITS.SEARCH_QUERY_MIN` (2), `LIMITS.SEARCH_QUERY_MAX` (200), `LIMITS.SEARCH_RESULTS_PER_PAGE` (25)
+- `validators.ts` — `validateSearchQuery(query)` length validation
+- `types.ts` — `SearchResult` interface (message subset with optional `channelName`)
+
+**Frontend store (`apps/desktop/src/stores/chatStore.ts`):**
+- `hasMoreAfter` state — tracks whether more messages exist after the loaded window (for `around` mode)
+- `targetMessageId` state — the message ID to scroll to and highlight after fetch
+- `fetchMessagesAround(channelId, messageId)` — fetches messages around a target, sets `hasMoreAfter` and `targetMessageId`
+- `fetchDMMessagesAround(conversationId, messageId)` — same for DM
+- `clearTargetMessage()` — clears `targetMessageId` after scroll/highlight completes
+
+**Frontend UI (`apps/desktop/src/components/search/SearchModal.tsx`):**
+- Modal with search input, debounced search (300ms), channel filter dropdown (server mode), infinite scroll pagination
+- Results show author avatar, display name, channel name (server mode), timestamp, truncated content
+- Click result: closes modal, navigates to correct channel/conversation, calls `fetchMessagesAround`, which triggers scroll-to-target effect
+
+**Scroll-to-target effect (MessageList.tsx, DMMessageList.tsx):**
+- `useEffect` watching `targetMessageId` — uses `requestAnimationFrame` + `querySelector('[data-message-id="..."]')` to scroll to and highlight the target message with a 2-second `bg-vox-accent-primary/10` highlight
+
+**Global shortcut (MainLayout.tsx):**
+- `Ctrl+K` / `Cmd+K` toggles the search modal; context-aware (server search if viewing a server, DM search if viewing a conversation)
+
+**Files added/modified:**
+- `apps/server/src/routes/search.ts` — new search route file
+- `apps/server/src/app.ts` — mounted `searchRouter` at `/search`
+- `apps/server/src/middleware/rateLimiter.ts` — added `rateLimitSearch`
+- `apps/server/src/routes/messages.ts` — added `around` query param support
+- `apps/server/src/routes/dm.ts` — added `around` query param support
+- `apps/desktop/src/stores/chatStore.ts` — `hasMoreAfter`, `targetMessageId`, `fetchMessagesAround`, `fetchDMMessagesAround`, `clearTargetMessage`
+- `apps/desktop/src/components/search/SearchModal.tsx` — new search modal component
+- `apps/desktop/src/components/chat/MessageList.tsx` — scroll-to-target effect
+- `apps/desktop/src/components/dm/DMMessageList.tsx` — scroll-to-target effect
+- `apps/desktop/src/components/chat/ChatArea.tsx` — search button + modal integration
+- `apps/desktop/src/components/dm/DMChatArea.tsx` — search button + modal integration
+- `apps/desktop/src/components/layout/MainLayout.tsx` — Ctrl+K shortcut + global search modal
+- `packages/shared/src/constants.ts` — search-related limits
+- `packages/shared/src/validators.ts` — `validateSearchQuery`
+- `packages/shared/src/types.ts` — `SearchResult` interface

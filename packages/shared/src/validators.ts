@@ -61,3 +61,9 @@ export function validateCategoryName(name: string): string | null {
   if (name.length > LIMITS.CATEGORY_NAME_MAX) return `Category name must be at most ${LIMITS.CATEGORY_NAME_MAX} characters`;
   return null;
 }
+
+export function validateSearchQuery(query: string): string | null {
+  if (query.length < LIMITS.SEARCH_QUERY_MIN) return `Search query must be at least ${LIMITS.SEARCH_QUERY_MIN} characters`;
+  if (query.length > LIMITS.SEARCH_QUERY_MAX) return `Search query must be at most ${LIMITS.SEARCH_QUERY_MAX} characters`;
+  return null;
+}

@@ -156,9 +156,64 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
     const userId = req.user!.userId;
     const limit = Math.min(parseInt(req.query.limit as string) || 50, LIMITS.MESSAGES_PER_PAGE);
     const before = req.query.before as string | undefined;
+    const around = req.query.around as string | undefined;
 
     await getConversationOrThrow(conversationId, userId);
 
+    const messageInclude = {
+      author: authorSelect,
+      replyTo: replyToSelect,
+      reactions: reactionInclude,
+    };
+
+    // "around" mode: fetch messages surrounding a target message
+    if (around) {
+      const target = await prisma.message.findUnique({
+        where: { id: around },
+        select: { id: true, conversationId: true, createdAt: true },
+      });
+      if (!target || target.conversationId !== conversationId) throw new NotFoundError('Message');
+
+      const half = Math.floor(limit / 2);
+
+      const [olderMessages, newerMessages] = await Promise.all([
+        prisma.message.findMany({
+          where: { conversationId, createdAt: { lte: target.createdAt } },
+          include: messageInclude,
+          orderBy: { createdAt: 'desc' },
+          take: half + 1,
+        }),
+        prisma.message.findMany({
+          where: { conversationId, createdAt: { gt: target.createdAt } },
+          include: messageInclude,
+          orderBy: { createdAt: 'asc' },
+          take: half + 1,
+        }),
+      ]);
+
+      const hasMore = olderMessages.length > half;
+      const hasMoreAfter = newerMessages.length > half;
+      if (hasMore) olderMessages.pop();
+      if (hasMoreAfter) newerMessages.pop();
+
+      const combined = [...olderMessages.reverse(), ...newerMessages];
+      const seen = new Set<string>();
+      const unique = combined.filter((m) => {
+        if (seen.has(m.id)) return false;
+        seen.add(m.id);
+        return true;
+      });
+
+      const data = unique.map((m) => ({
+        ...m,
+        reactions: aggregateReactions(m.reactions),
+      }));
+
+      res.json({ success: true, data, hasMore, hasMoreAfter, targetMessageId: around });
+      return;
+    }
+
+    // Standard pagination
     const where: Record<string, unknown> = { conversationId };
     if (before) {
       where.createdAt = { lt: new Date(before) };
@@ -166,11 +221,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
 
     const messages = await prisma.message.findMany({
       where,
-      include: {
-        author: authorSelect,
-        replyTo: replyToSelect,
-        reactions: reactionInclude,
-      },
+      include: messageInclude,
       orderBy: { createdAt: 'desc' },
       take: limit + 1,
     });

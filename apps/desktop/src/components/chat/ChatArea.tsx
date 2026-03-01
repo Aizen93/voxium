@@ -1,13 +1,15 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
 import { getSocket, onConnectionStatusChange } from '../../services/socket';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
-import { Hash } from 'lucide-react';
+import { SearchModal } from '../search/SearchModal';
+import { Hash, Search } from 'lucide-react';
 
 export function ChatArea() {
-  const { channels, activeChannelId } = useServerStore();
+  const { channels, activeChannelId, activeServerId } = useServerStore();
+  const [showSearch, setShowSearch] = useState(false);
   const { fetchMessages, clearMessages } = useChatStore();
   const prevChannelRef = useRef<string | null>(null);
 
@@ -120,7 +122,14 @@ export function ChatArea() {
       {/* Channel Header */}
       <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
         <Hash size={18} className="text-vox-text-muted" />
-        <h3 className="text-sm font-semibold text-vox-text-primary">{activeChannel.name}</h3>
+        <h3 className="flex-1 text-sm font-semibold text-vox-text-primary">{activeChannel.name}</h3>
+        <button
+          onClick={() => setShowSearch(true)}
+          className="rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
+          title="Search Messages (Ctrl+K)"
+        >
+          <Search size={18} />
+        </button>
       </div>
 
       {/* Messages */}
@@ -128,6 +137,14 @@ export function ChatArea() {
 
       {/* Input */}
       <MessageInput channelId={activeChannel.id} channelName={activeChannel.name} />
+
+      {showSearch && activeServerId && (
+        <SearchModal
+          onClose={() => setShowSearch(false)}
+          serverId={activeServerId}
+          channels={channels}
+        />
+      )}
     </div>
   );
 }

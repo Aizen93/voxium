@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore } from '../../stores/voiceStore';
@@ -22,14 +22,17 @@ import { toast } from '../../stores/toastStore';
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
+import { SearchModal } from '../search/SearchModal';
 import { initNotifications, notify } from '../../services/notifications';
 
 export function MainLayout() {
-  const { fetchServers, activeServerId } = useServerStore();
+  const { fetchServers, activeServerId, channels } = useServerStore();
   const { user } = useAuthStore();
   const activeConversationId = useDMStore((s) => s.activeConversationId);
+  const conversations = useDMStore((s) => s.conversations);
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
+  const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   usePushToTalk();
   const attachedGeneration = useRef(-1);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -44,6 +47,18 @@ export function MainLayout() {
   // Request notification permission on mount
   useEffect(() => {
     initNotifications();
+  }, []);
+
+  // Global Ctrl+K / Cmd+K search shortcut
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        setShowGlobalSearch((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
   // Fetch servers on mount
@@ -492,6 +507,28 @@ export function MainLayout() {
         <VoicePanel />
         {isSettingsOpen && <SettingsModal />}
         <IncomingCallModal />
+        {showGlobalSearch && (() => {
+          if (activeServerId) {
+            return (
+              <SearchModal
+                onClose={() => setShowGlobalSearch(false)}
+                serverId={activeServerId}
+                channels={channels}
+              />
+            );
+          }
+          if (activeConversationId) {
+            const conv = conversations.find((c) => c.id === activeConversationId);
+            return (
+              <SearchModal
+                onClose={() => setShowGlobalSearch(false)}
+                conversationId={activeConversationId}
+                participantName={conv?.participant.displayName}
+              />
+            );
+          }
+          return null;
+        })()}
       </div>
     </div>
   );

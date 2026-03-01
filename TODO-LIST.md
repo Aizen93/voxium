@@ -6,7 +6,7 @@
   - [x] When a new User joins the server, the members list is not updating in real time and needs a page refresh to see the new user in the members list (Right side panel)
   - [x] When a user (Alice) creates a new server, and joins a channel, she can't see her name in the channel list (Though she can speak and hear just fine)
   - [x] When creating a new voice channel or a new text channel, the other users does not see it in real time and require a page refresh
-  - [] Tauri client does not receive windows notifications, how do we activate them by default, or prompt the user to activate notifications. Our apps Settings has notifications enabled.
+  - [x] Tauri client does not receive windows notifications, how do we activate them by default, or prompt the user to activate notifications. Our apps Settings has notifications enabled.
   - [x] Security : Throtling, xss, sql injections, and rate limiting, captcha. Rate limiting — rate-limiter-flexible is installed but not wired up. Protect auth, uploads, message send, and forgot-password endpoints.
   - [x] Password forgot + profile password change
 
@@ -19,7 +19,7 @@
 ## Bigger features (high effort, high value):
   - [x] Direct messages (DMs) — 1:1 and group DMs outside of servers; this is a significant architecture addition but is probably the most-expected missing feature
   - [] Screen sharing — the WebRTC peer connections are already set up; adding a video track for screen capture is a natural extension
-  - [] Server roles & permissions — the MemberRole type exists (owner/admin/member) but I didn't see permission checks on the client for things like channel creation or member management
+  - [x] Server roles & permissions — the MemberRole type exists (owner/admin/member) but I didn't see permission checks on the client for things like channel creation or member management
 
 
 
@@ -33,12 +33,35 @@ Quick Wins (high impact, low effort)
   High-Value Features (medium effort)
 
   MessageItem. This is the biggest "expected feature" that's missing.
-  7. Channel categories — New ChannelCategory model with collapsible headers in ChannelSidebar. Small effort, big polish for servers with 10+ channels.
-  8. Rich text / Markdown — Discord-style formatting (bold, italics, code blocks, links). Store raw markdown, render with react-markdown.
+  7. [x] Channel categories — New ChannelCategory model with collapsible headers in ChannelSidebar. Small effort, big polish for servers with 10+ channels.
+  8. [x] Rich text / Markdown — Discord-style formatting (bold, italics, code blocks, links). Store raw markdown, render with react-markdown.
 
   Security (should ship before any public release)
   10. [x] sanitization — Currently relying on JSX escaping alone. Add explicit sanitization for messages, bios, and server names.
 
-  Strategic / Longer-Term
-  12. Screen sharing — WebRTC peers are already established; adding getDisplayMedia() as a second track is feasible without SFU.
-  13. mediasoup SFU — Needed to scale voice beyond ~8 users per channel.
+  
+
+
+  1. Message Search (V0.3 - most impactful remaining feature)
+
+  Full-text search across messages in a server or DM. This would involve:
+  - Backend: A search endpoint (GET /api/v1/servers/:id/search?q=...) using PostgreSQL full-text search (tsvector/tsquery) or ILIKE for simplicity
+  - Frontend: A search UI (modal or sidebar panel) with results showing message previews, author, channel, and timestamp — clicking a result navigates to that message
+
+  2. Screen Sharing (V0.3 - complex, WebRTC extension)
+
+  Adding getDisplayMedia() to the existing WebRTC mesh. Harder and more niche — I'd recommend doing this after message search.
+
+  3. Known issues worth fixing now
+
+  Several low-hanging improvements from the "Known Issues" section:
+  - New text channels don't seed ChannelRead — existing members see all history as unread (line 860)
+  - /forgot-password has no rate limiting (line 849)
+  - S3 env var validation at startup instead of cryptic runtime errors (line 844)
+  - Extract shared ImageUploadButton component from duplicated logic in ServerSettingsModal / CreateServerModal (line 848)
+
+  4. V0.4 Scalability (longer-term)
+
+  - mediasoup SFU for production voice/video
+  - Redis-based voice state
+  - Horizontal scaling

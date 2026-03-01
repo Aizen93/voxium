@@ -13,18 +13,22 @@ let lastFetchKey = '';
 interface ChatState {
   messages: Message[];
   hasMore: boolean;
+  hasMoreAfter: boolean;
   isLoading: boolean;
   typingUsers: Map<string, string>; // userId -> username
   replyingTo: Message | null;
+  targetMessageId: string | null;
 
   setReplyingTo: (message: Message | null) => void;
   clearReplyingTo: () => void;
   fetchMessages: (channelId: string, before?: string) => Promise<void>;
+  fetchMessagesAround: (channelId: string, messageId: string) => Promise<void>;
   sendMessage: (channelId: string, content: string) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   toggleReaction: (channelId: string, messageId: string, emoji: string) => Promise<void>;
   fetchDMMessages: (conversationId: string, before?: string) => Promise<void>;
+  fetchDMMessagesAround: (conversationId: string, messageId: string) => Promise<void>;
   sendDMMessage: (conversationId: string, content: string) => Promise<void>;
   editDMMessage: (conversationId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteDMMessage: (conversationId: string, messageId: string) => Promise<void>;
@@ -34,6 +38,7 @@ interface ChatState {
   updateMessageReactions: (messageId: string, reactions: ReactionGroup[]) => void;
   deleteMessage: (messageId: string) => void;
   clearMessages: () => void;
+  clearTargetMessage: () => void;
   setTypingUser: (userId: string, username: string) => void;
   removeTypingUser: (userId: string) => void;
   updateAuthorAvatar: (userId: string, avatarUrl: string | null) => void;
@@ -43,9 +48,11 @@ interface ChatState {
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   hasMore: false,
+  hasMoreAfter: false,
   isLoading: false,
   typingUsers: new Map(),
   replyingTo: null,
+  targetMessageId: null,
 
   setReplyingTo: (message) => set({ replyingTo: message }),
   clearReplyingTo: () => set({ replyingTo: null }),
@@ -89,11 +96,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
           };
         });
       } else {
-        set({ messages: newMessages, hasMore: data.hasMore, isLoading: false });
+        set({ messages: newMessages, hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
       }
     } catch (err: any) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
       console.error('Failed to fetch messages:', err);
+      set({ isLoading: false });
+    } finally {
+      if (activeFetchController === controller) {
+        activeFetchController = null;
+      }
+    }
+  },
+
+  fetchMessagesAround: async (channelId: string, messageId: string) => {
+    if (activeFetchController) {
+      activeFetchController.abort();
+    }
+
+    const controller = new AbortController();
+    activeFetchController = controller;
+    lastFetchKey = `${channelId}:around:${messageId}`;
+
+    set({ isLoading: true });
+    try {
+      const { data } = await api.get(`/channels/${channelId}/messages?around=${messageId}`, {
+        signal: controller.signal,
+      });
+
+      if (controller.signal.aborted) return;
+
+      set({
+        messages: data.data,
+        hasMore: data.hasMore,
+        hasMoreAfter: data.hasMoreAfter ?? false,
+        targetMessageId: data.targetMessageId ?? messageId,
+        isLoading: false,
+      });
+    } catch (err: any) {
+      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+      console.error('Failed to fetch messages around:', err);
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -179,11 +221,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
           };
         });
       } else {
-        set({ messages: newMessages, hasMore: data.hasMore, isLoading: false });
+        set({ messages: newMessages, hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
       }
     } catch (err: any) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
       console.error('Failed to fetch DM messages:', err);
+      set({ isLoading: false });
+    } finally {
+      if (activeFetchController === controller) {
+        activeFetchController = null;
+      }
+    }
+  },
+
+  fetchDMMessagesAround: async (conversationId: string, messageId: string) => {
+    if (activeFetchController) {
+      activeFetchController.abort();
+    }
+
+    const controller = new AbortController();
+    activeFetchController = controller;
+    lastFetchKey = `dm:${conversationId}:around:${messageId}`;
+
+    set({ isLoading: true });
+    try {
+      const { data } = await api.get(`/dm/${conversationId}/messages?around=${messageId}`, {
+        signal: controller.signal,
+      });
+
+      if (controller.signal.aborted) return;
+
+      set({
+        messages: data.data,
+        hasMore: data.hasMore,
+        hasMoreAfter: data.hasMoreAfter ?? false,
+        targetMessageId: data.targetMessageId ?? messageId,
+        isLoading: false,
+      });
+    } catch (err: any) {
+      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+      console.error('Failed to fetch DM messages around:', err);
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -272,8 +349,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     typingTimers.forEach((timer) => clearTimeout(timer));
     typingTimers.clear();
 
-    set({ messages: [], hasMore: false, isLoading: false, typingUsers: new Map(), replyingTo: null });
+    set({ messages: [], hasMore: false, hasMoreAfter: false, isLoading: false, typingUsers: new Map(), replyingTo: null, targetMessageId: null });
   },
+
+  clearTargetMessage: () => set({ targetMessageId: null }),
 
   setTypingUser: (userId: string, username: string) => {
     // Clear existing timer for this user to prevent accumulation

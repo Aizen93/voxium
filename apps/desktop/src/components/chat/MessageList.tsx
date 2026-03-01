@@ -5,7 +5,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from './MessageItem';
 
 export function MessageList() {
-  const { messages, hasMore, isLoading, fetchMessages, typingUsers } = useChatStore();
+  const { messages, hasMore, isLoading, fetchMessages, typingUsers, targetMessageId, clearTargetMessage } = useChatStore();
   const { activeChannelId, members } = useServerStore();
   const { user } = useAuthStore();
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -28,6 +28,20 @@ export function MessageList() {
     bottomRef.current?.scrollIntoView();
     fetchingRef.current = false;
   }, [activeChannelId]);
+
+  // Scroll to target message (from search)
+  useEffect(() => {
+    if (!targetMessageId) return;
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-message-id="${targetMessageId}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('bg-vox-accent-primary/10');
+        setTimeout(() => el.classList.remove('bg-vox-accent-primary/10'), 2000);
+      }
+      clearTargetMessage();
+    });
+  }, [targetMessageId, clearTargetMessage]);
 
   const handleScroll = useCallback(() => {
     const el = listRef.current;

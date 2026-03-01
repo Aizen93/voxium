@@ -314,6 +314,20 @@ export interface ServerMember {
   user: PublicUser;
 }
 
+// ─── Search ─────────────────────────────────────────────────────────────────
+
+export interface SearchResult {
+  id: string;
+  content: string;
+  type?: string;
+  channelId: string | null;
+  conversationId?: string | null;
+  author: MessageAuthor;
+  createdAt: string;
+  editedAt: string | null;
+  channelName?: string;
+}
+
 // ─── Invite ──────────────────────────────────────────────────────────────────
 
 export interface Invite {
