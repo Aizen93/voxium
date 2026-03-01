@@ -14,7 +14,7 @@ export function InviteModal({ serverId, onClose }: Props) {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const inviteLink = `http://localhost:8080/invite/${inviteCode}`;
+  const inviteLink = `${window.location.origin}/invite/${inviteCode}`;
 
   useEffect(() => {
     createInvite(serverId)
