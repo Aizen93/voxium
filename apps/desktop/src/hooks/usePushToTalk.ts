@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useVoiceStore } from '../stores/voiceStore';
 import { getSocket } from '../services/socket';
-import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold } from '../services/audioAnalyser';
 
 function isTextInput(el: Element | null): boolean {
   if (!el) return false;
@@ -28,8 +27,9 @@ export function usePushToTalk() {
       const { localStream, activeChannelId } = useVoiceStore.getState();
       if (!activeChannelId || !localStream) return;
 
+      // Disable raw mic tracks — the noise gate pipeline stays running
+      // but the AudioContext source outputs silence when tracks are disabled
       localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
-      stopSpeakingDetection();
 
       // Debounce the mute emission to avoid flooding on rapid key taps
       if (muteTimeoutRef.current) clearTimeout(muteTimeoutRef.current);
@@ -57,11 +57,8 @@ export function usePushToTalk() {
         muteTimeoutRef.current = null;
       }
 
+      // Enable raw mic tracks — noise gate pipeline handles the rest
       localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
-
-      const settings = useSettingsStore.getState();
-      setNoiseGateThreshold(settings.noiseGateThreshold);
-      startSpeakingDetection(localStream);
 
       const socket = getSocket();
       if (socket) socket.emit('voice:mute', false);

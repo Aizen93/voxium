@@ -87,17 +87,24 @@ export function connectSocket(token: string): VoxSocket {
     reconnectionDelayMax: 10000,
   });
 
-  // Debug: log ALL incoming events so we can see exactly what arrives
-  socket.onAny((event: string, ...args: any[]) => {
-    if (event === 'pong:latency') return; // too noisy
-    console.log(`[WS] ← ${event}`, args.length > 0 ? JSON.stringify(args[0]).slice(0, 120) : '');
-  });
+  // Debug logging — only in development
+  if (import.meta.env.DEV) {
+    const NOISY_EVENTS = new Set([
+      'pong:latency', 'ping:latency',
+      'voice:speaking', 'dm:voice:speaking',
+      'voice:signal', 'dm:voice:signal',
+    ]);
 
-  // Debug: log ALL outgoing events
-  socket.onAnyOutgoing((event: string, ...args: any[]) => {
-    if (event === 'ping:latency') return; // too noisy
-    console.log(`[WS] → ${event}`, args.length > 0 ? JSON.stringify(args[0]).slice(0, 120) : '');
-  });
+    socket.onAny((event: string, ...args: any[]) => {
+      if (NOISY_EVENTS.has(event)) return;
+      console.log(`[WS] ← ${event}`, args.length > 0 ? JSON.stringify(args[0]).slice(0, 120) : '');
+    });
+
+    socket.onAnyOutgoing((event: string, ...args: any[]) => {
+      if (NOISY_EVENTS.has(event)) return;
+      console.log(`[WS] → ${event}`, args.length > 0 ? JSON.stringify(args[0]).slice(0, 120) : '');
+    });
+  }
 
   socket.on('connect', () => {
     connecting = false;
@@ -121,12 +128,17 @@ export function connectSocket(token: string): VoxSocket {
     console.log('[WS] Disconnected:', reason);
     setStatus('disconnected');
 
-    // If the server kicked us (not a transient network issue), clean up voice
-    if (reason === 'io server disconnect' || reason === 'transport close') {
+    // Only fully leave voice when the server explicitly kicks us.
+    // For transient disconnects (transport close, ping timeout), keep voice
+    // state intact so the onSocketReconnect handler can re-join seamlessly.
+    if (reason === 'io server disconnect') {
       import('../stores/voiceStore').then(({ useVoiceStore }) => {
         const voiceState = useVoiceStore.getState();
         if (voiceState.activeChannelId) {
           voiceState.leaveChannel();
+        }
+        if (voiceState.dmCallConversationId) {
+          voiceState.leaveDMCall();
         }
       });
     }

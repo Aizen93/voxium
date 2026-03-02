@@ -7,7 +7,7 @@ import { formatDistanceToNow } from 'date-fns';
 import { clsx } from 'clsx';
 
 export function DMList() {
-  const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, deleteConversation } = useDMStore();
+  const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, participantStatuses, deleteConversation } = useDMStore();
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const pendingIncoming = useFriendStore((s) => s.pendingIncoming);
 
@@ -101,6 +101,7 @@ export function DMList() {
                 avatarUrl={conv.participant.avatarUrl}
                 displayName={conv.participant.displayName}
                 size="sm"
+                status={participantStatuses[conv.participant.id] || 'offline'}
               />
               <div className="min-w-0 flex-1">
                 <span className={clsx(

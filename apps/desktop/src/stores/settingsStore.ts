@@ -10,6 +10,7 @@ interface PersistedSettings {
   noiseGateThreshold: number;
   voiceMode: VoiceMode;
   pushToTalkKey: string;
+  enableNoiseSuppression: boolean;
   enableNotificationSounds: boolean;
   enableDesktopNotifications: boolean;
 }
@@ -23,6 +24,7 @@ interface SettingsState extends PersistedSettings {
   setNoiseGateThreshold: (threshold: number) => void;
   setVoiceMode: (mode: VoiceMode) => void;
   setPushToTalkKey: (key: string) => void;
+  setEnableNoiseSuppression: (enabled: boolean) => void;
   setEnableNotificationSounds: (enabled: boolean) => void;
   setEnableDesktopNotifications: (enabled: boolean) => void;
 }
@@ -35,9 +37,10 @@ function loadPersistedSettings(): PersistedSettings {
       return {
         audioInputDeviceId: parsed.audioInputDeviceId || '',
         audioOutputDeviceId: parsed.audioOutputDeviceId || '',
-        noiseGateThreshold: typeof parsed.noiseGateThreshold === 'number' ? parsed.noiseGateThreshold : 0.015,
+        noiseGateThreshold: typeof parsed.noiseGateThreshold === 'number' ? parsed.noiseGateThreshold : 0.03,
         voiceMode: parsed.voiceMode === 'push_to_talk' ? 'push_to_talk' : 'voice_activity',
         pushToTalkKey: typeof parsed.pushToTalkKey === 'string' ? parsed.pushToTalkKey : 'Backquote',
+        enableNoiseSuppression: parsed.enableNoiseSuppression !== false,
         enableNotificationSounds: parsed.enableNotificationSounds !== false,
         enableDesktopNotifications: parsed.enableDesktopNotifications !== false,
       };
@@ -45,7 +48,7 @@ function loadPersistedSettings(): PersistedSettings {
   } catch {
     // ignore parse errors
   }
-  return { audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.015, voiceMode: 'voice_activity', pushToTalkKey: 'Backquote', enableNotificationSounds: true, enableDesktopNotifications: true };
+  return { audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.008, voiceMode: 'voice_activity', pushToTalkKey: 'Backquote', enableNoiseSuppression: true, enableNotificationSounds: true, enableDesktopNotifications: true };
 }
 
 function persistSettings(state: PersistedSettings) {
@@ -56,6 +59,7 @@ function persistSettings(state: PersistedSettings) {
       noiseGateThreshold: state.noiseGateThreshold,
       voiceMode: state.voiceMode,
       pushToTalkKey: state.pushToTalkKey,
+      enableNoiseSuppression: state.enableNoiseSuppression,
       enableNotificationSounds: state.enableNotificationSounds,
       enableDesktopNotifications: state.enableDesktopNotifications,
     }));
@@ -86,6 +90,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setNoiseGateThreshold: (threshold: number) => {
     set({ noiseGateThreshold: threshold });
     persistSettings(get());
+    // Sync to the live audioAnalyser immediately so the slider takes effect in real-time
+    import('../services/audioAnalyser').then(({ setNoiseGateThreshold: setAnalyserThreshold }) => {
+      setAnalyserThreshold(threshold);
+    });
   },
 
   setVoiceMode: (mode: VoiceMode) => {
@@ -96,6 +104,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setPushToTalkKey: (key: string) => {
     set({ pushToTalkKey: key });
     persistSettings(get());
+  },
+
+  setEnableNoiseSuppression: (enabled: boolean) => {
+    set({ enableNoiseSuppression: enabled });
+    persistSettings(get());
+    // Sync to the live audioAnalyser immediately
+    import('../services/audioAnalyser').then(({ setNoiseSuppression }) => {
+      setNoiseSuppression(enabled);
+    });
   },
 
   setEnableNotificationSounds: (enabled: boolean) => {

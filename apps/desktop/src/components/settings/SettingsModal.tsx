@@ -3,7 +3,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Keyboard, Volume2, Bell, User, Headphones, Lock, Eye, EyeOff } from 'lucide-react';
+import { X, Keyboard, Volume2, Bell, User, Headphones, Lock, Eye, EyeOff, AudioLines } from 'lucide-react';
 import { LIMITS } from '@voxium/shared';
 
 interface DeviceInfo {
@@ -331,6 +331,7 @@ function AudioTab() {
     noiseGateThreshold,
     voiceMode,
     pushToTalkKey,
+    enableNoiseSuppression,
     enableNotificationSounds,
     enableDesktopNotifications,
     setAudioInputDeviceId,
@@ -338,6 +339,7 @@ function AudioTab() {
     setNoiseGateThreshold,
     setVoiceMode,
     setPushToTalkKey,
+    setEnableNoiseSuppression,
     setEnableNotificationSounds,
     setEnableDesktopNotifications,
   } = useSettingsStore();
@@ -497,6 +499,34 @@ function AudioTab() {
         </select>
       </div>
 
+      {/* Noise Suppression */}
+      <div className="mb-5">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AudioLines size={16} className="text-vox-text-muted" />
+            <div>
+              <p className="text-sm text-vox-text-primary">AI Noise Suppression</p>
+              <p className="text-[10px] text-vox-text-muted">ML-powered filter (RNNoise) removes keyboard, mouse, and background noise</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enableNoiseSuppression}
+            onClick={() => setEnableNoiseSuppression(!enableNoiseSuppression)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+              enableNoiseSuppression ? 'bg-vox-accent-primary' : 'bg-vox-bg-secondary'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform mt-0.5 ${
+                enableNoiseSuppression ? 'translate-x-[22px]' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+      </div>
+
       {/* Voice Mode */}
       <div className="mb-5">
         <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
@@ -547,21 +577,20 @@ function AudioTab() {
           Mic Sensitivity
         </label>
         <div className="flex items-center gap-3">
+          <span className="text-[10px] text-vox-text-muted">Sensitive</span>
           <input
             type="range"
-            min="0.005"
-            max="0.1"
-            step="0.005"
+            min="0.002"
+            max="0.05"
+            step="0.001"
             value={noiseGateThreshold}
             onChange={(e) => setNoiseGateThreshold(parseFloat(e.target.value))}
             className="flex-1 accent-vox-accent-primary"
           />
-          <span className="text-xs text-vox-text-secondary w-8 text-right">
-            {Math.round(noiseGateThreshold * 1000)}
-          </span>
+          <span className="text-[10px] text-vox-text-muted">Aggressive</span>
         </div>
         <p className="mt-1 text-[10px] text-vox-text-muted">
-          Lower = more sensitive (picks up quieter sounds)
+          Filters background noise (keyboard, mouse). Move right to filter more.
         </p>
       </div>}
 

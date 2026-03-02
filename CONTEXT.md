@@ -6,9 +6,9 @@
 
 ## Project Status
 
-**Version:** 0.9.6 (Screen Sharing)
-**Date:** 2026-03-01
-**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, DM call conversation hydration for brand-new conversations, channel categories with collapsible UI, drag-and-drop channel/category reordering, message search (server + DM) with jump-to-message navigation, and screen sharing in server voice channels with inline/floating viewer modes
+**Version:** 0.9.7 (ML Noise Suppression)
+**Date:** 2026-03-02
+**Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, DM call conversation hydration for brand-new conversations, channel categories with collapsible UI, drag-and-drop channel/category reordering, message search (server + DM) with jump-to-message navigation, screen sharing in server voice channels with inline/floating viewer modes, and ML-based noise suppression (RNNoise WASM AudioWorklet) with Opus SDP optimization
 
 ## What Has Been Done
 
@@ -1739,3 +1739,42 @@ Added `DEPLOYMENT.md` — a comprehensive single-server deployment guide targeti
 
 **Files added:**
 - `DEPLOYMENT.md` — production deployment guide (871 lines)
+
+---
+
+### ML Noise Suppression & Opus SDP Optimization (v0.9.7)
+
+**Date:** 2026-03-02
+
+**What was changed:**
+Production-grade ML-based noise suppression using RNNoise WASM AudioWorklet, Opus codec SDP optimization for voice chat, and a user-facing noise suppression settings toggle.
+
+**New dependency:** `@timephy/rnnoise-wasm` ^1.0.0 — RNNoise ML noise suppression compiled to WASM, runs in an AudioWorklet thread for zero main-thread blocking.
+
+**Architecture decisions:**
+- **RNNoise integration via AudioWorklet:** The `NoiseSuppressorWorklet` WASM module runs in a separate audio thread. Loaded asynchronously -- the audio pipeline starts immediately without RNNoise (source -> analyser -> gain -> destination), and RNNoise is inserted once the worklet finishes loading (source -> RNNoise -> analyser -> gain -> destination). This avoids blocking the voice join flow.
+- **Live toggle without pipeline teardown:** `setNoiseSuppression(enabled)` reconnects nodes via `rebuildPipeline()` without destroying the AudioContext or worklet. When toggled off, the RNNoise node is disconnected but kept alive for fast re-enable.
+- **SDP munging for Opus optimization:** `optimizeOpusSDP()` sets `usedtx=1` (20x bandwidth reduction during silence), `useinbandfec=1` (packet loss recovery), `maxaveragebitrate=32000` (32kbps mono voice), `stereo=0`. Applied to all SDP creation paths: initial offers, answers, renegotiation offers, and ICE restart offers.
+- **Consistent noise suppression state sync:** `setNoiseSuppression(settings.enableNoiseSuppression)` is called at all 3 voice entry points (joinChannel, joinDMCall, socket reconnect handler) to ensure the pipeline state matches the user's persisted preference.
+
+**Audio pipeline (with RNNoise enabled):**
+```
+mic -> MediaStreamSource -> RNNoise AudioWorklet -> AnalyserNode -> GainNode (noise gate) -> MediaStreamDestination -> WebRTC peers
+```
+
+**Files added:**
+- `apps/desktop/src/services/sdpUtils.ts` — `optimizeOpusSDP()` pure function for Opus codec parameter optimization in SDP offers/answers
+
+**Files modified:**
+- `apps/desktop/src/services/audioAnalyser.ts` — RNNoise AudioWorklet integration: `loadRNNoiseWorklet()`, `rebuildPipeline()`, `setNoiseSuppression()` export, worklet cleanup in `stopSpeakingDetection()`, orphan node cleanup on pipeline teardown during async load
+- `apps/desktop/src/stores/settingsStore.ts` — `enableNoiseSuppression` persisted setting (default: true), live sync to audio analyser via dynamic import
+- `apps/desktop/src/stores/voiceStore.ts` — `optimizeOpusSDP` applied at all 5 SDP creation points, `setNoiseSuppression` sync at all 3 voice entry points
+- `apps/desktop/src/components/settings/SettingsModal.tsx` — AI Noise Suppression toggle in Audio tab with `AudioLines` icon
+- `apps/desktop/src/vite-env.d.ts` — type declaration for `@timephy/rnnoise-wasm/NoiseSuppressorWorklet?worker&url` Vite import
+
+**Review status:** Approved with suggestions. No critical or warning-level issues found.
+
+**Known issues / suggestions:**
+- `acquireAudioStream()` in `voiceStore.ts` sets browser-level `noiseSuppression: true` as a media constraint. When RNNoise is enabled, this means two noise suppression algorithms run in series (browser built-in + RNNoise), which may cause audio artifacts. Consider conditionally setting `noiseSuppression: false` when RNNoise is active.
+- The speaking detection tick interval was reduced from 50ms to 20ms (2.5x more CPU for the detection loop). The CLAUDE.md documentation still references "50ms".
+- When noise suppression is toggled off, the RNNoise AudioWorklet node is kept alive but disconnected. This is a deliberate tradeoff (fast re-enable vs. idle thread). Consider destroying the node on disable if memory is a concern.
