@@ -16,6 +16,7 @@ let _friendRequestLimiter: RateLimiterRedis | null = null;
 let _memberManageLimiter: RateLimiterRedis | null = null;
 let _categoryManageLimiter: RateLimiterRedis | null = null;
 let _searchLimiter: RateLimiterRedis | null = null;
+let _statsLimiter: RateLimiterRedis | null = null;
 let _generalLimiter: RateLimiterRedis | null = null;
 
 function createLimiter(opts: {
@@ -102,6 +103,11 @@ function getSearchLimiter() {
   return _searchLimiter;
 }
 
+function getStatsLimiter() {
+  if (!_statsLimiter) _statsLimiter = createLimiter({ keyPrefix: 'rl:stats', points: 30, duration: 60 });
+  return _statsLimiter;
+}
+
 function getGeneralLimiter() {
   if (!_generalLimiter) _generalLimiter = createLimiter({ keyPrefix: 'rl:general', points: 100, duration: 60 });
   return _generalLimiter;
@@ -147,6 +153,7 @@ export const rateLimitFriendRequest = createMiddleware(getFriendRequestLimiter, 
 export const rateLimitMemberManage = createMiddleware(getMemberManageLimiter, byUserId);
 export const rateLimitCategoryManage = createMiddleware(getCategoryManageLimiter, byUserId);
 export const rateLimitSearch = createMiddleware(getSearchLimiter, byUserId);
+export const rateLimitStats = createMiddleware(getStatsLimiter, byIp);
 export const rateLimitGeneral = createMiddleware(getGeneralLimiter, byIp);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────

@@ -7,6 +7,9 @@ import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { InvitePage } from './pages/InvitePage';
 import { LandingPage } from './pages/LandingPage';
+import { TermsPage } from './pages/TermsPage';
+import { PrivacyPage } from './pages/PrivacyPage';
+import { CookiePolicyPage } from './pages/CookiePolicyPage';
 import { MainLayout } from './components/layout/MainLayout';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { ToastContainer } from './components/layout/ToastContainer';
@@ -76,6 +79,9 @@ export function App() {
             path="/invite/:code"
             element={isAuthenticated ? <InvitePage /> : <SaveAndRedirect />}
           />
+          <Route path="/terms" element={<TermsPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
+          <Route path="/cookies" element={<CookiePolicyPage />} />
           <Route
             path="/"
             element={

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Mic2,
@@ -15,6 +15,7 @@ import {
   Laptop,
   Terminal,
   ArrowRight,
+  Server,
 } from 'lucide-react';
 
 /* ─── Animated SVG Illustrations ─── */
@@ -569,6 +570,132 @@ function Hero() {
   );
 }
 
+/* ─── Animated Counter Hook ─── */
+
+function useCountUp(target: number, duration = 1500): number {
+  const [value, setValue] = useState(0);
+  const rafRef = useRef(0);
+  const prevRef = useRef(0);
+
+  useEffect(() => {
+    const from = prevRef.current;
+    prevRef.current = target;
+
+    if (target === from) return;
+
+    const start = performance.now();
+    const animate = (now: number) => {
+      const elapsed = now - start;
+      const progress = Math.min(elapsed / duration, 1);
+      // ease-out cubic
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setValue(Math.round(from + eased * (target - from)));
+      if (progress < 1) rafRef.current = requestAnimationFrame(animate);
+    };
+    rafRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [target, duration]);
+
+  return value;
+}
+
+function formatNumber(n: number): string {
+  return n.toLocaleString('en-US');
+}
+
+/* ─── Stats Section ─── */
+
+function StatsSection() {
+  const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
+  const [stats, setStats] = useState<{ users: number; servers: number; messages: number } | null>(null);
+  const [visible, setVisible] = useState(false);
+  const sectionRef = useRef<HTMLDivElement>(null);
+
+  const fetchStats = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/stats`);
+      if (res.ok) {
+        const json = await res.json();
+        setStats(json.data);
+      }
+    } catch {
+      // silently ignore — stats are non-critical
+    }
+  }, [API_BASE]);
+
+  // Fetch on mount + poll every 30s
+  useEffect(() => {
+    fetchStats();
+    const interval = setInterval(fetchStats, 30_000);
+    return () => clearInterval(interval);
+  }, [fetchStats]);
+
+  // Intersection observer for count-up trigger
+  useEffect(() => {
+    const el = sectionRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) setVisible(true); },
+      { threshold: 0.3 },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const usersCount = useCountUp(visible && stats ? stats.users : 0);
+  const serversCount = useCountUp(visible && stats ? stats.servers : 0);
+  const messagesCount = useCountUp(visible && stats ? stats.messages : 0);
+
+  const cards = [
+    { icon: Users, label: 'Users Registered', value: usersCount, gradient: 'from-[#5B21B6] to-[#7C3AED]' },
+    { icon: Server, label: 'Servers Created', value: serversCount, gradient: 'from-[#3B82F6] to-[#60A5FA]' },
+    { icon: MessageSquare, label: 'Messages Sent', value: messagesCount, gradient: 'from-[#5b5bf7] to-[#A78BFA]' },
+  ];
+
+  return (
+    <section ref={sectionRef} className="relative bg-vox-bg-primary py-20 overflow-hidden">
+      {/* Subtle gradient backdrop */}
+      <div
+        className="absolute inset-0 opacity-10"
+        style={{ background: 'radial-gradient(ellipse at center, #5b5bf7 0%, transparent 70%)' }}
+      />
+
+      <div className="relative z-10 max-w-5xl mx-auto px-6">
+        <h2 className="text-2xl sm:text-3xl font-bold text-vox-text-primary text-center mb-3">
+          Growing Together
+        </h2>
+        <p className="text-vox-text-secondary text-center mb-12 max-w-lg mx-auto text-sm">
+          Real numbers from the Voxium community — updated live.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+          {cards.map((card) => (
+            <div
+              key={card.label}
+              className="group relative rounded-xl border border-vox-border bg-vox-bg-secondary p-6 text-center hover:border-vox-accent-primary/40 transition-all duration-300"
+            >
+              {/* Icon */}
+              <div className={`h-12 w-12 rounded-lg bg-gradient-to-br ${card.gradient} bg-opacity-20 flex items-center justify-center mx-auto mb-4`}
+                style={{ background: `linear-gradient(135deg, ${card.gradient.includes('5B21B6') ? 'rgba(91,33,182,0.15)' : card.gradient.includes('3B82F6') ? 'rgba(59,130,246,0.15)' : 'rgba(91,91,247,0.15)'}, ${card.gradient.includes('7C3AED') ? 'rgba(124,58,237,0.15)' : card.gradient.includes('60A5FA') ? 'rgba(96,165,250,0.15)' : 'rgba(167,139,250,0.15)'})` }}
+              >
+                <card.icon className="h-6 w-6 text-vox-accent-primary" />
+              </div>
+
+              {/* Number */}
+              <div className="text-3xl sm:text-4xl font-extrabold text-vox-text-primary mb-1 tabular-nums">
+                {stats ? formatNumber(card.value) : '—'}
+              </div>
+
+              {/* Label */}
+              <div className="text-sm text-vox-text-secondary">{card.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function Features() {
   return (
     <section className="relative bg-vox-bg-secondary py-24">
@@ -715,7 +842,7 @@ function Footer() {
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">Product</h4>
             <ul className="space-y-2">
               <li><a href="#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Download</a></li>
-              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Changelog</a></li>
+              <li><a href="https://github.com/Aizen93/voxium/releases" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Changelog</a></li>
               <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Status</a></li>
             </ul>
           </div>
@@ -724,8 +851,9 @@ function Footer() {
           <div>
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">Legal</h4>
             <ul className="space-y-2">
-              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Privacy Policy</a></li>
-              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Terms of Service</a></li>
+              <li><Link to="/privacy" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Privacy Policy</Link></li>
+              <li><Link to="/terms" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Terms of Service</Link></li>
+              <li><Link to="/cookies" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Cookie Policy</Link></li>
             </ul>
           </div>
 
@@ -733,7 +861,7 @@ function Footer() {
           <div>
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">Community</h4>
             <ul className="space-y-2">
-              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">GitHub</a></li>
+              <li><a href="https://github.com/Aizen93/voxium" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">GitHub</a></li>
               <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Contributing</a></li>
             </ul>
           </div>
@@ -766,6 +894,7 @@ export function LandingPage() {
     <div className="bg-vox-bg-primary text-vox-text-primary">
       <Navbar />
       <Hero />
+      <StatsSection />
       <Features />
       <WhyVoxium />
       <FinalCTA />

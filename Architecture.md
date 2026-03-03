@@ -224,8 +224,8 @@ apps/desktop/
 │   ├── main.tsx              # React entry point
 │   ├── App.tsx               # Root component with routing
 │   ├── pages/
-│   │   ├── LoginPage.tsx          # Login form + forgot password link
-│   │   ├── RegisterPage.tsx       # Registration form
+│   │   ├── LoginPage.tsx          # Login form + forgot password link + peeking thief
+│   │   ├── RegisterPage.tsx       # Registration form + peeking thief
 │   │   ├── ForgotPasswordPage.tsx # Email input → sends reset link
 │   │   ├── ResetPasswordPage.tsx  # Token-based new password form
 │   │   └── InvitePage.tsx         # Invite preview + join
@@ -233,6 +233,9 @@ apps/desktop/
 │   │   ├── layout/
 │   │   │   ├── MainLayout.tsx    # 3-panel Discord-like layout
 │   │   │   └── ToastContainer.tsx # Fixed-position toast notification overlay
+│   │   ├── auth/
+│   │   │   ├── AuthBackground.tsx     # Animated auth page background
+│   │   │   └── PeekingThief.tsx       # SVG thief character (reacts to password typing)
 │   │   ├── server/
 │   │   │   ├── ServerSidebar.tsx      # Server icon strip (far left)
 │   │   │   ├── CreateServerModal.tsx  # Create/join server with icon upload

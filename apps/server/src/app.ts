@@ -14,6 +14,7 @@ import { dmRouter } from './routes/dm';
 import { friendRouter } from './routes/friends';
 import { categoryRouter } from './routes/categories';
 import { searchRouter } from './routes/search';
+import { statsRouter } from './routes/stats';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 
@@ -71,6 +72,7 @@ api.use('/uploads', uploadRouter);
 api.use('/dm', dmRouter);
 api.use('/friends', friendRouter);
 api.use('/search', searchRouter);
+api.use('/stats', statsRouter);
 
 app.use('/api/v1', api);
 

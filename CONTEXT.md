@@ -6,8 +6,8 @@
 
 ## Project Status
 
-**Version:** 0.9.7 (ML Noise Suppression)
-**Date:** 2026-03-02
+**Version:** 0.9.8 (Auth Page Peeking Thief)
+**Date:** 2026-03-03
 **Stage:** Full TypeScript strict compliance across server and desktop, pre-commit type-check gate, real-time channel CRUD, push-to-talk voice mode, notification sounds, unread message indicators with server-level count badges (persistent across refresh/reconnect via server-side read tracking), toast notification system, message editing and deletion UI, message reactions with emoji picker, S3 file uploads with avatar and server icon support (presigned URL direct upload), real-time avatar and profile updates across all clients, forgot password flow with email reset tokens, authenticated password change from settings, token version-based refresh token invalidation, 1-on-1 direct messages with real-time delivery, typing indicators, reactions, persistent unread tracking, delete DM conversations with real-time sync, 1-on-1 DM voice calls with WebRTC P2P audio, friend request system with real-time notifications, comprehensive rate limiting (per-endpoint + socket-level), input sanitization (HTML stripping + validation), WebRTC perfect negotiation for glare-free DM calls, Tauri desktop icon integration, Remember Me login with dual-storage token management, Tauri native desktop notifications, message replies with reply preview and scroll-to-original, client-side image processing with presigned S3 uploads, looping incoming call ringtone, DM profile popup fallback via API fetch, DM call conversation hydration for brand-new conversations, channel categories with collapsible UI, drag-and-drop channel/category reordering, message search (server + DM) with jump-to-message navigation, screen sharing in server voice channels with inline/floating viewer modes, and ML-based noise suppression (RNNoise WASM AudioWorklet) with Opus SDP optimization
 
 ## What Has Been Done
@@ -88,8 +88,8 @@ A complete React + TypeScript frontend with Tauri 2 desktop wrapper:
 - **Routing:** React Router v7
 - **Desktop Wrapper:** Tauri 2.0 (Rust-based, ~10x smaller than Electron)
 - **Pages:**
-  - Login page with email/password
-  - Registration page
+  - Login page with email/password + animated peeking thief character
+  - Registration page + animated peeking thief character
   - Invite page (`/invite/:code`) — server preview card with member count, join button
   - Main app layout (3-panel Discord-like design)
 - **Components:**
@@ -1778,3 +1778,34 @@ mic -> MediaStreamSource -> RNNoise AudioWorklet -> AnalyserNode -> GainNode (no
 - `acquireAudioStream()` in `voiceStore.ts` sets browser-level `noiseSuppression: true` as a media constraint. When RNNoise is enabled, this means two noise suppression algorithms run in series (browser built-in + RNNoise), which may cause audio artifacts. Consider conditionally setting `noiseSuppression: false` when RNNoise is active.
 - The speaking detection tick interval was reduced from 50ms to 20ms (2.5x more CPU for the detection loop). The CLAUDE.md documentation still references "50ms".
 - When noise suppression is toggled off, the RNNoise AudioWorklet node is kept alive but disconnected. This is a deliberate tradeoff (fast re-enable vs. idle thread). Consider destroying the node on disable if memory is a concern.
+
+---
+
+### Auth Page Peeking Thief Character (v0.9.8)
+
+**Date:** 2026-03-03
+
+**What was changed:**
+Added an animated SVG thief character that peeks over the top of the login/register card. The thief reacts to password input — eyes widen, look down toward the password field, and shake when the user types; blinks idly and looks to the side when not typing.
+
+**Component: `PeekingThief` (`apps/desktop/src/components/auth/PeekingThief.tsx`):**
+- Pure SVG character: dark beanie with pom-pom, rounded face, classic thief eye-mask (dark band across eyes), white eyes with dark pupils, two small hands gripping the card edge
+- Single `isWatching: boolean` prop drives all visual state
+- **Idle state (`isWatching=false`):** Small/relaxed eyes (r=6), pupils look to the side (cx offset), CSS blink animation every ~3s (`thief-blink` keyframe), normal position
+- **Watching state (`isWatching=true`):** Large eyes (r=9), pupils snap to center and shift down (cy=40, looking at password), eye shake animation (`thief-eye-shake` keyframe — 0.4s jitter), slight upward lean (-4px translateY)
+- All transitions smoothed with `transition: all 0.3s ease` on individual SVG attributes (cx, cy, rx, ry, r)
+- Positioned absolutely above the card (`-top-[52px]`, centered via `left-1/2 -translate-x-1/2`), `pointer-events-none`
+
+**Login/Register page changes:**
+- `isPasswordFocused` state — `onFocus`/`onBlur` on password input
+- `isTypingPassword` with 1.5s debounce — true on password `onChange`, resets via `setTimeout` after 1.5s idle
+- Derived: `isWatching = isPasswordFocused && isTypingPassword`
+- Card wrapper gains `pt-14` for thief headroom, inner `<div className="relative">` hosts the absolutely-positioned thief above the card
+- Password input `onChange` uses `handlePasswordChange()` callback (sets value, clears error, triggers typing debounce)
+
+**Files added:**
+- `apps/desktop/src/components/auth/PeekingThief.tsx` — animated SVG thief component
+
+**Files modified:**
+- `apps/desktop/src/pages/LoginPage.tsx` — PeekingThief integration, password focus/typing tracking
+- `apps/desktop/src/pages/RegisterPage.tsx` — PeekingThief integration, password focus/typing tracking

@@ -11,6 +11,7 @@ interface AuthState {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  isSubmitting: boolean;
   error: string | null;
 
   login: (email: string, password: string, rememberMe?: boolean) => Promise<void>;
@@ -29,10 +30,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   isAuthenticated: false,
   isLoading: true,
+  isSubmitting: false,
   error: null,
 
   login: async (email, password, rememberMe = true) => {
-    set({ isLoading: true, error: null });
+    set({ isSubmitting: true, error: null });
     try {
       const { data } = await api.post('/auth/login', { email, password, rememberMe });
       const { user, accessToken, refreshToken } = data.data;
@@ -41,18 +43,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       connectSocket(accessToken);
 
-      set({ user, isAuthenticated: true, isLoading: false });
+      set({ user, isAuthenticated: true, isSubmitting: false });
     } catch (err: any) {
       set({
         error: err.response?.data?.error || 'Login failed',
-        isLoading: false,
+        isSubmitting: false,
       });
       throw err;
     }
   },
 
   register: async (username, email, password) => {
-    set({ isLoading: true, error: null });
+    set({ isSubmitting: true, error: null });
     try {
       const { data } = await api.post('/auth/register', { username, email, password });
       const { user, accessToken, refreshToken } = data.data;
@@ -61,11 +63,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       connectSocket(accessToken);
 
-      set({ user, isAuthenticated: true, isLoading: false });
+      set({ user, isAuthenticated: true, isSubmitting: false });
     } catch (err: any) {
       set({
         error: err.response?.data?.error || 'Registration failed',
-        isLoading: false,
+        isSubmitting: false,
       });
       throw err;
     }
