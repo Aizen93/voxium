@@ -248,9 +248,9 @@ function ShieldSvg({ className }: { className?: string }) {
 /* ─── Download URLs ─── */
 
 const DOWNLOAD_URLS = {
-  windows: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.6_x64-setup.exe',
-  macos: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.6_aarch64.dmg',
-  linux: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.6_amd64.deb',
+  windows: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.8_x64-setup.exe',
+  macos: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.8_aarch64.dmg',
+  linux: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.8_amd64.deb',
   releases: 'https://github.com/Aizen93/voxium/releases',
 };
 
