@@ -17,6 +17,7 @@ import {
   ArrowRight,
   Server,
 } from 'lucide-react';
+import { APP_VERSION } from '@voxium/shared';
 
 /* ─── Animated SVG Illustrations ─── */
 
@@ -248,9 +249,9 @@ function ShieldSvg({ className }: { className?: string }) {
 /* ─── Download URLs ─── */
 
 const DOWNLOAD_URLS = {
-  windows: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.8_x64-setup.exe',
-  macos: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.8_aarch64.dmg',
-  linux: 'https://github.com/Aizen93/voxium/releases/latest/download/Voxium_0.9.8_amd64.deb',
+  windows: `https://github.com/Aizen93/voxium/releases/latest/download/Voxium_${APP_VERSION}_x64-setup.exe`,
+  macos: `https://github.com/Aizen93/voxium/releases/latest/download/Voxium_${APP_VERSION}_aarch64.dmg`,
+  linux: `https://github.com/Aizen93/voxium/releases/latest/download/Voxium_${APP_VERSION}_amd64.deb`,
   releases: 'https://github.com/Aizen93/voxium/releases',
 };
 

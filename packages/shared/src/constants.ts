@@ -1,5 +1,7 @@
+import pkg from '../package.json' with { type: 'json' };
+
 export const APP_NAME = 'Voxium';
-export const APP_VERSION = '0.9.8';
+export const APP_VERSION = pkg.version;
 
 export const API_VERSION = 'v1';
 
