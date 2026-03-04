@@ -118,6 +118,20 @@ export function leaveCurrentDMVoiceChannel(
   createSystemMessage(io, conversationId, userId, 'Voice call ended');
 }
 
+/** Returns count of active DM calls */
+export function getActiveDMCallCount(): number {
+  return dmVoiceUsers.size;
+}
+
+/** Returns total number of users in all DM calls */
+export function getTotalDMVoiceUsers(): number {
+  let count = 0;
+  for (const users of dmVoiceUsers.values()) {
+    count += users.size;
+  }
+  return count;
+}
+
 export function handleDMVoiceEvents(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   socket: Socket<ClientToServerEvents, ServerToClientEvents>

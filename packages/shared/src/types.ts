@@ -1,5 +1,7 @@
 // ─── User ────────────────────────────────────────────────────────────────────
 
+export type UserRole = 'user' | 'admin' | 'superadmin';
+
 export interface User {
   id: string;
   username: string;
@@ -8,6 +10,7 @@ export interface User {
   avatarUrl: string | null;
   bio: string | null;
   status: UserStatus;
+  role: UserRole;
   createdAt: string;
 }
 
@@ -266,6 +269,8 @@ export interface ServerToClientEvents {
   'voice:screen_share:start': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:stop': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:state': (data: { channelId: string; sharingUserId: string | null }) => void;
+  'admin:metrics': (data: AdminMetricsSnapshot) => void;
+  'force:logout': (data: { reason: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -292,6 +297,8 @@ export interface ClientToServerEvents {
   'dm:voice:decline': (conversationId: string) => void;
   'voice:screen_share:start': () => void;
   'voice:screen_share:stop': () => void;
+  'admin:subscribe_metrics': () => void;
+  'admin:unsubscribe_metrics': () => void;
 }
 
 // ─── API Response ────────────────────────────────────────────────────────────
@@ -343,4 +350,66 @@ export interface Invite {
   serverId: string;
   createdBy: string;
   expiresAt: string | null;
+}
+
+// ─── Admin ──────────────────────────────────────────────────────────────────
+
+export interface AdminUser {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  avatarUrl: string | null;
+  role: UserRole;
+  status: UserStatus;
+  bannedAt: string | null;
+  banReason: string | null;
+  createdAt: string;
+}
+
+export interface AdminServer {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  ownerId: string;
+  ownerUsername: string;
+  memberCount: number;
+  channelCount: number;
+  messageCount: number;
+  createdAt: string;
+}
+
+export interface BanRecord {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  bannedAt: string;
+  banReason: string | null;
+}
+
+export interface IpBanRecord {
+  id: string;
+  ip: string;
+  reason: string | null;
+  bannedBy: string;
+  bannedByUsername: string;
+  createdAt: string;
+}
+
+export interface AdminDashboardStats {
+  totalUsers: number;
+  totalServers: number;
+  totalMessages: number;
+  onlineUsers: number;
+  bannedUsers: number;
+}
+
+export interface AdminMetricsSnapshot {
+  onlineUsers: number;
+  voiceChannels: number;
+  voiceUsers: number;
+  dmCalls: number;
+  dmVoiceUsers: number;
+  messagesLastHour: number;
 }

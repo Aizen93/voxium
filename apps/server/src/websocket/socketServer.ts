@@ -29,16 +29,35 @@ export function initSocketServer(httpServer: HttpServer) {
   });
 
   // ─── Authentication middleware ───────────────────────────────────────
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) return next(new Error('Authentication required'));
 
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
+
+      // Check account ban
+      const user = await prisma.user.findUnique({
+        where: { id: payload.userId },
+        select: { bannedAt: true },
+      });
+      if (user?.bannedAt) return next(new Error('Account banned'));
+
+      // Check IP ban
+      const ip = socket.handshake.address;
+      if (ip) {
+        const ipBan = await prisma.ipBan.findUnique({ where: { ip } });
+        if (ipBan) return next(new Error('Account banned'));
+      }
+
       socket.data.userId = payload.userId;
       socket.data.username = payload.username;
+      socket.data.role = payload.role;
       next();
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Account banned') {
+        return next(err);
+      }
       next(new Error('Invalid token'));
     }
   });
@@ -127,6 +146,17 @@ export function initSocketServer(httpServer: HttpServer) {
     // ─── DM Voice events ─────────────────────────────────────────────
     handleDMVoiceEvents(io, socket);
 
+    // ─── Admin metrics subscription ──────────────────────────────────
+    socket.on('admin:subscribe_metrics', () => {
+      if (!socketRateLimit(socket, 'admin:subscribe_metrics', 10)) return;
+      if (socket.data.role !== 'superadmin') return;
+      socket.join('admin:metrics');
+    });
+
+    socket.on('admin:unsubscribe_metrics', () => {
+      socket.leave('admin:metrics');
+    });
+
     // ─── Disconnect ─────────────────────────────────────────────────
     socket.on('disconnecting', async () => {
       console.log(`[WS] User disconnecting: ${userId}`);
@@ -160,6 +190,16 @@ export function initSocketServer(httpServer: HttpServer) {
     try {
       // Track online presence
       await setUserOnline(userId, socket.id);
+
+      // Upsert IP record
+      const connectIp = socket.handshake.address;
+      if (connectIp) {
+        await prisma.ipRecord.upsert({
+          where: { userId_ip: { userId, ip: connectIp } },
+          update: { lastSeenAt: new Date() },
+          create: { userId, ip: connectIp },
+        }).catch(() => {}); // Non-critical
+      }
 
       // Join rooms for all servers the user is a member of
       const memberships = await prisma.serverMember.findMany({

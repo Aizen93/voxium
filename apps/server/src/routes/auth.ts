@@ -23,7 +23,8 @@ authRouter.post('/register', rateLimitRegister, async (req: Request, res: Respon
 authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email, password, rememberMe } = req.body;
-    const result = await loginUser(email, password, rememberMe ?? true);
+    const ip = req.ip || req.socket.remoteAddress;
+    const result = await loginUser(email, password, rememberMe ?? true, ip);
 
     res.json({
       success: true,
@@ -60,6 +61,7 @@ authRouter.get('/me', authenticate, async (req: Request, res: Response, next: Ne
         avatarUrl: true,
         bio: true,
         status: true,
+        role: true,
         createdAt: true,
       },
     });

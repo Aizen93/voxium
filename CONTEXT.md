@@ -20,7 +20,8 @@ The project is organized as a **pnpm monorepo** with the following packages:
 Voxium/
 ├── apps/
 │   ├── server/           # Backend API + WebSocket + WebRTC signaling
-│   └── desktop/          # Tauri 2 + React frontend (cross-platform desktop)
+│   ├── desktop/          # Tauri 2 + React frontend (cross-platform desktop)
+│   └── admin/            # Standalone admin dashboard (React + Vite, port 8082)
 ├── packages/
 │   └── shared/           # Shared TypeScript types, validators, constants
 ├── docker-compose.yml    # PostgreSQL + Redis infrastructure
@@ -1809,3 +1810,76 @@ Added an animated SVG thief character that peeks over the top of the login/regis
 **Files modified:**
 - `apps/desktop/src/pages/LoginPage.tsx` — PeekingThief integration, password focus/typing tracking
 - `apps/desktop/src/pages/RegisterPage.tsx` — PeekingThief integration, password focus/typing tracking
+
+### Admin System (v0.9.8+)
+
+**Overview:** A comprehensive admin dashboard for platform moderation and monitoring. Extracted from the desktop app into a standalone `apps/admin/` web application. Includes user management (ban/unban/delete), server management (view/delete), IP ban management, dashboard stats, live metrics via WebSocket, and signup/message charts.
+
+**New app: `apps/admin/`**
+- Standalone React 19 + Vite + Tailwind app on port 8082
+- Login gated to `superadmin` role (client-side check after standard `/auth/login`, server-side enforced on all `/admin/*` routes)
+- Socket.IO connection for live admin metrics (online users, voice channels, DM calls, messages/hour)
+- Zustand stores: `authStore` (login/logout/checkAuth), `adminStore` (all CRUD + metrics), `toastStore` (notification queue)
+- Pages: `AdminLoginPage` (email/password with error display)
+- Components: `AdminGuard` (role check wrapper), `AdminLayout` (sidebar nav + content), `AdminDashboard` (stat cards + live metrics + SVG bar charts), `AdminUserList` (paginated table with search/filter/sort), `AdminUserDetail` (profile + IP history + ban/unban/delete actions), `AdminServerList` (paginated table with search + delete), `AdminBanList` (account bans + IP bans tabs with add/remove), `AdminConfirmModal` (reusable confirmation dialog), `AdminStatCard`, `AdminTable`, `ToastContainer`
+- Services: `tokenStorage.ts` (localStorage/sessionStorage dual-storage), `api.ts` (Axios with token refresh interceptor), `socket.ts` (Socket.IO client)
+
+**New server files:**
+- `apps/server/src/routes/admin.ts` — Admin API routes (all gated by `authenticate` + `requireSuperAdmin` + `rateLimitAdmin`):
+  - `GET /admin/stats` — Dashboard totals (users, servers, messages, online, banned)
+  - `GET /admin/users` — Paginated user list with search/filter/sort
+  - `GET /admin/users/:userId` — User detail with IP history and message/server counts
+  - `POST /admin/users/:userId/ban` — Ban user (optional reason + IP ban), invalidates tokens, force-disconnects socket
+  - `POST /admin/users/:userId/unban` — Unban user, releases IP bans (with shared-IP protection)
+  - `DELETE /admin/users/:userId` — Delete user (cascade), force-disconnects socket
+  - `GET /admin/servers` — Paginated server list with message counts
+  - `DELETE /admin/servers/:serverId` — Delete server with voice cleanup, socket room eviction, and cascade
+  - `GET /admin/bans` — Paginated banned user list
+  - `GET /admin/ip-bans` — Paginated IP ban list
+  - `POST /admin/ip-bans` — Create IP ban with IPv4/IPv6 validation
+  - `DELETE /admin/ip-bans/:id` — Remove IP ban
+  - `GET /admin/signups` — Chart data for signups per day (raw SQL)
+  - `GET /admin/messages-per-hour` — Chart data for messages per hour (raw SQL)
+- `apps/server/src/middleware/requireSuperAdmin.ts` — `requireSuperAdmin` and `requireAdmin` middleware functions
+- `apps/server/src/websocket/adminMetrics.ts` — 5-second interval emitter for live metrics (checks room occupancy before querying)
+
+**Modified server files:**
+- `apps/server/src/middleware/auth.ts` — Now performs DB lookup on every request to check `bannedAt` and `tokenVersion` (security improvement, performance tradeoff)
+- `apps/server/src/services/authService.ts` — IP ban error message changed to generic "banned" message (prevents information disclosure)
+- `apps/server/src/websocket/socketServer.ts` — Added IP ban check during socket auth, added `admin:subscribe_metrics` / `admin:unsubscribe_metrics` socket events with role check, IP record upsert on connect
+- `apps/server/src/middleware/rateLimiter.ts` — Added `rateLimitAdmin` (60 req/min, userId-based)
+- `apps/server/src/app.ts` — Mounted `adminRouter` at `/api/v1/admin`
+- `apps/server/src/index.ts` — Starts `adminMetricsEmitter` on boot
+
+**Modified desktop files:**
+- `apps/desktop/src/App.tsx` — Removed admin imports and `/admin` route (extracted to standalone app)
+- `apps/desktop/src/components/server/ServerSidebar.tsx` — Removed admin shield icon and navigation
+- `apps/desktop/src/services/socket.ts` — Added `force:logout` handler (dynamic import of authStore, calls logout + redirect)
+
+**Database changes (migration `20260304002347_add_admin_system`):**
+- `users` table: Added `banned_at` (timestamp), `ban_reason` (text), `role` (text, default "user")
+- New `ip_records` table: tracks user IP addresses with `last_seen_at`, composite unique on `[user_id, ip]`, index on `ip`
+- New `ip_bans` table: unique on `ip`, FK to banning user (`banned_by`)
+
+**Shared type additions:**
+- `ServerToClientEvents`: `admin:metrics`, `force:logout`
+- `ClientToServerEvents`: `admin:subscribe_metrics`, `admin:unsubscribe_metrics`
+- New interfaces: `AdminUser`, `AdminServer`, `BanRecord`, `IpBanRecord`, `AdminDashboardStats`, `AdminMetricsSnapshot`
+
+**Resolved issues from first review:**
+1. ~~Admin app socket does not handle `force:logout`~~ -- Fixed: admin socket.ts now handles `force:logout` (calls logout + redirects to /login)
+2. ~~Deleting a user who owns servers does not emit `server:deleted` events~~ -- Fixed: delete route now iterates owned servers, calls `cleanupServerVoice`, emits `server:deleted`, and evicts sockets from rooms before cascade delete
+3. ~~Live metrics stop updating after socket reconnection~~ -- Fixed: `subscribeMetrics` registers a reconnect callback via `onSocketReconnect` that re-emits `admin:subscribe_metrics` and re-registers the listener
+6. ~~IPv6 validation regex is simplified~~ -- Fixed server-side: IP validation now uses Node.js `net.isIP()` which handles both IPv4 and IPv6 correctly
+
+**Known issues from second-pass review:**
+1. [WARNING] Metrics listener accumulation on reconnect: the reconnect callback in `adminStore.subscribeMetrics` calls `s.on('admin:metrics', metricsHandler)` without first calling `s.off()`, causing duplicate listeners after each reconnect
+2. [WARNING] `fetchUserDetail`, `fetchBans`, and `fetchIpBans` in adminStore have no try/catch -- errors leave the UI in a permanent loading/blank state
+3. [WARNING] `IpBan.creator` relation has `onDelete: Cascade` in schema -- deleting an admin user cascade-deletes all IP bans they created (may be unintentional)
+4. CORS_ORIGIN must include the admin app's origin (e.g., `http://localhost:8082`) for both HTTP and WebSocket connections
+5. Admin app shares localStorage token keys (`voxium_access_token`) with desktop app (collision risk if served from same domain; isolated by port in dev)
+6. Auth middleware DB query on every request is a performance consideration at scale (could add Redis TTL cache for ban status)
+7. Ban/delete user does not emit `member:left` for non-owned server memberships (cosmetic: banned user remains in member lists until page refresh)
+8. Unused `date-fns` dependency in `apps/admin/package.json`
+9. `stopAdminMetricsEmitter()` is not called during server shutdown (no real leak since `process.exit` follows)
+10. Account ban login error in `authService.ts` line 73 includes ban reason string (inconsistent with generic IP ban message on line 63)

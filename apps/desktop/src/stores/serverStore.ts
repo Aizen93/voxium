@@ -164,6 +164,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
           avatarUrl: user.avatarUrl,
           bio: user.bio ?? null,
           status: user.status || 'online',
+          role: user.role || 'user',
           createdAt: user.createdAt,
         },
       };

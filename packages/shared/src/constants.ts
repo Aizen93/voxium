@@ -94,4 +94,7 @@ export const WS_EVENTS = {
   VOICE_SCREEN_SHARE_START: 'voice:screen_share:start',
   VOICE_SCREEN_SHARE_STOP: 'voice:screen_share:stop',
   VOICE_SCREEN_SHARE_STATE: 'voice:screen_share:state',
+  ADMIN_METRICS: 'admin:metrics',
+  ADMIN_SUBSCRIBE_METRICS: 'admin:subscribe_metrics',
+  ADMIN_UNSUBSCRIBE_METRICS: 'admin:unsubscribe_metrics',
 } as const;

@@ -306,6 +306,24 @@ export function getVoiceChannelUsers(channelId: string): string[] {
   return users ? Array.from(users.keys()) : [];
 }
 
+/** Returns count of active voice channels (channels with at least one user) */
+export function getActiveVoiceChannelCount(): number {
+  let count = 0;
+  for (const users of voiceChannelUsers.values()) {
+    if (users.size > 0) count++;
+  }
+  return count;
+}
+
+/** Returns total number of users in all voice channels */
+export function getTotalVoiceUsers(): number {
+  let count = 0;
+  for (const users of voiceChannelUsers.values()) {
+    count += users.size;
+  }
+  return count;
+}
+
 /** Returns all channelIds that belong to a given server and have active voice users */
 export function getVoiceStateForServer(serverId: string): { channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean }> }[] {
   const result: { channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean }> }[] = [];

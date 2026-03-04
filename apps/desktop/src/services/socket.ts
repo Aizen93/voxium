@@ -124,6 +124,15 @@ export function connectSocket(token: string): VoxSocket {
     }
   });
 
+  socket.on('force:logout', (data) => {
+    console.log('[WS] Force logout received:', data?.reason);
+    import('../stores/authStore').then(({ useAuthStore }) => {
+      useAuthStore.getState().logout();
+      const reason = data?.reason;
+      window.location.href = reason ? `/login?reason=${encodeURIComponent(reason)}` : '/login';
+    });
+  });
+
   socket.on('disconnect', (reason) => {
     console.log('[WS] Disconnected:', reason);
     setStatus('disconnected');

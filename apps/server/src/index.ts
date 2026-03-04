@@ -22,6 +22,7 @@ if (missing.length > 0) {
 import http from 'http';
 import { app } from './app';
 import { initSocketServer } from './websocket/socketServer';
+import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
 import { prisma } from './utils/prisma';
 import { initRedis } from './utils/redis';
 
@@ -40,8 +41,11 @@ async function main() {
   const server = http.createServer(app);
 
   // Initialize WebSocket server
-  initSocketServer(server);
+  const io = initSocketServer(server);
   console.log('[WS] Socket.IO server initialized');
+
+  // Start admin metrics emitter
+  startAdminMetricsEmitter(io);
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 Voxium server running on http://0.0.0.0:${PORT}\n`);
@@ -50,6 +54,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     console.log('\nShutting down...');
+    stopAdminMetricsEmitter();
     server.close();
     await prisma.$disconnect();
     process.exit(0);
