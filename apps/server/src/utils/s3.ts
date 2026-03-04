@@ -3,6 +3,7 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -55,6 +56,47 @@ export async function generatePresignedGetUrl(
   });
 
   return getSignedUrl(s3, command, { expiresIn });
+}
+
+export interface S3ObjectInfo {
+  key: string;
+  size: number;
+  lastModified: string;
+}
+
+/**
+ * List all objects in the S3 bucket, optionally filtered by prefix.
+ * Handles pagination via ContinuationToken.
+ */
+export async function listAllS3Objects(prefix?: string): Promise<S3ObjectInfo[]> {
+  const objects: S3ObjectInfo[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const command = new ListObjectsV2Command({
+      Bucket: BUCKET,
+      Prefix: prefix,
+      ContinuationToken: continuationToken,
+    });
+
+    const response = await s3.send(command);
+
+    if (response.Contents) {
+      for (const obj of response.Contents) {
+        if (obj.Key && obj.Size !== undefined) {
+          objects.push({
+            key: obj.Key,
+            size: obj.Size,
+            lastModified: obj.LastModified?.toISOString() ?? new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+  } while (continuationToken);
+
+  return objects;
 }
 
 /**

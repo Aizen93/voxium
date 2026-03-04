@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot } from '@voxium/shared';
+import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader } from '@voxium/shared';
 
 // Module-level refs for metrics subscription cleanup
 let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
@@ -37,6 +37,14 @@ interface AdminState {
   ipBansTotal: number;
   ipBansPage: number;
 
+  // Storage
+  storageStats: StorageStats | null;
+  storageFiles: StorageFile[];
+  storageFilesTotal: number;
+  storageFilesPage: number;
+  storageFilter: string;
+  topUploaders: StorageTopUploader[];
+
   // Loading
   loading: boolean;
 
@@ -65,6 +73,13 @@ interface AdminState {
   fetchIpBans: (page?: number) => Promise<void>;
   addIpBan: (ip: string, reason?: string) => Promise<void>;
   removeIpBan: (id: string) => Promise<void>;
+
+  fetchStorageStats: () => Promise<void>;
+  fetchTopUploaders: () => Promise<void>;
+  fetchStorageFiles: (page?: number) => Promise<void>;
+  setStorageFilter: (filter: string) => void;
+  deleteStorageFile: (key: string) => Promise<void>;
+  cleanupOrphans: () => Promise<{ found: number; deleted: number }>;
 }
 
 export const useAdminStore = create<AdminState>((set, get) => ({
@@ -89,6 +104,12 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   ipBans: [],
   ipBansTotal: 0,
   ipBansPage: 1,
+  storageStats: null,
+  storageFiles: [],
+  storageFilesTotal: 0,
+  storageFilesPage: 1,
+  storageFilter: 'all',
+  topUploaders: [],
   loading: false,
 
   fetchStats: async () => {
@@ -246,5 +267,50 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   removeIpBan: async (id) => {
     await api.delete(`/admin/ip-bans/${id}`);
     await get().fetchIpBans();
+  },
+
+  fetchStorageStats: async () => {
+    try {
+      const { data } = await api.get('/admin/storage/stats');
+      set({ storageStats: data.data });
+    } catch {
+      console.error('Failed to fetch storage stats');
+    }
+  },
+
+  fetchTopUploaders: async () => {
+    try {
+      const { data } = await api.get('/admin/storage/top-uploaders');
+      set({ topUploaders: data.data });
+    } catch {
+      console.error('Failed to fetch top uploaders');
+    }
+  },
+
+  fetchStorageFiles: async (page?: number) => {
+    const state = get();
+    const p = page ?? state.storageFilesPage;
+    set({ loading: true });
+    try {
+      const { data } = await api.get('/admin/storage/files', {
+        params: { page: p, limit: 20, filter: state.storageFilter },
+      });
+      set({ storageFiles: data.data, storageFilesTotal: data.total, storageFilesPage: p });
+    } finally {
+      set({ loading: false });
+    }
+  },
+
+  setStorageFilter: (filter) => set({ storageFilter: filter }),
+
+  deleteStorageFile: async (key) => {
+    await api.delete(`/admin/storage/files/${key}`);
+    await Promise.all([get().fetchStorageStats(), get().fetchStorageFiles()]);
+  },
+
+  cleanupOrphans: async () => {
+    const { data } = await api.post('/admin/storage/cleanup-orphans');
+    await Promise.all([get().fetchStorageStats(), get().fetchStorageFiles()]);
+    return data.data;
   },
 }));

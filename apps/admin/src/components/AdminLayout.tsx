@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LayoutDashboard, Users, Server, ShieldBan, LogOut } from 'lucide-react';
+import { LayoutDashboard, Users, Server, ShieldBan, HardDrive, LogOut } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
@@ -8,14 +8,16 @@ import { AdminUserList } from './AdminUserList';
 import { AdminUserDetail } from './AdminUserDetail';
 import { AdminServerList } from './AdminServerList';
 import { AdminBanList } from './AdminBanList';
+import { AdminStorage } from './AdminStorage';
 
-type AdminView = 'dashboard' | 'users' | 'servers' | 'bans';
+type AdminView = 'dashboard' | 'users' | 'servers' | 'bans' | 'storage';
 
 const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'users', label: 'Users', icon: Users },
   { id: 'servers', label: 'Servers', icon: Server },
   { id: 'bans', label: 'Bans', icon: ShieldBan },
+  { id: 'storage', label: 'Storage', icon: HardDrive },
 ];
 
 export function AdminLayout() {
@@ -41,6 +43,8 @@ export function AdminLayout() {
         return <AdminServerList />;
       case 'bans':
         return <AdminBanList />;
+      case 'storage':
+        return <AdminStorage />;
     }
   };
 

@@ -413,3 +413,34 @@ export interface AdminMetricsSnapshot {
   dmVoiceUsers: number;
   messagesLastHour: number;
 }
+
+// ─── Storage ─────────────────────────────────────────────────────────────────
+
+export interface StorageStats {
+  totalFiles: number;
+  totalSize: number;
+  avatarCount: number;
+  avatarSize: number;
+  serverIconCount: number;
+  serverIconSize: number;
+  orphanCount: number;
+  orphanSize: number;
+}
+
+export interface StorageFile {
+  key: string;
+  type: 'avatar' | 'server-icon';
+  size: number;
+  lastModified: string;
+  linkedEntity: string | null;
+  linkedEntityId: string | null;
+  isOrphan: boolean;
+}
+
+export interface StorageTopUploader {
+  entityId: string;
+  entityName: string;
+  type: 'user' | 'server';
+  fileCount: number;
+  totalSize: number;
+}

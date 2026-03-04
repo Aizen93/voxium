@@ -1883,3 +1883,28 @@ Added an animated SVG thief character that peeks over the top of the login/regis
 8. Unused `date-fns` dependency in `apps/admin/package.json`
 9. `stopAdminMetricsEmitter()` is not called during server shutdown (no real leak since `process.exit` follows)
 10. Account ban login error in `authService.ts` line 73 includes ban reason string (inconsistent with generic IP ban message on line 63)
+
+### Admin Storage "Top Uploaders" Feature (2026-03-04)
+
+**What was changed:** Added a "Top Uploaders" leaderboard to the admin storage management page, showing which users and servers consume the most S3 storage.
+
+**New/modified files:**
+- `packages/shared/src/types.ts` -- Added `StorageTopUploader` interface (`entityId`, `entityName`, `type`, `fileCount`, `totalSize`)
+- `apps/server/src/routes/admin.ts` -- Added `GET /admin/storage/top-uploaders` endpoint (lines 589-663). Parses entity IDs from S3 key filenames by splitting on last hyphen, aggregates file count and total size per entity, resolves entity names from DB, returns top 10 sorted by total size descending
+- `apps/admin/src/stores/adminStore.ts` -- Added `topUploaders: StorageTopUploader[]` state and `fetchTopUploaders()` action
+- `apps/admin/src/components/AdminStorage.tsx` -- Added `TopUploaders` component (splits uploaders by user vs server, shows top 5 each) and `UploaderPanel` component (ranked list with proportional bar chart)
+
+**Architecture decisions:**
+- S3 key parsing uses `lastIndexOf('-')` on the filename portion to separate entity ID from timestamp. This is safe because CUIDs (used by Prisma `@default(cuid())`) contain only alphanumeric characters -- no hyphens -- so the only hyphen in the filename is the separator before the Unix timestamp
+- Top uploaders endpoint makes a full bucket listing (`listAllS3Objects()`) call, same as the existing `/storage/stats` endpoint. No caching layer. Acceptable at current scale but may need optimization if bucket grows large
+- Entity name resolution falls back to `'Deleted'` for entities no longer in DB (orphaned S3 files from deleted users/servers)
+- The endpoint returns a flat list of mixed user/server entries; the frontend `TopUploaders` component splits them into two panels using `useMemo` filters
+
+**Resolved issues during review:**
+1. [WARNING] `formatBytes` utility could produce `undefined` suffix for sizes >= 1 TB because `sizes` array only had 4 entries (`['B', 'KB', 'MB', 'GB']`) and the computed index could exceed bounds. **Fixed:** added `'TB'` to the sizes array and clamped index with `Math.min(i, sizes.length - 1)`
+
+**Known issues from review (suggestions, not acted upon):**
+1. [SUGGESTION] The `/storage/top-uploaders` endpoint scans the full S3 bucket on every request with no caching or pagination. For very large buckets this could be slow and memory-intensive. Consider adding a TTL cache or computing asynchronously
+2. [SUGGESTION] `fetchTopUploaders` error handling in the admin store silently swallows errors with `console.error`. The UI shows no feedback if the fetch fails -- the `TopUploaders` section simply does not render (since `topUploaders.length > 0` guard in JSX). This is acceptable but could show a subtle error state
+3. [SUGGESTION] The `useEffect` in `AdminStorage` has an empty dependency array (`[]`) and references `fetchStorageStats`, `fetchStorageFiles`, and `fetchTopUploaders` which are stable Zustand selectors, so no stale closure issue. However, the ESLint `react-hooks/exhaustive-deps` rule may warn about the missing dependencies
+4. [SUGGESTION] `TopUploaders` component uses `import('@voxium/shared').StorageTopUploader` inline type syntax instead of importing from the top-level imports. This works but is inconsistent with the rest of the file which uses direct imports

@@ -10,6 +10,8 @@ import { cleanupServerVoice } from '../websocket/voiceHandler';
 import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE } from '../utils/s3';
+import type { StorageStats, StorageFile, StorageTopUploader } from '@voxium/shared';
 
 export const adminRouter = Router();
 
@@ -529,6 +531,244 @@ adminRouter.get('/messages-per-hour', async (req: Request, res: Response, next: 
       success: true,
       data: messages.map((r) => ({ hour: r.hour, count: Number(r.count) })),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Storage Management ──────────────────────────────────────────────────────
+
+function classifyKey(key: string): 'avatar' | 'server-icon' {
+  return key.startsWith('server-icons/') ? 'server-icon' : 'avatar';
+}
+
+adminRouter.get('/storage/stats', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [objects, usersWithAvatar, serversWithIcon] = await Promise.all([
+      listAllS3Objects(),
+      prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
+      prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
+    ]);
+
+    const referencedKeys = new Set<string>();
+    for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
+    for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
+
+    const stats: StorageStats = {
+      totalFiles: 0, totalSize: 0,
+      avatarCount: 0, avatarSize: 0,
+      serverIconCount: 0, serverIconSize: 0,
+      orphanCount: 0, orphanSize: 0,
+    };
+
+    for (const obj of objects) {
+      stats.totalFiles++;
+      stats.totalSize += obj.size;
+
+      const type = classifyKey(obj.key);
+      if (type === 'avatar') {
+        stats.avatarCount++;
+        stats.avatarSize += obj.size;
+      } else {
+        stats.serverIconCount++;
+        stats.serverIconSize += obj.size;
+      }
+
+      if (!referencedKeys.has(obj.key)) {
+        stats.orphanCount++;
+        stats.orphanSize += obj.size;
+      }
+    }
+
+    res.json({ success: true, data: stats });
+  } catch (err) {
+    next(err);
+  }
+});
+
+let topUploadersCache: { data: StorageTopUploader[]; expiresAt: number } | null = null;
+const TOP_UPLOADERS_TTL_MS = 60_000; // 60 seconds
+
+adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (topUploadersCache && Date.now() < topUploadersCache.expiresAt) {
+      return res.json({ success: true, data: topUploadersCache.data });
+    }
+
+    const objects = await listAllS3Objects();
+
+    // Aggregate by entity ID parsed from S3 keys
+    const entityMap = new Map<string, { type: 'user' | 'server'; fileCount: number; totalSize: number }>();
+
+    for (const obj of objects) {
+      let type: 'user' | 'server';
+      let filename: string;
+
+      if (obj.key.startsWith('avatars/')) {
+        filename = obj.key.slice('avatars/'.length);
+        type = 'user';
+      } else if (obj.key.startsWith('server-icons/')) {
+        filename = obj.key.slice('server-icons/'.length);
+        type = 'server';
+      } else {
+        continue;
+      }
+
+      // Key format: {entityId}-{timestamp}.webp — split on last hyphen to get the entity ID
+      const lastDash = filename.lastIndexOf('-');
+      if (lastDash <= 0) continue;
+      const entityId = filename.slice(0, lastDash);
+
+      const existing = entityMap.get(entityId);
+      if (existing) {
+        existing.fileCount++;
+        existing.totalSize += obj.size;
+      } else {
+        entityMap.set(entityId, { type, fileCount: 1, totalSize: obj.size });
+      }
+    }
+
+    // Collect user IDs and server IDs
+    const userIds: string[] = [];
+    const serverIds: string[] = [];
+    for (const [id, info] of entityMap) {
+      if (info.type === 'user') userIds.push(id);
+      else serverIds.push(id);
+    }
+
+    // Fetch names from DB
+    const [users, servers] = await Promise.all([
+      userIds.length > 0
+        ? prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } })
+        : [],
+      serverIds.length > 0
+        ? prisma.server.findMany({ where: { id: { in: serverIds } }, select: { id: true, name: true } })
+        : [],
+    ]);
+
+    const nameMap = new Map<string, string>();
+    for (const u of users) nameMap.set(u.id, u.username);
+    for (const s of servers) nameMap.set(s.id, s.name);
+
+    // Build result, sort by totalSize desc, limit to 10
+    const result: StorageTopUploader[] = [];
+    for (const [entityId, info] of entityMap) {
+      result.push({
+        entityId,
+        entityName: nameMap.get(entityId) ?? 'Deleted',
+        type: info.type,
+        fileCount: info.fileCount,
+        totalSize: info.totalSize,
+      });
+    }
+    result.sort((a, b) => b.totalSize - a.totalSize);
+
+    const data = result.slice(0, 10);
+    topUploadersCache = { data, expiresAt: Date.now() + TOP_UPLOADERS_TTL_MS };
+
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/storage/files', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const filter = (req.query.filter as string) || 'all';
+
+    const prefix = filter === 'avatars' ? 'avatars/' : filter === 'server-icons' ? 'server-icons/' : undefined;
+    const objects = await listAllS3Objects(prefix);
+
+    const [usersWithAvatar, serversWithIcon] = await Promise.all([
+      prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { id: true, username: true, avatarUrl: true } }),
+      prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { id: true, name: true, iconUrl: true } }),
+    ]);
+
+    const keyToUser = new Map<string, { id: string; name: string }>();
+    for (const u of usersWithAvatar) if (u.avatarUrl) keyToUser.set(u.avatarUrl, { id: u.id, name: u.username });
+    const keyToServer = new Map<string, { id: string; name: string }>();
+    for (const s of serversWithIcon) if (s.iconUrl) keyToServer.set(s.iconUrl, { id: s.id, name: s.name });
+
+    let files: StorageFile[] = objects.map((obj) => {
+      const type = classifyKey(obj.key);
+      const userRef = keyToUser.get(obj.key);
+      const serverRef = keyToServer.get(obj.key);
+      const linked = userRef ?? serverRef ?? null;
+
+      return {
+        key: obj.key,
+        type,
+        size: obj.size,
+        lastModified: obj.lastModified,
+        linkedEntity: linked?.name ?? null,
+        linkedEntityId: linked?.id ?? null,
+        isOrphan: !linked,
+      };
+    });
+
+    if (filter === 'orphaned') {
+      files = files.filter((f) => f.isOrphan);
+    }
+
+    // Sort by lastModified desc
+    files.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
+
+    const total = files.length;
+    const paginated = files.slice((page - 1) * limit, page * limit);
+
+    res.json({ success: true, data: paginated, total, page, limit, hasMore: page * limit < total });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.delete('/storage/files/*', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const key = (req.params as Record<string, string>)[0];
+    if (!key || !VALID_S3_KEY_RE.test(key)) throw new BadRequestError('Invalid file key');
+
+    // Nullify DB reference
+    if (key.startsWith('avatars/')) {
+      await prisma.user.updateMany({ where: { avatarUrl: key }, data: { avatarUrl: null } });
+    } else if (key.startsWith('server-icons/')) {
+      await prisma.server.updateMany({ where: { iconUrl: key }, data: { iconUrl: null } });
+    }
+
+    await deleteFromS3(key);
+
+    res.json({ success: true, message: 'File deleted' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/storage/cleanup-orphans', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [objects, usersWithAvatar, serversWithIcon] = await Promise.all([
+      listAllS3Objects(),
+      prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
+      prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
+    ]);
+
+    const referencedKeys = new Set<string>();
+    for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
+    for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
+
+    const orphans = objects.filter((obj) => !referencedKeys.has(obj.key));
+    let deleted = 0;
+
+    for (const orphan of orphans) {
+      try {
+        await deleteFromS3(orphan.key);
+        deleted++;
+      } catch {
+        // Continue with remaining orphans
+      }
+    }
+
+    res.json({ success: true, data: { found: orphans.length, deleted } });
   } catch (err) {
     next(err);
   }
