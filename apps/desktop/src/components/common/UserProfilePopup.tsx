@@ -119,8 +119,6 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   // Re-measure after first render when we have the actual popup height
   useEffect(() => {
     if (position) updatePosition();
-    // Only run once after initial position set
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [position !== null]);
 
   useEffect(() => {
