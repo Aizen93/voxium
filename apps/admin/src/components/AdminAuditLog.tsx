@@ -17,6 +17,10 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'announcement.create': 'Announcement Created',
   'announcement.publish': 'Announcement Published',
   'announcement.delete': 'Announcement Deleted',
+  'report.resolve': 'Report Resolved',
+  'report.dismiss': 'Report Dismissed',
+  'support.claim': 'Ticket Claimed',
+  'support.close': 'Ticket Closed',
 };
 
 const ACTION_COLORS: Record<string, string> = {
@@ -32,6 +36,10 @@ const ACTION_COLORS: Record<string, string> = {
   'announcement.create': 'bg-purple-500/20 text-purple-400',
   'announcement.publish': 'bg-green-500/20 text-green-400',
   'announcement.delete': 'bg-red-500/20 text-red-400',
+  'report.resolve': 'bg-green-500/20 text-green-400',
+  'report.dismiss': 'bg-gray-500/20 text-gray-400',
+  'support.claim': 'bg-blue-500/20 text-blue-400',
+  'support.close': 'bg-gray-500/20 text-gray-400',
 };
 
 function formatMetadata(action: AuditAction, metadata: Record<string, unknown> | null): string {
@@ -68,6 +76,9 @@ const ALL_ACTIONS: AuditAction[] = [
   'server.delete',
   'ip_ban.create', 'ip_ban.delete',
   'storage.file_delete', 'storage.cleanup_orphans',
+  'announcement.create', 'announcement.publish', 'announcement.delete',
+  'report.resolve', 'report.dismiss',
+  'support.claim', 'support.close',
 ];
 
 export function AdminAuditLog() {

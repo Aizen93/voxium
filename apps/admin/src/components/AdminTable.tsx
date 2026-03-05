@@ -10,7 +10,7 @@ interface AdminTableProps {
   onRowClick?: (index: number) => void;
 }
 
-export function AdminTable({ columns, rows, page, total, limit = 20, onPageChange, onRowClick }: AdminTableProps) {
+export function AdminTable({ columns, rows, page, total, limit = 12, onPageChange, onRowClick }: AdminTableProps) {
   const totalPages = Math.ceil(total / limit);
 
   return (
@@ -51,30 +51,32 @@ export function AdminTable({ columns, rows, page, total, limit = 20, onPageChang
           </tbody>
         </table>
       </div>
-      {totalPages > 1 && (
+      {rows.length > 0 && (
         <div className="flex items-center justify-between px-4 py-3 border-t border-vox-border">
           <span className="text-xs text-vox-text-muted">
             Showing {(page - 1) * limit + 1}-{Math.min(page * limit, total)} of {total}
           </span>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => onPageChange(page - 1)}
-              disabled={page <= 1}
-              className="p-1 rounded text-vox-text-muted hover:text-vox-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <ChevronLeft size={16} />
-            </button>
-            <span className="text-xs text-vox-text-secondary">
-              {page} / {totalPages}
-            </span>
-            <button
-              onClick={() => onPageChange(page + 1)}
-              disabled={page >= totalPages}
-              className="p-1 rounded text-vox-text-muted hover:text-vox-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <ChevronRight size={16} />
-            </button>
-          </div>
+          {totalPages > 1 && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => onPageChange(page - 1)}
+                disabled={page <= 1}
+                className="p-1 rounded text-vox-text-muted hover:text-vox-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <ChevronLeft size={16} />
+              </button>
+              <span className="text-xs text-vox-text-secondary">
+                {page} / {totalPages}
+              </span>
+              <button
+                onClick={() => onPageChange(page + 1)}
+                disabled={page >= totalPages}
+                className="p-1 rounded text-vox-text-muted hover:text-vox-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

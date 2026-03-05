@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Users, Server, MessageSquare, Wifi, ShieldBan, Mic } from 'lucide-react';
+import { Users, Server, MessageSquare, Wifi, ShieldBan, Mic, Flag, LifeBuoy } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminStatCard } from './AdminStatCard';
 
@@ -19,12 +19,14 @@ export function AdminDashboard() {
       <h2 className="text-xl font-bold text-vox-text-primary">Dashboard</h2>
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-7 gap-4">
         <AdminStatCard label="Total Users" value={stats?.totalUsers ?? 0} icon={Users} />
         <AdminStatCard label="Total Servers" value={stats?.totalServers ?? 0} icon={Server} color="text-vox-accent-info" />
         <AdminStatCard label="Total Messages" value={stats?.totalMessages ?? 0} icon={MessageSquare} color="text-vox-accent-success" />
         <AdminStatCard label="Online Now" value={liveMetrics?.onlineUsers ?? stats?.onlineUsers ?? 0} icon={Wifi} color="text-green-400" />
         <AdminStatCard label="Banned Users" value={stats?.bannedUsers ?? 0} icon={ShieldBan} color="text-vox-accent-danger" />
+        <AdminStatCard label="Pending Reports" value={stats?.pendingReports ?? 0} icon={Flag} color="text-vox-accent-warning" />
+        <AdminStatCard label="Open Tickets" value={stats?.openTickets ?? 0} icon={LifeBuoy} color="text-vox-accent-info" />
       </div>
 
       {/* Live Metrics */}
@@ -34,11 +36,7 @@ export function AdminDashboard() {
             <span className="h-2 w-2 rounded-full bg-green-400 animate-pulse" />
             Live Metrics
           </h3>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-            <div>
-              <p className="text-lg font-bold text-vox-text-primary">{liveMetrics.onlineUsers}</p>
-              <p className="text-xs text-vox-text-muted">Online Users</p>
-            </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             <div>
               <p className="text-lg font-bold text-vox-text-primary">{liveMetrics.voiceChannels}</p>
               <p className="text-xs text-vox-text-muted">Voice Channels</p>
@@ -50,10 +48,6 @@ export function AdminDashboard() {
             <div>
               <p className="text-lg font-bold text-vox-text-primary">{liveMetrics.dmCalls}</p>
               <p className="text-xs text-vox-text-muted">DM Calls</p>
-            </div>
-            <div>
-              <p className="text-lg font-bold text-vox-text-primary">{liveMetrics.dmVoiceUsers}</p>
-              <p className="text-xs text-vox-text-muted">In DM Voice</p>
             </div>
             <div>
               <p className="text-lg font-bold text-vox-text-primary">{liveMetrics.messagesLastHour}</p>

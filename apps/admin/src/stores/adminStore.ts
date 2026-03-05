@@ -1,11 +1,21 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement } from '@voxium/shared';
+import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData } from '@voxium/shared';
 
 // Module-level refs for metrics subscription cleanup
 let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
 let metricsReconnectUnsub: (() => void) | null = null;
+
+// Module-level refs for reports subscription cleanup
+let reportsHandler: ((data: { total: number }) => void) | null = null;
+let reportsReconnectUnsub: (() => void) | null = null;
+
+// Module-level refs for support subscription cleanup
+let supportTicketHandler: ((data: { total: number }) => void) | null = null;
+let supportMessageHandler: ((msg: SupportMessageData) => void) | null = null;
+let supportStatusHandler: ((data: { ticketId: string; status: string; claimedById?: string; claimedByUsername?: string }) => void) | null = null;
+let supportReconnectUnsub: (() => void) | null = null;
 
 export interface OwnedServerInfo {
   id: string;
@@ -65,12 +75,26 @@ interface AdminState {
   announcementsPage: number;
   announcementsFilter: string;
 
+  // Reports
+  reports: Report[];
+  reportsTotal: number;
+  reportsPage: number;
+  reportsFilter: string;
+
   // Audit Logs
   auditLogs: AuditLogEntry[];
   auditLogsTotal: number;
   auditLogsPage: number;
   auditLogsFilter: string;
   auditLogsSearch: string;
+
+  // Support
+  supportTickets: SupportTicket[];
+  supportTicketsTotal: number;
+  supportTicketsPage: number;
+  supportTicketsFilter: string;
+  activeTicket: SupportTicket | null;
+  activeTicketMessages: SupportMessageData[];
 
   // Loading
   loading: boolean;
@@ -110,9 +134,26 @@ interface AdminState {
   publishAnnouncement: (id: string) => Promise<void>;
   deleteAnnouncement: (id: string) => Promise<void>;
 
+  fetchReports: (page?: number) => Promise<void>;
+  setReportsFilter: (filter: string) => void;
+  resolveReport: (id: string, data: { resolution: string; action?: 'ban'; deleteMessage?: boolean }) => Promise<void>;
+  dismissReport: (id: string) => Promise<void>;
+  subscribeReports: () => void;
+  unsubscribeReports: () => void;
+
   fetchAuditLogs: (page?: number) => Promise<void>;
   setAuditLogsFilter: (filter: string) => void;
   setAuditLogsSearch: (search: string) => void;
+
+  fetchSupportTickets: (page?: number) => Promise<void>;
+  setSupportTicketsFilter: (filter: string) => void;
+  claimTicket: (id: string) => Promise<void>;
+  fetchTicketMessages: (id: string) => Promise<void>;
+  sendTicketMessage: (id: string, content: string) => Promise<void>;
+  closeTicket: (id: string) => Promise<void>;
+  setActiveTicket: (ticket: SupportTicket | null) => void;
+  subscribeSupport: () => void;
+  unsubscribeSupport: () => void;
 
   fetchStorageStats: () => Promise<void>;
   fetchTopUploaders: () => Promise<void>;
@@ -160,11 +201,21 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   announcementsTotal: 0,
   announcementsPage: 1,
   announcementsFilter: 'all',
+  reports: [],
+  reportsTotal: 0,
+  reportsPage: 1,
+  reportsFilter: 'all',
   auditLogs: [],
   auditLogsTotal: 0,
   auditLogsPage: 1,
   auditLogsFilter: '',
   auditLogsSearch: '',
+  supportTickets: [],
+  supportTicketsTotal: 0,
+  supportTicketsPage: 1,
+  supportTicketsFilter: 'all',
+  activeTicket: null,
+  activeTicketMessages: [],
   loading: false,
 
   fetchStats: async () => {
@@ -234,7 +285,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     set({ loading: true });
     try {
       const { data } = await api.get('/admin/users', {
-        params: { page: p, limit: 20, search: state.usersSearch, filter: state.usersFilter, sort: state.usersSort },
+        params: { page: p, limit: 12, search: state.usersSearch, filter: state.usersFilter, sort: state.usersSort },
       });
       set({ users: data.data, usersTotal: data.total, usersPage: p });
     } finally {
@@ -293,7 +344,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     set({ loading: true });
     try {
       const { data } = await api.get('/admin/servers', {
-        params: { page: p, limit: 20, search: state.serversSearch },
+        params: { page: p, limit: 12, search: state.serversSearch },
       });
       set({ servers: data.data, serversTotal: data.total, serversPage: p });
     } finally {
@@ -311,7 +362,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   fetchBans: async (page?: number) => {
     try {
       const p = page ?? get().bansPage;
-      const { data } = await api.get('/admin/bans', { params: { page: p, limit: 20 } });
+      const { data } = await api.get('/admin/bans', { params: { page: p, limit: 12 } });
       set({ bans: data.data, bansTotal: data.total, bansPage: p });
     } catch {
       console.error('Failed to fetch bans');
@@ -321,7 +372,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   fetchIpBans: async (page?: number) => {
     try {
       const p = page ?? get().ipBansPage;
-      const { data } = await api.get('/admin/ip-bans', { params: { page: p, limit: 20 } });
+      const { data } = await api.get('/admin/ip-bans', { params: { page: p, limit: 12 } });
       set({ ipBans: data.data, ipBansTotal: data.total, ipBansPage: p });
     } catch {
       console.error('Failed to fetch IP bans');
@@ -344,7 +395,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     set({ loading: true });
     try {
       const { data } = await api.get('/admin/announcements', {
-        params: { page: p, limit: 20, filter: state.announcementsFilter },
+        params: { page: p, limit: 12, filter: state.announcementsFilter },
       });
       set({ announcements: data.data, announcementsTotal: data.total, announcementsPage: p });
     } finally {
@@ -369,13 +420,74 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     await get().fetchAnnouncements();
   },
 
+  fetchReports: async (page?: number) => {
+    const state = get();
+    const p = page ?? state.reportsPage;
+    set({ loading: true });
+    try {
+      const { data } = await api.get('/admin/reports', {
+        params: { page: p, limit: 12, filter: state.reportsFilter },
+      });
+      set({ reports: data.data, reportsTotal: data.total, reportsPage: p });
+    } finally {
+      set({ loading: false });
+    }
+  },
+
+  setReportsFilter: (filter) => set({ reportsFilter: filter }),
+
+  resolveReport: async (id, body) => {
+    await api.post(`/admin/reports/${id}/resolve`, body);
+    await get().fetchReports();
+  },
+
+  dismissReport: async (id) => {
+    await api.post(`/admin/reports/${id}/dismiss`);
+    await get().fetchReports();
+  },
+
+  subscribeReports: () => {
+    const socket = getSocket();
+    if (!socket) return;
+
+    reportsHandler = () => {
+      get().fetchReports();
+      get().fetchStats();
+    };
+
+    socket.emit('admin:subscribe_reports' as any);
+    socket.on('report:new' as any, reportsHandler);
+
+    reportsReconnectUnsub = onSocketReconnect(() => {
+      const s = getSocket();
+      if (s && reportsHandler) {
+        s.emit('admin:subscribe_reports' as any);
+        s.off('report:new' as any, reportsHandler);
+        s.on('report:new' as any, reportsHandler);
+      }
+    });
+  },
+
+  unsubscribeReports: () => {
+    const socket = getSocket();
+    if (socket) {
+      socket.emit('admin:unsubscribe_reports' as any);
+      if (reportsHandler) socket.off('report:new' as any, reportsHandler);
+    }
+    reportsHandler = null;
+    if (reportsReconnectUnsub) {
+      reportsReconnectUnsub();
+      reportsReconnectUnsub = null;
+    }
+  },
+
   fetchAuditLogs: async (page?: number) => {
     const state = get();
     const p = page ?? state.auditLogsPage;
     set({ loading: true });
     try {
       const { data } = await api.get('/admin/audit-logs', {
-        params: { page: p, limit: 20, action: state.auditLogsFilter || undefined, search: state.auditLogsSearch || undefined },
+        params: { page: p, limit: 12, action: state.auditLogsFilter || undefined, search: state.auditLogsSearch || undefined },
       });
       set({ auditLogs: data.data, auditLogsTotal: data.total, auditLogsPage: p });
     } finally {
@@ -385,6 +497,143 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
   setAuditLogsFilter: (filter) => set({ auditLogsFilter: filter }),
   setAuditLogsSearch: (search) => set({ auditLogsSearch: search }),
+
+  fetchSupportTickets: async (page?: number) => {
+    const state = get();
+    const p = page ?? state.supportTicketsPage;
+    set({ loading: true });
+    try {
+      const { data } = await api.get('/admin/support/tickets', {
+        params: { page: p, limit: 12, status: state.supportTicketsFilter === 'all' ? undefined : state.supportTicketsFilter },
+      });
+      set({ supportTickets: data.data, supportTicketsTotal: data.total, supportTicketsPage: p });
+    } finally {
+      set({ loading: false });
+    }
+  },
+
+  setSupportTicketsFilter: (filter) => {
+    set({ supportTicketsFilter: filter });
+    get().fetchSupportTickets(1);
+  },
+
+  claimTicket: async (id) => {
+    await api.post(`/admin/support/tickets/${id}/claim`);
+    // Update activeTicket status immediately + refetch messages (includes system message)
+    const activeTicket = get().activeTicket;
+    if (activeTicket && activeTicket.id === id) {
+      set({ activeTicket: { ...activeTicket, status: 'claimed' } });
+      await get().fetchTicketMessages(id);
+    }
+    await get().fetchSupportTickets();
+  },
+
+  fetchTicketMessages: async (id) => {
+    try {
+      const { data } = await api.get(`/admin/support/tickets/${id}/messages`);
+      set({ activeTicketMessages: data.data });
+    } catch {
+      console.error('Failed to fetch ticket messages');
+    }
+  },
+
+  sendTicketMessage: async (id, content) => {
+    const { data } = await api.post(`/admin/support/tickets/${id}/messages`, { content });
+    // Append message from REST response immediately (dedup with socket events)
+    const msg = data.data as SupportMessageData;
+    const msgs = get().activeTicketMessages;
+    if (!msgs.some((m) => m.id === msg.id)) {
+      set({ activeTicketMessages: [...msgs, msg] });
+    }
+  },
+
+  closeTicket: async (id) => {
+    await api.post(`/admin/support/tickets/${id}/close`);
+    // Update activeTicket status immediately + refetch messages (includes system message)
+    const activeTicket = get().activeTicket;
+    if (activeTicket && activeTicket.id === id) {
+      set({ activeTicket: { ...activeTicket, status: 'closed' } });
+      await get().fetchTicketMessages(id);
+    }
+    await get().fetchSupportTickets();
+  },
+
+  setActiveTicket: (ticket) => {
+    set({ activeTicket: ticket, activeTicketMessages: [] });
+    if (ticket) {
+      get().fetchTicketMessages(ticket.id);
+    }
+  },
+
+  subscribeSupport: () => {
+    const socket = getSocket();
+    if (!socket) return;
+
+    supportTicketHandler = () => {
+      get().fetchSupportTickets();
+      get().fetchStats();
+    };
+
+    supportMessageHandler = (msg: SupportMessageData) => {
+      const activeTicket = get().activeTicket;
+      if (activeTicket && msg.ticketId === activeTicket.id) {
+        const msgs = get().activeTicketMessages;
+        if (!msgs.some((m) => m.id === msg.id)) {
+          set({ activeTicketMessages: [...msgs, msg] });
+        }
+      }
+    };
+
+    supportStatusHandler = (data) => {
+      const activeTicket = get().activeTicket;
+      if (activeTicket && data.ticketId === activeTicket.id) {
+        set({ activeTicket: { ...activeTicket, status: data.status as SupportTicket['status'], claimedById: data.claimedById ?? null, claimedByUsername: data.claimedByUsername ?? null } });
+      }
+      // Refresh list
+      get().fetchSupportTickets();
+    };
+
+    socket.emit('admin:subscribe_support' as any);
+    socket.on('support:ticket:new' as any, supportTicketHandler);
+    socket.on('support:message:new' as any, supportMessageHandler);
+    socket.on('support:status_change' as any, supportStatusHandler);
+
+    supportReconnectUnsub = onSocketReconnect(() => {
+      const s = getSocket();
+      if (s) {
+        s.emit('admin:subscribe_support' as any);
+        if (supportTicketHandler) {
+          s.off('support:ticket:new' as any, supportTicketHandler);
+          s.on('support:ticket:new' as any, supportTicketHandler);
+        }
+        if (supportMessageHandler) {
+          s.off('support:message:new' as any, supportMessageHandler);
+          s.on('support:message:new' as any, supportMessageHandler);
+        }
+        if (supportStatusHandler) {
+          s.off('support:status_change' as any, supportStatusHandler);
+          s.on('support:status_change' as any, supportStatusHandler);
+        }
+      }
+    });
+  },
+
+  unsubscribeSupport: () => {
+    const socket = getSocket();
+    if (socket) {
+      socket.emit('admin:unsubscribe_support' as any);
+      if (supportTicketHandler) socket.off('support:ticket:new' as any, supportTicketHandler);
+      if (supportMessageHandler) socket.off('support:message:new' as any, supportMessageHandler);
+      if (supportStatusHandler) socket.off('support:status_change' as any, supportStatusHandler);
+    }
+    supportTicketHandler = null;
+    supportMessageHandler = null;
+    supportStatusHandler = null;
+    if (supportReconnectUnsub) {
+      supportReconnectUnsub();
+      supportReconnectUnsub = null;
+    }
+  },
 
   fetchStorageStats: async () => {
     try {
@@ -410,7 +659,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     set({ loading: true });
     try {
       const { data } = await api.get('/admin/storage/files', {
-        params: { page: p, limit: 20, filter: state.storageFilter },
+        params: { page: p, limit: 12, filter: state.storageFilter },
       });
       set({ storageFiles: data.data, storageFilesTotal: data.total, storageFilesPage: p });
     } finally {

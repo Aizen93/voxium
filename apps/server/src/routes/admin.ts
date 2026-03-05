@@ -11,7 +11,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE } from '../utils/s3';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, SupportMessageData } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
 
@@ -23,17 +23,19 @@ adminRouter.use(authenticate, requireAdmin, rateLimitAdmin);
 
 adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const [totalUsers, totalServers, totalMessages, bannedUsers, onlineUserIds] = await Promise.all([
+    const [totalUsers, totalServers, totalMessages, bannedUsers, onlineUserIds, pendingReports, openTickets] = await Promise.all([
       prisma.user.count(),
       prisma.server.count(),
       prisma.message.count(),
       prisma.user.count({ where: { bannedAt: { not: null } } }),
       getOnlineUsers(),
+      prisma.report.count({ where: { status: 'pending' } }),
+      prisma.supportTicket.count({ where: { status: { in: ['open', 'claimed'] } } }),
     ]);
 
     res.json({
       success: true,
-      data: { totalUsers, totalServers, totalMessages, onlineUsers: onlineUserIds.length, bannedUsers },
+      data: { totalUsers, totalServers, totalMessages, onlineUsers: onlineUserIds.length, bannedUsers, pendingReports, openTickets },
     });
   } catch (err) {
     next(err);
@@ -1419,6 +1421,448 @@ adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response,
     });
 
     res.json({ success: true, data: { found: orphans.length, deleted } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Reports / Moderation Queue ──────────────────────────────────────────────
+
+adminRouter.get('/reports', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const filter = (req.query.filter as string) || 'all';
+
+    const where: Record<string, unknown> = {};
+    if (filter === 'pending' || filter === 'resolved' || filter === 'dismissed') {
+      where.status = filter;
+    }
+
+    const [reports, total] = await Promise.all([
+      prisma.report.findMany({
+        where,
+        include: {
+          reporter: { select: { id: true, username: true } },
+          reportedUser: { select: { id: true, username: true } },
+          resolvedBy: { select: { id: true, username: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.report.count({ where }),
+    ]);
+
+    const data = reports.map((r) => ({
+      id: r.id,
+      type: r.type,
+      status: r.status,
+      reason: r.reason,
+      reporterId: r.reporterId,
+      reporterUsername: r.reporter.username,
+      reportedUserId: r.reportedUserId,
+      reportedUsername: r.reportedUser.username,
+      messageId: r.messageId,
+      messageContent: r.messageContent,
+      channelId: r.channelId,
+      conversationId: r.conversationId,
+      serverId: r.serverId,
+      resolvedById: r.resolvedById,
+      resolvedByUsername: r.resolvedBy?.username ?? null,
+      resolution: r.resolution,
+      createdAt: r.createdAt.toISOString(),
+      resolvedAt: r.resolvedAt?.toISOString() ?? null,
+    }));
+
+    res.json({ success: true, data, total, page, limit, hasMore: page * limit < total });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const { resolution, action, deleteMessage } = req.body;
+
+    const report = await prisma.report.findUnique({ where: { id } });
+    if (!report) throw new NotFoundError('Report');
+    if (report.status !== 'pending') throw new BadRequestError('Report is already processed');
+
+    const sanitizedResolution = resolution ? sanitizeText(resolution) : 'Resolved';
+
+    await prisma.report.update({
+      where: { id },
+      data: {
+        status: 'resolved',
+        resolvedById: req.user!.userId,
+        resolvedAt: new Date(),
+        resolution: sanitizedResolution,
+      },
+    });
+
+    // Optional action: delete the reported message
+    if (deleteMessage && report.messageId) {
+      const message = await prisma.message.findUnique({ where: { id: report.messageId }, select: { id: true, channelId: true, conversationId: true } });
+      if (message) {
+        await prisma.message.delete({ where: { id: message.id } });
+        const io = getIO();
+        if (message.channelId) {
+          io.to(`channel:${message.channelId}`).emit(WS_EVENTS.MESSAGE_DELETE as any, { messageId: message.id, channelId: message.channelId });
+        } else if (message.conversationId) {
+          io.to(`dm:${message.conversationId}`).emit(WS_EVENTS.DM_MESSAGE_DELETE as any, { messageId: message.id, conversationId: message.conversationId });
+        }
+      }
+    }
+
+    // Optional action: ban the reported user
+    if (action === 'ban') {
+      const target = await prisma.user.findUnique({
+        where: { id: report.reportedUserId },
+        select: { id: true, role: true },
+      });
+      if (target && target.role !== 'superadmin') {
+        await prisma.user.update({
+          where: { id: report.reportedUserId },
+          data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
+        });
+
+        // Force logout the banned user
+        const io = getIO();
+        const sockets = await io.fetchSockets();
+        for (const s of sockets) {
+          if (s.data.userId === report.reportedUserId) {
+            s.emit('force:logout', { reason: 'Your account has been banned.' });
+            s.disconnect(true);
+          }
+        }
+
+        logAuditEvent({
+          actorId: req.user!.userId,
+          action: 'user.ban',
+          targetType: 'user',
+          targetId: report.reportedUserId,
+          metadata: { reason: `Report resolved: ${sanitizedResolution}` },
+        });
+      }
+    }
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'report.resolve',
+      targetType: 'report',
+      targetId: id,
+      metadata: { resolution: sanitizedResolution, action: action ?? null, messageDeleted: !!(deleteMessage && report.messageId) },
+    });
+
+    const pendingCount = await prisma.report.count({ where: { status: 'pending' } });
+    getIO().to('admin:reports').emit('report:new', { total: pendingCount });
+
+    res.json({ success: true, message: 'Report resolved' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/reports/:id/dismiss', async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+
+    const report = await prisma.report.findUnique({ where: { id } });
+    if (!report) throw new NotFoundError('Report');
+    if (report.status !== 'pending') throw new BadRequestError('Report is already processed');
+
+    await prisma.report.update({
+      where: { id },
+      data: {
+        status: 'dismissed',
+        resolvedById: req.user!.userId,
+        resolvedAt: new Date(),
+      },
+    });
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'report.dismiss',
+      targetType: 'report',
+      targetId: id,
+    });
+
+    const pendingCount = await prisma.report.count({ where: { status: 'pending' } });
+    getIO().to('admin:reports').emit('report:new', { total: pendingCount });
+
+    res.json({ success: true, message: 'Report dismissed' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Support Tickets ────────────────────────────────────────────────────────
+
+const supportAuthorSelect = {
+  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
+};
+
+function mapSupportMessage(m: any): SupportMessageData {
+  return {
+    id: m.id,
+    ticketId: m.ticketId,
+    authorId: m.authorId,
+    content: m.content,
+    type: m.type,
+    createdAt: m.createdAt.toISOString(),
+    author: m.author,
+  };
+}
+
+async function emitSupportTicketCount() {
+  const total = await prisma.supportTicket.count({ where: { status: { in: ['open', 'claimed'] } } });
+  getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_TICKET_NEW as any, { total });
+}
+
+adminRouter.get('/support/tickets', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const status = (req.query.status as string) || 'all';
+
+    const where: Record<string, unknown> = {};
+    if (status === 'open' || status === 'claimed' || status === 'closed') {
+      where.status = status;
+    }
+
+    const [tickets, total] = await Promise.all([
+      prisma.supportTicket.findMany({
+        where,
+        include: {
+          user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          claimedBy: { select: { id: true, username: true } },
+          messages: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: { content: true, createdAt: true },
+          },
+        },
+        orderBy: { createdAt: 'asc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.supportTicket.count({ where }),
+    ]);
+
+    const data = tickets.map((t) => ({
+      id: t.id,
+      userId: t.userId,
+      username: t.user.username,
+      displayName: t.user.displayName,
+      avatarUrl: t.user.avatarUrl,
+      status: t.status,
+      claimedById: t.claimedById,
+      claimedByUsername: t.claimedBy?.username ?? null,
+      lastMessage: t.messages[0]?.content ?? null,
+      lastMessageAt: t.messages[0]?.createdAt?.toISOString() ?? null,
+      createdAt: t.createdAt.toISOString(),
+      updatedAt: t.updatedAt.toISOString(),
+    }));
+
+    res.json({ success: true, data, total, page, limit, hasMore: page * limit < total });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/support/tickets/:id/claim', async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const adminUserId = req.user!.userId;
+
+    const ticket = await prisma.supportTicket.findUnique({ where: { id } });
+    if (!ticket) throw new NotFoundError('Ticket');
+    if (ticket.status === 'closed') throw new BadRequestError('Ticket is closed');
+
+    const updated = await prisma.supportTicket.update({
+      where: { id },
+      data: { status: 'claimed', claimedById: adminUserId, claimedAt: new Date() },
+    });
+
+    const adminUser = await prisma.user.findUnique({ where: { id: adminUserId }, select: { username: true } });
+
+    // System message
+    const sysMsg = await prisma.supportMessage.create({
+      data: { ticketId: id, authorId: adminUserId, content: `Staff member ${adminUser?.username} has joined the conversation`, type: 'system' },
+      include: { author: supportAuthorSelect },
+    });
+
+    // Join admin socket to support room BEFORE emitting events
+    const io = getIO();
+    const sockets = await io.fetchSockets();
+    for (const s of sockets) {
+      if (s.data.userId === adminUserId) {
+        s.join(`support:${id}`);
+      }
+    }
+
+    const claimPayload = mapSupportMessage(sysMsg);
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, claimPayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, claimPayload);
+    const statusPayload = { ticketId: id, status: 'claimed', claimedById: adminUserId, claimedByUsername: adminUser?.username };
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, statusPayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, statusPayload);
+
+    await emitSupportTicketCount();
+
+    logAuditEvent({
+      actorId: adminUserId,
+      action: 'support.claim',
+      targetType: 'support_ticket',
+      targetId: id,
+      metadata: { userId: ticket.userId },
+    });
+
+    res.json({ success: true, data: { id: updated.id, status: updated.status } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/support/tickets/:id/messages', async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const before = req.query.before as string | undefined;
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+
+    const ticket = await prisma.supportTicket.findUnique({ where: { id } });
+    if (!ticket) throw new NotFoundError('Ticket');
+
+    const where: Record<string, unknown> = { ticketId: id };
+    if (before) {
+      const beforeDate = new Date(before);
+      if (isNaN(beforeDate.getTime())) throw new BadRequestError('Invalid before date');
+      where.createdAt = { lt: beforeDate };
+    }
+
+    const messages = await prisma.supportMessage.findMany({
+      where,
+      include: { author: supportAuthorSelect },
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+    });
+
+    const hasMore = messages.length > limit;
+    if (hasMore) messages.pop();
+
+    res.json({
+      success: true,
+      data: messages.reverse().map(mapSupportMessage),
+      hasMore,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const adminUserId = req.user!.userId;
+
+    const ticket = await prisma.supportTicket.findUnique({ where: { id } });
+    if (!ticket) throw new NotFoundError('Ticket');
+    if (ticket.status === 'closed') throw new BadRequestError('Ticket is closed');
+
+    // Auto-claim if open
+    if (ticket.status === 'open') {
+      await prisma.supportTicket.update({
+        where: { id },
+        data: { status: 'claimed', claimedById: adminUserId, claimedAt: new Date() },
+      });
+
+      const adminUser = await prisma.user.findUnique({ where: { id: adminUserId }, select: { username: true } });
+      const claimMsg = await prisma.supportMessage.create({
+        data: { ticketId: id, authorId: adminUserId, content: `Staff member ${adminUser?.username} has joined the conversation`, type: 'system' },
+        include: { author: supportAuthorSelect },
+      });
+      const io = getIO();
+      const autoClaimPayload = mapSupportMessage(claimMsg);
+      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, autoClaimPayload);
+      io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, autoClaimPayload);
+      const autoStatusPayload = { ticketId: id, status: 'claimed', claimedById: adminUserId, claimedByUsername: adminUser?.username };
+      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, autoStatusPayload);
+      io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, autoStatusPayload);
+
+      logAuditEvent({
+        actorId: adminUserId,
+        action: 'support.claim',
+        targetType: 'support_ticket',
+        targetId: id,
+        metadata: { userId: ticket.userId },
+      });
+    }
+
+    const content = sanitizeText(req.body.content ?? '');
+    if (content.length < LIMITS.SUPPORT_MESSAGE_MIN || content.length > LIMITS.SUPPORT_MESSAGE_MAX) {
+      throw new BadRequestError(`Message must be ${LIMITS.SUPPORT_MESSAGE_MIN}-${LIMITS.SUPPORT_MESSAGE_MAX} characters`);
+    }
+
+    const message = await prisma.supportMessage.create({
+      data: { ticketId: id, authorId: adminUserId, content },
+      include: { author: supportAuthorSelect },
+    });
+
+    await prisma.supportTicket.update({ where: { id }, data: { updatedAt: new Date() } });
+
+    const payload = mapSupportMessage(message);
+    getIO().to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, payload);
+    getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, payload);
+    await emitSupportTicketCount();
+
+    res.status(201).json({ success: true, data: payload });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/support/tickets/:id/close', async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const adminUserId = req.user!.userId;
+
+    const ticket = await prisma.supportTicket.findUnique({ where: { id } });
+    if (!ticket) throw new NotFoundError('Ticket');
+    if (ticket.status === 'closed') throw new BadRequestError('Ticket is already closed');
+
+    await prisma.supportTicket.update({
+      where: { id },
+      data: { status: 'closed', closedAt: new Date() },
+    });
+
+    const adminUser = await prisma.user.findUnique({ where: { id: adminUserId }, select: { username: true } });
+
+    const sysMsg = await prisma.supportMessage.create({
+      data: { ticketId: id, authorId: adminUserId, content: `Ticket closed by ${adminUser?.username}`, type: 'system' },
+      include: { author: supportAuthorSelect },
+    });
+
+    const io = getIO();
+    const closePayload = mapSupportMessage(sysMsg);
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, closePayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, closePayload);
+    const closeStatusPayload = { ticketId: id, status: 'closed' };
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, closeStatusPayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, closeStatusPayload);
+
+    await emitSupportTicketCount();
+
+    logAuditEvent({
+      actorId: adminUserId,
+      action: 'support.close',
+      targetType: 'support_ticket',
+      targetId: id,
+      metadata: { userId: ticket.userId },
+    });
+
+    res.json({ success: true, message: 'Ticket closed' });
   } catch (err) {
     next(err);
   }

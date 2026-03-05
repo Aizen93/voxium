@@ -131,6 +131,7 @@ export interface MessageAuthor {
   username: string;
   displayName: string;
   avatarUrl: string | null;
+  role?: string;
 }
 
 export interface SendMessageRequest {
@@ -272,7 +273,11 @@ export interface ServerToClientEvents {
   'announcement:new': (announcement: Announcement) => void;
   'announcement:init': (data: { announcements: Announcement[] }) => void;
   'admin:metrics': (data: AdminMetricsSnapshot) => void;
+  'report:new': (data: { total: number }) => void;
   'force:logout': (data: { reason: string }) => void;
+  'support:message:new': (message: SupportMessageData) => void;
+  'support:status_change': (data: { ticketId: string; status: SupportTicketStatus; claimedById?: string; claimedByUsername?: string }) => void;
+  'support:ticket:new': (data: { total: number }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -301,6 +306,10 @@ export interface ClientToServerEvents {
   'voice:screen_share:stop': () => void;
   'admin:subscribe_metrics': () => void;
   'admin:unsubscribe_metrics': () => void;
+  'admin:subscribe_reports': () => void;
+  'admin:unsubscribe_reports': () => void;
+  'admin:subscribe_support': () => void;
+  'admin:unsubscribe_support': () => void;
 }
 
 // ─── API Response ────────────────────────────────────────────────────────────
@@ -405,6 +414,8 @@ export interface AdminDashboardStats {
   totalMessages: number;
   onlineUsers: number;
   bannedUsers: number;
+  pendingReports: number;
+  openTickets: number;
 }
 
 export interface AdminMetricsSnapshot {
@@ -447,6 +458,67 @@ export interface StorageTopUploader {
   totalSize: number;
 }
 
+// ─── Reports ────────────────────────────────────────────────────────────────
+
+export type ReportStatus = 'pending' | 'resolved' | 'dismissed';
+export type ReportType = 'message' | 'user';
+
+export interface Report {
+  id: string;
+  type: ReportType;
+  status: ReportStatus;
+  reason: string;
+  reporterId: string;
+  reporterUsername: string;
+  reportedUserId: string;
+  reportedUsername: string;
+  messageId: string | null;
+  messageContent: string | null;
+  channelId: string | null;
+  conversationId: string | null;
+  serverId: string | null;
+  resolvedById: string | null;
+  resolvedByUsername: string | null;
+  resolution: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+// ─── Support Tickets ────────────────────────────────────────────────────────
+
+export type SupportTicketStatus = 'open' | 'claimed' | 'closed';
+
+export interface SupportTicket {
+  id: string;
+  userId: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  status: SupportTicketStatus;
+  claimedById: string | null;
+  claimedByUsername: string | null;
+  lastMessage: string | null;
+  lastMessageAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SupportMessageData {
+  id: string;
+  ticketId: string;
+  authorId: string;
+  content: string;
+  type: 'user' | 'system';
+  createdAt: string;
+  author: {
+    id: string;
+    username: string;
+    displayName: string;
+    avatarUrl: string | null;
+    role: string;
+  };
+}
+
 // ─── Audit Log ──────────────────────────────────────────────────────────────
 
 export type AuditAction =
@@ -454,7 +526,9 @@ export type AuditAction =
   | 'server.delete'
   | 'ip_ban.create' | 'ip_ban.delete'
   | 'storage.file_delete' | 'storage.cleanup_orphans'
-  | 'announcement.create' | 'announcement.publish' | 'announcement.delete';
+  | 'announcement.create' | 'announcement.publish' | 'announcement.delete'
+  | 'report.resolve' | 'report.dismiss'
+  | 'support.claim' | 'support.close';
 
 // ─── Announcements ─────────────────────────────────────────────────────────
 

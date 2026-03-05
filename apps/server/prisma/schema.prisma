@@ -42,6 +42,12 @@ model User {
   ipBansCreated IpBan[]  @relation("IpBanCreator")
   auditLogs     AuditLog[] @relation("AuditLogActor")
   announcements Announcement[] @relation("AnnouncementCreator")
+  reportsFiled    Report[] @relation("ReportReporter")
+  reportsAgainst  Report[] @relation("ReportReported")
+  reportsResolved Report[] @relation("ReportResolver")
+  supportTickets        SupportTicket[]  @relation("SupportTicketUser")
+  supportTicketsClaimed SupportTicket[]  @relation("SupportTicketClaimer")
+  supportMessages       SupportMessage[] @relation("SupportMessageAuthor")
 
   @@map("users")
 }
@@ -135,6 +141,7 @@ model Message {
   replyTo      Message?           @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
   replies      Message[]          @relation("MessageReply")
   reactions    MessageReaction[]
+  reports      Report[]
 
   @@index([channelId, createdAt])
   @@index([conversationId, createdAt])
@@ -303,4 +310,70 @@ model Announcement {
   @@index([publishedAt])
   @@index([expiresAt])
   @@map("announcements")
+}
+
+// ─── Reports ──────────────────────────────────────────────────────────────
+
+model Report {
+  id              String    @id @default(cuid())
+  type            String    // "message" | "user"
+  status          String    @default("pending") // "pending" | "resolved" | "dismissed"
+  reason          String
+  reporterId      String    @map("reporter_id")
+  reportedUserId  String    @map("reported_user_id")
+  messageId       String?   @map("message_id")
+  messageContent  String?   @map("message_content")
+  channelId       String?   @map("channel_id")
+  conversationId  String?   @map("conversation_id")
+  serverId        String?   @map("server_id")
+  resolvedById    String?   @map("resolved_by_id")
+  resolution      String?
+  resolvedAt      DateTime? @map("resolved_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  reporter     User     @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedUser User     @relation("ReportReported", fields: [reportedUserId], references: [id], onDelete: Cascade)
+  message      Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  resolvedBy   User?    @relation("ReportResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("reports")
+}
+
+// ─── Support Tickets ─────────────────────────────────────────────────────────
+
+model SupportTicket {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  status      String    @default("open") // "open" | "claimed" | "closed"
+  claimedById String?   @map("claimed_by_id")
+  claimedAt   DateTime? @map("claimed_at")
+  closedAt    DateTime? @map("closed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user      User             @relation("SupportTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  claimedBy User?            @relation("SupportTicketClaimer", fields: [claimedById], references: [id], onDelete: SetNull)
+  messages  SupportMessage[]
+
+  @@unique([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("support_tickets")
+}
+
+model SupportMessage {
+  id        String   @id @default(cuid())
+  ticketId  String   @map("ticket_id")
+  authorId  String   @map("author_id")
+  content   String
+  type      String   @default("user") // "user" | "system"
+  createdAt DateTime @default(now()) @map("created_at")
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User          @relation("SupportMessageAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@map("support_messages")
 }

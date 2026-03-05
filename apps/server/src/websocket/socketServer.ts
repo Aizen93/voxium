@@ -149,12 +149,34 @@ export function initSocketServer(httpServer: HttpServer) {
     // ─── Admin metrics subscription ──────────────────────────────────
     socket.on('admin:subscribe_metrics', () => {
       if (!socketRateLimit(socket, 'admin:subscribe_metrics', 10)) return;
-      if (socket.data.role !== 'superadmin') return;
+      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
       socket.join('admin:metrics');
     });
 
     socket.on('admin:unsubscribe_metrics', () => {
       socket.leave('admin:metrics');
+    });
+
+    // ─── Admin reports subscription ──────────────────────────────────
+    socket.on('admin:subscribe_reports', () => {
+      if (!socketRateLimit(socket, 'admin:subscribe_reports', 10)) return;
+      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
+      socket.join('admin:reports');
+    });
+
+    socket.on('admin:unsubscribe_reports', () => {
+      socket.leave('admin:reports');
+    });
+
+    // ─── Admin support subscription ──────────────────────────────────
+    socket.on('admin:subscribe_support', () => {
+      if (!socketRateLimit(socket, 'admin:subscribe_support', 10)) return;
+      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
+      socket.join('admin:support');
+    });
+
+    socket.on('admin:unsubscribe_support', () => {
+      socket.leave('admin:support');
     });
 
     // ─── Disconnect ─────────────────────────────────────────────────
@@ -284,6 +306,19 @@ export function initSocketServer(httpServer: HttpServer) {
             })),
           });
         }
+      }
+
+      // Auto-join support ticket room if user has an open/claimed ticket
+      try {
+        const supportTicket = await prisma.supportTicket.findUnique({
+          where: { userId },
+          select: { id: true, status: true },
+        });
+        if (supportTicket && (supportTicket.status === 'open' || supportTicket.status === 'claimed')) {
+          socket.join(`support:${supportTicket.id}`);
+        }
+      } catch (supportErr) {
+        console.error(`[WS] Error joining support room for ${userId}:`, supportErr);
       }
 
       // Send active announcements

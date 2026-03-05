@@ -18,6 +18,8 @@ let _categoryManageLimiter: RateLimiterRedis | null = null;
 let _searchLimiter: RateLimiterRedis | null = null;
 let _statsLimiter: RateLimiterRedis | null = null;
 let _adminLimiter: RateLimiterRedis | null = null;
+let _reportLimiter: RateLimiterRedis | null = null;
+let _supportLimiter: RateLimiterRedis | null = null;
 let _generalLimiter: RateLimiterRedis | null = null;
 
 function createLimiter(opts: {
@@ -114,6 +116,16 @@ function getAdminLimiter() {
   return _adminLimiter;
 }
 
+function getReportLimiter() {
+  if (!_reportLimiter) _reportLimiter = createLimiter({ keyPrefix: 'rl:report', points: 5, duration: 300 });
+  return _reportLimiter;
+}
+
+function getSupportLimiter() {
+  if (!_supportLimiter) _supportLimiter = createLimiter({ keyPrefix: 'rl:support', points: 10, duration: 30 });
+  return _supportLimiter;
+}
+
 function getGeneralLimiter() {
   if (!_generalLimiter) _generalLimiter = createLimiter({ keyPrefix: 'rl:general', points: 100, duration: 60 });
   return _generalLimiter;
@@ -161,6 +173,8 @@ export const rateLimitCategoryManage = createMiddleware(getCategoryManageLimiter
 export const rateLimitSearch = createMiddleware(getSearchLimiter, byUserId);
 export const rateLimitStats = createMiddleware(getStatsLimiter, byIp);
 export const rateLimitAdmin = createMiddleware(getAdminLimiter, byUserId);
+export const rateLimitReport = createMiddleware(getReportLimiter, byUserId);
+export const rateLimitSupport = createMiddleware(getSupportLimiter, byUserId);
 export const rateLimitGeneral = createMiddleware(getGeneralLimiter, byIp);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────

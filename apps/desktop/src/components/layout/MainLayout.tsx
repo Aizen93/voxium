@@ -22,6 +22,8 @@ import { toast } from '../../stores/toastStore';
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
+import { SupportTicketView } from '../dm/SupportTicketView';
+import { useSupportStore } from '../../stores/supportStore';
 import { SearchModal } from '../search/SearchModal';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
@@ -35,6 +37,7 @@ export function MainLayout() {
   const activeConversationId = useDMStore((s) => s.activeConversationId);
   const conversations = useDMStore((s) => s.conversations);
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
+  const showSupportView = useSupportStore((s) => s.showSupportView);
   const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
   const screenSharingUserId = useVoiceStore((s) => s.screenSharingUserId);
   const screenShareViewMode = useVoiceStore((s) => s.screenShareViewMode);
@@ -433,6 +436,12 @@ export function MainLayout() {
         const label = typeLabels[announcement.type] || 'Announcement';
         toast.info(`${label}: ${announcement.title}`);
       },
+      supportMessageNew: (message: any) => {
+        useSupportStore.getState().addMessage(message);
+      },
+      supportStatusChange: (data: any) => {
+        useSupportStore.getState().updateStatus(data.status, data.claimedById, data.claimedByUsername);
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -486,6 +495,8 @@ export function MainLayout() {
       ['server:deleted', handlers.serverDeleted],
       ['announcement:init', handlers.announcementInit],
       ['announcement:new', handlers.announcementNew],
+      ['support:message:new', handlers.supportMessageNew],
+      ['support:status_change', handlers.supportStatusChange],
     ];
 
     /**
@@ -543,6 +554,8 @@ export function MainLayout() {
       useDMStore.getState().fetchConversations();
       // Re-fetch friends
       useFriendStore.getState().fetchFriends();
+      // Re-fetch support ticket (auto-joins room on server)
+      useSupportStore.getState().fetchTicket();
     }
 
     // Mechanism 1: Direct listener on the socket object
@@ -608,6 +621,8 @@ export function MainLayout() {
             )
           ) : showFriendsView ? (
             <FriendsView />
+          ) : showSupportView ? (
+            <SupportTicketView />
           ) : activeConversationId ? (
             <DMChatArea />
           ) : (

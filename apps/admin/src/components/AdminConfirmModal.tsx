@@ -3,14 +3,15 @@ import { X } from 'lucide-react';
 
 interface AdminConfirmModalProps {
   title: string;
-  message: string;
+  message: React.ReactNode;
   confirmLabel?: string;
   danger?: boolean;
+  variant?: 'danger' | 'primary';
   onConfirm: () => Promise<void> | void;
   onCancel: () => void;
 }
 
-export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', danger = true, onConfirm, onCancel }: AdminConfirmModalProps) {
+export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', danger = true, variant, onConfirm, onCancel }: AdminConfirmModalProps) {
   const [loading, setLoading] = useState(false);
 
   const handleConfirm = async () => {
@@ -31,7 +32,7 @@ export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', da
             <X size={20} />
           </button>
         </div>
-        <p className="text-sm text-vox-text-secondary mb-6">{message}</p>
+        <div className="text-sm text-vox-text-secondary mb-6">{message}</div>
         <div className="flex justify-end gap-3">
           <button
             onClick={onCancel}
@@ -43,7 +44,7 @@ export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', da
             onClick={handleConfirm}
             disabled={loading}
             className={`px-4 py-2 text-sm rounded-md text-white transition-colors disabled:opacity-50 ${
-              danger ? 'bg-vox-accent-danger hover:bg-red-600' : 'bg-vox-accent-primary hover:bg-vox-accent-hover'
+              (variant === 'danger' || (variant === undefined && danger)) ? 'bg-vox-accent-danger hover:bg-red-600' : 'bg-vox-accent-primary hover:bg-vox-accent-hover'
             }`}
           >
             {loading ? 'Processing...' : confirmLabel}

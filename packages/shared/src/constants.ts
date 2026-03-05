@@ -33,6 +33,10 @@ export const LIMITS = {
   ANNOUNCEMENT_TITLE_MIN: 3,
   ANNOUNCEMENT_TITLE_MAX: 200,
   ANNOUNCEMENT_CONTENT_MAX: 2000,
+  REPORT_REASON_MIN: 10,
+  REPORT_REASON_MAX: 1000,
+  SUPPORT_MESSAGE_MIN: 1,
+  SUPPORT_MESSAGE_MAX: 2000,
 } as const;
 
 export const INVITE_CODE_LENGTH = 8;
@@ -102,4 +106,12 @@ export const WS_EVENTS = {
   ADMIN_UNSUBSCRIBE_METRICS: 'admin:unsubscribe_metrics',
   ANNOUNCEMENT_NEW: 'announcement:new',
   ANNOUNCEMENT_INIT: 'announcement:init',
+  REPORT_NEW: 'report:new',
+  ADMIN_SUBSCRIBE_REPORTS: 'admin:subscribe_reports',
+  ADMIN_UNSUBSCRIBE_REPORTS: 'admin:unsubscribe_reports',
+  SUPPORT_MESSAGE_NEW: 'support:message:new',
+  SUPPORT_STATUS_CHANGE: 'support:status_change',
+  SUPPORT_TICKET_NEW: 'support:ticket:new',
+  ADMIN_SUBSCRIBE_SUPPORT: 'admin:subscribe_support',
+  ADMIN_UNSUBSCRIBE_SUPPORT: 'admin:unsubscribe_support',
 } as const;

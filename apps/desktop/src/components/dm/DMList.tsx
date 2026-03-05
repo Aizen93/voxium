@@ -1,15 +1,18 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useDMStore } from '../../stores/dmStore';
 import { useFriendStore } from '../../stores/friendStore';
+import { useSupportStore } from '../../stores/supportStore';
 import { Avatar } from '../common/Avatar';
-import { MessageSquare, Users, X } from 'lucide-react';
-import { formatDistanceToNow } from 'date-fns';
+import { MessageSquare, Users, X, LifeBuoy } from 'lucide-react';
 import { clsx } from 'clsx';
+import { toast } from '../../stores/toastStore';
+import { StaffBadge } from '../common/StaffBadge';
 
 export function DMList() {
   const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, participantStatuses, deleteConversation } = useDMStore();
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const pendingIncoming = useFriendStore((s) => s.pendingIncoming);
+  const [showSupportConfirm, setShowSupportConfirm] = useState(false);
 
   useEffect(() => {
     fetchConversations();
@@ -17,12 +20,37 @@ export function DMList() {
 
   const handleOpenConversation = (conversationId: string) => {
     useFriendStore.getState().setShowFriendsView(false);
+    useSupportStore.getState().setShowSupportView(false);
     setActiveConversation(conversationId);
   };
 
   const handleOpenFriends = () => {
     useFriendStore.getState().setShowFriendsView(true);
+    useSupportStore.getState().setShowSupportView(false);
     useDMStore.getState().clearActiveConversation();
+  };
+
+  const handleContactSupport = async () => {
+    // If user already has an open/claimed ticket, go directly to it
+    const existing = useSupportStore.getState().ticket;
+    if (existing && existing.status !== 'closed') {
+      useSupportStore.getState().setShowSupportView(true);
+      useFriendStore.getState().setShowFriendsView(false);
+      useDMStore.getState().clearActiveConversation();
+      return;
+    }
+    setShowSupportConfirm(true);
+  };
+
+  const handleConfirmSupport = async () => {
+    setShowSupportConfirm(false);
+    try {
+      await useSupportStore.getState().openTicket();
+      useFriendStore.getState().setShowFriendsView(false);
+      useDMStore.getState().clearActiveConversation();
+    } catch {
+      toast.error('Failed to open support ticket');
+    }
   };
 
   return (
@@ -51,6 +79,17 @@ export function DMList() {
               {pendingIncoming.length}
             </span>
           )}
+        </button>
+      </div>
+
+      {/* Contact Support */}
+      <div className="px-2 pt-1">
+        <button
+          onClick={handleContactSupport}
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary transition-colors"
+        >
+          <LifeBuoy size={16} />
+          <span className="flex-1 text-sm font-medium">Contact Support</span>
         </button>
       </div>
 
@@ -104,12 +143,15 @@ export function DMList() {
                 status={participantStatuses[conv.participant.id] || 'offline'}
               />
               <div className="min-w-0 flex-1">
-                <span className={clsx(
-                  'block truncate text-sm',
-                  isActive ? 'font-medium' : unread > 0 ? 'font-semibold' : ''
-                )}>
-                  {conv.participant.displayName}
-                </span>
+                <div className="flex items-center gap-1">
+                  <span className={clsx(
+                    'truncate text-sm',
+                    isActive ? 'font-medium' : unread > 0 ? 'font-semibold' : ''
+                  )}>
+                    {conv.participant.displayName}
+                  </span>
+                  {(conv.participant.role === 'admin' || conv.participant.role === 'superadmin') && <StaffBadge />}
+                </div>
                 {conv.lastMessage && (
                   <p className="truncate text-[11px] text-vox-text-muted">
                     {conv.lastMessage.content}
@@ -135,6 +177,35 @@ export function DMList() {
           );
         })}
       </div>
+
+      {/* Support confirmation modal */}
+      {showSupportConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-sm rounded-lg bg-vox-bg-secondary p-5 shadow-xl border border-vox-border">
+            <div className="flex items-center gap-2 mb-3">
+              <LifeBuoy size={18} className="text-vox-accent-primary" />
+              <h3 className="text-sm font-semibold text-vox-text-primary">Contact Support</h3>
+            </div>
+            <p className="text-sm text-vox-text-secondary mb-4">
+              This will open a support ticket where you can chat with our staff. Would you like to continue?
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowSupportConfirm(false)}
+                className="px-3 py-1.5 text-sm rounded-md bg-vox-bg-hover text-vox-text-secondary hover:text-vox-text-primary transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmSupport}
+                className="px-3 py-1.5 text-sm rounded-md bg-vox-accent-primary text-white hover:bg-vox-accent-primary/90 transition-colors"
+              >
+                Open Ticket
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
