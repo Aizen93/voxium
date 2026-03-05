@@ -30,6 +30,9 @@ export const LIMITS = {
   SEARCH_QUERY_MIN: 2,
   SEARCH_QUERY_MAX: 200,
   SEARCH_RESULTS_PER_PAGE: 25,
+  ANNOUNCEMENT_TITLE_MIN: 3,
+  ANNOUNCEMENT_TITLE_MAX: 200,
+  ANNOUNCEMENT_CONTENT_MAX: 2000,
 } as const;
 
 export const INVITE_CODE_LENGTH = 8;
@@ -97,4 +100,6 @@ export const WS_EVENTS = {
   ADMIN_METRICS: 'admin:metrics',
   ADMIN_SUBSCRIBE_METRICS: 'admin:subscribe_metrics',
   ADMIN_UNSUBSCRIBE_METRICS: 'admin:unsubscribe_metrics',
+  ANNOUNCEMENT_NEW: 'announcement:new',
+  ANNOUNCEMENT_INIT: 'announcement:init',
 } as const;

@@ -41,6 +41,7 @@ model User {
   ipRecords    IpRecord[]
   ipBansCreated IpBan[]  @relation("IpBanCreator")
   auditLogs     AuditLog[] @relation("AuditLogActor")
+  announcements Announcement[] @relation("AnnouncementCreator")
 
   @@map("users")
 }
@@ -280,4 +281,26 @@ model AuditLog {
   @@index([createdAt])
   @@index([actorId])
   @@map("audit_logs")
+}
+
+// ─── Announcements ─────────────────────────────────────────────────────────
+
+model Announcement {
+  id          String    @id @default(cuid())
+  title       String
+  content     String
+  type        String    @default("info")
+  scope       String    @default("global")
+  serverIds   String[]  @map("server_ids")
+  createdById String    @map("created_by_id")
+  publishedAt DateTime? @map("published_at")
+  expiresAt   DateTime? @map("expires_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  createdBy User @relation("AnnouncementCreator", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([publishedAt])
+  @@index([expiresAt])
+  @@map("announcements")
 }

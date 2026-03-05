@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry } from '@voxium/shared';
+import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement } from '@voxium/shared';
 
 // Module-level refs for metrics subscription cleanup
 let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
@@ -59,6 +59,12 @@ interface AdminState {
   storageFilter: string;
   topUploaders: StorageTopUploader[];
 
+  // Announcements
+  announcements: Announcement[];
+  announcementsTotal: number;
+  announcementsPage: number;
+  announcementsFilter: string;
+
   // Audit Logs
   auditLogs: AuditLogEntry[];
   auditLogsTotal: number;
@@ -97,6 +103,12 @@ interface AdminState {
   fetchIpBans: (page?: number) => Promise<void>;
   addIpBan: (ip: string, reason?: string) => Promise<void>;
   removeIpBan: (id: string) => Promise<void>;
+
+  fetchAnnouncements: (page?: number) => Promise<void>;
+  setAnnouncementsFilter: (filter: string) => void;
+  createAnnouncement: (data: { title: string; content: string; type: string; scope: string; serverIds?: string[]; expiresAt?: string; publish?: boolean }) => Promise<void>;
+  publishAnnouncement: (id: string) => Promise<void>;
+  deleteAnnouncement: (id: string) => Promise<void>;
 
   fetchAuditLogs: (page?: number) => Promise<void>;
   setAuditLogsFilter: (filter: string) => void;
@@ -144,6 +156,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   storageFilesPage: 1,
   storageFilter: 'all',
   topUploaders: [],
+  announcements: [],
+  announcementsTotal: 0,
+  announcementsPage: 1,
+  announcementsFilter: 'all',
   auditLogs: [],
   auditLogsTotal: 0,
   auditLogsPage: 1,
@@ -320,6 +336,37 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   removeIpBan: async (id) => {
     await api.delete(`/admin/ip-bans/${id}`);
     await get().fetchIpBans();
+  },
+
+  fetchAnnouncements: async (page?: number) => {
+    const state = get();
+    const p = page ?? state.announcementsPage;
+    set({ loading: true });
+    try {
+      const { data } = await api.get('/admin/announcements', {
+        params: { page: p, limit: 20, filter: state.announcementsFilter },
+      });
+      set({ announcements: data.data, announcementsTotal: data.total, announcementsPage: p });
+    } finally {
+      set({ loading: false });
+    }
+  },
+
+  setAnnouncementsFilter: (filter) => set({ announcementsFilter: filter }),
+
+  createAnnouncement: async (body) => {
+    await api.post('/admin/announcements', body);
+    await get().fetchAnnouncements(1);
+  },
+
+  publishAnnouncement: async (id) => {
+    await api.post(`/admin/announcements/${id}/publish`);
+    await get().fetchAnnouncements();
+  },
+
+  deleteAnnouncement: async (id) => {
+    await api.delete(`/admin/announcements/${id}`);
+    await get().fetchAnnouncements();
   },
 
   fetchAuditLogs: async (page?: number) => {

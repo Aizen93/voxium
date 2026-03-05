@@ -286,6 +286,49 @@ export function initSocketServer(httpServer: HttpServer) {
         }
       }
 
+      // Send active announcements
+      try {
+        const memberServerIds = memberships.map((m) => m.serverId);
+        const now = new Date();
+        const activeAnnouncements = await prisma.announcement.findMany({
+          where: {
+            publishedAt: { not: null },
+            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+            AND: [
+              {
+                OR: [
+                  { scope: 'global' },
+                  { scope: 'servers', serverIds: { hasSome: memberServerIds.length > 0 ? memberServerIds : ['__none__'] } },
+                ],
+              },
+            ],
+          },
+          include: { createdBy: { select: { username: true } } },
+          orderBy: { publishedAt: 'desc' },
+          take: 10,
+        });
+
+        if (activeAnnouncements.length > 0) {
+          socket.emit('announcement:init', {
+            announcements: activeAnnouncements.map((a) => ({
+              id: a.id,
+              title: a.title,
+              content: a.content,
+              type: a.type as import('@voxium/shared').AnnouncementType,
+              scope: a.scope as import('@voxium/shared').AnnouncementScope,
+              serverIds: a.serverIds,
+              createdById: a.createdById,
+              createdByUsername: a.createdBy?.username ?? 'Deleted',
+              publishedAt: a.publishedAt!.toISOString(),
+              expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
+              createdAt: a.createdAt.toISOString(),
+            })),
+          });
+        }
+      } catch (annErr) {
+        console.error(`[WS] Error fetching announcements for ${userId}:`, annErr);
+      }
+
       // Broadcast online status to all servers
       for (const m of memberships) {
         socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });

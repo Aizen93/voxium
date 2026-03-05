@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LayoutDashboard, Users, Server, ShieldBan, HardDrive, ClipboardList, Download, LogOut } from 'lucide-react';
+import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
@@ -11,14 +11,16 @@ import { AdminBanList } from './AdminBanList';
 import { AdminStorage } from './AdminStorage';
 import { AdminDataTools } from './AdminDataTools';
 import { AdminAuditLog } from './AdminAuditLog';
+import { AdminAnnouncements } from './AdminAnnouncements';
 
-type AdminView = 'dashboard' | 'users' | 'servers' | 'bans' | 'storage' | 'audit-logs' | 'export';
+type AdminView = 'dashboard' | 'users' | 'servers' | 'bans' | 'announcements' | 'storage' | 'audit-logs' | 'export';
 
 const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'users', label: 'Users', icon: Users },
   { id: 'servers', label: 'Servers', icon: Server },
   { id: 'bans', label: 'Bans', icon: ShieldBan },
+  { id: 'announcements', label: 'Announcements', icon: Megaphone },
   { id: 'storage', label: 'Storage', icon: HardDrive },
   { id: 'audit-logs', label: 'Audit Log', icon: ClipboardList },
   { id: 'export', label: 'Data Tools', icon: Download },
@@ -48,6 +50,8 @@ export function AdminLayout() {
         return <AdminServerList />;
       case 'bans':
         return <AdminBanList />;
+      case 'announcements':
+        return <AdminAnnouncements />;
       case 'storage':
         return <AdminStorage />;
       case 'audit-logs':

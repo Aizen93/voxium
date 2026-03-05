@@ -26,6 +26,8 @@ import { SearchModal } from '../search/SearchModal';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { initNotifications, notify } from '../../services/notifications';
+import { useAnnouncementStore } from '../../stores/announcementStore';
+import { AnnouncementBanner } from './AnnouncementBanner';
 
 export function MainLayout() {
   const { fetchServers, activeServerId, channels } = useServerStore();
@@ -422,6 +424,15 @@ export function MainLayout() {
         serverState.handleServerDeleted(serverId);
         toast.info('Server was deleted');
       },
+      announcementInit: ({ announcements }: any) => {
+        useAnnouncementStore.getState().initAnnouncements(announcements);
+      },
+      announcementNew: (announcement: any) => {
+        useAnnouncementStore.getState().addAnnouncement(announcement);
+        const typeLabels: Record<string, string> = { info: 'Info', warning: 'Warning', maintenance: 'Maintenance' };
+        const label = typeLabels[announcement.type] || 'Announcement';
+        toast.info(`${label}: ${announcement.title}`);
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -473,6 +484,8 @@ export function MainLayout() {
       ['member:role_updated', handlers.memberRoleUpdated],
       ['member:kicked', handlers.memberKicked],
       ['server:deleted', handlers.serverDeleted],
+      ['announcement:init', handlers.announcementInit],
+      ['announcement:new', handlers.announcementNew],
     ];
 
     /**
@@ -575,6 +588,7 @@ export function MainLayout() {
   return (
     <div className="flex h-full flex-col">
       <ConnectionBanner />
+      <AnnouncementBanner />
       <div className="flex flex-1 min-h-0">
         <ServerSidebar />
         {activeServerId ? <ChannelSidebar /> : <DMList />}

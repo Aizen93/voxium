@@ -14,6 +14,9 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'ip_ban.delete': 'IP Ban Removed',
   'storage.file_delete': 'File Deleted',
   'storage.cleanup_orphans': 'Orphan Cleanup',
+  'announcement.create': 'Announcement Created',
+  'announcement.publish': 'Announcement Published',
+  'announcement.delete': 'Announcement Deleted',
 };
 
 const ACTION_COLORS: Record<string, string> = {
@@ -26,6 +29,9 @@ const ACTION_COLORS: Record<string, string> = {
   'ip_ban.delete': 'bg-green-500/20 text-green-400',
   'storage.file_delete': 'bg-yellow-500/20 text-yellow-400',
   'storage.cleanup_orphans': 'bg-yellow-500/20 text-yellow-400',
+  'announcement.create': 'bg-purple-500/20 text-purple-400',
+  'announcement.publish': 'bg-green-500/20 text-green-400',
+  'announcement.delete': 'bg-red-500/20 text-red-400',
 };
 
 function formatMetadata(action: AuditAction, metadata: Record<string, unknown> | null): string {

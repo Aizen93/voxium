@@ -269,6 +269,8 @@ export interface ServerToClientEvents {
   'voice:screen_share:start': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:stop': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:state': (data: { channelId: string; sharingUserId: string | null }) => void;
+  'announcement:new': (announcement: Announcement) => void;
+  'announcement:init': (data: { announcements: Announcement[] }) => void;
   'admin:metrics': (data: AdminMetricsSnapshot) => void;
   'force:logout': (data: { reason: string }) => void;
 }
@@ -451,7 +453,27 @@ export type AuditAction =
   | 'user.ban' | 'user.unban' | 'user.delete' | 'user.role_change'
   | 'server.delete'
   | 'ip_ban.create' | 'ip_ban.delete'
-  | 'storage.file_delete' | 'storage.cleanup_orphans';
+  | 'storage.file_delete' | 'storage.cleanup_orphans'
+  | 'announcement.create' | 'announcement.publish' | 'announcement.delete';
+
+// ─── Announcements ─────────────────────────────────────────────────────────
+
+export type AnnouncementType = 'info' | 'warning' | 'maintenance';
+export type AnnouncementScope = 'global' | 'servers';
+
+export interface Announcement {
+  id: string;
+  title: string;
+  content: string;
+  type: AnnouncementType;
+  scope: AnnouncementScope;
+  serverIds: string[];
+  createdById: string;
+  createdByUsername: string;
+  publishedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+}
 
 export interface AuditLogEntry {
   id: string;

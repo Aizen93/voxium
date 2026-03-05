@@ -11,8 +11,8 @@ import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE } from '../utils/s3';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry } from '@voxium/shared';
-import { WS_EVENTS } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement } from '@voxium/shared';
+import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
 
 export const adminRouter = Router();
@@ -1173,6 +1173,215 @@ adminRouter.get('/export/ip-bans', async (_req: Request, res: Response, next: Ne
     }));
 
     res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Announcements ──────────────────────────────────────────────────────────
+
+function mapAnnouncement(a: any): Announcement {
+  return {
+    id: a.id,
+    title: a.title,
+    content: a.content,
+    type: a.type,
+    scope: a.scope,
+    serverIds: a.serverIds,
+    createdById: a.createdById,
+    createdByUsername: a.createdBy?.username ?? 'Deleted',
+    publishedAt: a.publishedAt ? a.publishedAt.toISOString() : null,
+    expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
+    createdAt: a.createdAt.toISOString(),
+  };
+}
+
+function broadcastAnnouncement(announcement: Announcement) {
+  const io = getIO();
+  if (announcement.scope === 'global') {
+    io.emit(WS_EVENTS.ANNOUNCEMENT_NEW as any, announcement);
+  } else {
+    for (const serverId of announcement.serverIds) {
+      io.to(`server:${serverId}`).emit(WS_EVENTS.ANNOUNCEMENT_NEW as any, announcement);
+    }
+  }
+}
+
+adminRouter.get('/announcements', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const filter = (req.query.filter as string) || 'all';
+
+    const now = new Date();
+    const where: Record<string, unknown> = {};
+
+    if (filter === 'active') {
+      where.publishedAt = { not: null };
+      where.OR = [{ expiresAt: null }, { expiresAt: { gt: now } }];
+    } else if (filter === 'draft') {
+      where.publishedAt = null;
+    } else if (filter === 'expired') {
+      where.publishedAt = { not: null };
+      where.expiresAt = { lte: now };
+    }
+
+    const [announcements, total] = await Promise.all([
+      prisma.announcement.findMany({
+        where,
+        include: { createdBy: { select: { username: true } } },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.announcement.count({ where }),
+    ]);
+
+    const data = announcements.map(mapAnnouncement);
+
+    res.json({ success: true, data, total, page, limit, hasMore: page * limit < total });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/announcements', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { title, content, type, scope, serverIds, expiresAt, publish } = req.body;
+
+    // Validate
+    if (!title || typeof title !== 'string') throw new BadRequestError('Title is required');
+    const sanitizedTitle = sanitizeText(title);
+    if (sanitizedTitle.length < LIMITS.ANNOUNCEMENT_TITLE_MIN || sanitizedTitle.length > LIMITS.ANNOUNCEMENT_TITLE_MAX) {
+      throw new BadRequestError(`Title must be ${LIMITS.ANNOUNCEMENT_TITLE_MIN}-${LIMITS.ANNOUNCEMENT_TITLE_MAX} characters`);
+    }
+
+    if (!content || typeof content !== 'string') throw new BadRequestError('Content is required');
+    const sanitizedContent = sanitizeText(content);
+    if (sanitizedContent.length < 1 || sanitizedContent.length > LIMITS.ANNOUNCEMENT_CONTENT_MAX) {
+      throw new BadRequestError(`Content must be 1-${LIMITS.ANNOUNCEMENT_CONTENT_MAX} characters`);
+    }
+
+    const validTypes = ['info', 'warning', 'maintenance'];
+    if (type && !validTypes.includes(type)) throw new BadRequestError('Type must be info, warning, or maintenance');
+
+    const validScopes = ['global', 'servers'];
+    if (scope && !validScopes.includes(scope)) throw new BadRequestError('Scope must be global or servers');
+
+    const annScope = scope || 'global';
+    let annServerIds: string[] = [];
+
+    if (annScope === 'servers') {
+      if (!Array.isArray(serverIds) || serverIds.length === 0) {
+        throw new BadRequestError('serverIds required when scope is "servers"');
+      }
+      const existingServers = await prisma.server.findMany({
+        where: { id: { in: serverIds } },
+        select: { id: true },
+      });
+      if (existingServers.length !== serverIds.length) {
+        throw new BadRequestError('One or more server IDs are invalid');
+      }
+      annServerIds = serverIds;
+    }
+
+    let parsedExpiry: Date | undefined;
+    if (expiresAt) {
+      parsedExpiry = new Date(expiresAt);
+      if (isNaN(parsedExpiry.getTime()) || parsedExpiry <= new Date()) {
+        throw new BadRequestError('expiresAt must be a valid future date');
+      }
+    }
+
+    const announcement = await prisma.announcement.create({
+      data: {
+        title: sanitizedTitle,
+        content: sanitizedContent,
+        type: type || 'info',
+        scope: annScope,
+        serverIds: annServerIds,
+        createdById: req.user!.userId,
+        publishedAt: publish ? new Date() : undefined,
+        expiresAt: parsedExpiry,
+      },
+      include: { createdBy: { select: { username: true } } },
+    });
+
+    const mapped = mapAnnouncement(announcement);
+
+    if (publish) {
+      broadcastAnnouncement(mapped);
+      logAuditEvent({
+        actorId: req.user!.userId,
+        action: 'announcement.publish',
+        targetType: 'announcement',
+        targetId: announcement.id,
+        metadata: { title: sanitizedTitle, scope: annScope },
+      });
+    } else {
+      logAuditEvent({
+        actorId: req.user!.userId,
+        action: 'announcement.create',
+        targetType: 'announcement',
+        targetId: announcement.id,
+        metadata: { title: sanitizedTitle, scope: annScope },
+      });
+    }
+
+    res.status(201).json({ success: true, data: mapped });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/announcements/:id/publish', async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const announcement = await prisma.announcement.findUnique({
+      where: { id: req.params.id },
+      include: { createdBy: { select: { username: true } } },
+    });
+    if (!announcement) throw new NotFoundError('Announcement');
+    if (announcement.publishedAt) throw new BadRequestError('Announcement is already published');
+
+    const updated = await prisma.announcement.update({
+      where: { id: req.params.id },
+      data: { publishedAt: new Date() },
+      include: { createdBy: { select: { username: true } } },
+    });
+
+    const mapped = mapAnnouncement(updated);
+    broadcastAnnouncement(mapped);
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'announcement.publish',
+      targetType: 'announcement',
+      targetId: announcement.id,
+      metadata: { title: announcement.title, scope: announcement.scope },
+    });
+
+    res.json({ success: true, data: mapped });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.delete('/announcements/:id', async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const announcement = await prisma.announcement.findUnique({ where: { id: req.params.id } });
+    if (!announcement) throw new NotFoundError('Announcement');
+
+    await prisma.announcement.delete({ where: { id: req.params.id } });
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'announcement.delete',
+      targetType: 'announcement',
+      targetId: announcement.id,
+      metadata: { title: announcement.title },
+    });
+
+    res.json({ success: true, message: 'Announcement deleted' });
   } catch (err) {
     next(err);
   }
