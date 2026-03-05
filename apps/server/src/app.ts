@@ -56,8 +56,40 @@ app.use(cookieParser());
 
 // ─── Health Check ────────────────────────────────────────────────────────────
 
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+app.get('/health', async (_req, res) => {
+  const checks: Record<string, { status: string; latency?: number; error?: string }> = {};
+  let healthy = true;
+
+  // Check PostgreSQL
+  const dbStart = Date.now();
+  try {
+    const { prisma } = await import('./utils/prisma');
+    await prisma.$queryRaw`SELECT 1`;
+    checks.database = { status: 'ok', latency: Date.now() - dbStart };
+  } catch (err: any) {
+    checks.database = { status: 'error', latency: Date.now() - dbStart, error: err.message };
+    healthy = false;
+  }
+
+  // Check Redis
+  const redisStart = Date.now();
+  try {
+    const { getRedis } = await import('./utils/redis');
+    const redis = getRedis();
+    await redis.ping();
+    checks.redis = { status: 'ok', latency: Date.now() - redisStart };
+  } catch (err: any) {
+    checks.redis = { status: 'error', latency: Date.now() - redisStart, error: err.message };
+    healthy = false;
+  }
+
+  const statusCode = healthy ? 200 : 503;
+  res.status(statusCode).json({
+    status: healthy ? 'ok' : 'degraded',
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    checks,
+  });
 });
 
 // ─── API Routes ──────────────────────────────────────────────────────────────
