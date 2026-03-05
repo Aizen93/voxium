@@ -107,7 +107,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
     if (query.length >= 2) {
       doSearch(query);
     }
-  }, [channelFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [channelFilter]);
 
   const handleLoadMore = () => {
     if (!hasMore || results.length === 0) return;
