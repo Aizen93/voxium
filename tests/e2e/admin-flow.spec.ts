@@ -1,6 +1,6 @@
 import { test, expect } from './helpers/fixtures';
 import { testUser } from './helpers/auth';
-import { registerUser, API_URL } from './helpers/api';
+import { registerUser } from './helpers/api';
 import { promoteToSuperAdmin, createReport, createSupportTicket, disconnectDb } from './helpers/db';
 
 const ADMIN_URL = 'http://localhost:8082';
@@ -28,25 +28,17 @@ test.describe('Admin flow: login -> manage users -> resolve report -> close tick
     const ticketMessage = `E2E support request ${Date.now()}`;
     await createSupportTicket(userData.user.id, ticketMessage);
 
-    // Re-login to get fresh token with superadmin role
-    const freshAdmin = await request.post(`${API_URL}/auth/login`, {
-      data: { email: adminUser.email, password: adminUser.password },
-    });
-    const { data: loginData } = await freshAdmin.json();
-
     // === Step 1: Login to admin panel ===
     await page.goto(`${ADMIN_URL}/login`);
     await expect(page.getByText('Voxium Admin')).toBeVisible();
 
-    // Inject auth tokens (faster than typing into the form)
-    await page.evaluate((tokens) => {
-      localStorage.setItem('voxium_access_token', tokens.accessToken);
-      localStorage.setItem('voxium_refresh_token', tokens.refreshToken);
-    }, loginData);
-    await page.goto(ADMIN_URL);
+    // Login via the UI form
+    await page.getByPlaceholder('admin@example.com').fill(adminUser.email);
+    await page.getByPlaceholder('Password').fill(adminUser.password);
+    await page.getByRole('button', { name: 'Sign In' }).click();
 
     // Should see the admin dashboard
-    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText('Total Users')).toBeVisible({ timeout: 10_000 });
 
     // === Step 2: Navigate to Users and verify user list ===
