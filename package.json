@@ -32,7 +32,8 @@
     ],
     "overrides": {
       "rollup": ">=4.59.0",
-      "fast-xml-parser": ">=5.4.1"
+      "fast-xml-parser": ">=5.4.1",
+      "tar": ">=7.5.10"
     }
   },
   "engines": {

@@ -1,0 +1,103 @@
+# Voxium Production Docker Compose
+#
+# Usage:
+#   1. Copy .env.production.example to .env.production and fill in all values
+#   2. docker compose -f docker-compose.production.yml up -d
+#   3. docker compose -f docker-compose.production.yml exec server \
+#        npx prisma migrate deploy --schema=apps/server/prisma/schema.prisma
+#
+# The server image is built from the root Dockerfile (multi-stage, non-root).
+# Put nginx/TLS in front of this (see DEPLOYMENT.md sections 11-12).
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voxium-server
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env.production
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://voxium:${POSTGRES_PASSWORD}@postgres:5432/voxium
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r=>{if(!r.ok)throw 1})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: voxium-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: voxium
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: voxium
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voxium"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    container_name: voxium-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: voxium-uptime-kuma
+    restart: unless-stopped
+    ports:
+      - "3002:3001"
+    volumes:
+      - uptimekuma:/app/data
+    depends_on:
+      server:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pgdata:
+  redisdata:
+  uptimekuma:

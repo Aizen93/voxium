@@ -50,7 +50,21 @@ app.use(cors({
   origin: allowedOrigins,
   credentials: true,
 }));
-app.use(morgan('dev'));
+const logFormat = process.env.LOG_FORMAT || (process.env.NODE_ENV === 'production' ? 'json' : 'dev');
+if (logFormat === 'json') {
+  morgan.token('body-size', (_req, res) => res.getHeader('content-length') as string || '0');
+  app.use(morgan((tokens, req, res) => JSON.stringify({
+    ts: new Date().toISOString(),
+    method: tokens.method(req, res),
+    url: tokens.url(req, res),
+    status: Number(tokens.status(req, res)),
+    ms: Number(tokens['response-time'](req, res)),
+    bytes: Number(tokens['body-size'](req, res)) || 0,
+    ip: req.ip,
+  })));
+} else {
+  app.use(morgan('dev'));
+}
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
