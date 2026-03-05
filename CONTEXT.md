@@ -31,7 +31,7 @@ Voxium/
 - Direct messages with typing indicators, reactions, unread tracking
 - Friend request system with real-time notifications
 - Unread indicators (channel + server level, persistent via DB)
-- Two-tier admin dashboard (admin + superadmin roles) with user/server/ban management, storage tools, live metrics
+- Two-tier admin dashboard (admin + superadmin roles) with user/server/ban management, storage tools, live metrics, audit log
 - Admin user deletion with server ownership transfer
 - Rate limiting (per-endpoint + socket-level) and input sanitization
 - Tauri 2 desktop wrapper with native notifications
@@ -53,6 +53,10 @@ Voxium/
 - [ ] Horizontal scaling, CI/CD, monitoring
 - [ ] Mobile app (React Native)
 - [ ] End-to-end testing
+
+## Recent Changes
+
+- **Admin Audit Log** (2026-03-05) — `AuditLog` model, fire-and-forget `logAuditEvent()`, `GET /admin/audit-logs`, `AdminAuditLog` UI page. Logs all destructive admin actions.
 
 ## Related Documents
 

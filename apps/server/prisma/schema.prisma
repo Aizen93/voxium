@@ -40,6 +40,7 @@ model User {
   friendshipsReceived  Friendship[] @relation("FriendshipAddressee")
   ipRecords    IpRecord[]
   ipBansCreated IpBan[]  @relation("IpBanCreator")
+  auditLogs     AuditLog[] @relation("AuditLogActor")
 
   @@map("users")
 }
@@ -260,4 +261,23 @@ model IpBan {
   creator User? @relation("IpBanCreator", fields: [bannedBy], references: [id], onDelete: SetNull)
 
   @@map("ip_bans")
+}
+
+// ─── Audit Log ─────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?  @map("actor_id")
+  action     String
+  targetType String?  @map("target_type")
+  targetId   String?  @map("target_id")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor User? @relation("AuditLogActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([action])
+  @@index([createdAt])
+  @@index([actorId])
+  @@map("audit_logs")
 }

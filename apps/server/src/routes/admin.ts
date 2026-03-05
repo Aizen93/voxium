@@ -11,8 +11,9 @@ import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE } from '../utils/s3';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry } from '@voxium/shared';
 import { WS_EVENTS } from '@voxium/shared';
+import { logAuditEvent } from '../utils/auditLog';
 
 export const adminRouter = Router();
 
@@ -232,6 +233,14 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       }
     }
 
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'user.ban',
+      targetType: 'user',
+      targetId: targetId,
+      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned },
+    });
+
     res.json({ success: true, message: ipsBanned > 0 ? `User banned (${ipsBanned} IP(s) also banned)` : banIps ? 'User banned (no known IPs to ban)' : 'User banned' });
   } catch (err) {
     next(err);
@@ -269,6 +278,14 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
     await prisma.user.update({
       where: { id: req.params.userId },
       data: { bannedAt: null, banReason: null },
+    });
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'user.unban',
+      targetType: 'user',
+      targetId: req.params.userId,
+      metadata: { ipsReleased: ipsToRelease.length },
     });
 
     res.json({ success: true, message: 'User unbanned' });
@@ -439,6 +456,14 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
       // Delete user — cascade only removes ServerMember records for transferred servers
       await prisma.user.delete({ where: { id: targetId } });
 
+      logAuditEvent({
+        actorId: req.user!.userId,
+        action: 'user.delete',
+        targetType: 'user',
+        targetId,
+        metadata: { serverActions: serverActions.map((a) => ({ serverId: a.serverId, action: a.action })) },
+      });
+
       res.json({ success: true, message: 'User deleted' });
     } else {
       // User owns no servers — proceed with original simple delete
@@ -462,6 +487,13 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
       }
 
       await prisma.user.delete({ where: { id: targetId } });
+
+      logAuditEvent({
+        actorId: req.user!.userId,
+        action: 'user.delete',
+        targetType: 'user',
+        targetId,
+      });
 
       res.json({ success: true, message: 'User deleted' });
     }
@@ -494,6 +526,14 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
     await prisma.user.update({
       where: { id: targetId },
       data: { role },
+    });
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'user.role_change',
+      targetType: 'user',
+      targetId,
+      metadata: { oldRole: target.role, newRole: role, username: target.username },
     });
 
     res.json({ success: true, message: `User "${target.username}" role changed to ${role}` });
@@ -580,7 +620,7 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
   try {
     const server = await prisma.server.findUnique({
       where: { id: req.params.serverId },
-      select: { id: true },
+      select: { id: true, name: true },
     });
     if (!server) throw new NotFoundError('Server');
 
@@ -603,6 +643,14 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
 
     // Cascade delete
     await prisma.server.delete({ where: { id: server.id } });
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'server.delete',
+      targetType: 'server',
+      targetId: server.id,
+      metadata: { serverName: server.name },
+    });
 
     res.json({ success: true, message: 'Server deleted' });
   } catch (err) {
@@ -680,6 +728,14 @@ adminRouter.post('/ip-bans', async (req: Request, res: Response, next: NextFunct
       data: { ip: trimmedIp, reason: sanitizedReason, bannedBy: req.user!.userId },
     });
 
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'ip_ban.create',
+      targetType: 'ip',
+      targetId: trimmedIp,
+      metadata: { reason: sanitizedReason },
+    });
+
     res.status(201).json({ success: true, data: ipBan });
   } catch (err) {
     next(err);
@@ -692,6 +748,13 @@ adminRouter.delete('/ip-bans/:id', async (req: Request<{ id: string }>, res: Res
     if (!ipBan) throw new NotFoundError('IP ban');
 
     await prisma.ipBan.delete({ where: { id: req.params.id } });
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'ip_ban.delete',
+      targetType: 'ip',
+      targetId: ipBan.ip,
+    });
 
     res.json({ success: true, message: 'IP ban removed' });
   } catch (err) {
@@ -949,7 +1012,60 @@ adminRouter.delete('/storage/files/*', async (req: Request, res: Response, next:
 
     await deleteFromS3(key);
 
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'storage.file_delete',
+      targetType: 'file',
+      targetId: key,
+    });
+
     res.json({ success: true, message: 'File deleted' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Audit Log ──────────────────────────────────────────────────────────
+
+adminRouter.get('/audit-logs', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const action = (req.query.action as string)?.trim() || '';
+    const search = (req.query.search as string)?.trim() || '';
+
+    const where: Record<string, unknown> = {};
+    if (action) where.action = action;
+    if (search) {
+      where.OR = [
+        { actor: { username: { contains: search, mode: 'insensitive' } } },
+        { targetId: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [logs, total] = await Promise.all([
+      prisma.auditLog.findMany({
+        where,
+        include: { actor: { select: { username: true } } },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.auditLog.count({ where }),
+    ]);
+
+    const data: AuditLogEntry[] = logs.map((log) => ({
+      id: log.id,
+      actorId: log.actorId,
+      actorUsername: log.actor?.username ?? null,
+      action: log.action as AuditLogEntry['action'],
+      targetType: log.targetType,
+      targetId: log.targetId,
+      metadata: log.metadata as Record<string, unknown> | null,
+      createdAt: log.createdAt.toISOString(),
+    }));
+
+    res.json({ success: true, data, total, page, limit, hasMore: page * limit < total });
   } catch (err) {
     next(err);
   }
@@ -1062,7 +1178,7 @@ adminRouter.get('/export/ip-bans', async (_req: Request, res: Response, next: Ne
   }
 });
 
-adminRouter.post('/storage/cleanup-orphans', async (_req: Request, res: Response, next: NextFunction) => {
+adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const [objects, usersWithAvatar, serversWithIcon] = await Promise.all([
       listAllS3Objects(),
@@ -1085,6 +1201,13 @@ adminRouter.post('/storage/cleanup-orphans', async (_req: Request, res: Response
         // Continue with remaining orphans
       }
     }
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'storage.cleanup_orphans',
+      targetType: 'storage',
+      metadata: { found: orphans.length, deleted },
+    });
 
     res.json({ success: true, data: { found: orphans.length, deleted } });
   } catch (err) {

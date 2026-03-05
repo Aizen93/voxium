@@ -444,3 +444,22 @@ export interface StorageTopUploader {
   fileCount: number;
   totalSize: number;
 }
+
+// ─── Audit Log ──────────────────────────────────────────────────────────────
+
+export type AuditAction =
+  | 'user.ban' | 'user.unban' | 'user.delete' | 'user.role_change'
+  | 'server.delete'
+  | 'ip_ban.create' | 'ip_ban.delete'
+  | 'storage.file_delete' | 'storage.cleanup_orphans';
+
+export interface AuditLogEntry {
+  id: string;
+  actorId: string | null;
+  actorUsername: string | null;
+  action: AuditAction;
+  targetType: string | null;
+  targetId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}

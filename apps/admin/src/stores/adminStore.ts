@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader } from '@voxium/shared';
+import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry } from '@voxium/shared';
 
 // Module-level refs for metrics subscription cleanup
 let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
@@ -59,6 +59,13 @@ interface AdminState {
   storageFilter: string;
   topUploaders: StorageTopUploader[];
 
+  // Audit Logs
+  auditLogs: AuditLogEntry[];
+  auditLogsTotal: number;
+  auditLogsPage: number;
+  auditLogsFilter: string;
+  auditLogsSearch: string;
+
   // Loading
   loading: boolean;
 
@@ -90,6 +97,10 @@ interface AdminState {
   fetchIpBans: (page?: number) => Promise<void>;
   addIpBan: (ip: string, reason?: string) => Promise<void>;
   removeIpBan: (id: string) => Promise<void>;
+
+  fetchAuditLogs: (page?: number) => Promise<void>;
+  setAuditLogsFilter: (filter: string) => void;
+  setAuditLogsSearch: (search: string) => void;
 
   fetchStorageStats: () => Promise<void>;
   fetchTopUploaders: () => Promise<void>;
@@ -133,6 +144,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   storageFilesPage: 1,
   storageFilter: 'all',
   topUploaders: [],
+  auditLogs: [],
+  auditLogsTotal: 0,
+  auditLogsPage: 1,
+  auditLogsFilter: '',
+  auditLogsSearch: '',
   loading: false,
 
   fetchStats: async () => {
@@ -305,6 +321,23 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     await api.delete(`/admin/ip-bans/${id}`);
     await get().fetchIpBans();
   },
+
+  fetchAuditLogs: async (page?: number) => {
+    const state = get();
+    const p = page ?? state.auditLogsPage;
+    set({ loading: true });
+    try {
+      const { data } = await api.get('/admin/audit-logs', {
+        params: { page: p, limit: 20, action: state.auditLogsFilter || undefined, search: state.auditLogsSearch || undefined },
+      });
+      set({ auditLogs: data.data, auditLogsTotal: data.total, auditLogsPage: p });
+    } finally {
+      set({ loading: false });
+    }
+  },
+
+  setAuditLogsFilter: (filter) => set({ auditLogsFilter: filter }),
+  setAuditLogsSearch: (search) => set({ auditLogsSearch: search }),
 
   fetchStorageStats: async () => {
     try {
