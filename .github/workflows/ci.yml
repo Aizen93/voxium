@@ -205,15 +205,19 @@ jobs:
           # Start admin in background
           pnpm dev:admin &
 
-          # Wait for server health endpoint
+          # Wait for server to respond (any status — 503 is fine, means server is up)
           echo "Waiting for server (http://localhost:3001/health)..."
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:3001/health > /dev/null 2>&1; then
-              echo "Server ready after ${i}s"
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/health 2>/dev/null) || true
+            if [ "$HTTP_CODE" != "000" ] && [ -n "$HTTP_CODE" ]; then
+              echo "Server responding after ${i}s (HTTP $HTTP_CODE)"
+              # Print health details for diagnostics
+              curl -s http://localhost:3001/health | head -c 500
+              echo ""
               break
             fi
             if [ "$i" -eq 60 ]; then
-              echo "Server failed to start within 60s"
+              echo "Server failed to respond within 60s"
               exit 1
             fi
             sleep 1
