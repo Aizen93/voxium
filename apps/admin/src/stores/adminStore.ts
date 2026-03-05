@@ -96,6 +96,18 @@ interface AdminState {
   activeTicket: SupportTicket | null;
   activeTicketMessages: SupportMessageData[];
 
+  // Rate Limits
+  rateLimits: Array<{
+    name: string;
+    label: string;
+    keyType: 'ip' | 'userId';
+    keyPrefix: string;
+    points: number;
+    duration: number;
+    blockDuration: number;
+    isCustom: boolean;
+  }>;
+
   // Loading
   loading: boolean;
 
@@ -154,6 +166,11 @@ interface AdminState {
   setActiveTicket: (ticket: SupportTicket | null) => void;
   subscribeSupport: () => void;
   unsubscribeSupport: () => void;
+
+  fetchRateLimits: () => Promise<void>;
+  updateRateLimit: (name: string, updates: { points?: number; duration?: number; blockDuration?: number }) => Promise<void>;
+  resetRateLimit: (name: string) => Promise<void>;
+  clearUserRateLimits: (key: string) => Promise<number>;
 
   fetchStorageStats: () => Promise<void>;
   fetchTopUploaders: () => Promise<void>;
@@ -216,6 +233,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   supportTicketsFilter: 'all',
   activeTicket: null,
   activeTicketMessages: [],
+  rateLimits: [],
   loading: false,
 
   fetchStats: async () => {
@@ -633,6 +651,30 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       supportReconnectUnsub();
       supportReconnectUnsub = null;
     }
+  },
+
+  fetchRateLimits: async () => {
+    try {
+      const { data } = await api.get('/admin/rate-limits');
+      set({ rateLimits: data.data });
+    } catch {
+      console.error('Failed to fetch rate limits');
+    }
+  },
+
+  updateRateLimit: async (name, updates) => {
+    await api.put(`/admin/rate-limits/${name}`, updates);
+    await get().fetchRateLimits();
+  },
+
+  resetRateLimit: async (name) => {
+    await api.post(`/admin/rate-limits/${name}/reset`);
+    await get().fetchRateLimits();
+  },
+
+  clearUserRateLimits: async (key) => {
+    const { data } = await api.post('/admin/rate-limits/clear-user', { key });
+    return data.data.cleared as number;
   },
 
   fetchStorageStats: async () => {

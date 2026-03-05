@@ -1073,6 +1073,86 @@ adminRouter.get('/audit-logs', async (req: Request, res: Response, next: NextFun
   }
 });
 
+// ─── Rate Limit Controls ─────────────────────────────────────────────────────
+
+adminRouter.get('/rate-limits', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { getAllRateLimits } = await import('../middleware/rateLimiter');
+    res.json({ success: true, data: getAllRateLimits() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/rate-limits/clear-user', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { key } = req.body;
+    if (!key || typeof key !== 'string' || key.trim().length === 0) {
+      throw new BadRequestError('Provide a user ID or IP address');
+    }
+
+    const { clearUserRateLimits } = await import('../middleware/rateLimiter');
+    const cleared = await clearUserRateLimits(key.trim());
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'ratelimit.clear_user' as any,
+      targetType: 'rate_limit',
+      targetId: key.trim(),
+      metadata: { keysCleared: cleared },
+    });
+
+    res.json({ success: true, data: { cleared }, message: `Cleared ${cleared} rate limit key(s)` });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.put('/rate-limits/:name', async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { name } = req.params;
+    const { points, duration, blockDuration } = req.body;
+
+    if (points === undefined && duration === undefined && blockDuration === undefined) {
+      throw new BadRequestError('Provide at least one of: points, duration, blockDuration');
+    }
+
+    const { updateRateLimit } = await import('../middleware/rateLimiter');
+    await updateRateLimit(name, { points, duration, blockDuration });
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'ratelimit.update' as any,
+      targetType: 'rate_limit',
+      targetId: name,
+      metadata: { points, duration, blockDuration },
+    });
+
+    res.json({ success: true, message: `Rate limit "${name}" updated` });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/rate-limits/:name/reset', async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { name } = req.params;
+    const { resetRateLimit } = await import('../middleware/rateLimiter');
+    await resetRateLimit(name);
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'ratelimit.reset' as any,
+      targetType: 'rate_limit',
+      targetId: name,
+    });
+
+    res.json({ success: true, message: `Rate limit "${name}" reset to default` });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── Data Export ─────────────────────────────────────────────────────────────
 
 adminRouter.get('/export/users', async (_req: Request, res: Response, next: NextFunction) => {

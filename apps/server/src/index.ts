@@ -25,6 +25,7 @@ import { initSocketServer } from './websocket/socketServer';
 import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
 import { prisma } from './utils/prisma';
 import { initRedis } from './utils/redis';
+import { loadRateLimitOverrides } from './middleware/rateLimiter';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -36,6 +37,10 @@ async function main() {
   // Connect to Redis
   await initRedis();
   console.log('[Redis] Connected');
+
+  // Load rate limit overrides from Redis
+  await loadRateLimitOverrides();
+  console.log('[RateLimit] Overrides loaded');
 
   // Create HTTP server
   const server = http.createServer(app);

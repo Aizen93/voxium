@@ -21,6 +21,9 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'report.dismiss': 'Report Dismissed',
   'support.claim': 'Ticket Claimed',
   'support.close': 'Ticket Closed',
+  'ratelimit.update': 'Rate Limit Updated',
+  'ratelimit.reset': 'Rate Limit Reset',
+  'ratelimit.clear_user': 'User Rate Limits Cleared',
 };
 
 const ACTION_COLORS: Record<string, string> = {
@@ -40,6 +43,9 @@ const ACTION_COLORS: Record<string, string> = {
   'report.dismiss': 'bg-gray-500/20 text-gray-400',
   'support.claim': 'bg-blue-500/20 text-blue-400',
   'support.close': 'bg-gray-500/20 text-gray-400',
+  'ratelimit.update': 'bg-orange-500/20 text-orange-400',
+  'ratelimit.reset': 'bg-yellow-500/20 text-yellow-400',
+  'ratelimit.clear_user': 'bg-cyan-500/20 text-cyan-400',
 };
 
 function formatMetadata(action: AuditAction, metadata: Record<string, unknown> | null): string {
@@ -79,6 +85,7 @@ const ALL_ACTIONS: AuditAction[] = [
   'announcement.create', 'announcement.publish', 'announcement.delete',
   'report.resolve', 'report.dismiss',
   'support.claim', 'support.close',
+  'ratelimit.update', 'ratelimit.reset', 'ratelimit.clear_user',
 ];
 
 export function AdminAuditLog() {

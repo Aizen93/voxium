@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut, Flag, LifeBuoy } from 'lucide-react';
+import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut, Flag, LifeBuoy, Gauge } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
@@ -14,8 +14,9 @@ import { AdminAuditLog } from './AdminAuditLog';
 import { AdminAnnouncements } from './AdminAnnouncements';
 import { AdminReports } from './AdminReports';
 import { AdminSupportTickets } from './AdminSupportTickets';
+import { AdminRateLimits } from './AdminRateLimits';
 
-type AdminView = 'dashboard' | 'reports' | 'support' | 'users' | 'servers' | 'bans' | 'announcements' | 'storage' | 'audit-logs' | 'export';
+type AdminView = 'dashboard' | 'reports' | 'support' | 'users' | 'servers' | 'bans' | 'announcements' | 'storage' | 'rate-limits' | 'audit-logs' | 'export';
 
 const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -26,6 +27,7 @@ const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashbo
   { id: 'bans', label: 'Bans', icon: ShieldBan },
   { id: 'announcements', label: 'Announcements', icon: Megaphone },
   { id: 'storage', label: 'Storage', icon: HardDrive },
+  { id: 'rate-limits', label: 'Rate Limits', icon: Gauge },
   { id: 'audit-logs', label: 'Audit Log', icon: ClipboardList },
   { id: 'export', label: 'Data Tools', icon: Download },
 ];
@@ -62,6 +64,8 @@ export function AdminLayout() {
         return <AdminAnnouncements />;
       case 'storage':
         return <AdminStorage />;
+      case 'rate-limits':
+        return <AdminRateLimits />;
       case 'audit-logs':
         return <AdminAuditLog />;
       case 'export':

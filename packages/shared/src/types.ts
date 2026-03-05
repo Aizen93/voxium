@@ -528,7 +528,8 @@ export type AuditAction =
   | 'storage.file_delete' | 'storage.cleanup_orphans'
   | 'announcement.create' | 'announcement.publish' | 'announcement.delete'
   | 'report.resolve' | 'report.dismiss'
-  | 'support.claim' | 'support.close';
+  | 'support.claim' | 'support.close'
+  | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user';
 
 // ─── Announcements ─────────────────────────────────────────────────────────
 

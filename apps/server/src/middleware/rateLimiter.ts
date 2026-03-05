@@ -2,144 +2,146 @@ import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis } from '../utils/redis';
 
-// ─── Lazy-initialized limiters ──────────────────────────────────────────────
+// ─── Rate limit configuration registry ──────────────────────────────────────
 
-let _loginLimiter: RateLimiterRedis | null = null;
-let _registerLimiter: RateLimiterRedis | null = null;
-let _forgotPasswordLimiter: RateLimiterRedis | null = null;
-let _resetPasswordLimiter: RateLimiterRedis | null = null;
-let _refreshLimiter: RateLimiterRedis | null = null;
-let _changePasswordLimiter: RateLimiterRedis | null = null;
-let _messageSendLimiter: RateLimiterRedis | null = null;
-let _uploadLimiter: RateLimiterRedis | null = null;
-let _friendRequestLimiter: RateLimiterRedis | null = null;
-let _memberManageLimiter: RateLimiterRedis | null = null;
-let _categoryManageLimiter: RateLimiterRedis | null = null;
-let _searchLimiter: RateLimiterRedis | null = null;
-let _statsLimiter: RateLimiterRedis | null = null;
-let _adminLimiter: RateLimiterRedis | null = null;
-let _reportLimiter: RateLimiterRedis | null = null;
-let _supportLimiter: RateLimiterRedis | null = null;
-let _generalLimiter: RateLimiterRedis | null = null;
-
-function createLimiter(opts: {
-  keyPrefix: string;
+export interface RateLimitConfig {
   points: number;
   duration: number;
-  blockDuration?: number;
-}): RateLimiterRedis {
-  // Each limiter gets its own in-memory fallback with matching limits
-  const insuranceLimiter = new RateLimiterMemory({
-    points: opts.points,
-    duration: opts.duration,
-    blockDuration: opts.blockDuration ?? 0,
-  });
-
-  return new RateLimiterRedis({
-    storeClient: getRedis(),
-    useRedisPackage: true,
-    keyPrefix: opts.keyPrefix,
-    points: opts.points,
-    duration: opts.duration,
-    blockDuration: opts.blockDuration ?? 0,
-    insuranceLimiter,
-  });
+  blockDuration: number;
 }
 
-function getLoginLimiter() {
-  if (!_loginLimiter) _loginLimiter = createLimiter({ keyPrefix: 'rl:login', points: 5, duration: 60, blockDuration: 300 });
-  return _loginLimiter;
+interface RateLimitDef extends RateLimitConfig {
+  keyPrefix: string;
+  keyType: 'ip' | 'userId';
+  label: string;
 }
 
-function getRegisterLimiter() {
-  if (!_registerLimiter) _registerLimiter = createLimiter({ keyPrefix: 'rl:register', points: 3, duration: 60, blockDuration: 600 });
-  return _registerLimiter;
+const DEFAULTS: Record<string, RateLimitDef> = {
+  login:          { keyPrefix: 'rl:login',    points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Login' },
+  register:       { keyPrefix: 'rl:register', points: 3,   duration: 60,  blockDuration: 600, keyType: 'ip',     label: 'Register' },
+  forgotPassword: { keyPrefix: 'rl:forgot',   points: 3,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Forgot Password' },
+  resetPassword:  { keyPrefix: 'rl:reset',    points: 5,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Reset Password' },
+  refresh:        { keyPrefix: 'rl:refresh',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Token Refresh' },
+  changePassword: { keyPrefix: 'rl:chgpwd',   points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Change Password' },
+  messageSend:    { keyPrefix: 'rl:msg',       points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Send' },
+  upload:         { keyPrefix: 'rl:upload',    points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Upload' },
+  friendRequest:  { keyPrefix: 'rl:friend',    points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Friend Request' },
+  memberManage:   { keyPrefix: 'rl:member',    points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Member Manage' },
+  categoryManage: { keyPrefix: 'rl:category',  points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Category Manage' },
+  search:         { keyPrefix: 'rl:search',    points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Search' },
+  stats:          { keyPrefix: 'rl:stats',     points: 30,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Stats' },
+  admin:          { keyPrefix: 'rl:admin',     points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Admin' },
+  report:         { keyPrefix: 'rl:report',    points: 5,   duration: 300, blockDuration: 0,   keyType: 'userId', label: 'Report' },
+  support:        { keyPrefix: 'rl:support',   points: 10,  duration: 30,  blockDuration: 0,   keyType: 'userId', label: 'Support' },
+  general:        { keyPrefix: 'rl:general',   points: 100, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'General' },
+};
+
+// Overrides loaded from Redis on init, updated via admin API
+const overrides: Record<string, Partial<RateLimitConfig>> = {};
+
+// Cached limiter instances — nulled on config change to force recreation
+const limiters: Record<string, RateLimiterRedis | null> = {};
+
+function getConfig(name: string): RateLimitDef {
+  const def = DEFAULTS[name];
+  if (!def) throw new Error(`Unknown rate limiter: ${name}`);
+  const ovr = overrides[name];
+  if (!ovr) return def;
+  return { ...def, ...ovr };
 }
 
-function getForgotPasswordLimiter() {
-  if (!_forgotPasswordLimiter) _forgotPasswordLimiter = createLimiter({ keyPrefix: 'rl:forgot', points: 3, duration: 900 });
-  return _forgotPasswordLimiter;
+function getLimiter(name: string): RateLimiterRedis {
+  if (!limiters[name]) {
+    const cfg = getConfig(name);
+    const insuranceLimiter = new RateLimiterMemory({
+      points: cfg.points,
+      duration: cfg.duration,
+      blockDuration: cfg.blockDuration,
+    });
+    limiters[name] = new RateLimiterRedis({
+      storeClient: getRedis(),
+      useRedisPackage: true,
+      keyPrefix: cfg.keyPrefix,
+      points: cfg.points,
+      duration: cfg.duration,
+      blockDuration: cfg.blockDuration,
+      insuranceLimiter,
+    });
+  }
+  return limiters[name]!;
 }
 
-function getResetPasswordLimiter() {
-  if (!_resetPasswordLimiter) _resetPasswordLimiter = createLimiter({ keyPrefix: 'rl:reset', points: 5, duration: 900 });
-  return _resetPasswordLimiter;
+// ─── Admin API helpers ───────────────────────────────────────────────────────
+
+const REDIS_CONFIG_KEY = 'rl:config';
+
+/** Load overrides from Redis on server startup */
+export async function loadRateLimitOverrides(): Promise<void> {
+  try {
+    const redis = getRedis();
+    const data = await redis.hGetAll(REDIS_CONFIG_KEY);
+    for (const [name, json] of Object.entries(data)) {
+      if (DEFAULTS[name]) {
+        overrides[name] = JSON.parse(json);
+        limiters[name] = null; // force recreation
+      }
+    }
+  } catch {
+    console.error('[RateLimit] Failed to load overrides from Redis, using defaults');
+  }
 }
 
-function getRefreshLimiter() {
-  if (!_refreshLimiter) _refreshLimiter = createLimiter({ keyPrefix: 'rl:refresh', points: 10, duration: 60 });
-  return _refreshLimiter;
+/** Get all rate limit rules (defaults merged with overrides) */
+export function getAllRateLimits(): Array<RateLimitDef & { name: string; isCustom: boolean }> {
+  return Object.entries(DEFAULTS).map(([name, def]) => ({
+    name,
+    ...getConfig(name),
+    isCustom: !!overrides[name],
+  }));
 }
 
-function getChangePasswordLimiter() {
-  if (!_changePasswordLimiter) _changePasswordLimiter = createLimiter({ keyPrefix: 'rl:chgpwd', points: 5, duration: 60, blockDuration: 300 });
-  return _changePasswordLimiter;
+/** Update a specific rate limit rule */
+export async function updateRateLimit(name: string, updates: Partial<RateLimitConfig>): Promise<void> {
+  if (!DEFAULTS[name]) throw new Error(`Unknown rate limiter: ${name}`);
+  const clean: Partial<RateLimitConfig> = {};
+  if (updates.points !== undefined) clean.points = Math.max(1, Math.floor(updates.points));
+  if (updates.duration !== undefined) clean.duration = Math.max(1, Math.floor(updates.duration));
+  if (updates.blockDuration !== undefined) clean.blockDuration = Math.max(0, Math.floor(updates.blockDuration));
+  overrides[name] = { ...overrides[name], ...clean };
+  limiters[name] = null; // force recreation with new config
+  await getRedis().hSet(REDIS_CONFIG_KEY, name, JSON.stringify(overrides[name]));
 }
 
-function getMessageSendLimiter() {
-  if (!_messageSendLimiter) _messageSendLimiter = createLimiter({ keyPrefix: 'rl:msg', points: 30, duration: 60 });
-  return _messageSendLimiter;
+/** Reset a rate limit rule to its default */
+export async function resetRateLimit(name: string): Promise<void> {
+  if (!DEFAULTS[name]) throw new Error(`Unknown rate limiter: ${name}`);
+  delete overrides[name];
+  limiters[name] = null;
+  await getRedis().hDel(REDIS_CONFIG_KEY, name);
 }
 
-function getUploadLimiter() {
-  if (!_uploadLimiter) _uploadLimiter = createLimiter({ keyPrefix: 'rl:upload', points: 10, duration: 60 });
-  return _uploadLimiter;
-}
-
-function getFriendRequestLimiter() {
-  if (!_friendRequestLimiter) _friendRequestLimiter = createLimiter({ keyPrefix: 'rl:friend', points: 20, duration: 60 });
-  return _friendRequestLimiter;
-}
-
-function getMemberManageLimiter() {
-  if (!_memberManageLimiter) _memberManageLimiter = createLimiter({ keyPrefix: 'rl:member', points: 20, duration: 60 });
-  return _memberManageLimiter;
-}
-
-function getCategoryManageLimiter() {
-  if (!_categoryManageLimiter) _categoryManageLimiter = createLimiter({ keyPrefix: 'rl:category', points: 20, duration: 60 });
-  return _categoryManageLimiter;
-}
-
-function getSearchLimiter() {
-  if (!_searchLimiter) _searchLimiter = createLimiter({ keyPrefix: 'rl:search', points: 15, duration: 60 });
-  return _searchLimiter;
-}
-
-function getStatsLimiter() {
-  if (!_statsLimiter) _statsLimiter = createLimiter({ keyPrefix: 'rl:stats', points: 30, duration: 60 });
-  return _statsLimiter;
-}
-
-function getAdminLimiter() {
-  if (!_adminLimiter) _adminLimiter = createLimiter({ keyPrefix: 'rl:admin', points: 60, duration: 60 });
-  return _adminLimiter;
-}
-
-function getReportLimiter() {
-  if (!_reportLimiter) _reportLimiter = createLimiter({ keyPrefix: 'rl:report', points: 5, duration: 300 });
-  return _reportLimiter;
-}
-
-function getSupportLimiter() {
-  if (!_supportLimiter) _supportLimiter = createLimiter({ keyPrefix: 'rl:support', points: 10, duration: 30 });
-  return _supportLimiter;
-}
-
-function getGeneralLimiter() {
-  if (!_generalLimiter) _generalLimiter = createLimiter({ keyPrefix: 'rl:general', points: 100, duration: 60 });
-  return _generalLimiter;
+/** Delete all rate limit keys for a specific user or IP */
+export async function clearUserRateLimits(key: string): Promise<number> {
+  const redis = getRedis();
+  const prefixes = Object.values(DEFAULTS).map((d) => d.keyPrefix);
+  let cleared = 0;
+  for (const prefix of prefixes) {
+    const redisKey = `${prefix}:${key}`;
+    const result = await redis.del(redisKey);
+    cleared += result;
+  }
+  return cleared;
 }
 
 // ─── Middleware factories ────────────────────────────────────────────────────
 
 function createMiddleware(
-  getLimiter: () => RateLimiterRedis,
+  name: string,
   keyFn: (req: Request) => string,
 ) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      await getLimiter().consume(keyFn(req));
+      await getLimiter(name).consume(keyFn(req));
       next();
     } catch (err) {
       if (err instanceof RateLimiterRes) {
@@ -159,23 +161,23 @@ const byUserId = (req: Request) => req.user?.userId || req.ip || 'unknown';
 
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
-export const rateLimitLogin = createMiddleware(getLoginLimiter, byIp);
-export const rateLimitRegister = createMiddleware(getRegisterLimiter, byIp);
-export const rateLimitForgotPassword = createMiddleware(getForgotPasswordLimiter, byIp);
-export const rateLimitResetPassword = createMiddleware(getResetPasswordLimiter, byIp);
-export const rateLimitRefresh = createMiddleware(getRefreshLimiter, byIp);
-export const rateLimitChangePassword = createMiddleware(getChangePasswordLimiter, byIp);
-export const rateLimitMessageSend = createMiddleware(getMessageSendLimiter, byUserId);
-export const rateLimitUpload = createMiddleware(getUploadLimiter, byUserId);
-export const rateLimitFriendRequest = createMiddleware(getFriendRequestLimiter, byUserId);
-export const rateLimitMemberManage = createMiddleware(getMemberManageLimiter, byUserId);
-export const rateLimitCategoryManage = createMiddleware(getCategoryManageLimiter, byUserId);
-export const rateLimitSearch = createMiddleware(getSearchLimiter, byUserId);
-export const rateLimitStats = createMiddleware(getStatsLimiter, byIp);
-export const rateLimitAdmin = createMiddleware(getAdminLimiter, byUserId);
-export const rateLimitReport = createMiddleware(getReportLimiter, byUserId);
-export const rateLimitSupport = createMiddleware(getSupportLimiter, byUserId);
-export const rateLimitGeneral = createMiddleware(getGeneralLimiter, byIp);
+export const rateLimitLogin = createMiddleware('login', byIp);
+export const rateLimitRegister = createMiddleware('register', byIp);
+export const rateLimitForgotPassword = createMiddleware('forgotPassword', byIp);
+export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);
+export const rateLimitRefresh = createMiddleware('refresh', byIp);
+export const rateLimitChangePassword = createMiddleware('changePassword', byIp);
+export const rateLimitMessageSend = createMiddleware('messageSend', byUserId);
+export const rateLimitUpload = createMiddleware('upload', byUserId);
+export const rateLimitFriendRequest = createMiddleware('friendRequest', byUserId);
+export const rateLimitMemberManage = createMiddleware('memberManage', byUserId);
+export const rateLimitCategoryManage = createMiddleware('categoryManage', byUserId);
+export const rateLimitSearch = createMiddleware('search', byUserId);
+export const rateLimitStats = createMiddleware('stats', byIp);
+export const rateLimitAdmin = createMiddleware('admin', byUserId);
+export const rateLimitReport = createMiddleware('report', byUserId);
+export const rateLimitSupport = createMiddleware('support', byUserId);
+export const rateLimitGeneral = createMiddleware('general', byIp);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────
 
