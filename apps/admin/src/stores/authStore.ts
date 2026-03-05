@@ -30,8 +30,8 @@ export const useAuthStore = create<AuthState>((set) => ({
       const { data } = await api.post('/auth/login', { email, password, rememberMe: true });
       const { user, accessToken, refreshToken } = data.data;
 
-      if (user.role !== 'superadmin') {
-        set({ error: 'Access denied. Super admin privileges required.', isSubmitting: false });
+      if (user.role !== 'superadmin' && user.role !== 'admin') {
+        set({ error: 'Access denied. Admin privileges required.', isSubmitting: false });
         return;
       }
 
@@ -64,7 +64,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       const { data } = await api.get('/auth/me');
       const user = data.data;
 
-      if (user.role !== 'superadmin') {
+      if (user.role !== 'superadmin' && user.role !== 'admin') {
         clearTokens();
         set({ isLoading: false });
         return;

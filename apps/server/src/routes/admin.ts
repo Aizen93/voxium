@@ -1,21 +1,22 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import net from 'net';
 import { authenticate } from '../middleware/auth';
-import { requireSuperAdmin } from '../middleware/requireSuperAdmin';
+import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin';
 import { rateLimitAdmin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { getOnlineUsers, getUserSocket } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { cleanupServerVoice } from '../websocket/voiceHandler';
 import { sanitizeText } from '../utils/sanitize';
-import { broadcastMemberLeft } from '../utils/memberBroadcast';
+import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE } from '../utils/s3';
-import type { StorageStats, StorageFile, StorageTopUploader } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole } from '@voxium/shared';
+import { WS_EVENTS } from '@voxium/shared';
 
 export const adminRouter = Router();
 
-adminRouter.use(authenticate, requireSuperAdmin, rateLimitAdmin);
+adminRouter.use(authenticate, requireAdmin, rateLimitAdmin);
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
 
@@ -113,6 +114,53 @@ adminRouter.get('/users/:userId', async (req: Request<{ userId: string }>, res: 
     if (!user) throw new NotFoundError('User');
 
     res.json({ success: true, data: user });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/users/:userId/owned-servers', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.userId },
+      select: { id: true },
+    });
+    if (!user) throw new NotFoundError('User');
+
+    const servers = await prisma.server.findMany({
+      where: { ownerId: user.id },
+      select: {
+        id: true,
+        name: true,
+        iconUrl: true,
+        _count: { select: { members: true } },
+        members: {
+          where: { userId: { not: user.id } },
+          select: {
+            userId: true,
+            role: true,
+            user: { select: { username: true, displayName: true } },
+          },
+          orderBy: [{ role: 'asc' }, { user: { username: 'asc' } }],
+          take: 50,
+        },
+      },
+    });
+
+    const data = servers.map((s) => ({
+      id: s.id,
+      name: s.name,
+      iconUrl: s.iconUrl,
+      memberCount: s._count.members,
+      members: s.members.map((m) => ({
+        userId: m.userId,
+        username: m.user.username,
+        displayName: m.user.displayName,
+        role: m.role,
+      })),
+    }));
+
+    res.json({ success: true, data });
   } catch (err) {
     next(err);
   }
@@ -232,6 +280,9 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
 adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
   try {
     const { userId: targetId } = req.params;
+    const { serverActions } = req.body as {
+      serverActions?: Array<{ serverId: string; action: 'transfer' | 'delete'; newOwnerId?: string }>;
+    };
 
     if (targetId === req.user!.userId) throw new ForbiddenError('Cannot delete yourself');
 
@@ -245,47 +296,207 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
     // Fetch memberships and owned servers in parallel
     const [memberships, ownedServers] = await Promise.all([
       prisma.serverMember.findMany({ where: { userId: targetId }, select: { serverId: true } }),
-      prisma.server.findMany({ where: { ownerId: targetId }, select: { id: true } }),
+      prisma.server.findMany({ where: { ownerId: targetId }, select: { id: true, name: true } }),
     ]);
-    const ownedServerIds = new Set(ownedServers.map((s) => s.id));
 
-    // Notify non-owned servers that user left (owned ones get deleted below)
-    for (const { serverId } of memberships) {
-      if (!ownedServerIds.has(serverId)) {
-        await broadcastMemberLeft(targetId, serverId);
+    // If user owns servers, require serverActions
+    if (ownedServers.length > 0) {
+      if (!serverActions || serverActions.length === 0) {
+        throw new BadRequestError(
+          `User owns ${ownedServers.length} server(s). Provide serverActions for each owned server.`
+        );
       }
-    }
 
-    const io = getIO();
+      const ownedServerIds = new Set(ownedServers.map((s) => s.id));
+      const actionMap = new Map(serverActions.map((a) => [a.serverId, a]));
 
-    // Force logout then disconnect active socket
-    const socketId = await getUserSocket(targetId);
-    if (socketId) {
-      const targetSocket = io.sockets.sockets.get(socketId);
-      if (targetSocket) {
-        targetSocket.emit('force:logout', { reason: 'Your account has been deleted' });
-        targetSocket.disconnect(true);
-      }
-    }
-
-    // Clean up servers owned by this user before cascade delete
-    for (const server of ownedServers) {
-      cleanupServerVoice(io, server.id);
-      io.to(`server:${server.id}`).emit('server:deleted', { serverId: server.id });
-
-      const room = io.sockets.adapter.rooms.get(`server:${server.id}`);
-      if (room) {
-        for (const sid of room) {
-          const s = io.sockets.sockets.get(sid);
-          if (s) s.leave(`server:${server.id}`);
+      // Validate every owned server is accounted for
+      for (const serverId of ownedServerIds) {
+        if (!actionMap.has(serverId)) {
+          throw new BadRequestError(`Missing serverAction for server "${serverId}"`);
         }
       }
+
+      // Validate no actions for non-owned servers
+      for (const action of serverActions) {
+        if (!ownedServerIds.has(action.serverId)) {
+          throw new BadRequestError(`Server "${action.serverId}" is not owned by this user`);
+        }
+      }
+
+      const io = getIO();
+
+      // Process each server action
+      for (const action of serverActions) {
+        if (action.action === 'transfer') {
+          if (!action.newOwnerId) throw new BadRequestError(`newOwnerId required for transfer of server "${action.serverId}"`);
+          if (action.newOwnerId === targetId) throw new BadRequestError('Cannot transfer to the user being deleted');
+
+          // Validate new owner exists and is not banned
+          const newOwner = await prisma.user.findUnique({
+            where: { id: action.newOwnerId },
+            select: { id: true, bannedAt: true },
+          });
+          if (!newOwner) throw new NotFoundError('Transfer target user');
+          if (newOwner.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
+
+          // Check if new owner is already a member
+          const existingMembership = await prisma.serverMember.findUnique({
+            where: { userId_serverId: { userId: action.newOwnerId, serverId: action.serverId } },
+          });
+
+          if (!existingMembership) {
+            // Add them as a member first, seed ChannelRead records
+            const textChannels = await prisma.channel.findMany({
+              where: { serverId: action.serverId, type: 'text' },
+              select: { id: true },
+            });
+
+            await prisma.$transaction([
+              prisma.serverMember.create({
+                data: { userId: action.newOwnerId, serverId: action.serverId, role: 'owner' },
+              }),
+              ...textChannels.map((ch) =>
+                prisma.channelRead.upsert({
+                  where: { userId_channelId: { userId: action.newOwnerId!, channelId: ch.id } },
+                  update: {},
+                  create: { userId: action.newOwnerId!, channelId: ch.id, lastReadAt: new Date() },
+                })
+              ),
+              prisma.server.update({
+                where: { id: action.serverId },
+                data: { ownerId: action.newOwnerId },
+              }),
+            ]);
+
+            await broadcastMemberJoined(action.newOwnerId, action.serverId);
+          } else {
+            // Already a member — transfer ownership in transaction
+            await prisma.$transaction([
+              prisma.server.update({
+                where: { id: action.serverId },
+                data: { ownerId: action.newOwnerId },
+              }),
+              prisma.serverMember.update({
+                where: { userId_serverId: { userId: action.newOwnerId, serverId: action.serverId } },
+                data: { role: 'owner' },
+              }),
+            ]);
+          }
+
+          // Emit role + server update events
+          io.to(`server:${action.serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+            serverId: action.serverId,
+            userId: action.newOwnerId,
+            role: 'owner' as MemberRole,
+          });
+
+          const updatedServer = await prisma.server.findUnique({
+            where: { id: action.serverId },
+            select: { id: true, name: true, iconUrl: true, ownerId: true, createdAt: true },
+          });
+          if (updatedServer) {
+            io.to(`server:${action.serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updatedServer);
+          }
+
+          // Broadcast that the deleted user left this server
+          await broadcastMemberLeft(targetId, action.serverId);
+
+        } else {
+          // action === 'delete' — clean up and delete the server
+          cleanupServerVoice(io, action.serverId);
+          io.to(`server:${action.serverId}`).emit('server:deleted', { serverId: action.serverId });
+
+          const room = io.sockets.adapter.rooms.get(`server:${action.serverId}`);
+          if (room) {
+            for (const sid of room) {
+              const s = io.sockets.sockets.get(sid);
+              if (s) s.leave(`server:${action.serverId}`);
+            }
+          }
+
+          await prisma.server.delete({ where: { id: action.serverId } });
+        }
+      }
+
+      // Notify non-owned servers that user left
+      for (const { serverId } of memberships) {
+        if (!ownedServerIds.has(serverId)) {
+          await broadcastMemberLeft(targetId, serverId);
+        }
+      }
+
+      // Force logout then disconnect active socket
+      const socketId = await getUserSocket(targetId);
+      if (socketId) {
+        const targetSocket = io.sockets.sockets.get(socketId);
+        if (targetSocket) {
+          targetSocket.emit('force:logout', { reason: 'Your account has been deleted' });
+          targetSocket.disconnect(true);
+        }
+      }
+
+      // Delete user — cascade only removes ServerMember records for transferred servers
+      await prisma.user.delete({ where: { id: targetId } });
+
+      res.json({ success: true, message: 'User deleted' });
+    } else {
+      // User owns no servers — proceed with original simple delete
+      const ownedServerIds = new Set<string>();
+
+      for (const { serverId } of memberships) {
+        if (!ownedServerIds.has(serverId)) {
+          await broadcastMemberLeft(targetId, serverId);
+        }
+      }
+
+      const io = getIO();
+
+      const socketId = await getUserSocket(targetId);
+      if (socketId) {
+        const targetSocket = io.sockets.sockets.get(socketId);
+        if (targetSocket) {
+          targetSocket.emit('force:logout', { reason: 'Your account has been deleted' });
+          targetSocket.disconnect(true);
+        }
+      }
+
+      await prisma.user.delete({ where: { id: targetId } });
+
+      res.json({ success: true, message: 'User deleted' });
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Role Management (superadmin only) ───────────────────────────────────────
+
+adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { userId: targetId } = req.params;
+    const { role } = req.body as { role?: string };
+
+    if (!role || !['user', 'admin'].includes(role)) {
+      throw new BadRequestError('Role must be "user" or "admin"');
     }
 
-    // Cascade delete handles messages, memberships, etc.
-    await prisma.user.delete({ where: { id: targetId } });
+    if (targetId === req.user!.userId) throw new ForbiddenError('Cannot change your own role');
 
-    res.json({ success: true, message: 'User deleted' });
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      select: { id: true, role: true, username: true },
+    });
+    if (!target) throw new NotFoundError('User');
+    if (target.role === 'superadmin') throw new ForbiddenError('Cannot modify a super admin\'s role');
+    if (target.role === role) throw new BadRequestError(`User already has role "${role}"`);
+
+    await prisma.user.update({
+      where: { id: targetId },
+      data: { role },
+    });
+
+    res.json({ success: true, message: `User "${target.username}" role changed to ${role}` });
   } catch (err) {
     next(err);
   }
@@ -739,6 +950,113 @@ adminRouter.delete('/storage/files/*', async (req: Request, res: Response, next:
     await deleteFromS3(key);
 
     res.json({ success: true, message: 'File deleted' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Data Export ─────────────────────────────────────────────────────────────
+
+adminRouter.get('/export/users', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const users = await prisma.user.findMany({
+      select: {
+        id: true, username: true, displayName: true, email: true, avatarUrl: true,
+        role: true, status: true, bannedAt: true, banReason: true, createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ success: true, data: users });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/export/servers', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const servers = await prisma.server.findMany({
+      select: {
+        id: true, name: true, iconUrl: true, ownerId: true, createdAt: true,
+        owner: { select: { username: true } },
+        _count: { select: { members: true, channels: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const serverIds = servers.map((s) => s.id);
+    const messageCounts = serverIds.length > 0
+      ? await prisma.message.groupBy({
+          by: ['channelId'],
+          where: { channel: { serverId: { in: serverIds } } },
+          _count: true,
+        })
+      : [];
+
+    const channelToServer = new Map<string, string>();
+    if (serverIds.length > 0) {
+      const channels = await prisma.channel.findMany({
+        where: { serverId: { in: serverIds } },
+        select: { id: true, serverId: true },
+      });
+      for (const ch of channels) channelToServer.set(ch.id, ch.serverId);
+    }
+
+    const serverMessageCounts = new Map<string, number>();
+    for (const mc of messageCounts) {
+      if (mc.channelId) {
+        const sid = channelToServer.get(mc.channelId);
+        if (sid) serverMessageCounts.set(sid, (serverMessageCounts.get(sid) || 0) + mc._count);
+      }
+    }
+
+    const data = servers.map((s) => ({
+      id: s.id,
+      name: s.name,
+      iconUrl: s.iconUrl,
+      ownerId: s.ownerId,
+      ownerUsername: s.owner.username,
+      memberCount: s._count.members,
+      channelCount: s._count.channels,
+      messageCount: serverMessageCounts.get(s.id) || 0,
+      createdAt: s.createdAt,
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/export/bans', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const bans = await prisma.user.findMany({
+      where: { bannedAt: { not: null } },
+      select: { id: true, username: true, displayName: true, email: true, bannedAt: true, banReason: true },
+      orderBy: { bannedAt: 'desc' },
+    });
+    res.json({ success: true, data: bans });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/export/ip-bans', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const ipBans = await prisma.ipBan.findMany({
+      select: { id: true, ip: true, reason: true, bannedBy: true, createdAt: true, creator: { select: { username: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const data = ipBans.map((b) => ({
+      id: b.id,
+      ip: b.ip,
+      reason: b.reason,
+      bannedBy: b.bannedBy,
+      bannedByUsername: b.creator?.username ?? 'Deleted admin',
+      createdAt: b.createdAt,
+    }));
+
+    res.json({ success: true, data });
   } catch (err) {
     next(err);
   }

@@ -7,6 +7,20 @@ import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStat
 let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
 let metricsReconnectUnsub: (() => void) | null = null;
 
+export interface OwnedServerInfo {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  memberCount: number;
+  members: Array<{ userId: string; username: string; displayName: string; role: string }>;
+}
+
+export interface ServerAction {
+  serverId: string;
+  action: 'transfer' | 'delete';
+  newOwnerId?: string;
+}
+
 interface AdminState {
   // Dashboard
   stats: AdminDashboardStats | null;
@@ -64,6 +78,9 @@ interface AdminState {
   banUser: (userId: string, reason?: string, banIps?: boolean) => Promise<void>;
   unbanUser: (userId: string) => Promise<void>;
   deleteUser: (userId: string) => Promise<void>;
+  fetchUserOwnedServers: (userId: string) => Promise<OwnedServerInfo[]>;
+  deleteUserWithTransfers: (userId: string, serverActions: ServerAction[]) => Promise<void>;
+  updateUserRole: (userId: string, role: 'user' | 'admin') => Promise<void>;
 
   fetchServers: (page?: number) => Promise<void>;
   setServersSearch: (search: string) => void;
@@ -80,6 +97,12 @@ interface AdminState {
   setStorageFilter: (filter: string) => void;
   deleteStorageFile: (key: string) => Promise<void>;
   cleanupOrphans: () => Promise<{ found: number; deleted: number }>;
+
+  // Export
+  exportUsers: () => Promise<AdminUser[]>;
+  exportServers: () => Promise<AdminServer[]>;
+  exportBans: () => Promise<BanRecord[]>;
+  exportIpBans: () => Promise<IpBanRecord[]>;
 }
 
 export const useAdminStore = create<AdminState>((set, get) => ({
@@ -218,6 +241,20 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     await get().fetchUsers();
   },
 
+  fetchUserOwnedServers: async (userId) => {
+    const { data } = await api.get(`/admin/users/${userId}/owned-servers`);
+    return data.data as OwnedServerInfo[];
+  },
+
+  deleteUserWithTransfers: async (userId, serverActions) => {
+    await api.delete(`/admin/users/${userId}`, { data: { serverActions } });
+    await get().fetchUsers();
+  },
+
+  updateUserRole: async (userId, role) => {
+    await api.patch(`/admin/users/${userId}/role`, { role });
+  },
+
   fetchServers: async (page?: number) => {
     const state = get();
     const p = page ?? state.serversPage;
@@ -311,6 +348,26 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   cleanupOrphans: async () => {
     const { data } = await api.post('/admin/storage/cleanup-orphans');
     await Promise.all([get().fetchStorageStats(), get().fetchStorageFiles()]);
+    return data.data;
+  },
+
+  exportUsers: async () => {
+    const { data } = await api.get('/admin/export/users');
+    return data.data;
+  },
+
+  exportServers: async () => {
+    const { data } = await api.get('/admin/export/servers');
+    return data.data;
+  },
+
+  exportBans: async () => {
+    const { data } = await api.get('/admin/export/bans');
+    return data.data;
+  },
+
+  exportIpBans: async () => {
+    const { data } = await api.get('/admin/export/ip-bans');
     return data.data;
   },
 }));

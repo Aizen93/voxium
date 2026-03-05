@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Ban, ShieldOff, Trash2, Globe } from 'lucide-react';
+import { ArrowLeft, Ban, ShieldOff, Trash2, Globe, ShieldCheck, ShieldMinus } from 'lucide-react';
+import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminConfirmModal } from './AdminConfirmModal';
+import { AdminDeleteUserModal } from './AdminDeleteUserModal';
 import { toast } from '../stores/toastStore';
 
 interface Props {
@@ -10,8 +12,10 @@ interface Props {
 }
 
 export function AdminUserDetail({ userId, onBack }: Props) {
-  const { selectedUser, fetchUserDetail, banUser, unbanUser, deleteUser } = useAdminStore();
-  const [confirmAction, setConfirmAction] = useState<'ban' | 'unban' | 'delete' | null>(null);
+  const { selectedUser, fetchUserDetail, banUser, unbanUser, deleteUser, updateUserRole } = useAdminStore();
+  const currentUser = useAuthStore((s) => s.user);
+  const isSuperAdmin = currentUser?.role === 'superadmin';
+  const [confirmAction, setConfirmAction] = useState<'ban' | 'unban' | 'delete' | 'deleteWithTransfer' | 'promote' | 'demote' | null>(null);
   const [banReason, setBanReason] = useState('');
   const [banIps, setBanIps] = useState(false);
 
@@ -55,7 +59,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+        <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
           <div>
             <p className="text-vox-text-muted">Status</p>
             <p className="text-vox-text-primary">{selectedUser.status}</p>
@@ -74,6 +78,10 @@ export function AdminUserDetail({ userId, onBack }: Props) {
                 <p className="text-vox-text-muted">Servers</p>
                 <p className="text-vox-text-primary">{selectedUser._count.memberships}</p>
               </div>
+              <div>
+                <p className="text-vox-text-muted">Owned Servers</p>
+                <p className="text-vox-text-primary">{selectedUser._count.ownedServers ?? 0}</p>
+              </div>
             </>
           )}
         </div>
@@ -87,7 +95,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
 
         {/* Actions */}
         {selectedUser.role !== 'superadmin' && (
-          <div className="mt-6 flex gap-3">
+          <div className="mt-6 flex flex-wrap gap-3">
             {selectedUser.bannedAt ? (
               <button
                 onClick={() => setConfirmAction('unban')}
@@ -104,11 +112,31 @@ export function AdminUserDetail({ userId, onBack }: Props) {
               </button>
             )}
             <button
-              onClick={() => setConfirmAction('delete')}
+              onClick={() => setConfirmAction(
+                (selectedUser._count?.ownedServers ?? 0) > 0 ? 'deleteWithTransfer' : 'delete'
+              )}
               className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30"
             >
               <Trash2 size={14} /> Delete User
             </button>
+
+            {isSuperAdmin && (
+              selectedUser.role === 'admin' ? (
+                <button
+                  onClick={() => setConfirmAction('demote')}
+                  className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-orange-500/20 text-orange-400 hover:bg-orange-500/30"
+                >
+                  <ShieldMinus size={14} /> Demote to User
+                </button>
+              ) : (
+                <button
+                  onClick={() => setConfirmAction('promote')}
+                  className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-vox-accent-primary/20 text-vox-accent-primary hover:bg-vox-accent-primary/30"
+                >
+                  <ShieldCheck size={14} /> Promote to Admin
+                </button>
+              )
+            )}
           </div>
         )}
       </div>
@@ -200,6 +228,53 @@ export function AdminUserDetail({ userId, onBack }: Props) {
               toast.success('User deleted');
               onBack();
             } catch { toast.error('Failed to delete user'); }
+            setConfirmAction(null);
+          }}
+          onCancel={() => setConfirmAction(null)}
+        />
+      )}
+
+      {confirmAction === 'deleteWithTransfer' && (
+        <AdminDeleteUserModal
+          userId={selectedUser.id}
+          username={selectedUser.username}
+          onSuccess={() => {
+            setConfirmAction(null);
+            onBack();
+          }}
+          onCancel={() => setConfirmAction(null)}
+        />
+      )}
+
+      {confirmAction === 'promote' && (
+        <AdminConfirmModal
+          title="Promote to Admin"
+          message={`Promote "${selectedUser.username}" to admin? They will have full access to the admin dashboard.`}
+          confirmLabel="Promote"
+          danger={false}
+          onConfirm={async () => {
+            try {
+              await updateUserRole(selectedUser!.id, 'admin');
+              toast.success(`${selectedUser!.username} promoted to admin`);
+              fetchUserDetail(userId);
+            } catch { toast.error('Failed to promote user'); }
+            setConfirmAction(null);
+          }}
+          onCancel={() => setConfirmAction(null)}
+        />
+      )}
+
+      {confirmAction === 'demote' && (
+        <AdminConfirmModal
+          title="Demote to User"
+          message={`Demote "${selectedUser.username}" to regular user? They will lose access to the admin dashboard.`}
+          confirmLabel="Demote"
+          onConfirm={async () => {
+            try {
+              await updateUserRole(selectedUser!.id, 'user');
+              toast.success(`${selectedUser!.username} demoted to user`);
+              fetchUserDetail(userId);
+            } catch { toast.error('Failed to demote user'); }
             setConfirmAction(null);
           }}
           onCancel={() => setConfirmAction(null)}

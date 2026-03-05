@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LayoutDashboard, Users, Server, ShieldBan, HardDrive, LogOut } from 'lucide-react';
+import { LayoutDashboard, Users, Server, ShieldBan, HardDrive, Download, LogOut } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
@@ -9,8 +9,9 @@ import { AdminUserDetail } from './AdminUserDetail';
 import { AdminServerList } from './AdminServerList';
 import { AdminBanList } from './AdminBanList';
 import { AdminStorage } from './AdminStorage';
+import { AdminDataTools } from './AdminDataTools';
 
-type AdminView = 'dashboard' | 'users' | 'servers' | 'bans' | 'storage';
+type AdminView = 'dashboard' | 'users' | 'servers' | 'bans' | 'storage' | 'export';
 
 const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -18,10 +19,12 @@ const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashbo
   { id: 'servers', label: 'Servers', icon: Server },
   { id: 'bans', label: 'Bans', icon: ShieldBan },
   { id: 'storage', label: 'Storage', icon: HardDrive },
+  { id: 'export', label: 'Data Tools', icon: Download },
 ];
 
 export function AdminLayout() {
-  const logout = useAuthStore((s) => s.logout);
+  const { logout, user } = useAuthStore();
+  const isSuperAdmin = user?.role === 'superadmin';
   const [view, setView] = useState<AdminView>('dashboard');
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
 
@@ -45,6 +48,8 @@ export function AdminLayout() {
         return <AdminBanList />;
       case 'storage':
         return <AdminStorage />;
+      case 'export':
+        return <AdminDataTools />;
     }
   };
 
@@ -54,7 +59,9 @@ export function AdminLayout() {
       <div className="w-56 flex flex-col bg-vox-sidebar border-r border-vox-border">
         <div className="p-4 border-b border-vox-border">
           <h1 className="text-lg font-bold text-vox-text-primary">Admin Panel</h1>
-          <p className="text-xs text-vox-text-muted">Super Admin Dashboard</p>
+          <p className="text-xs text-vox-text-muted">
+            {isSuperAdmin ? 'Super Admin' : 'Admin'} — {user?.username}
+          </p>
         </div>
 
         <nav className="flex-1 p-2 space-y-1">
