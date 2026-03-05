@@ -25,24 +25,29 @@ export default defineConfig({
     },
   ],
 
-  webServer: [
-    {
-      command: 'pnpm dev:server',
-      url: 'http://localhost:3001/health',
-      reuseExistingServer: true,
-      timeout: 60_000,
-    },
-    {
-      command: 'pnpm dev:desktop',
-      url: 'http://localhost:8080',
-      reuseExistingServer: true,
-      timeout: 60_000,
-    },
-    {
-      command: 'pnpm dev:admin',
-      url: 'http://localhost:8082',
-      reuseExistingServer: true,
-      timeout: 60_000,
-    },
-  ],
+  // In CI, servers are started manually in the workflow before running tests
+  ...(process.env.CI
+    ? {}
+    : {
+        webServer: [
+          {
+            command: 'pnpm dev:server',
+            url: 'http://localhost:3001/health',
+            reuseExistingServer: true,
+            timeout: 60_000,
+          },
+          {
+            command: 'pnpm dev:desktop',
+            url: 'http://localhost:8080',
+            reuseExistingServer: true,
+            timeout: 60_000,
+          },
+          {
+            command: 'pnpm dev:admin',
+            url: 'http://localhost:8082',
+            reuseExistingServer: true,
+            timeout: 60_000,
+          },
+        ],
+      }),
 });
