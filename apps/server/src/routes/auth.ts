@@ -3,11 +3,16 @@ import { registerUser, loginUser, refreshTokens, requestPasswordReset, resetPass
 import { authenticate } from '../middleware/auth';
 import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
+import { isFeatureEnabled } from '../utils/featureFlags';
 
 export const authRouter = Router();
 
 authRouter.post('/register', rateLimitRegister, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (!isFeatureEnabled('registration')) {
+      res.status(403).json({ success: false, error: 'Registration is currently disabled' });
+      return;
+    }
     const { username, email, password, displayName } = req.body;
     const result = await registerUser(username, email, password, displayName);
 

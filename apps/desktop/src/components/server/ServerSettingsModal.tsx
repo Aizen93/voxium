@@ -4,7 +4,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
 import { ImageUploadButton } from '../common/ImageUploadButton';
-import { X } from 'lucide-react';
+import { X, Lock, Unlock } from 'lucide-react';
 import type { ServerMember, MemberRole } from '@voxium/shared';
 
 interface Props {
@@ -74,9 +74,10 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
 }
 
 function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => void }) {
-  const { servers, uploadServerIcon, updateServer, deleteServer } = useServerStore();
+  const { servers, members, uploadServerIcon, updateServer, deleteServer, toggleInvitesLock } = useServerStore();
   const currentUser = useAuthStore((s) => s.user);
   const server = servers.find((s) => s.id === serverId);
+  const currentMember = members.find((m) => m.userId === currentUser?.id);
 
   const [name, setName] = useState(server?.name || '');
   const [iconFile, setIconFile] = useState<File | null>(null);
@@ -85,10 +86,24 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteConfirmName, setDeleteConfirmName] = useState('');
   const [deleting, setDeleting] = useState(false);
+  const [togglingLock, setTogglingLock] = useState(false);
 
   if (!server) return null;
 
   const isOwner = server.ownerId === currentUser?.id;
+  const isAdminOrOwner = currentMember?.role === 'owner' || currentMember?.role === 'admin';
+
+  const handleToggleInvitesLock = async () => {
+    setTogglingLock(true);
+    try {
+      await toggleInvitesLock(serverId, !server.invitesLocked);
+      toast.success(server.invitesLocked ? 'Invites unlocked' : 'Invites locked');
+    } catch (err: any) {
+      toast.error(err.response?.data?.error || 'Failed to toggle invites lock');
+    } finally {
+      setTogglingLock(false);
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -169,6 +184,36 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
       >
         {saving ? 'Saving...' : 'Save Changes'}
       </button>
+
+      {/* Invites Lock — owner or admin */}
+      {isAdminOrOwner && (
+        <div className="mt-6 border-t border-vox-border pt-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-vox-text-primary flex items-center gap-1.5">
+                {server.invitesLocked ? <Lock size={14} /> : <Unlock size={14} />}
+                Server Invites
+              </h3>
+              <p className="text-xs text-vox-text-muted mt-0.5">
+                {server.invitesLocked
+                  ? 'Invites are locked. No one can create or use invite links.'
+                  : 'Invites are open. Members can create and share invite links.'}
+              </p>
+            </div>
+            <button
+              onClick={handleToggleInvitesLock}
+              disabled={togglingLock}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                server.invitesLocked
+                  ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                  : 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
+              }`}
+            >
+              {server.invitesLocked ? 'Unlock Invites' : 'Lock Invites'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Danger Zone — owner only */}
       {isOwner && (

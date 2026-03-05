@@ -31,9 +31,11 @@ Voxium/
 - Direct messages with typing indicators, reactions, unread tracking
 - Friend request system with real-time notifications
 - Unread indicators (channel + server level, persistent via DB)
-- Two-tier admin dashboard (admin + superadmin roles) with user/server/ban management, storage tools, live metrics, audit log, moderation queue (reports), support ticket management
+- Two-tier admin dashboard (admin + superadmin roles) with user/server/ban management, storage tools, live metrics, audit log, moderation queue (reports), support ticket management, rate limit controls, feature flags
 - Admin user deletion with server ownership transfer
-- Rate limiting (per-endpoint + socket-level) and input sanitization
+- Rate limiting (per-endpoint + socket-level, admin-editable via Redis-backed registry) and input sanitization
+- Feature flags (registration, invites, server creation, voice, DM voice, support) — Redis-backed, toggleable from admin dashboard without redeploying
+- Per-server invite lock (owners/admins can lock/unlock invites independently of global flag)
 - Tauri 2 desktop wrapper with native notifications
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
 
@@ -64,6 +66,8 @@ Voxium/
 - [ ] End-to-end testing
 
 ## Recent Changes
+
+- **Feature Flags + Server Invite Lock** (2026-03-05) -- Redis-backed global feature flag system (registration, invites, server creation, voice, DM voice, support) with admin UI, plus per-server invite lock toggle for owners/admins.
 
 - **Support Ticket System** (2026-03-05) — `SupportTicket` + `SupportMessage` Prisma models (one ticket per user via `@@unique([userId])`), user-facing `POST /support/open` (create/reopen), `GET /support/ticket` (fetch with cursor pagination), `POST /support/messages` (send with sanitization + rate limiting), admin routes for ticket listing/claiming/messaging/closing with audit logging (`support.claim`, `support.close`), real-time via `support:{ticketId}` Socket.IO rooms and `admin:support` subscription for ticket count updates, `supportStore.ts` Zustand store for desktop client, `SupportTicketView` chat UI, `AdminSupportTickets` admin panel with ticket queue + chat, socket auto-join for open/claimed tickets on connect, open tickets count on admin dashboard stat card, support audit actions in audit log labels.
 

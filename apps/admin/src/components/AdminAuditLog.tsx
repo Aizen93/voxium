@@ -24,6 +24,8 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'ratelimit.update': 'Rate Limit Updated',
   'ratelimit.reset': 'Rate Limit Reset',
   'ratelimit.clear_user': 'User Rate Limits Cleared',
+  'feature_flag.update': 'Feature Flag Updated',
+  'feature_flag.reset': 'Feature Flag Reset',
 };
 
 const ACTION_COLORS: Record<string, string> = {
@@ -46,6 +48,8 @@ const ACTION_COLORS: Record<string, string> = {
   'ratelimit.update': 'bg-orange-500/20 text-orange-400',
   'ratelimit.reset': 'bg-yellow-500/20 text-yellow-400',
   'ratelimit.clear_user': 'bg-cyan-500/20 text-cyan-400',
+  'feature_flag.update': 'bg-purple-500/20 text-purple-400',
+  'feature_flag.reset': 'bg-yellow-500/20 text-yellow-400',
 };
 
 function formatMetadata(action: AuditAction, metadata: Record<string, unknown> | null): string {
@@ -72,6 +76,8 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
       return metadata.reason ? `Reason: ${metadata.reason}` : '';
     case 'storage.cleanup_orphans':
       return `Found: ${metadata.found}, Deleted: ${metadata.deleted}`;
+    case 'feature_flag.update':
+      return `${metadata.enabled ? 'Enabled' : 'Disabled'}`;
     default:
       return '';
   }
@@ -86,6 +92,7 @@ const ALL_ACTIONS: AuditAction[] = [
   'report.resolve', 'report.dismiss',
   'support.claim', 'support.close',
   'ratelimit.update', 'ratelimit.reset', 'ratelimit.clear_user',
+  'feature_flag.update', 'feature_flag.reset',
 ];
 
 export function AdminAuditLog() {

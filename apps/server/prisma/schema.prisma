@@ -55,12 +55,13 @@ model User {
 // ─── Servers ─────────────────────────────────────────────────────────────────
 
 model Server {
-  id        String   @id @default(cuid())
-  name      String
-  iconUrl   String?  @map("icon_url")
-  ownerId   String   @map("owner_id")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id             String   @id @default(cuid())
+  name           String
+  iconUrl        String?  @map("icon_url")
+  invitesLocked  Boolean  @default(false) @map("invites_locked")
+  ownerId        String   @map("owner_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   owner      User           @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   channels   Channel[]

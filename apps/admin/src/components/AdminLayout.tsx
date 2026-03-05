@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut, Flag, LifeBuoy, Gauge } from 'lucide-react';
+import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut, Flag, LifeBuoy, Gauge, Zap } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
@@ -15,8 +15,9 @@ import { AdminAnnouncements } from './AdminAnnouncements';
 import { AdminReports } from './AdminReports';
 import { AdminSupportTickets } from './AdminSupportTickets';
 import { AdminRateLimits } from './AdminRateLimits';
+import { AdminFeatureFlags } from './AdminFeatureFlags';
 
-type AdminView = 'dashboard' | 'reports' | 'support' | 'users' | 'servers' | 'bans' | 'announcements' | 'storage' | 'rate-limits' | 'audit-logs' | 'export';
+type AdminView = 'dashboard' | 'reports' | 'support' | 'users' | 'servers' | 'bans' | 'announcements' | 'storage' | 'rate-limits' | 'feature-flags' | 'audit-logs' | 'export';
 
 const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -28,6 +29,7 @@ const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashbo
   { id: 'announcements', label: 'Announcements', icon: Megaphone },
   { id: 'storage', label: 'Storage', icon: HardDrive },
   { id: 'rate-limits', label: 'Rate Limits', icon: Gauge },
+  { id: 'feature-flags', label: 'Feature Flags', icon: Zap },
   { id: 'audit-logs', label: 'Audit Log', icon: ClipboardList },
   { id: 'export', label: 'Data Tools', icon: Download },
 ];
@@ -66,6 +68,8 @@ export function AdminLayout() {
         return <AdminStorage />;
       case 'rate-limits':
         return <AdminRateLimits />;
+      case 'feature-flags':
+        return <AdminFeatureFlags />;
       case 'audit-logs':
         return <AdminAuditLog />;
       case 'export':

@@ -1153,6 +1153,62 @@ adminRouter.post('/rate-limits/:name/reset', async (req: Request<{ name: string 
   }
 });
 
+// ─── Feature Flags ──────────────────────────────────────────────────────────
+
+adminRouter.get('/feature-flags', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { getAllFeatureFlags } = await import('../utils/featureFlags');
+    res.json({ success: true, data: getAllFeatureFlags() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.put('/feature-flags/:name', async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { name } = req.params;
+    const { enabled } = req.body;
+
+    if (typeof enabled !== 'boolean') {
+      throw new BadRequestError('Provide a boolean "enabled" value');
+    }
+
+    const { updateFeatureFlag } = await import('../utils/featureFlags');
+    await updateFeatureFlag(name, enabled);
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'feature_flag.update' as any,
+      targetType: 'feature_flag',
+      targetId: name,
+      metadata: { enabled },
+    });
+
+    res.json({ success: true, message: `Feature "${name}" ${enabled ? 'enabled' : 'disabled'}` });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.post('/feature-flags/:name/reset', async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { name } = req.params;
+    const { resetFeatureFlag } = await import('../utils/featureFlags');
+    await resetFeatureFlag(name);
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'feature_flag.reset' as any,
+      targetType: 'feature_flag',
+      targetId: name,
+    });
+
+    res.json({ success: true, message: `Feature "${name}" reset to default` });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── Data Export ─────────────────────────────────────────────────────────────
 
 adminRouter.get('/export/users', async (_req: Request, res: Response, next: NextFunction) => {

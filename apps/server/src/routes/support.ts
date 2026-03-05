@@ -2,8 +2,9 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { rateLimitSupport, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { LIMITS, WS_EVENTS } from '@voxium/shared';
+import { isFeatureEnabled } from '../utils/featureFlags';
 import type { SupportMessageData } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
@@ -37,6 +38,7 @@ async function emitTicketCount() {
 
 supportRouter.post('/open', rateLimitGeneral, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (!isFeatureEnabled('support')) throw new ForbiddenError('Support tickets are currently disabled');
     const userId = req.user!.userId;
 
     let ticket = await prisma.supportTicket.findUnique({ where: { userId } });

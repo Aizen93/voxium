@@ -442,6 +442,12 @@ export function MainLayout() {
       supportStatusChange: (data: any) => {
         useSupportStore.getState().updateStatus(data.status, data.claimedById, data.claimedByUsername);
       },
+      voiceError: (data: { message: string }) => {
+        const vs = useVoiceStore.getState();
+        if (vs.activeChannelId) vs.leaveChannel();
+        if (vs.dmCallConversationId) vs.leaveDMCall();
+        toast.error(data.message);
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -457,6 +463,7 @@ export function MainLayout() {
       ['voice:state_update', handlers.voiceStateUpdate],
       ['voice:speaking', handlers.voiceSpeaking],
       ['voice:signal', handlers.voiceSignal],
+      ['voice:error', handlers.voiceError],
       ['voice:screen_share:start', handlers.voiceScreenShareStart],
       ['voice:screen_share:stop', handlers.voiceScreenShareStop],
       ['voice:screen_share:state', handlers.voiceScreenShareState],

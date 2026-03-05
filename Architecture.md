@@ -149,17 +149,23 @@ apps/server/
 │   │   ├── invites.ts      # Create/use/preview invites
 │   │   ├── uploads.ts      # Presigned URL generation (S3) + GET redirect proxy
 │   │   ├── friends.ts      # Friend requests (send/accept/decline/remove), friendship status
-│   │   └── search.ts       # Full-text message search (server channels + DM conversations)
+│   │   ├── search.ts       # Full-text message search (server channels + DM conversations)
+│   │   ├── reports.ts      # User-facing report submission
+│   │   ├── support.ts      # User-facing support ticket routes
+│   │   ├── admin.ts        # Admin API (users, servers, bans, storage, reports, support, rate limits, feature flags, audit log, export)
+│   │   └── stats.ts        # Public stats endpoint
 │   ├── services/
 │   │   └── authService.ts  # Auth business logic
 │   ├── middleware/
 │   │   ├── auth.ts         # JWT authentication middleware
-│   │   ├── rateLimiter.ts  # Per-endpoint + per-socket rate limiting (Redis + memory fallback)
+│   │   ├── rateLimiter.ts  # Per-endpoint + per-socket rate limiting (Redis-backed registry, admin-editable)
+│   │   ├── requireSuperAdmin.ts # Admin/superadmin role guards
 │   │   └── errorHandler.ts # Global error handler
 │   ├── websocket/
 │   │   ├── socketServer.ts  # Socket.IO setup, connection handler
 │   │   ├── voiceHandler.ts  # Voice channel state management
-│   │   └── dmVoiceHandler.ts # DM call signaling + system messages
+│   │   ├── dmVoiceHandler.ts # DM call signaling + system messages
+│   │   └── adminMetrics.ts  # Live metrics emitter for admin dashboard
 │   └── utils/
 │       ├── prisma.ts            # Prisma client singleton
 │       ├── redis.ts             # Redis client + presence helpers
@@ -168,7 +174,9 @@ apps/server/
 │       ├── s3.ts                # S3 client + presigned URL generation + delete helper + VALID_S3_KEY_RE
 │       ├── email.ts             # Nodemailer transporter + password reset email
 │       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
-│       └── memberBroadcast.ts   # Server room join + member event broadcast
+│       ├── memberBroadcast.ts   # Server room join + member event broadcast
+│       ├── auditLog.ts         # Fire-and-forget audit event logger
+│       └── featureFlags.ts     # Redis-backed feature flag registry
 ```
 
 ### Request Flow
@@ -740,6 +748,101 @@ Member → Send messages, join voice, use invites
 ```
 
 Checked server-side on every request via `ServerMember.role`.
+
+### Feature Flags
+
+Redis-backed feature flag system for toggling features without redeployment:
+
+```
+Redis Hash: feature:flags
+┌─────────────────┬─────────┐
+│ registration    │ true    │  ← Gate: POST /auth/register
+│ invites         │ true    │  ← Gate: POST /invites/servers/:id, POST /invites/:code/join
+│ server_creation │ true    │  ← Gate: POST /servers
+│ voice           │ true    │  ← Gate: voice:join socket event
+│ dm_voice        │ true    │  ← Gate: dm:voice:join socket event
+│ support         │ true    │  ← Gate: POST /support/open
+└─────────────────┴─────────┘
+```
+
+- Defaults defined in `featureFlags.ts`, overrides persisted to Redis `feature:flags` hash
+- In-memory cache for zero-latency checks via `isFeatureEnabled(name)`
+- Loaded on server startup via `loadFeatureFlags()`
+- Admin API: `GET/PUT /feature-flags/:name`, `POST /feature-flags/:name/reset`
+- Changes take effect immediately (no restart needed)
+
+### Rate Limit Registry
+
+All 17 rate limiters are registered in a central `DEFAULTS` record with admin-editable overrides:
+
+```
+Redis Hash: rl:config
+┌────────────────┬───────────────────────┐
+│ limiter name   │ {points, duration,    │
+│                │  blockDuration}       │
+└────────────────┴───────────────────────┘
+```
+
+- Overrides loaded from Redis on startup, cached in memory
+- Limiter instances nulled on config change → recreated on next request
+- Admin API: `GET /rate-limits`, `PUT /rate-limits/:name`, `POST /rate-limits/:name/reset`, `POST /rate-limits/clear-user`
+
+### Server Invite Lock
+
+Per-server invite control independent of the global `invites` feature flag:
+
+- `Server.invitesLocked` boolean field (default `false`)
+- Owners and admins can toggle via `PATCH /servers/:id/invites-lock`
+- Checked on invite creation and invite join (returns 403 when locked)
+- Broadcast to all members via `server:updated` socket event
+
+---
+
+## Admin Dashboard
+
+Standalone React app (`apps/admin/`, port 8082) with two-tier role system:
+
+```
+apps/admin/
+├── src/
+│   ├── stores/
+│   │   ├── authStore.ts     # Admin login (admin + superadmin roles)
+│   │   └── adminStore.ts    # All admin state + actions (Zustand)
+│   ├── components/
+│   │   ├── AdminLayout.tsx         # Sidebar nav + content router
+│   │   ├── AdminDashboard.tsx      # Stats cards + live metrics + charts
+│   │   ├── AdminReports.tsx        # Moderation queue (pending/resolved/dismissed)
+│   │   ├── AdminSupportTickets.tsx # Support ticket queue + chat panel
+│   │   ├── AdminUserList.tsx       # Paginated user management
+│   │   ├── AdminServerList.tsx     # Paginated server management
+│   │   ├── AdminBanList.tsx        # User bans + IP bans
+│   │   ├── AdminAnnouncements.tsx  # Global/targeted announcements
+│   │   ├── AdminStorage.tsx        # S3 storage stats + file browser
+│   │   ├── AdminRateLimits.tsx     # Rate limit controls (edit/reset rules, clear user counters)
+│   │   ├── AdminFeatureFlags.tsx   # Feature flag toggles
+│   │   ├── AdminAuditLog.tsx       # Searchable/filterable audit trail
+│   │   └── AdminDataTools.tsx      # CSV/JSON data export
+│   └── services/
+│       ├── api.ts           # Axios with token interceptor
+│       └── socket.ts        # Socket.IO for real-time admin events
+```
+
+### Admin Permission Model
+
+| Action | admin | superadmin |
+|--------|-------|------------|
+| Full dashboard access | Yes | Yes |
+| Ban/unban/delete users, servers | Yes | Yes |
+| Manage reports, support tickets | Yes | Yes |
+| Edit rate limits, feature flags | Yes | Yes |
+| Promote/demote staff roles | No | Yes |
+
+### Admin Real-Time Events
+
+Socket.IO rooms for admin subscriptions:
+- `admin:metrics` — Live metrics (online users, voice channels, DM calls, messages/hour)
+- `admin:reports` — New report notifications → auto-refresh
+- `admin:support` — New ticket/message notifications → auto-refresh
 
 ---
 

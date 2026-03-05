@@ -50,6 +50,7 @@ export interface Server {
   id: string;
   name: string;
   iconUrl: string | null;
+  invitesLocked: boolean;
   ownerId: string;
   createdAt: string;
 }
@@ -225,6 +226,7 @@ export interface ServerToClientEvents {
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => void;
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;
   'voice:signal': (data: { from: string; signal: unknown }) => void;
+  'voice:error': (data: { message: string }) => void;
   'pong:latency': (timestamp: number) => void;
   'typing:start': (data: { channelId: string; userId: string; username: string }) => void;
   'typing:stop': (data: { channelId: string; userId: string }) => void;
@@ -529,7 +531,8 @@ export type AuditAction =
   | 'announcement.create' | 'announcement.publish' | 'announcement.delete'
   | 'report.resolve' | 'report.dismiss'
   | 'support.claim' | 'support.close'
-  | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user';
+  | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user'
+  | 'feature_flag.update' | 'feature_flag.reset';
 
 // ─── Announcements ─────────────────────────────────────────────────────────
 

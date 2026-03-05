@@ -39,9 +39,10 @@ export const useSupportStore = create<SupportState>((set, get) => ({
         showSupportView: true,
         isLoading: false,
       });
-    } catch {
+    } catch (err: any) {
       set({ isLoading: false });
-      throw new Error('Failed to open support ticket');
+      const msg = err?.response?.data?.error || 'Failed to open support ticket';
+      throw new Error(msg);
     }
   },
 

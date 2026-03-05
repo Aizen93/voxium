@@ -96,6 +96,15 @@ interface AdminState {
   activeTicket: SupportTicket | null;
   activeTicketMessages: SupportMessageData[];
 
+  // Feature Flags
+  featureFlags: Array<{
+    name: string;
+    label: string;
+    description: string;
+    enabled: boolean;
+    isCustom: boolean;
+  }>;
+
   // Rate Limits
   rateLimits: Array<{
     name: string;
@@ -167,6 +176,10 @@ interface AdminState {
   subscribeSupport: () => void;
   unsubscribeSupport: () => void;
 
+  fetchFeatureFlags: () => Promise<void>;
+  updateFeatureFlag: (name: string, enabled: boolean) => Promise<void>;
+  resetFeatureFlag: (name: string) => Promise<void>;
+
   fetchRateLimits: () => Promise<void>;
   updateRateLimit: (name: string, updates: { points?: number; duration?: number; blockDuration?: number }) => Promise<void>;
   resetRateLimit: (name: string) => Promise<void>;
@@ -233,6 +246,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   supportTicketsFilter: 'all',
   activeTicket: null,
   activeTicketMessages: [],
+  featureFlags: [],
   rateLimits: [],
   loading: false,
 
@@ -651,6 +665,25 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       supportReconnectUnsub();
       supportReconnectUnsub = null;
     }
+  },
+
+  fetchFeatureFlags: async () => {
+    try {
+      const { data } = await api.get('/admin/feature-flags');
+      set({ featureFlags: data.data });
+    } catch {
+      console.error('Failed to fetch feature flags');
+    }
+  },
+
+  updateFeatureFlag: async (name, enabled) => {
+    await api.put(`/admin/feature-flags/${name}`, { enabled });
+    await get().fetchFeatureFlags();
+  },
+
+  resetFeatureFlag: async (name) => {
+    await api.post(`/admin/feature-flags/${name}/reset`);
+    await get().fetchFeatureFlags();
   },
 
   fetchRateLimits: async () => {

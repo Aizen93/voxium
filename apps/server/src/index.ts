@@ -26,6 +26,7 @@ import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/a
 import { prisma } from './utils/prisma';
 import { initRedis } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
+import { loadFeatureFlags } from './utils/featureFlags';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -41,6 +42,10 @@ async function main() {
   // Load rate limit overrides from Redis
   await loadRateLimitOverrides();
   console.log('[RateLimit] Overrides loaded');
+
+  // Load feature flags from Redis
+  await loadFeatureFlags();
+  console.log('[FeatureFlags] Loaded');
 
   // Create HTTP server
   const server = http.createServer(app);

@@ -59,6 +59,7 @@ export const WS_EVENTS = {
   VOICE_STATE_UPDATE: 'voice:state_update',
   VOICE_SPEAKING: 'voice:speaking',
   VOICE_SIGNAL: 'voice:signal',
+  VOICE_ERROR: 'voice:error',
   TYPING_START: 'typing:start',
   TYPING_STOP: 'typing:stop',
   CHANNEL_JOIN: 'channel:join',
