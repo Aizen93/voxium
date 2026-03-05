@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
+import { toast } from '../stores/toastStore';
 import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData } from '@voxium/shared';
 
 // Module-level refs for metrics subscription cleanup
@@ -281,6 +282,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const socket = getSocket();
     if (!socket) return;
 
+    // Clean up any existing subscription to prevent listener accumulation
+    if (metricsHandler) socket.off('admin:metrics', metricsHandler);
+    if (metricsReconnectUnsub) { metricsReconnectUnsub(); metricsReconnectUnsub = null; }
+
     metricsHandler = (data: AdminMetricsSnapshot) => {
       set({ liveMetrics: data });
     };
@@ -334,7 +339,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       const { data } = await api.get(`/admin/users/${userId}`);
       set({ selectedUser: data.data });
     } catch {
-      console.error('Failed to fetch user detail');
+      toast.error('Failed to load user details');
     }
   },
 
@@ -397,7 +402,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       const { data } = await api.get('/admin/bans', { params: { page: p, limit: 12 } });
       set({ bans: data.data, bansTotal: data.total, bansPage: p });
     } catch {
-      console.error('Failed to fetch bans');
+      toast.error('Failed to load ban list');
     }
   },
 
@@ -407,7 +412,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       const { data } = await api.get('/admin/ip-bans', { params: { page: p, limit: 12 } });
       set({ ipBans: data.data, ipBansTotal: data.total, ipBansPage: p });
     } catch {
-      console.error('Failed to fetch IP bans');
+      toast.error('Failed to load IP ban list');
     }
   },
 
@@ -481,6 +486,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   subscribeReports: () => {
     const socket = getSocket();
     if (!socket) return;
+
+    // Clean up any existing subscription to prevent listener accumulation
+    if (reportsHandler) socket.off('report:new' as any, reportsHandler);
+    if (reportsReconnectUnsub) { reportsReconnectUnsub(); reportsReconnectUnsub = null; }
 
     reportsHandler = () => {
       get().fetchReports();
@@ -600,6 +609,12 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   subscribeSupport: () => {
     const socket = getSocket();
     if (!socket) return;
+
+    // Clean up any existing subscription to prevent listener accumulation
+    if (supportTicketHandler) socket.off('support:ticket:new' as any, supportTicketHandler);
+    if (supportMessageHandler) socket.off('support:message:new' as any, supportMessageHandler);
+    if (supportStatusHandler) socket.off('support:status_change' as any, supportStatusHandler);
+    if (supportReconnectUnsub) { supportReconnectUnsub(); supportReconnectUnsub = null; }
 
     supportTicketHandler = () => {
       get().fetchSupportTickets();

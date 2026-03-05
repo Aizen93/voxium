@@ -52,9 +52,6 @@ Voxium/
 ## Known Issues
 
 - No duplicate report prevention (same user can submit multiple pending reports against the same target)
-- Support ticket admin claim flow has a socket room join timing issue: status change and system message events are emitted to `support:{ticketId}` room BEFORE the claiming admin's socket is joined to that room, so the admin misses the real-time update (ticket list refresh via REST compensates)
-- Support routes `POST /support/open` and `GET /support/ticket` lack per-endpoint rate limiting (only covered by global limiter)
-- Admin support message endpoint hardcodes validation limits (1-2000) instead of using `LIMITS.SUPPORT_MESSAGE_MIN`/`LIMITS.SUPPORT_MESSAGE_MAX` from shared constants
 - Admin viewing an unclaimed support ticket does not receive real-time message updates (socket only joined to `support:{ticketId}` room upon claiming)
 
 ## Remaining Work

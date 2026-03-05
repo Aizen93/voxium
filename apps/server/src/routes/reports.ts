@@ -44,6 +44,19 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
     });
     if (!reportedUser) throw new NotFoundError('User');
 
+    // Check for existing pending report from this user against the same target
+    const existingReport = await prisma.report.findFirst({
+      where: {
+        reporterId: userId,
+        reportedUserId,
+        status: 'pending',
+        ...(type === 'message' && messageId ? { messageId } : { type: 'user' }),
+      },
+    });
+    if (existingReport) {
+      throw new BadRequestError('You already have a pending report against this target');
+    }
+
     let messageContent: string | null = null;
     let channelId: string | null = null;
     let conversationId: string | null = null;

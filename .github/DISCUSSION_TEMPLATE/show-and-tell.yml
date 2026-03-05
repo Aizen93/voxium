@@ -1,0 +1,17 @@
+title: "[Show] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Show & Tell
+
+        Share something you built with Voxium — a self-hosted deployment, a theme, a custom integration, anything!
+
+  - type: textarea
+    id: showcase
+    attributes:
+      label: What did you build?
+      description: Tell us about it. Screenshots and links are welcome!
+    validations:
+      required: true

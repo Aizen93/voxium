@@ -1871,6 +1871,16 @@ adminRouter.get('/support/tickets/:id/messages', async (req: Request<{ id: strin
     const ticket = await prisma.supportTicket.findUnique({ where: { id } });
     if (!ticket) throw new NotFoundError('Ticket');
 
+    // Join admin socket to the ticket room so they receive real-time messages
+    const adminUserId = req.user!.userId;
+    const io = getIO();
+    const sockets = await io.fetchSockets();
+    for (const s of sockets) {
+      if (s.data.userId === adminUserId) {
+        s.join(`support:${id}`);
+      }
+    }
+
     const where: Record<string, unknown> = { ticketId: id };
     if (before) {
       const beforeDate = new Date(before);

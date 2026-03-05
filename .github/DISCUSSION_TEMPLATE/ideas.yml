@@ -1,0 +1,23 @@
+title: "[Idea] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Share your idea
+
+        This is for open-ended ideas and brainstorming. For well-defined feature requests, use the [Feature Request](../../issues/new?template=feature_request.yml) template instead.
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What's your idea?
+      description: Describe what you'd like to see or discuss.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Mockups, references to other apps, use cases, etc.
