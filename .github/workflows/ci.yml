@@ -168,25 +168,24 @@ jobs:
         run: pnpm build:shared
 
       - name: Create server .env
-        working-directory: apps/server
         run: |
-          cat > .env << 'EOF'
-          DATABASE_URL=postgresql://voxium:voxium@localhost:5432/voxium
-          REDIS_URL=redis://localhost:6379
-          JWT_SECRET=ci-test-jwt-secret-not-for-production
-          JWT_REFRESH_SECRET=ci-test-refresh-secret-not-for-production
-          PORT=3001
-          CORS_ORIGIN=http://localhost:8080,http://localhost:8082
-          S3_ASSETS_ENDPOINT=http://localhost:9000
-          S3_ASSETS_REGION=us-east-1
-          S3_ACCESS_KEY=ci-test-key
-          S3_SECRET_KEY=ci-test-secret
-          S3_ASSETS_BUCKET=ci-test-bucket
-          SMTP_HOST=localhost
-          SMTP_PORT=1025
-          SMTP_FROM=noreply@test.local
-          CLIENT_URL=http://localhost:8080
-          EOF
+          printf '%s\n' \
+            'DATABASE_URL=postgresql://voxium:voxium@localhost:5432/voxium' \
+            'REDIS_URL=redis://localhost:6379' \
+            'JWT_SECRET=ci-test-jwt-secret-not-for-production' \
+            'JWT_REFRESH_SECRET=ci-test-refresh-secret-not-for-production' \
+            'PORT=3001' \
+            'CORS_ORIGIN=http://localhost:8080,http://localhost:8082' \
+            'S3_ASSETS_ENDPOINT=http://localhost:9000' \
+            'S3_ASSETS_REGION=us-east-1' \
+            'S3_ACCESS_KEY=ci-test-key' \
+            'S3_SECRET_KEY=ci-test-secret' \
+            'S3_ASSETS_BUCKET=ci-test-bucket' \
+            'SMTP_HOST=localhost' \
+            'SMTP_PORT=1025' \
+            'SMTP_FROM=noreply@test.local' \
+            'CLIENT_URL=http://localhost:8080' \
+            > apps/server/.env
 
       - name: Run E2E tests
         run: pnpm test:e2e

@@ -30,19 +30,19 @@ export default defineConfig({
       command: 'pnpm dev:server',
       url: 'http://localhost:3001/health',
       reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
+      timeout: process.env.CI ? 60_000 : 30_000,
     },
     {
       command: 'pnpm dev:desktop',
       url: 'http://localhost:8080',
       reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
+      timeout: process.env.CI ? 60_000 : 30_000,
     },
     {
       command: 'pnpm dev:admin',
       url: 'http://localhost:8082',
       reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
+      timeout: process.env.CI ? 60_000 : 30_000,
     },
   ],
 });
