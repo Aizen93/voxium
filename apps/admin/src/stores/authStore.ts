@@ -32,7 +32,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 
       if (user.role !== 'superadmin' && user.role !== 'admin') {
         set({ error: 'Access denied. Admin privileges required.', isSubmitting: false });
-        return;
+        throw new Error('Access denied. Admin privileges required.');
       }
 
       setTokens(accessToken, refreshToken, true);

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, Flag } from 'lucide-react';
 import { api } from '../../services/api';
 import { toast } from '../../stores/toastStore';
+import { LIMITS } from '@voxium/shared';
 
 interface Props {
   type: 'message' | 'user';
@@ -26,8 +27,8 @@ export function ReportModal({ type, reportedUserId, messageId, onClose }: Props)
   };
 
   const handleSubmit = async () => {
-    if (reason.trim().length < 10) {
-      toast.error('Reason must be at least 10 characters');
+    if (reason.trim().length < LIMITS.REPORT_REASON_MIN) {
+      toast.error(`Reason must be at least ${LIMITS.REPORT_REASON_MIN} characters`);
       return;
     }
     setSubmitting(true);
@@ -89,12 +90,12 @@ export function ReportModal({ type, reportedUserId, messageId, onClose }: Props)
           <textarea
             value={reason}
             onChange={(e) => setReason(e.target.value)}
-            placeholder="Describe the issue in detail (min 10 characters)..."
+            placeholder={`Describe the issue in detail (min ${LIMITS.REPORT_REASON_MIN} characters)...`}
             rows={4}
-            maxLength={1000}
+            maxLength={LIMITS.REPORT_REASON_MAX}
             className="w-full resize-none rounded-md border border-vox-border bg-vox-bg-hover px-3 py-2 text-sm text-vox-text-primary placeholder:text-vox-text-muted focus:border-vox-accent-primary focus:outline-none focus:ring-1 focus:ring-vox-accent-primary"
           />
-          <p className="text-right text-[10px] text-vox-text-muted">{reason.length}/1000</p>
+          <p className="text-right text-[10px] text-vox-text-muted">{reason.length}/{LIMITS.REPORT_REASON_MAX}</p>
         </div>
 
         {/* Footer */}
@@ -107,7 +108,7 @@ export function ReportModal({ type, reportedUserId, messageId, onClose }: Props)
           </button>
           <button
             onClick={handleSubmit}
-            disabled={submitting || reason.trim().length < 10}
+            disabled={submitting || reason.trim().length < LIMITS.REPORT_REASON_MIN}
             className="px-3 py-1.5 text-xs rounded-md bg-vox-accent-danger text-white hover:bg-vox-accent-danger/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {submitting ? 'Submitting...' : 'Submit Report'}

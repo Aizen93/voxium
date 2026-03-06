@@ -16,11 +16,21 @@ function normalizeIp(raw: string): string {
   return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
 }
 
-/** Get the real client IP, respecting X-Forwarded-For behind a trusted proxy */
+/**
+ * Get the real client IP. Only reads X-Forwarded-For in production
+ * (where a trusted reverse proxy is expected), matching Express's
+ * `trust proxy` setting. In other environments, uses the direct
+ * socket address to prevent header spoofing.
+ */
 function getSocketIp(socket: { handshake: { address: string; headers: Record<string, string | string[] | undefined> } }): string | undefined {
-  const forwarded = socket.handshake.headers['x-forwarded-for'];
-  const raw = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : socket.handshake.address;
-  return raw ? normalizeIp(raw) : undefined;
+  if (process.env.NODE_ENV === 'production') {
+    const forwarded = socket.handshake.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string') {
+      const firstHop = forwarded.split(',')[0].trim();
+      if (firstHop) return normalizeIp(firstHop);
+    }
+  }
+  return socket.handshake.address ? normalizeIp(socket.handshake.address) : undefined;
 }
 
 export function getIO(): SocketServer<ClientToServerEvents, ServerToClientEvents> {
@@ -48,10 +58,10 @@ export function initSocketServer(httpServer: HttpServer) {
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
 
-      // Check account ban and token version
+      // Check account ban, token version, and current role
       const user = await prisma.user.findUnique({
         where: { id: payload.userId },
-        select: { bannedAt: true, tokenVersion: true },
+        select: { bannedAt: true, tokenVersion: true, role: true },
       });
       if (!user) return next(new Error('User not found'));
       if (user.bannedAt) return next(new Error('Account banned'));
@@ -66,7 +76,7 @@ export function initSocketServer(httpServer: HttpServer) {
 
       socket.data.userId = payload.userId;
       socket.data.username = payload.username;
-      socket.data.role = payload.role;
+      socket.data.role = user.role;
       next();
     } catch (err) {
       if (err instanceof Error && err.message === 'Account banned') {
