@@ -1,13 +1,18 @@
 import { PrismaClient } from '@prisma/client';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
 // Load DATABASE_URL from server .env if not already set
 if (!process.env.DATABASE_URL) {
   const envPath = resolve(__dirname, '../../../apps/server/.env');
-  const envContent = readFileSync(envPath, 'utf-8');
-  const match = envContent.match(/^DATABASE_URL="?([^"\n]+)"?/m);
-  if (match) process.env.DATABASE_URL = match[1];
+  if (existsSync(envPath)) {
+    const envContent = readFileSync(envPath, 'utf-8');
+    const match = envContent.match(/^DATABASE_URL="?([^"\n]+)"?/m);
+    if (match) process.env.DATABASE_URL = match[1];
+  }
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL is not set and apps/server/.env was not found. Set DATABASE_URL in your environment.');
+  }
 }
 
 let prisma: PrismaClient | null = null;

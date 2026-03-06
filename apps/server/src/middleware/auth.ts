@@ -32,10 +32,10 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
 
-    // Check account ban and token version against DB
+    // Check account ban, token version, and current role against DB
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },
-      select: { bannedAt: true, tokenVersion: true },
+      select: { bannedAt: true, tokenVersion: true, role: true },
     });
 
     if (!user) return next(new UnauthorizedError('User not found'));
@@ -44,7 +44,8 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
       return next(new UnauthorizedError('Session invalidated'));
     }
 
-    req.user = payload;
+    // Use DB role (not JWT role) so role changes take effect immediately
+    req.user = { ...payload, role: user.role as UserRole };
     next();
   } catch (err) {
     if (err instanceof ForbiddenError || err instanceof UnauthorizedError) {

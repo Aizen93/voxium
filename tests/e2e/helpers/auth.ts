@@ -1,7 +1,5 @@
 import type { Page } from '@playwright/test';
 
-const API_URL = 'http://localhost:3001/api/v1';
-
 /** Unique suffix for test isolation — avoids collisions across runs. */
 export function uniqueId() {
   return Math.random().toString(36).slice(2, 8);
