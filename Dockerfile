@@ -29,23 +29,18 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 
 WORKDIR /app
 
-# Copy installed node_modules from deps stage
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/packages/shared/node_modules ./packages/shared/node_modules
-COPY --from=deps /app/apps/server/node_modules ./apps/server/node_modules
+# Copy everything from deps stage (preserves pnpm symlink structure)
+COPY --from=deps /app ./
 
 # Copy source files
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY packages/shared/ packages/shared/
 COPY apps/server/ apps/server/
 
-# Generate Prisma client (only generates query engine — no DB connection needed)
+# Generate Prisma client
 RUN cd apps/server && npx prisma generate
 
-# Build shared package
+# Build shared package then server
 RUN pnpm build:shared
-
-# Build server
 RUN pnpm build:server
 
 # ── Stage 3: Production (minimal image) ──────────────────────────────────────
@@ -73,10 +68,12 @@ RUN pnpm install --frozen-lockfile --prod
 # Copy built shared package
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 
-# Copy built server + Prisma artifacts
+# Copy built server
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/server/prisma apps/server/prisma
-COPY --from=build /app/apps/server/node_modules/.prisma apps/server/node_modules/.prisma
+
+# Generate Prisma client for production node_modules layout
+RUN cd apps/server && npx prisma generate
 
 # Switch to non-root user
 USER voxium
