@@ -35,8 +35,9 @@ export const useSupportStore = create<SupportState>((set, get) => ({
     set({ isLoading: true });
     try {
       const { data } = await api.post('/support/open');
+      const t = data.data.ticket;
       set({
-        ticket: data.data.ticket,
+        ticket: { ...t, claimedById: t.claimedById ?? null, claimedByUsername: t.claimedByUsername ?? null },
         messages: data.data.messages,
         showSupportView: true,
         isLoading: false,
@@ -52,8 +53,9 @@ export const useSupportStore = create<SupportState>((set, get) => ({
     try {
       const { data } = await api.get('/support/ticket');
       if (data.data.ticket) {
+        const t = data.data.ticket;
         set({
-          ticket: data.data.ticket,
+          ticket: { ...t, claimedById: t.claimedById ?? null, claimedByUsername: t.claimedByUsername ?? null },
           messages: data.data.messages,
         });
       }

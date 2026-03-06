@@ -27,7 +27,7 @@ export function AdminLoginPage() {
             <Shield size={24} />
           </div>
           <h1 className="text-xl font-bold text-vox-text-primary">Voxium Admin</h1>
-          <p className="text-sm text-vox-text-muted">Super admin access only</p>
+          <p className="text-sm text-vox-text-muted">Admin access only</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
