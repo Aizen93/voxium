@@ -381,10 +381,28 @@ function TwoFactorSection() {
     }
   };
 
-  const handleCopyBackupCodes = () => {
-    navigator.clipboard.writeText(backupCodes.join('\n'));
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopyBackupCodes = async () => {
+    const text = backupCodes.join('\n');
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-9999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        if (!ok) throw new Error('copy failed');
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Unable to copy backup codes to clipboard');
+    }
   };
 
   const isEnabled = user?.totpEnabled;

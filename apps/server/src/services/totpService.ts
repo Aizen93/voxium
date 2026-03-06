@@ -33,6 +33,14 @@ async function hashBackupCodes(codes: string[]): Promise<string> {
   return JSON.stringify(hashed);
 }
 
+function parseBackupCodes(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((c) => typeof c === 'string')) return parsed;
+  } catch { /* malformed */ }
+  return [];
+}
+
 /** Generate a TOTP secret and QR code data URL for setup */
 export async function setupTOTP(userId: string) {
   const user = await prisma.user.findUnique({
@@ -113,7 +121,7 @@ export async function disableTOTP(userId: string, code: string) {
     // Try backup codes
     let backupMatch = false;
     if (user.totpBackupCodes) {
-      const hashedCodes: string[] = JSON.parse(user.totpBackupCodes);
+      const hashedCodes = parseBackupCodes(user.totpBackupCodes);
       for (const hashedCode of hashedCodes) {
         if (await bcrypt.compare(code, hashedCode)) {
           backupMatch = true;
@@ -149,7 +157,7 @@ export async function verifyTOTP(userId: string, code: string): Promise<boolean>
 
   // Try backup codes
   if (user.totpBackupCodes) {
-    const hashedCodes: string[] = JSON.parse(user.totpBackupCodes);
+    const hashedCodes = parseBackupCodes(user.totpBackupCodes);
     for (let i = 0; i < hashedCodes.length; i++) {
       const match = await bcrypt.compare(code, hashedCodes[i]);
       if (match) {

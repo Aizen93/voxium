@@ -17,6 +17,7 @@ interface AuthState {
   // TOTP login flow
   totpRequired: boolean;
   totpToken: string | null;
+  totpRememberMe: boolean;
 
   login: (email: string, password: string, rememberMe?: boolean) => Promise<void>;
   verifyTOTP: (code: string) => Promise<void>;
@@ -43,6 +44,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   error: null,
   totpRequired: false,
   totpToken: null,
+  totpRememberMe: true,
 
   login: async (email, password, rememberMe = true) => {
     set({ isSubmitting: true, error: null });
@@ -52,7 +54,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       // If TOTP is required, pause login flow
       if (data.data.totpRequired) {
-        set({ totpRequired: true, totpToken: data.data.totpToken, isSubmitting: false });
+        set({ totpRequired: true, totpToken: data.data.totpToken, totpRememberMe: rememberMe, isSubmitting: false });
         return;
       }
 
@@ -70,18 +72,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   verifyTOTP: async (code) => {
-    const totpToken = get().totpToken;
+    const { totpToken, totpRememberMe } = get();
     if (!totpToken) return;
     set({ isSubmitting: true, error: null });
     try {
       const { data } = await api.post('/auth/totp/verify', { totpToken, code });
       const { user, accessToken, refreshToken, trustedDeviceToken } = data.data;
-      setTokens(accessToken, refreshToken);
+      setTokens(accessToken, refreshToken, totpRememberMe);
       if (trustedDeviceToken) {
         localStorage.setItem('voxium_trusted_device', trustedDeviceToken);
       }
       connectSocket(accessToken);
-      set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null });
+      set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true });
     } catch (err: any) {
       set({
         error: err.response?.data?.error || 'Invalid verification code',
@@ -92,7 +94,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   cancelTOTP: () => {
-    set({ totpRequired: false, totpToken: null, error: null });
+    set({ totpRequired: false, totpToken: null, totpRememberMe: true, error: null });
   },
 
   register: async (username, email, password) => {

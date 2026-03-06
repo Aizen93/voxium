@@ -67,7 +67,26 @@ export async function loginUser(email: string, password: string, rememberMe = tr
     if (ipBan) throw new ForbiddenError(ipBan.reason ? `Account banned: ${ipBan.reason}` : 'Your account has been banned');
   }
 
-  const user = await prisma.user.findUnique({ where: { email } });
+  // Need password for verification, plus fields for auth and response
+  const user = await prisma.user.findUnique({
+    where: { email },
+    select: {
+      id: true,
+      username: true,
+      displayName: true,
+      email: true,
+      avatarUrl: true,
+      bio: true,
+      status: true,
+      role: true,
+      password: true,
+      totpEnabled: true,
+      tokenVersion: true,
+      bannedAt: true,
+      banReason: true,
+      createdAt: true,
+    },
+  });
 
   if (!user) throw new UnauthorizedError('Invalid credentials');
 
@@ -91,8 +110,8 @@ export async function loginUser(email: string, password: string, rememberMe = tr
     let deviceTrusted = false;
     if (trustedDeviceToken) {
       try {
-        const payload = jwt.verify(trustedDeviceToken, process.env.JWT_SECRET!) as { userId: string; purpose: string };
-        if (payload.purpose === 'trusted-device' && payload.userId === user.id) {
+        const payload = jwt.verify(trustedDeviceToken, process.env.JWT_SECRET!) as { userId: string; purpose: string; tokenVersion?: number };
+        if (payload.purpose === 'trusted-device' && payload.userId === user.id && payload.tokenVersion === user.tokenVersion) {
           deviceTrusted = true;
         }
       } catch {
@@ -112,7 +131,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
 
   const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
 
-  const { password: _, tokenVersion: _tv, ...safeUser } = user;
+  const { password: _, tokenVersion: _tv, bannedAt: _ba, banReason: _br, ...safeUser } = user;
 
   return { user: safeUser, ...tokens };
 }
@@ -131,15 +150,30 @@ export async function verifyLoginTOTP(totpToken: string, code: string) {
   const valid = await verifyTOTP(payload.userId, code);
   if (!valid) throw new BadRequestError('Invalid verification code');
 
-  const user = await prisma.user.findUnique({ where: { id: payload.userId } });
+  const user = await prisma.user.findUnique({
+    where: { id: payload.userId },
+    select: {
+      id: true,
+      username: true,
+      displayName: true,
+      email: true,
+      avatarUrl: true,
+      bio: true,
+      status: true,
+      role: true,
+      totpEnabled: true,
+      tokenVersion: true,
+      createdAt: true,
+    },
+  });
   if (!user) throw new UnauthorizedError('User not found');
 
   const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, payload.rememberMe);
-  const { password: _, tokenVersion: _tv, ...safeUser } = user;
+  const { tokenVersion: _tv, ...safeUser } = user;
 
-  // Issue a trusted device token (30 days)
+  // Issue a trusted device token (30 days) — includes tokenVersion so password changes invalidate it
   const trustedDeviceToken = jwt.sign(
-    { userId: user.id, purpose: 'trusted-device' },
+    { userId: user.id, purpose: 'trusted-device', tokenVersion: user.tokenVersion },
     process.env.JWT_SECRET!,
     { expiresIn: '30d' } as jwt.SignOptions,
   );
