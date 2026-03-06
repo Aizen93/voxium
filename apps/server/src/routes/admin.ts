@@ -1,5 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import net from 'net';
+import { Prisma } from '@prisma/client';
 import { authenticate } from '../middleware/auth';
 import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin';
 import { rateLimitAdmin } from '../middleware/rateLimiter';
@@ -771,13 +772,12 @@ adminRouter.get('/signups', async (req: Request, res: Response, next: NextFuncti
     const days = Math.min(90, Math.max(1, parseInt(req.query.days as string) || 30));
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const signups = await prisma.$queryRawUnsafe<Array<{ day: string; count: bigint }>>(
-      `SELECT DATE(created_at) AS day, COUNT(*) AS count
-       FROM users
-       WHERE created_at >= $1
-       GROUP BY DATE(created_at)
-       ORDER BY day ASC`,
-      since
+    const signups = await prisma.$queryRaw<Array<{ day: string; count: bigint }>>(
+      Prisma.sql`SELECT DATE(created_at) AS day, COUNT(*) AS count
+      FROM users
+      WHERE created_at >= ${since}
+      GROUP BY DATE(created_at)
+      ORDER BY day ASC`
     );
 
     res.json({
@@ -794,13 +794,12 @@ adminRouter.get('/messages-per-hour', async (req: Request, res: Response, next: 
     const hours = Math.min(168, Math.max(1, parseInt(req.query.hours as string) || 24));
     const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
-    const messages = await prisma.$queryRawUnsafe<Array<{ hour: string; count: bigint }>>(
-      `SELECT DATE_TRUNC('hour', created_at) AS hour, COUNT(*) AS count
-       FROM messages
-       WHERE created_at >= $1
-       GROUP BY DATE_TRUNC('hour', created_at)
-       ORDER BY hour ASC`,
-      since
+    const messages = await prisma.$queryRaw<Array<{ hour: string; count: bigint }>>(
+      Prisma.sql`SELECT DATE_TRUNC('hour', created_at) AS hour, COUNT(*) AS count
+      FROM messages
+      WHERE created_at >= ${since}
+      GROUP BY DATE_TRUNC('hour', created_at)
+      ORDER BY hour ASC`
     );
 
     res.json({
