@@ -19,15 +19,16 @@ api.interceptors.request.use((config) => {
 
 // Handle token refresh on 401
 let isRefreshing = false;
-let refreshSubscribers: Array<(token: string) => void> = [];
+let refreshSubscribers: Array<{ resolve: (token: string) => void; reject: (err: unknown) => void }> = [];
 
 function onTokenRefreshed(token: string) {
-  refreshSubscribers.forEach((cb) => cb(token));
+  refreshSubscribers.forEach((sub) => sub.resolve(token));
   refreshSubscribers = [];
 }
 
-function addRefreshSubscriber(cb: (token: string) => void) {
-  refreshSubscribers.push(cb);
+function onRefreshFailed(err: unknown) {
+  refreshSubscribers.forEach((sub) => sub.reject(err));
+  refreshSubscribers = [];
 }
 
 api.interceptors.response.use(
@@ -40,10 +41,13 @@ api.interceptors.response.use(
 
       // If already refreshing, queue this request until the new token arrives
       if (isRefreshing) {
-        return new Promise((resolve) => {
-          addRefreshSubscriber((newToken: string) => {
-            originalRequest.headers.Authorization = `Bearer ${newToken}`;
-            resolve(api(originalRequest));
+        return new Promise((resolve, reject) => {
+          refreshSubscribers.push({
+            resolve: (newToken: string) => {
+              originalRequest.headers.Authorization = `Bearer ${newToken}`;
+              resolve(api(originalRequest));
+            },
+            reject,
           });
         });
       }
@@ -62,9 +66,11 @@ api.interceptors.response.use(
 
           originalRequest.headers.Authorization = `Bearer ${accessToken}`;
           return api(originalRequest);
-        } catch {
+        } catch (refreshErr) {
+          onRefreshFailed(refreshErr);
           clearTokens();
           window.location.href = '/login';
+          return Promise.reject(refreshErr);
         } finally {
           isRefreshing = false;
         }

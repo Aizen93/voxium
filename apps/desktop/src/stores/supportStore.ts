@@ -5,6 +5,8 @@ import type { SupportTicketStatus, SupportMessageData } from '@voxium/shared';
 interface SupportTicketLocal {
   id: string;
   status: SupportTicketStatus;
+  claimedById: string | null;
+  claimedByUsername: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -76,9 +78,9 @@ export const useSupportStore = create<SupportState>((set, get) => ({
     set({ messages: [...messages, message] });
   },
 
-  updateStatus: (status) => {
+  updateStatus: (status, claimedById, claimedByUsername) => {
     const ticket = get().ticket;
     if (!ticket) return;
-    set({ ticket: { ...ticket, status } });
+    set({ ticket: { ...ticket, status, claimedById: claimedById ?? null, claimedByUsername: claimedByUsername ?? null } });
   },
 }));

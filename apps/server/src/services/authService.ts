@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
+import type { UserRole } from '@voxium/shared';
 import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, validateUsername } from '@voxium/shared';
 import { sendPasswordResetEmail } from '../utils/email';
@@ -49,7 +50,7 @@ export async function registerUser(username: string, email: string, password: st
     },
   });
 
-  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role, tokenVersion: user.tokenVersion });
+  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion });
   const { tokenVersion: _, ...safeUser } = user;
 
   return { user: safeUser, ...tokens };
@@ -72,7 +73,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
   // Check account ban
   if (user.bannedAt) throw new ForbiddenError(user.banReason ? `Account banned: ${user.banReason}` : 'Your account has been banned');
 
-  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role, tokenVersion: user.tokenVersion }, rememberMe);
+  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
 
   const { password: _, tokenVersion: _tv, ...safeUser } = user;
 
@@ -125,7 +126,7 @@ export async function refreshTokens(token: string) {
     }
 
     const rememberMe = payload.rememberMe ?? true;
-    return generateTokens({ userId: user.id, username: user.username, role: user.role, tokenVersion: user.tokenVersion }, rememberMe);
+    return generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
   } catch (err) {
     if (err instanceof UnauthorizedError) throw err;
     throw new UnauthorizedError('Invalid refresh token');
@@ -215,5 +216,5 @@ export async function changePassword(userId: string, currentPassword: string, ne
   });
 
   // Return fresh tokens so the current session survives the version bump
-  return generateTokens({ userId: updated.id, username: updated.username, role: updated.role, tokenVersion: updated.tokenVersion }, rememberMe);
+  return generateTokens({ userId: updated.id, username: updated.username, role: updated.role as UserRole, tokenVersion: updated.tokenVersion }, rememberMe);
 }

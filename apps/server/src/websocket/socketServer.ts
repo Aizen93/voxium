@@ -67,6 +67,9 @@ export function initSocketServer(httpServer: HttpServer) {
     const userId = socket.data.userId as string;
     console.log(`[WS] User connected: ${userId} (${socket.id})`);
 
+    // Join per-user room for targeted operations (e.g., support room joins)
+    socket.join(`user:${userId}`);
+
     // ═══════════════════════════════════════════════════════════════════
     // CRITICAL: Register ALL event handlers SYNCHRONOUSLY before any
     // async work. The client may send events (channel:join, voice:join,
