@@ -7,6 +7,39 @@ import { BadRequestError, UnauthorizedError } from '../utils/errors';
 import { LIMITS } from '@voxium/shared';
 
 const APP_NAME = 'Voxium';
+const ENCRYPTION_ALGO = 'aes-256-gcm';
+const IV_LENGTH = 12;
+const AUTH_TAG_LENGTH = 16;
+
+function getEncryptionKey(): Buffer | null {
+  const key = process.env.TOTP_ENCRYPTION_KEY;
+  if (!key) return null;
+  return Buffer.from(key, 'hex');
+}
+
+function encryptSecret(plaintext: string): string {
+  const key = getEncryptionKey();
+  if (!key) return plaintext; // Fallback: store unencrypted if no key configured
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGO, key, iv, { authTagLength: AUTH_TAG_LENGTH });
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // Format: iv:tag:ciphertext (all hex)
+  return `enc:${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+function decryptSecret(stored: string): string {
+  if (!stored.startsWith('enc:')) return stored; // Unencrypted legacy value
+  const key = getEncryptionKey();
+  if (!key) throw new Error('TOTP_ENCRYPTION_KEY required to decrypt TOTP secrets');
+  const parts = stored.split(':');
+  const iv = Buffer.from(parts[1], 'hex');
+  const tag = Buffer.from(parts[2], 'hex');
+  const encrypted = Buffer.from(parts[3], 'hex');
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, key, iv, { authTagLength: AUTH_TAG_LENGTH });
+  decipher.setAuthTag(tag);
+  return decipher.update(encrypted) + decipher.final('utf8');
+}
 
 function createTOTP(secret: string, username: string): OTPAuth.TOTP {
   return new OTPAuth.TOTP({
@@ -63,10 +96,10 @@ export async function setupTOTP(userId: string) {
   const uri = totp.toString();
   const qrCodeDataUrl = await QRCode.toDataURL(uri);
 
-  // Store the secret temporarily (not enabled yet — user must verify first)
+  // Store the secret encrypted (not enabled yet — user must verify first)
   await prisma.user.update({
     where: { id: userId },
-    data: { totpSecret: secret.base32 },
+    data: { totpSecret: encryptSecret(secret.base32) },
   });
 
   return { secret: secret.base32, qrCodeDataUrl };
@@ -82,7 +115,7 @@ export async function enableTOTP(userId: string, code: string) {
   if (user.totpEnabled) throw new BadRequestError('Two-factor authentication is already enabled');
   if (!user.totpSecret) throw new BadRequestError('Please set up two-factor authentication first');
 
-  const totp = createTOTP(user.totpSecret, user.username);
+  const totp = createTOTP(decryptSecret(user.totpSecret), user.username);
   const delta = totp.validate({ token: code, window: 1 });
 
   if (delta === null) throw new BadRequestError('Invalid verification code');
@@ -114,7 +147,7 @@ export async function disableTOTP(userId: string, code: string) {
   if (!user.totpSecret) throw new BadRequestError('TOTP secret not found');
 
   // Try regular TOTP code
-  const totp = createTOTP(user.totpSecret, user.username);
+  const totp = createTOTP(decryptSecret(user.totpSecret), user.username);
   const delta = totp.validate({ token: code, window: 1 });
 
   if (delta === null) {
@@ -151,23 +184,25 @@ export async function verifyTOTP(userId: string, code: string): Promise<boolean>
   if (!user || !user.totpSecret) return false;
 
   // Try regular TOTP code first
-  const totp = createTOTP(user.totpSecret, user.username);
+  const totp = createTOTP(decryptSecret(user.totpSecret), user.username);
   const delta = totp.validate({ token: code, window: 1 });
   if (delta !== null) return true;
 
-  // Try backup codes
+  // Try backup codes — use optimistic concurrency to prevent concurrent reuse
   if (user.totpBackupCodes) {
     const hashedCodes = parseBackupCodes(user.totpBackupCodes);
     for (let i = 0; i < hashedCodes.length; i++) {
       const match = await bcrypt.compare(code, hashedCodes[i]);
       if (match) {
-        // Remove used backup code
-        hashedCodes.splice(i, 1);
-        await prisma.user.update({
-          where: { id: userId },
-          data: { totpBackupCodes: JSON.stringify(hashedCodes) },
+        // Atomically remove the used code only if totpBackupCodes hasn't changed
+        const remaining = [...hashedCodes];
+        remaining.splice(i, 1);
+        const result = await prisma.user.updateMany({
+          where: { id: userId, totpBackupCodes: user.totpBackupCodes },
+          data: { totpBackupCodes: JSON.stringify(remaining) },
         });
-        return true;
+        // If count is 0, a concurrent request already consumed/changed the codes
+        if (result.count > 0) return true;
       }
     }
   }

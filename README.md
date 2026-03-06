@@ -291,6 +291,7 @@ curl http://localhost:3001/api/v1/servers \
 | `SMTP_PASS` | — | SMTP auth password |
 | `SMTP_FROM` | `noreply@voxium.app` | Sender email address |
 | `CLIENT_URL` | `http://localhost:8080` | Frontend URL (used in emails) |
+| `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. Optional — if not set, TOTP secrets are stored unencrypted. |
 
 ### Frontend Environment Variables (`apps/desktop/.env`)
 

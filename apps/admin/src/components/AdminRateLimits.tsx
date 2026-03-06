@@ -18,6 +18,7 @@ const RULE_DESCRIPTIONS: Record<string, string> = {
   resetPassword: 'Limits password reset submissions to prevent token brute-forcing.',
   refresh: 'Limits auth token refresh requests.',
   changePassword: 'Limits password change attempts for logged-in users.',
+  totp: 'Limits TOTP two-factor authentication actions (setup, enable, disable).',
   messageSend: 'Limits how many messages a user can send per time window.',
   upload: 'Limits file upload requests (avatars, server icons).',
   friendRequest: 'Limits friend request sending to prevent spam.',

@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
 
@@ -29,9 +29,7 @@ authRouter.post('/register', rateLimitRegister, async (req: Request, res: Respon
 authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email, password, rememberMe, trustedDeviceToken } = req.body;
-    const rawIp = req.ip || req.socket.remoteAddress;
-    const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
-    const result = await loginUser(email, password, rememberMe ?? true, ip, trustedDeviceToken);
+    const result = await loginUser(email, password, rememberMe ?? true, req.ip || req.socket.remoteAddress, trustedDeviceToken);
 
     res.json({
       success: true,
@@ -150,7 +148,7 @@ authRouter.post('/totp/verify', rateLimitLogin, async (req: Request, res: Respon
   }
 });
 
-authRouter.post('/totp/setup', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/totp/setup', authenticate, rateLimitTOTP, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const result = await setupTOTP(req.user!.userId);
     res.json({ success: true, data: result });
@@ -159,7 +157,7 @@ authRouter.post('/totp/setup', authenticate, rateLimitChangePassword, async (req
   }
 });
 
-authRouter.post('/totp/enable', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/totp/enable', authenticate, rateLimitTOTP, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { code } = req.body;
     if (!code || typeof code !== 'string') {
@@ -173,7 +171,7 @@ authRouter.post('/totp/enable', authenticate, rateLimitChangePassword, async (re
   }
 });
 
-authRouter.post('/totp/disable', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/totp/disable', authenticate, rateLimitTOTP, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { code } = req.body;
     if (!code || typeof code !== 'string') {

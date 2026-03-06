@@ -8,13 +8,16 @@ import { dmHeading } from './helpers/selectors';
 /** Clear all rate limit keys in Redis */
 async function clearRateLimits() {
   const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
-  await redis.connect();
-  const keys: string[] = [];
-  for await (const key of redis.scanIterator({ MATCH: 'rl:*', COUNT: 100 })) {
-    if (key !== 'rl:config') keys.push(key);
+  try {
+    await redis.connect();
+    const keys: string[] = [];
+    for await (const key of redis.scanIterator({ MATCH: 'rl:*', COUNT: 100 })) {
+      if (key !== 'rl:config') keys.push(key);
+    }
+    if (keys.length > 0) await redis.del(keys);
+  } finally {
+    await redis.quit().catch(() => {});
   }
-  if (keys.length > 0) await redis.del(keys);
-  await redis.quit().catch(() => {});
 }
 
 /** Generate a valid TOTP code from a base32 secret */
@@ -55,6 +58,9 @@ async function enableTOTPForUser(
 }
 
 test.describe('TOTP Two-Factor Authentication', () => {
+  // TOTP tests do many API calls (register + setup + enable + login per test)
+  // which quickly exhaust rate limits (especially the 5/min changePassword limiter
+  // shared by TOTP setup/enable/disable endpoints).
   test.beforeEach(async () => {
     await clearRateLimits();
   });
