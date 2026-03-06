@@ -1,5 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { registerUser, loginUser, refreshTokens, requestPasswordReset, resetPassword, changePassword } from '../services/authService';
+import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword } from '../services/authService';
+import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
 import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
@@ -27,10 +28,10 @@ authRouter.post('/register', rateLimitRegister, async (req: Request, res: Respon
 
 authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { email, password, rememberMe } = req.body;
+    const { email, password, rememberMe, trustedDeviceToken } = req.body;
     const rawIp = req.ip || req.socket.remoteAddress;
     const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
-    const result = await loginUser(email, password, rememberMe ?? true, ip);
+    const result = await loginUser(email, password, rememberMe ?? true, ip, trustedDeviceToken);
 
     res.json({
       success: true,
@@ -68,6 +69,7 @@ authRouter.get('/me', authenticate, async (req: Request, res: Response, next: Ne
         bio: true,
         status: true,
         role: true,
+        totpEnabled: true,
         createdAt: true,
       },
     });
@@ -123,6 +125,63 @@ authRouter.post('/change-password', authenticate, rateLimitChangePassword, async
     }
     const tokens = await changePassword(req.user!.userId, currentPassword, newPassword, rememberMe ?? true);
     res.json({ success: true, message: 'Password changed successfully.', data: tokens });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── TOTP (Two-Factor Authentication) ──────────────────────────────────────
+
+authRouter.post('/totp/verify', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { totpToken, code } = req.body;
+    if (!totpToken || typeof totpToken !== 'string') {
+      res.status(400).json({ success: false, error: 'TOTP token is required' });
+      return;
+    }
+    if (!code || typeof code !== 'string') {
+      res.status(400).json({ success: false, error: 'Verification code is required' });
+      return;
+    }
+    const result = await verifyLoginTOTP(totpToken, code);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.post('/totp/setup', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await setupTOTP(req.user!.userId);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.post('/totp/enable', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { code } = req.body;
+    if (!code || typeof code !== 'string') {
+      res.status(400).json({ success: false, error: 'Verification code is required' });
+      return;
+    }
+    const result = await enableTOTP(req.user!.userId, code);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.post('/totp/disable', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { code } = req.body;
+    if (!code || typeof code !== 'string') {
+      res.status(400).json({ success: false, error: 'Verification code is required' });
+      return;
+    }
+    await disableTOTP(req.user!.userId, code);
+    res.json({ success: true, message: 'Two-factor authentication has been disabled.' });
   } catch (err) {
     next(err);
   }

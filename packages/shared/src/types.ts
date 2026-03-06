@@ -11,13 +11,14 @@ export interface User {
   bio: string | null;
   status: UserStatus;
   role: UserRole;
+  totpEnabled: boolean;
   createdAt: string;
 }
 
 export type UserStatus = 'online' | 'idle' | 'dnd' | 'offline';
 
-/** User without email — safe for broadcasting to other clients */
-export type PublicUser = Omit<User, 'email'>;
+/** User without private fields — safe for broadcasting to other clients */
+export type PublicUser = Omit<User, 'email' | 'totpEnabled'>;
 
 export interface UserProfile extends User {
   bio: string | null;

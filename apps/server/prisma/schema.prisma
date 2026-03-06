@@ -24,6 +24,9 @@ model User {
   tokenVersion        Int       @default(0) @map("token_version")
   resetToken          String?   @unique @map("reset_token")
   resetTokenExpiresAt DateTime? @map("reset_token_expires_at")
+  totpSecret          String?   @map("totp_secret")
+  totpEnabled         Boolean   @default(false) @map("totp_enabled")
+  totpBackupCodes     String?   @map("totp_backup_codes")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 

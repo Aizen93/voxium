@@ -42,8 +42,9 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 - **File Uploads** — S3-compatible storage for user avatars and server icons with client-side image processing
 - **Presence** — Real-time online/offline status for all server members and DM participants
 - **Notifications** — In-app toast notifications, notification sounds for voice join/leave and new messages, native desktop notifications
+- **Two-Factor Authentication** — TOTP-based 2FA with authenticator app support (Google Authenticator, Authy, etc.), QR code setup, 8 one-time backup codes, trusted device tokens (30-day remember)
 - **Authentication** — JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation
-- **Security** — Per-endpoint and per-socket rate limiting, input sanitization, CORS protection
+- **Security** — Per-endpoint and per-socket rate limiting, input sanitization, CORS protection, TOTP MFA
 - **Cross-Platform Desktop** — Tauri 2 native apps (Windows, macOS, Linux) with a sleek dark UI
 - **Landing Page** — Public-facing landing page for browser visitors with animated illustrations
 

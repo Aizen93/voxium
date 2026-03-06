@@ -45,6 +45,7 @@ export async function registerUser(username: string, email: string, password: st
       bio: true,
       status: true,
       role: true,
+      totpEnabled: true,
       tokenVersion: true,
       createdAt: true,
     },
@@ -56,7 +57,7 @@ export async function registerUser(username: string, email: string, password: st
   return { user: safeUser, ...tokens };
 }
 
-export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string) {
+export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string, trustedDeviceToken?: string) {
   // Normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 → 1.2.3.4) for consistent ban matching
   const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
 
@@ -76,10 +77,6 @@ export async function loginUser(email: string, password: string, rememberMe = tr
   // Check account ban
   if (user.bannedAt) throw new ForbiddenError(user.banReason ? `Account banned: ${user.banReason}` : 'Your account has been banned');
 
-  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
-
-  const { password: _, tokenVersion: _tv, ...safeUser } = user;
-
   // Upsert IP record
   if (ip) {
     await prisma.ipRecord.upsert({
@@ -89,7 +86,65 @@ export async function loginUser(email: string, password: string, rememberMe = tr
     }).catch(() => {}); // Non-critical
   }
 
+  // If TOTP is enabled, check for trusted device token
+  if (user.totpEnabled) {
+    let deviceTrusted = false;
+    if (trustedDeviceToken) {
+      try {
+        const payload = jwt.verify(trustedDeviceToken, process.env.JWT_SECRET!) as { userId: string; purpose: string };
+        if (payload.purpose === 'trusted-device' && payload.userId === user.id) {
+          deviceTrusted = true;
+        }
+      } catch {
+        // Invalid/expired token — require TOTP
+      }
+    }
+
+    if (!deviceTrusted) {
+      const totpToken = jwt.sign(
+        { userId: user.id, purpose: 'totp-verify', rememberMe },
+        process.env.JWT_SECRET!,
+        { expiresIn: '5m' } as jwt.SignOptions,
+      );
+      return { totpRequired: true, totpToken };
+    }
+  }
+
+  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
+
+  const { password: _, tokenVersion: _tv, ...safeUser } = user;
+
   return { user: safeUser, ...tokens };
+}
+
+export async function verifyLoginTOTP(totpToken: string, code: string) {
+  let payload: { userId: string; purpose: string; rememberMe: boolean };
+  try {
+    payload = jwt.verify(totpToken, process.env.JWT_SECRET!) as typeof payload;
+  } catch {
+    throw new UnauthorizedError('Invalid or expired TOTP token');
+  }
+
+  if (payload.purpose !== 'totp-verify') throw new UnauthorizedError('Invalid token purpose');
+
+  const { verifyTOTP } = await import('./totpService');
+  const valid = await verifyTOTP(payload.userId, code);
+  if (!valid) throw new BadRequestError('Invalid verification code');
+
+  const user = await prisma.user.findUnique({ where: { id: payload.userId } });
+  if (!user) throw new UnauthorizedError('User not found');
+
+  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, payload.rememberMe);
+  const { password: _, tokenVersion: _tv, ...safeUser } = user;
+
+  // Issue a trusted device token (30 days)
+  const trustedDeviceToken = jwt.sign(
+    { userId: user.id, purpose: 'trusted-device' },
+    process.env.JWT_SECRET!,
+    { expiresIn: '30d' } as jwt.SignOptions,
+  );
+
+  return { user: safeUser, ...tokens, trustedDeviceToken };
 }
 
 export function generateTokens(payload: AuthPayload, rememberMe = true) {
