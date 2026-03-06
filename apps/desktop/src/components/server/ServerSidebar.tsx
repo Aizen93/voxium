@@ -17,7 +17,6 @@ export function ServerSidebar() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ top: number; left: number } | null>(null);
   const [iconErrors, setIconErrors] = useState<Set<string>>(new Set());
-
   return (
     <>
       <div className="flex h-full w-[72px] flex-col items-center bg-vox-sidebar py-3 gap-2">

@@ -3,7 +3,8 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
-import { BadRequestError, ConflictError, UnauthorizedError } from '../utils/errors';
+import type { UserRole } from '@voxium/shared';
+import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, validateUsername } from '@voxium/shared';
 import { sendPasswordResetEmail } from '../utils/email';
 
@@ -43,18 +44,28 @@ export async function registerUser(username: string, email: string, password: st
       avatarUrl: true,
       bio: true,
       status: true,
+      role: true,
       tokenVersion: true,
       createdAt: true,
     },
   });
 
-  const tokens = generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion });
+  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion });
   const { tokenVersion: _, ...safeUser } = user;
 
   return { user: safeUser, ...tokens };
 }
 
-export async function loginUser(email: string, password: string, rememberMe = true) {
+export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string) {
+  // Normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 → 1.2.3.4) for consistent ban matching
+  const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+
+  // Check IP ban before anything else
+  if (ip) {
+    const ipBan = await prisma.ipBan.findUnique({ where: { ip } });
+    if (ipBan) throw new ForbiddenError(ipBan.reason ? `Account banned: ${ipBan.reason}` : 'Your account has been banned');
+  }
+
   const user = await prisma.user.findUnique({ where: { email } });
 
   if (!user) throw new UnauthorizedError('Invalid credentials');
@@ -62,9 +73,21 @@ export async function loginUser(email: string, password: string, rememberMe = tr
   const validPassword = await bcrypt.compare(password, user.password);
   if (!validPassword) throw new UnauthorizedError('Invalid credentials');
 
-  const tokens = generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion }, rememberMe);
+  // Check account ban
+  if (user.bannedAt) throw new ForbiddenError(user.banReason ? `Account banned: ${user.banReason}` : 'Your account has been banned');
+
+  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
 
   const { password: _, tokenVersion: _tv, ...safeUser } = user;
+
+  // Upsert IP record
+  if (ip) {
+    await prisma.ipRecord.upsert({
+      where: { userId_ip: { userId: user.id, ip } },
+      update: { lastSeenAt: new Date() },
+      create: { userId: user.id, ip },
+    }).catch(() => {}); // Non-critical
+  }
 
   return { user: safeUser, ...tokens };
 }
@@ -90,10 +113,13 @@ export async function refreshTokens(token: string) {
 
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },
-      select: { id: true, username: true, tokenVersion: true },
+      select: { id: true, username: true, role: true, tokenVersion: true, bannedAt: true },
     });
 
     if (!user) throw new UnauthorizedError('User not found');
+
+    // Block banned users from refreshing tokens
+    if (user.bannedAt) throw new ForbiddenError('Your account has been banned');
 
     // Tokens issued before the tokenVersion migration have no tokenVersion field;
     // treat undefined/missing as version 0 so pre-existing refresh tokens remain valid.
@@ -103,7 +129,7 @@ export async function refreshTokens(token: string) {
     }
 
     const rememberMe = payload.rememberMe ?? true;
-    return generateTokens({ userId: user.id, username: user.username, tokenVersion: user.tokenVersion }, rememberMe);
+    return generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
   } catch (err) {
     if (err instanceof UnauthorizedError) throw err;
     throw new UnauthorizedError('Invalid refresh token');
@@ -189,9 +215,9 @@ export async function changePassword(userId: string, currentPassword: string, ne
       password: hashedPassword,
       tokenVersion: { increment: 1 },
     },
-    select: { id: true, username: true, tokenVersion: true },
+    select: { id: true, username: true, role: true, tokenVersion: true },
   });
 
   // Return fresh tokens so the current session survives the version bump
-  return generateTokens({ userId: updated.id, username: updated.username, tokenVersion: updated.tokenVersion }, rememberMe);
+  return generateTokens({ userId: updated.id, username: updated.username, role: updated.role as UserRole, tokenVersion: updated.tokenVersion }, rememberMe);
 }

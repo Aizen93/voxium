@@ -3,6 +3,7 @@ import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared'
 import { prisma } from '../utils/prisma';
 import { leaveCurrentDMVoiceChannel } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
+import { isFeatureEnabled } from '../utils/featureFlags';
 
 // In-memory voice state tracking
 const voiceChannelUsers = new Map<string, Map<string, { socketId: string; selfMute: boolean; selfDeaf: boolean }>>();
@@ -18,6 +19,10 @@ export function handleVoiceEvents(
   const userId = socket.data.userId as string;
 
   socket.on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
+    if (!isFeatureEnabled('voice')) {
+      socket.emit('voice:error', { message: 'Voice channels are currently disabled' });
+      return;
+    }
     console.log(`[Voice] User ${userId} requesting to join channel ${channelId}`);
 
     const channel = await prisma.channel.findUnique({
@@ -304,6 +309,24 @@ export function getScreenShareState(channelId: string): string | null {
 export function getVoiceChannelUsers(channelId: string): string[] {
   const users = voiceChannelUsers.get(channelId);
   return users ? Array.from(users.keys()) : [];
+}
+
+/** Returns count of active voice channels (channels with at least one user) */
+export function getActiveVoiceChannelCount(): number {
+  let count = 0;
+  for (const users of voiceChannelUsers.values()) {
+    if (users.size > 0) count++;
+  }
+  return count;
+}
+
+/** Returns total number of users in all voice channels */
+export function getTotalVoiceUsers(): number {
+  let count = 0;
+  for (const users of voiceChannelUsers.values()) {
+    count += users.size;
+  }
+  return count;
 }
 
 /** Returns all channelIds that belong to a given server and have active voice users */

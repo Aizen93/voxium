@@ -22,8 +22,11 @@ if (missing.length > 0) {
 import http from 'http';
 import { app } from './app';
 import { initSocketServer } from './websocket/socketServer';
+import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
 import { prisma } from './utils/prisma';
 import { initRedis } from './utils/redis';
+import { loadRateLimitOverrides } from './middleware/rateLimiter';
+import { loadFeatureFlags } from './utils/featureFlags';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -36,12 +39,23 @@ async function main() {
   await initRedis();
   console.log('[Redis] Connected');
 
+  // Load rate limit overrides from Redis
+  await loadRateLimitOverrides();
+  console.log('[RateLimit] Overrides loaded');
+
+  // Load feature flags from Redis
+  await loadFeatureFlags();
+  console.log('[FeatureFlags] Loaded');
+
   // Create HTTP server
   const server = http.createServer(app);
 
   // Initialize WebSocket server
-  initSocketServer(server);
+  const io = initSocketServer(server);
   console.log('[WS] Socket.IO server initialized');
+
+  // Start admin metrics emitter
+  startAdminMetricsEmitter(io);
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 Voxium server running on http://0.0.0.0:${PORT}\n`);
@@ -50,6 +64,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     console.log('\nShutting down...');
+    stopAdminMetricsEmitter();
     server.close();
     await prisma.$disconnect();
     process.exit(0);

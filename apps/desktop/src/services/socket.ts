@@ -80,7 +80,7 @@ export function connectSocket(token: string): VoxSocket {
 
   socket = io(SOCKET_URL, {
     auth: { token },
-    transports: ['websocket', 'polling'],
+    transports: ['polling', 'websocket'],
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 1000,
@@ -122,6 +122,15 @@ export function connectSocket(token: string): VoxSocket {
       console.log('[WS] Reconnect detected — firing reconnect callbacks');
       reconnectCallbacks.forEach((fn) => fn());
     }
+  });
+
+  socket.on('force:logout', (data) => {
+    console.log('[WS] Force logout received:', data?.reason);
+    import('../stores/authStore').then(({ useAuthStore }) => {
+      useAuthStore.getState().logout();
+      const reason = data?.reason;
+      window.location.href = reason ? `/login?reason=${encodeURIComponent(reason)}` : '/login';
+    });
   });
 
   socket.on('disconnect', (reason) => {

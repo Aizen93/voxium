@@ -1,5 +1,7 @@
 // ─── User ────────────────────────────────────────────────────────────────────
 
+export type UserRole = 'user' | 'admin' | 'superadmin';
+
 export interface User {
   id: string;
   username: string;
@@ -8,6 +10,7 @@ export interface User {
   avatarUrl: string | null;
   bio: string | null;
   status: UserStatus;
+  role: UserRole;
   createdAt: string;
 }
 
@@ -47,6 +50,7 @@ export interface Server {
   id: string;
   name: string;
   iconUrl: string | null;
+  invitesLocked: boolean;
   ownerId: string;
   createdAt: string;
 }
@@ -128,6 +132,7 @@ export interface MessageAuthor {
   username: string;
   displayName: string;
   avatarUrl: string | null;
+  role?: UserRole;
 }
 
 export interface SendMessageRequest {
@@ -221,6 +226,7 @@ export interface ServerToClientEvents {
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => void;
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;
   'voice:signal': (data: { from: string; signal: unknown }) => void;
+  'voice:error': (data: { message: string }) => void;
   'pong:latency': (timestamp: number) => void;
   'typing:start': (data: { channelId: string; userId: string; username: string }) => void;
   'typing:stop': (data: { channelId: string; userId: string }) => void;
@@ -266,6 +272,14 @@ export interface ServerToClientEvents {
   'voice:screen_share:start': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:stop': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:state': (data: { channelId: string; sharingUserId: string | null }) => void;
+  'announcement:new': (announcement: Announcement) => void;
+  'announcement:init': (data: { announcements: Announcement[] }) => void;
+  'admin:metrics': (data: AdminMetricsSnapshot) => void;
+  'report:new': (data: { total: number }) => void;
+  'force:logout': (data: { reason: string }) => void;
+  'support:message:new': (message: SupportMessageData) => void;
+  'support:status_change': (data: { ticketId: string; status: SupportTicketStatus; claimedById?: string; claimedByUsername?: string }) => void;
+  'support:ticket:new': (data: { total: number }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -292,6 +306,12 @@ export interface ClientToServerEvents {
   'dm:voice:decline': (conversationId: string) => void;
   'voice:screen_share:start': () => void;
   'voice:screen_share:stop': () => void;
+  'admin:subscribe_metrics': () => void;
+  'admin:unsubscribe_metrics': () => void;
+  'admin:subscribe_reports': () => void;
+  'admin:unsubscribe_reports': () => void;
+  'admin:subscribe_support': () => void;
+  'admin:unsubscribe_support': () => void;
 }
 
 // ─── API Response ────────────────────────────────────────────────────────────
@@ -343,4 +363,203 @@ export interface Invite {
   serverId: string;
   createdBy: string;
   expiresAt: string | null;
+}
+
+// ─── Admin ──────────────────────────────────────────────────────────────────
+
+export interface AdminUser {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  avatarUrl: string | null;
+  role: UserRole;
+  status: UserStatus;
+  bannedAt: string | null;
+  banReason: string | null;
+  createdAt: string;
+}
+
+export interface AdminServer {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  ownerId: string;
+  ownerUsername: string;
+  memberCount: number;
+  channelCount: number;
+  messageCount: number;
+  createdAt: string;
+}
+
+export interface BanRecord {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  bannedAt: string;
+  banReason: string | null;
+}
+
+export interface IpBanRecord {
+  id: string;
+  ip: string;
+  reason: string | null;
+  bannedBy: string;
+  bannedByUsername: string;
+  createdAt: string;
+}
+
+export interface AdminDashboardStats {
+  totalUsers: number;
+  totalServers: number;
+  totalMessages: number;
+  onlineUsers: number;
+  bannedUsers: number;
+  pendingReports: number;
+  openTickets: number;
+}
+
+export interface AdminMetricsSnapshot {
+  onlineUsers: number;
+  voiceChannels: number;
+  voiceUsers: number;
+  dmCalls: number;
+  dmVoiceUsers: number;
+  messagesLastHour: number;
+}
+
+// ─── Storage ─────────────────────────────────────────────────────────────────
+
+export interface StorageStats {
+  totalFiles: number;
+  totalSize: number;
+  avatarCount: number;
+  avatarSize: number;
+  serverIconCount: number;
+  serverIconSize: number;
+  orphanCount: number;
+  orphanSize: number;
+}
+
+export interface StorageFile {
+  key: string;
+  type: 'avatar' | 'server-icon';
+  size: number;
+  lastModified: string | null;
+  linkedEntity: string | null;
+  linkedEntityId: string | null;
+  isOrphan: boolean;
+}
+
+export interface StorageTopUploader {
+  entityId: string;
+  entityName: string;
+  type: 'user' | 'server';
+  fileCount: number;
+  totalSize: number;
+}
+
+// ─── Reports ────────────────────────────────────────────────────────────────
+
+export type ReportStatus = 'pending' | 'resolved' | 'dismissed';
+export type ReportType = 'message' | 'user';
+
+export interface Report {
+  id: string;
+  type: ReportType;
+  status: ReportStatus;
+  reason: string;
+  reporterId: string;
+  reporterUsername: string;
+  reportedUserId: string;
+  reportedUsername: string;
+  messageId: string | null;
+  messageContent: string | null;
+  channelId: string | null;
+  conversationId: string | null;
+  serverId: string | null;
+  resolvedById: string | null;
+  resolvedByUsername: string | null;
+  resolution: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+// ─── Support Tickets ────────────────────────────────────────────────────────
+
+export type SupportTicketStatus = 'open' | 'claimed' | 'closed';
+
+export interface SupportTicket {
+  id: string;
+  userId: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  status: SupportTicketStatus;
+  claimedById: string | null;
+  claimedByUsername: string | null;
+  lastMessage: string | null;
+  lastMessageAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SupportMessageData {
+  id: string;
+  ticketId: string;
+  authorId: string;
+  content: string;
+  type: 'user' | 'system';
+  createdAt: string;
+  author: {
+    id: string;
+    username: string;
+    displayName: string;
+    avatarUrl: string | null;
+    role: UserRole;
+  };
+}
+
+// ─── Audit Log ──────────────────────────────────────────────────────────────
+
+export type AuditAction =
+  | 'user.ban' | 'user.unban' | 'user.delete' | 'user.role_change'
+  | 'server.delete'
+  | 'ip_ban.create' | 'ip_ban.delete'
+  | 'storage.file_delete' | 'storage.cleanup_orphans'
+  | 'announcement.create' | 'announcement.publish' | 'announcement.delete'
+  | 'report.resolve' | 'report.dismiss'
+  | 'support.claim' | 'support.close'
+  | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user'
+  | 'feature_flag.update' | 'feature_flag.reset';
+
+// ─── Announcements ─────────────────────────────────────────────────────────
+
+export type AnnouncementType = 'info' | 'warning' | 'maintenance';
+export type AnnouncementScope = 'global' | 'servers';
+
+export interface Announcement {
+  id: string;
+  title: string;
+  content: string;
+  type: AnnouncementType;
+  scope: AnnouncementScope;
+  serverIds: string[];
+  createdById: string;
+  createdByUsername: string;
+  publishedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  actorId: string | null;
+  actorUsername: string | null;
+  action: AuditAction;
+  targetType: string | null;
+  targetId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
 }

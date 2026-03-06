@@ -5,6 +5,7 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 import { nanoid } from 'nanoid';
 import { INVITE_CODE_LENGTH } from '@voxium/shared';
 import { broadcastMemberJoined } from '../utils/memberBroadcast';
+import { isFeatureEnabled } from '../utils/featureFlags';
 
 export const inviteRouter = Router();
 
@@ -13,12 +14,16 @@ inviteRouter.use(authenticate);
 // Create an invite for a server
 inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
+    if (!isFeatureEnabled('invites')) throw new ForbiddenError('Server invites are currently disabled');
     const { serverId } = req.params;
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
     });
     if (!membership) throw new ForbiddenError('Not a member of this server');
+
+    const server = await prisma.server.findUnique({ where: { id: serverId }, select: { invitesLocked: true } });
+    if (server?.invitesLocked) throw new ForbiddenError('Invites are locked for this server');
 
     const invite = await prisma.invite.create({
       data: {
@@ -37,6 +42,7 @@ inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }
 // Use an invite to join a server
 inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Response, next: NextFunction) => {
   try {
+    if (!isFeatureEnabled('invites')) throw new ForbiddenError('Server invites are currently disabled');
     const { code } = req.params;
 
     const invite = await prisma.invite.findUnique({
@@ -45,6 +51,7 @@ inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Res
     });
 
     if (!invite) throw new NotFoundError('Invite');
+    if (invite.server.invitesLocked) throw new ForbiddenError('Invites are locked for this server');
 
     if (invite.expiresAt && invite.expiresAt < new Date()) {
       await prisma.invite.delete({ where: { code } });

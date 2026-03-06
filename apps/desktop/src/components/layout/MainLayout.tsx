@@ -22,10 +22,14 @@ import { toast } from '../../stores/toastStore';
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
+import { SupportTicketView } from '../dm/SupportTicketView';
+import { useSupportStore } from '../../stores/supportStore';
 import { SearchModal } from '../search/SearchModal';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { initNotifications, notify } from '../../services/notifications';
+import { useAnnouncementStore } from '../../stores/announcementStore';
+import { AnnouncementBanner } from './AnnouncementBanner';
 
 export function MainLayout() {
   const { fetchServers, activeServerId, channels } = useServerStore();
@@ -33,6 +37,7 @@ export function MainLayout() {
   const activeConversationId = useDMStore((s) => s.activeConversationId);
   const conversations = useDMStore((s) => s.conversations);
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
+  const showSupportView = useSupportStore((s) => s.showSupportView);
   const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
   const screenSharingUserId = useVoiceStore((s) => s.screenSharingUserId);
   const screenShareViewMode = useVoiceStore((s) => s.screenShareViewMode);
@@ -422,6 +427,27 @@ export function MainLayout() {
         serverState.handleServerDeleted(serverId);
         toast.info('Server was deleted');
       },
+      announcementInit: ({ announcements }: any) => {
+        useAnnouncementStore.getState().initAnnouncements(announcements);
+      },
+      announcementNew: (announcement: any) => {
+        useAnnouncementStore.getState().addAnnouncement(announcement);
+        const typeLabels: Record<string, string> = { info: 'Info', warning: 'Warning', maintenance: 'Maintenance' };
+        const label = typeLabels[announcement.type] || 'Announcement';
+        toast.info(`${label}: ${announcement.title}`);
+      },
+      supportMessageNew: (message: any) => {
+        useSupportStore.getState().addMessage(message);
+      },
+      supportStatusChange: (data: any) => {
+        useSupportStore.getState().updateStatus(data.status, data.claimedById, data.claimedByUsername);
+      },
+      voiceError: (data: { message: string }) => {
+        const vs = useVoiceStore.getState();
+        if (vs.activeChannelId) vs.leaveChannel();
+        if (vs.dmCallConversationId) vs.leaveDMCall();
+        toast.error(data.message);
+      },
     };
 
     const eventMap: Array<[string, (...args: any[]) => void]> = [
@@ -437,6 +463,7 @@ export function MainLayout() {
       ['voice:state_update', handlers.voiceStateUpdate],
       ['voice:speaking', handlers.voiceSpeaking],
       ['voice:signal', handlers.voiceSignal],
+      ['voice:error', handlers.voiceError],
       ['voice:screen_share:start', handlers.voiceScreenShareStart],
       ['voice:screen_share:stop', handlers.voiceScreenShareStop],
       ['voice:screen_share:state', handlers.voiceScreenShareState],
@@ -473,6 +500,10 @@ export function MainLayout() {
       ['member:role_updated', handlers.memberRoleUpdated],
       ['member:kicked', handlers.memberKicked],
       ['server:deleted', handlers.serverDeleted],
+      ['announcement:init', handlers.announcementInit],
+      ['announcement:new', handlers.announcementNew],
+      ['support:message:new', handlers.supportMessageNew],
+      ['support:status_change', handlers.supportStatusChange],
     ];
 
     /**
@@ -530,6 +561,8 @@ export function MainLayout() {
       useDMStore.getState().fetchConversations();
       // Re-fetch friends
       useFriendStore.getState().fetchFriends();
+      // Re-fetch support ticket (auto-joins room on server)
+      useSupportStore.getState().fetchTicket();
     }
 
     // Mechanism 1: Direct listener on the socket object
@@ -575,6 +608,7 @@ export function MainLayout() {
   return (
     <div className="flex h-full flex-col">
       <ConnectionBanner />
+      <AnnouncementBanner />
       <div className="flex flex-1 min-h-0">
         <ServerSidebar />
         {activeServerId ? <ChannelSidebar /> : <DMList />}
@@ -594,6 +628,8 @@ export function MainLayout() {
             )
           ) : showFriendsView ? (
             <FriendsView />
+          ) : showSupportView ? (
+            <SupportTicketView />
           ) : activeConversationId ? (
             <DMChatArea />
           ) : (

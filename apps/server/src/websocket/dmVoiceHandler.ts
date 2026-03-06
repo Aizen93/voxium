@@ -3,6 +3,7 @@ import type { ServerToClientEvents, ClientToServerEvents, Message } from '@voxiu
 import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
+import { isFeatureEnabled } from '../utils/featureFlags';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -118,6 +119,20 @@ export function leaveCurrentDMVoiceChannel(
   createSystemMessage(io, conversationId, userId, 'Voice call ended');
 }
 
+/** Returns count of active DM calls */
+export function getActiveDMCallCount(): number {
+  return dmVoiceUsers.size;
+}
+
+/** Returns total number of users in all DM calls */
+export function getTotalDMVoiceUsers(): number {
+  let count = 0;
+  for (const users of dmVoiceUsers.values()) {
+    count += users.size;
+  }
+  return count;
+}
+
 export function handleDMVoiceEvents(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   socket: Socket<ClientToServerEvents, ServerToClientEvents>
@@ -125,6 +140,10 @@ export function handleDMVoiceEvents(
   const userId = socket.data.userId as string;
 
   socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
+    if (!isFeatureEnabled('dm_voice')) {
+      socket.emit('voice:error', { message: 'Voice calls are currently disabled' });
+      return;
+    }
     console.log(`[DMVoice] User ${userId} requesting to join DM call ${conversationId}`);
 
     // Verify user is a participant of this conversation

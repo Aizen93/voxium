@@ -6,16 +6,21 @@
   "scripts": {
     "dev:server": "pnpm --filter @voxium/server dev",
     "dev:desktop": "pnpm --filter @voxium/desktop dev",
+    "dev:admin": "pnpm --filter @voxium/admin dev",
     "dev": "pnpm run dev:server & pnpm run dev:desktop",
     "build:shared": "pnpm --filter @voxium/shared build",
     "build:server": "pnpm --filter @voxium/server build",
     "build:desktop": "pnpm --filter @voxium/desktop build",
+    "build:admin": "pnpm --filter @voxium/admin build",
     "build": "pnpm run build:shared && pnpm run build:server & pnpm run build:desktop",
-    "typecheck": "pnpm run build:shared && pnpm --filter @voxium/server exec tsc --noEmit && pnpm --filter @voxium/desktop exec tsc --noEmit",
+    "typecheck": "pnpm run build:shared && pnpm --filter @voxium/server exec tsc --noEmit && pnpm --filter @voxium/desktop exec tsc --noEmit && pnpm --filter @voxium/admin exec tsc --noEmit",
     "lint": "pnpm run --parallel -r lint",
     "db:migrate": "pnpm --filter @voxium/server db:migrate",
     "db:seed": "pnpm --filter @voxium/server db:seed",
-    "db:studio": "pnpm --filter @voxium/server db:studio"
+    "db:studio": "pnpm --filter @voxium/server db:studio",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -27,11 +32,19 @@
     ],
     "overrides": {
       "rollup": ">=4.59.0",
-      "fast-xml-parser": ">=5.4.1"
+      "fast-xml-parser": ">=5.4.1",
+      "tar": ">=7.5.10"
     }
   },
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=9.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.58.2",
+    "eslint": "^10.0.2",
+    "redis": "^4.7.1",
+    "typescript-eslint": "^8.56.1"
   }
 }

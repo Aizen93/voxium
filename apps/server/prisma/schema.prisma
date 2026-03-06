@@ -18,6 +18,9 @@ model User {
   avatarUrl   String?  @map("avatar_url")
   bio         String?
   status      String   @default("offline")
+  role        String   @default("user")
+  bannedAt    DateTime? @map("banned_at")
+  banReason   String?  @map("ban_reason")
   tokenVersion        Int       @default(0) @map("token_version")
   resetToken          String?   @unique @map("reset_token")
   resetTokenExpiresAt DateTime? @map("reset_token_expires_at")
@@ -35,6 +38,16 @@ model User {
   conversationReads    ConversationRead[]
   friendshipsRequested Friendship[] @relation("FriendshipRequester")
   friendshipsReceived  Friendship[] @relation("FriendshipAddressee")
+  ipRecords    IpRecord[]
+  ipBansCreated IpBan[]  @relation("IpBanCreator")
+  auditLogs     AuditLog[] @relation("AuditLogActor")
+  announcements Announcement[] @relation("AnnouncementCreator")
+  reportsFiled    Report[] @relation("ReportReporter")
+  reportsAgainst  Report[] @relation("ReportReported")
+  reportsResolved Report[] @relation("ReportResolver")
+  supportTickets        SupportTicket[]  @relation("SupportTicketUser")
+  supportTicketsClaimed SupportTicket[]  @relation("SupportTicketClaimer")
+  supportMessages       SupportMessage[] @relation("SupportMessageAuthor")
 
   @@map("users")
 }
@@ -42,12 +55,13 @@ model User {
 // ─── Servers ─────────────────────────────────────────────────────────────────
 
 model Server {
-  id        String   @id @default(cuid())
-  name      String
-  iconUrl   String?  @map("icon_url")
-  ownerId   String   @map("owner_id")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id             String   @id @default(cuid())
+  name           String
+  iconUrl        String?  @map("icon_url")
+  invitesLocked  Boolean  @default(false) @map("invites_locked")
+  ownerId        String   @map("owner_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   owner      User           @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   channels   Channel[]
@@ -128,6 +142,7 @@ model Message {
   replyTo      Message?           @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
   replies      Message[]          @relation("MessageReply")
   reactions    MessageReaction[]
+  reports      Report[]
 
   @@index([channelId, createdAt])
   @@index([conversationId, createdAt])
@@ -226,4 +241,140 @@ model Invite {
   creator User   @relation(fields: [createdBy], references: [id], onDelete: Cascade)
 
   @@map("invites")
+}
+
+// ─── IP Records ─────────────────────────────────────────────────────────────
+
+model IpRecord {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  ip         String
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, ip])
+  @@index([ip])
+  @@map("ip_records")
+}
+
+// ─── IP Bans ────────────────────────────────────────────────────────────────
+
+model IpBan {
+  id        String   @id @default(cuid())
+  ip        String   @unique
+  reason    String?
+  bannedBy  String?  @map("banned_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  creator User? @relation("IpBanCreator", fields: [bannedBy], references: [id], onDelete: SetNull)
+
+  @@map("ip_bans")
+}
+
+// ─── Audit Log ─────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?  @map("actor_id")
+  action     String
+  targetType String?  @map("target_type")
+  targetId   String?  @map("target_id")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor User? @relation("AuditLogActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([action])
+  @@index([createdAt])
+  @@index([actorId])
+  @@map("audit_logs")
+}
+
+// ─── Announcements ─────────────────────────────────────────────────────────
+
+model Announcement {
+  id          String    @id @default(cuid())
+  title       String
+  content     String
+  type        String    @default("info")
+  scope       String    @default("global")
+  serverIds   String[]  @map("server_ids")
+  createdById String    @map("created_by_id")
+  publishedAt DateTime? @map("published_at")
+  expiresAt   DateTime? @map("expires_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  createdBy User @relation("AnnouncementCreator", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([publishedAt])
+  @@index([expiresAt])
+  @@map("announcements")
+}
+
+// ─── Reports ──────────────────────────────────────────────────────────────
+
+model Report {
+  id              String    @id @default(cuid())
+  type            String    // "message" | "user"
+  status          String    @default("pending") // "pending" | "resolved" | "dismissed"
+  reason          String
+  reporterId      String    @map("reporter_id")
+  reportedUserId  String    @map("reported_user_id")
+  messageId       String?   @map("message_id")
+  messageContent  String?   @map("message_content")
+  channelId       String?   @map("channel_id")
+  conversationId  String?   @map("conversation_id")
+  serverId        String?   @map("server_id")
+  resolvedById    String?   @map("resolved_by_id")
+  resolution      String?
+  resolvedAt      DateTime? @map("resolved_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  reporter     User     @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedUser User     @relation("ReportReported", fields: [reportedUserId], references: [id], onDelete: Cascade)
+  message      Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  resolvedBy   User?    @relation("ReportResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("reports")
+}
+
+// ─── Support Tickets ─────────────────────────────────────────────────────────
+
+model SupportTicket {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  status      String    @default("open") // "open" | "claimed" | "closed"
+  claimedById String?   @map("claimed_by_id")
+  claimedAt   DateTime? @map("claimed_at")
+  closedAt    DateTime? @map("closed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user      User             @relation("SupportTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  claimedBy User?            @relation("SupportTicketClaimer", fields: [claimedById], references: [id], onDelete: SetNull)
+  messages  SupportMessage[]
+
+  @@unique([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("support_tickets")
+}
+
+model SupportMessage {
+  id        String   @id @default(cuid())
+  ticketId  String   @map("ticket_id")
+  authorId  String   @map("author_id")
+  content   String
+  type      String   @default("user") // "user" | "system"
+  createdAt DateTime @default(now()) @map("created_at")
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User          @relation("SupportMessageAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@map("support_messages")
 }

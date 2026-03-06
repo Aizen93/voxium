@@ -17,3 +17,8 @@ CLAUDE.md
 .claude/
 DEPLOYMENT.md
 TODO-LIST.md
+CONTEXT_CHANGELOG.md
+communication_platform_analysis.md
+test-results/
+playwright-report/
+blob-report/

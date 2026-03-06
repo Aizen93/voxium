@@ -3,11 +3,16 @@ import { registerUser, loginUser, refreshTokens, requestPasswordReset, resetPass
 import { authenticate } from '../middleware/auth';
 import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
+import { isFeatureEnabled } from '../utils/featureFlags';
 
 export const authRouter = Router();
 
 authRouter.post('/register', rateLimitRegister, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (!isFeatureEnabled('registration')) {
+      res.status(403).json({ success: false, error: 'Registration is currently disabled' });
+      return;
+    }
     const { username, email, password, displayName } = req.body;
     const result = await registerUser(username, email, password, displayName);
 
@@ -23,7 +28,9 @@ authRouter.post('/register', rateLimitRegister, async (req: Request, res: Respon
 authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email, password, rememberMe } = req.body;
-    const result = await loginUser(email, password, rememberMe ?? true);
+    const rawIp = req.ip || req.socket.remoteAddress;
+    const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+    const result = await loginUser(email, password, rememberMe ?? true, ip);
 
     res.json({
       success: true,
@@ -60,6 +67,7 @@ authRouter.get('/me', authenticate, async (req: Request, res: Response, next: Ne
         avatarUrl: true,
         bio: true,
         status: true,
+        role: true,
         createdAt: true,
       },
     });

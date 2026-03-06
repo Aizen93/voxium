@@ -1,10 +1,13 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { UnauthorizedError } from '../utils/errors';
+import { ForbiddenError, UnauthorizedError } from '../utils/errors';
+import { prisma } from '../utils/prisma';
+import type { UserRole } from '@voxium/shared';
 
 export interface AuthPayload {
   userId: string;
   username: string;
+  role: UserRole;
   tokenVersion: number;
   rememberMe?: boolean;
 }
@@ -17,7 +20,7 @@ declare global {
   }
 }
 
-export function authenticate(req: Request, _res: Response, next: NextFunction) {
+export async function authenticate(req: Request, _res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith('Bearer ')) {
@@ -28,9 +31,26 @@ export function authenticate(req: Request, _res: Response, next: NextFunction) {
 
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
-    req.user = payload;
+
+    // Check account ban, token version, and current role against DB
+    const user = await prisma.user.findUnique({
+      where: { id: payload.userId },
+      select: { bannedAt: true, tokenVersion: true, role: true },
+    });
+
+    if (!user) return next(new UnauthorizedError('User not found'));
+    if (user.bannedAt) return next(new ForbiddenError('Your account has been banned'));
+    if (user.tokenVersion !== payload.tokenVersion) {
+      return next(new UnauthorizedError('Session invalidated'));
+    }
+
+    // Use DB role (not JWT role) so role changes take effect immediately
+    req.user = { ...payload, role: user.role as UserRole };
     next();
-  } catch {
+  } catch (err) {
+    if (err instanceof ForbiddenError || err instanceof UnauthorizedError) {
+      return next(err);
+    }
     next(new UnauthorizedError('Invalid or expired token'));
   }
 }

@@ -11,6 +11,7 @@ import { rateLimitMemberManage } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { outranks, isAdminOrOwner } from '../utils/permissions';
 import { leaveCurrentVoiceChannel, cleanupServerVoice } from '../websocket/voiceHandler';
+import { isFeatureEnabled } from '../utils/featureFlags';
 
 export const serverRouter = Router();
 
@@ -23,7 +24,7 @@ serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) =>
       where: { userId: req.user!.userId },
       include: {
         server: {
-          select: { id: true, name: true, iconUrl: true, ownerId: true, createdAt: true },
+          select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
         },
       },
       orderBy: { joinedAt: 'asc' },
@@ -41,6 +42,7 @@ serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) =>
 // Create a new server
 serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (!isFeatureEnabled('server_creation')) throw new ForbiddenError('Server creation is currently disabled');
     const name = sanitizeText(req.body.name ?? '');
     const nameErr = validateServerName(name);
     if (nameErr) throw new BadRequestError(nameErr);
@@ -299,7 +301,7 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
 
     const updated = await prisma.server.update({
       where: { id: serverId },
-      select: { id: true, name: true, iconUrl: true, ownerId: true, createdAt: true },
+      select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
       data: updateData,
     });
 
@@ -307,6 +309,38 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
     if (updateData.iconUrl !== undefined && oldIconUrl && oldIconUrl !== updateData.iconUrl) {
       deleteFromS3(oldIconUrl).catch(() => {});
     }
+
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updated);
+
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Toggle invites lock (owner or admin)
+serverRouter.patch('/:serverId/invites-lock', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const { locked } = req.body;
+
+    if (typeof locked !== 'boolean') throw new BadRequestError('Provide a boolean "locked" value');
+
+    const server = await prisma.server.findUnique({ where: { id: serverId } });
+    if (!server) throw new NotFoundError('Server');
+
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId: req.user!.userId, serverId } },
+    });
+    if (!membership || !isAdminOrOwner(membership.role as MemberRole)) {
+      throw new ForbiddenError('Only the server owner or admin can toggle invites');
+    }
+
+    const updated = await prisma.server.update({
+      where: { id: serverId },
+      select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
+      data: { invitesLocked: locked },
+    });
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updated);
 
@@ -531,7 +565,7 @@ serverRouter.post(
       // Emit server:updated with new ownerId
       const updatedServer = await prisma.server.findUnique({
         where: { id: serverId },
-        select: { id: true, name: true, iconUrl: true, ownerId: true, createdAt: true },
+        select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
       });
       if (updatedServer) {
         io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updatedServer);

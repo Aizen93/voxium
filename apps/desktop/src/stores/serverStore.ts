@@ -51,6 +51,7 @@ interface ServerState {
   kickMember: (serverId: string, memberId: string) => Promise<void>;
   transferOwnership: (serverId: string, targetUserId: string) => Promise<void>;
   deleteServer: (serverId: string) => Promise<void>;
+  toggleInvitesLock: (serverId: string, locked: boolean) => Promise<void>;
   handleMemberRoleUpdated: (serverId: string, userId: string, role: MemberRole) => void;
   handleMemberKicked: (serverId: string) => void;
   handleServerDeleted: (serverId: string) => void;
@@ -164,6 +165,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
           avatarUrl: user.avatarUrl,
           bio: user.bio ?? null,
           status: user.status || 'online',
+          role: user.role || 'user',
           createdAt: user.createdAt,
         },
       };
@@ -393,6 +395,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
   deleteServer: async (serverId: string) => {
     await api.delete(`/servers/${serverId}`);
     // No local state update — socket event is source of truth
+  },
+
+  toggleInvitesLock: async (serverId: string, locked: boolean) => {
+    await api.patch(`/servers/${serverId}/invites-lock`, { locked });
+    // Local state updated via server:updated socket event
   },
 
   handleMemberRoleUpdated: (serverId: string, userId: string, role: MemberRole) => {

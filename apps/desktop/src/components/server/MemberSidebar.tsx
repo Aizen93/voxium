@@ -5,6 +5,7 @@ import { UserHoverTarget } from '../common/UserHoverTarget';
 import { MemberContextMenu } from './MemberContextMenu';
 import { clsx } from 'clsx';
 import type { ServerMember } from '@voxium/shared';
+import { StaffBadge } from '../common/StaffBadge';
 
 interface ContextMenuState {
   member: ServerMember;
@@ -75,12 +76,15 @@ function MemberGroup({ title, members, onContextMenu }: { title: string; members
             </div>
 
             <div className="min-w-0 flex-1">
-              <p className={clsx(
-                'truncate text-sm font-medium',
-                member.user.status === 'offline' ? 'text-vox-text-muted' : 'text-vox-text-primary'
-              )}>
-                {member.user.displayName}
-              </p>
+              <div className="flex items-center gap-1">
+                <p className={clsx(
+                  'truncate text-sm font-medium',
+                  member.user.status === 'offline' ? 'text-vox-text-muted' : 'text-vox-text-primary'
+                )}>
+                  {member.user.displayName}
+                </p>
+                {(member.user.role === 'admin' || member.user.role === 'superadmin') && <StaffBadge />}
+              </div>
             </div>
           </button>
         </UserHoverTarget>

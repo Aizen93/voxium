@@ -11,6 +11,28 @@ import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared'
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
+/** Strip IPv4-mapped IPv6 prefix (::ffff:1.2.3.4 → 1.2.3.4) */
+function normalizeIp(raw: string): string {
+  return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+}
+
+/**
+ * Get the real client IP. Only reads X-Forwarded-For in production
+ * (where a trusted reverse proxy is expected), matching Express's
+ * `trust proxy` setting. In other environments, uses the direct
+ * socket address to prevent header spoofing.
+ */
+function getSocketIp(socket: { handshake: { address: string; headers: Record<string, string | string[] | undefined> } }): string | undefined {
+  if (process.env.NODE_ENV === 'production') {
+    const forwarded = socket.handshake.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string') {
+      const firstHop = forwarded.split(',')[0].trim();
+      if (firstHop) return normalizeIp(firstHop);
+    }
+  }
+  return socket.handshake.address ? normalizeIp(socket.handshake.address) : undefined;
+}
+
 export function getIO(): SocketServer<ClientToServerEvents, ServerToClientEvents> {
   if (!io) throw new Error('Socket.IO not initialized');
   return io;
@@ -29,16 +51,37 @@ export function initSocketServer(httpServer: HttpServer) {
   });
 
   // ─── Authentication middleware ───────────────────────────────────────
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) return next(new Error('Authentication required'));
 
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
+
+      // Check account ban, token version, and current role
+      const user = await prisma.user.findUnique({
+        where: { id: payload.userId },
+        select: { bannedAt: true, tokenVersion: true, role: true },
+      });
+      if (!user) return next(new Error('User not found'));
+      if (user.bannedAt) return next(new Error('Account banned'));
+      if (user.tokenVersion !== payload.tokenVersion) return next(new Error('Session invalidated'));
+
+      // Check IP ban
+      const ip = getSocketIp(socket);
+      if (ip) {
+        const ipBan = await prisma.ipBan.findUnique({ where: { ip } });
+        if (ipBan) return next(new Error('Account banned'));
+      }
+
       socket.data.userId = payload.userId;
       socket.data.username = payload.username;
+      socket.data.role = user.role;
       next();
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Account banned') {
+        return next(err);
+      }
       next(new Error('Invalid token'));
     }
   });
@@ -47,6 +90,9 @@ export function initSocketServer(httpServer: HttpServer) {
   io.on('connection', async (socket) => {
     const userId = socket.data.userId as string;
     console.log(`[WS] User connected: ${userId} (${socket.id})`);
+
+    // Join per-user room for targeted operations (e.g., support room joins)
+    socket.join(`user:${userId}`);
 
     // ═══════════════════════════════════════════════════════════════════
     // CRITICAL: Register ALL event handlers SYNCHRONOUSLY before any
@@ -127,6 +173,39 @@ export function initSocketServer(httpServer: HttpServer) {
     // ─── DM Voice events ─────────────────────────────────────────────
     handleDMVoiceEvents(io, socket);
 
+    // ─── Admin metrics subscription ──────────────────────────────────
+    socket.on('admin:subscribe_metrics', () => {
+      if (!socketRateLimit(socket, 'admin:subscribe_metrics', 10)) return;
+      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
+      socket.join('admin:metrics');
+    });
+
+    socket.on('admin:unsubscribe_metrics', () => {
+      socket.leave('admin:metrics');
+    });
+
+    // ─── Admin reports subscription ──────────────────────────────────
+    socket.on('admin:subscribe_reports', () => {
+      if (!socketRateLimit(socket, 'admin:subscribe_reports', 10)) return;
+      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
+      socket.join('admin:reports');
+    });
+
+    socket.on('admin:unsubscribe_reports', () => {
+      socket.leave('admin:reports');
+    });
+
+    // ─── Admin support subscription ──────────────────────────────────
+    socket.on('admin:subscribe_support', () => {
+      if (!socketRateLimit(socket, 'admin:subscribe_support', 10)) return;
+      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
+      socket.join('admin:support');
+    });
+
+    socket.on('admin:unsubscribe_support', () => {
+      socket.leave('admin:support');
+    });
+
     // ─── Disconnect ─────────────────────────────────────────────────
     socket.on('disconnecting', async () => {
       console.log(`[WS] User disconnecting: ${userId}`);
@@ -160,6 +239,16 @@ export function initSocketServer(httpServer: HttpServer) {
     try {
       // Track online presence
       await setUserOnline(userId, socket.id);
+
+      // Upsert IP record
+      const connectIp = getSocketIp(socket);
+      if (connectIp) {
+        await prisma.ipRecord.upsert({
+          where: { userId_ip: { userId, ip: connectIp } },
+          update: { lastSeenAt: new Date() },
+          create: { userId, ip: connectIp },
+        }).catch(() => {}); // Non-critical
+      }
 
       // Join rooms for all servers the user is a member of
       const memberships = await prisma.serverMember.findMany({
@@ -244,6 +333,62 @@ export function initSocketServer(httpServer: HttpServer) {
             })),
           });
         }
+      }
+
+      // Auto-join support ticket room if user has an open/claimed ticket
+      try {
+        const supportTicket = await prisma.supportTicket.findUnique({
+          where: { userId },
+          select: { id: true, status: true },
+        });
+        if (supportTicket && (supportTicket.status === 'open' || supportTicket.status === 'claimed')) {
+          socket.join(`support:${supportTicket.id}`);
+        }
+      } catch (supportErr) {
+        console.error(`[WS] Error joining support room for ${userId}:`, supportErr);
+      }
+
+      // Send active announcements
+      try {
+        const memberServerIds = memberships.map((m) => m.serverId);
+        const now = new Date();
+        const activeAnnouncements = await prisma.announcement.findMany({
+          where: {
+            publishedAt: { not: null },
+            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+            AND: [
+              {
+                OR: [
+                  { scope: 'global' },
+                  { scope: 'servers', serverIds: { hasSome: memberServerIds.length > 0 ? memberServerIds : ['__none__'] } },
+                ],
+              },
+            ],
+          },
+          include: { createdBy: { select: { username: true } } },
+          orderBy: { publishedAt: 'desc' },
+          take: 10,
+        });
+
+        if (activeAnnouncements.length > 0) {
+          socket.emit('announcement:init', {
+            announcements: activeAnnouncements.map((a) => ({
+              id: a.id,
+              title: a.title,
+              content: a.content,
+              type: a.type as import('@voxium/shared').AnnouncementType,
+              scope: a.scope as import('@voxium/shared').AnnouncementScope,
+              serverIds: a.serverIds,
+              createdById: a.createdById,
+              createdByUsername: a.createdBy?.username ?? 'Deleted',
+              publishedAt: a.publishedAt!.toISOString(),
+              expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
+              createdAt: a.createdAt.toISOString(),
+            })),
+          });
+        }
+      } catch (annErr) {
+        console.error(`[WS] Error fetching announcements for ${userId}:`, annErr);
       }
 
       // Broadcast online status to all servers

@@ -13,14 +13,14 @@ export const dmRouter = Router();
 dmRouter.use(authenticate);
 
 const authorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true },
+  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
 };
 
 const replyToSelect = {
   select: {
     id: true,
     content: true,
-    author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+    author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
   },
 };
 

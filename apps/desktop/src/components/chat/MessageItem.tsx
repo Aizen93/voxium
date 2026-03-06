@@ -7,10 +7,12 @@ import { EmojiPicker } from '../common/EmojiPicker';
 import { Avatar } from '../common/Avatar';
 import { MessageContent } from './MessageContent';
 import { UserHoverTarget } from '../common/UserHoverTarget';
-import { Pencil, Trash2, SmilePlus, Reply } from 'lucide-react';
+import { Pencil, Trash2, SmilePlus, Reply, Flag } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
+import { StaffBadge } from '../common/StaffBadge';
+import { ReportModal } from './ReportModal';
 
 interface Props {
   message: Message;
@@ -36,6 +38,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
   const [isSaving, setIsSaving] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [showReactionPicker, setShowReactionPicker] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const reactionBtnRef = useRef<HTMLButtonElement>(null);
 
@@ -229,6 +232,15 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                 <Trash2 size={14} />
               </button>
             )}
+            {!isOwn && !isSystemMessage && (
+              <button
+                onClick={() => setShowReportModal(true)}
+                className="rounded p-1 text-vox-text-muted hover:text-vox-accent-warning hover:bg-vox-accent-warning/10 transition-colors"
+                title="Report"
+              >
+                <Flag size={14} />
+              </button>
+            )}
           </div>
         )}
 
@@ -250,6 +262,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                       {message.author.displayName}
                     </span>
                   </UserHoverTarget>
+                  {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}
                   <span className="text-xs text-vox-text-muted">
                     {formatMessageTime(message.createdAt)}
                   </span>
@@ -300,6 +313,15 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
           channelId={channelId}
           conversationId={conversationId}
           onClose={() => setShowDeleteModal(false)}
+        />
+      )}
+
+      {showReportModal && (
+        <ReportModal
+          type="message"
+          reportedUserId={message.author.id}
+          messageId={message.id}
+          onClose={() => setShowReportModal(false)}
         />
       )}
     </>

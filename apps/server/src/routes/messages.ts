@@ -33,13 +33,13 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
 
     const messageInclude = {
       author: {
-        select: { id: true, username: true, displayName: true, avatarUrl: true },
+        select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
       },
       replyTo: {
         select: {
           id: true,
           content: true,
-          author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
         },
       },
       reactions: reactionInclude,
@@ -162,13 +162,13 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       },
       include: {
         author: {
-          select: { id: true, username: true, displayName: true, avatarUrl: true },
+          select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
         },
         replyTo: {
           select: {
             id: true,
             content: true,
-            author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+            author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
           },
         },
       },
@@ -207,13 +207,13 @@ messageRouter.patch('/:messageId', async (req: Request<{ channelId: string; mess
       data: { content, editedAt: new Date() },
       include: {
         author: {
-          select: { id: true, username: true, displayName: true, avatarUrl: true },
+          select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
         },
         replyTo: {
           select: {
             id: true,
             content: true,
-            author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+            author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
           },
         },
         reactions: reactionInclude,

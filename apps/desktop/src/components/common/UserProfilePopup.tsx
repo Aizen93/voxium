@@ -6,11 +6,13 @@ import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { Avatar } from './Avatar';
-import { Volume2, Crown, Shield, MessageSquare, UserPlus, UserMinus, Check, X, Clock } from 'lucide-react';
+import { Volume2, Crown, Shield, MessageSquare, UserPlus, UserMinus, Check, X, Clock, Flag } from 'lucide-react';
 import { toast } from '../../stores/toastStore';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
 import { api } from '../../services/api';
+import { StaffBadge } from './StaffBadge';
+import { ReportModal } from '../chat/ReportModal';
 
 const POPUP_WIDTH = 300;
 const GAP = 8;
@@ -55,9 +57,10 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   const channelUsers = useVoiceStore((s) => s.channelUsers);
 
   // Fallback: fetch user profile from API when not in server members list (e.g. DM context)
+  const [showReport, setShowReport] = useState(false);
   const [fetchedUser, setFetchedUser] = useState<{
     id: string; username: string; displayName: string;
-    avatarUrl: string | null; bio?: string | null; status?: string; createdAt?: string;
+    avatarUrl: string | null; bio?: string | null; status?: string; role?: string; createdAt?: string;
   } | null>(null);
 
   useEffect(() => {
@@ -116,8 +119,6 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   // Re-measure after first render when we have the actual popup height
   useEffect(() => {
     if (position) updatePosition();
-    // Only run once after initial position set
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [position !== null]);
 
   useEffect(() => {
@@ -247,7 +248,10 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
               </span>
             )}
           </div>
-          <p className="text-xs text-vox-text-muted">@{user.username}</p>
+          <div className="flex items-center gap-1.5">
+            <p className="text-xs text-vox-text-muted">@{user.username}</p>
+            {(user.role === 'admin' || user.role === 'superadmin') && <StaffBadge />}
+          </div>
 
           <div className="mt-1 flex items-center gap-1.5">
             <div className={clsx('h-2.5 w-2.5 rounded-full', STATUS_COLORS[status])} />
@@ -352,7 +356,27 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
             </div>
           )}
         </div>
+
+        {/* Report User */}
+        {!isOwnProfile && (
+          <div className="border-t border-vox-border px-4 py-2">
+            <button
+              onClick={() => setShowReport(true)}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-md text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
+            >
+              <Flag size={12} /> Report User
+            </button>
+          </div>
+        )}
       </div>
+
+      {showReport && (
+        <ReportModal
+          type="user"
+          reportedUserId={userId}
+          onClose={() => setShowReport(false)}
+        />
+      )}
     </div>,
     document.body
   );

@@ -1,0 +1,25 @@
+title: "[Q&A] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Before asking
+
+        - Check the [README](../../blob/main/README.md) and [CONTRIBUTING](../../blob/main/CONTRIBUTING.md) guides
+        - Search [existing discussions](../../discussions) to see if your question was already answered
+        - For bugs, use the [Bug Report](../../issues/new?template=bug_report.yml) template instead
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What do you need help with?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Any relevant details — setup, config, screenshots, error messages, etc.
