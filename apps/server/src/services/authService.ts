@@ -56,7 +56,10 @@ export async function registerUser(username: string, email: string, password: st
   return { user: safeUser, ...tokens };
 }
 
-export async function loginUser(email: string, password: string, rememberMe = true, ip?: string) {
+export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string) {
+  // Normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 → 1.2.3.4) for consistent ban matching
+  const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+
   // Check IP ban before anything else
   if (ip) {
     const ipBan = await prisma.ipBan.findUnique({ where: { ip } });

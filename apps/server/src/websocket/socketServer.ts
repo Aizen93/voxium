@@ -11,6 +11,18 @@ import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared'
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
+/** Strip IPv4-mapped IPv6 prefix (::ffff:1.2.3.4 → 1.2.3.4) */
+function normalizeIp(raw: string): string {
+  return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+}
+
+/** Get the real client IP, respecting X-Forwarded-For behind a trusted proxy */
+function getSocketIp(socket: { handshake: { address: string; headers: Record<string, string | string[] | undefined> } }): string | undefined {
+  const forwarded = socket.handshake.headers['x-forwarded-for'];
+  const raw = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : socket.handshake.address;
+  return raw ? normalizeIp(raw) : undefined;
+}
+
 export function getIO(): SocketServer<ClientToServerEvents, ServerToClientEvents> {
   if (!io) throw new Error('Socket.IO not initialized');
   return io;
@@ -36,15 +48,17 @@ export function initSocketServer(httpServer: HttpServer) {
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
 
-      // Check account ban
+      // Check account ban and token version
       const user = await prisma.user.findUnique({
         where: { id: payload.userId },
-        select: { bannedAt: true },
+        select: { bannedAt: true, tokenVersion: true },
       });
-      if (user?.bannedAt) return next(new Error('Account banned'));
+      if (!user) return next(new Error('User not found'));
+      if (user.bannedAt) return next(new Error('Account banned'));
+      if (user.tokenVersion !== payload.tokenVersion) return next(new Error('Session invalidated'));
 
       // Check IP ban
-      const ip = socket.handshake.address;
+      const ip = getSocketIp(socket);
       if (ip) {
         const ipBan = await prisma.ipBan.findUnique({ where: { ip } });
         if (ipBan) return next(new Error('Account banned'));
@@ -217,7 +231,7 @@ export function initSocketServer(httpServer: HttpServer) {
       await setUserOnline(userId, socket.id);
 
       // Upsert IP record
-      const connectIp = socket.handshake.address;
+      const connectIp = getSocketIp(socket);
       if (connectIp) {
         await prisma.ipRecord.upsert({
           where: { userId_ip: { userId, ip: connectIp } },

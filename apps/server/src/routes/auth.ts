@@ -28,7 +28,8 @@ authRouter.post('/register', rateLimitRegister, async (req: Request, res: Respon
 authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email, password, rememberMe } = req.body;
-    const ip = req.ip || req.socket.remoteAddress;
+    const rawIp = req.ip || req.socket.remoteAddress;
+    const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
     const result = await loginUser(email, password, rememberMe ?? true, ip);
 
     res.json({
