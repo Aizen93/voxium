@@ -1,6 +1,6 @@
 {
   "name": "@voxium/server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -17,7 +17,6 @@
     "@aws-sdk/client-s3": "^3.998.0",
     "@aws-sdk/s3-request-presigner": "^3.1000.0",
     "@prisma/client": "^6.2.0",
-    "prisma": "^6.2.0",
     "@voxium/shared": "workspace:*",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
@@ -30,6 +29,9 @@
     "morgan": "^1.10.0",
     "nanoid": "^3.3.8",
     "nodemailer": "^8.0.1",
+    "otpauth": "^9.5.0",
+    "prisma": "^6.2.0",
+    "qrcode": "^1.5.4",
     "rate-limiter-flexible": "^5.0.0",
     "redis": "^4.7.0",
     "socket.io": "^4.8.0",
@@ -45,6 +47,7 @@
     "@types/morgan": "^1.9.9",
     "@types/node": "^22.10.0",
     "@types/nodemailer": "^7.0.11",
+    "@types/qrcode": "^1.5.6",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

@@ -738,6 +738,40 @@ Change Password (authenticated):
 | WebSocket | JWT verification on connection |
 | Input Sanitization | HTML tag stripping + trim on all user-generated text (defense-in-depth) |
 | Rate Limiting | rate-limiter-flexible with Redis (per-endpoint + per-socket), fail-open with in-memory fallback |
+| TOTP 2FA | AES-256-GCM encrypted secrets at rest (`TOTP_ENCRYPTION_KEY`), bcrypt-hashed backup codes, 30-day trusted device JWTs with tokenVersion validation, dedicated rate limiter |
+
+### TOTP Two-Factor Authentication Flow
+
+```
+Setup (authenticated):
+  POST /auth/totp/setup
+    → Generate 20-byte secret (otpauth library)
+    → Encrypt secret with AES-256-GCM → store in user.totpSecret
+    → Return base32 secret + QR code data URL
+
+  POST /auth/totp/enable { code }
+    → Decrypt stored secret, validate TOTP code (window: 1)
+    → Generate 8 backup codes → bcrypt hash each → store in user.totpBackupCodes
+    → Set totpEnabled = true
+    → Return plaintext backup codes (shown once)
+
+Login with TOTP:
+  POST /auth/login { email, password, trustedDeviceToken? }
+    → Verify credentials
+    → If trustedDeviceToken valid (30d JWT, matching tokenVersion) → skip TOTP
+    → If totpEnabled → return { totpRequired: true, totpToken } (no auth tokens)
+
+  POST /auth/totp/verify { totpToken, code }
+    → Validate totpToken JWT (5min expiry, purpose: 'totp')
+    → Try TOTP code first; if invalid try backup codes
+    → Backup code match: remove atomically via optimistic concurrency
+    → Return { accessToken, refreshToken, trustedDeviceToken }
+
+Disable (authenticated):
+  POST /auth/totp/disable { code }
+    → Accept either TOTP code or backup code
+    → Clear totpEnabled, totpSecret, totpBackupCodes
+```
 
 ### Permission Model
 
@@ -773,7 +807,7 @@ Redis Hash: feature:flags
 
 ### Rate Limit Registry
 
-All 17 rate limiters are registered in a central `DEFAULTS` record with admin-editable overrides:
+All 18 rate limiters are registered in a central `DEFAULTS` record with admin-editable overrides:
 
 ```
 Redis Hash: rl:config

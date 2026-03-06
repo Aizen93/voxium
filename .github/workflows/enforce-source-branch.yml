@@ -1,0 +1,15 @@
+name: Enforce source branch
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check source branch
+        if: github.head_ref != 'develop'
+        run: |
+          echo "::error::PRs to main must come from the develop branch, not '${{ github.head_ref }}'"
+          exit 1

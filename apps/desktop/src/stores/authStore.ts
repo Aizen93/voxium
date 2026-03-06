@@ -14,7 +14,14 @@ interface AuthState {
   isSubmitting: boolean;
   error: string | null;
 
+  // TOTP login flow
+  totpRequired: boolean;
+  totpToken: string | null;
+  totpRememberMe: boolean;
+
   login: (email: string, password: string, rememberMe?: boolean) => Promise<void>;
+  verifyTOTP: (code: string) => Promise<void>;
+  cancelTOTP: () => void;
   register: (username: string, email: string, password: string) => Promise<void>;
   logout: () => void;
   checkAuth: () => Promise<void>;
@@ -24,6 +31,9 @@ interface AuthState {
   forgotPassword: (email: string) => Promise<string>;
   resetPassword: (token: string, password: string) => Promise<string>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<string>;
+  setupTOTP: () => Promise<{ secret: string; qrCodeDataUrl: string }>;
+  enableTOTP: (code: string) => Promise<string[]>;
+  disableTOTP: (code: string) => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -32,17 +42,25 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isLoading: true,
   isSubmitting: false,
   error: null,
+  totpRequired: false,
+  totpToken: null,
+  totpRememberMe: true,
 
   login: async (email, password, rememberMe = true) => {
     set({ isSubmitting: true, error: null });
     try {
-      const { data } = await api.post('/auth/login', { email, password, rememberMe });
+      const trustedDeviceToken = localStorage.getItem('voxium_trusted_device') || undefined;
+      const { data } = await api.post('/auth/login', { email, password, rememberMe, trustedDeviceToken });
+
+      // If TOTP is required, pause login flow
+      if (data.data.totpRequired) {
+        set({ totpRequired: true, totpToken: data.data.totpToken, totpRememberMe: rememberMe, isSubmitting: false });
+        return;
+      }
+
       const { user, accessToken, refreshToken } = data.data;
-
       setTokens(accessToken, refreshToken, rememberMe);
-
       connectSocket(accessToken);
-
       set({ user, isAuthenticated: true, isSubmitting: false });
     } catch (err: any) {
       set({
@@ -51,6 +69,32 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       });
       throw err;
     }
+  },
+
+  verifyTOTP: async (code) => {
+    const { totpToken, totpRememberMe } = get();
+    if (!totpToken) return;
+    set({ isSubmitting: true, error: null });
+    try {
+      const { data } = await api.post('/auth/totp/verify', { totpToken, code });
+      const { user, accessToken, refreshToken, trustedDeviceToken } = data.data;
+      setTokens(accessToken, refreshToken, totpRememberMe);
+      if (trustedDeviceToken) {
+        localStorage.setItem('voxium_trusted_device', trustedDeviceToken);
+      }
+      connectSocket(accessToken);
+      set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true });
+    } catch (err: any) {
+      set({
+        error: err.response?.data?.error || 'Invalid verification code',
+        isSubmitting: false,
+      });
+      throw err;
+    }
+  },
+
+  cancelTOTP: () => {
+    set({ totpRequired: false, totpToken: null, totpRememberMe: true, error: null });
   },
 
   register: async (username, email, password) => {
@@ -152,5 +196,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       setTokens(data.data.accessToken, data.data.refreshToken);
     }
     return data.message;
+  },
+
+  setupTOTP: async () => {
+    const { data } = await api.post('/auth/totp/setup');
+    return data.data;
+  },
+
+  enableTOTP: async (code) => {
+    const { data } = await api.post('/auth/totp/enable', { code });
+    // Update local user state
+    set((state) => ({ user: state.user ? { ...state.user, totpEnabled: true } : null }));
+    return data.data.backupCodes;
+  },
+
+  disableTOTP: async (code) => {
+    await api.post('/auth/totp/disable', { code });
+    localStorage.removeItem('voxium_trusted_device');
+    set((state) => ({ user: state.user ? { ...state.user, totpEnabled: false } : null }));
   },
 }));

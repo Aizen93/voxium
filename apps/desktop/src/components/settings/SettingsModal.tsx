@@ -3,7 +3,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Keyboard, Volume2, Bell, User, Headphones, Lock, Eye, EyeOff, AudioLines } from 'lucide-react';
+import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check } from 'lucide-react';
 import { LIMITS } from '@voxium/shared';
 
 interface DeviceInfo {
@@ -11,7 +11,7 @@ interface DeviceInfo {
   label: string;
 }
 
-type SettingsTab = 'account' | 'audio';
+type SettingsTab = 'account' | 'security' | 'audio';
 
 function formatKeyCode(code: string): string {
   const map: Record<string, string> = {
@@ -121,7 +121,7 @@ function ChangePasswordForm() {
   };
 
   return (
-    <div className="border-t border-vox-border pt-5">
+    <div>
       <div className="flex items-center gap-2 mb-4">
         <Lock size={16} className="text-vox-text-muted" />
         <h3 className="text-sm font-semibold text-vox-text-primary">Change Password</h3>
@@ -317,7 +317,276 @@ function ProfileTab() {
         {saving ? 'Saving...' : 'Save Changes'}
       </button>
 
+    </div>
+  );
+}
+
+// ─── Two-Factor Authentication ──────────────────────────────────────────────
+
+function TwoFactorSection() {
+  const { user, setupTOTP, enableTOTP, disableTOTP } = useAuthStore();
+  const [step, setStep] = useState<'idle' | 'setup' | 'backup' | 'disable'>('idle');
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState('');
+  const [secret, setSecret] = useState('');
+  const [code, setCode] = useState('');
+  const [backupCodes, setBackupCodes] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleSetup = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await setupTOTP();
+      setQrCodeDataUrl(data.qrCodeDataUrl);
+      setSecret(data.secret);
+      setStep('setup');
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to set up 2FA');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEnable = async () => {
+    if (code.length < 6) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const codes = await enableTOTP(code);
+      setBackupCodes(codes);
+      setStep('backup');
+      setCode('');
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Invalid verification code');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDisable = async () => {
+    if (code.length < 6) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await disableTOTP(code);
+      toast.success('Two-factor authentication disabled');
+      setStep('idle');
+      setCode('');
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Invalid verification code');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCopyBackupCodes = async () => {
+    const text = backupCodes.join('\n');
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-9999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        if (!ok) throw new Error('copy failed');
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Unable to copy backup codes to clipboard');
+    }
+  };
+
+  const isEnabled = user?.totpEnabled;
+
+  return (
+    <div className="border-t border-vox-border pt-5">
+      <div className="flex items-center gap-2 mb-4">
+        <ShieldCheck size={16} className="text-vox-text-muted" />
+        <h3 className="text-sm font-semibold text-vox-text-primary">Two-Factor Authentication</h3>
+        {isEnabled && (
+          <span className="ml-auto rounded-full bg-vox-voice-connected/20 px-2 py-0.5 text-[10px] font-medium text-vox-voice-connected">
+            Enabled
+          </span>
+        )}
+      </div>
+
+      {error && (
+        <div className="mb-3 rounded-lg bg-vox-accent-danger/10 border border-vox-accent-danger/20 px-3 py-2 text-xs text-vox-accent-danger">
+          {error}
+        </div>
+      )}
+
+      {step === 'idle' && !isEnabled && (
+        <div>
+          <p className="text-xs text-vox-text-muted mb-3">
+            Add an extra layer of security to your account by requiring a verification code from an authenticator app when you sign in.
+          </p>
+          <button onClick={handleSetup} disabled={loading} className="btn-primary w-full disabled:opacity-50">
+            {loading ? 'Setting up...' : 'Enable Two-Factor Authentication'}
+          </button>
+        </div>
+      )}
+
+      {step === 'idle' && isEnabled && (
+        <div>
+          <p className="text-xs text-vox-text-muted mb-3">
+            Two-factor authentication is currently enabled. You will be asked for a verification code each time you sign in.
+          </p>
+          <button
+            onClick={() => { setStep('disable'); setError(null); setCode(''); }}
+            className="flex items-center gap-2 rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/10 px-3 py-2 text-xs text-vox-accent-danger hover:bg-vox-accent-danger/20 transition-colors w-full justify-center"
+          >
+            <ShieldOff size={14} />
+            Disable Two-Factor Authentication
+          </button>
+        </div>
+      )}
+
+      {step === 'setup' && (
+        <div className="space-y-4">
+          <p className="text-xs text-vox-text-muted">
+            Scan the QR code below with your authenticator app (Google Authenticator, Authy, etc.), then enter the 6-digit code to verify.
+          </p>
+
+          <div className="flex justify-center">
+            <div className="rounded-xl bg-white p-3">
+              <img src={qrCodeDataUrl} alt="TOTP QR Code" className="h-48 w-48" />
+            </div>
+          </div>
+
+          <div>
+            <p className="text-[10px] text-vox-text-muted mb-1">Can't scan? Enter this key manually:</p>
+            <code className="block rounded-lg bg-vox-bg-secondary border border-vox-border px-3 py-2 text-xs text-vox-text-primary font-mono break-all select-all">
+              {secret}
+            </code>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
+              Verification Code
+            </label>
+            <input
+              type="text"
+              inputMode="numeric"
+              maxLength={6}
+              value={code}
+              onChange={(e) => { setCode(e.target.value.replace(/\D/g, '')); setError(null); }}
+              className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary text-center tracking-[0.3em] font-mono focus:outline-none focus:border-vox-accent-primary"
+              placeholder="000000"
+              autoFocus
+            />
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => { setStep('idle'); setCode(''); setError(null); }}
+              className="flex-1 rounded-lg border border-vox-border px-3 py-2 text-xs text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleEnable}
+              disabled={loading || code.length < 6}
+              className="btn-primary flex-1 disabled:opacity-50"
+            >
+              {loading ? 'Verifying...' : 'Enable'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 'backup' && (
+        <div className="space-y-4">
+          <div className="rounded-lg bg-vox-accent-warning/10 border border-vox-accent-warning/20 px-3 py-2">
+            <p className="text-xs text-vox-accent-warning font-medium">Save your backup codes!</p>
+            <p className="text-[10px] text-vox-accent-warning/80 mt-1">
+              These codes can be used to access your account if you lose your authenticator device. Each code can only be used once. Store them somewhere safe.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            {backupCodes.map((c) => (
+              <code key={c} className="rounded-md bg-vox-bg-secondary border border-vox-border px-3 py-1.5 text-xs text-vox-text-primary font-mono text-center">
+                {c}
+              </code>
+            ))}
+          </div>
+
+          <button
+            onClick={handleCopyBackupCodes}
+            className="flex items-center justify-center gap-2 w-full rounded-lg border border-vox-border px-3 py-2 text-xs text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
+          >
+            {copied ? <Check size={14} className="text-vox-voice-connected" /> : <Copy size={14} />}
+            {copied ? 'Copied!' : 'Copy all codes'}
+          </button>
+
+          <button
+            onClick={() => { setStep('idle'); setBackupCodes([]); }}
+            className="btn-primary w-full"
+          >
+            I've saved my backup codes
+          </button>
+        </div>
+      )}
+
+      {step === 'disable' && (
+        <div className="space-y-4">
+          <p className="text-xs text-vox-text-muted">
+            Enter a verification code from your authenticator app or a backup code to disable two-factor authentication.
+          </p>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
+              Verification Code
+            </label>
+            <input
+              type="text"
+              maxLength={8}
+              value={code}
+              onChange={(e) => { setCode(e.target.value.replace(/[^a-zA-Z0-9]/g, '')); setError(null); }}
+              className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary text-center tracking-[0.3em] font-mono focus:outline-none focus:border-vox-accent-primary"
+              placeholder="000000"
+              autoFocus
+            />
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => { setStep('idle'); setCode(''); setError(null); }}
+              className="flex-1 rounded-lg border border-vox-border px-3 py-2 text-xs text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleDisable}
+              disabled={loading || code.length < 6}
+              className="flex-1 rounded-lg bg-vox-accent-danger px-3 py-2 text-xs text-white hover:bg-vox-accent-danger/80 disabled:opacity-50 transition-colors"
+            >
+              {loading ? 'Disabling...' : 'Disable'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Security Tab ────────────────────────────────────────────────────────────
+
+function SecurityTab() {
+  return (
+    <div className="space-y-6">
       <ChangePasswordForm />
+      <TwoFactorSection />
     </div>
   );
 }
@@ -662,6 +931,7 @@ export function SettingsModal() {
 
   const tabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
     { id: 'account', label: 'My Account', icon: User },
+    { id: 'security', label: 'Security', icon: Shield },
     { id: 'audio', label: 'Audio & Video', icon: Headphones },
   ];
 
@@ -702,7 +972,9 @@ export function SettingsModal() {
             </button>
           </div>
 
-          {activeTab === 'account' ? <ProfileTab /> : <AudioTab />}
+          {activeTab === 'account' && <ProfileTab />}
+          {activeTab === 'security' && <SecurityTab />}
+          {activeTab === 'audio' && <AudioTab />}
         </div>
       </div>
     </div>
