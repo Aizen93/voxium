@@ -61,7 +61,7 @@ export async function generatePresignedGetUrl(
 export interface S3ObjectInfo {
   key: string;
   size: number;
-  lastModified: string;
+  lastModified: string | null;
 }
 
 /**
@@ -87,7 +87,7 @@ export async function listAllS3Objects(prefix?: string): Promise<S3ObjectInfo[]>
           objects.push({
             key: obj.Key,
             size: obj.Size,
-            lastModified: obj.LastModified?.toISOString() ?? new Date().toISOString(),
+            lastModified: obj.LastModified?.toISOString() ?? null,
           });
         }
       }

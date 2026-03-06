@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { rateLimitReport } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
 import { getIO } from '../websocket/socketServer';
 import { LIMITS } from '@voxium/shared';
@@ -81,6 +81,24 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       // Ensure the reported user is the actual author of the message
       if (message.authorId !== reportedUserId) {
         throw new BadRequestError('Reported user does not match message author');
+      }
+
+      // Verify the reporter has access to this message
+      if (message.channel?.serverId) {
+        const membership = await prisma.serverMember.findUnique({
+          where: { userId_serverId: { userId, serverId: message.channel.serverId } },
+          select: { userId: true },
+        });
+        if (!membership) throw new ForbiddenError('You do not have access to this message');
+      } else if (message.conversationId) {
+        const conversation = await prisma.conversation.findFirst({
+          where: {
+            id: message.conversationId,
+            OR: [{ user1Id: userId }, { user2Id: userId }],
+          },
+          select: { id: true },
+        });
+        if (!conversation) throw new ForbiddenError('You do not have access to this message');
       }
 
       messageContent = message.content;

@@ -77,14 +77,8 @@ supportRouter.post('/open', rateLimitGeneral, async (req: Request, res: Response
       getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, mapped);
     }
 
-    // Join socket to support room
-    const io = getIO();
-    const sockets = await io.fetchSockets();
-    for (const s of sockets) {
-      if (s.data.userId === userId) {
-        s.join(`support:${ticket.id}`);
-      }
-    }
+    // Join socket to support room via per-user room
+    getIO().in(`user:${userId}`).socketsJoin(`support:${ticket.id}`);
 
     await emitTicketCount();
 

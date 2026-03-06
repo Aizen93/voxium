@@ -45,7 +45,9 @@ export const useAnnouncementStore = create<AnnouncementState>((set, get) => ({
   },
 
   dismissAnnouncement: (id) => {
-    const dismissed = [...get().dismissedIds, id];
+    const current = get().dismissedIds;
+    if (current.includes(id)) return;
+    const dismissed = [...current, id];
     saveDismissed(dismissed);
     set({ dismissedIds: dismissed });
   },

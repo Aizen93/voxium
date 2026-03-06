@@ -132,7 +132,7 @@ export interface MessageAuthor {
   username: string;
   displayName: string;
   avatarUrl: string | null;
-  role?: string;
+  role?: UserRole;
 }
 
 export interface SendMessageRequest {
@@ -446,7 +446,7 @@ export interface StorageFile {
   key: string;
   type: 'avatar' | 'server-icon';
   size: number;
-  lastModified: string;
+  lastModified: string | null;
   linkedEntity: string | null;
   linkedEntityId: string | null;
   isOrphan: boolean;
@@ -517,7 +517,7 @@ export interface SupportMessageData {
     username: string;
     displayName: string;
     avatarUrl: string | null;
-    role: string;
+    role: UserRole;
   };
 }
 

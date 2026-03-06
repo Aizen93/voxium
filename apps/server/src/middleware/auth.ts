@@ -2,11 +2,12 @@ import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { ForbiddenError, UnauthorizedError } from '../utils/errors';
 import { prisma } from '../utils/prisma';
+import type { UserRole } from '@voxium/shared';
 
 export interface AuthPayload {
   userId: string;
   username: string;
-  role: string;
+  role: UserRole;
   tokenVersion: number;
   rememberMe?: boolean;
 }

@@ -115,4 +115,5 @@ export const WS_EVENTS = {
   SUPPORT_TICKET_NEW: 'support:ticket:new',
   ADMIN_SUBSCRIBE_SUPPORT: 'admin:subscribe_support',
   ADMIN_UNSUBSCRIBE_SUPPORT: 'admin:unsubscribe_support',
+  FORCE_LOGOUT: 'force:logout',
 } as const;

@@ -118,7 +118,7 @@ export function AdminStorage() {
     ),
     modified: (
       <span className="text-xs text-vox-text-muted">
-        {new Date(f.lastModified).toLocaleDateString()}
+        {f.lastModified ? new Date(f.lastModified).toLocaleDateString() : '—'}
       </span>
     ),
     actions: (

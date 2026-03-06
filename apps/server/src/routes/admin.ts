@@ -988,8 +988,12 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
       files = files.filter((f) => f.isOrphan);
     }
 
-    // Sort by lastModified desc
-    files.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
+    // Sort by lastModified desc (nulls last)
+    files.sort((a, b) => {
+      const ta = a.lastModified ? new Date(a.lastModified).getTime() : 0;
+      const tb = b.lastModified ? new Date(b.lastModified).getTime() : 0;
+      return tb - ta;
+    });
 
     const total = files.length;
     const paginated = files.slice((page - 1) * limit, page * limit);
@@ -1664,15 +1668,10 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
           data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
         });
 
-        // Force logout the banned user
+        // Force logout the banned user via per-user room
         const io = getIO();
-        const sockets = await io.fetchSockets();
-        for (const s of sockets) {
-          if (s.data.userId === report.reportedUserId) {
-            s.emit('force:logout', { reason: 'Your account has been banned.' });
-            s.disconnect(true);
-          }
-        }
+        io.in(`user:${report.reportedUserId}`).emit('force:logout', { reason: 'Your account has been banned.' });
+        io.in(`user:${report.reportedUserId}`).disconnectSockets(true);
 
         logAuditEvent({
           actorId: req.user!.userId,
@@ -1832,12 +1831,7 @@ adminRouter.post('/support/tickets/:id/claim', async (req: Request<{ id: string 
 
     // Join admin socket to support room BEFORE emitting events
     const io = getIO();
-    const sockets = await io.fetchSockets();
-    for (const s of sockets) {
-      if (s.data.userId === adminUserId) {
-        s.join(`support:${id}`);
-      }
-    }
+    io.in(`user:${adminUserId}`).socketsJoin(`support:${id}`);
 
     const claimPayload = mapSupportMessage(sysMsg);
     io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, claimPayload);
@@ -1873,13 +1867,7 @@ adminRouter.get('/support/tickets/:id/messages', async (req: Request<{ id: strin
 
     // Join admin socket to the ticket room so they receive real-time messages
     const adminUserId = req.user!.userId;
-    const io = getIO();
-    const sockets = await io.fetchSockets();
-    for (const s of sockets) {
-      if (s.data.userId === adminUserId) {
-        s.join(`support:${id}`);
-      }
-    }
+    getIO().in(`user:${adminUserId}`).socketsJoin(`support:${id}`);
 
     const where: Record<string, unknown> = { ticketId: id };
     if (before) {
