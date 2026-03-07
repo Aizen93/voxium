@@ -1,6 +1,6 @@
 [package]
 name = "voxium"
-version = "0.9.6"
+version = "1.2.0"
 description = "Voxium - Modern voice & text communication platform"
 authors = ["Voxium Team"]
 edition = "2021"

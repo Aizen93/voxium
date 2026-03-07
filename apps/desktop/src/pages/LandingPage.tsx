@@ -13,6 +13,7 @@ import {
   CheckCircle2,
   ArrowRight,
   Server,
+  BrainCircuit,
 } from 'lucide-react';
 import { APP_VERSION } from '@voxium/shared';
 import { SoundWaveCanvas } from '../components/landing/SoundWaveCanvas';
@@ -198,7 +199,12 @@ const features = [
   {
     icon: Mic2,
     title: 'Crystal-Clear Voice',
-    description: 'Mesh P2P WebRTC — audio goes directly between peers, no middleman servers touching your voice data.',
+    description: 'SFU-powered server voice for 25+ users per channel. DM calls go direct peer-to-peer — no middleman.',
+  },
+  {
+    icon: BrainCircuit,
+    title: 'AI Noise Suppression',
+    description: 'ML-powered RNNoise filter removes keyboard, mouse, and background noise in real time — so only your voice comes through.',
   },
   {
     icon: MessageSquare,
@@ -218,7 +224,7 @@ const features = [
   {
     icon: PhoneCall,
     title: 'Direct Voice Calls',
-    description: '1-on-1 voice calls with WebRTC Perfect Negotiation. Crystal clear, peer-to-peer.',
+    description: '1-on-1 voice calls with WebRTC peer-to-peer. Crystal clear, zero latency.',
   },
   {
     icon: Zap,
@@ -231,9 +237,9 @@ const highlights = [
   'No ads or tracking',
   'Open source & transparent',
   'Free voice calls forever',
-  'Peer-to-peer audio',
+  'AI noise suppression',
   'Self-hostable',
-  'Free custom emoji',
+  'Scalable SFU voice',
 ];
 
 /* ─── Section Components ─── */
@@ -483,7 +489,7 @@ function Hero() {
                       <div>
                         <span className="text-[10px] font-semibold text-vox-accent-warning">Charlie</span>
                         <span className="text-[9px] text-vox-text-muted ml-1.5">12:03</span>
-                        <p className="text-xs text-vox-text-primary leading-snug">P2P is the way 🚀</p>
+                        <p className="text-xs text-vox-text-primary leading-snug">Noise suppression is magic 🚀</p>
                       </div>
                     </div>
                   </div>
@@ -640,12 +646,35 @@ function StatsSection() {
 }
 
 function Features() {
+  const sectionRef = useRef<HTMLDivElement>(null);
+  const [visibleCards, setVisibleCards] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    const el = sectionRef.current;
+    if (!el) return;
+    const cards = el.querySelectorAll('[data-feature-card]');
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const idx = Number((entry.target as HTMLElement).dataset.featureCard);
+            setVisibleCards((prev) => new Set(prev).add(idx));
+            observer.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.15 },
+    );
+    cards.forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <section className="relative bg-vox-bg-secondary py-24">
       {/* Particle separator at top */}
       <ParticlesSvg className="absolute top-0 left-0 w-full h-16" />
 
-      <div className="max-w-7xl mx-auto px-6">
+      <div ref={sectionRef} className="max-w-7xl mx-auto px-6">
         <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary text-center mb-4">
           Everything you need
         </h2>
@@ -654,15 +683,24 @@ function Features() {
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {features.map((f) => (
+          {features.map((f, i) => (
             <div
               key={f.title}
-              className="group rounded-xl border border-vox-border bg-vox-bg-primary p-6 hover:border-vox-accent-primary/60 transition-all duration-300 hover:shadow-lg hover:shadow-vox-accent-primary/5"
+              data-feature-card={i}
+              className={`group rounded-xl border border-vox-border bg-vox-bg-primary p-6
+                hover:border-vox-accent-primary/60 hover:-translate-y-2 hover:shadow-xl hover:shadow-vox-accent-primary/10
+                transition-all duration-300 cursor-default
+                ${i === features.length - 1 ? 'md:col-start-1 md:col-end-3 md:max-w-[calc(50%-12px)] md:justify-self-center lg:col-start-2 lg:col-end-3 lg:max-w-none' : ''}`}
+              style={{
+                opacity: visibleCards.has(i) ? 1 : 0,
+                transform: visibleCards.has(i) ? undefined : 'translateY(32px)',
+                transition: `opacity 0.5s ease-out ${i * 0.1}s, transform 0.5s ease-out ${i * 0.1}s, border-color 0.3s, box-shadow 0.3s`,
+              }}
             >
-              <div className="h-12 w-12 rounded-lg bg-gradient-to-br from-[#5B21B6]/20 to-[#3B82F6]/20 flex items-center justify-center mb-4 group-hover:from-[#5B21B6]/30 group-hover:to-[#3B82F6]/30 transition-all duration-300">
-                <f.icon className="h-6 w-6 text-vox-accent-primary" />
+              <div className="h-12 w-12 rounded-lg bg-gradient-to-br from-[#5B21B6]/20 to-[#3B82F6]/20 flex items-center justify-center mb-4 group-hover:from-[#5B21B6]/40 group-hover:to-[#3B82F6]/40 group-hover:scale-110 transition-all duration-300">
+                <f.icon className="h-6 w-6 text-vox-accent-primary group-hover:scale-110 transition-transform duration-300" />
               </div>
-              <h3 className="text-lg font-semibold text-vox-text-primary mb-2">
+              <h3 className="text-lg font-semibold text-vox-text-primary mb-2 group-hover:text-vox-accent-primary transition-colors duration-300">
                 {f.title}
               </h3>
               <p className="text-sm text-vox-text-secondary leading-relaxed">

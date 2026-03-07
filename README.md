@@ -14,7 +14,7 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 
 - **Zero personal data required** — No phone number, no ID verification, no tracking
 - **Fully open source** — Audit every line, self-host on your own infrastructure
-- **Production-ready voice** — WebRTC peer-to-peer with AI noise suppression (RNNoise ML)
+- **Production-ready voice** — mediasoup SFU for servers, direct P2P for DM calls, with AI noise suppression (RNNoise ML)
 - **Cross-platform** — Native desktop apps for Windows, macOS, and Linux via Tauri 2
 - **Modern stack** — React 19, TypeScript, Zustand, Tailwind CSS, real-time WebSockets
 
@@ -22,31 +22,40 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 
 ## Features
 
-- **Servers & Channels** — Create servers, organize them with categories, text and voice channels, drag-and-drop reordering, invite others via single-use invite links
-- **Real-Time Messaging** — Instant message delivery, typing indicators, cursor-based pagination, unread badges per channel and server
-- **Message Replies** — Reply to any message with a compact preview of the original; click to scroll to the referenced message; graceful handling of deleted parents
-- **Message Editing & Deletion** — Edit your own messages inline, delete with confirmation; admins can delete any message
-- **Reactions** — Emoji reactions on messages with grouped display and toggle support (channels and DMs)
-- **Direct Messages** — 1-on-1 text conversations with real-time delivery, typing indicators, reactions, persistent unread tracking, and conversation deletion
-- **DM Voice Calls** — 1-on-1 WebRTC P2P audio calls with incoming call modal, ringtone, speaking indicators, and call history as system messages
-- **Server Voice Chat** — WebRTC peer-to-peer voice (mesh, up to ~8 users per channel), speaking indicators, latency display
-- **Screen Sharing** — Share your screen in voice channels with real-time video and system audio
-- **AI Noise Suppression** — ML-powered noise filter (RNNoise WASM) removes keyboard, mouse, and background noise in real time via AudioWorklet
-- **Opus Codec Optimization** — DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate for voice
-- **Push-to-Talk & Voice Activity** — Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode
-- **Audio Settings** — Input/output device selection, live mic level meter, noise suppression toggle, persisted preferences
-- **Mute/Deaf Controls** — Always-visible controls that persist across channel switches, server switches, and app restarts
-- **Friend System** — Send, accept, decline, and remove friend requests with real-time notifications
-- **Role & Permission Management** — Owner/Admin/Member hierarchy; role changes, member kicks, ownership transfer
-- **User Profiles** — Avatars with online/offline status indicators, display names, bios with real-time sync across all clients
-- **File Uploads** — S3-compatible storage for user avatars and server icons with client-side image processing
-- **Presence** — Real-time online/offline status for all server members and DM participants
-- **Notifications** — In-app toast notifications, notification sounds for voice join/leave and new messages, native desktop notifications
-- **Two-Factor Authentication** — TOTP-based 2FA with authenticator app support (Google Authenticator, Authy, etc.), QR code setup, 8 one-time backup codes, trusted device tokens (30-day remember)
-- **Authentication** — JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation
-- **Security** — Per-endpoint and per-socket rate limiting, input sanitization, CORS protection, TOTP MFA
-- **Cross-Platform Desktop** — Tauri 2 native apps (Windows, macOS, Linux) with a sleek dark UI
-- **Landing Page** — Public-facing landing page for browser visitors with animated illustrations
+| Category | Feature | Description |
+|----------|---------|-------------|
+| **Communication** | Servers & Channels | Create servers, organize with categories, text and voice channels, drag-and-drop reordering, single-use invite links |
+| | Real-Time Messaging | Instant delivery, typing indicators, cursor-based pagination, unread badges per channel and server |
+| | Message Replies | Reply with compact preview, click to scroll to original, graceful handling of deleted parents |
+| | Message Editing & Deletion | Edit inline, delete with confirmation; admins can delete any message |
+| | Reactions | Emoji reactions with grouped display and toggle support (channels and DMs) |
+| | Direct Messages | 1-on-1 text with real-time delivery, typing indicators, reactions, persistent unread tracking, conversation deletion |
+| | Message Search | Full-text search across server channels and DM conversations with jump-to-message navigation |
+| **Voice** | Server Voice (SFU) | mediasoup Selective Forwarding Unit for scalable voice (25+ users per channel), speaking indicators, latency display |
+| | DM Voice Calls | 1-on-1 WebRTC P2P audio with incoming call modal, ringtone, speaking indicators, call history as system messages |
+| | Screen Sharing | Share screen in voice channels with real-time video and system audio, inline/floating viewer modes |
+| | AI Noise Suppression | ML-powered RNNoise WASM filter removes keyboard, mouse, and background noise in real time via AudioWorklet |
+| | Opus Optimization | DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate |
+| | Push-to-Talk | Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode |
+| | Audio Settings | Input/output device selection, live mic level meter, noise suppression toggle, persisted preferences |
+| | Mute/Deaf Controls | Always-visible controls that persist across channel switches, server switches, and app restarts |
+| **Social** | Friend System | Send, accept, decline, and remove friend requests with real-time notifications |
+| | Roles & Permissions | Owner/Admin/Member hierarchy; role changes, member kicks, ownership transfer |
+| | User Profiles | Avatars with online/offline status, display names, bios with real-time sync across all clients |
+| | Presence | Real-time online/offline status for all server members and DM participants |
+| **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/server/ban management, live metrics, audit log, moderation queue |
+| | Resource Limits | Dynamic limits (max channels, voice users, categories, members) — global defaults with per-server overrides |
+| | Feature Flags | Toggle registration, invites, server creation, voice, DM voice, support — Redis-backed, no redeploy needed |
+| | Reports & Moderation | User/message reports, admin moderation queue with resolve/dismiss/ban workflows |
+| | Support Tickets | One-per-user real-time chat with staff, admin claim/close workflow, audit logging |
+| **Security** | Two-Factor Auth | TOTP 2FA with authenticator app support, QR code setup, 8 backup codes, 30-day trusted device tokens |
+| | Authentication | JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation |
+| | Rate Limiting | Per-endpoint and per-socket rate limiting, admin-editable via Redis-backed registry |
+| | Input Sanitization | HTML stripping, validation, CORS protection |
+| **Platform** | File Uploads | S3-compatible storage for avatars and server icons with client-side image processing and presigned URLs |
+| | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
+| | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with Discord-inspired dark UI |
+| | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |
 
 ---
 
@@ -57,7 +66,7 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 | Backend | Node.js, Express, Socket.IO, Prisma, PostgreSQL, Redis |
 | Frontend | React 19, TypeScript, Vite, Zustand, Tailwind CSS |
 | Desktop | Tauri 2 (Rust) |
-| Voice | WebRTC (mesh P2P), RNNoise WASM, Web Audio API |
+| Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM, Web Audio API |
 | Infrastructure | S3-compatible storage, Nodemailer (SMTP) |
 
 ---
@@ -292,6 +301,7 @@ curl http://localhost:3001/api/v1/servers \
 | `SMTP_FROM` | `noreply@voxium.app` | Sender email address |
 | `CLIENT_URL` | `http://localhost:8080` | Frontend URL (used in emails) |
 | `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. Optional — if not set, TOTP secrets are stored unencrypted. |
+| `MEDIASOUP_ANNOUNCED_IP` | — | Public IP address announced to WebRTC clients for mediasoup SFU connectivity. Required for production. |
 
 ### Frontend Environment Variables (`apps/desktop/.env`)
 
