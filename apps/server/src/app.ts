@@ -81,7 +81,8 @@ app.get('/health', async (_req, res) => {
     await prisma.$queryRaw`SELECT 1`;
     checks.database = { status: 'ok', latency: Date.now() - dbStart };
   } catch (err: any) {
-    checks.database = { status: 'error', latency: Date.now() - dbStart, error: err.message };
+    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : err.message;
+    checks.database = { status: 'error', latency: Date.now() - dbStart, error: msg };
     healthy = false;
   }
 
@@ -93,7 +94,8 @@ app.get('/health', async (_req, res) => {
     await redis.ping();
     checks.redis = { status: 'ok', latency: Date.now() - redisStart };
   } catch (err: any) {
-    checks.redis = { status: 'error', latency: Date.now() - redisStart, error: err.message };
+    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : err.message;
+    checks.redis = { status: 'error', latency: Date.now() - redisStart, error: msg };
     healthy = false;
   }
 

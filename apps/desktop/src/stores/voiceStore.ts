@@ -1,9 +1,11 @@
 import { create } from 'zustand';
+import { Device } from 'mediasoup-client';
+import type { Transport, Producer, Consumer, RtpCapabilities, IceParameters, IceCandidate, DtlsParameters, RtpParameters } from 'mediasoup-client/types';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression } from '../services/audioAnalyser';
 import { useSettingsStore } from './settingsStore';
 import { optimizeOpusSDP } from '../services/sdpUtils';
-import type { VoiceUser } from '@voxium/shared';
+import type { VoiceUser, TransportOptions } from '@voxium/shared';
 
 /** Debug log — stripped in production builds by Vite tree-shaking */
 const debugLog = import.meta.env.DEV
@@ -46,18 +48,21 @@ function persistVoicePrefs(prefs: VoicePrefs) {
 
 const initialVoicePrefs = loadPersistedVoicePrefs();
 
+// ─── DM P2P WebRTC configuration (unchanged) ────────────────────────────────
+
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 
-// Retry delay for ICE restart (exponential backoff cap)
 const ICE_RESTART_DELAY_MS = 3000;
 
 interface PeerConnection {
   pc: RTCPeerConnection;
   makingOffer: boolean;
 }
+
+// ─── State Interface ─────────────────────────────────────────────────────────
 
 interface VoiceState {
   // ─── Shared State ──────────────────────────────────────────────────
@@ -66,12 +71,21 @@ interface VoiceState {
   selfDeaf: boolean;
   localStream: MediaStream | null;
   latency: number | null;
+
+  // DM P2P peers (not used for server voice anymore)
   peers: Map<string, PeerConnection>;
   remoteAudios: Map<string, HTMLAudioElement>;
 
-  // ─── Server Voice State ────────────────────────────────────────────
+  // ─── Server Voice State (SFU) ──────────────────────────────────────
   activeChannelId: string | null;
   channelUsers: Map<string, VoiceUser[]>;
+
+  // mediasoup SFU state
+  msDevice: Device | null;
+  msSendTransport: Transport | null;
+  msRecvTransport: Transport | null;
+  msProducers: Map<string, Producer>;
+  msConsumers: Map<string, { consumer: Consumer; producerUserId: string }>;
 
   // ─── Screen Share State ──────────────────────────────────────────
   screenStream: MediaStream | null;
@@ -94,7 +108,7 @@ interface VoiceState {
   destroyPeer: (userId: string) => void;
   destroyAllPeers: () => void;
 
-  // ─── Server Voice Actions ──────────────────────────────────────────
+  // ─── Server Voice Actions (SFU) ────────────────────────────────────
   joinChannel: (channelId: string) => Promise<void>;
   leaveChannel: () => void;
   setChannelUsers: (channelId: string, users: VoiceUser[]) => void;
@@ -104,6 +118,23 @@ interface VoiceState {
   setUserSpeaking: (channelId: string, userId: string, speaking: boolean) => void;
   handleSignal: (from: string, signal: unknown) => void;
   createPeer: (targetUserId: string, initiator: boolean) => void;
+
+  // mediasoup SFU actions
+  handleTransportCreated: (data: {
+    routerRtpCapabilities: unknown;
+    sendTransport: TransportOptions;
+    recvTransport: TransportOptions;
+  }) => Promise<void>;
+  handleNewConsumer: (data: {
+    id: string;
+    producerId: string;
+    kind: 'audio' | 'video';
+    rtpParameters: unknown;
+    producerUserId: string;
+    appData?: Record<string, unknown>;
+  }) => Promise<void>;
+  handleProducerClosed: (data: { consumerId: string; producerUserId: string }) => void;
+  cleanupSFU: () => void;
 
   // ─── Screen Share Actions ────────────────────────────────────────
   startScreenShare: () => Promise<void>;
@@ -128,11 +159,10 @@ interface VoiceState {
 let latencyInterval: ReturnType<typeof setInterval> | null = null;
 let pongHandler: ((timestamp: number) => void) | null = null;
 
-// Track RTCRtpSenders for screen share tracks so we can removeTrack later
-const currentScreenSenders = new Map<string, RTCRtpSender[]>();
-
-// Track ICE restart timers per peer so we can cancel them
+// Track ICE restart timers per DM peer
 const iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// ─── Audio element helpers ──────────────────────────────────────────────────
 
 function getAudioContainer(): HTMLElement {
   let container = document.getElementById('vox-audio-container');
@@ -146,14 +176,30 @@ function getAudioContainer(): HTMLElement {
 }
 
 function applyOutputDevice(audio: HTMLAudioElement, deviceId: string) {
-  if (deviceId && typeof (audio as any).setSinkId === 'function') {
-    (audio as any).setSinkId(deviceId).catch((err: Error) => {
+  // setSinkId is part of the Audio Output Devices API (not in all TS lib typings)
+  const audioWithSink = audio as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+  if (deviceId && typeof audioWithSink.setSinkId === 'function') {
+    audioWithSink.setSinkId(deviceId).catch((err: Error) => {
       console.warn('[Voice] Failed to set output device:', err);
     });
   }
 }
 
 type SignalEvent = 'voice:signal' | 'dm:voice:signal';
+
+/** Emit a signaling event on the socket with proper typing per event name. */
+function emitSignal(
+  socket: ReturnType<typeof getSocket>,
+  event: SignalEvent,
+  data: { to: string; signal: unknown },
+) {
+  if (!socket) return;
+  if (event === 'dm:voice:signal') {
+    socket.emit('dm:voice:signal', data);
+  } else {
+    socket.emit('voice:signal', data);
+  }
+}
 
 /** Acquire a mic audio stream using the user's preferred input device. */
 async function acquireAudioStream(): Promise<MediaStream | null> {
@@ -165,8 +211,6 @@ async function acquireAudioStream(): Promise<MediaStream | null> {
     const settings = useSettingsStore.getState();
     const audioConstraints: MediaTrackConstraints = {
       echoCancellation: true,
-      // Disable browser's built-in noise suppression when RNNoise ML is active
-      // to avoid double-processing which degrades audio quality
       noiseSuppression: !settings.enableNoiseSuppression,
       autoGainControl: true,
     };
@@ -180,9 +224,13 @@ async function acquireAudioStream(): Promise<MediaStream | null> {
   }
 }
 
+// ─── DM P2P Peer helpers (unchanged) ────────────────────────────────────────
+
+// Track RTCRtpSenders for screen share tracks (DM only — not used in SFU)
+const currentScreenSenders = new Map<string, RTCRtpSender[]>();
+
 /**
- * Shared RTCPeerConnection factory. Both server-voice `createPeer` and DM
- * `createDMPeer` delegate here — only the signal event name and log prefix differ.
+ * Shared RTCPeerConnection factory for DM voice only.
  */
 function createPeerInternal(
   signalEvent: SignalEvent,
@@ -192,8 +240,7 @@ function createPeerInternal(
   stateAccessors: { get: () => VoiceState; set: (partial: Partial<VoiceState>) => void },
 ) {
   const { get: getState, set: setState } = stateAccessors;
-  const { localStream, peers, selfDeaf } = getState();
-  const outputDeviceId = useSettingsStore.getState().audioOutputDeviceId;
+  const { localStream, peers } = getState();
 
   if (peers.has(targetUserId)) {
     getState().destroyPeer(targetUserId);
@@ -207,8 +254,6 @@ function createPeerInternal(
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const peerConn: PeerConnection = { pc, makingOffer: false };
 
-  // Prefer the noise-gated stream (filters background noise via gain node)
-  // Fall back to the raw mic stream if the gate isn't active yet
   const audioStream = getGatedStream() || localStream;
   if (audioStream) {
     audioStream.getAudioTracks().forEach((track) => {
@@ -216,23 +261,10 @@ function createPeerInternal(
     });
   }
 
-  // Add screen share tracks if we're currently sharing
-  const { isScreenSharing, screenStream } = getState();
-  if (isScreenSharing && screenStream) {
-    const senders: RTCRtpSender[] = [];
-    screenStream.getTracks().forEach((track) => {
-      const sender = pc.addTrack(track, screenStream);
-      senders.push(sender);
-    });
-    currentScreenSenders.set(targetUserId, senders);
-  }
-
-  // onnegotiationneeded: triggers when addTrack/removeTrack changes the session
-  // Skip if this is the initial setup (initiator will create offer below)
   let initialSetupDone = false;
   pc.onnegotiationneeded = async () => {
-    if (!initialSetupDone) return; // skip initial negotiation, handled by initiator block below
-    if (pc.signalingState !== 'stable') return; // already processing a remote offer — skip
+    if (!initialSetupDone) return;
+    if (pc.signalingState !== 'stable') return;
     try {
       peerConn.makingOffer = true;
       const offer = await pc.createOffer();
@@ -241,7 +273,7 @@ function createPeerInternal(
       if (pc.localDescription) {
         const s = getSocket();
         if (s) {
-          s.emit(signalEvent as any, {
+          emitSignal(s, signalEvent, {
             to: targetUserId,
             signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
           });
@@ -256,7 +288,7 @@ function createPeerInternal(
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      socket.emit(signalEvent as any, {
+      emitSignal(socket, signalEvent, {
         to: targetUserId,
         signal: { type: 'ice-candidate', candidate: event.candidate.toJSON() },
       });
@@ -283,7 +315,7 @@ function createPeerInternal(
           .then(() => {
             const s = getSocket();
             if (s && pc.localDescription) {
-              s.emit(signalEvent as any, {
+              emitSignal(s, signalEvent, {
                 to: targetUserId,
                 signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
               });
@@ -308,14 +340,11 @@ function createPeerInternal(
 
   pc.ontrack = (event) => {
     debugLog(`${logPrefix} Got remote track from ${targetUserId}:`, event.track.kind);
-    // Defensive: some WebRTC implementations may not provide streams[0]
     const remoteStream = event.streams[0] || new MediaStream([event.track]);
 
-    // Read fresh state instead of using stale closure values
     const currentDeaf = getState().selfDeaf;
     const currentOutputDevice = useSettingsStore.getState().audioOutputDeviceId;
 
-    // Video track = screen share stream
     if (event.track.kind === 'video') {
       debugLog(`${logPrefix} Got screen share video track from ${targetUserId}`);
       setState({ remoteScreenStream: remoteStream });
@@ -325,7 +354,6 @@ function createPeerInternal(
         setState({ remoteScreenStream: null });
       };
 
-      // Check if the screen share stream also has audio tracks (system audio from getDisplayMedia)
       const screenAudioTracks = remoteStream.getAudioTracks();
       if (screenAudioTracks.length > 0) {
         const container = getAudioContainer();
@@ -399,7 +427,7 @@ function createPeerInternal(
       .then(() => {
         if (pc.localDescription) {
           debugLog(`${logPrefix} Sending offer to ${targetUserId}`);
-          socket.emit(signalEvent as any, {
+          emitSignal(socket, signalEvent, {
             to: targetUserId,
             signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
           });
@@ -413,8 +441,7 @@ function createPeerInternal(
 }
 
 /**
- * Shared signal handler. Both `handleSignal` and `handleDMSignal` delegate
- * here — only the signal event name and peer-creation function differ.
+ * Shared signal handler for DM voice P2P.
  */
 function handleSignalInternal(
   signalEvent: SignalEvent,
@@ -449,13 +476,7 @@ function handleSignalInternal(
   const { pc } = peerConn;
 
   if (data.type === 'offer') {
-    // ── Perfect negotiation: detect offer collision ──────────────────
-    // Collision = we're currently making our own offer OR we already have
-    // a local offer set (signaling state is not stable).
     const offerCollision = peerConn.makingOffer || pc.signalingState !== 'stable';
-
-    // The "polite" peer yields on collision; "impolite" ignores the remote offer.
-    // Use lexicographic userId comparison to assign stable roles.
     const isPolite = (localUserId ?? '') < from;
 
     if (offerCollision && !isPolite) {
@@ -463,8 +484,6 @@ function handleSignalInternal(
       return;
     }
 
-    // Polite peer (or no collision): accept the incoming offer.
-    // If we had a pending local offer, rollback first.
     const acceptOffer = offerCollision
       ? pc.setLocalDescription({ type: 'rollback' })
           .then(() => pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp })))
@@ -480,7 +499,7 @@ function handleSignalInternal(
         const socket = getSocket();
         if (socket && pc.localDescription) {
           debugLog(`${logPrefix} Sending answer to ${from}`);
-          socket.emit(signalEvent as any, {
+          emitSignal(socket, signalEvent, {
             to: from,
             signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
           });
@@ -488,7 +507,6 @@ function handleSignalInternal(
       })
       .catch((err) => console.error(`${logPrefix} Error handling offer from ${from}:`, err));
   } else if (data.type === 'answer') {
-    // Only accept an answer if we're actually waiting for one
     if (pc.signalingState !== 'have-local-offer') {
       debugLog(`${logPrefix} Ignoring stale answer from ${from} (state: ${pc.signalingState})`);
       return;
@@ -505,6 +523,8 @@ function handleSignalInternal(
   }
 }
 
+// ─── Store ──────────────────────────────────────────────────────────────────
+
 export const useVoiceStore = create<VoiceState>((set, get) => ({
   localUserId: null,
   activeChannelId: null,
@@ -515,6 +535,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   channelUsers: new Map(),
   peers: new Map(),
   remoteAudios: new Map(),
+
+  // mediasoup SFU state
+  msDevice: null,
+  msSendTransport: null,
+  msRecvTransport: null,
+  msProducers: new Map(),
+  msConsumers: new Map(),
 
   // Screen share state
   screenStream: null,
@@ -529,6 +556,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   incomingCall: null,
 
   setLocalUserId: (userId: string) => set({ localUserId: userId }),
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SERVER VOICE (SFU)
+  // ═══════════════════════════════════════════════════════════════════════════
 
   joinChannel: async (channelId: string) => {
     const socket = getSocket();
@@ -553,28 +584,22 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      // Always start the noise gate pipeline so the gated stream is available
-      // for peer connections (even when muted, the gate stays closed = silence)
       startSpeakingDetection(stream);
 
       if (isPTT) {
-        // PTT mode: always start with tracks disabled; the PTT key enables them
         stream.getAudioTracks().forEach((track) => { track.enabled = false; });
       } else {
-        // VAD mode: apply persisted mute state
         if (selfMute) {
           stream.getAudioTracks().forEach((track) => { track.enabled = false; });
         }
       }
     }
 
-    // If no stream available, force mute
     const effectiveMute = stream ? selfMute : true;
-    // In PTT mode, always tell the server we start muted (PTT key will unmute)
     const serverMute = isPTT ? true : effectiveMute;
     set({ activeChannelId: channelId, localStream: stream, selfMute: effectiveMute });
 
-    // Send mute/deaf state to server on join
+    // Emit voice:join — server will respond with voice:transport_created
     socket.emit('voice:join', channelId, { selfMute: serverMute, selfDeaf });
 
     get().startLatencyMeasurement();
@@ -592,7 +617,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     get().stopLatencyMeasurement();
     stopSpeakingDetection();
 
-    // Immediately remove local user from channelUsers (don't wait for server event)
+    // Immediately remove local user from channelUsers
     if (activeChannelId && localUserId) {
       get().removeUserFromChannel(activeChannelId, localUserId);
     }
@@ -601,7 +626,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       localStream.getTracks().forEach((track) => track.stop());
     }
 
-    get().destroyAllPeers();
+    // Clean up SFU resources
+    get().cleanupSFU();
 
     if (socket) {
       socket.emit('voice:leave');
@@ -618,34 +644,373 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     });
   },
 
+  // ── mediasoup SFU handlers ─────────────────────────────────────────────
+
+  handleTransportCreated: async (data) => {
+    const { localStream, activeChannelId, selfMute } = get();
+    if (!activeChannelId) return;
+
+    const socket = getSocket();
+    if (!socket) return;
+
+    try {
+      // 1. Create and load Device
+      const device = new Device();
+      await device.load({ routerRtpCapabilities: data.routerRtpCapabilities as RtpCapabilities });
+
+      // Bail if user left during async load
+      if (!get().activeChannelId) { return; }
+
+      // 2. Create send transport
+      const sendTransport = device.createSendTransport({
+        id: data.sendTransport.id,
+        iceParameters: data.sendTransport.iceParameters as IceParameters,
+        iceCandidates: data.sendTransport.iceCandidates as IceCandidate[],
+        dtlsParameters: data.sendTransport.dtlsParameters as DtlsParameters,
+      });
+
+      sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
+        const s = getSocket();
+        if (s) {
+          s.emit('voice:transport:connect', { transportId: sendTransport.id, dtlsParameters });
+          // mediasoup-client calls connect before produce, we ACK immediately
+          // (the server connect is fast and fire-and-forget from client perspective)
+          callback();
+        } else {
+          errback(new Error('Socket not available'));
+        }
+      });
+
+      sendTransport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
+        const s = getSocket();
+        if (s) {
+          s.emit('voice:produce', { kind, rtpParameters, appData }, (response: { producerId: string }) => {
+            callback({ id: response.producerId });
+          });
+        } else {
+          errback(new Error('Socket not available'));
+        }
+      });
+
+      // 3. Create recv transport
+      const recvTransport = device.createRecvTransport({
+        id: data.recvTransport.id,
+        iceParameters: data.recvTransport.iceParameters as IceParameters,
+        iceCandidates: data.recvTransport.iceCandidates as IceCandidate[],
+        dtlsParameters: data.recvTransport.dtlsParameters as DtlsParameters,
+      });
+
+      recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
+        const s = getSocket();
+        if (s) {
+          s.emit('voice:transport:connect', { transportId: recvTransport.id, dtlsParameters });
+          callback();
+        } else {
+          errback(new Error('Socket not available'));
+        }
+      });
+
+      set({
+        msDevice: device,
+        msSendTransport: sendTransport,
+        msRecvTransport: recvTransport,
+      });
+
+      // 4. Tell the server our RTP capabilities so it can create consumers
+      socket.emit('voice:rtp_capabilities', { rtpCapabilities: device.rtpCapabilities });
+
+      // 5. Produce audio if we have a mic stream
+      // Re-check: user may have left during transport setup
+      if (!get().activeChannelId) { return; }
+      const audioTrack = (getGatedStream() || localStream)?.getAudioTracks()[0];
+      if (audioTrack && device.canProduce('audio')) {
+        const producer = await sendTransport.produce({
+          track: audioTrack,
+          codecOptions: {
+            opusStereo: false,
+            opusDtx: true,
+            opusFec: true,
+            opusMaxPlaybackRate: 48000,
+          },
+          appData: { type: 'audio' },
+        });
+
+        const newProducers = new Map(get().msProducers);
+        newProducers.set(producer.id, producer);
+        set({ msProducers: newProducers });
+
+        // If muted, pause the producer client-side too
+        if (selfMute) {
+          producer.pause();
+        }
+
+        debugLog('[Voice SFU] Audio producer created:', producer.id);
+      }
+    } catch (err) {
+      console.error('[Voice SFU] Failed to set up mediasoup:', err);
+    }
+  },
+
+  handleNewConsumer: async (data) => {
+    const { msRecvTransport, selfDeaf, activeChannelId } = get();
+    if (!msRecvTransport || !activeChannelId) return;
+
+    try {
+      const consumer = await msRecvTransport.consume({
+        id: data.id,
+        producerId: data.producerId,
+        kind: data.kind,
+        rtpParameters: data.rtpParameters as RtpParameters,
+      });
+
+      const newConsumers = new Map(get().msConsumers);
+      newConsumers.set(consumer.id, { consumer, producerUserId: data.producerUserId });
+      set({ msConsumers: newConsumers });
+
+      const outputDeviceId = useSettingsStore.getState().audioOutputDeviceId;
+
+      if (data.kind === 'audio') {
+        // Create audio element for this consumer
+        const container = getAudioContainer();
+        const audio = document.createElement('audio');
+        audio.id = `vox-sfu-audio-${data.producerUserId}`;
+        audio.autoplay = true;
+        audio.muted = selfDeaf;
+        audio.srcObject = new MediaStream([consumer.track]);
+        container.appendChild(audio);
+        applyOutputDevice(audio, outputDeviceId);
+
+        const newAudios = new Map(get().remoteAudios);
+        newAudios.set(data.producerUserId, audio);
+        set({ remoteAudios: newAudios });
+
+        audio.play().catch((err) =>
+          console.warn('[Voice SFU] Audio autoplay blocked for', data.producerUserId, err)
+        );
+      } else if (data.kind === 'video') {
+        // Video consumer = screen share
+        const appType = data.appData?.type;
+        if (appType === 'screen-audio') {
+          // Screen share audio track
+          const container = getAudioContainer();
+          const screenAudioKey = `${data.producerUserId}-screen`;
+          const audio = document.createElement('audio');
+          audio.id = `vox-sfu-audio-${screenAudioKey}`;
+          audio.autoplay = true;
+          audio.muted = selfDeaf;
+          audio.srcObject = new MediaStream([consumer.track]);
+          container.appendChild(audio);
+          applyOutputDevice(audio, outputDeviceId);
+
+          const newAudios = new Map(get().remoteAudios);
+          newAudios.set(screenAudioKey, audio);
+          set({ remoteAudios: newAudios });
+
+          audio.play().catch((err) =>
+            console.warn('[Voice SFU] Screen audio autoplay blocked:', err)
+          );
+        } else {
+          // Screen share video track
+          const stream = new MediaStream([consumer.track]);
+          set({ remoteScreenStream: stream });
+
+          consumer.track.onended = () => {
+            set({ remoteScreenStream: null });
+          };
+        }
+      }
+
+      // Resume the consumer on the server
+      const socket = getSocket();
+      if (socket) {
+        socket.emit('voice:consumer:resume', { consumerId: consumer.id });
+      }
+
+      debugLog('[Voice SFU] Consumer created:', consumer.id, data.kind, 'from', data.producerUserId);
+    } catch (err) {
+      console.error('[Voice SFU] Failed to consume:', err);
+    }
+  },
+
+  handleProducerClosed: (data) => {
+    const { msConsumers, remoteAudios } = get();
+    const entry = msConsumers.get(data.consumerId);
+    if (!entry) return;
+
+    entry.consumer.close();
+
+    const newConsumers = new Map(msConsumers);
+    newConsumers.delete(data.consumerId);
+    set({ msConsumers: newConsumers });
+
+    // Clean up audio element
+    const audio = remoteAudios.get(data.producerUserId);
+    if (audio) {
+      audio.pause();
+      audio.srcObject = null;
+      audio.remove();
+      const newAudios = new Map(remoteAudios);
+      newAudios.delete(data.producerUserId);
+      set({ remoteAudios: newAudios });
+    }
+
+    // Clean up screen audio if any
+    const screenAudio = remoteAudios.get(`${data.producerUserId}-screen`);
+    if (screenAudio) {
+      screenAudio.pause();
+      screenAudio.srcObject = null;
+      screenAudio.remove();
+      const newAudios = new Map(get().remoteAudios);
+      newAudios.delete(`${data.producerUserId}-screen`);
+      set({ remoteAudios: newAudios });
+    }
+
+    // Clear remote screen stream if this producer was the screen sharer
+    if (get().screenSharingUserId === data.producerUserId) {
+      set({ remoteScreenStream: null });
+    }
+
+    debugLog('[Voice SFU] Producer closed, consumer removed:', data.consumerId);
+  },
+
+  cleanupSFU: () => {
+    const { msProducers, msConsumers, msSendTransport, msRecvTransport, remoteAudios } = get();
+
+    // Close all producers
+    for (const producer of msProducers.values()) {
+      if (!producer.closed) producer.close();
+    }
+
+    // Close all consumers
+    for (const { consumer } of msConsumers.values()) {
+      if (!consumer.closed) consumer.close();
+    }
+
+    // Close transports
+    if (msSendTransport && !msSendTransport.closed) msSendTransport.close();
+    if (msRecvTransport && !msRecvTransport.closed) msRecvTransport.close();
+
+    // Clean up audio elements
+    remoteAudios.forEach((audio) => {
+      audio.pause();
+      audio.srcObject = null;
+      audio.remove();
+    });
+    const container = document.getElementById('vox-audio-container');
+    if (container) container.innerHTML = '';
+
+    set({
+      msDevice: null,
+      msSendTransport: null,
+      msRecvTransport: null,
+      msProducers: new Map(),
+      msConsumers: new Map(),
+      remoteAudios: new Map(),
+      remoteScreenStream: null,
+    });
+  },
+
+  // ── Channel user state (unchanged) ─────────────────────────────────────
+
+  setChannelUsers: (channelId: string, users: VoiceUser[]) => {
+    debugLog('[Voice] setChannelUsers:', channelId, users.length, 'users');
+    set((state) => {
+      const newMap = new Map(state.channelUsers);
+      newMap.set(channelId, users);
+      return { channelUsers: newMap };
+    });
+    // No peer creation needed — SFU handles media routing via consumers
+  },
+
+  addUserToChannel: (channelId: string, user: VoiceUser) => {
+    debugLog('[Voice] addUserToChannel:', channelId, user.displayName);
+
+    const existing = get().channelUsers.get(channelId) || [];
+    if (existing.some((u) => u.id === user.id)) return;
+
+    set((state) => {
+      const newMap = new Map(state.channelUsers);
+      const current = newMap.get(channelId) || [];
+      if (current.some((u) => u.id === user.id)) return state;
+      newMap.set(channelId, [...current, user]);
+      return { channelUsers: newMap };
+    });
+    // No peer creation needed — SFU creates consumers server-side
+  },
+
+  removeUserFromChannel: (channelId: string, userId: string) => {
+    debugLog('[Voice] removeUserFromChannel:', channelId, userId);
+
+    set((state) => {
+      const newMap = new Map(state.channelUsers);
+      const existing = newMap.get(channelId) || [];
+      const filtered = existing.filter((u) => u.id !== userId);
+      if (filtered.length === 0) {
+        newMap.delete(channelId);
+      } else {
+        newMap.set(channelId, filtered);
+      }
+      return { channelUsers: newMap };
+    });
+  },
+
+  updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean) => {
+    set((state) => {
+      const newMap = new Map(state.channelUsers);
+      const existing = newMap.get(channelId) || [];
+      newMap.set(channelId, existing.map((u) =>
+        u.id === userId ? { ...u, selfMute, selfDeaf } : u
+      ));
+      return { channelUsers: newMap };
+    });
+  },
+
+  setUserSpeaking: (channelId: string, userId: string, speaking: boolean) => {
+    set((state) => {
+      const newMap = new Map(state.channelUsers);
+      const existing = newMap.get(channelId) || [];
+      newMap.set(channelId, existing.map((u) =>
+        u.id === userId ? { ...u, speaking } : u
+      ));
+      return { channelUsers: newMap };
+    });
+  },
+
+  // These are kept for backward compat but are no-ops for server voice now
+  handleSignal: () => {},
+  createPeer: () => {},
+
   toggleMute: () => {
     const socket = getSocket();
-    const { selfMute, localStream } = get();
+    const { selfMute, localStream, msProducers, activeChannelId, dmCallConversationId } = get();
     const newMute = !selfMute;
     const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
 
     if (localStream) {
       if (isPTT) {
-        // PTT mode: only handle muting (disable tracks).
-        // When unmuting, do NOT enable tracks — the PTT key press handles that.
         if (newMute) {
           localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
         }
       } else {
-        // VAD mode: disable/enable the raw mic tracks.
-        // The noise gate pipeline stays running — when tracks are disabled,
-        // the AudioContext source outputs silence, so the gated stream
-        // (attached to peer connections) also goes silent.
         localStream.getAudioTracks().forEach((track) => {
           track.enabled = !newMute;
         });
       }
     }
 
+    // Pause/resume mediasoup audio producer (server voice)
+    if (activeChannelId) {
+      for (const producer of msProducers.values()) {
+        if (producer.kind === 'audio') {
+          if (newMute) { producer.pause(); } else { producer.resume(); }
+        }
+      }
+    }
+
     if (socket) {
-      if (get().activeChannelId) {
+      if (activeChannelId) {
         socket.emit('voice:mute', newMute);
-      } else if (get().dmCallConversationId) {
+      } else if (dmCallConversationId) {
         socket.emit('dm:voice:mute', newMute);
       }
     }
@@ -687,7 +1052,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     };
     socket.on('pong:latency', pongHandler);
 
-    // Send initial ping immediately
     socket.emit('ping:latency', Date.now());
 
     latencyInterval = setInterval(() => {
@@ -709,117 +1073,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({ latency: null });
   },
 
-  setChannelUsers: (channelId: string, users: VoiceUser[]) => {
-    debugLog('[Voice] setChannelUsers:', channelId, users.length, 'users');
-    set((state) => {
-      const newMap = new Map(state.channelUsers);
-      newMap.set(channelId, users);
-      return { channelUsers: newMap };
-    });
-
-    // Create peers for existing users when WE are in this channel
-    // (voice:channel_users arrives when we join — we must initiate peers,
-    // not just wait for the other side's voice:user_joined handler)
-    setTimeout(() => {
-      const { activeChannelId, localStream, localUserId, peers } = get();
-      if (activeChannelId !== channelId || !localStream) return;
-      for (const user of users) {
-        if (user.id !== localUserId && !peers.has(user.id)) {
-          debugLog('[Voice] Creating peer to existing user', user.id);
-          get().createPeer(user.id, true);
-        }
-      }
-    }, 0);
-  },
-
-  addUserToChannel: (channelId: string, user: VoiceUser) => {
-    debugLog('[Voice] addUserToChannel:', channelId, user.displayName);
-
-    // Dedup: check BEFORE the set call returns
-    const existing = get().channelUsers.get(channelId) || [];
-    if (existing.some((u) => u.id === user.id)) return;
-
-    set((state) => {
-      const newMap = new Map(state.channelUsers);
-      const current = newMap.get(channelId) || [];
-      if (current.some((u) => u.id === user.id)) return state;
-      newMap.set(channelId, [...current, user]);
-      return { channelUsers: newMap };
-    });
-
-    // If WE are in this voice channel, create a peer connection to the new user
-    // Use setTimeout(0) to ensure the state has settled before reading
-    setTimeout(() => {
-      const { activeChannelId, localStream, localUserId, peers } = get();
-      if (activeChannelId === channelId && localStream && user.id !== localUserId && !peers.has(user.id)) {
-        debugLog('[Voice] Creating initiator peer to', user.id);
-        get().createPeer(user.id, true);
-      }
-    }, 0);
-  },
-
-  removeUserFromChannel: (channelId: string, userId: string) => {
-    debugLog('[Voice] removeUserFromChannel:', channelId, userId);
-
-    // Cancel any pending ICE restart for this peer
-    const restartTimer = iceRestartTimers.get(userId);
-    if (restartTimer) {
-      clearTimeout(restartTimer);
-      iceRestartTimers.delete(userId);
-    }
-
-    const { activeChannelId } = get();
-    if (activeChannelId === channelId) {
-      get().destroyPeer(userId);
-    }
-
-    set((state) => {
-      const newMap = new Map(state.channelUsers);
-      const existing = newMap.get(channelId) || [];
-      const filtered = existing.filter((u) => u.id !== userId);
-      if (filtered.length === 0) {
-        newMap.delete(channelId);
-      } else {
-        newMap.set(channelId, filtered);
-      }
-      return { channelUsers: newMap };
-    });
-  },
-
-  updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean) => {
-    set((state) => {
-      const newMap = new Map(state.channelUsers);
-      const existing = newMap.get(channelId) || [];
-      newMap.set(channelId, existing.map((u) =>
-        u.id === userId ? { ...u, selfMute, selfDeaf } : u
-      ));
-      return { channelUsers: newMap };
-    });
-  },
-
-  setUserSpeaking: (channelId: string, userId: string, speaking: boolean) => {
-    set((state) => {
-      const newMap = new Map(state.channelUsers);
-      const existing = newMap.get(channelId) || [];
-      newMap.set(channelId, existing.map((u) =>
-        u.id === userId ? { ...u, speaking } : u
-      ));
-      return { channelUsers: newMap };
-    });
-  },
-
-  handleSignal: (from: string, signal: unknown) => {
-    handleSignalInternal('voice:signal', '[Voice]', get().createPeer, from, signal, { get });
-  },
-
-  createPeer: (targetUserId: string, initiator: boolean) => {
-    createPeerInternal('voice:signal', '[Voice]', targetUserId, initiator, { get, set });
-  },
-
   destroyPeer: (userId: string) => {
     const { peers, remoteAudios } = get();
 
-    // Cancel any pending ICE restart
     const restartTimer = iceRestartTimers.get(userId);
     if (restartTimer) {
       clearTimeout(restartTimer);
@@ -846,7 +1102,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       audio.remove();
       newAudios.delete(userId);
     }
-    // Clean up screen share audio element
     const screenAudio = remoteAudios.get(`${userId}-screen`);
     if (screenAudio) {
       screenAudio.pause();
@@ -856,10 +1111,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
     set({ remoteAudios: newAudios });
 
-    // Clean up screen senders for this peer
     currentScreenSenders.delete(userId);
 
-    // Clear remote screen stream if this user was the sharer
     if (get().screenSharingUserId === userId) {
       set({ remoteScreenStream: null });
     }
@@ -868,7 +1121,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   destroyAllPeers: () => {
     const { peers, remoteAudios } = get();
 
-    // Cancel all pending ICE restart timers
     iceRestartTimers.forEach((timer) => clearTimeout(timer));
     iceRestartTimers.clear();
 
@@ -890,11 +1142,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({ peers: new Map(), remoteAudios: new Map(), remoteScreenStream: null });
   },
 
-  // ─── Screen Share Methods ─────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SCREEN SHARE (via SFU)
+  // ═══════════════════════════════════════════════════════════════════════════
 
   startScreenShare: async () => {
     const socket = getSocket();
-    if (!socket || !get().activeChannelId) return;
+    const { activeChannelId, msSendTransport, msDevice } = get();
+    if (!socket || !activeChannelId || !msSendTransport || !msDevice) return;
 
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -902,23 +1157,35 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         audio: true,
       });
 
-      // Add screen tracks to all existing peer connections
-      const { peers } = get();
-      peers.forEach((peerConn, peerId) => {
-        const senders: RTCRtpSender[] = [];
-        stream.getTracks().forEach((track) => {
-          const sender = peerConn.pc.addTrack(track, stream);
-          senders.push(sender);
+      // Produce video track via SFU
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack && msDevice.canProduce('video')) {
+        const videoProducer = await msSendTransport.produce({
+          track: videoTrack,
+          appData: { type: 'screen-video' },
         });
-        currentScreenSenders.set(peerId, senders);
-      });
 
-      // Auto-stop when user clicks browser's "Stop sharing" button
-      stream.getVideoTracks().forEach((track) => {
-        track.onended = () => {
+        const newProducers = new Map(get().msProducers);
+        newProducers.set(videoProducer.id, videoProducer);
+        set({ msProducers: newProducers });
+
+        videoTrack.onended = () => {
           get().stopScreenShare();
         };
-      });
+      }
+
+      // Produce audio track if available (system audio from getDisplayMedia)
+      const audioTrack = stream.getAudioTracks()[0];
+      if (audioTrack) {
+        const audioProducer = await msSendTransport.produce({
+          track: audioTrack,
+          appData: { type: 'screen-audio' },
+        });
+
+        const newProducers = new Map(get().msProducers);
+        newProducers.set(audioProducer.id, audioProducer);
+        set({ msProducers: newProducers });
+      }
 
       socket.emit('voice:screen_share:start');
 
@@ -933,24 +1200,19 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   stopScreenShare: () => {
     const socket = getSocket();
-    const { screenStream, peers } = get();
+    const { screenStream, msProducers } = get();
 
-    // Remove screen tracks from all peer connections
-    peers.forEach((peerConn, peerId) => {
-      const senders = currentScreenSenders.get(peerId);
-      if (senders) {
-        senders.forEach((sender) => {
-          try {
-            peerConn.pc.removeTrack(sender);
-          } catch {
-            // ignore if already removed
-          }
-        });
+    // Close screen-related producers
+    const newProducers = new Map(msProducers);
+    for (const [id, producer] of msProducers.entries()) {
+      const appType = (producer.appData as Record<string, unknown>)?.type;
+      if (appType === 'screen-video' || appType === 'screen-audio') {
+        if (!producer.closed) producer.close();
+        newProducers.delete(id);
       }
-      currentScreenSenders.delete(peerId);
-    });
+    }
+    set({ msProducers: newProducers });
 
-    // Stop all screen stream tracks
     if (screenStream) {
       screenStream.getTracks().forEach((track) => track.stop());
     }
@@ -978,7 +1240,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({ screenShareViewMode: mode });
   },
 
-  // ─── DM Call Methods ──────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DM CALLS (P2P — unchanged)
+  // ═══════════════════════════════════════════════════════════════════════════
 
   setIncomingCall: (data) => set({ incomingCall: data }),
 
@@ -1006,7 +1270,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      // Always start the noise gate pipeline for the gated stream
       startSpeakingDetection(stream, 'dm');
 
       if (isPTT) {
@@ -1079,7 +1342,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     set({ dmCallUsers: [...dmCallUsers, user] });
 
-    // Create peer connection to new user if we're in this DM call
     setTimeout(() => {
       const state = get();
       if (state.dmCallConversationId && state.localStream && user.id !== state.localUserId && !state.peers.has(user.id)) {
@@ -1128,6 +1390,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 }));
 
+// ─── Subscriptions ──────────────────────────────────────────────────────────
+
 // Subscribe to output device changes and update all existing remote audio elements
 useSettingsStore.subscribe((state, prevState) => {
   if (state.audioOutputDeviceId !== prevState.audioOutputDeviceId) {
@@ -1142,40 +1406,60 @@ useSettingsStore.subscribe((state, prevState) => {
 useSettingsStore.subscribe((state, prevState) => {
   if (state.voiceMode === prevState.voiceMode) return;
 
-  const { activeChannelId, dmCallConversationId, localStream, selfMute } = useVoiceStore.getState();
+  const { activeChannelId, dmCallConversationId, localStream, selfMute, msProducers } = useVoiceStore.getState();
   if ((!activeChannelId && !dmCallConversationId) || !localStream) return;
 
   const socket = getSocket();
-  const muteEvent = activeChannelId ? 'voice:mute' : 'dm:voice:mute';
 
   if (state.voiceMode === 'push_to_talk') {
     localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
-    if (socket) socket.emit(muteEvent as any, true);
+    if (socket) {
+      if (activeChannelId) socket.emit('voice:mute', true);
+      else socket.emit('dm:voice:mute', true);
+    }
+    // Pause SFU audio producer
+    if (activeChannelId) {
+      for (const producer of msProducers.values()) {
+        if (producer.kind === 'audio') producer.pause();
+      }
+    }
   } else {
     if (!selfMute) {
       localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
-      if (socket) socket.emit(muteEvent as any, false);
+      if (socket) {
+        if (activeChannelId) socket.emit('voice:mute', false);
+        else socket.emit('dm:voice:mute', false);
+      }
+      // Resume SFU audio producer
+      if (activeChannelId) {
+        for (const producer of msProducers.values()) {
+          if (producer.kind === 'audio') producer.resume();
+        }
+      }
     }
   }
 });
 
-// On socket reconnect while in a voice channel: re-join and re-establish peers
+// On socket reconnect while in a voice channel: re-join and re-establish
 onSocketReconnect(async () => {
   const { activeChannelId, dmCallConversationId } = useVoiceStore.getState();
 
   const socket = getSocket();
   if (!socket) return;
 
-  // Nothing to re-join
   if (!activeChannelId && !dmCallConversationId) return;
 
-  // Stop screen sharing (stale peers can't receive tracks)
+  // Clean up SFU resources on reconnect (server voice)
+  if (activeChannelId) {
+    useVoiceStore.getState().cleanupSFU();
+  }
+
+  // Stop screen sharing (stale state)
   if (useVoiceStore.getState().isScreenSharing) {
     const { screenStream } = useVoiceStore.getState();
     if (screenStream) {
       screenStream.getTracks().forEach((track) => track.stop());
     }
-    currentScreenSenders.clear();
     useVoiceStore.setState({
       screenStream: null,
       isScreenSharing: false,
@@ -1184,8 +1468,10 @@ onSocketReconnect(async () => {
     });
   }
 
-  // Destroy stale peers (they used the old socket)
-  useVoiceStore.getState().destroyAllPeers();
+  // For DM calls, destroy stale P2P peers
+  if (dmCallConversationId) {
+    useVoiceStore.getState().destroyAllPeers();
+  }
 
   // Re-acquire microphone if the old stream's tracks ended during disconnect
   let { localStream } = useVoiceStore.getState();
@@ -1210,7 +1496,8 @@ onSocketReconnect(async () => {
   }
 
   if (activeChannelId) {
-    debugLog('[Voice] Socket reconnected — re-joining voice channel', activeChannelId);
+    debugLog('[Voice SFU] Socket reconnected — re-joining voice channel', activeChannelId);
+    // Re-emit voice:join — server will send voice:transport_created to re-establish SFU
     socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
   } else if (dmCallConversationId) {
     debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
@@ -1220,8 +1507,7 @@ onSocketReconnect(async () => {
   // Re-start latency measurement with new socket
   useVoiceStore.getState().startLatencyMeasurement();
 
-  // Always restart the noise gate pipeline so the gated stream is available
-  // for new peer connections after reconnect
+  // Restart the noise gate pipeline
   if (localStream) {
     setNoiseGateThreshold(settings.noiseGateThreshold);
     setNoiseSuppression(settings.enableNoiseSuppression);

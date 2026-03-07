@@ -2,11 +2,12 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateCategoryName, LIMITS, WS_EVENTS } from '@voxium/shared';
+import { validateCategoryName, WS_EVENTS } from '@voxium/shared';
 import type { Category, Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitCategoryManage } from '../middleware/rateLimiter';
+import { getEffectiveLimits } from '../utils/serverLimits';
 
 export const categoryRouter = Router({ mergeParams: true });
 
@@ -77,9 +78,12 @@ categoryRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId
     const nameErr = validateCategoryName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
-    const categoryCount = await prisma.category.count({ where: { serverId } });
-    if (categoryCount >= LIMITS.MAX_CATEGORIES_PER_SERVER) {
-      throw new BadRequestError(`Server can have at most ${LIMITS.MAX_CATEGORIES_PER_SERVER} categories`);
+    const [categoryCount, limits] = await Promise.all([
+      prisma.category.count({ where: { serverId } }),
+      getEffectiveLimits(serverId),
+    ]);
+    if (categoryCount >= limits.maxCategoriesPerServer) {
+      throw new BadRequestError(`Server can have at most ${limits.maxCategoriesPerServer} categories`);
     }
 
     const category = await prisma.category.create({

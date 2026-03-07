@@ -73,7 +73,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 │           └─────────────────────────────┘                            │
 │                                                                       │
 │           ┌─────────────────────────────┐                            │
-│           │     SFU Media Server        │  ← mediasoup (future)     │
+│           │     SFU Media Server        │  ← mediasoup (active)     │
 │           │     (Voice/Video routing)   │                            │
 │           └─────────────────────────────┘                            │
 └───────────────────────────────────────────────────────────────────────┘
@@ -93,7 +93,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 | ORM | Prisma | 6.x |
 | Database | PostgreSQL | 16 |
 | Cache / Pub/Sub | Redis | 7 |
-| Voice (future) | mediasoup | 3.x |
+| Voice (SFU) | mediasoup | 3.x |
 | Auth | JWT (jsonwebtoken) | 9.x |
 | Validation | Zod + custom validators | — |
 | Password Hashing | bcryptjs | — |
@@ -447,6 +447,19 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 │ @@unique(user1Id,    │    user1Id < user2Id invariant
 │   user2Id)           │    for deduplication
 └──────────────────────┘
+
+┌──────────────────────┐    ┌──────────────────────┐
+│   GlobalConfig       │    │   ServerLimits        │
+│   (singleton)        │    │   (per-server)        │
+│                      │    │                       │
+│ id = "global" (PK)   │    │ serverId (PK,FK)      │
+│ maxChannelsPerServer │    │ maxChannelsPerServer?  │
+│ maxVoiceUsersPerCh.  │    │ maxVoiceUsersPerCh.?  │
+│ maxCategoriesPerSrv  │    │ maxCategoriesPerSrv?  │
+│ maxMembersPerServer  │    │ maxMembersPerServer?   │
+│ updatedAt            │    │ updatedAt              │
+└──────────────────────┘    └──────────────────────┘
+  Defaults: 20/12/12/0       Nullable = use global
 ```
 
 ### Key Indexes
@@ -577,27 +590,7 @@ Client                          Server
 
 ## Voice Architecture
 
-### Current Implementation (V0.1 - Mesh)
-
-```
-            ┌────────┐
-   ┌────────│ Server │────────┐
-   │        │(Signal)│        │
-   │        └───┬────┘        │
-   │            │             │
-┌──┴──┐    ┌───┴───┐    ┌────┴──┐
-│User A│<──>│User B │<──>│User C │
-│      │    │       │    │       │
-└──────┘    └───────┘    └───────┘
-  P2P WebRTC connections (mesh)
-```
-
-- Server acts as signaling relay only (ICE candidates, SDP offers/answers)
-- Peers connect directly via WebRTC
-- Works well for up to ~6-8 users per channel
-- State tracked in-memory on the server
-
-### Future Implementation (V0.4+ - SFU)
+### Current Implementation — mediasoup SFU
 
 ```
 ┌────────┐  ┌────────┐  ┌────────┐
@@ -614,22 +607,29 @@ Client                          Server
           └────────────┘
 ```
 
-- Each client sends one upstream to the SFU
-- SFU selectively forwards streams to recipients
-- Scales to 99+ users per channel
-- Supports simulcast for bandwidth adaptation
-- mediasoup workers distribute across CPU cores
+- Each client sends one upstream (Producer) to the SFU
+- SFU selectively forwards streams to recipients via Consumers
+- Each voice channel gets its own mediasoup Router (lazy-created, round-robin across Workers)
+- Each user gets 2 WebRTC transports (send + recv), each using one UDP port from shared range
+- Workers: 1 per CPU core (capped at 8), auto-restart on death
+- Configuration: `MEDIASOUP_LISTEN_IP`, `MEDIASOUP_ANNOUNCED_IP` (LAN IP), `MEDIASOUP_MIN_PORT`/`MAX_PORT`
+- Key files: `mediasoup/mediasoupManager.ts`, `mediasoup/mediasoupConfig.ts`, `websocket/voiceHandler.ts`
 
 ### Voice State Management
 
 Voice state is tracked per-channel in memory:
 
 ```typescript
-// Voice user state
+// Voice user state (includes mediasoup transports/producers/consumers)
 Map<channelId, Map<userId, {
   socketId: string;
   selfMute: boolean;
   selfDeaf: boolean;
+  sendTransport: WebRtcTransport | null;
+  recvTransport: WebRtcTransport | null;
+  producers: Map<string, Producer>;
+  consumers: Map<string, Consumer>;
+  rtpCapabilities: RtpCapabilities | null;
 }>>
 
 // Screen share state (one sharer per channel)
@@ -638,12 +638,21 @@ Map<channelId, userId>  // screenSharers
 
 For multi-node deployment, this will migrate to Redis with pub/sub for cross-node synchronization.
 
-### Screen Sharing (V0.9.6)
+### Resource Limits
+
+Server resource limits are enforced dynamically via `utils/serverLimits.ts`:
+- **Resolution order:** per-server override (`ServerLimits` table) > global config (`GlobalConfig` singleton) > hardcoded `LIMITS` constants
+- **Defaults:** maxChannelsPerServer=20, maxVoiceUsersPerChannel=12, maxCategoriesPerServer=12, maxMembersPerServer=0 (unlimited)
+- **Enforcement points:** channel creation, category creation, voice:join, invite join
+- **Admin API:** `GET/PUT /admin/limits/global`, `GET/PUT/DELETE /admin/limits/servers/:serverId`
+- **User API:** `GET /servers/:serverId/limits` (read-only, shown in ServerSettingsModal "Limits" tab)
+
+### Screen Sharing
 
 Screen sharing allows one user per voice channel to share their screen with all other participants using `getDisplayMedia` for capture:
 
 - **Capture:** Browser/WebView2 native `getDisplayMedia()` API (hardware-accelerated, supports video + optional system audio)
-- **Transport:** Video tracks added to existing WebRTC peer connections via `addTrack`/`removeTrack`, triggering `onnegotiationneeded` for SDP renegotiation
+- **Transport:** Video track produced as a mediasoup Producer with `appData: { type: 'screen' }`, consumed by all other channel users
 - **One sharer per channel:** Server enforces via `screenSharers` Map; second start request is silently dropped
 - **Late-joiner hydration:** `voice:join` handler emits `voice:screen_share:state` so users joining mid-share see the stream immediately
 - **Viewer modes:** Inline (replaces ChatArea) or floating (draggable/resizable portal)
@@ -844,11 +853,11 @@ apps/admin/
 │   │   └── adminStore.ts    # All admin state + actions (Zustand)
 │   ├── components/
 │   │   ├── AdminLayout.tsx         # Sidebar nav + content router
-│   │   ├── AdminDashboard.tsx      # Stats cards + live metrics + charts
+│   │   ├── AdminDashboard.tsx      # Stats cards + REST metrics + SFU stats + charts
 │   │   ├── AdminReports.tsx        # Moderation queue (pending/resolved/dismissed)
 │   │   ├── AdminSupportTickets.tsx # Support ticket queue + chat panel
 │   │   ├── AdminUserList.tsx       # Paginated user management
-│   │   ├── AdminServerList.tsx     # Paginated server management
+│   │   ├── AdminServerList.tsx     # Paginated server management + global/per-server resource limits
 │   │   ├── AdminBanList.tsx        # User bans + IP bans
 │   │   ├── AdminAnnouncements.tsx  # Global/targeted announcements
 │   │   ├── AdminStorage.tsx        # S3 storage stats + file browser
@@ -873,10 +882,17 @@ apps/admin/
 
 ### Admin Real-Time Events
 
-Socket.IO rooms for admin subscriptions:
-- `admin:metrics` — Live metrics (online users, voice channels, DM calls, messages/hour)
-- `admin:reports` — New report notifications → auto-refresh
-- `admin:support` — New ticket/message notifications → auto-refresh
+- **Dashboard metrics** — fetched via REST (`GET /admin/stats/live`, `GET /admin/stats/sfu`) with refresh buttons. SFU stats include per-worker transport counts, port utilization, producers/consumers.
+- `admin:reports` — Socket.IO subscription for new report notifications → auto-refresh
+- `admin:support` — Socket.IO subscription for new ticket/message notifications → auto-refresh
+
+### Admin Resource Limits
+
+Admins can control server resource allocation:
+- **Global limits** (`GET/PUT /admin/limits/global`) — defaults applied to all servers
+- **Per-server overrides** (`GET/PUT/DELETE /admin/limits/servers/:serverId`) — nullable fields override global (null = use global)
+- Resolution: server override > global config > hardcoded `LIMITS` constants
+- Managed in AdminServerList: collapsible global limits panel + per-server settings modal
 
 ---
 

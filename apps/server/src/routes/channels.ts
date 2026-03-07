@@ -2,10 +2,11 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateChannelName, LIMITS, WS_EVENTS, type Channel } from '@voxium/shared';
+import { validateChannelName, WS_EVENTS, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
+import { getEffectiveLimits } from '../utils/serverLimits';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -129,9 +130,12 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
       if (!category) throw new BadRequestError('Category not found in this server');
     }
 
-    const channelCount = await prisma.channel.count({ where: { serverId } });
-    if (channelCount >= LIMITS.MAX_CHANNELS_PER_SERVER) {
-      throw new BadRequestError(`Server can have at most ${LIMITS.MAX_CHANNELS_PER_SERVER} channels`);
+    const [channelCount, limits] = await Promise.all([
+      prisma.channel.count({ where: { serverId } }),
+      getEffectiveLimits(serverId),
+    ]);
+    if (channelCount >= limits.maxChannelsPerServer) {
+      throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
     }
 
     const channel = await prisma.channel.create({

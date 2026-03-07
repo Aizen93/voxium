@@ -6,6 +6,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
+import { VoicePanel } from '../voice/VoicePanel';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { toast } from '../../stores/toastStore';
@@ -367,8 +368,8 @@ export function ChannelSidebar() {
       toast.success('Channel created');
       setNewChannelName('');
       setShowCreateChannel(false);
-    } catch {
-      toast.error('Failed to create channel');
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || 'Failed to create channel');
     }
   };
 
@@ -718,6 +719,9 @@ export function ChannelSidebar() {
           </button>
         )}
       </div>
+
+      {/* Voice panel (between channel list and user area) */}
+      <VoicePanel />
 
       {/* User area at bottom */}
       <div className="flex items-center gap-2 border-t border-vox-border bg-vox-sidebar px-2 py-2">

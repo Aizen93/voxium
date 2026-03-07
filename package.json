@@ -43,7 +43,9 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.58.2",
+    "@roamhq/wrtc": "^0.9.1",
     "eslint": "^10.0.2",
+    "mediasoup-client": "^3.18.7",
     "otpauth": "^9.5.0",
     "redis": "^4.7.1",
     "typescript-eslint": "^8.56.1"

@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
-**Version:** 0.9.8
-**Date:** 2026-03-05
+**Version:** 1.2.0
+**Date:** 2026-03-07
 
 ## Project Structure
 
@@ -24,7 +24,7 @@ Voxium/
 ## Key Features Implemented
 
 - Real-time text messaging with editing, deletion, reactions, replies, search
-- WebRTC P2P voice chat (server channels + 1-on-1 DM calls) with push-to-talk, noise suppression, screen sharing
+- **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls, push-to-talk, noise suppression, screen sharing
 - Server/channel/category management with drag-and-drop reordering
 - JWT auth with refresh tokens, password reset, Remember Me
 - S3 file uploads (avatars, server icons) with presigned URLs
@@ -38,6 +38,7 @@ Voxium/
 - Per-server invite lock (owners/admins can lock/unlock invites independently of global flag)
 - Tauri 2 desktop wrapper with native notifications
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
+- **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members; admin UI for global + per-server management; read-only limits tab in server settings
 
 ## Tech Stack
 
@@ -45,7 +46,7 @@ Voxium/
 |-------|-----------|
 | Backend | Node.js, Express, TypeScript, Prisma, PostgreSQL, Redis, Socket.IO |
 | Frontend | React 19, Vite 6, Zustand, Tailwind CSS, Tauri 2 |
-| Voice | WebRTC (mesh P2P), RNNoise WASM noise suppression |
+| Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM noise suppression |
 | Storage | S3-compatible (presigned URL direct upload) |
 | Admin | React 19, Vite, Zustand (standalone app, port 8082) |
 
@@ -56,21 +57,25 @@ Voxium/
 
 ## Remaining Work
 
-- [ ] mediasoup SFU for production-grade voice/video
+- [x] ~~mediasoup SFU for production-grade voice~~ (done — server voice channels use SFU)
 - [ ] Redis-based voice state for multi-node
-- [ ] Horizontal scaling, CI/CD, monitoring
+- [ ] Horizontal scaling, monitoring
 - [ ] Mobile app (React Native)
 - [ ] End-to-end testing
 
 ## Recent Changes
 
-- **Feature Flags + Server Invite Lock** (2026-03-05) -- Redis-backed global feature flag system (registration, invites, server creation, voice, DM voice, support) with admin UI, plus per-server invite lock toggle for owners/admins.
+- **Dynamic Resource Limits** (2026-03-07) — 3-tier limit resolution system (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members. `GlobalConfig` + `ServerLimits` Prisma models, `getEffectiveLimits()` utility, admin CRUD endpoints, admin UI with global editor + per-server modal, read-only Limits tab in server settings, enforcement in channel/category creation, voice join, and invite join.
 
-- **Support Ticket System** (2026-03-05) — `SupportTicket` + `SupportMessage` Prisma models (one ticket per user via `@@unique([userId])`), user-facing `POST /support/open` (create/reopen), `GET /support/ticket` (fetch with cursor pagination), `POST /support/messages` (send with sanitization + rate limiting), admin routes for ticket listing/claiming/messaging/closing with audit logging (`support.claim`, `support.close`), real-time via `support:{ticketId}` Socket.IO rooms and `admin:support` subscription for ticket count updates, `supportStore.ts` Zustand store for desktop client, `SupportTicketView` chat UI, `AdminSupportTickets` admin panel with ticket queue + chat, socket auto-join for open/claimed tickets on connect, open tickets count on admin dashboard stat card, support audit actions in audit log labels.
+- **mediasoup SFU Voice Architecture** (2026-03-07) — Replaced mesh P2P with mediasoup SFU for server voice channels. `mediasoupManager.ts` + `mediasoupConfig.ts` manage workers/routers/transports/producers/consumers. `voiceHandler.ts` rewritten for SFU signaling (create-transport, connect-transport, produce, consume). DM calls remain P2P. Load test script (`scripts/load-test-voice.ts`) for stress testing.
 
-- **Reports/Moderation Queue + Staff Badge** (2026-03-05) — `Report` model (type: message/user, status: pending/resolved/dismissed), user-facing `POST /reports` endpoint with rate limiting, admin report management (`GET /admin/reports`, `POST /admin/reports/:id/resolve` with optional ban, `POST /admin/reports/:id/dismiss`), real-time admin notifications via `report:new` socket event + `admin:reports` room subscription, `StaffBadge` component shown in message headers/member sidebar/DM list/profile popups for admin/superadmin users, `ReportModal` portaled component for message and user reports, `AdminReports` moderation queue page with filter tabs and resolve/dismiss workflows, `role` field added to message author selects across `messages.ts` and `dm.ts`, audit log entries for `report.resolve` and `report.dismiss`, pending reports count on admin dashboard.
+- **Feature Flags + Server Invite Lock** (2026-03-05) — Redis-backed global feature flag system with admin UI, plus per-server invite lock toggle for owners/admins.
 
-- **Admin Audit Log** (2026-03-05) — `AuditLog` model, fire-and-forget `logAuditEvent()`, `GET /admin/audit-logs`, `AdminAuditLog` UI page. Logs all destructive admin actions.
+- **Support Ticket System** (2026-03-05) — One-per-user support tickets with real-time chat, admin claim/close workflow, audit logging.
+
+- **Reports/Moderation Queue + Staff Badge** (2026-03-05) — Report system, admin moderation queue, StaffBadge component for admin/superadmin users.
+
+- **Admin Audit Log** (2026-03-05) — `AuditLog` model, fire-and-forget `logAuditEvent()`, admin UI page.
 
 ## Related Documents
 

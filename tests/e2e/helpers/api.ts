@@ -1,6 +1,24 @@
 import type { APIRequestContext } from '@playwright/test';
+import { createClient } from 'redis';
 
 export const API_URL = 'http://localhost:3001/api/v1';
+
+/** Clear all rate limit keys in Redis. Call before tests that register many users. */
+export async function clearRateLimits() {
+  const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+  try {
+    await redis.connect();
+    const keysToDelete: string[] = [];
+    for await (const key of redis.scanIterator({ MATCH: 'rl:*', COUNT: 100 })) {
+      if (key !== 'rl:config') keysToDelete.push(key);
+    }
+    if (keysToDelete.length > 0) {
+      await redis.del(keysToDelete);
+    }
+  } finally {
+    await redis.quit().catch(() => {});
+  }
+}
 
 /** Register a new user via the API. Returns access + refresh tokens. */
 export async function registerUser(
@@ -63,6 +81,58 @@ export async function createInvite(
   }
   const { data } = await res.json();
   return data.code as string;
+}
+
+/** Create a channel in a server. Returns the created channel. */
+export async function createChannel(
+  request: APIRequestContext,
+  token: string,
+  serverId: string,
+  name: string,
+  type: 'text' | 'voice' = 'text',
+) {
+  const res = await request.post(`${API_URL}/servers/${serverId}/channels`, {
+    data: { name, type },
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok()) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Create channel failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
+  const { data } = await res.json();
+  return data as { id: string; name: string; type: string; serverId: string };
+}
+
+/** Get all channels for a server. */
+export async function getServerChannels(
+  request: APIRequestContext,
+  token: string,
+  serverId: string,
+) {
+  const res = await request.get(`${API_URL}/servers/${serverId}/channels`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok()) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Get channels failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
+  const { data } = await res.json();
+  return data as Array<{ id: string; name: string; type: string; serverId: string }>;
+}
+
+/** Join a server via invite code. */
+export async function joinServerViaInvite(
+  request: APIRequestContext,
+  token: string,
+  inviteCode: string,
+) {
+  const res = await request.post(`${API_URL}/invites/${inviteCode}/join`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok()) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Join server failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
 }
 
 /** Send a friend request. */

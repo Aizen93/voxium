@@ -16,12 +16,21 @@ export default defineConfig({
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     actionTimeout: 10_000,
+    permissions: ['microphone'],
   },
 
   projects: [
     {
       name: 'chromium',
-      use: { browserName: 'chromium' },
+      use: {
+        browserName: 'chromium',
+        launchOptions: {
+          args: [
+            '--use-fake-device-for-media-stream',
+            '--use-fake-ui-for-media-stream',
+          ],
+        },
+      },
     },
   ],
 

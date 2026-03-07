@@ -27,6 +27,7 @@ import { prisma } from './utils/prisma';
 import { initRedis } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
+import { initMediasoup } from './mediasoup/mediasoupManager';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -46,6 +47,10 @@ async function main() {
   // Load feature flags from Redis
   await loadFeatureFlags();
   console.log('[FeatureFlags] Loaded');
+
+  // Initialize mediasoup workers
+  await initMediasoup();
+  console.log('[mediasoup] Workers initialized');
 
   // Create HTTP server
   const server = http.createServer(app);

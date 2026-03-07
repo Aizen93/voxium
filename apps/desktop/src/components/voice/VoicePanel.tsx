@@ -24,7 +24,7 @@ export function VoicePanel() {
     'text-vox-accent-danger';
 
   return (
-    <div className="fixed bottom-0 left-[72px] w-60 border-t border-vox-border bg-vox-sidebar">
+    <div data-testid="voice-panel" className="border-t border-vox-border bg-vox-sidebar">
       {/* Voice Connected Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-vox-border">
         <ConnectionQuality latency={latency} />

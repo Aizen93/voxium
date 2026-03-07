@@ -161,6 +161,30 @@ export interface VoiceUser {
   screenSharing?: boolean;
 }
 
+// ─── mediasoup SFU ──────────────────────────────────────────────────────────
+
+/**
+ * Transport parameters sent from server to client on voice:transport_created.
+ * Uses `unknown` for mediasoup internal types to avoid coupling shared package
+ * to mediasoup — the client casts to mediasoup-client types, the server uses
+ * mediasoup/node types.
+ */
+export interface TransportOptions {
+  id: string;
+  iceParameters: Record<string, unknown>;
+  iceCandidates: Record<string, unknown>[];
+  dtlsParameters: Record<string, unknown>;
+}
+
+export interface ConsumerOptions {
+  id: string;
+  producerId: string;
+  kind: 'audio' | 'video';
+  rtpParameters: Record<string, unknown>;
+  producerUserId: string;
+  appData?: Record<string, unknown>;
+}
+
 // ─── Unread ─────────────────────────────────────────────────────────────────
 
 export interface UnreadCount {
@@ -228,6 +252,13 @@ export interface ServerToClientEvents {
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;
   'voice:signal': (data: { from: string; signal: unknown }) => void;
   'voice:error': (data: { message: string }) => void;
+  'voice:transport_created': (data: {
+    routerRtpCapabilities: unknown;
+    sendTransport: TransportOptions;
+    recvTransport: TransportOptions;
+  }) => void;
+  'voice:new_consumer': (data: ConsumerOptions) => void;
+  'voice:producer_closed': (data: { consumerId: string; producerUserId: string }) => void;
   'pong:latency': (timestamp: number) => void;
   'typing:start': (data: { channelId: string; userId: string; username: string }) => void;
   'typing:stop': (data: { channelId: string; userId: string }) => void;
@@ -292,6 +323,13 @@ export interface ClientToServerEvents {
   'voice:deaf': (deafened: boolean) => void;
   'voice:speaking': (speaking: boolean) => void;
   'voice:signal': (data: { to: string; signal: unknown }) => void;
+  'voice:transport:connect': (data: { transportId: string; dtlsParameters: unknown }) => void;
+  'voice:produce': (
+    data: { kind: 'audio' | 'video'; rtpParameters: unknown; appData?: Record<string, unknown> },
+    callback: (response: { producerId: string }) => void,
+  ) => void;
+  'voice:consumer:resume': (data: { consumerId: string }) => void;
+  'voice:rtp_capabilities': (data: { rtpCapabilities: unknown }) => void;
   'ping:latency': (timestamp: number) => void;
   'typing:start': (channelId: string) => void;
   'typing:stop': (channelId: string) => void;
@@ -436,6 +474,46 @@ export interface AdminMetricsSnapshot {
   dmCalls: number;
   dmVoiceUsers: number;
   messagesLastHour: number;
+}
+
+export interface SfuWorkerStats {
+  pid: number;
+  routerCount: number;
+  transportCount: number;
+  /** User CPU time in ms */
+  cpuUser: number;
+  /** System CPU time in ms */
+  cpuSystem: number;
+  /** Max resident set size in KB */
+  memoryRss: number;
+}
+
+export interface SfuStats {
+  workers: SfuWorkerStats[];
+  totalRouters: number;
+  portRange: { min: number; max: number; total: number };
+}
+
+export interface SfuMediaCounts {
+  totalTransports: number;
+  totalProducers: number;
+  totalConsumers: number;
+}
+
+// ─── Resource Limits ─────────────────────────────────────────────────────
+
+export interface ResourceLimits {
+  maxChannelsPerServer: number;
+  maxVoiceUsersPerChannel: number;
+  maxCategoriesPerServer: number;
+  maxMembersPerServer: number; // 0 = unlimited
+}
+
+export interface ServerResourceLimits {
+  maxChannelsPerServer: number | null;
+  maxVoiceUsersPerChannel: number | null;
+  maxCategoriesPerServer: number | null;
+  maxMembersPerServer: number | null;
 }
 
 // ─── Storage ─────────────────────────────────────────────────────────────────

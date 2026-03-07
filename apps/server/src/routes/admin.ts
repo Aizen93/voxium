@@ -6,7 +6,10 @@ import { rateLimitAdmin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { getOnlineUsers, getUserSocket } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
-import { cleanupServerVoice } from '../websocket/voiceHandler';
+import { cleanupServerVoice, getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers } from '../websocket/voiceHandler';
+import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
+import { getSfuStats } from '../mediasoup/mediasoupManager';
+import { getGlobalLimits } from '../utils/serverLimits';
 import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
@@ -38,6 +41,57 @@ adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunctio
     res.json({
       success: true,
       data: { totalUsers, totalServers, totalMessages, onlineUsers: onlineUserIds.length, bannedUsers, pendingReports, openTickets, totalConversations, totalFriendships },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── SFU Stats ─────────────────────────────────────────────────────────────
+
+adminRouter.get('/stats/sfu', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const channelTransports = getTransportCountsByChannel();
+    const [sfuStats, mediaCounts] = await Promise.all([
+      getSfuStats(channelTransports),
+      Promise.resolve(getVoiceMediaCounts()),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        ...sfuStats,
+        totalTransports: mediaCounts.transports,
+        totalProducers: mediaCounts.producers,
+        totalConsumers: mediaCounts.consumers,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Live Metrics ─────────────────────────────────────────────────────────
+
+adminRouter.get('/stats/live', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+    const [onlineUserIds, messagesLastHour] = await Promise.all([
+      getOnlineUsers(),
+      prisma.message.count({ where: { createdAt: { gte: oneHourAgo } } }),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        onlineUsers: onlineUserIds.length,
+        voiceChannels: getActiveVoiceChannelCount(),
+        voiceUsers: getTotalVoiceUsers(),
+        dmCalls: getActiveDMCallCount(),
+        dmVoiceUsers: getTotalDMVoiceUsers(),
+        messagesLastHour,
+      },
     });
   } catch (err) {
     next(err);
@@ -684,6 +738,105 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
   } catch (err) {
     next(err);
   }
+});
+
+// ─── Resource Limits ────────────────────────────────────────────────────────
+
+// Get global resource limits
+adminRouter.get('/limits/global', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const limits = await getGlobalLimits();
+    res.json({ success: true, data: limits });
+  } catch (err) { next(err); }
+});
+
+// Update global resource limits
+adminRouter.put('/limits/global', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer } = req.body;
+    const data: Record<string, number> = {};
+    if (maxChannelsPerServer !== undefined) data.maxChannelsPerServer = Math.max(1, Math.min(500, Number(maxChannelsPerServer)));
+    if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = Math.max(1, Math.min(500, Number(maxVoiceUsersPerChannel)));
+    if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = Math.max(1, Math.min(200, Number(maxCategoriesPerServer)));
+    if (maxMembersPerServer !== undefined) data.maxMembersPerServer = Math.max(0, Math.min(100000, Number(maxMembersPerServer)));
+
+    const config = await prisma.globalConfig.upsert({
+      where: { id: 'global' },
+      create: { id: 'global', ...data },
+      update: data,
+    });
+
+    res.json({ success: true, data: {
+      maxChannelsPerServer: config.maxChannelsPerServer,
+      maxVoiceUsersPerChannel: config.maxVoiceUsersPerChannel,
+      maxCategoriesPerServer: config.maxCategoriesPerServer,
+      maxMembersPerServer: config.maxMembersPerServer,
+    }});
+  } catch (err) { next(err); }
+});
+
+// Get per-server limits (returns null fields for "use global")
+adminRouter.get('/limits/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const limits = await prisma.serverLimits.findUnique({ where: { serverId: req.params.serverId } });
+    res.json({ success: true, data: limits ? {
+      maxChannelsPerServer: limits.maxChannelsPerServer,
+      maxVoiceUsersPerChannel: limits.maxVoiceUsersPerChannel,
+      maxCategoriesPerServer: limits.maxCategoriesPerServer,
+      maxMembersPerServer: limits.maxMembersPerServer,
+    } : {
+      maxChannelsPerServer: null,
+      maxVoiceUsersPerChannel: null,
+      maxCategoriesPerServer: null,
+      maxMembersPerServer: null,
+    }});
+  } catch (err) { next(err); }
+});
+
+// Update per-server limits (null = use global default)
+adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const server = await prisma.server.findUnique({ where: { id: req.params.serverId }, select: { id: true } });
+    if (!server) throw new NotFoundError('Server');
+
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer } = req.body;
+    const toInt = (v: unknown): number | null => {
+      if (v === null || v === undefined || v === '') return null;
+      const n = Number(v);
+      return isNaN(n) ? null : n;
+    };
+
+    const data = {
+      maxChannelsPerServer: maxChannelsPerServer !== undefined ? (toInt(maxChannelsPerServer) !== null ? Math.max(1, Math.min(500, toInt(maxChannelsPerServer)!)) : null) : undefined,
+      maxVoiceUsersPerChannel: maxVoiceUsersPerChannel !== undefined ? (toInt(maxVoiceUsersPerChannel) !== null ? Math.max(1, Math.min(500, toInt(maxVoiceUsersPerChannel)!)) : null) : undefined,
+      maxCategoriesPerServer: maxCategoriesPerServer !== undefined ? (toInt(maxCategoriesPerServer) !== null ? Math.max(1, Math.min(200, toInt(maxCategoriesPerServer)!)) : null) : undefined,
+      maxMembersPerServer: maxMembersPerServer !== undefined ? (toInt(maxMembersPerServer) !== null ? Math.max(0, Math.min(100000, toInt(maxMembersPerServer)!)) : null) : undefined,
+    };
+
+    // Remove undefined keys
+    const cleanData = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
+
+    const limits = await prisma.serverLimits.upsert({
+      where: { serverId: req.params.serverId },
+      create: { serverId: req.params.serverId, ...cleanData },
+      update: cleanData,
+    });
+
+    res.json({ success: true, data: {
+      maxChannelsPerServer: limits.maxChannelsPerServer,
+      maxVoiceUsersPerChannel: limits.maxVoiceUsersPerChannel,
+      maxCategoriesPerServer: limits.maxCategoriesPerServer,
+      maxMembersPerServer: limits.maxMembersPerServer,
+    }});
+  } catch (err) { next(err); }
+});
+
+// Reset per-server limits (remove all overrides)
+adminRouter.delete('/limits/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    await prisma.serverLimits.deleteMany({ where: { serverId: req.params.serverId } });
+    res.json({ success: true, message: 'Server limits reset to global defaults' });
+  } catch (err) { next(err); }
 });
 
 // ─── Ban Management ─────────────────────────────────────────────────────────

@@ -71,8 +71,35 @@ model Server {
   categories Category[]
   members    ServerMember[]
   invites    Invite[]
+  limits     ServerLimits?
 
   @@map("servers")
+}
+
+// ─── Server Resource Limits ─────────────────────────────────────────────────
+
+model GlobalConfig {
+  id                      String   @id @default("global")
+  maxChannelsPerServer    Int      @default(20) @map("max_channels_per_server")
+  maxVoiceUsersPerChannel Int      @default(12) @map("max_voice_users_per_channel")
+  maxCategoriesPerServer  Int      @default(12) @map("max_categories_per_server")
+  maxMembersPerServer     Int      @default(0) @map("max_members_per_server") // 0 = unlimited
+  updatedAt               DateTime @updatedAt @map("updated_at")
+
+  @@map("global_config")
+}
+
+model ServerLimits {
+  serverId                String   @id @map("server_id")
+  maxChannelsPerServer    Int?     @map("max_channels_per_server")
+  maxVoiceUsersPerChannel Int?     @map("max_voice_users_per_channel")
+  maxCategoriesPerServer  Int?     @map("max_categories_per_server")
+  maxMembersPerServer     Int?     @map("max_members_per_server")
+  updatedAt               DateTime @updatedAt @map("updated_at")
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@map("server_limits")
 }
 
 // ─── Server Members ──────────────────────────────────────────────────────────

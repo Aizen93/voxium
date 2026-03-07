@@ -12,6 +12,7 @@ import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { outranks, isAdminOrOwner } from '../utils/permissions';
 import { leaveCurrentVoiceChannel, cleanupServerVoice } from '../websocket/voiceHandler';
 import { isFeatureEnabled } from '../utils/featureFlags';
+import { getEffectiveLimits } from '../utils/serverLimits';
 
 export const serverRouter = Router();
 
@@ -138,6 +139,22 @@ serverRouter.get('/:serverId', async (req: Request<{ serverId: string }>, res: R
       success: true,
       data: { ...server, memberCount: server._count.members },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Get server resource limits (read-only for members)
+serverRouter.get('/:serverId/limits', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId: req.user!.userId, serverId } },
+    });
+    if (!membership) throw new NotFoundError('Server');
+
+    const limits = await getEffectiveLimits(serverId);
+    res.json({ success: true, data: limits });
   } catch (err) {
     next(err);
   }
