@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData } from '@voxium/shared';
+import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat } from '@voxium/shared';
 
 // Module-level refs for metrics subscription cleanup
 let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
@@ -38,6 +38,9 @@ interface AdminState {
   liveMetrics: AdminMetricsSnapshot | null;
   signupData: Array<{ day: string; count: number }>;
   messagesData: Array<{ hour: string; count: number }>;
+  serverGrowthData: Array<{ day: string; count: number }>;
+  topServers: Array<{ id: string; name: string; messageCount: number; memberCount: number }>;
+  geoStats: GeoStat[];
 
   // Users
   users: AdminUser[];
@@ -125,6 +128,9 @@ interface AdminState {
   fetchStats: () => Promise<void>;
   fetchSignups: (days?: number) => Promise<void>;
   fetchMessagesPerHour: (hours?: number) => Promise<void>;
+  fetchServerGrowth: (days?: number) => Promise<void>;
+  fetchTopServers: (limit?: number) => Promise<void>;
+  fetchGeoStats: () => Promise<void>;
   subscribeMetrics: () => void;
   unsubscribeMetrics: () => void;
 
@@ -205,6 +211,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   liveMetrics: null,
   signupData: [],
   messagesData: [],
+  serverGrowthData: [],
+  topServers: [],
+  geoStats: [],
   users: [],
   usersTotal: 0,
   usersPage: 1,
@@ -275,6 +284,33 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       set({ messagesData: data.data });
     } catch {
       console.error('Failed to fetch messages data');
+    }
+  },
+
+  fetchServerGrowth: async (days = 30) => {
+    try {
+      const { data } = await api.get(`/admin/server-growth?days=${days}`);
+      set({ serverGrowthData: data.data });
+    } catch {
+      console.error('Failed to fetch server growth data');
+    }
+  },
+
+  fetchTopServers: async (limit = 10) => {
+    try {
+      const { data } = await api.get(`/admin/top-servers?limit=${limit}`);
+      set({ topServers: data.data });
+    } catch {
+      console.error('Failed to fetch top servers');
+    }
+  },
+
+  fetchGeoStats: async () => {
+    try {
+      const { data } = await api.get('/admin/stats/geo');
+      set({ geoStats: data.data });
+    } catch {
+      console.error('Failed to fetch geo stats');
     }
   },
 

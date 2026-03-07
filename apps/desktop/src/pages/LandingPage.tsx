@@ -11,76 +11,13 @@ import {
   Code2,
   HeartHandshake,
   CheckCircle2,
-  Monitor,
-  Laptop,
-  Terminal,
   ArrowRight,
   Server,
 } from 'lucide-react';
 import { APP_VERSION } from '@voxium/shared';
+import { SoundWaveCanvas } from '../components/landing/SoundWaveCanvas';
 
 /* ─── Animated SVG Illustrations ─── */
-
-/** Floating mesh network — represents P2P architecture */
-function NetworkMeshSvg({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 800 600"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden="true"
-    >
-      <style>{`
-        @keyframes drift1 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(12px,-18px)} }
-        @keyframes drift2 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-16px,14px)} }
-        @keyframes drift3 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(10px,20px)} }
-        @keyframes drift4 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-14px,-12px)} }
-        @keyframes drift5 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(18px,8px)} }
-        @keyframes linePulse { 0%,100%{opacity:0.08} 50%{opacity:0.25} }
-        @keyframes nodePulse { 0%,100%{r:4} 50%{r:6} }
-        .n1{animation:drift1 8s ease-in-out infinite}
-        .n2{animation:drift2 10s ease-in-out infinite}
-        .n3{animation:drift3 7s ease-in-out infinite}
-        .n4{animation:drift4 9s ease-in-out infinite}
-        .n5{animation:drift5 11s ease-in-out infinite}
-        .n6{animation:drift1 12s ease-in-out 1s infinite}
-        .n7{animation:drift3 9s ease-in-out 0.5s infinite}
-        .n8{animation:drift2 8s ease-in-out 2s infinite}
-        .mesh-line{animation:linePulse 4s ease-in-out infinite;stroke:#5b5bf7;stroke-width:1}
-        .mesh-line-d{animation:linePulse 4s ease-in-out 2s infinite;stroke:#5b5bf7;stroke-width:1}
-        .mesh-node{fill:#5b5bf7;animation:nodePulse 3s ease-in-out infinite}
-        .mesh-node-d{fill:#a78bfa;animation:nodePulse 3s ease-in-out 1.5s infinite}
-      `}</style>
-      {/* Lines connecting nodes */}
-      <g opacity="0.15">
-        <line x1="120" y1="150" x2="350" y2="100" className="mesh-line" />
-        <line x1="350" y1="100" x2="580" y2="180" className="mesh-line-d" />
-        <line x1="120" y1="150" x2="250" y2="350" className="mesh-line-d" />
-        <line x1="350" y1="100" x2="250" y2="350" className="mesh-line" />
-        <line x1="580" y1="180" x2="650" y2="380" className="mesh-line" />
-        <line x1="250" y1="350" x2="500" y2="450" className="mesh-line-d" />
-        <line x1="650" y1="380" x2="500" y2="450" className="mesh-line" />
-        <line x1="580" y1="180" x2="500" y2="450" className="mesh-line-d" />
-        <line x1="120" y1="150" x2="580" y2="180" className="mesh-line" />
-        <line x1="250" y1="350" x2="650" y2="380" className="mesh-line-d" />
-        <line x1="700" y1="120" x2="580" y2="180" className="mesh-line" />
-        <line x1="700" y1="120" x2="650" y2="380" className="mesh-line-d" />
-        <line x1="80" y1="420" x2="250" y2="350" className="mesh-line" />
-        <line x1="80" y1="420" x2="120" y2="150" className="mesh-line-d" />
-      </g>
-      {/* Nodes */}
-      <g className="n1"><circle cx="120" cy="150" className="mesh-node" r="4" /></g>
-      <g className="n2"><circle cx="350" cy="100" className="mesh-node-d" r="5" /></g>
-      <g className="n3"><circle cx="580" cy="180" className="mesh-node" r="4" /></g>
-      <g className="n4"><circle cx="250" cy="350" className="mesh-node-d" r="5" /></g>
-      <g className="n5"><circle cx="650" cy="380" className="mesh-node" r="4" /></g>
-      <g className="n6"><circle cx="500" cy="450" className="mesh-node-d" r="4" /></g>
-      <g className="n7"><circle cx="700" cy="120" className="mesh-node" r="3" /></g>
-      <g className="n8"><circle cx="80" cy="420" className="mesh-node-d" r="3" /></g>
-    </svg>
-  );
-}
 
 /** Animated audio waveform bars */
 function WaveformSvg({ className }: { className?: string }) {
@@ -111,8 +48,8 @@ function WaveformSvg({ className }: { className?: string }) {
       `}</style>
       <defs>
         <linearGradient id="waveGrad" x1="0" y1="0" x2="0" y2="80" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#A78BFA" />
-          <stop offset="100%" stopColor="#5b5bf7" />
+          <stop offset="0%" stopColor="#7C6BBF" />
+          <stop offset="100%" stopColor="#4242B8" />
         </linearGradient>
       </defs>
       <rect x="10" y="32" width="8" height="16" className="wb wb1" />
@@ -328,14 +265,9 @@ function Hero() {
       id="hero"
       className="relative min-h-screen flex items-center justify-center pt-16 overflow-hidden"
     >
-      {/* Background */}
+      {/* Background: solid fallback + WebGL sound waves (lower half) */}
       <div className="absolute inset-0 bg-vox-bg-primary" />
-      <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[900px] h-[900px] rounded-full opacity-15"
-        style={{ background: 'radial-gradient(circle, #5b5bf7 0%, transparent 70%)' }}
-      />
-      {/* Animated mesh background */}
-      <NetworkMeshSvg className="absolute inset-0 w-full h-full opacity-60" />
+      <SoundWaveCanvas className="absolute inset-0 w-full h-full" />
 
       <div className="relative z-10 max-w-7xl mx-auto px-6 py-24 flex flex-col lg:flex-row items-center gap-16">
         {/* Text content */}
@@ -350,20 +282,12 @@ function Hero() {
             </span>
           </h1>
           <p
-            className="mt-6 text-lg sm:text-xl text-vox-text-secondary max-w-xl mx-auto lg:mx-0 animate-slide-up"
+            className="mt-6 text-lg sm:text-xl max-w-xl mx-auto lg:mx-0 animate-slide-up"
             style={{ animationDelay: '0.1s', animationFillMode: 'backwards' }}
           >
             The open, privacy-first voice and text platform for communities that
             value freedom and transparency.
           </p>
-
-          {/* Waveform decoration */}
-          <div
-            className="mt-6 flex justify-center lg:justify-start animate-slide-up"
-            style={{ animationDelay: '0.15s', animationFillMode: 'backwards' }}
-          >
-            <WaveformSvg className="h-10 w-48 opacity-50" />
-          </div>
 
           {/* Download buttons */}
           <div
@@ -374,25 +298,34 @@ function Hero() {
               href={DOWNLOAD_URLS.windows}
               target="_blank"
               rel="noopener noreferrer"
-              className="btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover px-5 py-3 text-base"
+              className="group relative btn bg-vox-bg-tertiary/80 text-vox-text-primary border border-white/5 hover:border-[#0078D4]/50 hover:bg-[#0078D4]/15 hover:shadow-[0_0_20px_rgba(0,120,212,0.2)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
             >
-              <Monitor className="mr-2 h-5 w-5" /> Download for Windows
+              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/>
+              </svg>
+              Download for Windows
             </a>
             <a
               href={DOWNLOAD_URLS.macos}
               target="_blank"
               rel="noopener noreferrer"
-              className="btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover px-5 py-3 text-base"
+              className="group relative btn bg-vox-bg-tertiary/80 text-vox-text-primary border border-white/5 hover:border-[#A2AAAD]/50 hover:bg-[#A2AAAD]/15 hover:shadow-[0_0_20px_rgba(162,170,173,0.15)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
             >
-              <Laptop className="mr-2 h-5 w-5" /> Download for macOS
+              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
+              </svg>
+              Download for macOS
             </a>
             <a
               href={DOWNLOAD_URLS.linux}
               target="_blank"
               rel="noopener noreferrer"
-              className="btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover px-5 py-3 text-base"
+              className="group relative btn bg-vox-bg-tertiary/80 text-vox-text-primary border border-white/5 hover:border-[#E95420]/50 hover:bg-[#E95420]/15 hover:shadow-[0_0_20px_rgba(233,84,32,0.15)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
             >
-              <Terminal className="mr-2 h-5 w-5" /> Download for Linux
+              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M17.61.455a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zM12.92.8C8.923.777 5.137 2.941 3.148 6.451a4.5 4.5 0 0 1 .26-.007 4.92 4.92 0 0 1 2.585.737A8.316 8.316 0 0 1 12.688 3.6 4.944 4.944 0 0 1 13.723.834 11.008 11.008 0 0 0 12.92.8zm9.226 4.994a4.915 4.915 0 0 1-1.918 2.246 8.36 8.36 0 0 1-.273 8.303 4.89 4.89 0 0 1 1.632 2.54 11.156 11.156 0 0 0 .559-13.089zM3.41 7.932A3.41 3.41 0 0 0 0 11.342a3.41 3.41 0 0 0 3.41 3.409 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zm2.027 7.866a4.908 4.908 0 0 1-2.915.358 11.1 11.1 0 0 0 7.991 6.698 11.234 11.234 0 0 0 2.422.249 4.879 4.879 0 0 1-.999-2.85 8.484 8.484 0 0 1-.836-.136 8.304 8.304 0 0 1-5.663-4.32zm11.405.928a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41z"/>
+              </svg>
+              Download for Linux
             </a>
           </div>
 
@@ -405,6 +338,15 @@ function Hero() {
               launch in your browser
             </Link>
           </p>
+
+		  {/* Waveform decoration */}
+          <div
+            className="mt-6 flex justify-center lg:justify-start animate-slide-up"
+            style={{ animationDelay: '0.15s', animationFillMode: 'backwards' }}
+          >
+            <WaveformSvg className="h-10 w-48 opacity-50" />
+          </div>
+
         </div>
 
         {/* Animated Mock UI panel */}

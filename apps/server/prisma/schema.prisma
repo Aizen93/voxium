@@ -249,10 +249,12 @@ model Invite {
 // ─── IP Records ─────────────────────────────────────────────────────────────
 
 model IpRecord {
-  id         String   @id @default(cuid())
-  userId     String   @map("user_id")
-  ip         String
-  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  ip          String
+  countryCode String?  @map("country_code")
+  country     String?
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
