@@ -23,7 +23,7 @@ adminRouter.use(authenticate, requireAdmin, rateLimitAdmin);
 
 adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const [totalUsers, totalServers, totalMessages, bannedUsers, onlineUserIds, pendingReports, openTickets] = await Promise.all([
+    const [totalUsers, totalServers, totalMessages, bannedUsers, onlineUserIds, pendingReports, openTickets, totalConversations, totalFriendships] = await Promise.all([
       prisma.user.count(),
       prisma.server.count(),
       prisma.message.count(),
@@ -31,12 +31,38 @@ adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunctio
       getOnlineUsers(),
       prisma.report.count({ where: { status: 'pending' } }),
       prisma.supportTicket.count({ where: { status: { in: ['open', 'claimed'] } } }),
+      prisma.conversation.count(),
+      prisma.friendship.count({ where: { status: 'accepted' } }),
     ]);
 
     res.json({
       success: true,
-      data: { totalUsers, totalServers, totalMessages, onlineUsers: onlineUserIds.length, bannedUsers, pendingReports, openTickets },
+      data: { totalUsers, totalServers, totalMessages, onlineUsers: onlineUserIds.length, bannedUsers, pendingReports, openTickets, totalConversations, totalFriendships },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Geo Stats ─────────────────────────────────────────────────────────────
+
+adminRouter.get('/stats/geo', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rows = await prisma.ipRecord.groupBy({
+      by: ['countryCode', 'country'],
+      where: { countryCode: { not: null } },
+      _count: { userId: true },
+    });
+
+    const data = rows
+      .filter((r) => r.countryCode)
+      .map((r) => ({
+        countryCode: r.countryCode!,
+        country: r.country || r.countryCode!,
+        count: r._count.userId,
+      }));
+
+    res.json({ success: true, data });
   } catch (err) {
     next(err);
   }
@@ -806,6 +832,61 @@ adminRouter.get('/messages-per-hour', async (req: Request, res: Response, next: 
     res.json({
       success: true,
       data: messages.map((r) => ({ hour: r.hour, count: Number(r.count) })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/server-growth', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days as string) || 30));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const rows = await prisma.$queryRawUnsafe<Array<{ day: string; count: bigint }>>(
+      `SELECT DATE(created_at) AS day, COUNT(*) AS count
+       FROM servers
+       WHERE created_at >= $1
+       GROUP BY DATE(created_at)
+       ORDER BY day ASC`,
+      since
+    );
+
+    res.json({
+      success: true,
+      data: rows.map((r) => ({ day: r.day, count: Number(r.count) })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/top-servers', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit as string) || 10));
+
+    const rows = await prisma.$queryRawUnsafe<Array<{ id: string; name: string; message_count: bigint; member_count: bigint }>>(
+      `SELECT s.id, s.name,
+              COUNT(DISTINCT m.id) AS message_count,
+              COUNT(DISTINCT sm.user_id) AS member_count
+       FROM servers s
+       LEFT JOIN channels c ON c.server_id = s.id
+       LEFT JOIN messages m ON m.channel_id = c.id
+       LEFT JOIN server_members sm ON sm.server_id = s.id
+       GROUP BY s.id, s.name
+       ORDER BY message_count DESC
+       LIMIT $1`,
+      limit
+    );
+
+    res.json({
+      success: true,
+      data: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        messageCount: Number(r.message_count),
+        memberCount: Number(r.member_count),
+      })),
     });
   } catch (err) {
     next(err);

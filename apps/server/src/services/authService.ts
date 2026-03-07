@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
 import type { UserRole } from '@voxium/shared';
@@ -96,12 +97,18 @@ export async function loginUser(email: string, password: string, rememberMe = tr
   // Check account ban
   if (user.bannedAt) throw new ForbiddenError(user.banReason ? `Account banned: ${user.banReason}` : 'Your account has been banned');
 
-  // Upsert IP record
+  // Upsert IP record with geolocation
   if (ip) {
+    const geo = geoip.lookup(ip);
+    const countryNames = new Intl.DisplayNames(['en'], { type: 'region' });
+    const geoFields = geo ? {
+      countryCode: geo.country || null,
+      country: (geo.country && countryNames.of(geo.country)) || geo.country || null,
+    } : {};
     await prisma.ipRecord.upsert({
       where: { userId_ip: { userId: user.id, ip } },
-      update: { lastSeenAt: new Date() },
-      create: { userId: user.id, ip },
+      update: { lastSeenAt: new Date(), ...geoFields },
+      create: { userId: user.id, ip, ...geoFields },
     }).catch(() => {}); // Non-critical
   }
 

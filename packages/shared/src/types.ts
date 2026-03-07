@@ -419,6 +419,14 @@ export interface AdminDashboardStats {
   bannedUsers: number;
   pendingReports: number;
   openTickets: number;
+  totalConversations: number;
+  totalFriendships: number;
+}
+
+export interface GeoStat {
+  countryCode: string;
+  country: string;
+  count: number;
 }
 
 export interface AdminMetricsSnapshot {
