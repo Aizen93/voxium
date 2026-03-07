@@ -1,6 +1,7 @@
 import type { Server as HttpServer } from 'http';
 import { Server as SocketServer } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import { Prisma } from '@prisma/client';
 import type { AuthPayload } from '../middleware/auth';
 import { setUserOnline, setUserOffline } from '../utils/redis';
 import { prisma } from '../utils/prisma';
@@ -271,20 +272,16 @@ export function initSocketServer(httpServer: HttpServer) {
       // Compute unread counts across all text channels in a single query
       if (textChannels.length > 0) {
         const textChannelIds = textChannels.map((ch) => ch.id);
-        const unreads = await prisma.$queryRawUnsafe<
-          Array<{ channel_id: string; server_id: string; cnt: bigint }>
-        >(
-          `SELECT c.id AS channel_id, c.server_id, COUNT(m.id) AS cnt
+        const unreads = await prisma.$queryRaw<Array<{ channel_id: string; server_id: string; cnt: bigint }>>(
+          Prisma.sql`SELECT c.id AS channel_id, c.server_id, COUNT(m.id) AS cnt
            FROM channels c
-           LEFT JOIN channel_reads cr ON cr.channel_id = c.id AND cr.user_id = $1
+           LEFT JOIN channel_reads cr ON cr.channel_id = c.id AND cr.user_id = ${userId}
            INNER JOIN messages m ON m.channel_id = c.id
              AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
-             AND m.author_id != $1
-           WHERE c.id = ANY($2::text[])
+             AND m.author_id != ${userId}
+           WHERE c.id = ANY(${textChannelIds}::text[])
            GROUP BY c.id, c.server_id
-           HAVING COUNT(m.id) > 0`,
-          userId,
-          textChannelIds
+           HAVING COUNT(m.id) > 0`
         );
 
         if (unreads.length > 0) {
@@ -310,19 +307,15 @@ export function initSocketServer(httpServer: HttpServer) {
       // Compute DM unread counts
       if (conversations.length > 0) {
         const convIds = conversations.map((c) => c.id);
-        const dmUnreads = await prisma.$queryRawUnsafe<
-          Array<{ conversation_id: string; cnt: bigint }>
-        >(
-          `SELECT m.conversation_id, COUNT(m.id) AS cnt
+        const dmUnreads = await prisma.$queryRaw<Array<{ conversation_id: string; cnt: bigint }>>(
+          Prisma.sql`SELECT m.conversation_id, COUNT(m.id) AS cnt
            FROM messages m
-           LEFT JOIN conversation_reads cr ON cr.conversation_id = m.conversation_id AND cr.user_id = $1
-           WHERE m.conversation_id = ANY($2::text[])
+           LEFT JOIN conversation_reads cr ON cr.conversation_id = m.conversation_id AND cr.user_id = ${userId}
+           WHERE m.conversation_id = ANY(${convIds}::text[])
              AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
-             AND m.author_id != $1
+             AND m.author_id != ${userId}
            GROUP BY m.conversation_id
-           HAVING COUNT(m.id) > 0`,
-          userId,
-          convIds
+           HAVING COUNT(m.id) > 0`
         );
 
         if (dmUnreads.length > 0) {
