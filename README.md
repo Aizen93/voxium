@@ -310,6 +310,13 @@ curl http://localhost:3001/api/v1/servers \
 | `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
 | `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
 
+### Admin Dashboard Environment Variables (`apps/admin/.env`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
+| `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
+
 ---
 
 ## Troubleshooting

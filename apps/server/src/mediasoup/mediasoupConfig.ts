@@ -34,6 +34,12 @@ export const webRtcTransportOptions = {
   initialAvailableOutgoingBitrate: 600_000,
 };
 
+// Max outgoing bitrate for recv transports (server → client).
+// Caps each consumer connection to prevent bandwidth abuse.
+// 1.5 Mbps covers 12 users × 64kbps high-quality audio (768kbps) plus screen
+// share video (~500kbps) with headroom for overhead and RTCP.
+export const RECV_TRANSPORT_MAX_BITRATE = 1_500_000;
+
 // Worker settings
 export const workerSettings = {
   rtcMinPort: parseInt(process.env.MEDIASOUP_MIN_PORT || '10000', 10),

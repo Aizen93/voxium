@@ -2,8 +2,8 @@ import { create } from 'zustand';
 import { Device } from 'mediasoup-client';
 import type { Transport, Producer, Consumer, RtpCapabilities, IceParameters, IceCandidate, DtlsParameters, RtpParameters } from 'mediasoup-client/types';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression } from '../services/audioAnalyser';
-import { useSettingsStore } from './settingsStore';
+import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange } from '../services/audioAnalyser';
+import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { optimizeOpusSDP } from '../services/sdpUtils';
 import type { VoiceUser, TransportOptions } from '@voxium/shared';
 
@@ -586,6 +586,17 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     if (stream) {
       startSpeakingDetection(stream);
 
+      // Pause/resume audio producer based on noise gate speaking detection
+      onSpeakingChange((speaking) => {
+        const state = get();
+        if (state.selfMute) return; // stay paused if muted
+        for (const producer of state.msProducers.values()) {
+          if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+            if (speaking) { producer.resume(); } else { producer.pause(); }
+          }
+        }
+      });
+
       if (isPTT) {
         stream.getAudioTracks().forEach((track) => { track.enabled = false; });
       } else {
@@ -615,6 +626,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     get().stopLatencyMeasurement();
+    onSpeakingChange(null);
     stopSpeakingDetection();
 
     // Immediately remove local user from channelUsers
@@ -724,6 +736,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       if (!get().activeChannelId) { return; }
       const audioTrack = (getGatedStream() || localStream)?.getAudioTracks()[0];
       if (audioTrack && device.canProduce('audio')) {
+        const voiceQuality = useSettingsStore.getState().voiceQuality;
+        const maxBitrate = VOICE_QUALITY_BITRATE[voiceQuality];
         const producer = await sendTransport.produce({
           track: audioTrack,
           codecOptions: {
@@ -732,6 +746,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             opusFec: true,
             opusMaxPlaybackRate: 48000,
           },
+          encodings: [{ maxBitrate }],
           appData: { type: 'audio' },
         });
 
@@ -1301,6 +1316,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const { localStream, dmCallConversationId } = get();
 
     get().stopLatencyMeasurement();
+    onSpeakingChange(null);
     stopSpeakingDetection();
 
     if (localStream) {
@@ -1512,5 +1528,18 @@ onSocketReconnect(async () => {
     setNoiseGateThreshold(settings.noiseGateThreshold);
     setNoiseSuppression(settings.enableNoiseSuppression);
     startSpeakingDetection(localStream, dmCallConversationId ? 'dm' : 'server');
+
+    // Re-register producer pause/resume callback for silence detection (server voice only)
+    if (activeChannelId) {
+      onSpeakingChange((speaking) => {
+        const state = useVoiceStore.getState();
+        if (state.selfMute) return;
+        for (const producer of state.msProducers.values()) {
+          if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+            if (speaking) { producer.resume(); } else { producer.pause(); }
+          }
+        }
+      });
+    }
   }
 });

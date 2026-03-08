@@ -6,6 +6,7 @@ import { leaveCurrentDMVoiceChannel } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerRouters, getRouter } from '../mediasoup/mediasoupManager';
+import { RECV_TRANSPORT_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
 
 // ─── In-memory voice state ──────────────────────────────────────────────────
@@ -51,6 +52,7 @@ export function handleVoiceEvents(
 
     if (!channel || channel.type !== 'voice') {
       console.log(`[Voice] Channel ${channelId} not found or not voice type`);
+      socket.emit('voice:error', { message: 'Voice channel not found.' });
       return;
     }
 
@@ -59,6 +61,7 @@ export function handleVoiceEvents(
     });
     if (!membership) {
       console.log(`[Voice] User ${userId} not a member of server`);
+      socket.emit('voice:error', { message: 'You are not a member of this server.' });
       return;
     }
 
@@ -108,6 +111,8 @@ export function handleVoiceEvents(
     try {
       sendTransport = await createWebRtcTransport(router);
       recvTransport = await createWebRtcTransport(router);
+      // Cap downstream bandwidth per consumer for fair distribution
+      await recvTransport.setMaxOutgoingBitrate(RECV_TRANSPORT_MAX_BITRATE);
     } catch (err) {
       console.error(`[Voice] Failed to create transports for ${userId}:`, err);
       socket.emit('voice:error', { message: 'Failed to create voice connection.' });
@@ -392,6 +397,17 @@ export function handleVoiceEvents(
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
+    // Pause/resume mic audio producer server-side to stop forwarding RTP during silence.
+    // Only target mic audio (appData.type === 'audio'), not screen-share audio.
+    const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
+    if (userMedia && !userMedia.selfMute) {
+      for (const producer of userMedia.producers.values()) {
+        if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+          if (speaking) { producer.resume(); } else { producer.pause(); }
+        }
+      }
+    }
+
     const serverId = channelServerMap.get(channelId);
     if (serverId) {
       io.to(`server:${serverId}`).emit('voice:speaking', {
@@ -662,6 +678,44 @@ export function getTransportCountsByChannel(): Map<string, number> {
       if (state.recvTransport) count++;
     }
     if (count > 0) result.set(channelId, count);
+  }
+  return result;
+}
+
+/** Returns detailed diagnostic info for all active voice channels (for testing/admin). */
+export function getVoiceDiagnostics(): {
+  channelId: string;
+  userCount: number;
+  users: {
+    userId: string;
+    selfMute: boolean;
+    selfDeaf: boolean;
+    producers: { id: string; kind: string; paused: boolean; type: string }[];
+    consumerCount: number;
+  }[];
+}[] {
+  const result = [];
+  for (const [channelId, users] of voiceChannelUsers) {
+    const userStates = [];
+    for (const [uid, state] of users) {
+      const producers = [];
+      for (const [producerId, producer] of state.producers) {
+        producers.push({
+          id: producerId,
+          kind: producer.kind,
+          paused: producer.paused,
+          type: ((producer.appData as Record<string, unknown>)?.type as string) ?? 'unknown',
+        });
+      }
+      userStates.push({
+        userId: uid,
+        selfMute: state.selfMute,
+        selfDeaf: state.selfDeaf,
+        producers,
+        consumerCount: state.consumers.size,
+      });
+    }
+    result.push({ channelId, userCount: users.size, users: userStates });
   }
   return result;
 }

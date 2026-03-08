@@ -6,7 +6,7 @@ import { rateLimitAdmin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { getOnlineUsers, getUserSocket } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
-import { cleanupServerVoice, getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers } from '../websocket/voiceHandler';
+import { cleanupServerVoice, getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
 import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
 import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
@@ -69,6 +69,12 @@ adminRouter.get('/stats/sfu', async (_req: Request, res: Response, next: NextFun
   } catch (err) {
     next(err);
   }
+});
+
+// ─── Voice Diagnostics (for testing optimizations) ────────────────────────
+
+adminRouter.get('/stats/voice-diag', (_req: Request, res: Response) => {
+  res.json({ success: true, data: getVoiceDiagnostics() });
 });
 
 // ─── Live Metrics ─────────────────────────────────────────────────────────

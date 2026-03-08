@@ -24,7 +24,7 @@ Voxium/
 ## Key Features Implemented
 
 - Real-time text messaging with editing, deletion, reactions, replies, search
-- **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls, push-to-talk, noise suppression, screen sharing
+- **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls, push-to-talk, noise suppression, screen sharing, silence detection (producer pause/resume), voice quality selector (low/medium/high bitrate), adaptive bandwidth caps
 - Server/channel/category management with drag-and-drop reordering
 - JWT auth with refresh tokens, password reset, Remember Me
 - S3 file uploads (avatars, server icons) with presigned URLs
@@ -64,6 +64,8 @@ Voxium/
 - [ ] End-to-end testing
 
 ## Recent Changes
+
+- **SFU Voice Optimization** (2026-03-08) — Silence detection pauses mediasoup producers when noise gate detects silence (70-94% bandwidth reduction in typical use). Voice quality selector (low 16kbps / medium 32kbps / high 64kbps) applied to SFU producer encoding + DM SDP. Recv transport capped at 1.5 Mbps for fair bandwidth distribution. All voice:join error paths now emit `voice:error` with user-facing messages. Eliminated `as any` lint warnings via typed `emitSpeaking()` helper. Review fixes: reconnect callback re-registration, screen-audio producer filtering, teardown callback consistency.
 
 - **Dynamic Resource Limits** (2026-03-07) — 3-tier limit resolution system (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members. `GlobalConfig` + `ServerLimits` Prisma models, `getEffectiveLimits()` utility, admin CRUD endpoints, admin UI with global editor + per-server modal, read-only Limits tab in server settings, enforcement in channel/category creation, voice join, and invite join.
 

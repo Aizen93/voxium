@@ -16,11 +16,28 @@ let currentLevel = 0;
 const SILENCE_DELAY_MS = 300;
 const TICK_INTERVAL_MS = 20; // 50 checks/sec — won't be throttled in background like rAF
 let threshold = 0.008;
-let speakingEvent: 'voice:speaking' | 'dm:voice:speaking' = 'voice:speaking';
+let speakingMode: 'server' | 'dm' = 'server';
+
+function emitSpeaking(speaking: boolean) {
+  const socket = getSocket();
+  if (!socket) return;
+  if (speakingMode === 'dm') {
+    socket.emit('dm:voice:speaking', speaking);
+  } else {
+    socket.emit('voice:speaking', speaking);
+  }
+}
+
 let noiseSuppEnabled = true;
+let speakingChangeCallback: ((speaking: boolean) => void) | null = null;
 
 export function setNoiseGateThreshold(value: number) {
   threshold = value;
+}
+
+/** Register a callback invoked whenever local speaking state changes (for producer pause/resume). */
+export function onSpeakingChange(cb: ((speaking: boolean) => void) | null) {
+  speakingChangeCallback = cb;
 }
 
 export function getAudioLevel(): number {
@@ -96,7 +113,7 @@ async function loadRNNoiseWorklet(ctx: AudioContext): Promise<AudioWorkletNode |
 }
 
 export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm' = 'server') {
-  speakingEvent = mode === 'dm' ? 'dm:voice:speaking' : 'voice:speaking';
+  speakingMode = mode;
   stopSpeakingDetection();
 
   try {
@@ -149,7 +166,6 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
     currentLevel = Math.min(rms / 0.15, 1); // normalize to 0-1 range
 
     const now = Date.now();
-    const socket = getSocket();
 
     if (rms > threshold) {
       silenceStart = 0;
@@ -157,7 +173,8 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
       gainNode.gain.value = 1;
       if (!isSpeaking) {
         isSpeaking = true;
-        socket?.emit(speakingEvent as any, true);
+        emitSpeaking(true);
+        speakingChangeCallback?.(true);
       }
     } else {
       if (isSpeaking) {
@@ -167,7 +184,8 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
           // Close the noise gate — send silence
           gainNode.gain.value = 0;
           isSpeaking = false;
-          socket?.emit(speakingEvent as any, false);
+          emitSpeaking(false);
+          speakingChangeCallback?.(false);
         }
         // While debouncing, keep gate open so speech tail isn't clipped
       }
@@ -188,8 +206,8 @@ export function stopSpeakingDetection() {
 
   if (isSpeaking) {
     isSpeaking = false;
-    const socket = getSocket();
-    socket?.emit(speakingEvent as any, false);
+    emitSpeaking(false);
+    speakingChangeCallback?.(false);
   }
 
   if (sourceNode) {

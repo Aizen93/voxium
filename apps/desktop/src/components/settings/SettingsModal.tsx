@@ -3,7 +3,8 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check } from 'lucide-react';
+import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio } from 'lucide-react';
+import type { VoiceQuality } from '../../stores/settingsStore';
 import { LIMITS } from '@voxium/shared';
 
 interface DeviceInfo {
@@ -599,6 +600,7 @@ function AudioTab() {
     audioOutputDeviceId,
     noiseGateThreshold,
     voiceMode,
+    voiceQuality,
     pushToTalkKey,
     enableNoiseSuppression,
     enableNotificationSounds,
@@ -607,6 +609,7 @@ function AudioTab() {
     setAudioOutputDeviceId,
     setNoiseGateThreshold,
     setVoiceMode,
+    setVoiceQuality,
     setPushToTalkKey,
     setEnableNoiseSuppression,
     setEnableNotificationSounds,
@@ -794,6 +797,40 @@ function AudioTab() {
             />
           </button>
         </div>
+      </div>
+
+      {/* Voice Quality */}
+      <div className="mb-5">
+        <div className="flex items-center gap-2 mb-1.5">
+          <Radio size={16} className="text-vox-text-muted" />
+          <label className="text-xs font-semibold uppercase tracking-wide text-vox-text-muted">
+            Voice Quality
+          </label>
+        </div>
+        <div className="flex rounded-lg border border-vox-border overflow-hidden">
+          {([
+            { id: 'low' as VoiceQuality, label: 'Low', desc: '16 kbps' },
+            { id: 'medium' as VoiceQuality, label: 'Medium', desc: '32 kbps' },
+            { id: 'high' as VoiceQuality, label: 'High', desc: '64 kbps' },
+          ]).map((q) => (
+            <button
+              key={q.id}
+              type="button"
+              onClick={() => setVoiceQuality(q.id)}
+              className={`flex-1 px-3 py-2 transition-colors ${
+                voiceQuality === q.id
+                  ? 'bg-vox-accent-primary text-white'
+                  : 'bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary'
+              }`}
+            >
+              <span className="text-sm font-medium">{q.label}</span>
+              <span className={`block text-[10px] ${voiceQuality === q.id ? 'text-white/70' : 'text-vox-text-muted'}`}>{q.desc}</span>
+            </button>
+          ))}
+        </div>
+        <p className="mt-1 text-[10px] text-vox-text-muted">
+          Higher quality uses more bandwidth. Takes effect on next voice join.
+        </p>
       </div>
 
       {/* Voice Mode */}
