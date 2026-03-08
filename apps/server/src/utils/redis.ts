@@ -1,17 +1,31 @@
 import { createClient, type RedisClientType } from 'redis';
+import crypto from 'crypto';
+
+/** Unique identifier for this server node (for multi-node coordination). */
+export const NODE_ID = process.env.NODE_ID || crypto.randomUUID().slice(0, 8);
 
 let redisClient: RedisClientType;
+let redisPub: RedisClientType;
+let redisSub: RedisClientType;
+let redisConfigSub: RedisClientType;
 
 export async function initRedis(): Promise<RedisClientType> {
-  redisClient = createClient({
-    url: process.env.REDIS_URL || 'redis://localhost:6379',
-  });
+  const url = process.env.REDIS_URL || 'redis://localhost:6379';
 
-  redisClient.on('error', (err) => {
-    console.error('[Redis] Error:', err);
-  });
-
+  redisClient = createClient({ url });
+  redisClient.on('error', (err) => console.error('[Redis] Error:', err));
   await redisClient.connect();
+
+  // Dedicated pub/sub pair for Socket.IO Redis adapter
+  redisPub = redisClient.duplicate();
+  redisSub = redisClient.duplicate();
+  // Separate subscriber for config propagation (feature flags, rate limits)
+  redisConfigSub = redisClient.duplicate();
+  redisPub.on('error', (err) => console.error('[Redis:pub] Error:', err));
+  redisSub.on('error', (err) => console.error('[Redis:sub] Error:', err));
+  redisConfigSub.on('error', (err) => console.error('[Redis:configSub] Error:', err));
+  await Promise.all([redisPub.connect(), redisSub.connect(), redisConfigSub.connect()]);
+
   return redisClient;
 }
 
@@ -22,23 +36,45 @@ export function getRedis(): RedisClientType {
   return redisClient;
 }
 
-// ─── Presence helpers ────────────────────────────────────────────────────────
+/** Returns the dedicated pub/sub client pair for Socket.IO Redis adapter. */
+export function getRedisPubSub(): { pub: RedisClientType; sub: RedisClientType } {
+  if (!redisPub || !redisSub) {
+    throw new Error('Redis not initialized. Call initRedis() first.');
+  }
+  return { pub: redisPub, sub: redisSub };
+}
+
+/** Returns the config subscriber for cross-node config propagation. */
+export function getRedisConfigSub(): RedisClientType {
+  if (!redisConfigSub) {
+    throw new Error('Redis not initialized. Call initRedis() first.');
+  }
+  return redisConfigSub;
+}
+
+// ─── Presence helpers (multi-node safe: 1 user → many sockets) ──────────────
 
 export async function setUserOnline(userId: string, socketId: string): Promise<void> {
   const redis = getRedis();
-  await redis.hSet('user:sockets', userId, socketId);
+  await redis.sAdd(`user:sockets:${userId}`, socketId);
   await redis.hSet('socket:users', socketId, userId);
   await redis.sAdd('online_users', userId);
 }
 
-export async function setUserOffline(socketId: string): Promise<string | undefined> {
+export async function setUserOffline(socketId: string): Promise<{ userId: string; fullyOffline: boolean } | undefined> {
   const redis = getRedis();
   const userId = await redis.hGet('socket:users', socketId);
   if (userId) {
-    await redis.hDel('user:sockets', userId);
     await redis.hDel('socket:users', socketId);
-    await redis.sRem('online_users', userId);
-    return userId;
+    await redis.sRem(`user:sockets:${userId}`, socketId);
+    // Only mark user offline if they have no remaining sockets on any node
+    const remaining = await redis.sCard(`user:sockets:${userId}`);
+    if (remaining === 0) {
+      await redis.sRem('online_users', userId);
+      await redis.del(`user:sockets:${userId}`);
+      return { userId, fullyOffline: true };
+    }
+    return { userId, fullyOffline: false };
   }
   return undefined;
 }
@@ -53,7 +89,8 @@ export async function getOnlineUsers(): Promise<string[]> {
   return await redis.sMembers('online_users');
 }
 
-export async function getUserSocket(userId: string): Promise<string | undefined> {
+/** Get all socket IDs for a user across all nodes. */
+export async function getUserSockets(userId: string): Promise<string[]> {
   const redis = getRedis();
-  return (await redis.hGet('user:sockets', userId)) ?? undefined;
+  return await redis.sMembers(`user:sockets:${userId}`);
 }

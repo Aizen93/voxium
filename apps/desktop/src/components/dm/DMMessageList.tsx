@@ -1,8 +1,8 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from '../chat/MessageItem';
-import { Phone } from 'lucide-react';
+import { Phone, ArrowDown } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 
 interface Props {
@@ -16,6 +16,7 @@ export function DMMessageList({ conversationId }: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const fetchingRef = useRef(false);
+  const [showScrollButton, setShowScrollButton] = useState(false);
 
   useEffect(() => {
     if (isNearBottomRef.current) {
@@ -26,6 +27,7 @@ export function DMMessageList({ conversationId }: Props) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView();
     fetchingRef.current = false;
+    setShowScrollButton(false);
   }, [conversationId]);
 
   // Scroll to target message (from search)
@@ -46,7 +48,9 @@ export function DMMessageList({ conversationId }: Props) {
     const el = listRef.current;
     if (!el) return;
 
-    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    isNearBottomRef.current = nearBottom;
+    setShowScrollButton(!nearBottom);
 
     if (
       el.scrollTop < 50 &&
@@ -91,75 +95,90 @@ export function DMMessageList({ conversationId }: Props) {
     return `${names.join(' and ')} are typing...`;
   })();
 
+  const scrollToBottom = () => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
   return (
-    <div
-      ref={listRef}
-      className="flex-1 overflow-y-auto px-4 py-4"
-      onScroll={handleScroll}
-    >
-      {isLoading && messages.length === 0 && (
-        <div className="flex items-center justify-center py-8">
-          <div className="h-6 w-6 animate-spin rounded-full border-2 border-vox-accent-primary border-t-transparent" />
-        </div>
-      )}
+    <div className="relative flex-1 overflow-hidden">
+      <div
+        ref={listRef}
+        className="h-full overflow-y-auto px-4 py-4"
+        onScroll={handleScroll}
+      >
+        {isLoading && messages.length === 0 && (
+          <div className="flex items-center justify-center py-8">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-vox-accent-primary border-t-transparent" />
+          </div>
+        )}
 
-      {!hasMore && messages.length > 0 && (
-        <div className="mb-6 border-b border-vox-border pb-4">
-          <h4 className="text-2xl font-bold text-vox-text-primary">Beginning of conversation</h4>
-          <p className="text-sm text-vox-text-secondary">This is the start of your direct message history.</p>
-        </div>
-      )}
+        {!hasMore && messages.length > 0 && (
+          <div className="mb-6 border-b border-vox-border pb-4">
+            <h4 className="text-2xl font-bold text-vox-text-primary">Beginning of conversation</h4>
+            <p className="text-sm text-vox-text-secondary">This is the start of your direct message history.</p>
+          </div>
+        )}
 
-      {messages.map((message, index) => {
-        // System messages (call started/ended)
-        if (message.type === 'system') {
-          const date = new Date(message.createdAt);
-          const timeStr = isToday(date)
-            ? `Today at ${format(date, 'h:mm a')}`
-            : isYesterday(date)
-              ? `Yesterday at ${format(date, 'h:mm a')}`
-              : format(date, 'MM/dd/yyyy h:mm a');
+        {messages.map((message, index) => {
+          // System messages (call started/ended)
+          if (message.type === 'system') {
+            const date = new Date(message.createdAt);
+            const timeStr = isToday(date)
+              ? `Today at ${format(date, 'h:mm a')}`
+              : isYesterday(date)
+                ? `Yesterday at ${format(date, 'h:mm a')}`
+                : format(date, 'MM/dd/yyyy h:mm a');
+
+            return (
+              <div key={message.id} className="my-3 flex items-center justify-center gap-2">
+                <div className="flex items-center gap-2 rounded-full bg-vox-bg-secondary px-4 py-1.5">
+                  <Phone size={14} className="text-vox-text-muted" />
+                  <span className="text-xs text-vox-text-secondary">{message.content}</span>
+                  <span className="text-[10px] text-vox-text-muted">{timeStr}</span>
+                </div>
+              </div>
+            );
+          }
+
+          const showHeader = shouldShowHeader(index);
+          const isOwn = message.author.id === user?.id;
 
           return (
-            <div key={message.id} className="my-3 flex items-center justify-center gap-2">
-              <div className="flex items-center gap-2 rounded-full bg-vox-bg-secondary px-4 py-1.5">
-                <Phone size={14} className="text-vox-text-muted" />
-                <span className="text-xs text-vox-text-secondary">{message.content}</span>
-                <span className="text-[10px] text-vox-text-muted">{timeStr}</span>
-              </div>
-            </div>
+            <MessageItem
+              key={message.id}
+              message={message}
+              showHeader={showHeader}
+              addTopMargin={showHeader && index > 0}
+              isOwn={isOwn}
+              canDelete={isOwn}
+              channelId={undefined}
+              conversationId={conversationId}
+            />
           );
-        }
+        })}
 
-        const showHeader = shouldShowHeader(index);
-        const isOwn = message.author.id === user?.id;
-
-        return (
-          <MessageItem
-            key={message.id}
-            message={message}
-            showHeader={showHeader}
-            addTopMargin={showHeader && index > 0}
-            isOwn={isOwn}
-            canDelete={isOwn}
-            channelId={undefined}
-            conversationId={conversationId}
-          />
-        );
-      })}
-
-      {typingText && (
-        <div className="flex items-center gap-2 px-4 py-1">
-          <div className="flex gap-0.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
-            <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
-            <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
+        {typingText && (
+          <div className="flex items-center gap-2 px-4 py-1">
+            <div className="flex gap-0.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
+            </div>
+            <span className="text-xs text-vox-text-muted">{typingText}</span>
           </div>
-          <span className="text-xs text-vox-text-muted">{typingText}</span>
-        </div>
-      )}
+        )}
 
-      <div ref={bottomRef} />
+        <div ref={bottomRef} />
+      </div>
+
+      {showScrollButton && (
+        <button
+          onClick={scrollToBottom}
+          className="absolute bottom-4 left-1/2 -translate-x-1/2 flex h-8 w-8 items-center justify-center rounded-full bg-vox-bg-tertiary text-vox-text-secondary shadow-lg hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
+        >
+          <ArrowDown size={16} />
+        </button>
+      )}
     </div>
   );
 }

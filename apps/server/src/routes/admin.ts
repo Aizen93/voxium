@@ -4,7 +4,7 @@ import { authenticate } from '../middleware/auth';
 import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin';
 import { rateLimitAdmin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { getOnlineUsers, getUserSocket } from '../utils/redis';
+import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { cleanupServerVoice, getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
 import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
@@ -21,6 +21,21 @@ import { logAuditEvent } from '../utils/auditLog';
 export const adminRouter = Router();
 
 adminRouter.use(authenticate, requireAdmin, rateLimitAdmin);
+
+/** Force-logout and disconnect a user across all nodes. */
+async function forceLogoutUser(userId: string, reason: string): Promise<void> {
+  const io = getIO();
+  io.to(`user:${userId}`).emit('force:logout', { reason });
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
+  for (const s of sockets) s.disconnect(true);
+}
+
+/** Remove all sockets from a server room across all nodes. */
+async function clearServerRoom(serverId: string): Promise<void> {
+  const io = getIO();
+  const sockets = await io.in(`server:${serverId}`).fetchSockets();
+  for (const s of sockets) s.leave(`server:${serverId}`);
+}
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
 
@@ -83,19 +98,23 @@ adminRouter.get('/stats/live', async (_req: Request, res: Response, next: NextFu
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
-    const [onlineUserIds, messagesLastHour] = await Promise.all([
+    const [onlineUserIds, messagesLastHour, dmCalls, dmVoiceUsers, voiceChannels, voiceUsers] = await Promise.all([
       getOnlineUsers(),
       prisma.message.count({ where: { createdAt: { gte: oneHourAgo } } }),
+      getActiveDMCallCount(),
+      getTotalDMVoiceUsers(),
+      getActiveVoiceChannelCount(),
+      getTotalVoiceUsers(),
     ]);
 
     res.json({
       success: true,
       data: {
         onlineUsers: onlineUserIds.length,
-        voiceChannels: getActiveVoiceChannelCount(),
-        voiceUsers: getTotalVoiceUsers(),
-        dmCalls: getActiveDMCallCount(),
-        dmVoiceUsers: getTotalDMVoiceUsers(),
+        voiceChannels,
+        voiceUsers,
+        dmCalls,
+        dmVoiceUsers,
         messagesLastHour,
       },
     });
@@ -310,16 +329,8 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       await broadcastMemberLeft(targetId, serverId);
     }
 
-    // Force logout then disconnect active socket
-    const socketId = await getUserSocket(targetId);
-    if (socketId) {
-      const io = getIO();
-      const socket = io.sockets.sockets.get(socketId);
-      if (socket) {
-        socket.emit('force:logout', { reason: 'Your account has been banned' });
-        socket.disconnect(true);
-      }
-    }
+    // Force logout then disconnect active socket (works across all nodes)
+    await forceLogoutUser(targetId, 'Your account has been banned');
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -511,15 +522,7 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           // action === 'delete' — clean up and delete the server
           cleanupServerVoice(io, action.serverId);
           io.to(`server:${action.serverId}`).emit('server:deleted', { serverId: action.serverId });
-
-          const room = io.sockets.adapter.rooms.get(`server:${action.serverId}`);
-          if (room) {
-            for (const sid of room) {
-              const s = io.sockets.sockets.get(sid);
-              if (s) s.leave(`server:${action.serverId}`);
-            }
-          }
-
+          await clearServerRoom(action.serverId);
           await prisma.server.delete({ where: { id: action.serverId } });
         }
       }
@@ -531,15 +534,8 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
         }
       }
 
-      // Force logout then disconnect active socket
-      const socketId = await getUserSocket(targetId);
-      if (socketId) {
-        const targetSocket = io.sockets.sockets.get(socketId);
-        if (targetSocket) {
-          targetSocket.emit('force:logout', { reason: 'Your account has been deleted' });
-          targetSocket.disconnect(true);
-        }
-      }
+      // Force logout then disconnect active socket (works across all nodes)
+      await forceLogoutUser(targetId, 'Your account has been deleted');
 
       // Delete user — cascade only removes ServerMember records for transferred servers
       await prisma.user.delete({ where: { id: targetId } });
@@ -563,16 +559,8 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
         }
       }
 
-      const io = getIO();
-
-      const socketId = await getUserSocket(targetId);
-      if (socketId) {
-        const targetSocket = io.sockets.sockets.get(socketId);
-        if (targetSocket) {
-          targetSocket.emit('force:logout', { reason: 'Your account has been deleted' });
-          targetSocket.disconnect(true);
-        }
-      }
+      // Force logout then disconnect active socket (works across all nodes)
+      await forceLogoutUser(targetId, 'Your account has been deleted');
 
       await prisma.user.delete({ where: { id: targetId } });
 
@@ -720,14 +708,8 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
     // Notify members
     io.to(`server:${server.id}`).emit('server:deleted', { serverId: server.id });
 
-    // Remove all sockets from the server room
-    const room = io.sockets.adapter.rooms.get(`server:${server.id}`);
-    if (room) {
-      for (const socketId of room) {
-        const socket = io.sockets.sockets.get(socketId);
-        if (socket) socket.leave(`server:${server.id}`);
-      }
-    }
+    // Remove all sockets from the server room (works across all nodes)
+    await clearServerRoom(server.id);
 
     // Cascade delete
     await prisma.server.delete({ where: { id: server.id } });

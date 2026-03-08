@@ -24,7 +24,7 @@ import { app } from './app';
 import { initSocketServer } from './websocket/socketServer';
 import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
 import { prisma } from './utils/prisma';
-import { initRedis } from './utils/redis';
+import { initRedis, NODE_ID } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
 import { initMediasoup } from './mediasoup/mediasoupManager';
@@ -63,7 +63,7 @@ async function main() {
   startAdminMetricsEmitter(io);
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 Voxium server running on http://0.0.0.0:${PORT}\n`);
+    console.log(`\n[Node ${NODE_ID}] Voxium server running on http://0.0.0.0:${PORT}\n`);
   });
 
   // Graceful shutdown

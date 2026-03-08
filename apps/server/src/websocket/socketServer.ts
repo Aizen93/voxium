@@ -1,8 +1,9 @@
 import type { Server as HttpServer } from 'http';
 import { Server as SocketServer } from 'socket.io';
+import { createAdapter } from '@socket.io/redis-adapter';
 import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
-import { setUserOnline, setUserOffline } from '../utils/redis';
+import { setUserOnline, setUserOffline, getRedisPubSub } from '../utils/redis';
 import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, getVoiceStateForServer, getScreenShareState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
@@ -49,6 +50,10 @@ export function initSocketServer(httpServer: HttpServer) {
     pingInterval: 25000,
     pingTimeout: 20000,
   });
+
+  // Attach Redis adapter for multi-node broadcast support
+  const { pub, sub } = getRedisPubSub();
+  io.adapter(createAdapter(pub, sub));
 
   // ─── Authentication middleware ───────────────────────────────────────
   io.use(async (socket, next) => {
@@ -214,16 +219,21 @@ export function initSocketServer(httpServer: HttpServer) {
       // the variable from the outer scope — it may not be set yet if
       // the connection handler's async work hasn't finished)
       try {
-        const membershipList = await prisma.serverMember.findMany({
-          where: { userId },
-          select: { serverId: true },
-        });
+        const result = await setUserOffline(socket.id);
 
-        await setUserOffline(socket.id);
-        await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
+        // Only broadcast offline and update DB if the user has no remaining
+        // sockets on any node (1:many presence model).
+        if (result?.fullyOffline) {
+          const membershipList = await prisma.serverMember.findMany({
+            where: { userId },
+            select: { serverId: true },
+          });
 
-        for (const m of membershipList) {
-          socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
+          await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
+
+          for (const m of membershipList) {
+            socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
+          }
         }
       } catch (err) {
         console.error(`[WS] Error during disconnect cleanup for ${userId}:`, err);
@@ -396,9 +406,9 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
       }
 
-      // Send existing voice channel users for all servers
+      // Send existing voice channel users for all servers (reads from Redis for cross-node visibility)
       for (const m of memberships) {
-        const voiceState = getVoiceStateForServer(m.serverId);
+        const voiceState = await getVoiceStateForServer(m.serverId);
         for (const { channelId, userIds, userStates } of voiceState) {
           const userInfos = await prisma.user.findMany({
             where: { id: { in: userIds } },
@@ -416,7 +426,7 @@ export function initSocketServer(httpServer: HttpServer) {
           socket.emit('voice:channel_users', { channelId, users: voiceUsers });
 
           // Send screen share state if someone is sharing in this channel
-          const sharingUserId = getScreenShareState(channelId);
+          const sharingUserId = await getScreenShareState(channelId);
           if (sharingUserId) {
             socket.emit('voice:screen_share:state', { channelId, sharingUserId });
           }

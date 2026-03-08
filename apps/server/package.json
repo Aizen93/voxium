@@ -17,6 +17,7 @@
     "@aws-sdk/client-s3": "^3.998.0",
     "@aws-sdk/s3-request-presigner": "^3.1000.0",
     "@prisma/client": "^6.2.0",
+    "@socket.io/redis-adapter": "^8.3.0",
     "@voxium/shared": "workspace:*",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",

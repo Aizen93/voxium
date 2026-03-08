@@ -15,13 +15,11 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
     where: { serverId, type: 'text' },
     select: { id: true },
   });
-  const sockets = await io.fetchSockets();
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
   for (const s of sockets) {
-    if (s.data.userId === userId) {
-      s.join(`server:${serverId}`);
-      for (const ch of textChannels) {
-        s.join(`channel:${ch.id}`);
-      }
+    s.join(`server:${serverId}`);
+    for (const ch of textChannels) {
+      s.join(`channel:${ch.id}`);
     }
   }
 
@@ -56,13 +54,11 @@ export async function joinServerRoom(userId: string, serverId: string): Promise<
     where: { serverId, type: 'text' },
     select: { id: true },
   });
-  const sockets = await io.fetchSockets();
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
   for (const s of sockets) {
-    if (s.data.userId === userId) {
-      s.join(`server:${serverId}`);
-      for (const ch of textChannels) {
-        s.join(`channel:${ch.id}`);
-      }
+    s.join(`server:${serverId}`);
+    for (const ch of textChannels) {
+      s.join(`channel:${ch.id}`);
     }
   }
 }
@@ -79,13 +75,11 @@ export async function broadcastMemberLeft(userId: string, serverId: string): Pro
     where: { serverId, type: 'text' },
     select: { id: true },
   });
-  const sockets = await io.fetchSockets();
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
   for (const s of sockets) {
-    if (s.data.userId === userId) {
-      s.leave(`server:${serverId}`);
-      for (const ch of textChannels) {
-        s.leave(`channel:${ch.id}`);
-      }
+    s.leave(`server:${serverId}`);
+    for (const ch of textChannels) {
+      s.leave(`channel:${ch.id}`);
     }
   }
 

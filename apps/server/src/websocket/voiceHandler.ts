@@ -8,8 +8,13 @@ import { isFeatureEnabled } from '../utils/featureFlags';
 import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerRouters, getRouter } from '../mediasoup/mediasoupManager';
 import { RECV_TRANSPORT_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
+import { getRedis, NODE_ID } from '../utils/redis';
 
 // ─── In-memory voice state ──────────────────────────────────────────────────
+// mediasoup objects (Routers, Transports, Producers, Consumers) are C++ handles
+// that MUST stay node-local. The Maps below are authoritative for mediasoup ops.
+// Redis mirrors metadata (who's in which channel, mute/deaf, screen share) so
+// other nodes can see voice state for stats and initial-state-on-connect.
 
 interface UserMediaState {
   socketId: string;
@@ -28,6 +33,54 @@ const voiceChannelUsers = new Map<string, Map<string, UserMediaState>>();
 const channelServerMap = new Map<string, string>();
 // channelId → userId (one screen sharer per channel)
 const screenSharers = new Map<string, string>();
+
+// ─── Redis metadata mirror ──────────────────────────────────────────────────
+// Redis keys:
+// voice:channel:users:{channelId}  — Hash: userId → JSON({ selfMute, selfDeaf, nodeId })
+// voice:channel:server:{channelId} — String: serverId
+// voice:channel:node:{channelId}   — String: nodeId (which node owns the Router)
+// voice:user:{userId}              — String: channelId (reverse lookup)
+// voice:screen:{channelId}         — String: userId (screen sharer)
+// voice:active                     — Set of channelIds with active voice users
+
+function mirrorVoiceJoin(channelId: string, serverId: string, userId: string, selfMute: boolean, selfDeaf: boolean): void {
+  getRedis().multi()
+    .hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, nodeId: NODE_ID }))
+    .set(`voice:channel:server:${channelId}`, serverId)
+    .set(`voice:channel:node:${channelId}`, NODE_ID)
+    .set(`voice:user:${userId}`, channelId)
+    .sAdd('voice:active', channelId)
+    .exec().catch(() => {});
+}
+
+function mirrorVoiceLeave(channelId: string, userId: string, channelEmpty: boolean): void {
+  const redis = getRedis();
+  const pipeline = redis.multi()
+    .hDel(`voice:channel:users:${channelId}`, userId)
+    .del(`voice:user:${userId}`);
+  if (channelEmpty) {
+    pipeline
+      .del(`voice:channel:users:${channelId}`)
+      .del(`voice:channel:server:${channelId}`)
+      .del(`voice:channel:node:${channelId}`)
+      .sRem('voice:active', channelId)
+      .del(`voice:screen:${channelId}`);
+  }
+  pipeline.exec().catch(() => {});
+}
+
+function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean): void {
+  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, nodeId: NODE_ID })).catch(() => {});
+}
+
+function mirrorScreenShare(channelId: string, userId: string | null): void {
+  const redis = getRedis();
+  if (userId) {
+    redis.set(`voice:screen:${channelId}`, userId).catch(() => {});
+  } else {
+    redis.del(`voice:screen:${channelId}`).catch(() => {});
+  }
+}
 
 // ─── Handler Registration ───────────────────────────────────────────────────
 
@@ -74,7 +127,7 @@ export function handleVoiceEvents(
     }
 
     // Leave any current DM voice call first (cross-cleanup)
-    leaveCurrentDMVoiceChannel(io, socket, userId);
+    await leaveCurrentDMVoiceChannel(io, socket, userId);
     // Leave any current voice channel first
     leaveCurrentVoiceChannel(io, socket, userId);
 
@@ -140,6 +193,9 @@ export function handleVoiceEvents(
     };
 
     voiceChannelUsers.get(channelId)!.set(userId, userMedia);
+
+    // Mirror to Redis for cross-node visibility
+    mirrorVoiceJoin(channelId, channel.serverId, userId, initialMute, initialDeaf);
 
     // Fetch user info
     const user = await prisma.user.findUnique({
@@ -355,6 +411,8 @@ export function handleVoiceEvents(
           if (muted) { producer.pause(); } else { producer.resume(); }
         }
       }
+
+      mirrorVoiceStateUpdate(channelId, userId, muted, userMedia.selfDeaf);
     }
 
     const serverId = channelServerMap.get(channelId);
@@ -378,6 +436,7 @@ export function handleVoiceEvents(
     const userMedia = channelUsers?.get(userId);
     if (userMedia) {
       userMedia.selfDeaf = deafened;
+      mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, deafened);
     }
 
     const serverId = channelServerMap.get(channelId);
@@ -434,6 +493,7 @@ export function handleVoiceEvents(
     if (screenSharers.has(channelId)) return;
 
     screenSharers.set(channelId, userId);
+    mirrorScreenShare(channelId, userId);
     const serverId = channelServerMap.get(channelId);
     if (serverId) {
       io.to(`server:${serverId}`).emit('voice:screen_share:start', { channelId, userId });
@@ -449,6 +509,7 @@ export function handleVoiceEvents(
     if (screenSharers.get(channelId) !== userId) return;
 
     screenSharers.delete(channelId);
+    mirrorScreenShare(channelId, null);
     const serverId = channelServerMap.get(channelId);
     if (serverId) {
       io.to(`server:${serverId}`).emit('voice:screen_share:stop', { channelId, userId });
@@ -462,6 +523,9 @@ export function handleVoiceEvents(
 }
 
 // ─── Consumer creation helper ───────────────────────────────────────────────
+// NOTE (multi-node): Uses io.sockets.sockets.get() intentionally — mediasoup
+// Consumers/Transports are node-local objects.  With ip_hash sticky sessions,
+// all voice users for a given channel are on the same node as the Router.
 
 async function createConsumerForUser(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
@@ -541,6 +605,7 @@ export function leaveCurrentVoiceChannel(
   // Clean up screen share if this user was sharing
   if (screenSharers.get(channelId) === userId) {
     screenSharers.delete(channelId);
+    mirrorScreenShare(channelId, null);
     if (serverId) {
       io.to(`server:${serverId}`).emit('voice:screen_share:stop', { channelId, userId });
     }
@@ -567,9 +632,11 @@ export function leaveCurrentVoiceChannel(
     }
   }
 
+  let channelEmpty = false;
   if (channelUsers) {
     channelUsers.delete(userId);
     if (channelUsers.size === 0) {
+      channelEmpty = true;
       voiceChannelUsers.delete(channelId);
       channelServerMap.delete(channelId);
       screenSharers.delete(channelId);
@@ -577,6 +644,9 @@ export function leaveCurrentVoiceChannel(
       releaseRouter(channelId);
     }
   }
+
+  // Mirror leave to Redis
+  mirrorVoiceLeave(channelId, userId, channelEmpty);
 
   socket.leave(`voice:${channelId}`);
   socket.data.voiceChannelId = undefined;
@@ -589,6 +659,13 @@ export function leaveCurrentVoiceChannel(
 
 /**
  * Silently clean up all voice state for a server being deleted.
+ *
+ * NOTE (multi-node): This only cleans up voice channels whose mediasoup
+ * Router lives on THIS node.  `io.sockets.sockets.get()` is intentionally
+ * local-only here because mediasoup objects (Routers, Transports, Producers,
+ * Consumers) are inherently node-local and cannot be proxied across nodes.
+ * In a multi-node deployment, server deletion should ideally be broadcast
+ * to every node so each can clean up its own voice state.
  */
 export function cleanupServerVoice(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
@@ -602,7 +679,7 @@ export function cleanupServerVoice(
   for (const channelId of channelIds) {
     const users = voiceChannelUsers.get(channelId);
     if (users) {
-      for (const [, userMedia] of users.entries()) {
+      for (const [uid, userMedia] of users.entries()) {
         // Close mediasoup resources
         for (const consumer of userMedia.consumers.values()) consumer.close();
         for (const producer of userMedia.producers.values()) producer.close();
@@ -614,19 +691,30 @@ export function cleanupServerVoice(
           socket.leave(`voice:${channelId}`);
           socket.data.voiceChannelId = undefined;
         }
+
+        // Clean up Redis mirror for this user
+        getRedis().del(`voice:user:${uid}`).catch(() => {});
       }
       voiceChannelUsers.delete(channelId);
     }
     screenSharers.delete(channelId);
     channelServerMap.delete(channelId);
+    // Clean up Redis mirror for the entire channel
+    const redis = getRedis();
+    redis.del(`voice:channel:users:${channelId}`).catch(() => {});
+    redis.del(`voice:channel:server:${channelId}`).catch(() => {});
+    redis.del(`voice:channel:node:${channelId}`).catch(() => {});
+    redis.sRem('voice:active', channelId).catch(() => {});
+    redis.del(`voice:screen:${channelId}`).catch(() => {});
   }
 
   // Release mediasoup Routers for these channels
   releaseServerRouters(channelIds);
 }
 
-export function getScreenShareState(channelId: string): string | null {
-  return screenSharers.get(channelId) ?? null;
+/** Get screen share state — reads from Redis for cross-node visibility */
+export async function getScreenShareState(channelId: string): Promise<string | null> {
+  return await getRedis().get(`voice:screen:${channelId}`) ?? null;
 }
 
 export function getVoiceChannelUsers(channelId: string): string[] {
@@ -634,20 +722,24 @@ export function getVoiceChannelUsers(channelId: string): string[] {
   return users ? Array.from(users.keys()) : [];
 }
 
-/** Returns count of active voice channels (channels with at least one user) */
-export function getActiveVoiceChannelCount(): number {
-  let count = 0;
-  for (const users of voiceChannelUsers.values()) {
-    if (users.size > 0) count++;
-  }
-  return count;
+/** Returns count of active voice channels across all nodes (via Redis) */
+export async function getActiveVoiceChannelCount(): Promise<number> {
+  return await getRedis().sCard('voice:active');
 }
 
-/** Returns total number of users in all voice channels */
-export function getTotalVoiceUsers(): number {
+/** Returns total number of users in all voice channels across all nodes (via Redis) */
+export async function getTotalVoiceUsers(): Promise<number> {
+  const redis = getRedis();
+  const activeChannels = await redis.sMembers('voice:active');
+  if (activeChannels.length === 0) return 0;
+  const pipeline = redis.multi();
+  for (const channelId of activeChannels) {
+    pipeline.hLen(`voice:channel:users:${channelId}`);
+  }
+  const results = await pipeline.exec();
   let count = 0;
-  for (const users of voiceChannelUsers.values()) {
-    count += users.size;
+  for (const val of results) {
+    if (typeof val === 'number') count += val;
   }
   return count;
 }
@@ -720,20 +812,42 @@ export function getVoiceDiagnostics(): {
   return result;
 }
 
-/** Returns all channelIds that belong to a given server and have active voice users */
-export function getVoiceStateForServer(serverId: string): { channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean }> }[] {
+/** Returns all channelIds that belong to a given server and have active voice users (cross-node via Redis) */
+export async function getVoiceStateForServer(serverId: string): Promise<{ channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean }> }[]> {
+  const redis = getRedis();
+  const activeChannels = await redis.sMembers('voice:active');
+  if (activeChannels.length === 0) return [];
+
+  // Pipeline: fetch server ID for all active channels in one round-trip
+  const serverPipeline = redis.multi();
+  for (const channelId of activeChannels) {
+    serverPipeline.get(`voice:channel:server:${channelId}`);
+  }
+  const serverIdsRaw = await serverPipeline.exec();
+
+  // Filter to channels belonging to this server, then fetch user data
+  const matchingChannels = activeChannels.filter((_, i) => serverIdsRaw[i] === serverId);
+  if (matchingChannels.length === 0) return [];
+
+  const usersPipeline = redis.multi();
+  for (const channelId of matchingChannels) {
+    usersPipeline.hGetAll(`voice:channel:users:${channelId}`);
+  }
+  const usersResultsRaw = await usersPipeline.exec();
+
   const result: { channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean }> }[] = [];
-  for (const [channelId, serverIdForChannel] of channelServerMap.entries()) {
-    if (serverIdForChannel === serverId) {
-      const users = voiceChannelUsers.get(channelId);
-      if (users && users.size > 0) {
-        const userStates = new Map<string, { selfMute: boolean; selfDeaf: boolean }>();
-        for (const [uid, state] of users.entries()) {
-          userStates.set(uid, { selfMute: state.selfMute, selfDeaf: state.selfDeaf });
-        }
-        result.push({ channelId, userIds: Array.from(users.keys()), userStates });
-      }
+  for (let i = 0; i < matchingChannels.length; i++) {
+    const usersData = usersResultsRaw[i] as unknown as Record<string, string>;
+    if (!usersData || typeof usersData !== 'object') continue;
+    const userIds = Object.keys(usersData);
+    if (userIds.length === 0) continue;
+
+    const userStates = new Map<string, { selfMute: boolean; selfDeaf: boolean }>();
+    for (const [uid, json] of Object.entries(usersData)) {
+      const { selfMute, selfDeaf } = JSON.parse(json);
+      userStates.set(uid, { selfMute, selfDeaf });
     }
+    result.push({ channelId: matchingChannels[i], userIds, userStates });
   }
   return result;
 }
