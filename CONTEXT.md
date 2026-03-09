@@ -5,7 +5,7 @@
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
 **Version:** 1.2.0
-**Date:** 2026-03-07
+**Date:** 2026-03-09
 
 ## Project Structure
 
@@ -27,12 +27,13 @@ Voxium/
 - **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls, push-to-talk, noise suppression, screen sharing, silence detection (producer pause/resume), voice quality selector (low/medium/high bitrate), adaptive bandwidth caps
 - Server/channel/category management with drag-and-drop reordering
 - JWT auth with refresh tokens, password reset, Remember Me
-- S3 file uploads (avatars, server icons) with presigned URLs
+- S3 file uploads (avatars, server icons, message attachments) with presigned URLs; attachments proxied through server (S3 URL never exposed to client); 3-day retention with daily 4 AM cleanup job + email report; expired attachments show placeholder in chat
 - Direct messages with typing indicators, reactions, unread tracking
 - Friend request system with real-time notifications
 - Unread indicators (channel + server level, persistent via DB)
-- Two-tier admin dashboard (admin + superadmin roles) with user/server/ban management, storage tools, live metrics, audit log, moderation queue (reports), support ticket management, rate limit controls, feature flags
+- Two-tier admin dashboard (admin + superadmin roles) with user/server/ban management, storage tools (avatars/server-icons/attachments with top uploaders, file browser, orphan cleanup), live metrics, audit log, moderation queue (reports), support ticket management, rate limit controls, feature flags
 - Admin user deletion with server ownership transfer
+- Comprehensive security hardening: JWT algorithm pinning (`HS256`), token purpose validation, IDOR prevention on message routes, admin role hierarchy enforcement, email enumeration prevention, TOTP replay protection (Redis), bcrypt 72-byte input limit, Tauri CSP, socket payload runtime type validation, presigned URL content-type enforcement, trust proxy conditional, GitHub Actions injection prevention
 - Rate limiting (per-endpoint + socket-level, admin-editable via Redis-backed registry) and input sanitization
 - Feature flags (registration, invites, server creation, voice, DM voice, support) — Redis-backed, toggleable from admin dashboard without redeploying
 - Per-server invite lock (owners/admins can lock/unlock invites independently of global flag)
@@ -47,7 +48,7 @@ Voxium/
 | Backend | Node.js, Express, TypeScript, Prisma, PostgreSQL, Redis, Socket.IO |
 | Frontend | React 19, Vite 6, Zustand, Tailwind CSS, Tauri 2 |
 | Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM noise suppression |
-| Storage | S3-compatible (presigned URL direct upload) |
+| Storage | S3-compatible (presigned URL upload, proxy streaming for attachments) |
 | Admin | React 19, Vite, Zustand (standalone app, port 8082) |
 
 ## Known Issues
@@ -58,6 +59,7 @@ Voxium/
 ## Remaining Work
 
 - [x] ~~mediasoup SFU for production-grade voice~~ (done — server voice channels use SFU)
+- [x] ~~Comprehensive security audit & hardening~~ (done — JWT hardening, IDOR fixes, runtime validation, TOTP replay protection, etc.)
 - [ ] Redis-based voice state for multi-node
 - [ ] Horizontal scaling, monitoring
 - [ ] Mobile app (React Native)
@@ -65,6 +67,14 @@ Voxium/
 
 ## Recent Changes
 
+- **Comprehensive Security Hardening** (2026-03-09) — Multi-pass security audit and fixes across the entire backend: JWT algorithm pinning (`HS256`) on all `jwt.verify()` calls to prevent algorithm confusion; token purpose validation in HTTP auth middleware and Socket.IO auth to reject trusted-device/totp-verify tokens as access tokens; IDOR prevention on message edit/delete (channelId match + server membership verification); admin role hierarchy (admins cannot ban/delete peer admins); email enumeration prevention (generic conflict error on registration); TOTP replay protection via Redis `SET NX EX` with 90s TTL; presigned URL content-type enforcement via `signableHeaders`; bcrypt PASSWORD_MAX reduced to 72; runtime type validation on all Socket.IO event payloads (strings, booleans, objects); rate limiting on all previously unprotected endpoints (messages PATCH/DELETE, DM PATCH/DELETE, reactions, socket events); 64KB size limit on DM voice signal relay; trust proxy conditional (production only); Tauri CSP configured; GitHub Actions script injection fix; displayName sanitization on registration; TOTP_ENCRYPTION_KEY startup warning.
+
+- **Socket Authorization Hardening** (2026-03-09) — `channel:join` now verifies server membership via DB query; `typing:start`/`typing:stop` check `socket.rooms.has()` before broadcasting.
+
+- **Attachment Security Hardening + Admin Storage** (2026-03-08) — Switched attachment access from presigned URL redirects to server-side proxy streaming (S3 URL never reaches client). Added `expired` soft-delete flag to `MessageAttachment` — expired files show placeholder in chat UI instead of silently disappearing. Self-healing proxy auto-marks attachments as expired when S3 returns `NoSuchKey`. Daily 4 AM cleanup job expires attachments older than 3 days, sends email report to `CLEANUP_REPORT_EMAIL`. Admin storage dashboard extended: 5 stat cards (total, avatars, server-icons, attachments, orphaned), file browser with type/status filters (Active/Orphaned/Expired), top uploaders aggregated from S3 + DB (users and servers), context-aware delete messages. Image lightbox for in-app image viewing. Download notifications via toast. E2E rate limit fixture for per-test Redis clearing.
+
+- **Attachment Security Audit** (2026-03-08) -- Read-only security review of file attachment system. Found 1 HIGH (JWT token leakage via query param), 5 MEDIUM (input validation gaps, no content-length enforcement, no presigned URL tracking, cleanup ordering), 4 LOW issues. No code changes; see CONTEXT_CHANGELOG.md for full findings.
+- **File Attachments Review** (2026-03-08) -- Read-only review of message attachment feature. Found stale-index bug in `MessageInput.tsx` upload state management; see CONTEXT_CHANGELOG.md for details.
 - **SFU Voice Optimization** (2026-03-08) — Silence detection pauses mediasoup producers when noise gate detects silence (70-94% bandwidth reduction in typical use). Voice quality selector (low 16kbps / medium 32kbps / high 64kbps) applied to SFU producer encoding + DM SDP. Recv transport capped at 1.5 Mbps for fair bandwidth distribution. All voice:join error paths now emit `voice:error` with user-facing messages. Eliminated `as any` lint warnings via typed `emitSpeaking()` helper. Review fixes: reconnect callback re-registration, screen-audio producer filtering, teardown callback consistency.
 
 - **Dynamic Resource Limits** (2026-03-07) — 3-tier limit resolution system (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members. `GlobalConfig` + `ServerLimits` Prisma models, `getEffectiveLimits()` utility, admin CRUD endpoints, admin UI with global editor + per-server modal, read-only Limits tab in server settings, enforcement in channel/category creation, voice join, and invite join.

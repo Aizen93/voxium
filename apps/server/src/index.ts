@@ -19,10 +19,17 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+// Warn about optional but security-critical env vars
+if (!process.env.TOTP_ENCRYPTION_KEY) {
+  console.warn('\nWARNING: TOTP_ENCRYPTION_KEY is not set. TOTP secrets will be stored UNENCRYPTED in the database.');
+  console.warn('Set this to a 32-byte hex string (64 characters) for production use.\n');
+}
+
 import http from 'http';
 import { app } from './app';
 import { initSocketServer } from './websocket/socketServer';
 import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
+import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
 import { prisma } from './utils/prisma';
 import { initRedis, NODE_ID } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
@@ -62,6 +69,9 @@ async function main() {
   // Start admin metrics emitter
   startAdminMetricsEmitter(io);
 
+  // Start attachment cleanup (3-day retention)
+  startAttachmentCleanup();
+
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n[Node ${NODE_ID}] Voxium server running on http://0.0.0.0:${PORT}\n`);
   });
@@ -70,6 +80,7 @@ async function main() {
   const shutdown = async () => {
     console.log('\nShutting down...');
     stopAdminMetricsEmitter();
+    stopAttachmentCleanup();
     server.close();
     await prisma.$disconnect();
     process.exit(0);

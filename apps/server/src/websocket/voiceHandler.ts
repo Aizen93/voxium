@@ -10,6 +10,11 @@ import { RECV_TRANSPORT_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { getRedis, NODE_ID } from '../utils/redis';
 
+/** Runtime type guard — returns false if value is not a non-empty string */
+function isString(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0;
+}
+
 // ─── In-memory voice state ──────────────────────────────────────────────────
 // mediasoup objects (Routers, Transports, Producers, Consumers) are C++ handles
 // that MUST stay node-local. The Maps below are authoritative for mediasoup ops.
@@ -92,6 +97,8 @@ export function handleVoiceEvents(
 
   // ── voice:join ────────────────────────────────────────────────────────
   socket.on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
+    if (!socketRateLimit(socket, 'voice:join', 10)) return;
+    if (!isString(channelId)) return;
     if (!isFeatureEnabled('voice')) {
       socket.emit('voice:error', { message: 'Voice channels are currently disabled' });
       return;
@@ -261,6 +268,7 @@ export function handleVoiceEvents(
 
   // ── voice:leave ───────────────────────────────────────────────────────
   socket.on('voice:leave', () => {
+    if (!socketRateLimit(socket, 'voice:leave', 30)) return;
     console.log(`[Voice] User ${userId} leaving voice channel`);
     leaveCurrentVoiceChannel(io, socket, userId);
   });
@@ -268,6 +276,7 @@ export function handleVoiceEvents(
   // ── voice:transport:connect ───────────────────────────────────────────
   socket.on('voice:transport:connect', async (data: { transportId: string; dtlsParameters: unknown }) => {
     if (!socketRateLimit(socket, 'voice:transport:connect', 30)) return;
+    if (!data || typeof data !== 'object' || !isString(data.transportId) || !data.dtlsParameters || typeof data.dtlsParameters !== 'object') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
@@ -297,6 +306,7 @@ export function handleVoiceEvents(
     callback,
   ) => {
     if (!socketRateLimit(socket, 'voice:produce', 20)) return;
+    if (!data || typeof data !== 'object' || (data.kind !== 'audio' && data.kind !== 'video') || !data.rtpParameters || typeof data.rtpParameters !== 'object') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
@@ -352,6 +362,7 @@ export function handleVoiceEvents(
   // ── voice:rtp_capabilities ────────────────────────────────────────────
   socket.on('voice:rtp_capabilities', async (data: { rtpCapabilities: unknown }) => {
     if (!socketRateLimit(socket, 'voice:rtp_capabilities', 10)) return;
+    if (!data || typeof data !== 'object' || !data.rtpCapabilities || typeof data.rtpCapabilities !== 'object') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
@@ -378,6 +389,7 @@ export function handleVoiceEvents(
   // ── voice:consumer:resume ─────────────────────────────────────────────
   socket.on('voice:consumer:resume', async (data: { consumerId: string }) => {
     if (!socketRateLimit(socket, 'voice:consumer:resume', 60)) return;
+    if (!data || typeof data !== 'object' || !isString(data.consumerId)) return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
@@ -397,6 +409,7 @@ export function handleVoiceEvents(
   // ── voice:mute ────────────────────────────────────────────────────────
   socket.on('voice:mute', (muted: boolean) => {
     if (!socketRateLimit(socket, 'voice:mute', 30)) return;
+    if (typeof muted !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
@@ -429,6 +442,7 @@ export function handleVoiceEvents(
   // ── voice:deaf ────────────────────────────────────────────────────────
   socket.on('voice:deaf', (deafened: boolean) => {
     if (!socketRateLimit(socket, 'voice:deaf', 30)) return;
+    if (typeof deafened !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
@@ -453,6 +467,7 @@ export function handleVoiceEvents(
   // ── voice:speaking ────────────────────────────────────────────────────
   socket.on('voice:speaking', (speaking: boolean) => {
     if (!socketRateLimit(socket, 'voice:speaking', 120)) return;
+    if (typeof speaking !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
@@ -478,9 +493,9 @@ export function handleVoiceEvents(
   });
 
   // ── voice:signal (kept as no-op for backward compat) ──────────────────
+  // No-op: kept for backward compat (SFU replaced P2P). Rate-limited to prevent spam.
   socket.on('voice:signal', () => {
-    // No longer used for server voice (SFU replaced P2P signaling).
-    // DM voice uses dm:voice:signal, which is handled separately.
+    socketRateLimit(socket, 'voice:signal', 10);
   });
 
   // ── Screen sharing ────────────────────────────────────────────────────

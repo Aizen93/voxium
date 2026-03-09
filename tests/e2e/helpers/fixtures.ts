@@ -1,7 +1,13 @@
 import { test as base } from '@playwright/test';
+import { clearRateLimits } from './api';
 
-// Rate limit keys are cleared once per run in global-setup.ts.
-// Re-export base test — no per-test fixture overhead needed.
-export const test = base;
+// Clear rate limits before each test to prevent 429 errors accumulating
+// across tests (the in-memory fallback limiter persists in the server process).
+export const test = base.extend({
+  page: async ({ page }, use) => {
+    await clearRateLimits();
+    await use(page);
+  },
+});
 
 export { expect } from '@playwright/test';

@@ -10,7 +10,7 @@ export const LIMITS = {
   USERNAME_MAX: 32,
   DISPLAY_NAME_MAX: 64,
   PASSWORD_MIN: 8,
-  PASSWORD_MAX: 128,
+  PASSWORD_MAX: 72,
   SERVER_NAME_MIN: 2,
   SERVER_NAME_MAX: 100,
   CHANNEL_NAME_MIN: 1,
@@ -39,7 +39,23 @@ export const LIMITS = {
   SUPPORT_MESSAGE_MAX: 2000,
   TOTP_CODE_LENGTH: 6,
   TOTP_BACKUP_CODE_COUNT: 8,
+  MAX_ATTACHMENTS_PER_MESSAGE: 5,
+  MAX_ATTACHMENT_SIZE: 8 * 1024 * 1024, // 8 MB (default for non-video files)
+  MAX_VIDEO_ATTACHMENT_SIZE: 12 * 1024 * 1024, // 12 MB (for video files)
+  ATTACHMENT_RETENTION_DAYS: 3,
 } as const;
+
+export const ALLOWED_ATTACHMENT_TYPES = [
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+  'application/pdf',
+  'text/plain', 'text/csv',
+  'audio/mpeg', 'audio/ogg', 'audio/wav',
+  'video/mp4', 'video/webm',
+] as const;
+
+export function getMaxAttachmentSize(mimeType: string): number {
+  return mimeType.startsWith('video/') ? LIMITS.MAX_VIDEO_ATTACHMENT_SIZE : LIMITS.MAX_ATTACHMENT_SIZE;
+}
 
 export const INVITE_CODE_LENGTH = 8;
 

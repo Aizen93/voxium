@@ -147,7 +147,7 @@ apps/server/
 │   │   ├── dm.ts           # DM conversations, messages, reactions, read tracking, deletion
 │   │   ├── users.ts        # User profiles, profile update with real-time broadcast
 │   │   ├── invites.ts      # Create/use/preview invites
-│   │   ├── uploads.ts      # Presigned URL generation (S3) + GET redirect proxy
+│   │   ├── uploads.ts      # Presigned URL generation (S3) + proxy streaming for attachments + GET redirect for public assets
 │   │   ├── friends.ts      # Friend requests (send/accept/decline/remove), friendship status
 │   │   ├── search.ts       # Full-text message search (server channels + DM conversations)
 │   │   ├── reports.ts      # User-facing report submission
@@ -171,8 +171,9 @@ apps/server/
 │       ├── redis.ts             # Redis client + presence helpers
 │       ├── errors.ts            # Custom error classes
 │       ├── sanitize.ts          # HTML stripping + text sanitization utility
-│       ├── s3.ts                # S3 client + presigned URL generation + delete helper + VALID_S3_KEY_RE
-│       ├── email.ts             # Nodemailer transporter + password reset email
+│       ├── s3.ts                # S3 client + presigned URL generation + delete helper + getS3Object proxy + VALID_S3_KEY_RE
+│       ├── email.ts             # Nodemailer transporter + password reset email + cleanup report email
+│       ├── attachmentCleanup.ts # Scheduled job (daily 4 AM) — expires attachments older than retention period, deletes from S3, emails report
 │       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
 │       ├── memberBroadcast.ts   # Server room join + member event broadcast
 │       ├── auditLog.ts         # Fire-and-forget audit event logger
@@ -737,17 +738,23 @@ Change Password (authenticated):
 | Layer | Protection |
 |-------|-----------|
 | Transport | HTTPS in production |
-| Headers | Helmet.js (CSP, HSTS, X-Frame, etc.) |
-| Auth | JWT with short expiry + refresh rotation + tokenVersion invalidation |
-| Passwords | bcrypt with 12 salt rounds |
+| Headers | Helmet.js (CSP, HSTS, X-Frame, etc.) + Tauri CSP (restrictive `connect-src`, `script-src`, etc.) |
+| Auth | JWT with short expiry + refresh rotation + tokenVersion invalidation + `algorithms: ['HS256']` pinning + purpose field rejection (prevents token type confusion) |
+| Passwords | bcrypt with 12 salt rounds, PASSWORD_MAX=72 (matches bcrypt's actual input limit) |
 | Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
+| Registration | Generic "Username or email already in use" error prevents email enumeration |
 | CORS | Explicit origin whitelist |
-| Input | Server-side validation on all endpoints |
+| Input | Server-side validation on all endpoints + runtime type validation on all Socket.IO payloads |
 | SQL Injection | Prisma parameterized queries |
-| WebSocket | JWT verification on connection |
+| IDOR | Message edit/delete verify channelId match + server membership; cross-channel manipulation blocked |
+| WebSocket | JWT verification on connection + purpose field rejection + runtime payload validation |
 | Input Sanitization | HTML tag stripping + trim on all user-generated text (defense-in-depth) |
-| Rate Limiting | rate-limiter-flexible with Redis (per-endpoint + per-socket), fail-open with in-memory fallback |
-| TOTP 2FA | AES-256-GCM encrypted secrets at rest (`TOTP_ENCRYPTION_KEY`), bcrypt-hashed backup codes, 30-day trusted device JWTs with tokenVersion validation, dedicated rate limiter |
+| Rate Limiting | rate-limiter-flexible with Redis (per-endpoint + per-socket), fail-open with in-memory fallback; complete coverage on all write endpoints and socket events |
+| TOTP 2FA | AES-256-GCM encrypted secrets at rest (`TOTP_ENCRYPTION_KEY`), bcrypt-hashed backup codes, 30-day trusted device JWTs with tokenVersion validation, dedicated rate limiter, Redis-based replay protection (90s TTL) |
+| Admin | Role hierarchy enforcement — admins cannot ban/delete peer admins (superadmin required) |
+| S3 Uploads | Presigned PUT URLs enforce Content-Type via `signableHeaders`; proxy streaming for attachments (S3 URL never exposed) |
+| Trust Proxy | Conditional on `NODE_ENV=production` or `TRUST_PROXY=true` — prevents IP spoofing in dev |
+| CI/CD | GitHub Actions use env vars for attacker-controlled context (never interpolated in `run:`) |
 
 ### TOTP Two-Factor Authentication Flow
 
@@ -860,7 +867,7 @@ apps/admin/
 │   │   ├── AdminServerList.tsx     # Paginated server management + global/per-server resource limits
 │   │   ├── AdminBanList.tsx        # User bans + IP bans
 │   │   ├── AdminAnnouncements.tsx  # Global/targeted announcements
-│   │   ├── AdminStorage.tsx        # S3 storage stats + file browser
+│   │   ├── AdminStorage.tsx        # S3 storage stats (avatars, server icons, attachments, orphans) + file browser with type/status filters + delete/cleanup actions
 │   │   ├── AdminRateLimits.tsx     # Rate limit controls (edit/reset rules, clear user counters)
 │   │   ├── AdminFeatureFlags.tsx   # Feature flag toggles
 │   │   ├── AdminAuditLog.tsx       # Searchable/filterable audit trail
@@ -893,6 +900,30 @@ Admins can control server resource allocation:
 - **Per-server overrides** (`GET/PUT/DELETE /admin/limits/servers/:serverId`) — nullable fields override global (null = use global)
 - Resolution: server override > global config > hardcoded `LIMITS` constants
 - Managed in AdminServerList: collapsible global limits panel + per-server settings modal
+
+### Admin Storage Management
+
+Admin dashboard storage page provides full visibility into S3 usage:
+- **Stat cards** — Total storage, avatars, server icons, attachments, orphaned files (count + size)
+- **Top uploaders** — Users and servers ranked by total storage consumption (avatars + server icons + message attachments aggregated from S3 keys and DB records)
+- **File browser** — Filterable table (all/avatars/server-icons/attachments/orphaned) with type badges, status badges (Active/Orphaned/Expired), linked entity display, and per-file delete
+- **Bulk cleanup** — Delete all orphaned files (files in S3 not referenced by any DB record)
+- **Delete behavior** — Avatar/server-icon deletion removes from S3 and clears the DB reference; attachment deletion marks as `expired: true` in DB (soft-delete) so the chat UI shows an "Expired" placeholder instead of a broken link
+
+### Attachment Lifecycle
+
+Message attachments follow a 3-day retention lifecycle:
+
+1. **Upload** — Client requests presigned PUT URL (`POST /uploads/presign/attachment`), uploads directly to S3. Server validates file type, size, and authorization (server membership or DM participation). S3 key includes context prefix (`attachments/ch-{channelId}/` or `attachments/dm-{conversationId}/`)
+2. **Access** — Attachments are proxied through the server (`GET /uploads/attachments/*`) — S3 URLs never reach the client. Authorization is checked per-request (server member or DM participant). Self-healing: if S3 returns `NoSuchKey`, the attachment is auto-marked as expired
+3. **Expiry** — A scheduled cleanup job runs daily at 4 AM. It queries `MessageAttachment` records older than `ATTACHMENT_RETENTION_DAYS` (default: 3), marks them as `expired: true` in the DB, then deletes the S3 objects. DB records are preserved for the "Expired" UI placeholder
+4. **Report** — After each cleanup run, an email report is sent to `CLEANUP_REPORT_EMAIL` with: status, duration, files expired, storage freed, remaining active attachments, and any errors
+
+### Email System
+
+Nodemailer transporter (`utils/email.ts`) with configurable SMTP:
+- **Password reset emails** — HTML + plaintext with reset link, 1hr expiry
+- **Cleanup report emails** — HTML + plaintext summary table sent to `CLEANUP_REPORT_EMAIL` after each daily attachment cleanup run
 
 ---
 
@@ -1022,7 +1053,7 @@ mediasoup Deployment (autoscaling)
 | **Video calls** | mediasoup SFU with video codecs (VP8/VP9/H264) |
 | **~~Screen sharing~~** | ~~mediasoup producer for screen capture~~ **Implemented (v0.9.6)** — `getDisplayMedia()` capture with WebRTC P2P track forwarding; one sharer per channel; inline + floating viewer modes |
 | **~~Direct Messages~~** | ~~New DM channel type, conversation model~~ **Implemented (v0.5.0–v0.7.0)** — 1-on-1 text + voice with `Conversation` model, real-time delivery, typing, reactions, unread tracking, WebRTC P2P calls, conversation deletion with cascade + real-time sync |
-| **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2, migrated v0.9.1)** — presigned URL direct-to-S3 uploads with client-side Canvas image processing; server generates presigned PUT/GET URLs, no file bytes touch the backend |
+| **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2, migrated v0.9.1, attachments v1.2.0)** — presigned URL direct-to-S3 uploads for avatars, server icons, and message attachments; attachments proxied through server (S3 URL never exposed); 3-day retention with daily 4 AM cleanup job + email report; soft-delete preserves DB records for "Expired" UI placeholders |
 | **~~Password reset~~** | ~~Email-based reset flow~~ **Implemented (v0.4.0)** — Nodemailer + SHA-256 hashed tokens + tokenVersion-based session invalidation |
 | **Push notifications** | FCM/APNs integration service |
 | **~~Message search~~** | ~~Elasticsearch / PostgreSQL full-text search~~ **Implemented (v0.9.5)** — PostgreSQL case-insensitive `contains` search across server channels and DM conversations; cursor-based pagination; "around" mode for jump-to-message with scroll + highlight |

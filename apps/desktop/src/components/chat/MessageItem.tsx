@@ -6,6 +6,7 @@ import { ReactionDisplay } from './ReactionDisplay';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { Avatar } from '../common/Avatar';
 import { MessageContent } from './MessageContent';
+import { AttachmentDisplay } from './AttachmentDisplay';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Pencil, Trash2, SmilePlus, Reply, Flag } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
@@ -274,9 +275,20 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                 {isEditing ? (
                   <div className="mt-1">{editArea}</div>
                 ) : (
-                  <div className="text-sm text-vox-text-primary break-words">
-                    <MessageContent content={message.content} />
-                  </div>
+                  <>
+                    {message.content && (
+                      <div className="text-sm text-vox-text-primary break-words">
+                        <MessageContent content={message.content} />
+                      </div>
+                    )}
+                    {message.attachments && message.attachments.length > 0 && (
+                      <div className="flex flex-col">
+                        {message.attachments.map((a) => (
+                          <AttachmentDisplay key={a.id} attachment={a} />
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -293,12 +305,21 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
 
               {isEditing ? editArea : (
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm text-vox-text-primary break-words">
-                    <MessageContent content={message.content} />
-                    {message.editedAt && (
-                      <span className="text-[10px] text-vox-text-muted">(edited)</span>
-                    )}
-                  </div>
+                  {message.content && (
+                    <div className="text-sm text-vox-text-primary break-words">
+                      <MessageContent content={message.content} />
+                      {message.editedAt && (
+                        <span className="text-[10px] text-vox-text-muted">(edited)</span>
+                      )}
+                    </div>
+                  )}
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="flex flex-col">
+                      {message.attachments.map((a) => (
+                        <AttachmentDisplay key={a.id} attachment={a} />
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

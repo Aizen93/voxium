@@ -43,7 +43,7 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 | | Roles & Permissions | Owner/Admin/Member hierarchy; role changes, member kicks, ownership transfer |
 | | User Profiles | Avatars with online/offline status, display names, bios with real-time sync across all clients |
 | | Presence | Real-time online/offline status for all server members and DM participants |
-| **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/server/ban management, live metrics, audit log, moderation queue |
+| **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/server/ban management, storage management (avatars/icons/attachments with top uploaders and orphan cleanup), live metrics, audit log, moderation queue |
 | | Resource Limits | Dynamic limits (max channels, voice users, categories, members) — global defaults with per-server overrides |
 | | Feature Flags | Toggle registration, invites, server creation, voice, DM voice, support — Redis-backed, no redeploy needed |
 | | Reports & Moderation | User/message reports, admin moderation queue with resolve/dismiss/ban workflows |
@@ -52,7 +52,7 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 | | Authentication | JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation |
 | | Rate Limiting | Per-endpoint and per-socket rate limiting, admin-editable via Redis-backed registry |
 | | Input Sanitization | HTML stripping, validation, CORS protection |
-| **Platform** | File Uploads | S3-compatible storage for avatars and server icons with client-side image processing and presigned URLs |
+| **Platform** | File Uploads | S3-compatible storage for avatars, server icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
 | | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
 | | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with Discord-inspired dark UI |
 | | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |
@@ -300,6 +300,7 @@ curl http://localhost:3001/api/v1/servers \
 | `SMTP_PASS` | — | SMTP auth password |
 | `SMTP_FROM` | `noreply@voxium.app` | Sender email address |
 | `CLIENT_URL` | `http://localhost:8080` | Frontend URL (used in emails) |
+| `CLEANUP_REPORT_EMAIL` | — | Email address for daily attachment cleanup reports. If not set, no report is sent. |
 | `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. Optional — if not set, TOTP secrets are stored unencrypted. |
 | `MEDIASOUP_ANNOUNCED_IP` | — | Public IP address announced to WebRTC clients for mediasoup SFU connectivity. Required for production. |
 

@@ -172,11 +172,32 @@ model Message {
   replyTo      Message?           @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
   replies      Message[]          @relation("MessageReply")
   reactions    MessageReaction[]
+  attachments  MessageAttachment[]
   reports      Report[]
 
   @@index([channelId, createdAt])
   @@index([conversationId, createdAt])
   @@map("messages")
+}
+
+// ─── Message Attachments ───────────────────────────────────────────────────
+
+model MessageAttachment {
+  id        String   @id @default(cuid())
+  messageId String   @map("message_id")
+  s3Key     String   @map("s3_key")
+  fileName  String   @map("file_name")
+  fileSize  Int      @map("file_size")
+  mimeType  String   @map("mime_type")
+  expired   Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([s3Key])
+  @@index([messageId])
+  @@index([createdAt])
+  @@map("message_attachments")
 }
 
 // ─── Message Reactions ──────────────────────────────────────────────────────

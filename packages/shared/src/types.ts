@@ -110,6 +110,15 @@ export interface ReactionGroup {
   userIds: string[];
 }
 
+export interface Attachment {
+  id: string;
+  s3Key: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  expired: boolean;
+}
+
 export interface Message {
   id: string;
   content: string;
@@ -123,6 +132,7 @@ export interface Message {
     author: MessageAuthor;
   } | null;
   author: MessageAuthor;
+  attachments?: Attachment[];
   createdAt: string;
   editedAt: string | null;
   reactions: ReactionGroup[];
@@ -525,18 +535,21 @@ export interface StorageStats {
   avatarSize: number;
   serverIconCount: number;
   serverIconSize: number;
+  attachmentCount: number;
+  attachmentSize: number;
   orphanCount: number;
   orphanSize: number;
 }
 
 export interface StorageFile {
   key: string;
-  type: 'avatar' | 'server-icon';
+  type: 'avatar' | 'server-icon' | 'attachment';
   size: number;
   lastModified: string | null;
   linkedEntity: string | null;
   linkedEntityId: string | null;
   isOrphan: boolean;
+  isExpired?: boolean;
 }
 
 export interface StorageTopUploader {

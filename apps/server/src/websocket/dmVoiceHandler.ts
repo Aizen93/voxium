@@ -190,6 +190,7 @@ export function handleDMVoiceEvents(
 
   socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
     if (!socketRateLimit(socket, 'dm:voice:join', 10)) return;
+    if (typeof conversationId !== 'string' || !conversationId) return;
     if (!isFeatureEnabled('dm_voice')) {
       socket.emit('voice:error', { message: 'Voice calls are currently disabled' });
       return;
@@ -289,12 +290,14 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:leave', async (conversationId: string) => {
+    if (!socketRateLimit(socket, 'dm:voice:leave', 30)) return;
     console.log(`[DMVoice] User ${userId} leaving DM call ${conversationId}`);
     await leaveCurrentDMVoiceChannel(io, socket, userId);
   });
 
   socket.on('dm:voice:decline', async (conversationId: string) => {
     if (!socketRateLimit(socket, 'dm:voice:decline', 10)) return;
+    if (typeof conversationId !== 'string' || !conversationId) return;
 
     // Authorization: verify the declining user is a participant of this conversation
     const conv = await prisma.conversation.findUnique({
@@ -325,6 +328,8 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:mute', async (muted: boolean) => {
+    if (!socketRateLimit(socket, 'dm:voice:mute', 30)) return;
+    if (typeof muted !== 'boolean') return;
     // Use socket.data for fast local lookup (source of truth is Redis)
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
@@ -346,6 +351,8 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:deaf', async (deafened: boolean) => {
+    if (!socketRateLimit(socket, 'dm:voice:deaf', 30)) return;
+    if (typeof deafened !== 'boolean') return;
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 
@@ -366,6 +373,8 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:speaking', (speaking: boolean) => {
+    if (!socketRateLimit(socket, 'dm:voice:speaking', 120)) return;
+    if (typeof speaking !== 'boolean') return;
     // Hot path — use socket.data for zero-latency local lookup
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
@@ -379,6 +388,9 @@ export function handleDMVoiceEvents(
 
   socket.on('dm:voice:signal', async (data: { to: string; signal: unknown }) => {
     if (!socketRateLimit(socket, 'dm:voice:signal', 300)) return;
+    if (!data || typeof data !== 'object' || typeof data.to !== 'string' || !data.to) return;
+    // Reject excessively large signal payloads (max 64KB serialized)
+    if (JSON.stringify(data.signal).length > 65536) return;
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 

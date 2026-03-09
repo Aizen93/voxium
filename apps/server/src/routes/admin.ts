@@ -13,7 +13,7 @@ import { getGlobalLimits } from '../utils/serverLimits';
 import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE } from '../utils/s3';
+import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, SupportMessageData } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
@@ -288,6 +288,7 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
     });
     if (!target) throw new NotFoundError('User');
     if (target.role === 'superadmin') throw new ForbiddenError('Cannot ban a super admin');
+    if (target.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can ban other admins');
 
     const sanitizedReason = reason ? sanitizeText(reason) : null;
 
@@ -408,6 +409,7 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
     });
     if (!target) throw new NotFoundError('User');
     if (target.role === 'superadmin') throw new ForbiddenError('Cannot delete a super admin');
+    if (target.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can delete other admins');
 
     // Fetch memberships and owned servers in parallel
     const [memberships, ownedServers] = await Promise.all([
@@ -1036,26 +1038,31 @@ adminRouter.get('/top-servers', async (req: Request, res: Response, next: NextFu
 
 // ─── Storage Management ──────────────────────────────────────────────────────
 
-function classifyKey(key: string): 'avatar' | 'server-icon' {
-  return key.startsWith('server-icons/') ? 'server-icon' : 'avatar';
+function classifyKey(key: string): 'avatar' | 'server-icon' | 'attachment' {
+  if (key.startsWith('server-icons/')) return 'server-icon';
+  if (key.startsWith('attachments/')) return 'attachment';
+  return 'avatar';
 }
 
 adminRouter.get('/storage/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const [objects, usersWithAvatar, serversWithIcon] = await Promise.all([
+    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys] = await Promise.all([
       listAllS3Objects(),
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
+      prisma.messageAttachment.findMany({ where: { expired: false }, select: { s3Key: true } }),
     ]);
 
     const referencedKeys = new Set<string>();
     for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
     for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
+    for (const a of attachmentKeys) referencedKeys.add(a.s3Key);
 
     const stats: StorageStats = {
       totalFiles: 0, totalSize: 0,
       avatarCount: 0, avatarSize: 0,
       serverIconCount: 0, serverIconSize: 0,
+      attachmentCount: 0, attachmentSize: 0,
       orphanCount: 0, orphanSize: 0,
     };
 
@@ -1067,9 +1074,12 @@ adminRouter.get('/storage/stats', async (_req: Request, res: Response, next: Nex
       if (type === 'avatar') {
         stats.avatarCount++;
         stats.avatarSize += obj.size;
-      } else {
+      } else if (type === 'server-icon') {
         stats.serverIconCount++;
         stats.serverIconSize += obj.size;
+      } else {
+        stats.attachmentCount++;
+        stats.attachmentSize += obj.size;
       }
 
       if (!referencedKeys.has(obj.key)) {
@@ -1093,10 +1103,9 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
       return res.json({ success: true, data: topUploadersCache.data });
     }
 
+    // ── 1. S3-based aggregation for avatars & server-icons ──
     const objects = await listAllS3Objects();
-
-    // Aggregate by entity ID parsed from S3 keys
-    const entityMap = new Map<string, { type: 'user' | 'server'; fileCount: number; totalSize: number }>();
+    const s3EntityMap = new Map<string, { type: 'user' | 'server'; fileCount: number; totalSize: number }>();
 
     for (const obj of objects) {
       let type: 'user' | 'server';
@@ -1109,38 +1118,121 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
         filename = obj.key.slice('server-icons/'.length);
         type = 'server';
       } else {
-        continue;
+        continue; // attachments handled via DB below
       }
 
-      // Key format: {entityId}-{timestamp}.webp — split on last hyphen to get the entity ID
       const lastDash = filename.lastIndexOf('-');
       if (lastDash <= 0) continue;
       const entityId = filename.slice(0, lastDash);
 
-      const existing = entityMap.get(entityId);
+      const existing = s3EntityMap.get(entityId);
       if (existing) {
         existing.fileCount++;
         existing.totalSize += obj.size;
       } else {
-        entityMap.set(entityId, { type, fileCount: 1, totalSize: obj.size });
+        s3EntityMap.set(entityId, { type, fileCount: 1, totalSize: obj.size });
       }
     }
 
-    // Collect user IDs and server IDs
-    const userIds: string[] = [];
-    const serverIds: string[] = [];
-    for (const [id, info] of entityMap) {
-      if (info.type === 'user') userIds.push(id);
-      else serverIds.push(id);
+    // ── 2. DB-based aggregation for attachments ──
+    // Top users by attachment storage (grouped by message author)
+    const userAttachments = await prisma.messageAttachment.groupBy({
+      by: ['messageId'],
+      _count: { id: true },
+      _sum: { fileSize: true },
+      where: { expired: false },
+    });
+
+    // Resolve messageId → authorId
+    const messageIds = userAttachments.map((g) => g.messageId);
+    const messagesWithAuthor = messageIds.length > 0
+      ? await prisma.message.findMany({
+          where: { id: { in: messageIds } },
+          select: { id: true, authorId: true, channelId: true, channel: { select: { serverId: true } } },
+        })
+      : [];
+    const messageInfoMap = new Map(messagesWithAuthor.map((m) => [m.id, m]));
+
+    // Aggregate attachments per user and per server
+    const userAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>();
+    const serverAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>();
+
+    for (const group of userAttachments) {
+      const msgInfo = messageInfoMap.get(group.messageId);
+      if (!msgInfo) continue;
+      const count = group._count.id;
+      const size = group._sum.fileSize ?? 0;
+
+      // Per-user
+      const userEntry = userAttachmentMap.get(msgInfo.authorId);
+      if (userEntry) {
+        userEntry.fileCount += count;
+        userEntry.totalSize += size;
+      } else {
+        userAttachmentMap.set(msgInfo.authorId, { fileCount: count, totalSize: size });
+      }
+
+      // Per-server (only for channel messages)
+      if (msgInfo.channel) {
+        const serverId = msgInfo.channel.serverId;
+        const serverEntry = serverAttachmentMap.get(serverId);
+        if (serverEntry) {
+          serverEntry.fileCount += count;
+          serverEntry.totalSize += size;
+        } else {
+          serverAttachmentMap.set(serverId, { fileCount: count, totalSize: size });
+        }
+      }
     }
 
-    // Fetch names from DB
+    // ── 3. Merge S3 + attachment data ──
+    const mergedUsers = new Map<string, { fileCount: number; totalSize: number }>();
+    const mergedServers = new Map<string, { fileCount: number; totalSize: number }>();
+
+    // S3 avatars → users, S3 server-icons → servers
+    for (const [entityId, info] of s3EntityMap) {
+      const target = info.type === 'user' ? mergedUsers : mergedServers;
+      const existing = target.get(entityId);
+      if (existing) {
+        existing.fileCount += info.fileCount;
+        existing.totalSize += info.totalSize;
+      } else {
+        target.set(entityId, { fileCount: info.fileCount, totalSize: info.totalSize });
+      }
+    }
+
+    // Attachment data → users
+    for (const [userId, info] of userAttachmentMap) {
+      const existing = mergedUsers.get(userId);
+      if (existing) {
+        existing.fileCount += info.fileCount;
+        existing.totalSize += info.totalSize;
+      } else {
+        mergedUsers.set(userId, { fileCount: info.fileCount, totalSize: info.totalSize });
+      }
+    }
+
+    // Attachment data → servers
+    for (const [serverId, info] of serverAttachmentMap) {
+      const existing = mergedServers.get(serverId);
+      if (existing) {
+        existing.fileCount += info.fileCount;
+        existing.totalSize += info.totalSize;
+      } else {
+        mergedServers.set(serverId, { fileCount: info.fileCount, totalSize: info.totalSize });
+      }
+    }
+
+    // ── 4. Resolve names ──
+    const allUserIds = [...mergedUsers.keys()];
+    const allServerIds = [...mergedServers.keys()];
+
     const [users, servers] = await Promise.all([
-      userIds.length > 0
-        ? prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } })
+      allUserIds.length > 0
+        ? prisma.user.findMany({ where: { id: { in: allUserIds } }, select: { id: true, username: true } })
         : [],
-      serverIds.length > 0
-        ? prisma.server.findMany({ where: { id: { in: serverIds } }, select: { id: true, name: true } })
+      allServerIds.length > 0
+        ? prisma.server.findMany({ where: { id: { in: allServerIds } }, select: { id: true, name: true } })
         : [],
     ]);
 
@@ -1148,13 +1240,22 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
     for (const u of users) nameMap.set(u.id, u.username);
     for (const s of servers) nameMap.set(s.id, s.name);
 
-    // Build result, sort by totalSize desc, limit to 10
+    // ── 5. Build result ──
     const result: StorageTopUploader[] = [];
-    for (const [entityId, info] of entityMap) {
+    for (const [entityId, info] of mergedUsers) {
       result.push({
         entityId,
         entityName: nameMap.get(entityId) ?? 'Deleted',
-        type: info.type,
+        type: 'user',
+        fileCount: info.fileCount,
+        totalSize: info.totalSize,
+      });
+    }
+    for (const [entityId, info] of mergedServers) {
+      result.push({
+        entityId,
+        entityName: nameMap.get(entityId) ?? 'Deleted',
+        type: 'server',
         fileCount: info.fileCount,
         totalSize: info.totalSize,
       });
@@ -1176,24 +1277,31 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
     const filter = (req.query.filter as string) || 'all';
 
-    const prefix = filter === 'avatars' ? 'avatars/' : filter === 'server-icons' ? 'server-icons/' : undefined;
+    const prefix = filter === 'avatars' ? 'avatars/'
+      : filter === 'server-icons' ? 'server-icons/'
+      : filter === 'attachments' ? 'attachments/'
+      : undefined;
     const objects = await listAllS3Objects(prefix);
 
-    const [usersWithAvatar, serversWithIcon] = await Promise.all([
+    const [usersWithAvatar, serversWithIcon, attachmentRecords] = await Promise.all([
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { id: true, username: true, avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { id: true, name: true, iconUrl: true } }),
+      prisma.messageAttachment.findMany({ select: { s3Key: true, fileName: true, messageId: true, expired: true } }),
     ]);
 
     const keyToUser = new Map<string, { id: string; name: string }>();
     for (const u of usersWithAvatar) if (u.avatarUrl) keyToUser.set(u.avatarUrl, { id: u.id, name: u.username });
     const keyToServer = new Map<string, { id: string; name: string }>();
     for (const s of serversWithIcon) if (s.iconUrl) keyToServer.set(s.iconUrl, { id: s.id, name: s.name });
+    const keyToAttachment = new Map<string, { id: string; name: string; expired: boolean }>();
+    for (const a of attachmentRecords) keyToAttachment.set(a.s3Key, { id: a.messageId, name: a.fileName, expired: a.expired });
 
     let files: StorageFile[] = objects.map((obj) => {
       const type = classifyKey(obj.key);
       const userRef = keyToUser.get(obj.key);
       const serverRef = keyToServer.get(obj.key);
-      const linked = userRef ?? serverRef ?? null;
+      const attachRef = keyToAttachment.get(obj.key);
+      const linked = userRef ?? serverRef ?? (attachRef ? { id: attachRef.id, name: attachRef.name } : null);
 
       return {
         key: obj.key,
@@ -1203,6 +1311,7 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
         linkedEntity: linked?.name ?? null,
         linkedEntityId: linked?.id ?? null,
         isOrphan: !linked,
+        isExpired: attachRef?.expired ?? false,
       };
     });
 
@@ -1229,13 +1338,17 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
 adminRouter.delete('/storage/files/*', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const key = (req.params as Record<string, string>)[0];
-    if (!key || !VALID_S3_KEY_RE.test(key)) throw new BadRequestError('Invalid file key');
+    if (!key || (!VALID_S3_KEY_RE.test(key) && !VALID_ATTACHMENT_KEY_RE.test(key))) {
+      throw new BadRequestError('Invalid file key');
+    }
 
-    // Nullify DB reference
+    // Nullify or expire DB reference
     if (key.startsWith('avatars/')) {
       await prisma.user.updateMany({ where: { avatarUrl: key }, data: { avatarUrl: null } });
     } else if (key.startsWith('server-icons/')) {
       await prisma.server.updateMany({ where: { iconUrl: key }, data: { iconUrl: null } });
+    } else if (key.startsWith('attachments/')) {
+      await prisma.messageAttachment.updateMany({ where: { s3Key: key }, data: { expired: true } });
     }
 
     await deleteFromS3(key);
@@ -1753,15 +1866,17 @@ adminRouter.delete('/announcements/:id', async (req: Request<{ id: string }>, re
 
 adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const [objects, usersWithAvatar, serversWithIcon] = await Promise.all([
+    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys] = await Promise.all([
       listAllS3Objects(),
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
+      prisma.messageAttachment.findMany({ where: { expired: false }, select: { s3Key: true } }),
     ]);
 
     const referencedKeys = new Set<string>();
     for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
     for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
+    for (const a of attachmentKeys) referencedKeys.add(a.s3Key);
 
     const orphans = objects.filter((obj) => !referencedKeys.has(obj.key));
     let deleted = 0;

@@ -1,9 +1,11 @@
-import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, type KeyboardEvent, type ChangeEvent } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
-import { PlusCircle, Smile, Send, X } from 'lucide-react';
+import { api } from '../../services/api';
+import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize } from '@voxium/shared';
+import { PlusCircle, Smile, Send, X, FileText, Image, Film, Music } from 'lucide-react';
 
 interface Props {
   channelId?: string;
@@ -12,13 +14,39 @@ interface Props {
   placeholderName?: string;
 }
 
+interface PendingFile {
+  id: string;
+  file: File;
+  status: 'uploading' | 'uploaded' | 'error';
+  s3Key?: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  previewUrl?: string;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getFileIcon(mimeType: string) {
+  if (mimeType.startsWith('image/')) return Image;
+  if (mimeType.startsWith('video/')) return Film;
+  if (mimeType.startsWith('audio/')) return Music;
+  return FileText;
+}
+
 export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
   const { sendMessage, sendDMMessage, replyingTo, clearReplyingTo } = useChatStore();
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const emojiBtnRef = useRef<HTMLButtonElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = useRef(false);
 
@@ -28,6 +56,16 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       textareaRef.current?.focus();
     }
   }, [replyingTo]);
+
+  // Clear pending files on channel/conversation switch
+  useEffect(() => {
+    setPendingFiles((prev) => {
+      for (const pf of prev) {
+        if (pf.previewUrl) URL.revokeObjectURL(pf.previewUrl);
+      }
+      return [];
+    });
+  }, [channelId, conversationId]);
 
   const handleTyping = () => {
     const socket = getSocket();
@@ -54,18 +92,119 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     }, 2000);
   };
 
+  const uploadFile = async (file: File, fileId: string) => {
+    try {
+      const { data } = await api.post('/uploads/presign/attachment', {
+        fileName: file.name,
+        fileSize: file.size,
+        mimeType: file.type,
+        ...(channelId ? { channelId } : { conversationId }),
+      });
+
+      const { uploadUrl, key } = data.data;
+
+      await fetch(uploadUrl, {
+        method: 'PUT',
+        body: file,
+        headers: { 'Content-Type': file.type },
+      });
+
+      setPendingFiles((prev) =>
+        prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'uploaded' as const, s3Key: key } : pf))
+      );
+    } catch {
+      setPendingFiles((prev) =>
+        prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'error' as const } : pf))
+      );
+    }
+  };
+
+  const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const remaining = LIMITS.MAX_ATTACHMENTS_PER_MESSAGE - pendingFiles.length;
+    if (remaining <= 0) {
+      toast.error(`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments per message`);
+      return;
+    }
+
+    const toAdd: PendingFile[] = [];
+    for (let i = 0; i < Math.min(files.length, remaining); i++) {
+      const file = files[i];
+      if (!ALLOWED_ATTACHMENT_TYPES.includes(file.type as typeof ALLOWED_ATTACHMENT_TYPES[number])) {
+        toast.error(`${file.name}: file type not allowed`);
+        continue;
+      }
+      const maxSize = getMaxAttachmentSize(file.type);
+      if (file.size > maxSize) {
+        toast.error(`${file.name} is too large (max ${maxSize / 1024 / 1024}MB)`);
+        continue;
+      }
+      const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
+      toAdd.push({
+        id: crypto.randomUUID(),
+        file,
+        status: 'uploading',
+        fileName: file.name,
+        fileSize: file.size,
+        mimeType: file.type,
+        previewUrl,
+      });
+    }
+
+    if (toAdd.length === 0) return;
+
+    setPendingFiles((prev) => [...prev, ...toAdd]);
+
+    // Upload each file
+    toAdd.forEach((pf) => uploadFile(pf.file, pf.id));
+
+    // Reset input so same file can be re-selected
+    e.target.value = '';
+  };
+
+  const removePendingFile = (fileId: string) => {
+    setPendingFiles((prev) => {
+      const removed = prev.find((pf) => pf.id === fileId);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return prev.filter((pf) => pf.id !== fileId);
+    });
+  };
+
   const handleSend = async () => {
     const trimmed = content.trim();
-    if (!trimmed || isSending) return;
+    const uploadedFiles = pendingFiles.filter((pf) => pf.status === 'uploaded');
+    const hasUploading = pendingFiles.some((pf) => pf.status === 'uploading');
+
+    if (hasUploading) {
+      toast.warning('Please wait for uploads to finish');
+      return;
+    }
+
+    if (!trimmed && uploadedFiles.length === 0) return;
+    if (isSending) return;
+
+    const attachments = uploadedFiles.map((pf) => ({
+      s3Key: pf.s3Key!,
+      fileName: pf.fileName,
+      fileSize: pf.fileSize,
+      mimeType: pf.mimeType,
+    }));
 
     setIsSending(true);
     try {
       if (conversationId) {
-        await sendDMMessage(conversationId, trimmed);
+        await sendDMMessage(conversationId, trimmed, attachments.length ? attachments : undefined);
       } else if (channelId) {
-        await sendMessage(channelId, trimmed);
+        await sendMessage(channelId, trimmed, attachments.length ? attachments : undefined);
       }
       setContent('');
+      // Clean up previews
+      for (const pf of pendingFiles) {
+        if (pf.previewUrl) URL.revokeObjectURL(pf.previewUrl);
+      }
+      setPendingFiles([]);
       isTypingRef.current = false;
     } catch {
       toast.error('Failed to send message');
@@ -83,6 +222,16 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       clearReplyingTo();
     }
   };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const files = e.clipboardData?.files;
+    if (files && files.length > 0) {
+      const fakeEvent = { target: { files, value: '' } } as unknown as ChangeEvent<HTMLInputElement>;
+      handleFileSelect(fakeEvent);
+    }
+  };
+
+  const canSend = content.trim() || pendingFiles.some((pf) => pf.status === 'uploaded');
 
   return (
     <div className="border-t border-vox-border px-4 py-3">
@@ -104,16 +253,74 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           </button>
         </div>
       )}
-      <div className={`flex items-end gap-2 bg-vox-bg-floating border border-vox-border px-3 py-2 ${replyingTo ? 'rounded-b-xl border-t-0' : 'rounded-xl'}`}>
-        <button className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors">
+
+      {/* Pending file previews */}
+      {pendingFiles.length > 0 && (
+        <div className={`flex gap-2 overflow-x-auto border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2 ${replyingTo ? '' : 'rounded-t-xl'}`}>
+          {pendingFiles.map((pf) => {
+            const FileIcon = getFileIcon(pf.mimeType);
+            return (
+              <div
+                key={pf.id}
+                className={`relative flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 ${
+                  pf.status === 'error'
+                    ? 'border-vox-accent-danger/50 bg-vox-accent-danger/10'
+                    : 'border-vox-border bg-vox-bg-floating'
+                }`}
+              >
+                {pf.previewUrl ? (
+                  <img src={pf.previewUrl} alt="" className="h-10 w-10 rounded object-cover" />
+                ) : (
+                  <FileIcon size={20} className="text-vox-text-muted" />
+                )}
+                <div className="min-w-0 max-w-[120px]">
+                  <p className="truncate text-xs text-vox-text-primary">{pf.fileName}</p>
+                  <p className="text-[10px] text-vox-text-muted">
+                    {pf.status === 'uploading' ? 'Uploading...' : pf.status === 'error' ? 'Failed' : formatFileSize(pf.fileSize)}
+                  </p>
+                </div>
+                {pf.status === 'uploading' && (
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 overflow-hidden rounded-b-lg">
+                    <div className="h-full w-1/2 animate-pulse bg-vox-accent-primary" />
+                  </div>
+                )}
+                <button
+                  onClick={() => removePendingFile(pf.id)}
+                  className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-vox-bg-tertiary text-vox-text-muted hover:text-vox-text-primary"
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className={`flex items-end gap-2 bg-vox-bg-floating border border-vox-border px-3 py-2 ${
+        replyingTo || pendingFiles.length > 0 ? 'rounded-b-xl border-t-0' : 'rounded-xl'
+      }`}>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
+          title="Attach file"
+        >
           <PlusCircle size={20} />
         </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={handleFileSelect}
+          accept={ALLOWED_ATTACHMENT_TYPES.join(',')}
+        />
 
         <textarea
           ref={textareaRef}
           value={content}
           onChange={(e) => { setContent(e.target.value); handleTyping(); }}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder={conversationId ? `Message @${placeholderName}` : `Message #${channelName}`}
           className="max-h-36 min-h-[24px] flex-1 resize-none bg-transparent text-sm text-vox-text-primary
                      placeholder:text-vox-text-muted focus:outline-none"
@@ -143,7 +350,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           />
         )}
 
-        {content.trim() && (
+        {canSend && (
           <button
             onClick={handleSend}
             disabled={isSending}

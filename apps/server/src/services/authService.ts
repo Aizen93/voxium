@@ -8,6 +8,7 @@ import type { UserRole } from '@voxium/shared';
 import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, validateUsername } from '@voxium/shared';
 import { sendPasswordResetEmail } from '../utils/email';
+import { sanitizeText } from '../utils/sanitize';
 
 export async function registerUser(username: string, email: string, password: string, displayName?: string) {
   const usernameErr = validateUsername(username);
@@ -24,8 +25,7 @@ export async function registerUser(username: string, email: string, password: st
   });
 
   if (existing) {
-    if (existing.username === username) throw new ConflictError('Username already taken');
-    throw new ConflictError('Email already registered');
+    throw new ConflictError('Username or email already in use');
   }
 
   const hashedPassword = await bcrypt.hash(password, 12);
@@ -34,7 +34,7 @@ export async function registerUser(username: string, email: string, password: st
     data: {
       username,
       email,
-      displayName: displayName || username,
+      displayName: sanitizeText(displayName) || username,
       password: hashedPassword,
     },
     select: {
@@ -117,7 +117,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
     let deviceTrusted = false;
     if (trustedDeviceToken) {
       try {
-        const payload = jwt.verify(trustedDeviceToken, process.env.JWT_SECRET!) as { userId: string; purpose: string; tokenVersion?: number };
+        const payload = jwt.verify(trustedDeviceToken, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as { userId: string; purpose: string; tokenVersion?: number };
         if (payload.purpose === 'trusted-device' && payload.userId === user.id && payload.tokenVersion === user.tokenVersion) {
           deviceTrusted = true;
         }
@@ -146,7 +146,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
 export async function verifyLoginTOTP(totpToken: string, code: string) {
   let payload: { userId: string; purpose: string; rememberMe: boolean };
   try {
-    payload = jwt.verify(totpToken, process.env.JWT_SECRET!) as typeof payload;
+    payload = jwt.verify(totpToken, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as typeof payload;
   } catch {
     throw new UnauthorizedError('Invalid or expired TOTP token');
   }
@@ -195,7 +195,9 @@ export function generateTokens(payload: AuthPayload, rememberMe = true) {
     expiresIn: process.env.JWT_EXPIRES_IN || '15m',
   } as jwt.SignOptions);
 
-  const refreshExpiry = rememberMe ? '30d' : '24h';
+  const refreshExpiry = rememberMe
+    ? (process.env.JWT_REFRESH_EXPIRES_IN || '30d')
+    : '24h';
   const refreshToken = jwt.sign({ ...accessPayload, rememberMe }, process.env.JWT_REFRESH_SECRET!, {
     expiresIn: refreshExpiry,
   } as jwt.SignOptions);
@@ -205,7 +207,7 @@ export function generateTokens(payload: AuthPayload, rememberMe = true) {
 
 export async function refreshTokens(token: string) {
   try {
-    const payload = jwt.verify(token, process.env.JWT_REFRESH_SECRET!) as AuthPayload;
+    const payload = jwt.verify(token, process.env.JWT_REFRESH_SECRET!, { algorithms: ['HS256'] }) as AuthPayload;
 
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },

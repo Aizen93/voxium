@@ -24,7 +24,10 @@ import { rateLimitGeneral } from './middleware/rateLimiter';
 export const app = express();
 
 // Enable trust proxy so req.ip reflects the real client IP behind reverse proxies
-app.set('trust proxy', 1);
+// Only trust proxy headers in production where a reverse proxy is expected
+if (process.env.TRUST_PROXY === 'true' || process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 

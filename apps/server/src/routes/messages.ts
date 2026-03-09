@@ -1,12 +1,17 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate } from '../middleware/auth';
-import { rateLimitMessageSend } from '../middleware/rateLimiter';
+import { rateLimitMessageSend, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, type Message } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
+import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
+
+const attachmentSelect = {
+  select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
+} as const;
 
 export const messageRouter = Router({ mergeParams: true });
 
@@ -43,6 +48,7 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
         },
       },
       reactions: reactionInclude,
+      attachments: attachmentSelect,
     };
 
     // "around" mode: fetch messages surrounding a target message
@@ -131,8 +137,36 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
     const { channelId } = req.params;
     const content = sanitizeText(req.body.content ?? '');
 
-    const contentErr = validateMessageContent(content);
-    if (contentErr) throw new BadRequestError(contentErr);
+    // Validate attachments
+    const attachments = req.body.attachments as Array<{
+      s3Key: string; fileName: string; fileSize: number; mimeType: string;
+    }> | undefined;
+
+    if (attachments) {
+      if (!Array.isArray(attachments)) throw new BadRequestError('attachments must be an array');
+      if (attachments.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE) {
+        throw new BadRequestError(`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments`);
+      }
+      const expectedPrefix = `attachments/ch-${channelId}/`;
+      for (const a of attachments) {
+        if (!a || typeof a !== 'object') throw new BadRequestError('Invalid attachment');
+        if (typeof a.s3Key !== 'string' || typeof a.fileName !== 'string' || typeof a.fileSize !== 'number' || typeof a.mimeType !== 'string') {
+          throw new BadRequestError('Invalid attachment fields');
+        }
+        if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
+        if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this channel');
+        if (a.fileSize <= 0 || a.fileSize > LIMITS.MAX_ATTACHMENT_SIZE) throw new BadRequestError('Invalid attachment size');
+        if (!ALLOWED_ATTACHMENT_TYPES.includes(a.mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) throw new BadRequestError('Invalid file type');
+      }
+    }
+
+    // Allow empty content if attachments are present
+    if (!attachments?.length) {
+      const contentErr = validateMessageContent(content);
+      if (contentErr) throw new BadRequestError(contentErr);
+    } else if (content.length > LIMITS.MESSAGE_MAX) {
+      throw new BadRequestError(`Message must be at most ${LIMITS.MESSAGE_MAX} characters`);
+    }
 
     const channel = await prisma.channel.findUnique({
       where: { id: channelId },
@@ -153,25 +187,39 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       if (!parent || parent.channelId !== channelId) throw new BadRequestError('Invalid replyToId');
     }
 
-    const message = await prisma.message.create({
-      data: {
-        content,
-        channelId,
-        authorId: req.user!.userId,
-        ...(replyToId && { replyToId }),
-      },
-      include: {
-        author: {
-          select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
+    const message = await prisma.$transaction(async (tx) => {
+      const msg = await tx.message.create({
+        data: {
+          content,
+          channelId,
+          authorId: req.user!.userId,
+          ...(replyToId && { replyToId }),
         },
-        replyTo: {
-          select: {
-            id: true,
-            content: true,
-            author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
+      });
+      if (attachments?.length) {
+        await tx.messageAttachment.createMany({
+          data: attachments.map((a) => ({
+            messageId: msg.id,
+            s3Key: a.s3Key,
+            fileName: a.fileName,
+            fileSize: a.fileSize,
+            mimeType: a.mimeType,
+          })),
+        });
+      }
+      return tx.message.findUniqueOrThrow({
+        where: { id: msg.id },
+        include: {
+          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
+          replyTo: {
+            select: {
+              id: true, content: true,
+              author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
+            },
           },
+          attachments: attachmentSelect,
         },
-      },
+      });
     });
 
     // Broadcast to all users subscribed to this channel
@@ -190,17 +238,27 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
 });
 
 // Edit a message
-messageRouter.patch('/:messageId', async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
+messageRouter.patch('/:messageId', rateLimitGeneral, async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
-    const { messageId } = req.params;
+    const { channelId, messageId } = req.params;
     const content = sanitizeText(req.body.content ?? '');
 
     const contentErr = validateMessageContent(content);
     if (contentErr) throw new BadRequestError(contentErr);
 
-    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    const message = await prisma.message.findUnique({
+      where: { id: messageId },
+      include: { channel: { select: { serverId: true } } },
+    });
     if (!message) throw new NotFoundError('Message');
+    if (message.channelId !== channelId) throw new NotFoundError('Message');
     if (message.authorId !== req.user!.userId) throw new ForbiddenError('You can only edit your own messages');
+
+    // Verify server membership
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId: req.user!.userId, serverId: message.channel!.serverId } },
+    });
+    if (!membership) throw new ForbiddenError('Not a member of this server');
 
     const updated = await prisma.message.update({
       where: { id: messageId },
@@ -217,6 +275,7 @@ messageRouter.patch('/:messageId', async (req: Request<{ channelId: string; mess
           },
         },
         reactions: reactionInclude,
+        attachments: attachmentSelect,
       },
     });
 
@@ -230,7 +289,7 @@ messageRouter.patch('/:messageId', async (req: Request<{ channelId: string; mess
 });
 
 // Toggle reaction on a message
-messageRouter.put('/:messageId/reactions/:emoji', async (req: Request<{ channelId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
+messageRouter.put('/:messageId/reactions/:emoji', rateLimitGeneral, async (req: Request<{ channelId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId, messageId } = req.params;
     const emoji = decodeURIComponent(req.params.emoji);
@@ -289,15 +348,16 @@ messageRouter.put('/:messageId/reactions/:emoji', async (req: Request<{ channelI
 });
 
 // Delete a message
-messageRouter.delete('/:messageId', async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
+messageRouter.delete('/:messageId', rateLimitGeneral, async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
-    const { messageId } = req.params;
+    const { channelId, messageId } = req.params;
 
     const message = await prisma.message.findUnique({
       where: { id: messageId },
-      include: { channel: { select: { serverId: true } } },
+      include: { channel: { select: { serverId: true } }, attachments: { select: { s3Key: true } } },
     });
     if (!message || !message.channel) throw new NotFoundError('Message');
+    if (message.channelId !== channelId) throw new NotFoundError('Message');
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId: req.user!.userId, serverId: message.channel.serverId } },
@@ -311,6 +371,11 @@ messageRouter.delete('/:messageId', async (req: Request<{ channelId: string; mes
     }
 
     await prisma.message.delete({ where: { id: messageId } });
+
+    // Fire-and-forget S3 cleanup
+    if (message.attachments.length > 0) {
+      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch(() => {});
+    }
 
     getIO().to(`channel:${message.channelId!}`).emit('message:delete', {
       messageId,

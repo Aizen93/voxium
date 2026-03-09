@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { HardDrive, Image, Server, AlertTriangle, Trash2, RefreshCw, Users, Crown } from 'lucide-react';
+import { HardDrive, Image, Server, AlertTriangle, Trash2, RefreshCw, Users, Crown, Paperclip } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminStatCard } from './AdminStatCard';
 import { AdminTable } from './AdminTable';
@@ -15,12 +15,13 @@ function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
-type FilterTab = 'all' | 'avatars' | 'server-icons' | 'orphaned';
+type FilterTab = 'all' | 'avatars' | 'server-icons' | 'attachments' | 'orphaned';
 
 const FILTER_TABS: Array<{ id: FilterTab; label: string }> = [
   { id: 'all', label: 'All' },
   { id: 'avatars', label: 'Avatars' },
   { id: 'server-icons', label: 'Server Icons' },
+  { id: 'attachments', label: 'Attachments' },
   { id: 'orphaned', label: 'Orphaned' },
 ];
 
@@ -30,7 +31,7 @@ export function AdminStorage() {
     fetchStorageStats, fetchStorageFiles, setStorageFilter, deleteStorageFile, cleanupOrphans, fetchTopUploaders,
   } = useAdminStore();
 
-  const [deleteTarget, setDeleteTarget] = useState<{ key: string; linkedEntity: string | null } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ key: string; linkedEntity: string | null; type: 'avatar' | 'server-icon' | 'attachment' } | null>(null);
   const [showCleanup, setShowCleanup] = useState(false);
 
   const loadInitial = useCallback(() => {
@@ -96,9 +97,11 @@ export function AdminStorage() {
       <span className={`text-xs px-2 py-0.5 rounded-full ${
         f.type === 'avatar'
           ? 'bg-blue-500/20 text-blue-400'
+          : f.type === 'attachment'
+          ? 'bg-emerald-500/20 text-emerald-400'
           : 'bg-purple-500/20 text-purple-400'
       }`}>
-        {f.type === 'avatar' ? 'Avatar' : 'Server Icon'}
+        {f.type === 'avatar' ? 'Avatar' : f.type === 'attachment' ? 'Attachment' : 'Server Icon'}
       </span>
     ),
     size: <span className="text-xs text-vox-text-secondary">{formatBytes(f.size)}</span>,
@@ -109,11 +112,13 @@ export function AdminStorage() {
     ),
     status: (
       <span className={`text-xs px-2 py-0.5 rounded-full ${
-        f.isOrphan
+        f.isExpired
+          ? 'bg-red-500/20 text-red-400'
+          : f.isOrphan
           ? 'bg-yellow-500/20 text-yellow-400'
           : 'bg-green-500/20 text-green-400'
       }`}>
-        {f.isOrphan ? 'Orphaned' : 'Active'}
+        {f.isExpired ? 'Expired' : f.isOrphan ? 'Orphaned' : 'Active'}
       </span>
     ),
     modified: (
@@ -123,7 +128,7 @@ export function AdminStorage() {
     ),
     actions: (
       <button
-        onClick={(e) => { e.stopPropagation(); setDeleteTarget({ key: f.key, linkedEntity: f.linkedEntity }); }}
+        onClick={(e) => { e.stopPropagation(); setDeleteTarget({ key: f.key, linkedEntity: f.linkedEntity, type: f.type }); }}
         className="p-1 rounded text-vox-text-muted hover:text-vox-accent-danger transition-colors"
         title="Delete file"
       >
@@ -158,7 +163,7 @@ export function AdminStorage() {
       </div>
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <AdminStatCard
           label="Total Storage"
           value={storageStats ? formatBytes(storageStats.totalSize) : '—'}
@@ -175,6 +180,12 @@ export function AdminStorage() {
           value={storageStats ? formatBytes(storageStats.serverIconSize) : '—'}
           icon={Server}
           color="text-purple-400"
+        />
+        <AdminStatCard
+          label={`Attachments (${storageStats?.attachmentCount ?? 0})`}
+          value={storageStats ? formatBytes(storageStats.attachmentSize) : '—'}
+          icon={Paperclip}
+          color="text-emerald-400"
         />
         <AdminStatCard
           label={`Orphaned (${storageStats?.orphanCount ?? 0})`}
@@ -217,7 +228,13 @@ export function AdminStorage() {
       {deleteTarget && (
         <AdminConfirmModal
           title="Delete File"
-          message={`Delete "${deleteTarget.key}"?${deleteTarget.linkedEntity ? ` This file is currently linked to "${deleteTarget.linkedEntity}" — their avatar/icon will be removed.` : ' This is an orphaned file.'}`}
+          message={`Delete "${deleteTarget.key}"?${
+            deleteTarget.type === 'attachment'
+              ? ' This attachment will show as expired in the chat.'
+              : deleteTarget.linkedEntity
+              ? ` This file is currently linked to "${deleteTarget.linkedEntity}" — their avatar/icon will be removed.`
+              : ' This is an orphaned file.'
+          }`}
           confirmLabel="Delete"
           danger
           onConfirm={handleDelete}
@@ -229,7 +246,7 @@ export function AdminStorage() {
       {showCleanup && storageStats && (
         <AdminConfirmModal
           title="Cleanup Orphaned Files"
-          message={`This will permanently delete ${storageStats.orphanCount} orphaned file${storageStats.orphanCount !== 1 ? 's' : ''} (${formatBytes(storageStats.orphanSize)}). These files are not referenced by any user avatar or server icon. This action is irreversible.`}
+          message={`This will permanently delete ${storageStats.orphanCount} orphaned file${storageStats.orphanCount !== 1 ? 's' : ''} (${formatBytes(storageStats.orphanSize)}). These files are not referenced by any user avatar, server icon, or message attachment. This action is irreversible.`}
           confirmLabel="Delete All Orphans"
           danger
           onConfirm={handleCleanup}

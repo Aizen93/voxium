@@ -61,7 +61,10 @@ export function initSocketServer(httpServer: HttpServer) {
     if (!token) return next(new Error('Authentication required'));
 
     try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
+      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as AuthPayload & { purpose?: string };
+
+      // Reject non-access tokens (e.g. trusted-device, totp-verify)
+      if (payload.purpose) return next(new Error('Invalid token type'));
 
       // Check account ban, token version, and current role
       const user = await prisma.user.findUnique({
@@ -108,14 +111,30 @@ export function initSocketServer(httpServer: HttpServer) {
     // ═══════════════════════════════════════════════════════════════════
 
     // ─── Channel subscription ───────────────────────────────────────
-    socket.on('channel:join', (channelId: string) => {
+    socket.on('channel:join', async (channelId: string) => {
       if (!socketRateLimit(socket, 'channel:join', 60)) return;
-      socket.join(`channel:${channelId}`);
-      console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
+      if (typeof channelId !== 'string' || !channelId) return;
+      try {
+        const channel = await prisma.channel.findUnique({
+          where: { id: channelId },
+          select: { serverId: true },
+        });
+        if (!channel) return;
+        const membership = await prisma.serverMember.findUnique({
+          where: { userId_serverId: { userId, serverId: channel.serverId } },
+        });
+        if (!membership) return;
+        socket.join(`channel:${channelId}`);
+        console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
+      } catch (err) {
+        console.error(`[WS] channel:join auth check failed for ${userId}:`, err);
+      }
     });
 
     socket.on('channel:leave', (channelId: string) => {
       if (!socketRateLimit(socket, 'channel:leave', 60)) return;
+      if (typeof channelId !== 'string' || !channelId) return;
+      if (!socket.rooms.has(`channel:${channelId}`)) return;
       socket.leave(`channel:${channelId}`);
       console.log(`[WS] ${userId} (${socket.id}) left room channel:${channelId}`);
     });
@@ -123,6 +142,8 @@ export function initSocketServer(httpServer: HttpServer) {
     // ─── Typing indicators ──────────────────────────────────────────
     socket.on('typing:start', (channelId: string) => {
       if (!socketRateLimit(socket, 'typing', 30)) return;
+      if (typeof channelId !== 'string' || !channelId) return;
+      if (!socket.rooms.has(`channel:${channelId}`)) return;
       socket.to(`channel:${channelId}`).emit('typing:start', {
         channelId,
         userId,
@@ -132,12 +153,15 @@ export function initSocketServer(httpServer: HttpServer) {
 
     socket.on('typing:stop', (channelId: string) => {
       if (!socketRateLimit(socket, 'typing', 30)) return;
+      if (typeof channelId !== 'string' || !channelId) return;
+      if (!socket.rooms.has(`channel:${channelId}`)) return;
       socket.to(`channel:${channelId}`).emit('typing:stop', { channelId, userId });
     });
 
     // ─── DM subscription ────────────────────────────────────────────
     socket.on('dm:join', async (conversationId: string) => {
       if (!socketRateLimit(socket, 'dm:join', 60)) return;
+      if (typeof conversationId !== 'string' || !conversationId) return;
       try {
         const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { user1Id: true, user2Id: true } });
         if (!conv || (conv.user1Id !== userId && conv.user2Id !== userId)) return;
@@ -149,7 +173,7 @@ export function initSocketServer(httpServer: HttpServer) {
 
     socket.on('dm:typing:start', (conversationId: string) => {
       if (!socketRateLimit(socket, 'dm:typing', 30)) return;
-      // Only emit if this socket is actually in the DM room (joined via authorized dm:join)
+      if (typeof conversationId !== 'string' || !conversationId) return;
       if (!socket.rooms.has(`dm:${conversationId}`)) return;
       socket.to(`dm:${conversationId}`).emit('dm:typing:start', {
         conversationId,
@@ -160,6 +184,7 @@ export function initSocketServer(httpServer: HttpServer) {
 
     socket.on('dm:typing:stop', (conversationId: string) => {
       if (!socketRateLimit(socket, 'dm:typing', 30)) return;
+      if (typeof conversationId !== 'string' || !conversationId) return;
       if (!socket.rooms.has(`dm:${conversationId}`)) return;
       socket.to(`dm:${conversationId}`).emit('dm:typing:stop', {
         conversationId,
@@ -169,6 +194,7 @@ export function initSocketServer(httpServer: HttpServer) {
 
     // ─── Latency measurement ────────────────────────────────────────
     socket.on('ping:latency', (ts) => {
+      if (!socketRateLimit(socket, 'ping:latency', 60)) return;
       socket.emit('pong:latency', ts);
     });
 
@@ -186,6 +212,7 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     socket.on('admin:unsubscribe_metrics', () => {
+      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
       socket.leave('admin:metrics');
     });
 
@@ -197,6 +224,7 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     socket.on('admin:unsubscribe_reports', () => {
+      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
       socket.leave('admin:reports');
     });
 
@@ -208,6 +236,7 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     socket.on('admin:unsubscribe_support', () => {
+      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
       socket.leave('admin:support');
     });
 
