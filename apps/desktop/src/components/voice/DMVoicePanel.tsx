@@ -1,64 +1,77 @@
 import { useVoiceStore } from '../../stores/voiceStore';
+import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useLocalAudioLevel } from '../../hooks/useLocalAudioLevel';
-import { ConnectionQuality } from './ConnectionQuality';
 import { UserHoverTarget } from '../common/UserHoverTarget';
-import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff } from 'lucide-react';
+import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Phone } from 'lucide-react';
 import { clsx } from 'clsx';
 
-export function VoicePanel() {
-  const { activeChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf, leaveChannel, latency, isScreenSharing, screenSharingUserId, startScreenShare, stopScreenShare } = useVoiceStore();
-  const { channels } = useServerStore();
+/**
+ * Global DM voice panel — mirrors VoicePanel but for DM calls.
+ * Renders in both ChannelSidebar (server view) and DMList (DM view)
+ * so the user always sees their active DM call.
+ */
+export function DMVoicePanel() {
+  const dmCallConversationId = useVoiceStore((s) => s.dmCallConversationId);
+  const dmCallUsers = useVoiceStore((s) => s.dmCallUsers);
+  const selfMute = useVoiceStore((s) => s.selfMute);
+  const selfDeaf = useVoiceStore((s) => s.selfDeaf);
+  const toggleMute = useVoiceStore((s) => s.toggleMute);
+  const toggleDeaf = useVoiceStore((s) => s.toggleDeaf);
+  const leaveDMCall = useVoiceStore((s) => s.leaveDMCall);
   const { user } = useAuthStore();
   const localAudioLevel = useLocalAudioLevel();
-  const servers = useServerStore((s) => s.servers);
-  const activeVoiceServerId = useVoiceStore((s) => s.activeVoiceServerId);
 
-  if (!activeChannelId) return null;
+  const conversations = useDMStore((s) => s.conversations);
+  const setActiveConversation = useDMStore((s) => s.setActiveConversation);
+  const activeServerId = useServerStore((s) => s.activeServerId);
 
-  const channel = channels.find((c) => c.id === activeChannelId);
-  const voiceServer = activeVoiceServerId ? servers.find((s) => s.id === activeVoiceServerId) : null;
-  const users = channelUsers.get(activeChannelId) || [];
+  if (!dmCallConversationId) return null;
 
-  const latencyColor = latency === null ? 'text-vox-text-muted' :
-    latency < 100 ? 'text-vox-voice-connected' :
-    latency < 200 ? 'text-vox-accent-warning' :
-    'text-vox-accent-danger';
+  const conversation = conversations.find((c) => c.id === dmCallConversationId);
+  const participantName = conversation?.participant.displayName || 'DM Call';
+  const waiting = dmCallUsers.length <= 1;
+
+  const handleNavigateToCall = () => {
+    // Clear active server to switch to DM view, then open the conversation
+    if (activeServerId) {
+      useServerStore.setState({ activeServerId: null });
+    }
+    setActiveConversation(dmCallConversationId);
+  };
 
   return (
-    <div data-testid="voice-panel" className="border-t border-vox-border bg-vox-sidebar">
-      {/* Voice Connected Header */}
+    <div data-testid="dm-voice-panel" className="border-t border-vox-border bg-vox-sidebar">
+      {/* Call Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-vox-border">
-        <ConnectionQuality latency={latency} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <p className="text-xs font-semibold text-vox-voice-connected">
-              Voice Connected
-            </p>
-            {latency !== null && (
-              <span className={clsx('text-[10px] font-medium', latencyColor)}>
-                {latency}ms
-              </span>
-            )}
-          </div>
-          <p className="truncate text-[10px] text-vox-text-muted">
-            {voiceServer?.name ? `${voiceServer.name} / ` : ''}{channel?.name || 'Voice Channel'}
-          </p>
-        </div>
         <button
-          onClick={leaveChannel}
-          className="rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-accent-danger transition-colors"
+          onClick={handleNavigateToCall}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:opacity-80 transition-opacity"
+        >
+          <Phone size={14} className="shrink-0 text-vox-voice-connected" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold text-vox-voice-connected">
+              {waiting ? 'Calling...' : 'In a Call'}
+            </p>
+            <p className="truncate text-[10px] text-vox-text-muted">
+              {participantName}
+            </p>
+          </div>
+        </button>
+        <button
+          onClick={leaveDMCall}
+          className="shrink-0 rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-accent-danger transition-colors"
           title="Disconnect"
         >
           <PhoneOff size={16} />
         </button>
       </div>
 
-      {/* Voice Users */}
-      {users.length > 0 && (
-        <div className="max-h-32 overflow-y-auto px-2 py-1">
-          {users.map((voiceUser) => {
+      {/* Call Users */}
+      {dmCallUsers.length > 0 && (
+        <div className="max-h-24 overflow-y-auto px-2 py-1">
+          {dmCallUsers.map((voiceUser) => {
             const isLocal = voiceUser.id === user?.id;
             const isSpeaking = isLocal ? (localAudioLevel > 0.05 && !selfMute) : voiceUser.speaking;
 
@@ -88,7 +101,7 @@ export function VoicePanel() {
         </div>
       )}
 
-      {/* Voice Controls */}
+      {/* Call Controls */}
       <div className="flex items-center justify-center gap-2 px-3 py-2 border-t border-vox-border">
         <button
           onClick={toggleMute}
@@ -115,28 +128,6 @@ export function VoicePanel() {
         >
           {selfDeaf ? <HeadphoneOff size={18} /> : <Headphones size={18} />}
         </button>
-
-        {/* Screen Share */}
-        {(() => {
-          const otherSharing = screenSharingUserId && screenSharingUserId !== user?.id;
-          return (
-            <button
-              onClick={() => isScreenSharing ? stopScreenShare() : startScreenShare()}
-              disabled={!!otherSharing}
-              className={clsx(
-                'rounded-full p-2 transition-colors',
-                isScreenSharing
-                  ? 'bg-vox-voice-connected/20 text-vox-voice-connected hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger'
-                  : otherSharing
-                    ? 'bg-vox-bg-hover text-vox-text-muted cursor-not-allowed opacity-50'
-                    : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
-              )}
-              title={isScreenSharing ? 'Stop Sharing' : otherSharing ? 'Someone is already sharing' : 'Share Screen'}
-            >
-              {isScreenSharing ? <MonitorOff size={18} /> : <Monitor size={18} />}
-            </button>
-          );
-        })()}
       </div>
     </div>
   );

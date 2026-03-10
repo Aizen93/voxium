@@ -140,10 +140,10 @@ apps/server/
 │   ├── app.ts              # Express app configuration, middleware, routes
 │   ├── routes/
 │   │   ├── auth.ts         # Register, login, refresh, me, forgot/reset/change password
-│   │   ├── servers.ts      # CRUD servers, join/leave, members, settings
+│   │   ├── servers.ts      # CRUD servers, join/leave, members, settings, member search
 │   │   ├── channels.ts     # CRUD channels, mark-as-read, bulk reorder
 │   │   ├── categories.ts   # CRUD categories, bulk reorder
-│   │   ├── messages.ts     # CRUD messages with pagination, reactions
+│   │   ├── messages.ts     # CRUD messages with pagination, reactions, @mention resolution
 │   │   ├── dm.ts           # DM conversations, messages, reactions, read tracking, deletion
 │   │   ├── users.ts        # User profiles, profile update with real-time broadcast
 │   │   ├── invites.ts      # Create/use/preview invites
@@ -175,6 +175,7 @@ apps/server/
 │       ├── email.ts             # Nodemailer transporter + password reset email + cleanup report email
 │       ├── attachmentCleanup.ts # Scheduled job (daily 4 AM) — expires attachments older than retention period, deletes from S3, emails report
 │       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
+│       ├── mentions.ts          # @mention extraction, resolution, batch resolution (server members only)
 │       ├── memberBroadcast.ts   # Server room join + member event broadcast
 │       ├── auditLog.ts         # Fire-and-forget audit event logger
 │       └── featureFlags.ts     # Redis-backed feature flag registry
@@ -260,7 +261,9 @@ apps/desktop/
 │   │   ├── chat/
 │   │   │   ├── ChatArea.tsx         # Server chat container
 │   │   │   ├── MessageList.tsx      # Scrollable message list
-│   │   │   ├── MessageItem.tsx      # Single message with edit/delete/reactions
+│   │   │   ├── MessageItem.tsx      # Single message with edit/delete/reactions/mention highlight
+│   │   │   ├── MessageContent.tsx   # Mention-aware content rendering (text + @mention badges)
+│   │   │   ├── MentionAutocomplete.tsx # @mention autocomplete (server-side search, keyboard nav)
 │   │   │   ├── MessageInput.tsx     # Message composer (channels + DMs)
 │   │   │   ├── ReactionDisplay.tsx  # Reaction chips (channels + DMs)
 │   │   │   └── DeleteConfirmModal.tsx # Message delete confirmation
@@ -276,6 +279,7 @@ apps/desktop/
 │   │   │   └── AddFriendForm.tsx   # Send friend request by username
 │   │   ├── voice/
 │   │   │   ├── VoicePanel.tsx          # Server voice connection controls
+│   │   │   ├── DMVoicePanel.tsx        # Global DM call status (visible from any view)
 │   │   │   ├── ScreenShareViewer.tsx   # Inline screen share viewer (replaces ChatArea)
 │   │   │   └── ScreenShareFloating.tsx # Draggable/resizable floating viewer
 │   │   └── search/
@@ -293,7 +297,7 @@ apps/desktop/
 │   │   ├── api.ts               # Axios instance with interceptors
 │   │   ├── socket.ts            # Socket.IO client manager
 │   │   ├── audioAnalyser.ts     # Speaking detection (server + DM mode)
-│   │   ├── notificationSounds.ts # Sound effects (message, join, leave, looping call ringtone)
+│   │   ├── notificationSounds.ts # Sound effects (message, mention, join, leave, looping call ringtone)
 │   │   ├── tokenStorage.ts      # Dual-storage token abstraction (localStorage/sessionStorage)
 │   │   └── notifications.ts     # Tauri native notifications with Web API fallback
 │   ├── utils/
@@ -681,7 +685,7 @@ Screen sharing allows one user per voice channel to share their screen with all 
 - In-memory state: `dmVoiceUsers` Map (conversationId → Map of userId → socketId) + `userDMCall` reverse lookup
 - System messages ("Voice call started" / "Voice call ended") persisted to DB as `type: 'system'`
 - Call offer broadcasts to `dm:{conversationId}` room; incoming call shown via `IncomingCallModal` with looping ringtone (stops on accept/decline/cancel)
-- DM call UI rendered inline in `DMChatArea` via `DMCallPanel` (separate from server `VoicePanel`)
+- DM call UI has two layers: `DMCallPanel` renders inline in `DMChatArea` (full avatars + controls when viewing the conversation), and `DMVoicePanel` is a compact global panel rendered in both `ChannelSidebar` (after `VoicePanel`) and `DMList` so the user always sees their DM call status from any view
 
 ---
 

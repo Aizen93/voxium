@@ -6,6 +6,7 @@ import { MemberContextMenu } from './MemberContextMenu';
 import { clsx } from 'clsx';
 import type { ServerMember } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
+import { SupporterBadge } from '../common/SupporterBadge';
 
 interface ContextMenuState {
   member: ServerMember;
@@ -84,6 +85,7 @@ function MemberGroup({ title, members, onContextMenu }: { title: string; members
                   {member.user.displayName}
                 </p>
                 {(member.user.role === 'admin' || member.user.role === 'superadmin') && <StaffBadge />}
+                {member.user.isSupporter && <SupporterBadge />}
               </div>
             </div>
           </button>

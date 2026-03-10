@@ -157,6 +157,7 @@ interface AdminState {
   fetchUserOwnedServers: (userId: string) => Promise<OwnedServerInfo[]>;
   deleteUserWithTransfers: (userId: string, serverActions: ServerAction[]) => Promise<void>;
   updateUserRole: (userId: string, role: 'user' | 'admin') => Promise<void>;
+  toggleSupporter: (userId: string, isSupporter: boolean) => Promise<void>;
 
   fetchServers: (page?: number) => Promise<void>;
   setServersSearch: (search: string) => void;
@@ -459,6 +460,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
   updateUserRole: async (userId, role) => {
     await api.patch(`/admin/users/${userId}/role`, { role });
+  },
+
+  toggleSupporter: async (userId, isSupporter) => {
+    await api.patch(`/admin/users/${userId}/supporter`, { isSupporter });
   },
 
   fetchServers: async (page?: number) => {

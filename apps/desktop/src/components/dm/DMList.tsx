@@ -5,8 +5,10 @@ import { useSupportStore } from '../../stores/supportStore';
 import { Avatar } from '../common/Avatar';
 import { MessageSquare, Users, X, LifeBuoy } from 'lucide-react';
 import { clsx } from 'clsx';
+import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { toast } from '../../stores/toastStore';
 import { StaffBadge } from '../common/StaffBadge';
+import { SupporterBadge } from '../common/SupporterBadge';
 
 export function DMList() {
   const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, participantStatuses, deleteConversation } = useDMStore();
@@ -151,6 +153,7 @@ export function DMList() {
                     {conv.participant.displayName}
                   </span>
                   {(conv.participant.role === 'admin' || conv.participant.role === 'superadmin') && <StaffBadge />}
+                  {conv.participant.isSupporter && <SupporterBadge />}
                 </div>
                 {conv.lastMessage && (
                   <p className="truncate text-[11px] text-vox-text-muted">
@@ -177,6 +180,9 @@ export function DMList() {
           );
         })}
       </div>
+
+      {/* Global DM voice panel */}
+      <DMVoicePanel />
 
       {/* Support confirmation modal */}
       {showSupportConfirm && (

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Search, Ban, Trash2 } from 'lucide-react';
+import { Search, Ban, Trash2, Heart } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
@@ -38,6 +38,7 @@ export function AdminUserList({ onSelectUser }: { onSelectUser: (userId: string)
     username: (
       <div className="flex items-center gap-2">
         <span className="text-vox-text-primary font-medium">{user.username}</span>
+        {user.isSupporter && <span title="Supporter"><Heart size={12} className="text-pink-400" /></span>}
         {user.bannedAt && <span className="text-[10px] px-1.5 py-0.5 rounded bg-vox-accent-danger/20 text-vox-accent-danger">BANNED</span>}
       </div>
     ),

@@ -8,6 +8,7 @@ import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
+import { extractMentionIds, resolveMentionsForServer, batchResolveMentions, attachMentions } from '../utils/mentions';
 
 const attachmentSelect = {
   select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
@@ -38,13 +39,13 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
 
     const messageInclude = {
       author: {
-        select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
+        select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true },
       },
       replyTo: {
         select: {
           id: true,
           content: true,
-          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
+          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true } },
         },
       },
       reactions: reactionInclude,
@@ -91,9 +92,11 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
         return true;
       });
 
+      const mentionMap = await batchResolveMentions(unique, channel.serverId);
       const data = unique.map((m) => ({
         ...m,
         reactions: aggregateReactions(m.reactions),
+        mentions: attachMentions(m, mentionMap),
       }));
 
       res.json({ success: true, data, hasMore, hasMoreAfter, targetMessageId: around });
@@ -116,9 +119,12 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
     const hasMore = messages.length > limit;
     if (hasMore) messages.pop();
 
-    const data = messages.reverse().map((m) => ({
+    const reversed = messages.reverse();
+    const mentionMap = await batchResolveMentions(reversed, channel.serverId);
+    const data = reversed.map((m) => ({
       ...m,
       reactions: aggregateReactions(m.reactions),
+      mentions: attachMentions(m, mentionMap),
     }));
 
     res.json({
@@ -210,11 +216,11 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       return tx.message.findUniqueOrThrow({
         where: { id: msg.id },
         include: {
-          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
+          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true } },
           replyTo: {
             select: {
               id: true, content: true,
-              author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
+              author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true } },
             },
           },
           attachments: attachmentSelect,
@@ -222,16 +228,20 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       });
     });
 
+    // Resolve mentions from content
+    const mentionIds = extractMentionIds(content);
+    const mentions = await resolveMentionsForServer(mentionIds, channel.serverId);
+
     // Broadcast to all users subscribed to this channel
     const room = `channel:${channelId}`;
     const socketsInRoom = await getIO().in(room).fetchSockets();
     console.log(`[MSG] Broadcasting message:new to ${room} — ${socketsInRoom.length} socket(s) in room: [${socketsInRoom.map(s => s.data.userId).join(', ')}]`);
     // Prisma returns Date objects; Socket.IO serializes them to ISO strings over the wire
-    // Attach channel/server names for desktop notification context
-    const payload = { ...message, reactions: [], channelName: channel.name, serverName: channel.server.name, serverId: channel.serverId };
+    // Attach channel/server names for desktop notification context + mentions
+    const payload = { ...message, reactions: [], mentions, channelName: channel.name, serverName: channel.server.name, serverId: channel.serverId };
     getIO().to(room).emit('message:new', payload as unknown as Message);
 
-    res.status(201).json({ success: true, data: message });
+    res.status(201).json({ success: true, data: { ...message, mentions } });
   } catch (err) {
     next(err);
   }
@@ -265,13 +275,13 @@ messageRouter.patch('/:messageId', rateLimitGeneral, async (req: Request<{ chann
       data: { content, editedAt: new Date() },
       include: {
         author: {
-          select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
+          select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true },
         },
         replyTo: {
           select: {
             id: true,
             content: true,
-            author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
+            author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true } },
           },
         },
         reactions: reactionInclude,
@@ -279,10 +289,12 @@ messageRouter.patch('/:messageId', rateLimitGeneral, async (req: Request<{ chann
       },
     });
 
-    const payload = { ...updated, reactions: aggregateReactions(updated.reactions) };
+    const editMentionIds = extractMentionIds(content);
+    const editMentions = await resolveMentionsForServer(editMentionIds, message.channel!.serverId);
+    const payload = { ...updated, reactions: aggregateReactions(updated.reactions), mentions: editMentions };
     getIO().to(`channel:${message.channelId!}`).emit('message:update', payload as unknown as Message);
 
-    res.json({ success: true, data: updated });
+    res.json({ success: true, data: { ...updated, mentions: editMentions } });
   } catch (err) {
     next(err);
   }

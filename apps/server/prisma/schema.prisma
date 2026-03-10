@@ -27,6 +27,8 @@ model User {
   totpSecret          String?   @map("totp_secret")
   totpEnabled         Boolean   @default(false) @map("totp_enabled")
   totpBackupCodes     String?   @map("totp_backup_codes")
+  isSupporter         Boolean   @default(false) @map("is_supporter")
+  supporterSince      DateTime? @map("supporter_since")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 

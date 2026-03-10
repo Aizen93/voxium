@@ -7,7 +7,7 @@ import type { MemberRole } from '@voxium/shared';
 import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
-import { rateLimitMemberManage } from '../middleware/rateLimiter';
+import { rateLimitMemberManage, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { outranks, isAdminOrOwner } from '../utils/permissions';
 import { leaveCurrentVoiceChannel, cleanupServerVoice } from '../websocket/voiceHandler';
@@ -177,7 +177,7 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
         where: { serverId },
         include: {
           user: {
-            select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, createdAt: true },
+            select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, isSupporter: true, createdAt: true },
           },
         },
         skip: (page - 1) * limit,
@@ -195,6 +195,46 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
       limit,
       hasMore: page * limit < total,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Search server members by username/displayName (for @mention autocomplete)
+serverRouter.get('/:serverId/members/search', rateLimitSearch, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const q = (req.query.q as string || '').trim();
+    if (!q || q.length > 100) {
+      res.json({ success: true, data: [] });
+      return;
+    }
+
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId: req.user!.userId, serverId } },
+    });
+    if (!membership) throw new NotFoundError('Server');
+
+    const members = await prisma.serverMember.findMany({
+      where: {
+        serverId,
+        user: {
+          OR: [
+            { username: { contains: q, mode: 'insensitive' } },
+            { displayName: { contains: q, mode: 'insensitive' } },
+          ],
+        },
+      },
+      include: {
+        user: {
+          select: { id: true, username: true, displayName: true, avatarUrl: true, status: true },
+        },
+      },
+      take: 8,
+      orderBy: { joinedAt: 'asc' },
+    });
+
+    res.json({ success: true, data: members });
   } catch (err) {
     next(err);
   }

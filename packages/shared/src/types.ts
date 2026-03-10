@@ -12,6 +12,7 @@ export interface User {
   status: UserStatus;
   role: UserRole;
   totpEnabled: boolean;
+  isSupporter: boolean;
   createdAt: string;
 }
 
@@ -132,6 +133,7 @@ export interface Message {
     author: MessageAuthor;
   } | null;
   author: MessageAuthor;
+  mentions?: MessageAuthor[];
   attachments?: Attachment[];
   createdAt: string;
   editedAt: string | null;
@@ -144,6 +146,7 @@ export interface MessageAuthor {
   displayName: string;
   avatarUrl: string | null;
   role?: UserRole;
+  isSupporter?: boolean;
 }
 
 export interface SendMessageRequest {
@@ -424,6 +427,7 @@ export interface AdminUser {
   avatarUrl: string | null;
   role: UserRole;
   status: UserStatus;
+  isSupporter: boolean;
   bannedAt: string | null;
   banReason: string | null;
   createdAt: string;

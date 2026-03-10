@@ -166,6 +166,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
           bio: user.bio ?? null,
           status: user.status || 'online',
           role: user.role || 'user',
+          isSupporter: user.isSupporter ?? false,
           createdAt: user.createdAt,
         },
       };

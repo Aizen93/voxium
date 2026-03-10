@@ -5,7 +5,7 @@
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
 **Version:** 1.2.0
-**Date:** 2026-03-09
+**Date:** 2026-03-10
 
 ## Project Structure
 
@@ -23,8 +23,8 @@ Voxium/
 
 ## Key Features Implemented
 
-- Real-time text messaging with editing, deletion, reactions, replies, search
-- **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls, push-to-talk, noise suppression, screen sharing, silence detection (producer pause/resume), voice quality selector (low/medium/high bitrate), adaptive bandwidth caps
+- Real-time text messaging with editing, deletion, reactions, replies, search, @mentions with server-side autocomplete search + styled mention badges + mention highlight + distinct notification sound
+- **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls with global call status panel (visible from any view), push-to-talk, noise suppression, screen sharing, silence detection (producer pause/resume), voice quality selector (low/medium/high bitrate), adaptive bandwidth caps
 - Server/channel/category management with drag-and-drop reordering
 - JWT auth with refresh tokens, password reset, Remember Me
 - S3 file uploads (avatars, server icons, message attachments) with presigned URLs; attachments proxied through server (S3 URL never exposed to client); 3-day retention with daily 4 AM cleanup job + email report; expired attachments show placeholder in chat
@@ -60,12 +60,20 @@ Voxium/
 
 - [x] ~~mediasoup SFU for production-grade voice~~ (done — server voice channels use SFU)
 - [x] ~~Comprehensive security audit & hardening~~ (done — JWT hardening, IDOR fixes, runtime validation, TOTP replay protection, etc.)
-- [ ] Redis-based voice state for multi-node
-- [ ] Horizontal scaling, monitoring
+- [x] ~~Horizontal scaling foundation~~ (done — Socket.IO Redis adapter, Redis-based presence/DM voice state, multi-node test passing)
+- [x] ~~@Mention system~~ (done — server-side search, styled badges, highlight, mention sound)
+- [x] ~~Global DM call panel~~ (done — DMVoicePanel visible from any view)
 - [ ] Mobile app (React Native)
-- [ ] End-to-end testing
+- [ ] E2E encryption for DMs
+- [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **Global DMVoicePanel** (2026-03-10) -- Persistent DM call status panel visible in both server and DM sidebar views, mirroring the server VoicePanel pattern.
+
+- **@Mention System** (2026-03-10) — @mentions in server messages with autocomplete, styled mention badges, highlighted messages, distinct notification sound. No DB schema change; mentions parsed from content at query time.
+
+- **Drag-and-Drop File Upload** (2026-03-09) — Added drag-and-drop file upload to MessageInput with visual drop zone overlay, extracted `processFiles` shared by file picker, paste, and drop handlers.
 
 - **Comprehensive Security Hardening** (2026-03-09) — Multi-pass security audit and fixes across the entire backend: JWT algorithm pinning (`HS256`) on all `jwt.verify()` calls to prevent algorithm confusion; token purpose validation in HTTP auth middleware and Socket.IO auth to reject trusted-device/totp-verify tokens as access tokens; IDOR prevention on message edit/delete (channelId match + server membership verification); admin role hierarchy (admins cannot ban/delete peer admins); email enumeration prevention (generic conflict error on registration); TOTP replay protection via Redis `SET NX EX` with 90s TTL; presigned URL content-type enforcement via `signableHeaders`; bcrypt PASSWORD_MAX reduced to 72; runtime type validation on all Socket.IO event payloads (strings, booleans, objects); rate limiting on all previously unprotected endpoints (messages PATCH/DELETE, DM PATCH/DELETE, reactions, socket events); 64KB size limit on DM voice signal relay; trust proxy conditional (production only); Tauri CSP configured; GitHub Actions script injection fix; displayName sanitization on registration; TOTP_ENCRYPTION_KEY startup warning.
 

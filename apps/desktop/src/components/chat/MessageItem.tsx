@@ -13,7 +13,9 @@ import { format, isToday, isYesterday } from 'date-fns';
 import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
+import { SupporterBadge } from '../common/SupporterBadge';
 import { ReportModal } from './ReportModal';
+import { useAuthStore } from '../../stores/authStore';
 
 interface Props {
   message: Message;
@@ -132,6 +134,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
   );
 
   const isSystemMessage = message.type === 'system';
+  const currentUserId = useAuthStore((s) => s.user?.id);
+  const isMentioned = !!(message.mentions && currentUserId && message.mentions.some((m) => m.id === currentUserId));
 
   const handleReply = () => {
     useChatStore.getState().setReplyingTo(message);
@@ -179,7 +183,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
       <div
         data-message-id={message.id}
         className={clsx(
-          'group relative px-2 py-0.5 hover:bg-vox-bg-hover/50 rounded transition-colors',
+          'group relative px-2 py-0.5 rounded transition-colors',
+          isMentioned ? 'bg-vox-accent-primary/10 border-l-2 border-vox-accent-primary hover:bg-vox-accent-primary/15' : 'hover:bg-vox-bg-hover/50',
           addTopMargin && 'mt-4'
         )}
       >
@@ -264,6 +269,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                     </span>
                   </UserHoverTarget>
                   {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}
+                  {message.author.isSupporter && <SupporterBadge />}
                   <span className="text-xs text-vox-text-muted">
                     {formatMessageTime(message.createdAt)}
                   </span>
@@ -278,7 +284,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                   <>
                     {message.content && (
                       <div className="text-sm text-vox-text-primary break-words">
-                        <MessageContent content={message.content} />
+                        <MessageContent content={message.content} mentions={message.mentions} />
                       </div>
                     )}
                     {message.attachments && message.attachments.length > 0 && (
@@ -307,7 +313,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                 <div className="min-w-0 flex-1">
                   {message.content && (
                     <div className="text-sm text-vox-text-primary break-words">
-                      <MessageContent content={message.content} />
+                      <MessageContent content={message.content} mentions={message.mentions} />
                       {message.editedAt && (
                         <span className="text-[10px] text-vox-text-muted">(edited)</span>
                       )}

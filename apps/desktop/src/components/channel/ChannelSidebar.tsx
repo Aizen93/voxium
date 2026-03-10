@@ -7,6 +7,7 @@ import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOf
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
 import { VoicePanel } from '../voice/VoicePanel';
+import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { toast } from '../../stores/toastStore';
@@ -358,7 +359,7 @@ export function ChannelSidebar() {
   };
 
   const handleJoinVoice = (channelId: string) => {
-    joinChannel(channelId);
+    joinChannel(channelId, activeServerId ?? undefined);
   };
 
   const handleCreateChannel = async () => {
@@ -722,6 +723,7 @@ export function ChannelSidebar() {
 
       {/* Voice panel (between channel list and user area) */}
       <VoicePanel />
+      <DMVoicePanel />
 
       {/* User area at bottom */}
       <div className="flex items-center gap-2 border-t border-vox-border bg-vox-sidebar px-2 py-2">

@@ -37,6 +37,7 @@ export const LIMITS = {
   REPORT_REASON_MAX: 1000,
   SUPPORT_MESSAGE_MIN: 1,
   SUPPORT_MESSAGE_MAX: 2000,
+  MAX_MENTIONS_PER_MESSAGE: 10,
   TOTP_CODE_LENGTH: 6,
   TOTP_BACKUP_CODE_COUNT: 8,
   MAX_ATTACHMENTS_PER_MESSAGE: 5,
@@ -58,6 +59,9 @@ export function getMaxAttachmentSize(mimeType: string): number {
 }
 
 export const INVITE_CODE_LENGTH = 8;
+
+/** Regex to match @[userId] mention tokens in message content */
+export const MENTION_RE = /@\[([^\]]{1,30})\]/g;
 
 export const WS_EVENTS = {
   MESSAGE_NEW: 'message:new',

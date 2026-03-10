@@ -185,7 +185,7 @@ adminRouter.get('/users', async (req: Request, res: Response, next: NextFunction
         where,
         select: {
           id: true, username: true, displayName: true, email: true, avatarUrl: true,
-          role: true, status: true, bannedAt: true, banReason: true, createdAt: true,
+          role: true, status: true, isSupporter: true, bannedAt: true, banReason: true, createdAt: true,
         },
         orderBy,
         skip: (page - 1) * limit,
@@ -213,7 +213,7 @@ adminRouter.get('/users/:userId', async (req: Request<{ userId: string }>, res: 
       where: { id: req.params.userId },
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
-        bio: true, role: true, status: true, bannedAt: true, banReason: true, createdAt: true,
+        bio: true, role: true, status: true, isSupporter: true, bannedAt: true, banReason: true, createdAt: true,
         ipRecords: { select: { ip: true, lastSeenAt: true }, orderBy: { lastSeenAt: 'desc' } },
         _count: { select: { messages: true, memberships: true, ownedServers: true } },
       },
@@ -615,6 +615,37 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
     });
 
     res.json({ success: true, message: `User "${target.username}" role changed to ${role}` });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Supporter Badge ────────────────────────────────────────────────────────
+
+adminRouter.patch('/users/:userId/supporter', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { userId: targetId } = req.params;
+    const { isSupporter } = req.body as { isSupporter?: boolean };
+
+    if (typeof isSupporter !== 'boolean') {
+      throw new BadRequestError('isSupporter must be a boolean');
+    }
+
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      select: { id: true, username: true, isSupporter: true },
+    });
+    if (!target) throw new NotFoundError('User');
+
+    await prisma.user.update({
+      where: { id: targetId },
+      data: {
+        isSupporter,
+        supporterSince: isSupporter ? (target.isSupporter ? undefined : new Date()) : null,
+      },
+    });
+
+    res.json({ success: true, message: `Supporter badge ${isSupporter ? 'granted to' : 'removed from'} "${target.username}"` });
   } catch (err) {
     next(err);
   }
@@ -1555,7 +1586,7 @@ adminRouter.get('/export/users', async (_req: Request, res: Response, next: Next
     const users = await prisma.user.findMany({
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
-        role: true, status: true, bannedAt: true, banReason: true, createdAt: true,
+        role: true, status: true, isSupporter: true, bannedAt: true, banReason: true, createdAt: true,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -2073,7 +2104,7 @@ adminRouter.post('/reports/:id/dismiss', async (req: Request<{ id: string }>, re
 // ─── Support Tickets ────────────────────────────────────────────────────────
 
 const supportAuthorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
+  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true },
 };
 
 function mapSupportMessage(m: any): SupportMessageData {

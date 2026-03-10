@@ -16,6 +16,7 @@ const DEFAULTS: Record<string, FeatureFlagDef> = {
   voice:           { name: 'voice',           label: 'Voice Channels',      description: 'Allow users to join server voice channels',        enabled: true },
   dm_voice:        { name: 'dm_voice',        label: 'DM Voice Calls',      description: 'Allow users to start direct message voice calls',  enabled: true },
   support:         { name: 'support',         label: 'Support Tickets',     description: 'Allow users to open support tickets',              enabled: true },
+  community_funding: { name: 'community_funding', label: 'Community Funding', description: 'Show the community funding section on the landing page', enabled: false },
 };
 
 const REDIS_KEY = 'feature:flags';

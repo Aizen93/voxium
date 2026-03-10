@@ -26,7 +26,7 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
   // Fetch only the fields needed for the broadcast (no email)
   const joinedUser = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, role: true, createdAt: true },
+    select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, role: true, isSupporter: true, createdAt: true },
   });
 
   if (joinedUser) {

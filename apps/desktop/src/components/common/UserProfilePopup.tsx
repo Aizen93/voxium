@@ -12,6 +12,7 @@ import { format } from 'date-fns';
 import { clsx } from 'clsx';
 import { api } from '../../services/api';
 import { StaffBadge } from './StaffBadge';
+import { SupporterBadge } from './SupporterBadge';
 import { ReportModal } from '../chat/ReportModal';
 
 const POPUP_WIDTH = 300;
@@ -60,7 +61,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   const [showReport, setShowReport] = useState(false);
   const [fetchedUser, setFetchedUser] = useState<{
     id: string; username: string; displayName: string;
-    avatarUrl: string | null; bio?: string | null; status?: string; role?: string; createdAt?: string;
+    avatarUrl: string | null; bio?: string | null; status?: string; role?: string; isSupporter?: boolean; createdAt?: string;
   } | null>(null);
 
   useEffect(() => {
@@ -251,6 +252,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
           <div className="flex items-center gap-1.5">
             <p className="text-xs text-vox-text-muted">@{user.username}</p>
             {(user.role === 'admin' || user.role === 'superadmin') && <StaffBadge />}
+            {user.isSupporter && <SupporterBadge />}
           </div>
 
           <div className="mt-1 flex items-center gap-1.5">

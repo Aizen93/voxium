@@ -111,6 +111,18 @@ app.get('/health', async (_req, res) => {
   });
 });
 
+// ─── Public Feature Flags (unauthenticated, for landing page) ────────────────
+
+app.get('/api/v1/feature-flags/public', rateLimitGeneral, async (_req, res) => {
+  const { isFeatureEnabled } = await import('./utils/featureFlags');
+  const PUBLIC_FLAGS = ['community_funding', 'registration'] as const;
+  const flags: Record<string, boolean> = {};
+  for (const name of PUBLIC_FLAGS) {
+    flags[name] = isFeatureEnabled(name);
+  }
+  res.json({ success: true, data: flags });
+});
+
 // ─── API Routes ──────────────────────────────────────────────────────────────
 
 const api = express.Router();

@@ -78,6 +78,7 @@ interface VoiceState {
 
   // ─── Server Voice State (SFU) ──────────────────────────────────────
   activeChannelId: string | null;
+  activeVoiceServerId: string | null;
   channelUsers: Map<string, VoiceUser[]>;
 
   // mediasoup SFU state
@@ -109,7 +110,7 @@ interface VoiceState {
   destroyAllPeers: () => void;
 
   // ─── Server Voice Actions (SFU) ────────────────────────────────────
-  joinChannel: (channelId: string) => Promise<void>;
+  joinChannel: (channelId: string, serverId?: string) => Promise<void>;
   leaveChannel: () => void;
   setChannelUsers: (channelId: string, users: VoiceUser[]) => void;
   addUserToChannel: (channelId: string, user: VoiceUser) => void;
@@ -528,6 +529,7 @@ function handleSignalInternal(
 export const useVoiceStore = create<VoiceState>((set, get) => ({
   localUserId: null,
   activeChannelId: null,
+  activeVoiceServerId: null,
   selfMute: initialVoicePrefs.selfMute,
   selfDeaf: initialVoicePrefs.selfDeaf,
   localStream: null,
@@ -561,7 +563,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   // SERVER VOICE (SFU)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  joinChannel: async (channelId: string) => {
+  joinChannel: async (channelId: string, serverId?: string) => {
     const socket = getSocket();
     if (!socket) return;
 
@@ -608,7 +610,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     const effectiveMute = stream ? selfMute : true;
     const serverMute = isPTT ? true : effectiveMute;
-    set({ activeChannelId: channelId, localStream: stream, selfMute: effectiveMute });
+    set({ activeChannelId: channelId, activeVoiceServerId: serverId ?? null, localStream: stream, selfMute: effectiveMute });
 
     // Emit voice:join — server will respond with voice:transport_created
     socket.emit('voice:join', channelId, { selfMute: serverMute, selfDeaf });
@@ -647,6 +649,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     set({
       activeChannelId: null,
+      activeVoiceServerId: null,
       localStream: null,
       latency: null,
       screenStream: null,

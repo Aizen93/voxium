@@ -1,11 +1,13 @@
-import { useState, useRef, useEffect, type KeyboardEvent, type ChangeEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ChangeEvent, type DragEvent } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
+import { MentionAutocomplete, getMentionQuery, handleMentionKeyDown } from './MentionAutocomplete';
 import { api } from '../../services/api';
 import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize } from '@voxium/shared';
-import { PlusCircle, Smile, Send, X, FileText, Image, Film, Music } from 'lucide-react';
+import type { ServerMember } from '@voxium/shared';
+import { PlusCircle, Smile, Send, X, FileText, Image, Film, Music, Upload } from 'lucide-react';
 
 interface Props {
   channelId?: string;
@@ -44,11 +46,17 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounterRef = useRef(0);
   const emojiBtnRef = useRef<HTMLButtonElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = useRef(false);
+  const [cursorPos, setCursorPos] = useState(0);
+  const [showMentions, setShowMentions] = useState(false);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const mentionResultsRef = useRef<ServerMember[]>([]);
 
   // Focus textarea when replying to a message
   useEffect(() => {
@@ -92,6 +100,34 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     }, 2000);
   };
 
+  const handleMentionSelect = useCallback((userId: string, displayName: string, mentionStart: number, mentionEnd: number) => {
+    // Replace @query with @[userId] followed by a space
+    const before = content.slice(0, mentionStart);
+    const after = content.slice(mentionEnd);
+    const mention = `@[${userId}] `;
+    const newContent = before + mention + after;
+    setContent(newContent);
+    setShowMentions(false);
+    setMentionIndex(0);
+    // Focus textarea and place cursor after the inserted mention
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        const newPos = mentionStart + mention.length;
+        textareaRef.current.focus();
+        textareaRef.current.selectionStart = newPos;
+        textareaRef.current.selectionEnd = newPos;
+        setCursorPos(newPos);
+      }
+    });
+  }, [content]);
+
+  const handleMentionMemberSelect = useCallback((member: ServerMember) => {
+    const mention = getMentionQuery(content, cursorPos);
+    if (!mention) return;
+    const mentionEnd = mention.start + 1 + mention.query.length;
+    handleMentionSelect(member.user.id, member.user.displayName, mention.start, mentionEnd);
+  }, [content, cursorPos, handleMentionSelect]);
+
   const uploadFile = async (file: File, fileId: string) => {
     try {
       const { data } = await api.post('/uploads/presign/attachment', {
@@ -119,9 +155,8 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     }
   };
 
-  const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  const processFiles = (files: FileList) => {
+    if (files.length === 0) return;
 
     const remaining = LIMITS.MAX_ATTACHMENTS_PER_MESSAGE - pendingFiles.length;
     if (remaining <= 0) {
@@ -156,11 +191,13 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     if (toAdd.length === 0) return;
 
     setPendingFiles((prev) => [...prev, ...toAdd]);
-
-    // Upload each file
     toAdd.forEach((pf) => uploadFile(pf.file, pf.id));
+  };
 
-    // Reset input so same file can be re-selected
+  const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    processFiles(files);
     e.target.value = '';
   };
 
@@ -214,9 +251,19 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Let mention autocomplete consume keys first (only in server channels)
+    if (showMentions && channelId) {
+      const consumed = handleMentionKeyDown(
+        e, mentionResultsRef.current, mentionIndex, setMentionIndex, handleMentionMemberSelect,
+      );
+      if (consumed) return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    } else if (e.key === 'Escape' && showMentions) {
+      e.preventDefault();
+      setShowMentions(false);
     } else if (e.key === 'Escape' && replyingTo) {
       e.preventDefault();
       clearReplyingTo();
@@ -226,15 +273,64 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const handlePaste = (e: React.ClipboardEvent) => {
     const files = e.clipboardData?.files;
     if (files && files.length > 0) {
-      const fakeEvent = { target: { files, value: '' } } as unknown as ChangeEvent<HTMLInputElement>;
-      handleFileSelect(fakeEvent);
+      e.preventDefault();
+      processFiles(files);
+    }
+  };
+
+  const handleDragEnter = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragLeave = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDragOver = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = 0;
+    setIsDragging(false);
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      processFiles(files);
     }
   };
 
   const canSend = content.trim() || pendingFiles.some((pf) => pf.status === 'uploaded');
 
   return (
-    <div className="border-t border-vox-border px-4 py-3">
+    <div
+      className="relative border-t border-vox-border px-4 py-3"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {isDragging && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-vox-accent-primary bg-vox-accent-primary/10 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-2 text-vox-accent-primary">
+            <Upload size={32} />
+            <span className="text-sm font-medium">Drop files to upload</span>
+          </div>
+        </div>
+      )}
+
       {replyingTo && (
         <div className="flex items-center justify-between rounded-t-xl border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2">
           <div className="min-w-0 flex-1 text-xs text-vox-text-secondary">
@@ -296,6 +392,17 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         </div>
       )}
 
+      {/* Mention autocomplete (server channels only) */}
+      {showMentions && channelId && (
+        <MentionAutocomplete
+          text={content}
+          cursorPos={cursorPos}
+          onSelect={handleMentionSelect}
+          onClose={() => setShowMentions(false)}
+          onResultsChange={(r) => { mentionResultsRef.current = r; }}
+        />
+      )}
+
       <div className={`flex items-end gap-2 bg-vox-bg-floating border border-vox-border px-3 py-2 ${
         replyingTo || pendingFiles.length > 0 ? 'rounded-b-xl border-t-0' : 'rounded-xl'
       }`}>
@@ -318,9 +425,22 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         <textarea
           ref={textareaRef}
           value={content}
-          onChange={(e) => { setContent(e.target.value); handleTyping(); }}
+          onChange={(e) => {
+            setContent(e.target.value);
+            const pos = e.target.selectionStart ?? e.target.value.length;
+            setCursorPos(pos);
+            // Show mention autocomplete if in a server channel and @ detected
+            if (channelId) {
+              const mention = getMentionQuery(e.target.value, pos);
+              setShowMentions(!!mention);
+              if (mention) setMentionIndex(0);
+            }
+            handleTyping();
+          }}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
+          onClick={(e) => setCursorPos((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
+          onKeyUp={(e) => setCursorPos((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           placeholder={conversationId ? `Message @${placeholderName}` : `Message #${channelName}`}
           className="max-h-36 min-h-[24px] flex-1 resize-none bg-transparent text-sm text-vox-text-primary
                      placeholder:text-vox-text-muted focus:outline-none"

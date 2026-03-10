@@ -16,7 +16,7 @@ import { DMList } from '../dm/DMList';
 import { DMChatArea } from '../dm/DMChatArea';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
-import { playJoinSound, playLeaveSound, playMessageSound } from '../../services/notificationSounds';
+import { playJoinSound, playLeaveSound, playMessageSound, playMentionSound } from '../../services/notificationSounds';
 import { toast } from '../../stores/toastStore';
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
@@ -91,18 +91,43 @@ export function MainLayout() {
         }
         const currentUser = useAuthStore.getState().user;
         if (message.author?.id === currentUser?.id) return;
-        if (message.channelId === useServerStore.getState().activeChannelId) return;
+
+        // Check if the current user is mentioned
+        const isMentioned = !!(currentUser && message.mentions?.some((m) => m.id === currentUser.id));
+
+        const isActiveChannel = message.channelId === useServerStore.getState().activeChannelId;
+
+        // If viewing this channel and not mentioned, no notification needed
+        if (isActiveChannel && !isMentioned) return;
+
+        // Mention in active channel: play sound but do NOT increment unread (user is already viewing)
+        if (isActiveChannel && isMentioned) {
+          const settings = useSettingsStore.getState();
+          if (settings.enableNotificationSounds) playMentionSound();
+          return;
+        }
+
+        // Message in another channel: increment unread and notify
         if (message.channelId && message.serverId) {
           useServerStore.getState().incrementUnread(message.channelId, message.serverId);
         }
         const settings = useSettingsStore.getState();
-        if (settings.enableNotificationSounds) playMessageSound();
+        if (settings.enableNotificationSounds) {
+          if (isMentioned) {
+            playMentionSound();
+          } else {
+            playMessageSound();
+          }
+        }
         if (settings.enableDesktopNotifications) {
           const authorName = message.author?.displayName || message.author?.username || 'Someone';
           const serverName = message.serverName || 'Unknown Server';
           const channelName = message.channelName || 'unknown';
           const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
-          notify(`${serverName} — #${channelName}`, `${authorName}: ${body}`);
+          const title = isMentioned
+            ? `${authorName} mentioned you in ${serverName} — #${channelName}`
+            : `${serverName} — #${channelName}`;
+          notify(title, `${authorName}: ${body}`);
         }
       },
       messageUpdate: (message: Message) => {
