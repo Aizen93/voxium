@@ -94,3 +94,22 @@ export async function getUserSockets(userId: string): Promise<string[]> {
   const redis = getRedis();
   return await redis.sMembers(`user:sockets:${userId}`);
 }
+
+/**
+ * Clear all presence state from Redis and reset DB user statuses to 'offline'.
+ * Must be called on server startup to clean up stale state from previous runs
+ * (e.g. crash, hot reload) where disconnect handlers never fired.
+ */
+export async function clearPresenceState(db: { user: { updateMany: (args: { where: { status: string }; data: { status: string } }) => Promise<unknown> } }): Promise<void> {
+  const redis = getRedis();
+  // Collect all user IDs that Redis thinks are online
+  const staleUsers = await redis.sMembers('online_users');
+  // Delete per-user socket sets
+  if (staleUsers.length > 0) {
+    await redis.del(staleUsers.map((id) => `user:sockets:${id}`));
+  }
+  // Clear global presence keys
+  await redis.del(['online_users', 'socket:users']);
+  // Reset all 'online' users in DB to 'offline'
+  await db.user.updateMany({ where: { status: 'online' }, data: { status: 'offline' } });
+}

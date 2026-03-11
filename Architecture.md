@@ -299,7 +299,7 @@ apps/desktop/
 │   │   ├── audioAnalyser.ts     # Speaking detection (server + DM mode)
 │   │   ├── notificationSounds.ts # Sound effects (message, mention, join, leave, looping call ringtone)
 │   │   ├── tokenStorage.ts      # Dual-storage token abstraction (localStorage/sessionStorage)
-│   │   └── notifications.ts     # Tauri native notifications with Web API fallback
+│   │   └── notifications.ts     # 3-tier notifications: WinRT toast (avatar) → Tauri plugin → Web API (blob URL avatar)
 │   ├── utils/
 │   │   └── imageProcessing.ts   # Client-side image resize + WebP via Canvas API
 │   └── styles/
@@ -307,7 +307,7 @@ apps/desktop/
 ├── src-tauri/                # Tauri Rust backend
 │   ├── src/
 │   │   ├── main.rs           # Desktop entry point
-│   │   └── lib.rs            # Tauri setup
+│   │   └── lib.rs            # Tauri setup + notify_with_avatar command (WinRT toast with circular avatar)
 │   ├── Cargo.toml
 │   └── tauri.conf.json       # Tauri configuration
 ```
@@ -923,6 +923,48 @@ Message attachments follow a 3-day retention lifecycle:
 3. **Expiry** — A scheduled cleanup job runs daily at 4 AM. It queries `MessageAttachment` records older than `ATTACHMENT_RETENTION_DAYS` (default: 3), marks them as `expired: true` in the DB, then deletes the S3 objects. DB records are preserved for the "Expired" UI placeholder
 4. **Report** — After each cleanup run, an email report is sent to `CLEANUP_REPORT_EMAIL` with: status, duration, files expired, storage freed, remaining active attachments, and any errors
 
+### Desktop Notifications
+
+3-tier notification system with avatar support (`services/notifications.ts`):
+
+```
+notify(title, body, avatarKey)
+  │
+  ├─ [1] Tauri: invoke('notify_with_avatar') ── Rust command ──┐
+  │       │                                                     │
+  │       │  Windows: WinRT Toast with circular avatar          │
+  │       │  ├─ Download avatar via ureq (HTTP GET ?inline)     │
+  │       │  ├─ Validate: key regex + magic bytes + 1MB limit   │
+  │       │  ├─ Cache to %TEMP%/voxium_avatars/ (symlink check) │
+  │       │  └─ Toast::icon(path, IconCrop::Circular)           │
+  │       │                                                     │
+  │       │  Other OS: returns Err → falls through              │
+  │       │                                                     │
+  ├─ [2] Tauri: sendNotification({title, body}) ── text-only    │
+  │       (plugin fallback, no avatar support)                   │
+  │                                                              │
+  └─ [3] Browser: new Notification(title, {icon: blobUrl})      │
+          ├─ fetch(API_BASE/uploads/{key}?inline)                │
+          ├─ Create blob URL (URL.createObjectURL)               │
+          ├─ Cache: Map<key, blobUrl>, max 100, LRU eviction     │
+          └─ Dedup: concurrent fetches for same key share promise│
+```
+
+**Security:**
+- All Tauri-specific code gated behind `TAURI_AVAILABLE` (`'__TAURI_INTERNALS__' in window`)
+- Avatar key validated against `VALID_AVATAR_KEY_RE` on both frontend (JS regex) and backend (Rust regex)
+- Rust: null byte rejection, control char rejection, 128-char key limit, image magic byte validation (PNG/JPEG/WebP/GIF), symlink detection on cached files
+- Server: `?inline` proxy forces `Content-Type: image/webp`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`
+
+### Presence Cleanup
+
+`clearPresenceState()` in `utils/redis.ts` prevents ghost online statuses:
+- Collects all user IDs from Redis `online_users` set
+- Deletes per-user socket sets (`user:sockets:{userId}`)
+- Clears global keys (`online_users`, `socket:users`)
+- Resets all DB users with `status: 'online'` to `'offline'`
+- Called on server startup (before accepting connections) and graceful shutdown
+
 ### Email System
 
 Nodemailer transporter (`utils/email.ts`) with configurable SMTP:
@@ -1059,7 +1101,7 @@ mediasoup Deployment (autoscaling)
 | **~~Direct Messages~~** | ~~New DM channel type, conversation model~~ **Implemented (v0.5.0–v0.7.0)** — 1-on-1 text + voice with `Conversation` model, real-time delivery, typing, reactions, unread tracking, WebRTC P2P calls, conversation deletion with cascade + real-time sync |
 | **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2, migrated v0.9.1, attachments v1.2.0)** — presigned URL direct-to-S3 uploads for avatars, server icons, and message attachments; attachments proxied through server (S3 URL never exposed); 3-day retention with daily 4 AM cleanup job + email report; soft-delete preserves DB records for "Expired" UI placeholders |
 | **~~Password reset~~** | ~~Email-based reset flow~~ **Implemented (v0.4.0)** — Nodemailer + SHA-256 hashed tokens + tokenVersion-based session invalidation |
-| **Push notifications** | FCM/APNs integration service |
+| **~~Push notifications~~** | ~~FCM/APNs integration service~~ **Partially implemented (v1.2.1)** — Native OS notifications with avatar support (WinRT toast on Windows, Web Notification API in browser); FCM/APNs for mobile remains future work |
 | **~~Message search~~** | ~~Elasticsearch / PostgreSQL full-text search~~ **Implemented (v0.9.5)** — PostgreSQL case-insensitive `contains` search across server channels and DM conversations; cursor-based pagination; "around" mode for jump-to-message with scroll + highlight |
 | **Mobile app** | React Native sharing stores/services with web |
 | **Bot API** | Gateway API for third-party integrations |

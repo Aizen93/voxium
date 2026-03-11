@@ -1,10 +1,10 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate } from '../middleware/auth';
-import { rateLimitUpload } from '../middleware/rateLimiter';
+import { rateLimitUpload, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize } from '@voxium/shared';
+import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize } from '@voxium/shared';
 import crypto from 'crypto';
 import { Readable } from 'stream';
 
@@ -155,8 +155,9 @@ uploadRouter.get(
       let s3Response;
       try {
         s3Response = await getS3Object(key);
-      } catch (s3Err: any) {
-        if (s3Err.name === 'NoSuchKey' || s3Err.$metadata?.httpStatusCode === 404) {
+      } catch (s3Err: unknown) {
+        const err = s3Err as { name?: string; $metadata?: { httpStatusCode?: number } };
+        if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
           // File deleted from S3 (e.g. admin or manual cleanup) — mark as expired
           await prisma.messageAttachment.updateMany({ where: { s3Key: key }, data: { expired: true } });
           throw new NotFoundError('Attachment expired');
@@ -177,13 +178,29 @@ uploadRouter.get(
 );
 
 // GET /uploads/* — public redirect for avatars and server icons
+// Append ?inline to proxy the image directly instead of 302→S3.
+// Used by browser notifications where the S3 redirect fails due to CORS.
 uploadRouter.get(
   '/*',
+  rateLimitGeneral,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const key = req.params[0];
       if (!key || key.includes('..') || !VALID_S3_KEY_RE.test(key)) {
         throw new BadRequestError('Invalid key');
+      }
+
+      if (req.query.inline !== undefined) {
+        const s3Response = await getS3Object(key);
+        if (!s3Response.Body) throw new NotFoundError('Asset');
+        // Force image Content-Type regardless of what S3 returns (defense-in-depth against stored XSS)
+        res.set('Content-Type', 'image/webp');
+        if (s3Response.ContentLength) res.set('Content-Length', String(s3Response.ContentLength));
+        res.set('Cache-Control', 'public, max-age=86400, immutable');
+        res.set('Content-Disposition', 'inline');
+        res.set('X-Content-Type-Options', 'nosniff');
+        (s3Response.Body as Readable).pipe(res);
+        return;
       }
 
       const url = await generatePresignedGetUrl(key);

@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
-**Version:** 1.2.0
-**Date:** 2026-03-10
+**Version:** 1.2.1
+**Date:** 2026-03-11
 
 ## Project Structure
 
@@ -27,7 +27,7 @@ Voxium/
 - **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls with global call status panel (visible from any view), push-to-talk, noise suppression, screen sharing, silence detection (producer pause/resume), voice quality selector (low/medium/high bitrate), adaptive bandwidth caps
 - Server/channel/category management with drag-and-drop reordering
 - JWT auth with refresh tokens, password reset, Remember Me
-- S3 file uploads (avatars, server icons, message attachments) with presigned URLs; attachments proxied through server (S3 URL never exposed to client); 3-day retention with daily 4 AM cleanup job + email report; expired attachments show placeholder in chat
+- S3 file uploads (avatars, server icons, message attachments) with presigned URLs; attachments proxied through server (S3 URL never exposed to client); `?inline` proxy for avatars/server-icons (used by notifications); 3-day retention with daily 4 AM cleanup job + email report; expired attachments show placeholder in chat
 - Direct messages with typing indicators, reactions, unread tracking
 - Friend request system with real-time notifications
 - Unread indicators (channel + server level, persistent via DB)
@@ -37,7 +37,7 @@ Voxium/
 - Rate limiting (per-endpoint + socket-level, admin-editable via Redis-backed registry) and input sanitization
 - Feature flags (registration, invites, server creation, voice, DM voice, support) — Redis-backed, toggleable from admin dashboard without redeploying
 - Per-server invite lock (owners/admins can lock/unlock invites independently of global flag)
-- Tauri 2 desktop wrapper with native notifications
+- Tauri 2 desktop wrapper with native notifications (avatar support: WinRT circular icon on Windows, blob URL icon in browser)
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
 - **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members; admin UI for global + per-server management; read-only limits tab in server settings
 
@@ -68,6 +68,8 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **Notification Avatars + Presence Cleanup** (2026-03-11) — 3-tier notification system with avatar support: (1) Windows WinRT toast with circular avatar via custom `notify_with_avatar` Tauri command + `ureq` download; (2) Tauri plugin fallback (text-only); (3) Web Notification API with pre-fetched blob URL via `?inline` S3 proxy. Added `?inline` query param to `GET /uploads/*` for direct image proxy (avoids S3 302 redirect CORS issues). Security hardened: Rust-side avatar key regex, magic byte validation, symlink detection, 1MB limit, forced Content-Type, nosniff. Fixed stale presence bug via `clearPresenceState()` on server startup/shutdown. Fixed `catch (s3Err: any)` → typed `unknown` cast.
 
 - **Global DMVoicePanel** (2026-03-10) -- Persistent DM call status panel visible in both server and DM sidebar views, mirroring the server VoicePanel pattern.
 

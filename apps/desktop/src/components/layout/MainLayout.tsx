@@ -127,7 +127,7 @@ export function MainLayout() {
           const title = isMentioned
             ? `${authorName} mentioned you in ${serverName} — #${channelName}`
             : `${serverName} — #${channelName}`;
-          notify(title, `${authorName}: ${body}`);
+          void notify(title, `${authorName}: ${body}`, message.author?.avatarUrl);
         }
       },
       messageUpdate: (message: Message) => {
@@ -268,7 +268,7 @@ export function MainLayout() {
             if (settings.enableDesktopNotifications) {
               const authorName = message.author?.displayName || message.author?.username || 'Someone';
               const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
-              notify(`DM — ${authorName}`, body);
+              void notify(`DM — ${authorName}`, body, message.author?.avatarUrl);
             }
           }
         }

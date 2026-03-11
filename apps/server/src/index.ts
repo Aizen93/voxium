@@ -31,7 +31,7 @@ import { initSocketServer } from './websocket/socketServer';
 import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
 import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
 import { prisma } from './utils/prisma';
-import { initRedis, NODE_ID } from './utils/redis';
+import { initRedis, clearPresenceState, NODE_ID } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
 import { initMediasoup } from './mediasoup/mediasoupManager';
@@ -46,6 +46,10 @@ async function main() {
   // Connect to Redis
   await initRedis();
   console.log('[Redis] Connected');
+
+  // Reset stale presence from previous runs (crash, hot reload, etc.)
+  await clearPresenceState(prisma);
+  console.log('[Presence] Stale presence cleared');
 
   // Load rate limit overrides from Redis
   await loadRateLimitOverrides();
@@ -82,6 +86,8 @@ async function main() {
     stopAdminMetricsEmitter();
     stopAttachmentCleanup();
     server.close();
+    // Clean up presence so users don't appear online after shutdown
+    await clearPresenceState(prisma).catch(() => {});
     await prisma.$disconnect();
     process.exit(0);
   };
