@@ -177,7 +177,7 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
         where: { serverId },
         include: {
           user: {
-            select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, isSupporter: true, createdAt: true },
+            select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, isSupporter: true, supporterTier: true, createdAt: true },
           },
         },
         skip: (page - 1) * limit,

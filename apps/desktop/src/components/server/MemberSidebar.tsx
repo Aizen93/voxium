@@ -85,7 +85,7 @@ function MemberGroup({ title, members, onContextMenu }: { title: string; members
                   {member.user.displayName}
                 </p>
                 {(member.user.role === 'admin' || member.user.role === 'superadmin') && <StaffBadge />}
-                {member.user.isSupporter && <SupporterBadge />}
+                {member.user.isSupporter && <SupporterBadge tier={member.user.supporterTier} />}
               </div>
             </div>
           </button>

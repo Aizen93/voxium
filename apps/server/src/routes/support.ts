@@ -14,7 +14,7 @@ export const supportRouter = Router();
 supportRouter.use(authenticate);
 
 const authorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true },
+  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
 };
 
 function mapMessage(m: any): SupportMessageData {

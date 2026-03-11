@@ -18,14 +18,14 @@ export const dmRouter = Router();
 dmRouter.use(authenticate);
 
 const authorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true },
+  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
 };
 
 const replyToSelect = {
   select: {
     id: true,
     content: true,
-    author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true } },
+    author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
   },
 };
 
@@ -100,7 +100,7 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
     // Verify target user exists
     const targetUser = await prisma.user.findUnique({
       where: { id: targetUserId },
-      select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true },
+      select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
     });
     if (!targetUser) throw new NotFoundError('User');
 

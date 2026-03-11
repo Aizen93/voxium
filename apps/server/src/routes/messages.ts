@@ -39,13 +39,13 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
 
     const messageInclude = {
       author: {
-        select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true },
+        select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
       },
       replyTo: {
         select: {
           id: true,
           content: true,
-          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true } },
+          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
         },
       },
       reactions: reactionInclude,
@@ -216,11 +216,11 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       return tx.message.findUniqueOrThrow({
         where: { id: msg.id },
         include: {
-          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true } },
+          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
           replyTo: {
             select: {
               id: true, content: true,
-              author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true } },
+              author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
             },
           },
           attachments: attachmentSelect,
@@ -275,13 +275,13 @@ messageRouter.patch('/:messageId', rateLimitGeneral, async (req: Request<{ chann
       data: { content, editedAt: new Date() },
       include: {
         author: {
-          select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true },
+          select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
         },
         replyTo: {
           select: {
             id: true,
             content: true,
-            author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true } },
+            author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
           },
         },
         reactions: reactionInclude,

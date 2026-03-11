@@ -13,8 +13,11 @@ export interface User {
   role: UserRole;
   totpEnabled: boolean;
   isSupporter: boolean;
+  supporterTier: SupporterTier;
   createdAt: string;
 }
+
+export type SupporterTier = 'first' | 'top' | null;
 
 export type UserStatus = 'online' | 'idle' | 'dnd' | 'offline';
 
@@ -147,6 +150,7 @@ export interface MessageAuthor {
   avatarUrl: string | null;
   role?: UserRole;
   isSupporter?: boolean;
+  supporterTier?: SupporterTier;
 }
 
 export interface SendMessageRequest {
@@ -428,6 +432,7 @@ export interface AdminUser {
   role: UserRole;
   status: UserStatus;
   isSupporter: boolean;
+  supporterTier: SupporterTier;
   bannedAt: string | null;
   banReason: string | null;
   createdAt: string;

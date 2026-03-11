@@ -185,7 +185,7 @@ adminRouter.get('/users', async (req: Request, res: Response, next: NextFunction
         where,
         select: {
           id: true, username: true, displayName: true, email: true, avatarUrl: true,
-          role: true, status: true, isSupporter: true, bannedAt: true, banReason: true, createdAt: true,
+          role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
         },
         orderBy,
         skip: (page - 1) * limit,
@@ -213,7 +213,7 @@ adminRouter.get('/users/:userId', async (req: Request<{ userId: string }>, res: 
       where: { id: req.params.userId },
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
-        bio: true, role: true, status: true, isSupporter: true, bannedAt: true, banReason: true, createdAt: true,
+        bio: true, role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
         ipRecords: { select: { ip: true, lastSeenAt: true }, orderBy: { lastSeenAt: 'desc' } },
         _count: { select: { messages: true, memberships: true, ownedServers: true } },
       },
@@ -625,15 +625,21 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
 adminRouter.patch('/users/:userId/supporter', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
   try {
     const { userId: targetId } = req.params;
-    const { isSupporter } = req.body as { isSupporter?: boolean };
+    const { isSupporter, supporterTier } = req.body as { isSupporter?: boolean; supporterTier?: string | null };
 
     if (typeof isSupporter !== 'boolean') {
       throw new BadRequestError('isSupporter must be a boolean');
     }
 
+    // Validate supporterTier if provided
+    const validTiers = ['first', 'top', null];
+    if (supporterTier !== undefined && !validTiers.includes(supporterTier)) {
+      throw new BadRequestError('supporterTier must be "first", "top", or null');
+    }
+
     const target = await prisma.user.findUnique({
       where: { id: targetId },
-      select: { id: true, username: true, isSupporter: true },
+      select: { id: true, username: true, isSupporter: true, supporterTier: true },
     });
     if (!target) throw new NotFoundError('User');
 
@@ -641,6 +647,7 @@ adminRouter.patch('/users/:userId/supporter', async (req: Request<{ userId: stri
       where: { id: targetId },
       data: {
         isSupporter,
+        supporterTier: isSupporter ? (supporterTier !== undefined ? supporterTier : target.supporterTier) : null,
         supporterSince: isSupporter ? (target.isSupporter ? undefined : new Date()) : null,
       },
     });
@@ -1586,7 +1593,7 @@ adminRouter.get('/export/users', async (_req: Request, res: Response, next: Next
     const users = await prisma.user.findMany({
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
-        role: true, status: true, isSupporter: true, bannedAt: true, banReason: true, createdAt: true,
+        role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -2104,7 +2111,7 @@ adminRouter.post('/reports/:id/dismiss', async (req: Request<{ id: string }>, re
 // ─── Support Tickets ────────────────────────────────────────────────────────
 
 const supportAuthorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true },
+  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
 };
 
 function mapSupportMessage(m: any): SupportMessageData {

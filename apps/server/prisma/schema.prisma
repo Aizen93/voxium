@@ -28,6 +28,7 @@ model User {
   totpEnabled         Boolean   @default(false) @map("totp_enabled")
   totpBackupCodes     String?   @map("totp_backup_codes")
   isSupporter         Boolean   @default(false) @map("is_supporter")
+  supporterTier       String?   @map("supporter_tier") // null = regular, 'first' = first contributor, 'top' = top donator
   supporterSince      DateTime? @map("supporter_since")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")

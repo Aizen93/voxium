@@ -68,7 +68,7 @@ authRouter.get('/me', authenticate, async (req: Request, res: Response, next: Ne
         status: true,
         role: true,
         totpEnabled: true,
-        isSupporter: true,
+        isSupporter: true, supporterTier: true,
         createdAt: true,
       },
     });

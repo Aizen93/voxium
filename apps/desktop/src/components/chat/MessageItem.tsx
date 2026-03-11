@@ -269,7 +269,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                     </span>
                   </UserHoverTarget>
                   {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}
-                  {message.author.isSupporter && <SupporterBadge />}
+                  {message.author.isSupporter && <SupporterBadge tier={message.author.supporterTier} />}
                   <span className="text-xs text-vox-text-muted">
                     {formatMessageTime(message.createdAt)}
                   </span>

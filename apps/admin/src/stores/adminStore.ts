@@ -157,7 +157,7 @@ interface AdminState {
   fetchUserOwnedServers: (userId: string) => Promise<OwnedServerInfo[]>;
   deleteUserWithTransfers: (userId: string, serverActions: ServerAction[]) => Promise<void>;
   updateUserRole: (userId: string, role: 'user' | 'admin') => Promise<void>;
-  toggleSupporter: (userId: string, isSupporter: boolean) => Promise<void>;
+  toggleSupporter: (userId: string, isSupporter: boolean, supporterTier?: string | null) => Promise<void>;
 
   fetchServers: (page?: number) => Promise<void>;
   setServersSearch: (search: string) => void;
@@ -462,8 +462,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     await api.patch(`/admin/users/${userId}/role`, { role });
   },
 
-  toggleSupporter: async (userId, isSupporter) => {
-    await api.patch(`/admin/users/${userId}/supporter`, { isSupporter });
+  toggleSupporter: async (userId, isSupporter, supporterTier) => {
+    await api.patch(`/admin/users/${userId}/supporter`, { isSupporter, ...(supporterTier !== undefined && { supporterTier }) });
   },
 
   fetchServers: async (page?: number) => {

@@ -25,7 +25,7 @@ userRouter.get('/:userId', async (req: Request<{ userId: string }>, res: Respons
         avatarUrl: true,
         bio: true,
         status: true,
-        isSupporter: true,
+        isSupporter: true, supporterTier: true,
         createdAt: true,
       },
     });
