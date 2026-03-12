@@ -1,84 +1,76 @@
 # Voxium Server — Multi-stage Docker build
 #
-# SECURITY: This image contains NO secrets. All configuration (DATABASE_URL,
-# JWT_SECRET, REDIS_URL, S3 keys, SMTP credentials, etc.) must be injected
-# at runtime via environment variables or a mounted .env file.
-#
-# Example:
-#   docker run -d --env-file .env.production -p 3001:3001 voxium-server
+# SECURITY: This image contains NO secrets. All configuration must be
+# injected at runtime via environment variables or a mounted .env file.
 
-# ── Stage 1: Install dependencies ─────────────────────────────────────────────
-FROM node:20-slim AS deps
+# ── Stage 1: Build ───────────────────────────────────────────────────────────
+FROM node:20-slim AS build
 
-RUN corepack enable && corepack prepare pnpm@9 --activate
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN corepack enable && corepack prepare pnpm@10 --activate
 
 WORKDIR /app
 
-# Copy workspace config + lockfile (only package.json files — no source code)
+# pnpm's isolated node_modules breaks CLI shim resolution in Docker.
+# Hoisted layout puts all binaries at root level where they're findable.
+RUN echo "node-linker=hoisted" > .npmrc
+
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY packages/shared/package.json packages/shared/
 COPY apps/server/package.json apps/server/
 
-# Install all dependencies (including devDependencies for build stage)
 RUN pnpm install --frozen-lockfile
 
-# ── Stage 2: Build ────────────────────────────────────────────────────────────
-FROM node:20-slim AS build
+# pnpm hoisted layout doesn't auto-link workspace packages
+RUN mkdir -p node_modules/@voxium && \
+    ln -sfn ../../packages/shared node_modules/@voxium/shared
 
-RUN corepack enable && corepack prepare pnpm@9 --activate
-
-WORKDIR /app
-
-# Copy everything from deps stage (preserves pnpm symlink structure)
-COPY --from=deps /app ./
-
-# Copy source files
 COPY packages/shared/ packages/shared/
 COPY apps/server/ apps/server/
 
-# Generate Prisma client
-RUN cd apps/server && npx prisma generate
+RUN npx tsc --project packages/shared/tsconfig.json
+RUN npx prisma generate --schema=apps/server/prisma/schema.prisma
+RUN npx tsc --project apps/server/tsconfig.json
 
-# Build shared package then server
-RUN pnpm build:shared
-RUN pnpm build:server
-
-# ── Stage 3: Production (minimal image) ──────────────────────────────────────
+# ── Stage 2: Production ─────────────────────────────────────────────────────
 FROM node:20-slim AS production
 
-RUN corepack enable && corepack prepare pnpm@9 --activate
-
-# OpenSSL required by Prisma query engine
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Run as non-root user
+RUN corepack enable && corepack prepare pnpm@10 --activate
+
 RUN groupadd --gid 1001 voxium && useradd --uid 1001 --gid voxium --create-home voxium
 
 WORKDIR /app
 
-# Copy workspace config (needed for pnpm to resolve workspace packages)
+RUN echo "node-linker=hoisted" > .npmrc
+
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY packages/shared/package.json packages/shared/
 COPY apps/server/package.json apps/server/
 
-# Install production dependencies only (no devDependencies)
 RUN pnpm install --frozen-lockfile --prod
 
-# Copy built shared package
-COPY --from=build /app/packages/shared/dist packages/shared/dist
+RUN mkdir -p node_modules/@voxium && \
+    ln -sfn ../../packages/shared node_modules/@voxium/shared
 
-# Copy built server
+COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/server/prisma apps/server/prisma
 
-# Generate Prisma client for production node_modules layout
-RUN cd apps/server && npx prisma generate
+RUN npx prisma generate --schema=apps/server/prisma/schema.prisma
 
-# Switch to non-root user
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 USER voxium
 
 ENV NODE_ENV=production
 EXPOSE 3001
+EXPOSE 10000-10100/udp
+EXPOSE 10000-10100/tcp
 
-CMD ["node", "apps/server/dist/index.js"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

@@ -47,10 +47,10 @@ jobs:
         with:
           node-version: 20
 
-      - name: Setup pnpm 9
+      - name: Setup pnpm 10
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

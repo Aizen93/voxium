@@ -181,16 +181,36 @@ pnpm run dev:desktop
 
 The backend runs on `http://localhost:3001` and the frontend on `http://localhost:8080`.
 
+Open **`http://localhost:8080`** in your browser to use Voxium. No additional setup needed — the Vite dev server serves the full web client.
+
+### 9. Admin Dashboard (Optional)
+
+The admin dashboard is a separate React app for managing users, servers, bans, feature flags, resource limits, and viewing live metrics.
+
+Start it in a new terminal:
+
+```bash
+pnpm run dev:admin
+```
+
+The admin dashboard runs on **`http://localhost:8082`**. It connects to the same backend server.
+
+> **Note:** You need an admin account to log in. Use Prisma Studio (`pnpm db:studio`) to set a user's `role` field to `admin` or `superadmin`.
+
 ---
 
 ## Running as Desktop App (Tauri)
+
+If you want to run Voxium as a native desktop app:
 
 ```bash
 cd apps/desktop
 pnpm tauri:dev
 ```
 
-This compiles the Rust backend, starts the Vite dev server, and opens the native window.
+This starts both the Vite dev server (`http://localhost:8080`) and the native Tauri desktop window simultaneously. You can use either the browser or the desktop app — both connect to the same backend.
+
+Requires [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS (Rust toolchain + platform-specific dependencies listed in Prerequisites above).
 
 ---
 
@@ -217,6 +237,134 @@ This creates platform-specific installers in `apps/desktop/src-tauri/target/rele
 - **Windows:** `.msi` and `.exe` installers
 - **macOS:** `.dmg` and `.app` bundle
 - **Linux:** `.deb`, `.AppImage`, and `.rpm` packages
+
+---
+
+## Docker Deployment (Production)
+
+Docker packages the **backend server** alongside PostgreSQL and Redis. This is the easiest way to deploy Voxium on your own server.
+
+### Prerequisites
+
+- Docker 20+
+- Docker Compose v2+
+
+### 1. Create the Environment File
+
+```bash
+cp .env.production.example .env.production
+```
+
+### 2. Configure `.env.production`
+
+Open `.env.production` and fill in all values:
+
+```env
+# ── Database ──────────────────────────────────────────────────────────────────
+# Pick a strong password — used by both PostgreSQL and the server
+POSTGRES_PASSWORD=your_strong_password_here
+
+# ── Auth (generate with: openssl rand -hex 32) ───────────────────────────────
+JWT_SECRET=your_random_64_char_secret
+JWT_REFRESH_SECRET=another_random_64_char_secret
+
+# ── TOTP (generate with: openssl rand -hex 32) ───────────────────────────────
+TOTP_ENCRYPTION_KEY=your_32_byte_hex_key
+
+# ── S3 / Object Storage (required for file uploads) ──────────────────────────
+S3_ASSETS_ENDPOINT=https://s3.us-east-1.amazonaws.com
+S3_ASSETS_REGION=us-east-1
+S3_ACCESS_KEY=your_access_key
+S3_SECRET_KEY=your_secret_key
+S3_ASSETS_BUCKET=your-bucket-name
+
+# ── SMTP (optional, for password reset emails) ───────────────────────────────
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=your_smtp_user
+SMTP_PASS=your_smtp_password
+SMTP_FROM=noreply@yourdomain.com
+
+# ── App ───────────────────────────────────────────────────────────────────────
+PORT=3001
+# CORS_ORIGIN must match the URL where your frontend is hosted.
+# For local testing with the dev frontend, use: http://localhost:8080
+CORS_ORIGIN=https://yourdomain.com
+CLIENT_URL=https://yourdomain.com
+
+# ── mediasoup (Voice) ────────────────────────────────────────────────────────
+# ANNOUNCED_IP must be your server's public IP for voice to work
+MEDIASOUP_LISTEN_IP=0.0.0.0
+MEDIASOUP_ANNOUNCED_IP=YOUR_SERVER_PUBLIC_IP
+MEDIASOUP_MIN_PORT=10000
+MEDIASOUP_MAX_PORT=10100
+```
+
+> **Important:** `MEDIASOUP_ANNOUNCED_IP` must be your server's public IP address. Voice channels will not work without this.
+
+> **Windows users:** If ports 10000-10100 conflict with Hyper-V reserved ranges, use a different range like `20000-20100`.
+
+### 3. Start the Stack
+
+```bash
+docker compose -f docker-compose.production.yml --env-file .env.production up -d
+```
+
+This starts three services:
+
+| Service           | Description              | Port     |
+| ----------------- | ------------------------ | -------- |
+| `voxium-server`   | Backend API + WebSocket  | 3001     |
+| `voxium-postgres` | PostgreSQL 16            | internal |
+| `voxium-redis`    | Redis 7                  | internal |
+
+Database migrations run **automatically** on first startup — no manual steps needed.
+
+### 4. Verify It's Running
+
+```bash
+docker compose -f docker-compose.production.yml ps
+```
+
+All services should show `healthy`. You can also check the health endpoint:
+
+```bash
+curl http://localhost:3001/health
+```
+
+### 5. Connect a Client
+
+Point the Voxium desktop app (or web client) to your server by setting these in the client's `.env`:
+
+```env
+VITE_API_URL=http://YOUR_SERVER_IP:3001/api/v1
+VITE_WS_URL=http://YOUR_SERVER_IP:3001
+```
+
+> **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
+
+### Managing the Docker Stack
+
+```bash
+# View server logs
+docker compose -f docker-compose.production.yml logs -f server
+
+# Stop all services
+docker compose -f docker-compose.production.yml down
+
+# Stop and remove all data (database, Redis, etc.)
+docker compose -f docker-compose.production.yml down -v
+
+# Rebuild after pulling new code
+docker compose -f docker-compose.production.yml --env-file .env.production up -d --build
+```
+
+### Production Recommendations
+
+- Put **nginx** or another reverse proxy in front for TLS/SSL termination
+- Open UDP ports for the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall
+- For better reliability, use a managed PostgreSQL instance (override `DATABASE_URL` directly)
+- Set up regular database backups
 
 ---
 
@@ -367,7 +515,8 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 |--------|-------------|
 | `pnpm dev` | Start backend and frontend in parallel |
 | `pnpm dev:server` | Start backend with hot reload |
-| `pnpm dev:desktop` | Start frontend Vite dev server |
+| `pnpm dev:desktop` | Start frontend Vite dev server (browser at localhost:8080) |
+| `pnpm dev:admin` | Start admin dashboard (browser at localhost:8082) |
 | `pnpm build` | Build all packages for production |
 | `pnpm build:shared` | Build shared types package |
 | `pnpm build:server` | Build backend TypeScript |
