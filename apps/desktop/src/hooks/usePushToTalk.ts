@@ -31,6 +31,12 @@ export function usePushToTalk() {
       // but the AudioContext source outputs silence when tracks are disabled
       localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
 
+      // Pause SFU audio producer to stop forwarding RTP packets
+      const { msProducers } = useVoiceStore.getState();
+      for (const producer of msProducers.values()) {
+        if (producer.kind === 'audio') producer.pause();
+      }
+
       // Debounce the mute emission to avoid flooding on rapid key taps
       if (muteTimeoutRef.current) clearTimeout(muteTimeoutRef.current);
       muteTimeoutRef.current = setTimeout(() => {
@@ -59,6 +65,12 @@ export function usePushToTalk() {
 
       // Enable raw mic tracks — noise gate pipeline handles the rest
       localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
+
+      // Resume SFU audio producer to start forwarding RTP packets
+      const { msProducers } = useVoiceStore.getState();
+      for (const producer of msProducers.values()) {
+        if (producer.kind === 'audio') producer.resume();
+      }
 
       const socket = getSocket();
       if (socket) socket.emit('voice:mute', false);

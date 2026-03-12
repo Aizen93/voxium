@@ -5,6 +5,7 @@ import bcrypt from 'bcryptjs';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, UnauthorizedError } from '../utils/errors';
 import { LIMITS } from '@voxium/shared';
+import { getRedis } from '../utils/redis';
 
 const APP_NAME = 'Voxium';
 const ENCRYPTION_ALGO = 'aes-256-gcm';
@@ -19,7 +20,10 @@ function getEncryptionKey(): Buffer | null {
 
 function encryptSecret(plaintext: string): string {
   const key = getEncryptionKey();
-  if (!key) return plaintext; // Fallback: store unencrypted if no key configured
+  if (!key) {
+    console.warn('[TOTP] WARNING: TOTP_ENCRYPTION_KEY not set — TOTP secrets will be stored unencrypted. Set this env var in production!');
+    return plaintext;
+  }
   const iv = crypto.randomBytes(IV_LENGTH);
   const cipher = crypto.createCipheriv(ENCRYPTION_ALGO, key, iv, { authTagLength: AUTH_TAG_LENGTH });
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
@@ -186,7 +190,18 @@ export async function verifyTOTP(userId: string, code: string): Promise<boolean>
   // Try regular TOTP code first
   const totp = createTOTP(decryptSecret(user.totpSecret), user.username);
   const delta = totp.validate({ token: code, window: 1 });
-  if (delta !== null) return true;
+  if (delta !== null) {
+    // Replay protection: reject codes already used within the validity window
+    const replayKey = `totp:used:${userId}:${code}`;
+    try {
+      const redis = getRedis();
+      const alreadyUsed = await redis.set(replayKey, '1', { NX: true, EX: 90 });
+      if (!alreadyUsed) return false; // Code already used within the window
+    } catch {
+      // Redis unavailable — allow through (fail-open for TOTP, rate limit still applies)
+    }
+    return true;
+  }
 
   // Try backup codes — use optimistic concurrency to prevent concurrent reuse
   if (user.totpBackupCodes) {

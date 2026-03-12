@@ -67,11 +67,11 @@ Voxium/
 
 ### Workflow
 
-1. Fork the repo and create a branch from `main`
+1. Fork the repo and create a branch from `develop`
 2. Make your changes
 3. Run `pnpm typecheck` — this also runs as a pre-commit hook and must pass
 4. Run `pnpm test:e2e` if your changes affect user-facing behavior
-5. Open a PR against `main`
+5. Open a PR against `develop` — PRs to `main` are only accepted from `develop`
 
 ### Code Conventions
 

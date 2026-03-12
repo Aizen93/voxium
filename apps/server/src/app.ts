@@ -24,7 +24,10 @@ import { rateLimitGeneral } from './middleware/rateLimiter';
 export const app = express();
 
 // Enable trust proxy so req.ip reflects the real client IP behind reverse proxies
-app.set('trust proxy', 1);
+// Only trust proxy headers in production where a reverse proxy is expected
+if (process.env.TRUST_PROXY === 'true' || process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
@@ -81,7 +84,8 @@ app.get('/health', async (_req, res) => {
     await prisma.$queryRaw`SELECT 1`;
     checks.database = { status: 'ok', latency: Date.now() - dbStart };
   } catch (err: any) {
-    checks.database = { status: 'error', latency: Date.now() - dbStart, error: err.message };
+    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : err.message;
+    checks.database = { status: 'error', latency: Date.now() - dbStart, error: msg };
     healthy = false;
   }
 
@@ -93,7 +97,8 @@ app.get('/health', async (_req, res) => {
     await redis.ping();
     checks.redis = { status: 'ok', latency: Date.now() - redisStart };
   } catch (err: any) {
-    checks.redis = { status: 'error', latency: Date.now() - redisStart, error: err.message };
+    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : err.message;
+    checks.redis = { status: 'error', latency: Date.now() - redisStart, error: msg };
     healthy = false;
   }
 
@@ -104,6 +109,18 @@ app.get('/health', async (_req, res) => {
     uptime: Math.floor(process.uptime()),
     checks,
   });
+});
+
+// ─── Public Feature Flags (unauthenticated, for landing page) ────────────────
+
+app.get('/api/v1/feature-flags/public', rateLimitGeneral, async (_req, res) => {
+  const { isFeatureEnabled } = await import('./utils/featureFlags');
+  const PUBLIC_FLAGS = ['community_funding', 'registration'] as const;
+  const flags: Record<string, boolean> = {};
+  for (const name of PUBLIC_FLAGS) {
+    flags[name] = isFeatureEnabled(name);
+  }
+  res.json({ success: true, data: flags });
 });
 
 // ─── API Routes ──────────────────────────────────────────────────────────────

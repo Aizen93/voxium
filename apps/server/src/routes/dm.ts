@@ -1,26 +1,31 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate } from '../middleware/auth';
-import { rateLimitMessageSend } from '../middleware/rateLimiter';
+import { rateLimitMessageSend, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, type Message } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
+import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
+
+const attachmentSelect = {
+  select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
+} as const;
 
 export const dmRouter = Router();
 
 dmRouter.use(authenticate);
 
 const authorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
+  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
 };
 
 const replyToSelect = {
   select: {
     id: true,
     content: true,
-    author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true } },
+    author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
   },
 };
 
@@ -95,7 +100,7 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
     // Verify target user exists
     const targetUser = await prisma.user.findUnique({
       where: { id: targetUserId },
-      select: { id: true, username: true, displayName: true, avatarUrl: true },
+      select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
     });
     if (!targetUser) throw new NotFoundError('User');
 
@@ -164,6 +169,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
       author: authorSelect,
       replyTo: replyToSelect,
       reactions: reactionInclude,
+      attachments: attachmentSelect,
     };
 
     // "around" mode: fetch messages surrounding a target message
@@ -248,8 +254,36 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
     const userId = req.user!.userId;
     const content = sanitizeText(req.body.content ?? '');
 
-    const contentErr = validateMessageContent(content);
-    if (contentErr) throw new BadRequestError(contentErr);
+    // Validate attachments
+    const attachments = req.body.attachments as Array<{
+      s3Key: string; fileName: string; fileSize: number; mimeType: string;
+    }> | undefined;
+
+    if (attachments) {
+      if (!Array.isArray(attachments)) throw new BadRequestError('attachments must be an array');
+      if (attachments.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE) {
+        throw new BadRequestError(`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments`);
+      }
+      const expectedPrefix = `attachments/dm-${conversationId}/`;
+      for (const a of attachments) {
+        if (!a || typeof a !== 'object') throw new BadRequestError('Invalid attachment');
+        if (typeof a.s3Key !== 'string' || typeof a.fileName !== 'string' || typeof a.fileSize !== 'number' || typeof a.mimeType !== 'string') {
+          throw new BadRequestError('Invalid attachment fields');
+        }
+        if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
+        if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this conversation');
+        if (a.fileSize <= 0 || a.fileSize > getMaxAttachmentSize(a.mimeType)) throw new BadRequestError('Invalid attachment size');
+        if (!ALLOWED_ATTACHMENT_TYPES.includes(a.mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) throw new BadRequestError('Invalid file type');
+      }
+    }
+
+    // Allow empty content if attachments are present
+    if (!attachments?.length) {
+      const contentErr = validateMessageContent(content);
+      if (contentErr) throw new BadRequestError(contentErr);
+    } else if (content.length > LIMITS.MESSAGE_MAX) {
+      throw new BadRequestError(`Message must be at most ${LIMITS.MESSAGE_MAX} characters`);
+    }
 
     await getConversationOrThrow(conversationId, userId);
 
@@ -260,17 +294,34 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
       if (!parent || parent.conversationId !== conversationId) throw new BadRequestError('Invalid replyToId');
     }
 
-    const message = await prisma.message.create({
-      data: {
-        content,
-        conversationId,
-        authorId: userId,
-        ...(replyToId && { replyToId }),
-      },
-      include: {
-        author: authorSelect,
-        replyTo: replyToSelect,
-      },
+    const message = await prisma.$transaction(async (tx) => {
+      const msg = await tx.message.create({
+        data: {
+          content,
+          conversationId,
+          authorId: userId,
+          ...(replyToId && { replyToId }),
+        },
+      });
+      if (attachments?.length) {
+        await tx.messageAttachment.createMany({
+          data: attachments.map((a) => ({
+            messageId: msg.id,
+            s3Key: a.s3Key,
+            fileName: a.fileName,
+            fileSize: a.fileSize,
+            mimeType: a.mimeType,
+          })),
+        });
+      }
+      return tx.message.findUniqueOrThrow({
+        where: { id: msg.id },
+        include: {
+          author: authorSelect,
+          replyTo: replyToSelect,
+          attachments: attachmentSelect,
+        },
+      });
     });
 
     // Update conversation updatedAt
@@ -290,7 +341,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
 
 // ─── Edit DM ─────────────────────────────────────────────────────────────────
 
-dmRouter.patch('/:conversationId/messages/:messageId', async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
+dmRouter.patch('/:conversationId/messages/:messageId', rateLimitGeneral, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId, messageId } = req.params;
     const userId = req.user!.userId;
@@ -312,6 +363,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', async (req: Request<{ con
         author: authorSelect,
         replyTo: replyToSelect,
         reactions: reactionInclude,
+        attachments: attachmentSelect,
       },
     });
 
@@ -326,18 +378,26 @@ dmRouter.patch('/:conversationId/messages/:messageId', async (req: Request<{ con
 
 // ─── Delete DM ───────────────────────────────────────────────────────────────
 
-dmRouter.delete('/:conversationId/messages/:messageId', async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
+dmRouter.delete('/:conversationId/messages/:messageId', rateLimitGeneral, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId, messageId } = req.params;
     const userId = req.user!.userId;
 
     await getConversationOrThrow(conversationId, userId);
 
-    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    const message = await prisma.message.findUnique({
+      where: { id: messageId },
+      include: { attachments: { select: { s3Key: true } } },
+    });
     if (!message || message.conversationId !== conversationId) throw new NotFoundError('Message');
     if (message.authorId !== userId) throw new ForbiddenError('You can only delete your own messages');
 
     await prisma.message.delete({ where: { id: messageId } });
+
+    // Fire-and-forget S3 cleanup
+    if (message.attachments.length > 0) {
+      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch(() => {});
+    }
 
     getIO().to(`dm:${conversationId}`).emit('dm:message:delete', { messageId, conversationId });
 
@@ -349,7 +409,7 @@ dmRouter.delete('/:conversationId/messages/:messageId', async (req: Request<{ co
 
 // ─── Toggle reaction on DM ──────────────────────────────────────────────────
 
-dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', async (req: Request<{ conversationId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
+dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitGeneral, async (req: Request<{ conversationId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId, messageId } = req.params;
     const emoji = decodeURIComponent(req.params.emoji);
@@ -405,15 +465,26 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', async (req
 
 // ─── Delete conversation ────────────────────────────────────────────────────
 
-dmRouter.delete('/:conversationId', async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
+dmRouter.delete('/:conversationId', rateLimitGeneral, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;
 
     await getConversationOrThrow(conversationId, userId);
 
-    // Delete conversation (cascades messages + conversation reads)
+    // Collect attachment S3 keys before cascade delete
+    const attachments = await prisma.messageAttachment.findMany({
+      where: { message: { conversationId } },
+      select: { s3Key: true },
+    });
+
+    // Delete conversation (cascades messages + attachments + conversation reads)
     await prisma.conversation.delete({ where: { id: conversationId } });
+
+    // Fire-and-forget S3 cleanup
+    if (attachments.length > 0) {
+      deleteMultipleFromS3(attachments.map((a) => a.s3Key)).catch(() => {});
+    }
 
     // Notify the other participant
     const io = getIO();

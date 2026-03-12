@@ -10,14 +10,13 @@ import { ServerSidebar } from '../server/ServerSidebar';
 import { ChannelSidebar } from '../channel/ChannelSidebar';
 import { ChatArea } from '../chat/ChatArea';
 import { MemberSidebar } from '../server/MemberSidebar';
-import { VoicePanel } from '../voice/VoicePanel';
 import { SettingsModal } from '../settings/SettingsModal';
 import { ConnectionBanner } from './ConnectionBanner';
 import { DMList } from '../dm/DMList';
 import { DMChatArea } from '../dm/DMChatArea';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
-import { playJoinSound, playLeaveSound, playMessageSound } from '../../services/notificationSounds';
+import { playJoinSound, playLeaveSound, playMessageSound, playMentionSound } from '../../services/notificationSounds';
 import { toast } from '../../stores/toastStore';
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
@@ -30,6 +29,12 @@ import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { initNotifications, notify } from '../../services/notifications';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
+import type {
+  Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
+  TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
+  MemberRole, Announcement, SupportMessageData, SupportTicketStatus,
+  ReactionGroup,
+} from '@voxium/shared';
 
 export function MainLayout() {
   const { fetchServers, activeServerId, channels } = useServerStore();
@@ -80,61 +85,88 @@ export function MainLayout() {
   useEffect(() => {
     // Store function references so cleanup actually works
     const handlers = {
-      messageNew: (message: any) => {
+      messageNew: (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
         if (message.channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().addMessage(message);
         }
         const currentUser = useAuthStore.getState().user;
         if (message.author?.id === currentUser?.id) return;
-        if (message.channelId === useServerStore.getState().activeChannelId) return;
-        useServerStore.getState().incrementUnread(message.channelId, message.serverId);
+
+        // Check if the current user is mentioned
+        const isMentioned = !!(currentUser && message.mentions?.some((m) => m.id === currentUser.id));
+
+        const isActiveChannel = message.channelId === useServerStore.getState().activeChannelId;
+
+        // If viewing this channel and not mentioned, no notification needed
+        if (isActiveChannel && !isMentioned) return;
+
+        // Mention in active channel: play sound but do NOT increment unread (user is already viewing)
+        if (isActiveChannel && isMentioned) {
+          const settings = useSettingsStore.getState();
+          if (settings.enableNotificationSounds) playMentionSound();
+          return;
+        }
+
+        // Message in another channel: increment unread and notify
+        if (message.channelId && message.serverId) {
+          useServerStore.getState().incrementUnread(message.channelId, message.serverId);
+        }
         const settings = useSettingsStore.getState();
-        if (settings.enableNotificationSounds) playMessageSound();
+        if (settings.enableNotificationSounds) {
+          if (isMentioned) {
+            playMentionSound();
+          } else {
+            playMessageSound();
+          }
+        }
         if (settings.enableDesktopNotifications) {
           const authorName = message.author?.displayName || message.author?.username || 'Someone';
           const serverName = message.serverName || 'Unknown Server';
           const channelName = message.channelName || 'unknown';
           const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
-          notify(`${serverName} — #${channelName}`, `${authorName}: ${body}`);
+          const title = isMentioned
+            ? `${authorName} mentioned you in ${serverName} — #${channelName}`
+            : `${serverName} — #${channelName}`;
+          void notify(title, `${authorName}: ${body}`, message.author?.avatarUrl);
         }
       },
-      messageUpdate: (message: any) => {
+      messageUpdate: (message: Message) => {
         if (message.channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().updateMessage(message);
         }
       },
-      messageDelete: ({ messageId, channelId }: any) => {
+      messageDelete: ({ messageId, channelId }: { messageId: string; channelId: string }) => {
         if (channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().deleteMessage(messageId);
         }
       },
-      typingStart: ({ channelId, userId, username }: any) => {
+      typingStart: ({ channelId, userId, username }: { channelId: string; userId: string; username: string }) => {
         const currentUser = useAuthStore.getState().user;
         if (userId !== currentUser?.id && channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().setTypingUser(userId, username);
         }
       },
-      typingStop: ({ channelId, userId }: any) => {
+      typingStop: ({ channelId, userId }: { channelId: string; userId: string }) => {
         if (channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().removeTypingUser(userId);
         }
       },
-      presenceUpdate: ({ userId, status }: any) => {
+      presenceUpdate: ({ userId, status }: { userId: string; status: UserStatus }) => {
         useServerStore.getState().updateMemberStatus(userId, status);
         useDMStore.getState().updateParticipantStatus(userId, status);
         useFriendStore.getState().updateFriendStatus(userId, status);
       },
-      voiceChannelUsers: ({ channelId, users: voiceUsers }: any) => {
+      voiceChannelUsers: ({ channelId, users: voiceUsers }: { channelId: string; users: VoiceUser[] }) => {
         useVoiceStore.getState().setChannelUsers(channelId, voiceUsers);
       },
-      voiceUserJoined: ({ channelId, user: voiceUser }: any) => {
+      voiceUserJoined: ({ channelId, user: voiceUser }: { channelId: string; user: VoiceUser }) => {
         useVoiceStore.getState().addUserToChannel(channelId, voiceUser);
         const currentUser = useAuthStore.getState().user;
         if (voiceUser.id === currentUser?.id) return;
         if (useVoiceStore.getState().activeChannelId !== channelId) return;
         if (useSettingsStore.getState().enableNotificationSounds) playJoinSound();
       },
-      voiceUserLeft: ({ channelId, userId }: any) => {
+      voiceUserLeft: ({ channelId, userId }: { channelId: string; userId: string }) => {
         const currentUser = useAuthStore.getState().user;
         const voiceState = useVoiceStore.getState();
         voiceState.removeUserFromChannel(channelId, userId);
@@ -142,52 +174,61 @@ export function MainLayout() {
         if (voiceState.activeChannelId !== channelId) return;
         if (useSettingsStore.getState().enableNotificationSounds) playLeaveSound();
       },
-      voiceStateUpdate: ({ channelId, userId, selfMute, selfDeaf }: any) => {
+      voiceStateUpdate: ({ channelId, userId, selfMute, selfDeaf }: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => {
         useVoiceStore.getState().updateUserState(channelId, userId, selfMute, selfDeaf);
       },
-      voiceSpeaking: ({ channelId, userId, speaking }: any) => {
+      voiceSpeaking: ({ channelId, userId, speaking }: { channelId: string; userId: string; speaking: boolean }) => {
         useVoiceStore.getState().setUserSpeaking(channelId, userId, speaking);
       },
-      voiceSignal: ({ from, signal }: any) => {
+      voiceSignal: ({ from, signal }: { from: string; signal: unknown }) => {
         useVoiceStore.getState().handleSignal(from, signal);
       },
-      memberJoined: ({ serverId, user }: any) => {
-        useServerStore.getState().addMember(serverId, user);
+      voiceTransportCreated: (data: { routerRtpCapabilities: unknown; sendTransport: TransportOptions; recvTransport: TransportOptions }) => {
+        useVoiceStore.getState().handleTransportCreated(data);
       },
-      memberLeft: ({ serverId, userId }: any) => {
+      voiceNewConsumer: (data: ConsumerOptions) => {
+        useVoiceStore.getState().handleNewConsumer(data);
+      },
+      voiceProducerClosed: (data: { consumerId: string; producerUserId: string }) => {
+        useVoiceStore.getState().handleProducerClosed(data);
+      },
+      memberJoined: ({ serverId, user: joinedUser }: { serverId: string; user: PublicUser }) => {
+        useServerStore.getState().addMember(serverId, joinedUser);
+      },
+      memberLeft: ({ serverId, userId }: { serverId: string; userId: string }) => {
         useServerStore.getState().removeMember(serverId, userId);
       },
-      channelCreated: (channel: any) => {
+      channelCreated: (channel: Channel) => {
         useServerStore.getState().addChannel(channel);
       },
-      channelUpdated: (channel: any) => {
+      channelUpdated: (channel: Channel) => {
         useServerStore.getState().updateChannelData(channel);
       },
-      channelDeleted: ({ channelId, serverId }: any) => {
+      channelDeleted: ({ channelId, serverId }: { channelId: string; serverId: string }) => {
         useServerStore.getState().removeChannel(channelId, serverId);
       },
-      categoryCreated: (category: any) => {
+      categoryCreated: (category: Category) => {
         useServerStore.getState().addCategory(category);
       },
-      categoryUpdated: (category: any) => {
+      categoryUpdated: (category: Category) => {
         useServerStore.getState().updateCategory(category);
       },
-      categoryDeleted: ({ categoryId, serverId }: any) => {
+      categoryDeleted: ({ categoryId, serverId }: { categoryId: string; serverId: string }) => {
         useServerStore.getState().removeCategory(categoryId, serverId);
       },
-      serverUpdated: (server: any) => {
+      serverUpdated: (server: Server) => {
         useServerStore.getState().updateServerData(server);
       },
-      userUpdated: ({ userId, displayName, avatarUrl }: any) => {
+      userUpdated: ({ userId, displayName, avatarUrl }: { userId: string; displayName: string; avatarUrl: string | null }) => {
         useServerStore.getState().updateMemberProfile(userId, { displayName, avatarUrl });
         useChatStore.getState().updateAuthorProfile(userId, { displayName, avatarUrl });
       },
-      messageReactionUpdate: ({ messageId, channelId, reactions }: any) => {
+      messageReactionUpdate: ({ messageId, channelId, reactions }: { messageId: string; channelId: string; reactions: ReactionGroup[] }) => {
         if (channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().updateMessageReactions(messageId, reactions);
         }
       },
-      unreadInit: ({ unreads }: any) => {
+      unreadInit: ({ unreads }: { unreads: UnreadCount[] }) => {
         const store = useServerStore.getState();
         store.initUnreadCounts(unreads);
         // If the user is already viewing a channel, clear its unread and mark as read
@@ -197,7 +238,7 @@ export function MainLayout() {
           store.markChannelRead(activeChannelId);
         }
       },
-      dmMessageNew: async (message: any) => {
+      dmMessageNew: async (message: Message) => {
         const dmStore = useDMStore.getState();
         const activeConvId = dmStore.activeConversationId;
 
@@ -211,7 +252,7 @@ export function MainLayout() {
             dmStore.updateLastMessage(message.conversationId, {
               content: message.content,
               createdAt: message.createdAt,
-              authorId: message.author?.id || message.authorId,
+              authorId: message.author?.id,
             });
           }
         }
@@ -227,43 +268,43 @@ export function MainLayout() {
             if (settings.enableDesktopNotifications) {
               const authorName = message.author?.displayName || message.author?.username || 'Someone';
               const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
-              notify(`DM — ${authorName}`, body);
+              void notify(`DM — ${authorName}`, body, message.author?.avatarUrl);
             }
           }
         }
       },
-      dmMessageUpdate: (message: any) => {
+      dmMessageUpdate: (message: Message) => {
         const activeConvId = useDMStore.getState().activeConversationId;
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().updateMessage(message);
         }
       },
-      dmMessageDelete: ({ messageId, conversationId }: any) => {
+      dmMessageDelete: ({ messageId, conversationId }: { messageId: string; conversationId: string }) => {
         const activeConvId = useDMStore.getState().activeConversationId;
         if (conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().deleteMessage(messageId);
         }
       },
-      dmTypingStart: ({ conversationId, userId, username }: any) => {
+      dmTypingStart: ({ conversationId, userId, username }: { conversationId: string; userId: string; username: string }) => {
         const currentUser = useAuthStore.getState().user;
         const activeConvId = useDMStore.getState().activeConversationId;
         if (userId !== currentUser?.id && conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().setTypingUser(userId, username);
         }
       },
-      dmTypingStop: ({ conversationId, userId }: any) => {
+      dmTypingStop: ({ conversationId, userId }: { conversationId: string; userId: string }) => {
         const activeConvId = useDMStore.getState().activeConversationId;
         if (conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().removeTypingUser(userId);
         }
       },
-      dmReactionUpdate: ({ messageId, conversationId, reactions }: any) => {
+      dmReactionUpdate: ({ messageId, conversationId, reactions }: { messageId: string; conversationId: string; reactions: ReactionGroup[] }) => {
         const activeConvId = useDMStore.getState().activeConversationId;
         if (conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().updateMessageReactions(messageId, reactions);
         }
       },
-      dmUnreadInit: ({ unreads }: any) => {
+      dmUnreadInit: ({ unreads }: { unreads: DMUnreadCount[] }) => {
         const dmStore = useDMStore.getState();
         dmStore.initDMUnreadCounts(unreads);
         const activeConvId = dmStore.activeConversationId;
@@ -272,7 +313,7 @@ export function MainLayout() {
           dmStore.markConversationRead(activeConvId);
         }
       },
-      dmVoiceOffer: ({ conversationId, from }: any) => {
+      dmVoiceOffer: ({ conversationId, from }: { conversationId: string; from: VoiceUser }) => {
         const currentUser = useAuthStore.getState().user;
         if (from.id === currentUser?.id) return;
         // Don't show incoming call if already in a voice channel or DM call
@@ -280,27 +321,27 @@ export function MainLayout() {
         if (voiceState.activeChannelId || voiceState.dmCallConversationId) return;
         voiceState.setIncomingCall({ conversationId, from });
       },
-      dmVoiceJoined: ({ conversationId, user: voiceUser }: any) => {
+      dmVoiceJoined: ({ conversationId, user: voiceUser }: { conversationId: string; user: VoiceUser }) => {
         if (useVoiceStore.getState().dmCallConversationId !== conversationId) return;
         useVoiceStore.getState().addDMCallUser(voiceUser);
       },
-      dmVoiceLeft: ({ conversationId, userId }: any) => {
+      dmVoiceLeft: ({ conversationId, userId }: { conversationId: string; userId: string }) => {
         if (useVoiceStore.getState().dmCallConversationId !== conversationId) return;
         useVoiceStore.getState().removeDMCallUser(userId);
       },
-      dmVoiceStateUpdate: ({ conversationId, userId, selfMute, selfDeaf }: any) => {
+      dmVoiceStateUpdate: ({ conversationId, userId, selfMute, selfDeaf }: { conversationId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => {
         if (useVoiceStore.getState().dmCallConversationId !== conversationId) return;
         useVoiceStore.getState().updateDMCallUserState(userId, selfMute, selfDeaf);
       },
-      dmVoiceSpeaking: ({ conversationId, userId, speaking }: any) => {
+      dmVoiceSpeaking: ({ conversationId, userId, speaking }: { conversationId: string; userId: string; speaking: boolean }) => {
         if (useVoiceStore.getState().dmCallConversationId !== conversationId) return;
         useVoiceStore.getState().setDMCallUserSpeaking(userId, speaking);
       },
-      dmVoiceSignal: ({ from, signal }: any) => {
+      dmVoiceSignal: ({ from, signal }: { from: string; signal: unknown }) => {
         if (!useVoiceStore.getState().dmCallConversationId) return;
         useVoiceStore.getState().handleDMSignal(from, signal);
       },
-      dmVoiceEnded: ({ conversationId }: any) => {
+      dmVoiceEnded: ({ conversationId }: { conversationId: string }) => {
         const voiceState = useVoiceStore.getState();
         if (voiceState.dmCallConversationId === conversationId) {
           // Inline cleanup instead of leaveDMCall() to avoid emitting dm:voice:leave
@@ -322,19 +363,19 @@ export function MainLayout() {
           voiceState.setIncomingCall(null);
         }
       },
-      dmConversationDeleted: ({ conversationId }: any) => {
+      dmConversationDeleted: ({ conversationId }: { conversationId: string }) => {
         useDMStore.getState().handleConversationDeleted(conversationId);
       },
-      friendRequestReceived: (data: any) => {
+      friendRequestReceived: (data: { friendship: Friendship }) => {
         useFriendStore.getState().handleRequestReceived(data);
       },
-      friendRequestAccepted: (data: any) => {
+      friendRequestAccepted: (data: { friendship: Friendship }) => {
         useFriendStore.getState().handleRequestAccepted(data);
       },
-      friendRemoved: (data: any) => {
+      friendRemoved: (data: { userId: string }) => {
         useFriendStore.getState().handleFriendRemoved(data);
       },
-      voiceScreenShareStart: ({ channelId, userId }: any) => {
+      voiceScreenShareStart: ({ channelId, userId }: { channelId: string; userId: string }) => {
         useVoiceStore.getState().setScreenSharingUser(channelId, userId);
         // Mark the user as screenSharing in channelUsers
         const users = useVoiceStore.getState().channelUsers.get(channelId);
@@ -343,7 +384,7 @@ export function MainLayout() {
           useVoiceStore.getState().setChannelUsers(channelId, updated);
         }
       },
-      voiceScreenShareStop: ({ channelId, userId }: any) => {
+      voiceScreenShareStop: ({ channelId, userId }: { channelId: string; userId: string }) => {
         useVoiceStore.getState().setScreenSharingUser(channelId, null);
         // Clear the screenSharing flag in channelUsers
         const users = useVoiceStore.getState().channelUsers.get(channelId);
@@ -352,7 +393,7 @@ export function MainLayout() {
           useVoiceStore.getState().setChannelUsers(channelId, updated);
         }
       },
-      voiceScreenShareState: ({ channelId, sharingUserId }: any) => {
+      voiceScreenShareState: ({ channelId, sharingUserId }: { channelId: string; sharingUserId: string | null }) => {
         useVoiceStore.getState().setScreenSharingUser(channelId, sharingUserId);
         // Mark the user as screenSharing in channelUsers
         if (sharingUserId) {
@@ -363,10 +404,10 @@ export function MainLayout() {
           }
         }
       },
-      memberRoleUpdated: ({ serverId, userId, role }: any) => {
+      memberRoleUpdated: ({ serverId, userId, role }: { serverId: string; userId: string; role: MemberRole }) => {
         useServerStore.getState().handleMemberRoleUpdated(serverId, userId, role);
       },
-      memberKicked: ({ serverId }: any) => {
+      memberKicked: ({ serverId }: { serverId: string }) => {
         // Leave voice if the active voice channel belongs to the kicked server
         const voiceState = useVoiceStore.getState();
         const serverState = useServerStore.getState();
@@ -379,7 +420,7 @@ export function MainLayout() {
         serverState.handleMemberKicked(serverId);
         toast.warning('You were kicked from the server');
       },
-      serverDeleted: ({ serverId }: any) => {
+      serverDeleted: ({ serverId }: { serverId: string }) => {
         const voiceState = useVoiceStore.getState();
         const serverState = useServerStore.getState();
 
@@ -394,7 +435,7 @@ export function MainLayout() {
             if (voiceState.localStream) {
               voiceState.localStream.getTracks().forEach((track) => track.stop());
             }
-            voiceState.destroyAllPeers();
+            voiceState.cleanupSFU();
             useVoiceStore.setState({
               activeChannelId: null,
               localStream: null,
@@ -427,19 +468,19 @@ export function MainLayout() {
         serverState.handleServerDeleted(serverId);
         toast.info('Server was deleted');
       },
-      announcementInit: ({ announcements }: any) => {
+      announcementInit: ({ announcements }: { announcements: Announcement[] }) => {
         useAnnouncementStore.getState().initAnnouncements(announcements);
       },
-      announcementNew: (announcement: any) => {
+      announcementNew: (announcement: Announcement) => {
         useAnnouncementStore.getState().addAnnouncement(announcement);
         const typeLabels: Record<string, string> = { info: 'Info', warning: 'Warning', maintenance: 'Maintenance' };
         const label = typeLabels[announcement.type] || 'Announcement';
         toast.info(`${label}: ${announcement.title}`);
       },
-      supportMessageNew: (message: any) => {
+      supportMessageNew: (message: SupportMessageData) => {
         useSupportStore.getState().addMessage(message);
       },
-      supportStatusChange: (data: any) => {
+      supportStatusChange: (data: { ticketId: string; status: SupportTicketStatus; claimedById?: string; claimedByUsername?: string }) => {
         useSupportStore.getState().updateStatus(data.status, data.claimedById, data.claimedByUsername);
       },
       voiceError: (data: { message: string }) => {
@@ -450,6 +491,7 @@ export function MainLayout() {
       },
     };
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Socket.IO requires any[] for generic on/off iteration
     const eventMap: Array<[string, (...args: any[]) => void]> = [
       ['message:new', handlers.messageNew],
       ['message:update', handlers.messageUpdate],
@@ -463,6 +505,9 @@ export function MainLayout() {
       ['voice:state_update', handlers.voiceStateUpdate],
       ['voice:speaking', handlers.voiceSpeaking],
       ['voice:signal', handlers.voiceSignal],
+      ['voice:transport_created', handlers.voiceTransportCreated],
+      ['voice:new_consumer', handlers.voiceNewConsumer],
+      ['voice:producer_closed', handlers.voiceProducerClosed],
       ['voice:error', handlers.voiceError],
       ['voice:screen_share:start', handlers.voiceScreenShareStart],
       ['voice:screen_share:stop', handlers.voiceScreenShareStop],
@@ -510,27 +555,31 @@ export function MainLayout() {
      * Idempotent: removes then re-adds all listeners on the given socket.
      * Tracks socket generation so we know if the socket instance changed.
      */
-    function ensureListeners(socket: any) {
+    function ensureListeners(socket: NonNullable<ReturnType<typeof getSocket>>) {
       const gen = getSocketGeneration();
       if (attachedGeneration.current === gen) return; // same socket, already attached
 
+      // Cast to untyped emitter for generic iteration over the event map
+      const emitter = socket as { on: (e: string, fn: (...a: unknown[]) => void) => void; off: (e: string, fn: (...a: unknown[]) => void) => void };
+
       // Remove from whatever socket previously had them (no-op if wrong instance)
       for (const [event, handler] of eventMap) {
-        socket.off(event, handler);
+        emitter.off(event, handler);
       }
 
       // Attach fresh
       for (const [event, handler] of eventMap) {
-        socket.on(event, handler);
+        emitter.on(event, handler);
       }
 
       attachedGeneration.current = gen;
       console.log('[MainLayout] Listeners attached (generation', gen + ')');
     }
 
-    function detachListeners(socket: any) {
+    function detachListeners(socket: NonNullable<ReturnType<typeof getSocket>>) {
+      const emitter = socket as { off: (e: string, fn: (...a: unknown[]) => void) => void };
       for (const [event, handler] of eventMap) {
-        socket.off(event, handler);
+        emitter.off(event, handler);
       }
       attachedGeneration.current = -1;
     }
@@ -637,7 +686,6 @@ export function MainLayout() {
           )}
         </div>
         {activeServerId && <MemberSidebar />}
-        <VoicePanel />
         {isSettingsOpen && <SettingsModal />}
         <IncomingCallModal />
         {showGlobalSearch && (() => {

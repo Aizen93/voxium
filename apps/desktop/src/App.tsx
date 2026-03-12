@@ -13,6 +13,7 @@ import { CookiePolicyPage } from './pages/CookiePolicyPage';
 import { MainLayout } from './components/layout/MainLayout';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { ToastContainer } from './components/layout/ToastContainer';
+import { UpdateChecker } from './components/updater/UpdateChecker';
 
 const isTauri = '__TAURI_INTERNALS__' in window;
 
@@ -99,6 +100,7 @@ export function App() {
         </Routes>
       </ErrorBoundary>
       <ToastContainer />
+      <UpdateChecker />
     </>
   );
 }

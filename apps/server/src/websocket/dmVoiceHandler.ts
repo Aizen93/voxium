@@ -4,6 +4,7 @@ import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
+import { getRedis } from '../utils/redis';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -48,13 +49,12 @@ async function createSystemMessage(
   }
 }
 
-// conversationId -> Map<userId, { socketId, selfMute, selfDeaf }>
-const dmVoiceUsers = new Map<string, Map<string, { socketId: string; selfMute: boolean; selfDeaf: boolean }>>();
+// ─── Redis keys ───────────────────────────────────────────────────────────────
+// dm:voice:users:{conversationId}  — Hash: userId → JSON({ socketId, selfMute, selfDeaf })
+// dm:voice:call:{userId}           — String: conversationId
+// dm:voice:active                  — Set of conversationIds with active calls
 
-// userId -> conversationId (quick lookup for cleanup)
-const userDMCall = new Map<string, string>();
-
-// conversationId -> timeout (auto-cancel unanswered calls after 30s)
+// Timeout map stays node-local (Node.js timeouts can't be serialized)
 const DM_CALL_TIMEOUT_MS = 30_000;
 const dmCallTimeouts = new Map<string, NodeJS.Timeout>();
 
@@ -66,49 +66,90 @@ function clearCallTimeout(conversationId: string) {
   }
 }
 
-export function leaveCurrentDMVoiceChannel(
+// ─── Redis helpers ────────────────────────────────────────────────────────────
+
+interface DMVoiceUserState {
+  socketId: string;
+  selfMute: boolean;
+  selfDeaf: boolean;
+}
+
+async function getDMVoiceUsers(conversationId: string): Promise<Map<string, DMVoiceUserState>> {
+  const redis = getRedis();
+  const data = await redis.hGetAll(`dm:voice:users:${conversationId}`);
+  const map = new Map<string, DMVoiceUserState>();
+  for (const [userId, json] of Object.entries(data)) {
+    map.set(userId, JSON.parse(json));
+  }
+  return map;
+}
+
+async function addDMVoiceUser(
+  conversationId: string,
+  userId: string,
+  state: DMVoiceUserState
+): Promise<void> {
+  const redis = getRedis();
+  await redis.multi()
+    .hSet(`dm:voice:users:${conversationId}`, userId, JSON.stringify(state))
+    .set(`dm:voice:call:${userId}`, conversationId)
+    .sAdd('dm:voice:active', conversationId)
+    .exec();
+}
+
+async function removeDMVoiceUser(conversationId: string, userId: string): Promise<void> {
+  const redis = getRedis();
+  await redis.multi()
+    .hDel(`dm:voice:users:${conversationId}`, userId)
+    .del(`dm:voice:call:${userId}`)
+    .exec();
+  // Clean up empty hash + active set (separate call to check remaining)
+  const remaining = await redis.hLen(`dm:voice:users:${conversationId}`);
+  if (remaining === 0) {
+    await redis.multi()
+      .del(`dm:voice:users:${conversationId}`)
+      .sRem('dm:voice:active', conversationId)
+      .exec();
+  }
+}
+
+async function getUserDMCall(userId: string): Promise<string | null> {
+  return await getRedis().get(`dm:voice:call:${userId}`);
+}
+
+// ─── Leave / cleanup ──────────────────────────────────────────────────────────
+
+export async function leaveCurrentDMVoiceChannel(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   socket: Socket<ClientToServerEvents, ServerToClientEvents>,
   userId: string
 ) {
-  const conversationId = userDMCall.get(userId);
+  const conversationId = await getUserDMCall(userId);
   if (!conversationId) return;
 
   console.log(`[DMVoice] Removing user ${userId} from DM call ${conversationId}`);
 
-  const callUsers = dmVoiceUsers.get(conversationId);
-
-  // Collect remaining users and their socketIds BEFORE removing the leaving user
-  const remainingUsers: Array<{ id: string; socketId: string }> = [];
-  if (callUsers) {
-    for (const [uid, state] of callUsers.entries()) {
-      if (uid !== userId) remainingUsers.push({ id: uid, socketId: state.socketId });
-    }
-    callUsers.delete(userId);
-    if (callUsers.size === 0) {
-      dmVoiceUsers.delete(conversationId);
-    }
+  // Collect remaining users BEFORE removing the leaving user
+  const callUsers = await getDMVoiceUsers(conversationId);
+  const remainingUsers: Array<{ id: string }> = [];
+  for (const [uid] of callUsers.entries()) {
+    if (uid !== userId) remainingUsers.push({ id: uid });
   }
 
-  userDMCall.delete(userId);
+  // Remove the leaving user from Redis
+  await removeDMVoiceUser(conversationId, userId);
   socket.leave(`dm:voice:${conversationId}`);
+  socket.data.dmCallConversationId = undefined;
 
   // DM calls are 1-on-1: always end the call when someone leaves
-  // Clean up remaining users' server state and socket rooms so they don't get stuck
+  // Clean up remaining users' state and socket rooms
   for (const remaining of remainingUsers) {
-    if (callUsers) callUsers.delete(remaining.id);
-    userDMCall.delete(remaining.id);
-    // Remove remaining user's socket from the voice room
-    const remainingSocket = io.sockets.sockets.get(remaining.socketId);
-    if (remainingSocket) {
-      remainingSocket.leave(`dm:voice:${conversationId}`);
-    }
-  }
-  if (callUsers && callUsers.size === 0) {
-    dmVoiceUsers.delete(conversationId);
+    await removeDMVoiceUser(conversationId, remaining.id);
+    // fetchSockets works across nodes via Redis adapter
+    const sockets = await io.in(`user:${remaining.id}`).fetchSockets();
+    for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
   }
 
-  // Clear any pending call timeout
   clearCallTimeout(conversationId);
 
   // Emit left then ended — all clients should tear down
@@ -119,16 +160,24 @@ export function leaveCurrentDMVoiceChannel(
   createSystemMessage(io, conversationId, userId, 'Voice call ended');
 }
 
-/** Returns count of active DM calls */
-export function getActiveDMCallCount(): number {
-  return dmVoiceUsers.size;
+/** Returns count of active DM calls (cross-node via Redis) */
+export async function getActiveDMCallCount(): Promise<number> {
+  return await getRedis().sCard('dm:voice:active');
 }
 
-/** Returns total number of users in all DM calls */
-export function getTotalDMVoiceUsers(): number {
+/** Returns total number of users in all DM calls (cross-node via Redis) */
+export async function getTotalDMVoiceUsers(): Promise<number> {
+  const redis = getRedis();
+  const activeConvs = await redis.sMembers('dm:voice:active');
+  if (activeConvs.length === 0) return 0;
+  const pipeline = redis.multi();
+  for (const convId of activeConvs) {
+    pipeline.hLen(`dm:voice:users:${convId}`);
+  }
+  const results = await pipeline.exec();
   let count = 0;
-  for (const users of dmVoiceUsers.values()) {
-    count += users.size;
+  for (const val of results) {
+    if (typeof val === 'number') count += val;
   }
   return count;
 }
@@ -140,6 +189,8 @@ export function handleDMVoiceEvents(
   const userId = socket.data.userId as string;
 
   socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
+    if (!socketRateLimit(socket, 'dm:voice:join', 10)) return;
+    if (typeof conversationId !== 'string' || !conversationId) return;
     if (!isFeatureEnabled('dm_voice')) {
       socket.emit('voice:error', { message: 'Voice calls are currently disabled' });
       return;
@@ -160,24 +211,20 @@ export function handleDMVoiceEvents(
     leaveCurrentVoiceChannel(io, socket, userId);
 
     // Leave any existing DM call
-    leaveCurrentDMVoiceChannel(io, socket, userId);
+    await leaveCurrentDMVoiceChannel(io, socket, userId);
 
     // Join the DM voice room
     socket.join(`dm:voice:${conversationId}`);
-
-    if (!dmVoiceUsers.has(conversationId)) {
-      dmVoiceUsers.set(conversationId, new Map());
-    }
+    socket.data.dmCallConversationId = conversationId;
 
     const initialMute = state?.selfMute ?? false;
     const initialDeaf = state?.selfDeaf ?? false;
 
-    dmVoiceUsers.get(conversationId)!.set(userId, {
+    await addDMVoiceUser(conversationId, userId, {
       socketId: socket.id,
       selfMute: initialMute,
       selfDeaf: initialDeaf,
     });
-    userDMCall.set(userId, conversationId);
 
     // Fetch user info
     const user = await prisma.user.findUnique({
@@ -188,7 +235,7 @@ export function handleDMVoiceEvents(
     if (!user) return;
 
     const voiceUser = { ...user, selfMute: initialMute, selfDeaf: initialDeaf, speaking: false };
-    const callUsers = dmVoiceUsers.get(conversationId)!;
+    const callUsers = await getDMVoiceUsers(conversationId);
 
     if (callUsers.size === 1) {
       // First user in the call — send offer/ring to the DM room AND joined so caller appears in own dmCallUsers
@@ -200,15 +247,27 @@ export function handleDMVoiceEvents(
 
       // Start call timeout — auto-cancel if no one answers within 30s
       clearCallTimeout(conversationId);
-      dmCallTimeouts.set(conversationId, setTimeout(() => {
+      dmCallTimeouts.set(conversationId, setTimeout(async () => {
         dmCallTimeouts.delete(conversationId);
-        console.log(`[DMVoice] Call timeout for conversation ${conversationId}`);
-        leaveCurrentDMVoiceChannel(io, socket, userId);
+        // Check Redis — call may have been answered on another node
+        const currentUsers = await getDMVoiceUsers(conversationId);
+        if (currentUsers.size <= 1) {
+          console.log(`[DMVoice] Call timeout for conversation ${conversationId}`);
+          // Clean up all remaining users
+          for (const [uid] of currentUsers) {
+            await removeDMVoiceUser(conversationId, uid);
+            const sockets = await io.in(`user:${uid}`).fetchSockets();
+            for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
+          }
+          io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId });
+          io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
+          createSystemMessage(io, conversationId, userId, 'Voice call ended');
+        }
       }, DM_CALL_TIMEOUT_MS));
     } else {
       // Second user joined — clear the call timeout
       clearCallTimeout(conversationId);
-      // Second user joined — notify the room
+      // Notify the room
       io.to(`dm:${conversationId}`).emit('dm:voice:joined', { conversationId, user: voiceUser });
 
       // Send existing users to the joiner
@@ -230,70 +289,94 @@ export function handleDMVoiceEvents(
     }
   });
 
-  socket.on('dm:voice:leave', (conversationId: string) => {
+  socket.on('dm:voice:leave', async (conversationId: string) => {
+    if (!socketRateLimit(socket, 'dm:voice:leave', 30)) return;
     console.log(`[DMVoice] User ${userId} leaving DM call ${conversationId}`);
-    leaveCurrentDMVoiceChannel(io, socket, userId);
+    await leaveCurrentDMVoiceChannel(io, socket, userId);
   });
 
-  socket.on('dm:voice:decline', (conversationId: string) => {
+  socket.on('dm:voice:decline', async (conversationId: string) => {
+    if (!socketRateLimit(socket, 'dm:voice:decline', 10)) return;
+    if (typeof conversationId !== 'string' || !conversationId) return;
+
+    // Authorization: verify the declining user is a participant of this conversation
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { user1Id: true, user2Id: true },
+    });
+    if (!conv || (conv.user1Id !== userId && conv.user2Id !== userId)) return;
+
     console.log(`[DMVoice] User ${userId} declined DM call ${conversationId}`);
 
-    // Find the caller in this conversation and end the call
-    const callUsers = dmVoiceUsers.get(conversationId);
-    if (!callUsers) return;
+    const callUsers = await getDMVoiceUsers(conversationId);
+    if (callUsers.size === 0) return;
 
-    // End the call for all participants (the solo caller)
-    const callerIds = Array.from(callUsers.keys());
-    for (const callerId of callerIds) {
-      const callerState = callUsers.get(callerId);
-      if (callerState) {
-        const callerSocket = io.sockets.sockets.get(callerState.socketId);
-        if (callerSocket) {
-          leaveCurrentDMVoiceChannel(io, callerSocket, callerId);
-          break; // 1-on-1 call, only one caller
-        }
-      }
+    // End the call for all users in the conversation
+    const callerIdForMsg = Array.from(callUsers.keys())[0];
+    for (const [callerId] of callUsers) {
+      await removeDMVoiceUser(conversationId, callerId);
+      // fetchSockets works across nodes via Redis adapter
+      const sockets = await io.in(`user:${callerId}`).fetchSockets();
+      for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
     }
+
+    clearCallTimeout(conversationId);
+
+    io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: callerIdForMsg });
+    io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
+    createSystemMessage(io, conversationId, callerIdForMsg, 'Voice call ended');
   });
 
-  socket.on('dm:voice:mute', (muted: boolean) => {
-    const conversationId = userDMCall.get(userId);
+  socket.on('dm:voice:mute', async (muted: boolean) => {
+    if (!socketRateLimit(socket, 'dm:voice:mute', 30)) return;
+    if (typeof muted !== 'boolean') return;
+    // Use socket.data for fast local lookup (source of truth is Redis)
+    const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 
-    const callUsers = dmVoiceUsers.get(conversationId);
-    const userState = callUsers?.get(userId);
-    if (userState) {
-      userState.selfMute = muted;
-    }
+    const redis = getRedis();
+    const dataStr = await redis.hGet(`dm:voice:users:${conversationId}`, userId);
+    if (!dataStr) return;
+
+    const data: DMVoiceUserState = JSON.parse(dataStr);
+    data.selfMute = muted;
+    await redis.hSet(`dm:voice:users:${conversationId}`, userId, JSON.stringify(data));
 
     io.to(`dm:${conversationId}`).emit('dm:voice:state_update', {
       conversationId,
       userId,
       selfMute: muted,
-      selfDeaf: userState?.selfDeaf ?? false,
+      selfDeaf: data.selfDeaf,
     });
   });
 
-  socket.on('dm:voice:deaf', (deafened: boolean) => {
-    const conversationId = userDMCall.get(userId);
+  socket.on('dm:voice:deaf', async (deafened: boolean) => {
+    if (!socketRateLimit(socket, 'dm:voice:deaf', 30)) return;
+    if (typeof deafened !== 'boolean') return;
+    const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 
-    const callUsers = dmVoiceUsers.get(conversationId);
-    const userState = callUsers?.get(userId);
-    if (userState) {
-      userState.selfDeaf = deafened;
-    }
+    const redis = getRedis();
+    const dataStr = await redis.hGet(`dm:voice:users:${conversationId}`, userId);
+    if (!dataStr) return;
+
+    const data: DMVoiceUserState = JSON.parse(dataStr);
+    data.selfDeaf = deafened;
+    await redis.hSet(`dm:voice:users:${conversationId}`, userId, JSON.stringify(data));
 
     io.to(`dm:${conversationId}`).emit('dm:voice:state_update', {
       conversationId,
       userId,
-      selfMute: userState?.selfMute ?? false,
+      selfMute: data.selfMute,
       selfDeaf: deafened,
     });
   });
 
   socket.on('dm:voice:speaking', (speaking: boolean) => {
-    const conversationId = userDMCall.get(userId);
+    if (!socketRateLimit(socket, 'dm:voice:speaking', 120)) return;
+    if (typeof speaking !== 'boolean') return;
+    // Hot path — use socket.data for zero-latency local lookup
+    const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 
     io.to(`dm:${conversationId}`).emit('dm:voice:speaking', {
@@ -303,15 +386,22 @@ export function handleDMVoiceEvents(
     });
   });
 
-  socket.on('dm:voice:signal', (data: { to: string; signal: unknown }) => {
+  socket.on('dm:voice:signal', async (data: { to: string; signal: unknown }) => {
     if (!socketRateLimit(socket, 'dm:voice:signal', 300)) return;
-    const conversationId = userDMCall.get(userId);
+    if (!data || typeof data !== 'object' || typeof data.to !== 'string' || !data.to) return;
+    // Reject excessively large signal payloads (max 64KB serialized)
+    if (JSON.stringify(data.signal).length > 65536) return;
+    const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 
-    const targetState = dmVoiceUsers.get(conversationId)?.get(data.to);
-    if (targetState) {
+    // Look up target user's socketId from Redis (works cross-node)
+    const redis = getRedis();
+    const targetDataStr = await redis.hGet(`dm:voice:users:${conversationId}`, data.to);
+    if (targetDataStr) {
+      const targetData: DMVoiceUserState = JSON.parse(targetDataStr);
       console.log(`[DMVoice] Relaying signal from ${userId} to ${data.to}`);
-      io.to(targetState.socketId).emit('dm:voice:signal', {
+      // io.to(socketId) works across nodes via Redis adapter
+      io.to(targetData.socketId).emit('dm:voice:signal', {
         from: userId,
         signal: data.signal,
       });
@@ -319,7 +409,7 @@ export function handleDMVoiceEvents(
   });
 
   // Clean up on disconnect
-  socket.on('disconnecting', () => {
-    leaveCurrentDMVoiceChannel(io, socket, userId);
+  socket.on('disconnecting', async () => {
+    await leaveCurrentDMVoiceChannel(io, socket, userId);
   });
 }

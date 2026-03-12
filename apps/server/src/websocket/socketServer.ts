@@ -1,8 +1,9 @@
 import type { Server as HttpServer } from 'http';
 import { Server as SocketServer } from 'socket.io';
+import { createAdapter } from '@socket.io/redis-adapter';
 import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
-import { setUserOnline, setUserOffline } from '../utils/redis';
+import { setUserOnline, setUserOffline, getRedisPubSub } from '../utils/redis';
 import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, getVoiceStateForServer, getScreenShareState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
@@ -50,13 +51,20 @@ export function initSocketServer(httpServer: HttpServer) {
     pingTimeout: 20000,
   });
 
+  // Attach Redis adapter for multi-node broadcast support
+  const { pub, sub } = getRedisPubSub();
+  io.adapter(createAdapter(pub, sub));
+
   // ─── Authentication middleware ───────────────────────────────────────
   io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) return next(new Error('Authentication required'));
 
     try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
+      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as AuthPayload & { purpose?: string };
+
+      // Reject non-access tokens (e.g. trusted-device, totp-verify)
+      if (payload.purpose) return next(new Error('Invalid token type'));
 
       // Check account ban, token version, and current role
       const user = await prisma.user.findUnique({
@@ -103,14 +111,38 @@ export function initSocketServer(httpServer: HttpServer) {
     // ═══════════════════════════════════════════════════════════════════
 
     // ─── Channel subscription ───────────────────────────────────────
-    socket.on('channel:join', (channelId: string) => {
+    socket.on('channel:join', async (channelId: string) => {
       if (!socketRateLimit(socket, 'channel:join', 60)) return;
-      socket.join(`channel:${channelId}`);
-      console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
+      if (typeof channelId !== 'string' || !channelId) return;
+      try {
+        // Single query: find channel + verify membership in one shot
+        const channel = await prisma.channel.findUnique({
+          where: { id: channelId },
+          select: {
+            serverId: true,
+            server: {
+              select: {
+                members: {
+                  where: { userId },
+                  select: { userId: true },
+                  take: 1,
+                },
+              },
+            },
+          },
+        });
+        if (!channel || channel.server.members.length === 0) return;
+        socket.join(`channel:${channelId}`);
+        console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
+      } catch (err) {
+        console.error(`[WS] channel:join auth check failed for ${userId}:`, err);
+      }
     });
 
     socket.on('channel:leave', (channelId: string) => {
       if (!socketRateLimit(socket, 'channel:leave', 60)) return;
+      if (typeof channelId !== 'string' || !channelId) return;
+      if (!socket.rooms.has(`channel:${channelId}`)) return;
       socket.leave(`channel:${channelId}`);
       console.log(`[WS] ${userId} (${socket.id}) left room channel:${channelId}`);
     });
@@ -118,6 +150,8 @@ export function initSocketServer(httpServer: HttpServer) {
     // ─── Typing indicators ──────────────────────────────────────────
     socket.on('typing:start', (channelId: string) => {
       if (!socketRateLimit(socket, 'typing', 30)) return;
+      if (typeof channelId !== 'string' || !channelId) return;
+      if (!socket.rooms.has(`channel:${channelId}`)) return;
       socket.to(`channel:${channelId}`).emit('typing:start', {
         channelId,
         userId,
@@ -127,12 +161,15 @@ export function initSocketServer(httpServer: HttpServer) {
 
     socket.on('typing:stop', (channelId: string) => {
       if (!socketRateLimit(socket, 'typing', 30)) return;
+      if (typeof channelId !== 'string' || !channelId) return;
+      if (!socket.rooms.has(`channel:${channelId}`)) return;
       socket.to(`channel:${channelId}`).emit('typing:stop', { channelId, userId });
     });
 
     // ─── DM subscription ────────────────────────────────────────────
     socket.on('dm:join', async (conversationId: string) => {
       if (!socketRateLimit(socket, 'dm:join', 60)) return;
+      if (typeof conversationId !== 'string' || !conversationId) return;
       try {
         const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { user1Id: true, user2Id: true } });
         if (!conv || (conv.user1Id !== userId && conv.user2Id !== userId)) return;
@@ -144,7 +181,7 @@ export function initSocketServer(httpServer: HttpServer) {
 
     socket.on('dm:typing:start', (conversationId: string) => {
       if (!socketRateLimit(socket, 'dm:typing', 30)) return;
-      // Only emit if this socket is actually in the DM room (joined via authorized dm:join)
+      if (typeof conversationId !== 'string' || !conversationId) return;
       if (!socket.rooms.has(`dm:${conversationId}`)) return;
       socket.to(`dm:${conversationId}`).emit('dm:typing:start', {
         conversationId,
@@ -155,6 +192,7 @@ export function initSocketServer(httpServer: HttpServer) {
 
     socket.on('dm:typing:stop', (conversationId: string) => {
       if (!socketRateLimit(socket, 'dm:typing', 30)) return;
+      if (typeof conversationId !== 'string' || !conversationId) return;
       if (!socket.rooms.has(`dm:${conversationId}`)) return;
       socket.to(`dm:${conversationId}`).emit('dm:typing:stop', {
         conversationId,
@@ -164,6 +202,7 @@ export function initSocketServer(httpServer: HttpServer) {
 
     // ─── Latency measurement ────────────────────────────────────────
     socket.on('ping:latency', (ts) => {
+      if (!socketRateLimit(socket, 'ping:latency', 60)) return;
       socket.emit('pong:latency', ts);
     });
 
@@ -181,6 +220,7 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     socket.on('admin:unsubscribe_metrics', () => {
+      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
       socket.leave('admin:metrics');
     });
 
@@ -192,6 +232,7 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     socket.on('admin:unsubscribe_reports', () => {
+      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
       socket.leave('admin:reports');
     });
 
@@ -203,6 +244,7 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     socket.on('admin:unsubscribe_support', () => {
+      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
       socket.leave('admin:support');
     });
 
@@ -214,16 +256,21 @@ export function initSocketServer(httpServer: HttpServer) {
       // the variable from the outer scope — it may not be set yet if
       // the connection handler's async work hasn't finished)
       try {
-        const membershipList = await prisma.serverMember.findMany({
-          where: { userId },
-          select: { serverId: true },
-        });
+        const result = await setUserOffline(socket.id);
 
-        await setUserOffline(socket.id);
-        await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
+        // Only broadcast offline and update DB if the user has no remaining
+        // sockets on any node (1:many presence model).
+        if (result?.fullyOffline) {
+          const membershipList = await prisma.serverMember.findMany({
+            where: { userId },
+            select: { serverId: true },
+          });
 
-        for (const m of membershipList) {
-          socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
+          await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
+
+          for (const m of membershipList) {
+            socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
+          }
         }
       } catch (err) {
         console.error(`[WS] Error during disconnect cleanup for ${userId}:`, err);
@@ -396,9 +443,9 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
       }
 
-      // Send existing voice channel users for all servers
+      // Send existing voice channel users for all servers (reads from Redis for cross-node visibility)
       for (const m of memberships) {
-        const voiceState = getVoiceStateForServer(m.serverId);
+        const voiceState = await getVoiceStateForServer(m.serverId);
         for (const { channelId, userIds, userStates } of voiceState) {
           const userInfos = await prisma.user.findMany({
             where: { id: { in: userIds } },
@@ -416,7 +463,7 @@ export function initSocketServer(httpServer: HttpServer) {
           socket.emit('voice:channel_users', { channelId, users: voiceUsers });
 
           // Send screen share state if someone is sharing in this channel
-          const sharingUserId = getScreenShareState(channelId);
+          const sharingUserId = await getScreenShareState(channelId);
           if (sharingUserId) {
             socket.emit('voice:screen_share:state', { channelId, sharingUserId });
           }

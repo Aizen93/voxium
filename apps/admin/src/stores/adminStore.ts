@@ -2,11 +2,12 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData } from '@voxium/shared';
+import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
 
 // Module-level refs for metrics subscription cleanup
 let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
 let metricsReconnectUnsub: (() => void) | null = null;
+let metricsRetryTimer: ReturnType<typeof setInterval> | null = null;
 
 // Module-level refs for reports subscription cleanup
 let reportsHandler: ((data: { total: number }) => void) | null = null;
@@ -38,6 +39,9 @@ interface AdminState {
   liveMetrics: AdminMetricsSnapshot | null;
   signupData: Array<{ day: string; count: number }>;
   messagesData: Array<{ hour: string; count: number }>;
+  serverGrowthData: Array<{ day: string; count: number }>;
+  topServers: Array<{ id: string; name: string; messageCount: number; memberCount: number }>;
+  geoStats: GeoStat[];
 
   // Users
   users: AdminUser[];
@@ -118,6 +122,14 @@ interface AdminState {
     isCustom: boolean;
   }>;
 
+  // SFU
+  sfuStats: (SfuStats & SfuMediaCounts) | null;
+
+  // Resource Limits
+  globalLimits: ResourceLimits | null;
+  serverLimits: ServerResourceLimits | null;
+  serverLimitsServerId: string | null;
+
   // Loading
   loading: boolean;
 
@@ -125,6 +137,11 @@ interface AdminState {
   fetchStats: () => Promise<void>;
   fetchSignups: (days?: number) => Promise<void>;
   fetchMessagesPerHour: (hours?: number) => Promise<void>;
+  fetchServerGrowth: (days?: number) => Promise<void>;
+  fetchTopServers: (limit?: number) => Promise<void>;
+  fetchGeoStats: () => Promise<void>;
+  fetchSfuStats: () => Promise<void>;
+  fetchLiveMetrics: () => Promise<void>;
   subscribeMetrics: () => void;
   unsubscribeMetrics: () => void;
 
@@ -140,6 +157,7 @@ interface AdminState {
   fetchUserOwnedServers: (userId: string) => Promise<OwnedServerInfo[]>;
   deleteUserWithTransfers: (userId: string, serverActions: ServerAction[]) => Promise<void>;
   updateUserRole: (userId: string, role: 'user' | 'admin') => Promise<void>;
+  toggleSupporter: (userId: string, isSupporter: boolean, supporterTier?: string | null) => Promise<void>;
 
   fetchServers: (page?: number) => Promise<void>;
   setServersSearch: (search: string) => void;
@@ -186,6 +204,12 @@ interface AdminState {
   resetRateLimit: (name: string) => Promise<void>;
   clearUserRateLimits: (key: string) => Promise<number>;
 
+  fetchGlobalLimits: () => Promise<void>;
+  updateGlobalLimits: (limits: Partial<ResourceLimits>) => Promise<void>;
+  fetchServerLimits: (serverId: string) => Promise<void>;
+  updateServerLimits: (serverId: string, limits: Partial<ServerResourceLimits>) => Promise<void>;
+  resetServerLimits: (serverId: string) => Promise<void>;
+
   fetchStorageStats: () => Promise<void>;
   fetchTopUploaders: () => Promise<void>;
   fetchStorageFiles: (page?: number) => Promise<void>;
@@ -205,6 +229,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   liveMetrics: null,
   signupData: [],
   messagesData: [],
+  serverGrowthData: [],
+  topServers: [],
+  geoStats: [],
   users: [],
   usersTotal: 0,
   usersPage: 1,
@@ -247,6 +274,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   supportTicketsFilter: 'all',
   activeTicket: null,
   activeTicketMessages: [],
+  sfuStats: null,
+  globalLimits: null,
+  serverLimits: null,
+  serverLimitsServerId: null,
   featureFlags: [],
   rateLimits: [],
   loading: false,
@@ -278,32 +309,88 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     }
   },
 
-  subscribeMetrics: () => {
-    const socket = getSocket();
-    if (!socket) return;
+  fetchServerGrowth: async (days = 30) => {
+    try {
+      const { data } = await api.get(`/admin/server-growth?days=${days}`);
+      set({ serverGrowthData: data.data });
+    } catch {
+      console.error('Failed to fetch server growth data');
+    }
+  },
 
-    // Clean up any existing subscription to prevent listener accumulation
-    if (metricsHandler) socket.off('admin:metrics', metricsHandler);
+  fetchTopServers: async (limit = 10) => {
+    try {
+      const { data } = await api.get(`/admin/top-servers?limit=${limit}`);
+      set({ topServers: data.data });
+    } catch {
+      console.error('Failed to fetch top servers');
+    }
+  },
+
+  fetchGeoStats: async () => {
+    try {
+      const { data } = await api.get('/admin/stats/geo');
+      set({ geoStats: data.data });
+    } catch {
+      console.error('Failed to fetch geo stats');
+    }
+  },
+
+  fetchSfuStats: async () => {
+    try {
+      const { data } = await api.get('/admin/stats/sfu');
+      set({ sfuStats: data.data });
+    } catch {
+      console.error('Failed to fetch SFU stats');
+    }
+  },
+
+  fetchLiveMetrics: async () => {
+    try {
+      const { data } = await api.get('/admin/stats/live');
+      set({ liveMetrics: data.data });
+    } catch {
+      console.error('Failed to fetch live metrics');
+    }
+  },
+
+  subscribeMetrics: () => {
+    // Clean up any existing subscription
     if (metricsReconnectUnsub) { metricsReconnectUnsub(); metricsReconnectUnsub = null; }
+    if (metricsRetryTimer) { clearInterval(metricsRetryTimer); metricsRetryTimer = null; }
+    const oldSocket = getSocket();
+    if (oldSocket && metricsHandler) oldSocket.off('admin:metrics', metricsHandler);
 
     metricsHandler = (data: AdminMetricsSnapshot) => {
       set({ liveMetrics: data });
     };
 
-    socket.emit('admin:subscribe_metrics');
-    socket.on('admin:metrics', metricsHandler);
-
-    metricsReconnectUnsub = onSocketReconnect(() => {
+    function doSubscribe(): boolean {
       const s = getSocket();
-      if (s && metricsHandler) {
-        s.emit('admin:subscribe_metrics');
+      if (!s) return false;
+      s.emit('admin:subscribe_metrics');
+      if (metricsHandler) {
         s.off('admin:metrics', metricsHandler);
         s.on('admin:metrics', metricsHandler);
       }
-    });
+      return true;
+    }
+
+    // Try immediately; if socket isn't ready yet, retry until it is
+    if (!doSubscribe()) {
+      metricsRetryTimer = setInterval(() => {
+        if (doSubscribe()) {
+          if (metricsRetryTimer) { clearInterval(metricsRetryTimer); metricsRetryTimer = null; }
+        }
+      }, 500);
+    }
+
+    // Re-subscribe on reconnect
+    metricsReconnectUnsub = onSocketReconnect(() => { doSubscribe(); });
   },
 
   unsubscribeMetrics: () => {
+    if (metricsRetryTimer) { clearInterval(metricsRetryTimer); metricsRetryTimer = null; }
     const socket = getSocket();
     if (socket) {
       socket.emit('admin:unsubscribe_metrics');
@@ -373,6 +460,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
   updateUserRole: async (userId, role) => {
     await api.patch(`/admin/users/${userId}/role`, { role });
+  },
+
+  toggleSupporter: async (userId, isSupporter, supporterTier) => {
+    await api.patch(`/admin/users/${userId}/supporter`, { isSupporter, ...(supporterTier !== undefined && { supporterTier }) });
   },
 
   fetchServers: async (page?: number) => {
@@ -723,6 +814,42 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   clearUserRateLimits: async (key) => {
     const { data } = await api.post('/admin/rate-limits/clear-user', { key });
     return data.data.cleared as number;
+  },
+
+  fetchGlobalLimits: async () => {
+    try {
+      const { data } = await api.get('/admin/limits/global');
+      set({ globalLimits: data.data });
+    } catch {
+      console.error('Failed to fetch global limits');
+    }
+  },
+
+  updateGlobalLimits: async (limits) => {
+    await api.put('/admin/limits/global', limits);
+    await get().fetchGlobalLimits();
+    toast.success('Global limits updated');
+  },
+
+  fetchServerLimits: async (serverId) => {
+    try {
+      const { data } = await api.get(`/admin/limits/servers/${serverId}`);
+      set({ serverLimits: data.data, serverLimitsServerId: serverId });
+    } catch {
+      console.error('Failed to fetch server limits');
+    }
+  },
+
+  updateServerLimits: async (serverId, limits) => {
+    await api.put(`/admin/limits/servers/${serverId}`, limits);
+    await get().fetchServerLimits(serverId);
+    toast.success('Server limits updated');
+  },
+
+  resetServerLimits: async (serverId) => {
+    await api.delete(`/admin/limits/servers/${serverId}`);
+    set({ serverLimits: { maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null } });
+    toast.success('Server limits reset to global defaults');
   },
 
   fetchStorageStats: async () => {

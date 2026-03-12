@@ -15,20 +15,18 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
     where: { serverId, type: 'text' },
     select: { id: true },
   });
-  const sockets = await io.fetchSockets();
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
   for (const s of sockets) {
-    if (s.data.userId === userId) {
-      s.join(`server:${serverId}`);
-      for (const ch of textChannels) {
-        s.join(`channel:${ch.id}`);
-      }
+    s.join(`server:${serverId}`);
+    for (const ch of textChannels) {
+      s.join(`channel:${ch.id}`);
     }
   }
 
   // Fetch only the fields needed for the broadcast (no email)
   const joinedUser = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, role: true, createdAt: true },
+    select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, role: true, isSupporter: true, supporterTier: true, createdAt: true },
   });
 
   if (joinedUser) {
@@ -39,6 +37,7 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
         bio: joinedUser.bio ?? null,
         status: joinedUser.status as any,
         role: joinedUser.role as any,
+        supporterTier: joinedUser.supporterTier as any,
         createdAt: joinedUser.createdAt.toISOString(),
       },
     });
@@ -56,13 +55,11 @@ export async function joinServerRoom(userId: string, serverId: string): Promise<
     where: { serverId, type: 'text' },
     select: { id: true },
   });
-  const sockets = await io.fetchSockets();
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
   for (const s of sockets) {
-    if (s.data.userId === userId) {
-      s.join(`server:${serverId}`);
-      for (const ch of textChannels) {
-        s.join(`channel:${ch.id}`);
-      }
+    s.join(`server:${serverId}`);
+    for (const ch of textChannels) {
+      s.join(`channel:${ch.id}`);
     }
   }
 }
@@ -79,13 +76,11 @@ export async function broadcastMemberLeft(userId: string, serverId: string): Pro
     where: { serverId, type: 'text' },
     select: { id: true },
   });
-  const sockets = await io.fetchSockets();
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
   for (const s of sockets) {
-    if (s.data.userId === userId) {
-      s.leave(`server:${serverId}`);
-      for (const ch of textChannels) {
-        s.leave(`channel:${ch.id}`);
-      }
+    s.leave(`server:${serverId}`);
+    for (const ch of textChannels) {
+      s.leave(`channel:${ch.id}`);
     }
   }
 

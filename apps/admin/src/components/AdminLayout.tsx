@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut, Flag, LifeBuoy, Gauge, Zap } from 'lucide-react';
+import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut, Flag, LifeBuoy, Gauge, Zap, Globe } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
@@ -16,13 +16,15 @@ import { AdminReports } from './AdminReports';
 import { AdminSupportTickets } from './AdminSupportTickets';
 import { AdminRateLimits } from './AdminRateLimits';
 import { AdminFeatureFlags } from './AdminFeatureFlags';
+import { AdminGeography } from './AdminGeography';
 
-type AdminView = 'dashboard' | 'reports' | 'support' | 'users' | 'servers' | 'bans' | 'announcements' | 'storage' | 'rate-limits' | 'feature-flags' | 'audit-logs' | 'export';
+type AdminView = 'dashboard' | 'reports' | 'support' | 'geography' | 'users' | 'servers' | 'bans' | 'announcements' | 'storage' | 'rate-limits' | 'feature-flags' | 'audit-logs' | 'export';
 
 const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'reports', label: 'Reports', icon: Flag },
   { id: 'support', label: 'Support', icon: LifeBuoy },
+  { id: 'geography', label: 'Geography', icon: Globe },
   { id: 'users', label: 'Users', icon: Users },
   { id: 'servers', label: 'Servers', icon: Server },
   { id: 'bans', label: 'Bans', icon: ShieldBan },
@@ -56,6 +58,8 @@ export function AdminLayout() {
         return <AdminReports />;
       case 'support':
         return <AdminSupportTickets />;
+      case 'geography':
+        return <AdminGeography />;
       case 'users':
         return <AdminUserList onSelectUser={handleSelectUser} />;
       case 'servers':

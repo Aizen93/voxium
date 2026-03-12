@@ -10,6 +10,8 @@ Thumbs.db
 target/
 *.rs.bk
 *.pdb
+*.key
+*.key.pub
 .turbo
 coverage/
 .nyc_output/
@@ -18,7 +20,7 @@ CLAUDE.md
 DEPLOYMENT.md
 TODO-LIST.md
 CONTEXT_CHANGELOG.md
-communication_platform_analysis.md
+ROADMAP.md
 test-results/
 playwright-report/
 blob-report/

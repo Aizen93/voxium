@@ -11,76 +11,18 @@ import {
   Code2,
   HeartHandshake,
   CheckCircle2,
-  Monitor,
-  Laptop,
-  Terminal,
   ArrowRight,
   Server,
+  BrainCircuit,
+  Check,
+  X,
+  Heart,
+  Sparkles,
 } from 'lucide-react';
 import { APP_VERSION } from '@voxium/shared';
+import { SoundWaveCanvas } from '../components/landing/SoundWaveCanvas';
 
 /* ─── Animated SVG Illustrations ─── */
-
-/** Floating mesh network — represents P2P architecture */
-function NetworkMeshSvg({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 800 600"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden="true"
-    >
-      <style>{`
-        @keyframes drift1 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(12px,-18px)} }
-        @keyframes drift2 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-16px,14px)} }
-        @keyframes drift3 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(10px,20px)} }
-        @keyframes drift4 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-14px,-12px)} }
-        @keyframes drift5 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(18px,8px)} }
-        @keyframes linePulse { 0%,100%{opacity:0.08} 50%{opacity:0.25} }
-        @keyframes nodePulse { 0%,100%{r:4} 50%{r:6} }
-        .n1{animation:drift1 8s ease-in-out infinite}
-        .n2{animation:drift2 10s ease-in-out infinite}
-        .n3{animation:drift3 7s ease-in-out infinite}
-        .n4{animation:drift4 9s ease-in-out infinite}
-        .n5{animation:drift5 11s ease-in-out infinite}
-        .n6{animation:drift1 12s ease-in-out 1s infinite}
-        .n7{animation:drift3 9s ease-in-out 0.5s infinite}
-        .n8{animation:drift2 8s ease-in-out 2s infinite}
-        .mesh-line{animation:linePulse 4s ease-in-out infinite;stroke:#5b5bf7;stroke-width:1}
-        .mesh-line-d{animation:linePulse 4s ease-in-out 2s infinite;stroke:#5b5bf7;stroke-width:1}
-        .mesh-node{fill:#5b5bf7;animation:nodePulse 3s ease-in-out infinite}
-        .mesh-node-d{fill:#a78bfa;animation:nodePulse 3s ease-in-out 1.5s infinite}
-      `}</style>
-      {/* Lines connecting nodes */}
-      <g opacity="0.15">
-        <line x1="120" y1="150" x2="350" y2="100" className="mesh-line" />
-        <line x1="350" y1="100" x2="580" y2="180" className="mesh-line-d" />
-        <line x1="120" y1="150" x2="250" y2="350" className="mesh-line-d" />
-        <line x1="350" y1="100" x2="250" y2="350" className="mesh-line" />
-        <line x1="580" y1="180" x2="650" y2="380" className="mesh-line" />
-        <line x1="250" y1="350" x2="500" y2="450" className="mesh-line-d" />
-        <line x1="650" y1="380" x2="500" y2="450" className="mesh-line" />
-        <line x1="580" y1="180" x2="500" y2="450" className="mesh-line-d" />
-        <line x1="120" y1="150" x2="580" y2="180" className="mesh-line" />
-        <line x1="250" y1="350" x2="650" y2="380" className="mesh-line-d" />
-        <line x1="700" y1="120" x2="580" y2="180" className="mesh-line" />
-        <line x1="700" y1="120" x2="650" y2="380" className="mesh-line-d" />
-        <line x1="80" y1="420" x2="250" y2="350" className="mesh-line" />
-        <line x1="80" y1="420" x2="120" y2="150" className="mesh-line-d" />
-      </g>
-      {/* Nodes */}
-      <g className="n1"><circle cx="120" cy="150" className="mesh-node" r="4" /></g>
-      <g className="n2"><circle cx="350" cy="100" className="mesh-node-d" r="5" /></g>
-      <g className="n3"><circle cx="580" cy="180" className="mesh-node" r="4" /></g>
-      <g className="n4"><circle cx="250" cy="350" className="mesh-node-d" r="5" /></g>
-      <g className="n5"><circle cx="650" cy="380" className="mesh-node" r="4" /></g>
-      <g className="n6"><circle cx="500" cy="450" className="mesh-node-d" r="4" /></g>
-      <g className="n7"><circle cx="700" cy="120" className="mesh-node" r="3" /></g>
-      <g className="n8"><circle cx="80" cy="420" className="mesh-node-d" r="3" /></g>
-    </svg>
-  );
-}
 
 /** Animated audio waveform bars */
 function WaveformSvg({ className }: { className?: string }) {
@@ -111,8 +53,8 @@ function WaveformSvg({ className }: { className?: string }) {
       `}</style>
       <defs>
         <linearGradient id="waveGrad" x1="0" y1="0" x2="0" y2="80" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#A78BFA" />
-          <stop offset="100%" stopColor="#5b5bf7" />
+          <stop offset="0%" stopColor="#7C6BBF" />
+          <stop offset="100%" stopColor="#4242B8" />
         </linearGradient>
       </defs>
       <rect x="10" y="32" width="8" height="16" className="wb wb1" />
@@ -261,7 +203,12 @@ const features = [
   {
     icon: Mic2,
     title: 'Crystal-Clear Voice',
-    description: 'Mesh P2P WebRTC — audio goes directly between peers, no middleman servers touching your voice data.',
+    description: 'SFU-powered server voice for 25+ users per channel. DM calls go direct peer-to-peer — no middleman.',
+  },
+  {
+    icon: BrainCircuit,
+    title: 'AI Noise Suppression',
+    description: 'ML-powered RNNoise filter removes keyboard, mouse, and background noise in real time — so only your voice comes through.',
   },
   {
     icon: MessageSquare,
@@ -281,7 +228,7 @@ const features = [
   {
     icon: PhoneCall,
     title: 'Direct Voice Calls',
-    description: '1-on-1 voice calls with WebRTC Perfect Negotiation. Crystal clear, peer-to-peer.',
+    description: '1-on-1 voice calls with WebRTC peer-to-peer. Crystal clear, zero latency.',
   },
   {
     icon: Zap,
@@ -294,9 +241,9 @@ const highlights = [
   'No ads or tracking',
   'Open source & transparent',
   'Free voice calls forever',
-  'Peer-to-peer audio',
+  'AI noise suppression',
   'Self-hostable',
-  'Free custom emoji',
+  'Scalable SFU voice',
 ];
 
 /* ─── Section Components ─── */
@@ -328,14 +275,9 @@ function Hero() {
       id="hero"
       className="relative min-h-screen flex items-center justify-center pt-16 overflow-hidden"
     >
-      {/* Background */}
+      {/* Background: solid fallback + WebGL sound waves (lower half) */}
       <div className="absolute inset-0 bg-vox-bg-primary" />
-      <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[900px] h-[900px] rounded-full opacity-15"
-        style={{ background: 'radial-gradient(circle, #5b5bf7 0%, transparent 70%)' }}
-      />
-      {/* Animated mesh background */}
-      <NetworkMeshSvg className="absolute inset-0 w-full h-full opacity-60" />
+      <SoundWaveCanvas className="absolute inset-0 w-full h-full" />
 
       <div className="relative z-10 max-w-7xl mx-auto px-6 py-24 flex flex-col lg:flex-row items-center gap-16">
         {/* Text content */}
@@ -350,20 +292,12 @@ function Hero() {
             </span>
           </h1>
           <p
-            className="mt-6 text-lg sm:text-xl text-vox-text-secondary max-w-xl mx-auto lg:mx-0 animate-slide-up"
+            className="mt-6 text-lg sm:text-xl max-w-xl mx-auto lg:mx-0 animate-slide-up"
             style={{ animationDelay: '0.1s', animationFillMode: 'backwards' }}
           >
             The open, privacy-first voice and text platform for communities that
             value freedom and transparency.
           </p>
-
-          {/* Waveform decoration */}
-          <div
-            className="mt-6 flex justify-center lg:justify-start animate-slide-up"
-            style={{ animationDelay: '0.15s', animationFillMode: 'backwards' }}
-          >
-            <WaveformSvg className="h-10 w-48 opacity-50" />
-          </div>
 
           {/* Download buttons */}
           <div
@@ -374,25 +308,34 @@ function Hero() {
               href={DOWNLOAD_URLS.windows}
               target="_blank"
               rel="noopener noreferrer"
-              className="btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover px-5 py-3 text-base"
+              className="group relative btn bg-vox-bg-tertiary/80 text-vox-text-primary border border-white/5 hover:border-[#0078D4]/50 hover:bg-[#0078D4]/15 hover:shadow-[0_0_20px_rgba(0,120,212,0.2)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
             >
-              <Monitor className="mr-2 h-5 w-5" /> Download for Windows
+              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/>
+              </svg>
+              Download for Windows
             </a>
             <a
               href={DOWNLOAD_URLS.macos}
               target="_blank"
               rel="noopener noreferrer"
-              className="btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover px-5 py-3 text-base"
+              className="group relative btn bg-vox-bg-tertiary/80 text-vox-text-primary border border-white/5 hover:border-[#A2AAAD]/50 hover:bg-[#A2AAAD]/15 hover:shadow-[0_0_20px_rgba(162,170,173,0.15)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
             >
-              <Laptop className="mr-2 h-5 w-5" /> Download for macOS
+              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
+              </svg>
+              Download for macOS
             </a>
             <a
               href={DOWNLOAD_URLS.linux}
               target="_blank"
               rel="noopener noreferrer"
-              className="btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover px-5 py-3 text-base"
+              className="group relative btn bg-vox-bg-tertiary/80 text-vox-text-primary border border-white/5 hover:border-[#E95420]/50 hover:bg-[#E95420]/15 hover:shadow-[0_0_20px_rgba(233,84,32,0.15)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
             >
-              <Terminal className="mr-2 h-5 w-5" /> Download for Linux
+              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M17.61.455a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zM12.92.8C8.923.777 5.137 2.941 3.148 6.451a4.5 4.5 0 0 1 .26-.007 4.92 4.92 0 0 1 2.585.737A8.316 8.316 0 0 1 12.688 3.6 4.944 4.944 0 0 1 13.723.834 11.008 11.008 0 0 0 12.92.8zm9.226 4.994a4.915 4.915 0 0 1-1.918 2.246 8.36 8.36 0 0 1-.273 8.303 4.89 4.89 0 0 1 1.632 2.54 11.156 11.156 0 0 0 .559-13.089zM3.41 7.932A3.41 3.41 0 0 0 0 11.342a3.41 3.41 0 0 0 3.41 3.409 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zm2.027 7.866a4.908 4.908 0 0 1-2.915.358 11.1 11.1 0 0 0 7.991 6.698 11.234 11.234 0 0 0 2.422.249 4.879 4.879 0 0 1-.999-2.85 8.484 8.484 0 0 1-.836-.136 8.304 8.304 0 0 1-5.663-4.32zm11.405.928a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41z"/>
+              </svg>
+              Download for Linux
             </a>
           </div>
 
@@ -405,6 +348,15 @@ function Hero() {
               launch in your browser
             </Link>
           </p>
+
+		  {/* Waveform decoration */}
+          <div
+            className="mt-6 flex justify-center lg:justify-start animate-slide-up"
+            style={{ animationDelay: '0.15s', animationFillMode: 'backwards' }}
+          >
+            <WaveformSvg className="h-10 w-48 opacity-50" />
+          </div>
+
         </div>
 
         {/* Animated Mock UI panel */}
@@ -541,7 +493,7 @@ function Hero() {
                       <div>
                         <span className="text-[10px] font-semibold text-vox-accent-warning">Charlie</span>
                         <span className="text-[9px] text-vox-text-muted ml-1.5">12:03</span>
-                        <p className="text-xs text-vox-text-primary leading-snug">P2P is the way 🚀</p>
+                        <p className="text-xs text-vox-text-primary leading-snug">Noise suppression is magic 🚀</p>
                       </div>
                     </div>
                   </div>
@@ -698,12 +650,35 @@ function StatsSection() {
 }
 
 function Features() {
+  const sectionRef = useRef<HTMLDivElement>(null);
+  const [visibleCards, setVisibleCards] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    const el = sectionRef.current;
+    if (!el) return;
+    const cards = el.querySelectorAll('[data-feature-card]');
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const idx = Number((entry.target as HTMLElement).dataset.featureCard);
+            setVisibleCards((prev) => new Set(prev).add(idx));
+            observer.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.15 },
+    );
+    cards.forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <section className="relative bg-vox-bg-secondary py-24">
       {/* Particle separator at top */}
       <ParticlesSvg className="absolute top-0 left-0 w-full h-16" />
 
-      <div className="max-w-7xl mx-auto px-6">
+      <div ref={sectionRef} className="max-w-7xl mx-auto px-6">
         <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary text-center mb-4">
           Everything you need
         </h2>
@@ -712,15 +687,24 @@ function Features() {
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {features.map((f) => (
+          {features.map((f, i) => (
             <div
               key={f.title}
-              className="group rounded-xl border border-vox-border bg-vox-bg-primary p-6 hover:border-vox-accent-primary/60 transition-all duration-300 hover:shadow-lg hover:shadow-vox-accent-primary/5"
+              data-feature-card={i}
+              className={`group rounded-xl border border-vox-border bg-vox-bg-primary p-6
+                hover:border-vox-accent-primary/60 hover:-translate-y-2 hover:shadow-xl hover:shadow-vox-accent-primary/10
+                transition-all duration-300 cursor-default
+                ${i === features.length - 1 ? 'md:col-start-1 md:col-end-3 md:max-w-[calc(50%-12px)] md:justify-self-center lg:col-start-2 lg:col-end-3 lg:max-w-none' : ''}`}
+              style={{
+                opacity: visibleCards.has(i) ? 1 : 0,
+                transform: visibleCards.has(i) ? undefined : 'translateY(32px)',
+                transition: `opacity 0.5s ease-out ${i * 0.1}s, transform 0.5s ease-out ${i * 0.1}s, border-color 0.3s, box-shadow 0.3s`,
+              }}
             >
-              <div className="h-12 w-12 rounded-lg bg-gradient-to-br from-[#5B21B6]/20 to-[#3B82F6]/20 flex items-center justify-center mb-4 group-hover:from-[#5B21B6]/30 group-hover:to-[#3B82F6]/30 transition-all duration-300">
-                <f.icon className="h-6 w-6 text-vox-accent-primary" />
+              <div className="h-12 w-12 rounded-lg bg-gradient-to-br from-[#5B21B6]/20 to-[#3B82F6]/20 flex items-center justify-center mb-4 group-hover:from-[#5B21B6]/40 group-hover:to-[#3B82F6]/40 group-hover:scale-110 transition-all duration-300">
+                <f.icon className="h-6 w-6 text-vox-accent-primary group-hover:scale-110 transition-transform duration-300" />
               </div>
-              <h3 className="text-lg font-semibold text-vox-text-primary mb-2">
+              <h3 className="text-lg font-semibold text-vox-text-primary mb-2 group-hover:text-vox-accent-primary transition-colors duration-300">
                 {f.title}
               </h3>
               <p className="text-sm text-vox-text-secondary leading-relaxed">
@@ -729,6 +713,80 @@ function Features() {
             </div>
           ))}
         </div>
+      </div>
+    </section>
+  );
+}
+
+/* ─── Comparison Table ─── */
+
+type CellValue = true | false | string;
+
+const comparisonData: { feature: string; voxium: CellValue; discord: CellValue; teamspeak: CellValue; matrix: CellValue }[] = [
+  { feature: 'Open Source',           voxium: true,            discord: false,          teamspeak: false,          matrix: true },
+  { feature: 'Self-Hostable',         voxium: true,            discord: false,          teamspeak: true,           matrix: true },
+  { feature: 'Free Voice Chat',       voxium: true,            discord: true,           teamspeak: true,           matrix: true },
+  { feature: 'SFU Voice (25+ users)', voxium: true,            discord: true,           teamspeak: true,           matrix: 'Via Jitsi' },
+  { feature: 'DM Voice Calls',        voxium: true,            discord: true,           teamspeak: false,          matrix: true },
+  { feature: 'AI Noise Suppression',  voxium: 'RNNoise ML',    discord: 'Krisp',        teamspeak: 'Basic',        matrix: false },
+  { feature: 'Screen Sharing',        voxium: true,            discord: true,           teamspeak: false,          matrix: 'Via Jitsi' },
+  { feature: 'Message Reactions',     voxium: true,            discord: true,           teamspeak: false,          matrix: true },
+  { feature: 'File Sharing',          voxium: true,            discord: true,           teamspeak: true,           matrix: true },
+  { feature: 'No Ads / No Tracking',  voxium: true,            discord: false,          teamspeak: true,           matrix: true },
+  { feature: 'Desktop App',           voxium: true,            discord: true,           teamspeak: true,           matrix: true },
+  { feature: 'Lightweight Client',    voxium: 'Tauri (~10MB)',  discord: 'Electron',     teamspeak: 'Native',       matrix: 'Electron' },
+  { feature: 'Encryption',            voxium: 'TLS + Planned E2E', discord: 'TLS',      teamspeak: 'AES',          matrix: 'E2E (Olm)' },
+  { feature: 'Custom Bots / API',     voxium: 'Planned',       discord: true,           teamspeak: 'Plugins + SDK', matrix: true },
+  { feature: 'Mobile App',            voxium: 'Planned',       discord: true,           teamspeak: true,           matrix: true },
+];
+
+function ComparisonCell({ value }: { value: CellValue }) {
+  if (value === true) return <Check className="h-5 w-5 text-vox-accent-success mx-auto" />;
+  if (value === false) return <X className="h-5 w-5 text-vox-text-muted/40 mx-auto" />;
+  return <span className="text-xs text-vox-text-secondary">{value}</span>;
+}
+
+function ComparisonTable() {
+  return (
+    <section className="bg-vox-bg-secondary py-24">
+      <div className="max-w-5xl mx-auto px-6">
+        <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary text-center mb-4">
+          How Voxium compares
+        </h2>
+        <p className="text-vox-text-secondary text-center mb-14 max-w-2xl mx-auto">
+          See how Voxium stacks up against the alternatives. We believe communication software should be open, private, and community-owned.
+        </p>
+
+        <div className="overflow-x-auto rounded-xl border border-vox-border">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-vox-bg-tertiary">
+                <th className="text-left px-5 py-4 text-vox-text-primary font-semibold min-w-[180px]">Feature</th>
+                <th className="px-5 py-4 text-center min-w-[110px]">
+                  <span className="font-bold text-vox-accent-primary">Voxium</span>
+                </th>
+                <th className="px-5 py-4 text-center text-vox-text-secondary font-medium min-w-[110px]">Discord</th>
+                <th className="px-5 py-4 text-center text-vox-text-secondary font-medium min-w-[110px]">TeamSpeak</th>
+                <th className="px-5 py-4 text-center text-vox-text-secondary font-medium min-w-[110px]">Matrix</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-vox-border">
+              {comparisonData.map((row) => (
+                <tr key={row.feature} className="hover:bg-vox-bg-hover/50 transition-colors">
+                  <td className="px-5 py-3.5 text-vox-text-primary font-medium">{row.feature}</td>
+                  <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.voxium} />}</td>
+                  <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.discord} />}</td>
+                  <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.teamspeak} />}</td>
+                  <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.matrix} />}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="text-xs text-vox-text-muted text-center mt-6">
+          Comparison based on free tiers as of March 2026. Features marked "Planned" are on the roadmap.
+        </p>
       </div>
     </section>
   );
@@ -788,6 +846,187 @@ function WhyVoxium() {
               ))}
             </div>
           </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** Mini heart path centered at 0,0 (size ~12x11) */
+const MINI_HEART = 'M0 4 C0 4 -6 -1 -6 -4 C-6 -6.5 -4 -8 -2 -8 C-0.5 -8 0 -6.5 0 -5.5 C0 -6.5 0.5 -8 2 -8 C4 -8 6 -6.5 6 -4 C6 -1 0 4 0 4Z';
+
+const miniHearts = [
+  { x: 100, y: 100, tx: -55, ty: -50, dur: 3.5, delay: 0,   fill: 'rgba(236,72,153,0.6)' },
+  { x: 100, y: 100, tx:  50, ty: -45, dur: 4.0, delay: 0.8, fill: 'rgba(167,139,250,0.55)' },
+  { x: 100, y: 100, tx: -35, ty: -65, dur: 3.8, delay: 1.5, fill: 'rgba(236,72,153,0.5)' },
+  { x: 100, y: 100, tx:  60, ty: -30, dur: 4.2, delay: 2.2, fill: 'rgba(167,139,250,0.45)' },
+  { x: 100, y: 100, tx:  10, ty: -70, dur: 3.6, delay: 0.4, fill: 'rgba(236,72,153,0.55)' },
+  { x: 100, y: 100, tx: -50, ty: -25, dur: 4.5, delay: 1.8, fill: 'rgba(167,139,250,0.5)' },
+  { x: 100, y: 100, tx:  40, ty: -60, dur: 3.9, delay: 2.8, fill: 'rgba(236,72,153,0.45)' },
+  { x: 100, y: 100, tx: -20, ty: -55, dur: 4.1, delay: 3.2, fill: 'rgba(167,139,250,0.5)' },
+];
+
+function PulsingHeartSvg({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <style>{`
+        @keyframes heartBeat{0%,100%{transform:scale(1)}14%{transform:scale(1.15)}28%{transform:scale(1)}42%{transform:scale(1.08)}56%{transform:scale(1)}}
+        @keyframes heartGlow{0%,100%{filter:drop-shadow(0 0 12px rgba(236,72,153,0.2))}50%{filter:drop-shadow(0 0 32px rgba(236,72,153,0.5))}}
+        @keyframes ringPulse{0%,100%{opacity:0.06;transform:scale(1)}50%{opacity:0.12;transform:scale(1.04)}}
+      `}</style>
+      {/* Orbit rings */}
+      <circle cx="100" cy="100" r="90" stroke="rgba(236,72,153,0.08)" strokeWidth="1" fill="none"
+        style={{ animation: 'ringPulse 4s ease-in-out infinite' }} />
+      <circle cx="100" cy="100" r="70" stroke="rgba(167,139,250,0.06)" strokeWidth="1" fill="none"
+        style={{ animation: 'ringPulse 4s ease-in-out 1s infinite' }} />
+      {/* Main pulsing heart */}
+      <g style={{ transformOrigin: '100px 105px', animation: 'heartBeat 1.8s ease-in-out infinite, heartGlow 3s ease-in-out infinite' }}>
+        <path d="M100 145 C100 145 55 112 55 82 C55 64 69 50 87 50 C96 50 103 56 100 66 C97 56 104 50 113 50 C131 50 145 64 145 82 C145 112 100 145 100 145Z"
+          fill="rgba(236,72,153,0.2)" stroke="rgba(236,72,153,0.6)" strokeWidth="1.5" />
+      </g>
+      {/* Mini hearts spawning from center and floating outward */}
+      {miniHearts.map((h, i) => (
+        <g key={i} style={{ transform: `translate(${h.x}px, ${h.y}px)` }}>
+          <path d={MINI_HEART} fill={h.fill}
+            style={{
+              animation: `miniFloat${i} ${h.dur}s ease-out ${h.delay}s infinite`,
+              opacity: 0,
+            }}
+          />
+          <style>{`
+            @keyframes miniFloat${i}{
+              0%{transform:translate(0,0) scale(0.5);opacity:0}
+              10%{opacity:0.8;transform:translate(${h.tx * 0.1}px,${h.ty * 0.1}px) scale(0.7)}
+              80%{opacity:0.3}
+              100%{transform:translate(${h.tx}px,${h.ty}px) scale(0.3);opacity:0}
+            }
+          `}</style>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function CommunityFunding() {
+  const sectionRef = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const el = sectionRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) setVisible(true); },
+      { threshold: 0.2 },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const cards = [
+    { icon: Code2, value: '100%', label: 'Open Source', color: 'from-pink-500/20 to-purple-500/20' },
+    { icon: Users, value: 'You', label: 'Decide the Roadmap', color: 'from-purple-500/20 to-blue-500/20' },
+    { icon: Shield, value: 'Zero', label: 'Ads or Tracking', color: 'from-blue-500/20 to-pink-500/20' },
+  ];
+
+  return (
+    <section ref={sectionRef} className="relative bg-vox-bg-primary py-24 overflow-hidden">
+      {/* Radial gradient backdrop */}
+      <div
+        className="absolute inset-0 opacity-15"
+        style={{ background: 'radial-gradient(ellipse at center, rgba(236,72,153,0.4) 0%, transparent 70%)' }}
+      />
+
+      <div className="relative z-10 max-w-5xl mx-auto px-6">
+        {/* Header with heart illustration */}
+        <div
+          className="text-center mb-14"
+          style={{
+            opacity: visible ? 1 : 0,
+            transform: visible ? 'translateY(0)' : 'translateY(24px)',
+            transition: 'opacity 0.6s ease-out, transform 0.6s ease-out',
+          }}
+        >
+          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-pink-500/10 border border-pink-500/20 text-pink-400 text-sm font-medium mb-6">
+            <Heart size={14} className="animate-pulse" />
+            Community Powered
+            <Sparkles size={14} />
+          </div>
+
+          <div className="flex items-center justify-center gap-4 mb-4">
+            <PulsingHeartSvg className="w-32 h-32 sm:w-40 sm:h-40 shrink-0" />
+            <div className="text-left">
+              <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary">
+                Funded by the Community
+              </h2>
+              <p className="text-vox-text-secondary mt-2 text-lg max-w-xl">
+                No ads. No data harvesting. No strings attached.
+                Voxium is funded entirely by the people who use it.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Stat cards with staggered entrance */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-12">
+          {cards.map((card, i) => (
+            <div
+              key={card.label}
+              className="group relative rounded-xl border border-vox-border bg-vox-bg-secondary p-6 text-center
+                         hover:border-pink-500/40 hover:-translate-y-2 hover:shadow-xl hover:shadow-pink-500/10
+                         transition-all duration-300 cursor-default"
+              style={{
+                opacity: visible ? 1 : 0,
+                transform: visible ? 'translateY(0)' : 'translateY(32px)',
+                transition: `opacity 0.5s ease-out ${0.2 + i * 0.15}s, transform 0.5s ease-out ${0.2 + i * 0.15}s, border-color 0.3s, box-shadow 0.3s`,
+              }}
+            >
+              <div className={`h-12 w-12 rounded-lg bg-gradient-to-br ${card.color} flex items-center justify-center mx-auto mb-4
+                              group-hover:scale-110 transition-transform duration-300`}>
+                <card.icon className="h-6 w-6 text-pink-400 group-hover:scale-110 transition-transform duration-300" />
+              </div>
+              <p className="text-3xl sm:text-4xl font-extrabold text-vox-text-primary mb-1">{card.value}</p>
+              <p className="text-sm text-vox-text-secondary">{card.label}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* CTA buttons */}
+        <div
+          className="text-center"
+          style={{
+            opacity: visible ? 1 : 0,
+            transform: visible ? 'translateY(0)' : 'translateY(20px)',
+            transition: 'opacity 0.5s ease-out 0.7s, transform 0.5s ease-out 0.7s',
+          }}
+        >
+          <div className="flex flex-wrap gap-4 justify-center mb-6">
+            <a
+              href="https://github.com/sponsors/Aizen93"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group relative btn-primary px-8 py-3 text-base inline-flex items-center gap-2
+                         hover:shadow-lg hover:shadow-pink-500/20 hover:scale-105 active:scale-[0.98] transition-all duration-200"
+            >
+              <Heart size={18} className="group-hover:animate-pulse" />
+              Sponsor on GitHub
+              <ArrowRight size={16} className="opacity-0 -ml-4 group-hover:opacity-100 group-hover:ml-0 transition-all duration-200" />
+            </a>
+            <a
+              href="https://opencollective.com/voxium"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-secondary px-8 py-3 text-base inline-flex items-center gap-2
+                         hover:scale-105 active:scale-[0.98] transition-all duration-200"
+            >
+              <HeartHandshake size={18} />
+              Open Collective
+            </a>
+          </div>
+
+          <p className="text-sm text-vox-text-muted flex items-center justify-center gap-1.5">
+            <Sparkles size={14} className="text-pink-400" />
+            Supporters get a special in-app badge to show their contribution
+          </p>
         </div>
       </div>
     </section>
@@ -883,12 +1122,25 @@ function Footer() {
 
 /* ─── Main Export ─── */
 
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
+
 export function LandingPage() {
+  const [showFunding, setShowFunding] = useState(false);
+
   useEffect(() => {
     document.documentElement.classList.add('landing-scroll');
     return () => {
       document.documentElement.classList.remove('landing-scroll');
     };
+  }, []);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/feature-flags/public`)
+      .then((r) => r.json())
+      .then((res) => {
+        if (res.success && res.data.community_funding) setShowFunding(true);
+      })
+      .catch(() => {});
   }, []);
 
   return (
@@ -898,6 +1150,8 @@ export function LandingPage() {
       <StatsSection />
       <Features />
       <WhyVoxium />
+      <ComparisonTable />
+      {showFunding && <CommunityFunding />}
       <FinalCTA />
       <Footer />
     </div>

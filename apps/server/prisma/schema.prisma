@@ -27,6 +27,9 @@ model User {
   totpSecret          String?   @map("totp_secret")
   totpEnabled         Boolean   @default(false) @map("totp_enabled")
   totpBackupCodes     String?   @map("totp_backup_codes")
+  isSupporter         Boolean   @default(false) @map("is_supporter")
+  supporterTier       String?   @map("supporter_tier") // null = regular, 'first' = first contributor, 'top' = top donator
+  supporterSince      DateTime? @map("supporter_since")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -71,8 +74,35 @@ model Server {
   categories Category[]
   members    ServerMember[]
   invites    Invite[]
+  limits     ServerLimits?
 
   @@map("servers")
+}
+
+// ─── Server Resource Limits ─────────────────────────────────────────────────
+
+model GlobalConfig {
+  id                      String   @id @default("global")
+  maxChannelsPerServer    Int      @default(20) @map("max_channels_per_server")
+  maxVoiceUsersPerChannel Int      @default(12) @map("max_voice_users_per_channel")
+  maxCategoriesPerServer  Int      @default(12) @map("max_categories_per_server")
+  maxMembersPerServer     Int      @default(0) @map("max_members_per_server") // 0 = unlimited
+  updatedAt               DateTime @updatedAt @map("updated_at")
+
+  @@map("global_config")
+}
+
+model ServerLimits {
+  serverId                String   @id @map("server_id")
+  maxChannelsPerServer    Int?     @map("max_channels_per_server")
+  maxVoiceUsersPerChannel Int?     @map("max_voice_users_per_channel")
+  maxCategoriesPerServer  Int?     @map("max_categories_per_server")
+  maxMembersPerServer     Int?     @map("max_members_per_server")
+  updatedAt               DateTime @updatedAt @map("updated_at")
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@map("server_limits")
 }
 
 // ─── Server Members ──────────────────────────────────────────────────────────
@@ -145,11 +175,32 @@ model Message {
   replyTo      Message?           @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
   replies      Message[]          @relation("MessageReply")
   reactions    MessageReaction[]
+  attachments  MessageAttachment[]
   reports      Report[]
 
   @@index([channelId, createdAt])
   @@index([conversationId, createdAt])
   @@map("messages")
+}
+
+// ─── Message Attachments ───────────────────────────────────────────────────
+
+model MessageAttachment {
+  id        String   @id @default(cuid())
+  messageId String   @map("message_id")
+  s3Key     String   @map("s3_key")
+  fileName  String   @map("file_name")
+  fileSize  Int      @map("file_size")
+  mimeType  String   @map("mime_type")
+  expired   Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([s3Key])
+  @@index([messageId])
+  @@index([createdAt])
+  @@map("message_attachments")
 }
 
 // ─── Message Reactions ──────────────────────────────────────────────────────
@@ -249,10 +300,12 @@ model Invite {
 // ─── IP Records ─────────────────────────────────────────────────────────────
 
 model IpRecord {
-  id         String   @id @default(cuid())
-  userId     String   @map("user_id")
-  ip         String
-  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  ip          String
+  countryCode String?  @map("country_code")
+  country     String?
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

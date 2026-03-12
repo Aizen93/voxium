@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
-import { getRedis } from '../utils/redis';
+import { getRedis, getRedisPubSub, getRedisConfigSub } from '../utils/redis';
 
 // ─── Rate limit configuration registry ──────────────────────────────────────
 
@@ -75,6 +75,7 @@ function getLimiter(name: string): RateLimiterRedis {
 // ─── Admin API helpers ───────────────────────────────────────────────────────
 
 const REDIS_CONFIG_KEY = 'rl:config';
+const RL_CONFIG_CHANNEL = 'config:rate_limits';
 
 /** Load overrides from Redis on server startup */
 export async function loadRateLimitOverrides(): Promise<void> {
@@ -90,6 +91,25 @@ export async function loadRateLimitOverrides(): Promise<void> {
   } catch {
     console.error('[RateLimit] Failed to load overrides from Redis, using defaults');
   }
+
+  // Subscribe to config changes from other nodes
+  try {
+    const configSub = getRedisConfigSub();
+    await configSub.subscribe(RL_CONFIG_CHANNEL, (message) => {
+      try {
+        const { name, config, action } = JSON.parse(message);
+        if (!DEFAULTS[name]) return;
+        if (action === 'reset') {
+          delete overrides[name];
+        } else {
+          overrides[name] = config;
+        }
+        limiters[name] = null; // force recreation
+      } catch { /* ignore malformed messages */ }
+    });
+  } catch (err) {
+    console.error('[RateLimit] Failed to subscribe to config channel:', err);
+  }
 }
 
 /** Get all rate limit rules (defaults merged with overrides) */
@@ -101,7 +121,7 @@ export function getAllRateLimits(): Array<RateLimitDef & { name: string; isCusto
   }));
 }
 
-/** Update a specific rate limit rule */
+/** Update a specific rate limit rule and notify all nodes. */
 export async function updateRateLimit(name: string, updates: Partial<RateLimitConfig>): Promise<void> {
   if (!DEFAULTS[name]) throw new Error(`Unknown rate limiter: ${name}`);
   const clean: Partial<RateLimitConfig> = {};
@@ -111,14 +131,18 @@ export async function updateRateLimit(name: string, updates: Partial<RateLimitCo
   overrides[name] = { ...overrides[name], ...clean };
   limiters[name] = null; // force recreation with new config
   await getRedis().hSet(REDIS_CONFIG_KEY, name, JSON.stringify(overrides[name]));
+  const { pub } = getRedisPubSub();
+  await pub.publish(RL_CONFIG_CHANNEL, JSON.stringify({ name, config: overrides[name], action: 'set' }));
 }
 
-/** Reset a rate limit rule to its default */
+/** Reset a rate limit rule to its default and notify all nodes. */
 export async function resetRateLimit(name: string): Promise<void> {
   if (!DEFAULTS[name]) throw new Error(`Unknown rate limiter: ${name}`);
   delete overrides[name];
   limiters[name] = null;
   await getRedis().hDel(REDIS_CONFIG_KEY, name);
+  const { pub } = getRedisPubSub();
+  await pub.publish(RL_CONFIG_CHANNEL, JSON.stringify({ name, action: 'reset' }));
 }
 
 /** Delete all rate limit keys for a specific user or IP */

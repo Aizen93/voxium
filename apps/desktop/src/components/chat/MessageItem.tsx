@@ -6,13 +6,16 @@ import { ReactionDisplay } from './ReactionDisplay';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { Avatar } from '../common/Avatar';
 import { MessageContent } from './MessageContent';
+import { AttachmentDisplay } from './AttachmentDisplay';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Pencil, Trash2, SmilePlus, Reply, Flag } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
+import { SupporterBadge } from '../common/SupporterBadge';
 import { ReportModal } from './ReportModal';
+import { useAuthStore } from '../../stores/authStore';
 
 interface Props {
   message: Message;
@@ -131,6 +134,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
   );
 
   const isSystemMessage = message.type === 'system';
+  const currentUserId = useAuthStore((s) => s.user?.id);
+  const isMentioned = !!(message.mentions && currentUserId && message.mentions.some((m) => m.id === currentUserId));
 
   const handleReply = () => {
     useChatStore.getState().setReplyingTo(message);
@@ -178,7 +183,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
       <div
         data-message-id={message.id}
         className={clsx(
-          'group relative px-2 py-0.5 hover:bg-vox-bg-hover/50 rounded transition-colors',
+          'group relative px-2 py-0.5 rounded transition-colors',
+          isMentioned ? 'bg-vox-accent-primary/10 border-l-2 border-vox-accent-primary hover:bg-vox-accent-primary/15' : 'hover:bg-vox-bg-hover/50',
           addTopMargin && 'mt-4'
         )}
       >
@@ -263,6 +269,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                     </span>
                   </UserHoverTarget>
                   {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}
+                  {message.author.isSupporter && <SupporterBadge tier={message.author.supporterTier} />}
                   <span className="text-xs text-vox-text-muted">
                     {formatMessageTime(message.createdAt)}
                   </span>
@@ -274,9 +281,20 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                 {isEditing ? (
                   <div className="mt-1">{editArea}</div>
                 ) : (
-                  <div className="text-sm text-vox-text-primary break-words">
-                    <MessageContent content={message.content} />
-                  </div>
+                  <>
+                    {message.content && (
+                      <div className="text-sm text-vox-text-primary break-words">
+                        <MessageContent content={message.content} mentions={message.mentions} />
+                      </div>
+                    )}
+                    {message.attachments && message.attachments.length > 0 && (
+                      <div className="flex flex-col">
+                        {message.attachments.map((a) => (
+                          <AttachmentDisplay key={a.id} attachment={a} />
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -293,12 +311,21 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
 
               {isEditing ? editArea : (
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm text-vox-text-primary break-words">
-                    <MessageContent content={message.content} />
-                    {message.editedAt && (
-                      <span className="text-[10px] text-vox-text-muted">(edited)</span>
-                    )}
-                  </div>
+                  {message.content && (
+                    <div className="text-sm text-vox-text-primary break-words">
+                      <MessageContent content={message.content} mentions={message.mentions} />
+                      {message.editedAt && (
+                        <span className="text-[10px] text-vox-text-muted">(edited)</span>
+                      )}
+                    </div>
+                  )}
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="flex flex-col">
+                      {message.attachments.map((a) => (
+                        <AttachmentDisplay key={a.id} attachment={a} />
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
