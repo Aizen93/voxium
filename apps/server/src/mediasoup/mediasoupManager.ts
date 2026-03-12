@@ -1,5 +1,6 @@
 import * as mediasoup from 'mediasoup';
 import type { Worker, Router, WebRtcTransport } from 'mediasoup/node/lib/types';
+import type { SfuStats, SfuWorkerStats } from '@voxium/shared';
 import os from 'os';
 import { mediaCodecs, workerSettings, webRtcTransportOptions } from './mediasoupConfig';
 
@@ -138,8 +139,6 @@ export async function getSfuStats(channelTransports?: Map<string, number>): Prom
     portRange: { min: portMin, max: portMax, total: portMax - portMin + 1 },
   };
 }
-
-import type { SfuStats, SfuWorkerStats } from '@voxium/shared';
 
 /** Returns the Router for a channel (or undefined if none) */
 export function getRouter(channelId: string): Router | undefined {

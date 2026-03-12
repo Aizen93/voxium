@@ -59,14 +59,14 @@ async function runCleanup() {
 
       if (toExpire.length === 0) break;
 
+      // Delete S3 objects first to avoid orphaned storage if DB update succeeds but S3 fails
+      await deleteMultipleFromS3(toExpire.map((a) => a.s3Key));
+
       // Mark as expired in DB (keep records for "File expired" UI placeholder)
       await prisma.messageAttachment.updateMany({
         where: { id: { in: toExpire.map((a) => a.id) } },
         data: { expired: true },
       });
-
-      // Delete S3 objects
-      await deleteMultipleFromS3(toExpire.map((a) => a.s3Key));
 
       totalExpired += toExpire.length;
       totalSizeFreed += toExpire.reduce((sum, a) => sum + a.fileSize, 0);

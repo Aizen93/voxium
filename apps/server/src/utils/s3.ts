@@ -34,14 +34,12 @@ export async function generatePresignedPutUrl(
   key: string,
   contentType: string,
   expiresIn = 300,
-  maxContentLength?: number,
 ): Promise<string> {
   const command = new PutObjectCommand({
     Bucket: BUCKET,
     Key: key,
     ContentType: contentType,
     CacheControl: 'public, max-age=31536000, immutable',
-    ...(maxContentLength !== undefined && { ContentLength: maxContentLength }),
   });
 
   return getSignedUrl(s3, command, {

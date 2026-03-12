@@ -3,7 +3,7 @@ import { authenticate } from '../middleware/auth';
 import { rateLimitMessageSend, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, type Message } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
@@ -161,7 +161,7 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
         }
         if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
         if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this channel');
-        if (a.fileSize <= 0 || a.fileSize > LIMITS.MAX_ATTACHMENT_SIZE) throw new BadRequestError('Invalid attachment size');
+        if (a.fileSize <= 0 || a.fileSize > getMaxAttachmentSize(a.mimeType)) throw new BadRequestError('Invalid attachment size');
         if (!ALLOWED_ATTACHMENT_TYPES.includes(a.mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) throw new BadRequestError('Invalid file type');
       }
     }

@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
-**Version:** 1.2.1
-**Date:** 2026-03-11
+**Version:** 1.3.0
+**Date:** 2026-03-12
 
 ## Project Structure
 
@@ -69,7 +69,9 @@ Voxium/
 
 ## Recent Changes
 
-- **Tauri Auto-Update** (2026-03-12) -- Auto-update system via `tauri-plugin-updater` + `tauri-plugin-process` with Discord-like modal UI (available/downloading/ready/error phases), signed builds via `tauri-apps/tauri-action@v0`, and app relaunch on install. Pubkey placeholder must be replaced before first release.
+- **Tauri Auto-Update** (2026-03-12) — Mandatory auto-update system via `tauri-plugin-updater` + `tauri-plugin-process`. Update modal blocks the app (no dismiss/skip — prevents client-server version mismatch). Phases: available → downloading (progress bar) → ready → restart. Signed builds via `tauri-apps/tauri-action@v0`, update manifest at GitHub releases `latest.json`. Minisign pubkey embedded in `tauri.conf.json`.
+
+- **Copilot Review Fixes** (2026-03-12) — Misplaced import in `mediasoupManager.ts`; removed dead `maxContentLength` param from `s3.ts` (S3 `ContentLength` is exact, not a max); fixed video attachment size bug in `dm.ts` + `messages.ts` (was hardcoded 8MB instead of `getMaxAttachmentSize()` — videos 8-12MB were rejected); reversed S3 delete order in `attachmentCleanup.ts` (delete S3 first, then mark DB expired — prevents orphaned storage); fixed `MentionAutocomplete.tsx` stale closure + missing abort on mention dismiss; optimized `channel:join` from 2 DB queries to 1 via nested select.
 
 - **Notification Avatars + Presence Cleanup** (2026-03-11) — 3-tier notification system with avatar support: (1) Windows WinRT toast with circular avatar via custom `notify_with_avatar` Tauri command + `ureq` download; (2) Tauri plugin fallback (text-only); (3) Web Notification API with pre-fetched blob URL via `?inline` S3 proxy. Added `?inline` query param to `GET /uploads/*` for direct image proxy (avoids S3 302 redirect CORS issues). Security hardened: Rust-side avatar key regex, magic byte validation, symlink detection, 1MB limit, forced Content-Type, nosniff. Fixed stale presence bug via `clearPresenceState()` on server startup/shutdown. Fixed `catch (s3Err: any)` → typed `unknown` cast.
 

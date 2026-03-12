@@ -115,15 +115,23 @@ export function initSocketServer(httpServer: HttpServer) {
       if (!socketRateLimit(socket, 'channel:join', 60)) return;
       if (typeof channelId !== 'string' || !channelId) return;
       try {
+        // Single query: find channel + verify membership in one shot
         const channel = await prisma.channel.findUnique({
           where: { id: channelId },
-          select: { serverId: true },
+          select: {
+            serverId: true,
+            server: {
+              select: {
+                members: {
+                  where: { userId },
+                  select: { userId: true },
+                  take: 1,
+                },
+              },
+            },
+          },
         });
-        if (!channel) return;
-        const membership = await prisma.serverMember.findUnique({
-          where: { userId_serverId: { userId, serverId: channel.serverId } },
-        });
-        if (!membership) return;
+        if (!channel || channel.server.members.length === 0) return;
         socket.join(`channel:${channelId}`);
         console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
       } catch (err) {

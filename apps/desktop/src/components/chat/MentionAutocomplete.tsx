@@ -48,19 +48,27 @@ export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResu
   const listRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const onResultsChangeRef = useRef(onResultsChange);
+  onResultsChangeRef.current = onResultsChange;
 
   const mention = getMentionQuery(text, cursorPos);
 
   // Debounced server-side search
   useEffect(() => {
     if (!mention || !activeServerId || mention.query.length === 0) {
+      // Cancel any in-flight request when mention context is lost
+      if (abortRef.current) abortRef.current.abort();
+      if (debounceRef.current) clearTimeout(debounceRef.current);
       setResults([]);
-      onResultsChange([]);
+      onResultsChangeRef.current([]);
       return;
     }
 
     // Cancel previous debounce
     if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    const query = mention.query;
+    const serverId = activeServerId;
 
     debounceRef.current = setTimeout(async () => {
       // Cancel previous in-flight request
@@ -71,14 +79,14 @@ export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResu
       setIsSearching(true);
       try {
         const { data } = await api.get(
-          `/servers/${activeServerId}/members/search?q=${encodeURIComponent(mention.query)}`,
+          `/servers/${serverId}/members/search?q=${encodeURIComponent(query)}`,
           { signal: controller.signal },
         );
         if (!controller.signal.aborted) {
           const newResults = data.data ?? [];
           setResults(newResults);
           setSelectedIndex(0);
-          onResultsChange(newResults);
+          onResultsChangeRef.current(newResults);
         }
       } catch {
         // Ignore aborted requests
