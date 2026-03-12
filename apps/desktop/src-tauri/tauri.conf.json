@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' http://localhost:3001 ws://localhost:3001 https://*.voxium.app wss://*.voxium.app; img-src 'self' blob: data: http://localhost:3001 https://*.voxium.app; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:"
+      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' http://localhost:3001 ws://localhost:3001 https://voxium.app https://*.voxium.app wss://voxium.app wss://*.voxium.app; img-src 'self' blob: data: http://localhost:3001 https://voxium.app https://*.voxium.app; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:"
     }
   },
   "bundle": {
