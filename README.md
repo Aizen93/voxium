@@ -14,7 +14,7 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 
 - **Zero personal data required** — No phone number, no ID verification, no tracking
 - **Fully open source** — Audit every line, self-host on your own infrastructure
-- **Production-ready voice** — WebRTC peer-to-peer with AI noise suppression (RNNoise ML)
+- **Production-ready voice** — mediasoup SFU for servers, direct P2P for DM calls, with AI noise suppression (RNNoise ML)
 - **Cross-platform** — Native desktop apps for Windows, macOS, and Linux via Tauri 2
 - **Modern stack** — React 19, TypeScript, Zustand, Tailwind CSS, real-time WebSockets
 
@@ -22,31 +22,40 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 
 ## Features
 
-- **Servers & Channels** — Create servers, organize them with categories, text and voice channels, drag-and-drop reordering, invite others via single-use invite links
-- **Real-Time Messaging** — Instant message delivery, typing indicators, cursor-based pagination, unread badges per channel and server
-- **Message Replies** — Reply to any message with a compact preview of the original; click to scroll to the referenced message; graceful handling of deleted parents
-- **Message Editing & Deletion** — Edit your own messages inline, delete with confirmation; admins can delete any message
-- **Reactions** — Emoji reactions on messages with grouped display and toggle support (channels and DMs)
-- **Direct Messages** — 1-on-1 text conversations with real-time delivery, typing indicators, reactions, persistent unread tracking, and conversation deletion
-- **DM Voice Calls** — 1-on-1 WebRTC P2P audio calls with incoming call modal, ringtone, speaking indicators, and call history as system messages
-- **Server Voice Chat** — WebRTC peer-to-peer voice (mesh, up to ~8 users per channel), speaking indicators, latency display
-- **Screen Sharing** — Share your screen in voice channels with real-time video and system audio
-- **AI Noise Suppression** — ML-powered noise filter (RNNoise WASM) removes keyboard, mouse, and background noise in real time via AudioWorklet
-- **Opus Codec Optimization** — DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate for voice
-- **Push-to-Talk & Voice Activity** — Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode
-- **Audio Settings** — Input/output device selection, live mic level meter, noise suppression toggle, persisted preferences
-- **Mute/Deaf Controls** — Always-visible controls that persist across channel switches, server switches, and app restarts
-- **Friend System** — Send, accept, decline, and remove friend requests with real-time notifications
-- **Role & Permission Management** — Owner/Admin/Member hierarchy; role changes, member kicks, ownership transfer
-- **User Profiles** — Avatars with online/offline status indicators, display names, bios with real-time sync across all clients
-- **File Uploads** — S3-compatible storage for user avatars and server icons with client-side image processing
-- **Presence** — Real-time online/offline status for all server members and DM participants
-- **Notifications** — In-app toast notifications, notification sounds for voice join/leave and new messages, native desktop notifications
-- **Two-Factor Authentication** — TOTP-based 2FA with authenticator app support (Google Authenticator, Authy, etc.), QR code setup, 8 one-time backup codes, trusted device tokens (30-day remember)
-- **Authentication** — JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation
-- **Security** — Per-endpoint and per-socket rate limiting, input sanitization, CORS protection, TOTP MFA
-- **Cross-Platform Desktop** — Tauri 2 native apps (Windows, macOS, Linux) with a sleek dark UI
-- **Landing Page** — Public-facing landing page for browser visitors with animated illustrations
+| Category | Feature | Description |
+|----------|---------|-------------|
+| **Communication** | Servers & Channels | Create servers, organize with categories, text and voice channels, drag-and-drop reordering, single-use invite links |
+| | Real-Time Messaging | Instant delivery, typing indicators, cursor-based pagination, unread badges per channel and server |
+| | Message Replies | Reply with compact preview, click to scroll to original, graceful handling of deleted parents |
+| | Message Editing & Deletion | Edit inline, delete with confirmation; admins can delete any message |
+| | Reactions | Emoji reactions with grouped display and toggle support (channels and DMs) |
+| | Direct Messages | 1-on-1 text with real-time delivery, typing indicators, reactions, persistent unread tracking, conversation deletion |
+| | Message Search | Full-text search across server channels and DM conversations with jump-to-message navigation |
+| **Voice** | Server Voice (SFU) | mediasoup Selective Forwarding Unit for scalable voice (25+ users per channel), speaking indicators, latency display |
+| | DM Voice Calls | 1-on-1 WebRTC P2P audio with incoming call modal, ringtone, speaking indicators, call history as system messages |
+| | Screen Sharing | Share screen in voice channels with real-time video and system audio, inline/floating viewer modes |
+| | AI Noise Suppression | ML-powered RNNoise WASM filter removes keyboard, mouse, and background noise in real time via AudioWorklet |
+| | Opus Optimization | DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate |
+| | Push-to-Talk | Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode |
+| | Audio Settings | Input/output device selection, live mic level meter, noise suppression toggle, persisted preferences |
+| | Mute/Deaf Controls | Always-visible controls that persist across channel switches, server switches, and app restarts |
+| **Social** | Friend System | Send, accept, decline, and remove friend requests with real-time notifications |
+| | Roles & Permissions | Owner/Admin/Member hierarchy; role changes, member kicks, ownership transfer |
+| | User Profiles | Avatars with online/offline status, display names, bios with real-time sync across all clients |
+| | Presence | Real-time online/offline status for all server members and DM participants |
+| **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/server/ban management, storage management (avatars/icons/attachments with top uploaders and orphan cleanup), live metrics, audit log, moderation queue |
+| | Resource Limits | Dynamic limits (max channels, voice users, categories, members) — global defaults with per-server overrides |
+| | Feature Flags | Toggle registration, invites, server creation, voice, DM voice, support — Redis-backed, no redeploy needed |
+| | Reports & Moderation | User/message reports, admin moderation queue with resolve/dismiss/ban workflows |
+| | Support Tickets | One-per-user real-time chat with staff, admin claim/close workflow, audit logging |
+| **Security** | Two-Factor Auth | TOTP 2FA with authenticator app support, QR code setup, 8 backup codes, 30-day trusted device tokens |
+| | Authentication | JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation |
+| | Rate Limiting | Per-endpoint and per-socket rate limiting, admin-editable via Redis-backed registry |
+| | Input Sanitization | HTML stripping, validation, CORS protection |
+| **Platform** | File Uploads | S3-compatible storage for avatars, server icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
+| | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
+| | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with Discord-inspired dark UI |
+| | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |
 
 ---
 
@@ -57,7 +66,7 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 | Backend | Node.js, Express, Socket.IO, Prisma, PostgreSQL, Redis |
 | Frontend | React 19, TypeScript, Vite, Zustand, Tailwind CSS |
 | Desktop | Tauri 2 (Rust) |
-| Voice | WebRTC (mesh P2P), RNNoise WASM, Web Audio API |
+| Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM, Web Audio API |
 | Infrastructure | S3-compatible storage, Nodemailer (SMTP) |
 
 ---
@@ -172,16 +181,36 @@ pnpm run dev:desktop
 
 The backend runs on `http://localhost:3001` and the frontend on `http://localhost:8080`.
 
+Open **`http://localhost:8080`** in your browser to use Voxium. No additional setup needed — the Vite dev server serves the full web client.
+
+### 9. Admin Dashboard (Optional)
+
+The admin dashboard is a separate React app for managing users, servers, bans, feature flags, resource limits, and viewing live metrics.
+
+Start it in a new terminal:
+
+```bash
+pnpm run dev:admin
+```
+
+The admin dashboard runs on **`http://localhost:8082`**. It connects to the same backend server.
+
+> **Note:** You need an admin account to log in. Use Prisma Studio (`pnpm db:studio`) to set a user's `role` field to `admin` or `superadmin`.
+
 ---
 
 ## Running as Desktop App (Tauri)
+
+If you want to run Voxium as a native desktop app:
 
 ```bash
 cd apps/desktop
 pnpm tauri:dev
 ```
 
-This compiles the Rust backend, starts the Vite dev server, and opens the native window.
+This starts both the Vite dev server (`http://localhost:8080`) and the native Tauri desktop window simultaneously. You can use either the browser or the desktop app — both connect to the same backend.
+
+Requires [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS (Rust toolchain + platform-specific dependencies listed in Prerequisites above).
 
 ---
 
@@ -208,6 +237,134 @@ This creates platform-specific installers in `apps/desktop/src-tauri/target/rele
 - **Windows:** `.msi` and `.exe` installers
 - **macOS:** `.dmg` and `.app` bundle
 - **Linux:** `.deb`, `.AppImage`, and `.rpm` packages
+
+---
+
+## Docker Deployment (Production)
+
+Docker packages the **backend server** alongside PostgreSQL and Redis. This is the easiest way to deploy Voxium on your own server.
+
+### Prerequisites
+
+- Docker 20+
+- Docker Compose v2+
+
+### 1. Create the Environment File
+
+```bash
+cp .env.production.example .env.production
+```
+
+### 2. Configure `.env.production`
+
+Open `.env.production` and fill in all values:
+
+```env
+# ── Database ──────────────────────────────────────────────────────────────────
+# Pick a strong password — used by both PostgreSQL and the server
+POSTGRES_PASSWORD=your_strong_password_here
+
+# ── Auth (generate with: openssl rand -hex 32) ───────────────────────────────
+JWT_SECRET=your_random_64_char_secret
+JWT_REFRESH_SECRET=another_random_64_char_secret
+
+# ── TOTP (generate with: openssl rand -hex 32) ───────────────────────────────
+TOTP_ENCRYPTION_KEY=your_32_byte_hex_key
+
+# ── S3 / Object Storage (required for file uploads) ──────────────────────────
+S3_ASSETS_ENDPOINT=https://s3.us-east-1.amazonaws.com
+S3_ASSETS_REGION=us-east-1
+S3_ACCESS_KEY=your_access_key
+S3_SECRET_KEY=your_secret_key
+S3_ASSETS_BUCKET=your-bucket-name
+
+# ── SMTP (optional, for password reset emails) ───────────────────────────────
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=your_smtp_user
+SMTP_PASS=your_smtp_password
+SMTP_FROM=noreply@yourdomain.com
+
+# ── App ───────────────────────────────────────────────────────────────────────
+PORT=3001
+# CORS_ORIGIN must match the URL where your frontend is hosted.
+# For local testing with the dev frontend, use: http://localhost:8080
+CORS_ORIGIN=https://yourdomain.com
+CLIENT_URL=https://yourdomain.com
+
+# ── mediasoup (Voice) ────────────────────────────────────────────────────────
+# ANNOUNCED_IP must be your server's public IP for voice to work
+MEDIASOUP_LISTEN_IP=0.0.0.0
+MEDIASOUP_ANNOUNCED_IP=YOUR_SERVER_PUBLIC_IP
+MEDIASOUP_MIN_PORT=10000
+MEDIASOUP_MAX_PORT=10100
+```
+
+> **Important:** `MEDIASOUP_ANNOUNCED_IP` must be your server's public IP address. Voice channels will not work without this.
+
+> **Windows users:** If ports 10000-10100 conflict with Hyper-V reserved ranges, use a different range like `20000-20100`.
+
+### 3. Start the Stack
+
+```bash
+docker compose -f docker-compose.production.yml --env-file .env.production up -d
+```
+
+This starts three services:
+
+| Service           | Description              | Port     |
+| ----------------- | ------------------------ | -------- |
+| `voxium-server`   | Backend API + WebSocket  | 3001     |
+| `voxium-postgres` | PostgreSQL 16            | internal |
+| `voxium-redis`    | Redis 7                  | internal |
+
+Database migrations run **automatically** on first startup — no manual steps needed.
+
+### 4. Verify It's Running
+
+```bash
+docker compose -f docker-compose.production.yml ps
+```
+
+All services should show `healthy`. You can also check the health endpoint:
+
+```bash
+curl http://localhost:3001/health
+```
+
+### 5. Connect a Client
+
+Point the Voxium desktop app (or web client) to your server by setting these in the client's `.env`:
+
+```env
+VITE_API_URL=http://YOUR_SERVER_IP:3001/api/v1
+VITE_WS_URL=http://YOUR_SERVER_IP:3001
+```
+
+> **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
+
+### Managing the Docker Stack
+
+```bash
+# View server logs
+docker compose -f docker-compose.production.yml logs -f server
+
+# Stop all services
+docker compose -f docker-compose.production.yml down
+
+# Stop and remove all data (database, Redis, etc.)
+docker compose -f docker-compose.production.yml down -v
+
+# Rebuild after pulling new code
+docker compose -f docker-compose.production.yml --env-file .env.production up -d --build
+```
+
+### Production Recommendations
+
+- Put **nginx** or another reverse proxy in front for TLS/SSL termination
+- Open UDP ports for the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall
+- For better reliability, use a managed PostgreSQL instance (override `DATABASE_URL` directly)
+- Set up regular database backups
 
 ---
 
@@ -291,9 +448,18 @@ curl http://localhost:3001/api/v1/servers \
 | `SMTP_PASS` | — | SMTP auth password |
 | `SMTP_FROM` | `noreply@voxium.app` | Sender email address |
 | `CLIENT_URL` | `http://localhost:8080` | Frontend URL (used in emails) |
+| `CLEANUP_REPORT_EMAIL` | — | Email address for daily attachment cleanup reports. If not set, no report is sent. |
 | `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. Optional — if not set, TOTP secrets are stored unencrypted. |
+| `MEDIASOUP_ANNOUNCED_IP` | — | Public IP address announced to WebRTC clients for mediasoup SFU connectivity. Required for production. |
 
 ### Frontend Environment Variables (`apps/desktop/.env`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
+| `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
+
+### Admin Dashboard Environment Variables (`apps/admin/.env`)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -349,7 +515,8 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 |--------|-------------|
 | `pnpm dev` | Start backend and frontend in parallel |
 | `pnpm dev:server` | Start backend with hot reload |
-| `pnpm dev:desktop` | Start frontend Vite dev server |
+| `pnpm dev:desktop` | Start frontend Vite dev server (browser at localhost:8080) |
+| `pnpm dev:admin` | Start admin dashboard (browser at localhost:8082) |
 | `pnpm build` | Build all packages for production |
 | `pnpm build:shared` | Build shared types package |
 | `pnpm build:server` | Build backend TypeScript |

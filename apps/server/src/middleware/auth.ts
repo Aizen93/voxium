@@ -30,7 +30,12 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   const token = authHeader.slice(7);
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
+    const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as AuthPayload & { purpose?: string };
+
+    // Reject non-access tokens (e.g. trusted-device, totp-verify)
+    if (payload.purpose) {
+      return next(new UnauthorizedError('Invalid token type'));
+    }
 
     // Check account ban, token version, and current role against DB
     const user = await prisma.user.findUnique({

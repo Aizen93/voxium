@@ -23,17 +23,21 @@ export function startAdminMetricsEmitter(
       try {
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
-        const [onlineUserIds, messagesLastHour] = await Promise.all([
+        const [onlineUserIds, messagesLastHour, dmCalls, dmVoiceUsers, voiceChannels, voiceUsers] = await Promise.all([
           getOnlineUsers(),
           prisma.message.count({ where: { createdAt: { gte: oneHourAgo } } }),
+          getActiveDMCallCount(),
+          getTotalDMVoiceUsers(),
+          getActiveVoiceChannelCount(),
+          getTotalVoiceUsers(),
         ]);
 
         const snapshot: AdminMetricsSnapshot = {
           onlineUsers: onlineUserIds.length,
-          voiceChannels: getActiveVoiceChannelCount(),
-          voiceUsers: getTotalVoiceUsers(),
-          dmCalls: getActiveDMCallCount(),
-          dmVoiceUsers: getTotalDMVoiceUsers(),
+          voiceChannels,
+          voiceUsers,
+          dmCalls,
+          dmVoiceUsers,
           messagesLastHour,
         };
 

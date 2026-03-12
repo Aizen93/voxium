@@ -10,7 +10,7 @@ export const LIMITS = {
   USERNAME_MAX: 32,
   DISPLAY_NAME_MAX: 64,
   PASSWORD_MIN: 8,
-  PASSWORD_MAX: 128,
+  PASSWORD_MAX: 72,
   SERVER_NAME_MIN: 2,
   SERVER_NAME_MAX: 100,
   CHANNEL_NAME_MIN: 1,
@@ -20,13 +20,13 @@ export const LIMITS = {
   MESSAGES_PER_PAGE: 50,
   MEMBERS_PER_PAGE: 100,
   MAX_SERVERS_PER_USER: 5,
-  MAX_CHANNELS_PER_SERVER: 100,
-  MAX_VOICE_USERS_PER_CHANNEL: 99,
+  MAX_CHANNELS_PER_SERVER: 20,
+  MAX_VOICE_USERS_PER_CHANNEL: 12,
   MAX_REACTIONS_PER_MESSAGE: 20,
   MAX_EMOJI_LENGTH: 32,
   CATEGORY_NAME_MIN: 1,
   CATEGORY_NAME_MAX: 100,
-  MAX_CATEGORIES_PER_SERVER: 50,
+  MAX_CATEGORIES_PER_SERVER: 12,
   SEARCH_QUERY_MIN: 2,
   SEARCH_QUERY_MAX: 200,
   SEARCH_RESULTS_PER_PAGE: 25,
@@ -37,11 +37,31 @@ export const LIMITS = {
   REPORT_REASON_MAX: 1000,
   SUPPORT_MESSAGE_MIN: 1,
   SUPPORT_MESSAGE_MAX: 2000,
+  MAX_MENTIONS_PER_MESSAGE: 10,
   TOTP_CODE_LENGTH: 6,
   TOTP_BACKUP_CODE_COUNT: 8,
+  MAX_ATTACHMENTS_PER_MESSAGE: 5,
+  MAX_ATTACHMENT_SIZE: 8 * 1024 * 1024, // 8 MB (default for non-video files)
+  MAX_VIDEO_ATTACHMENT_SIZE: 12 * 1024 * 1024, // 12 MB (for video files)
+  ATTACHMENT_RETENTION_DAYS: 3,
 } as const;
 
+export const ALLOWED_ATTACHMENT_TYPES = [
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+  'application/pdf',
+  'text/plain', 'text/csv',
+  'audio/mpeg', 'audio/ogg', 'audio/wav',
+  'video/mp4', 'video/webm',
+] as const;
+
+export function getMaxAttachmentSize(mimeType: string): number {
+  return mimeType.startsWith('video/') ? LIMITS.MAX_VIDEO_ATTACHMENT_SIZE : LIMITS.MAX_ATTACHMENT_SIZE;
+}
+
 export const INVITE_CODE_LENGTH = 8;
+
+/** Regex to match @[userId] mention tokens in message content */
+export const MENTION_RE = /@\[([^\]]{1,30})\]/g;
 
 export const WS_EVENTS = {
   MESSAGE_NEW: 'message:new',
@@ -56,12 +76,20 @@ export const WS_EVENTS = {
   MEMBER_JOINED: 'member:joined',
   MEMBER_LEFT: 'member:left',
   PRESENCE_UPDATE: 'presence:update',
+  VOICE_CHANNEL_USERS: 'voice:channel_users',
   VOICE_USER_JOINED: 'voice:user_joined',
   VOICE_USER_LEFT: 'voice:user_left',
   VOICE_STATE_UPDATE: 'voice:state_update',
   VOICE_SPEAKING: 'voice:speaking',
   VOICE_SIGNAL: 'voice:signal',
   VOICE_ERROR: 'voice:error',
+  VOICE_TRANSPORT_CREATED: 'voice:transport_created',
+  VOICE_TRANSPORT_CONNECT: 'voice:transport:connect',
+  VOICE_PRODUCE: 'voice:produce',
+  VOICE_NEW_CONSUMER: 'voice:new_consumer',
+  VOICE_CONSUMER_RESUME: 'voice:consumer:resume',
+  VOICE_PRODUCER_CLOSED: 'voice:producer_closed',
+  VOICE_RTP_CAPABILITIES: 'voice:rtp_capabilities',
   TYPING_START: 'typing:start',
   TYPING_STOP: 'typing:stop',
   CHANNEL_JOIN: 'channel:join',

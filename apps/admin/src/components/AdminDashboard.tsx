@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { Users, Server, MessageSquare, Wifi, ShieldBan, Mic, Flag, LifeBuoy, MessageCircle, UserCheck } from 'lucide-react';
+import { Users, Server, MessageSquare, Wifi, ShieldBan, Mic, Flag, LifeBuoy, MessageCircle, UserCheck, Cpu, HardDrive, Radio, RefreshCw } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminStatCard } from './AdminStatCard';
 
 export function AdminDashboard() {
   const {
-    stats, liveMetrics, signupData, messagesData, serverGrowthData, topServers,
+    stats, liveMetrics, sfuStats, signupData, messagesData, serverGrowthData, topServers,
     fetchStats, fetchSignups, fetchMessagesPerHour, fetchServerGrowth, fetchTopServers,
-    subscribeMetrics, unsubscribeMetrics,
+    fetchSfuStats, fetchLiveMetrics,
   } = useAdminStore();
+  const [sfuRefreshing, setSfuRefreshing] = useState(false);
+  const [metricsRefreshing, setMetricsRefreshing] = useState(false);
 
   useEffect(() => {
     fetchStats();
@@ -16,9 +18,21 @@ export function AdminDashboard() {
     fetchMessagesPerHour();
     fetchServerGrowth();
     fetchTopServers();
-    subscribeMetrics();
-    return () => unsubscribeMetrics();
-  }, [fetchStats, fetchSignups, fetchMessagesPerHour, fetchServerGrowth, fetchTopServers, subscribeMetrics, unsubscribeMetrics]);
+    fetchSfuStats();
+    fetchLiveMetrics();
+  }, [fetchStats, fetchSignups, fetchMessagesPerHour, fetchServerGrowth, fetchTopServers, fetchSfuStats, fetchLiveMetrics]);
+
+  const handleRefreshSfu = async () => {
+    setSfuRefreshing(true);
+    await fetchSfuStats();
+    setSfuRefreshing(false);
+  };
+
+  const handleRefreshMetrics = async () => {
+    setMetricsRefreshing(true);
+    await fetchLiveMetrics();
+    setMetricsRefreshing(false);
+  };
 
   return (
     <div className="space-y-6">
@@ -37,14 +51,26 @@ export function AdminDashboard() {
         <AdminStatCard label="Open Tickets" value={stats?.openTickets ?? 0} icon={LifeBuoy} color="text-vox-accent-info" />
       </div>
 
-      {/* Live Metrics */}
-      {liveMetrics && (
-        <div className="rounded-lg bg-vox-bg-secondary border border-vox-border p-4">
-          <h3 className="text-sm font-semibold text-vox-text-primary mb-3 flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-green-400 animate-pulse" />
-            Live Metrics
-          </h3>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+      {/* Real-time Metrics */}
+      <div className="rounded-lg bg-vox-bg-secondary border border-vox-border p-4">
+        <h3 className="text-sm font-semibold text-vox-text-primary mb-3 flex items-center gap-2">
+          <Wifi size={14} className="text-green-400" />
+          Real-time Metrics
+          <button
+            onClick={handleRefreshMetrics}
+            disabled={metricsRefreshing}
+            className="ml-auto p-1.5 rounded hover:bg-vox-bg-hover text-vox-text-muted hover:text-vox-text-primary transition-colors disabled:opacity-50"
+            title="Refresh metrics"
+          >
+            <RefreshCw size={14} className={metricsRefreshing ? 'animate-spin' : ''} />
+          </button>
+        </h3>
+        {liveMetrics ? (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+            <div>
+              <p className="text-lg font-bold text-vox-text-primary">{liveMetrics.onlineUsers}</p>
+              <p className="text-xs text-vox-text-muted">Online Users</p>
+            </div>
             <div>
               <p className="text-lg font-bold text-vox-text-primary">{liveMetrics.voiceChannels}</p>
               <p className="text-xs text-vox-text-muted">Voice Channels</p>
@@ -62,8 +88,118 @@ export function AdminDashboard() {
               <p className="text-xs text-vox-text-muted">Msgs/Hour</p>
             </div>
           </div>
-        </div>
-      )}
+        ) : (
+          <p className="text-xs text-vox-text-muted py-4 text-center">Loading metrics...</p>
+        )}
+      </div>
+
+      {/* SFU Infrastructure */}
+      <div className="rounded-lg bg-vox-bg-secondary border border-vox-border p-4">
+        <h3 className="text-sm font-semibold text-vox-text-primary mb-3 flex items-center gap-2">
+          <Radio size={14} className="text-vox-accent-info" />
+          SFU Infrastructure
+          <button
+            onClick={handleRefreshSfu}
+            disabled={sfuRefreshing}
+            className="ml-auto p-1.5 rounded hover:bg-vox-bg-hover text-vox-text-muted hover:text-vox-text-primary transition-colors disabled:opacity-50"
+            title="Refresh SFU stats"
+          >
+            <RefreshCw size={14} className={sfuRefreshing ? 'animate-spin' : ''} />
+          </button>
+        </h3>
+
+        {sfuStats ? (
+          <>
+            {/* Aggregate counts */}
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-4">
+              <div>
+                <p className="text-lg font-bold text-vox-text-primary">{sfuStats.workers.length}</p>
+                <p className="text-xs text-vox-text-muted">Workers</p>
+              </div>
+              <div>
+                <p className="text-lg font-bold text-vox-text-primary">{sfuStats.totalRouters}</p>
+                <p className="text-xs text-vox-text-muted">Routers</p>
+              </div>
+              <div>
+                <p className="text-lg font-bold text-vox-text-primary">{sfuStats.totalTransports}</p>
+                <p className="text-xs text-vox-text-muted">Transports</p>
+              </div>
+              <div>
+                <p className="text-lg font-bold text-vox-text-primary">{sfuStats.totalProducers}</p>
+                <p className="text-xs text-vox-text-muted">Producers</p>
+              </div>
+              <div>
+                <p className="text-lg font-bold text-vox-text-primary">{sfuStats.totalConsumers}</p>
+                <p className="text-xs text-vox-text-muted">Consumers</p>
+              </div>
+              <div>
+                <p className="text-lg font-bold text-vox-text-primary">
+                  {sfuStats.totalTransports}
+                  <span className="text-xs font-normal text-vox-text-muted"> / {sfuStats.portRange.total}</span>
+                </p>
+                <p className="text-xs text-vox-text-muted">Port Usage</p>
+              </div>
+            </div>
+
+            {/* Port utilization bar */}
+            {(() => {
+              const used = sfuStats.totalTransports;
+              const total = sfuStats.portRange.total;
+              const pct = total > 0 ? Math.min((used / total) * 100, 100) : 0;
+              const color = pct < 50 ? 'bg-green-500' : pct < 80 ? 'bg-yellow-500' : 'bg-red-500';
+              return (
+                <div className="mb-4">
+                  <div className="flex items-center justify-between text-xs text-vox-text-muted mb-1">
+                    <span>Global Port Range (shared): {sfuStats.portRange.min}–{sfuStats.portRange.max}</span>
+                    <span>{pct.toFixed(1)}% used</span>
+                  </div>
+                  <div className="h-2 rounded-full bg-vox-bg-hover overflow-hidden">
+                    <div className={`h-full rounded-full ${color} transition-all`} style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Per-worker breakdown */}
+            {sfuStats.workers.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-vox-text-secondary mb-2">Workers</p>
+                <div className="grid gap-2">
+                  {sfuStats.workers.map((w, i) => (
+                    <div key={`worker-${i}-${w.pid}`} className="flex items-center gap-3 rounded bg-vox-bg-primary px-3 py-2 text-xs">
+                      <div className="flex items-center gap-1.5 min-w-[80px]">
+                        <Cpu size={12} className="text-vox-text-muted" />
+                        <span className="text-vox-text-secondary font-mono">PID {w.pid}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 min-w-[90px]">
+                        <span className="text-vox-text-muted">Routers:</span>
+                        <span className="text-vox-text-primary font-medium">{w.routerCount}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 min-w-[100px]">
+                        <span className="text-vox-text-muted">Transports:</span>
+                        <span className="text-vox-text-primary font-medium">{w.transportCount}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 min-w-[120px]">
+                        <span className="text-vox-text-muted">CPU:</span>
+                        <span className="text-vox-text-primary font-medium">{(w.cpuUser / 1000).toFixed(1)}s</span>
+                        <span className="text-vox-text-muted">usr</span>
+                        <span className="text-vox-text-primary font-medium">{(w.cpuSystem / 1000).toFixed(1)}s</span>
+                        <span className="text-vox-text-muted">sys</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <HardDrive size={12} className="text-vox-text-muted" />
+                        <span className="text-vox-text-primary font-medium">{(w.memoryRss / 1024).toFixed(1)} MB</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="text-xs text-vox-text-muted py-4 text-center">Loading SFU stats...</p>
+        )}
+      </div>
 
       {/* Charts Row 1 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -145,7 +281,7 @@ function MiniBarChart({ data, labels, color }: { data: number[]; labels: string[
   const barWidth = availableWidth > 0 ? Math.max(4, (availableWidth - gap * data.length) / data.length) : 10;
   const svgWidth = containerWidth || yAxisWidth + data.length * (barWidth + gap);
 
-  const ticks = [0, Math.round(max / 2), max];
+  const ticks = [...new Set([0, Math.round(max / 2), max])];
 
   return (
     <div>

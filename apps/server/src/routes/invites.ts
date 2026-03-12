@@ -6,6 +6,7 @@ import { nanoid } from 'nanoid';
 import { INVITE_CODE_LENGTH } from '@voxium/shared';
 import { broadcastMemberJoined } from '../utils/memberBroadcast';
 import { isFeatureEnabled } from '../utils/featureFlags';
+import { getEffectiveLimits } from '../utils/serverLimits';
 
 export const inviteRouter = Router();
 
@@ -62,6 +63,15 @@ inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Res
       where: { userId_serverId: { userId: req.user!.userId, serverId: invite.serverId } },
     });
     if (existing) throw new BadRequestError('You are already a member of this server');
+
+    // Enforce max members per server
+    const limits = await getEffectiveLimits(invite.serverId);
+    if (limits.maxMembersPerServer > 0) {
+      const memberCount = await prisma.serverMember.count({ where: { serverId: invite.serverId } });
+      if (memberCount >= limits.maxMembersPerServer) {
+        throw new BadRequestError(`This server has reached its member limit (${limits.maxMembersPerServer})`);
+      }
+    }
 
     await prisma.$transaction([
       prisma.serverMember.create({

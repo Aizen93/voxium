@@ -4,13 +4,16 @@ import { authenticate } from '../middleware/auth';
 import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin';
 import { rateLimitAdmin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { getOnlineUsers, getUserSocket } from '../utils/redis';
+import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
-import { cleanupServerVoice } from '../websocket/voiceHandler';
+import { cleanupServerVoice, getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
+import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
+import { getSfuStats } from '../mediasoup/mediasoupManager';
+import { getGlobalLimits } from '../utils/serverLimits';
 import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE } from '../utils/s3';
+import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, SupportMessageData } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
@@ -18,6 +21,21 @@ import { logAuditEvent } from '../utils/auditLog';
 export const adminRouter = Router();
 
 adminRouter.use(authenticate, requireAdmin, rateLimitAdmin);
+
+/** Force-logout and disconnect a user across all nodes. */
+async function forceLogoutUser(userId: string, reason: string): Promise<void> {
+  const io = getIO();
+  io.to(`user:${userId}`).emit('force:logout', { reason });
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
+  for (const s of sockets) s.disconnect(true);
+}
+
+/** Remove all sockets from a server room across all nodes. */
+async function clearServerRoom(serverId: string): Promise<void> {
+  const io = getIO();
+  const sockets = await io.in(`server:${serverId}`).fetchSockets();
+  for (const s of sockets) s.leave(`server:${serverId}`);
+}
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
 
@@ -38,6 +56,67 @@ adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunctio
     res.json({
       success: true,
       data: { totalUsers, totalServers, totalMessages, onlineUsers: onlineUserIds.length, bannedUsers, pendingReports, openTickets, totalConversations, totalFriendships },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── SFU Stats ─────────────────────────────────────────────────────────────
+
+adminRouter.get('/stats/sfu', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const channelTransports = getTransportCountsByChannel();
+    const [sfuStats, mediaCounts] = await Promise.all([
+      getSfuStats(channelTransports),
+      Promise.resolve(getVoiceMediaCounts()),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        ...sfuStats,
+        totalTransports: mediaCounts.transports,
+        totalProducers: mediaCounts.producers,
+        totalConsumers: mediaCounts.consumers,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Voice Diagnostics (for testing optimizations) ────────────────────────
+
+adminRouter.get('/stats/voice-diag', (_req: Request, res: Response) => {
+  res.json({ success: true, data: getVoiceDiagnostics() });
+});
+
+// ─── Live Metrics ─────────────────────────────────────────────────────────
+
+adminRouter.get('/stats/live', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+    const [onlineUserIds, messagesLastHour, dmCalls, dmVoiceUsers, voiceChannels, voiceUsers] = await Promise.all([
+      getOnlineUsers(),
+      prisma.message.count({ where: { createdAt: { gte: oneHourAgo } } }),
+      getActiveDMCallCount(),
+      getTotalDMVoiceUsers(),
+      getActiveVoiceChannelCount(),
+      getTotalVoiceUsers(),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        onlineUsers: onlineUserIds.length,
+        voiceChannels,
+        voiceUsers,
+        dmCalls,
+        dmVoiceUsers,
+        messagesLastHour,
+      },
     });
   } catch (err) {
     next(err);
@@ -106,7 +185,7 @@ adminRouter.get('/users', async (req: Request, res: Response, next: NextFunction
         where,
         select: {
           id: true, username: true, displayName: true, email: true, avatarUrl: true,
-          role: true, status: true, bannedAt: true, banReason: true, createdAt: true,
+          role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
         },
         orderBy,
         skip: (page - 1) * limit,
@@ -134,7 +213,7 @@ adminRouter.get('/users/:userId', async (req: Request<{ userId: string }>, res: 
       where: { id: req.params.userId },
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
-        bio: true, role: true, status: true, bannedAt: true, banReason: true, createdAt: true,
+        bio: true, role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
         ipRecords: { select: { ip: true, lastSeenAt: true }, orderBy: { lastSeenAt: 'desc' } },
         _count: { select: { messages: true, memberships: true, ownedServers: true } },
       },
@@ -209,6 +288,7 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
     });
     if (!target) throw new NotFoundError('User');
     if (target.role === 'superadmin') throw new ForbiddenError('Cannot ban a super admin');
+    if (target.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can ban other admins');
 
     const sanitizedReason = reason ? sanitizeText(reason) : null;
 
@@ -250,16 +330,8 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       await broadcastMemberLeft(targetId, serverId);
     }
 
-    // Force logout then disconnect active socket
-    const socketId = await getUserSocket(targetId);
-    if (socketId) {
-      const io = getIO();
-      const socket = io.sockets.sockets.get(socketId);
-      if (socket) {
-        socket.emit('force:logout', { reason: 'Your account has been banned' });
-        socket.disconnect(true);
-      }
-    }
+    // Force logout then disconnect active socket (works across all nodes)
+    await forceLogoutUser(targetId, 'Your account has been banned');
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -337,6 +409,7 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
     });
     if (!target) throw new NotFoundError('User');
     if (target.role === 'superadmin') throw new ForbiddenError('Cannot delete a super admin');
+    if (target.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can delete other admins');
 
     // Fetch memberships and owned servers in parallel
     const [memberships, ownedServers] = await Promise.all([
@@ -451,15 +524,7 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           // action === 'delete' — clean up and delete the server
           cleanupServerVoice(io, action.serverId);
           io.to(`server:${action.serverId}`).emit('server:deleted', { serverId: action.serverId });
-
-          const room = io.sockets.adapter.rooms.get(`server:${action.serverId}`);
-          if (room) {
-            for (const sid of room) {
-              const s = io.sockets.sockets.get(sid);
-              if (s) s.leave(`server:${action.serverId}`);
-            }
-          }
-
+          await clearServerRoom(action.serverId);
           await prisma.server.delete({ where: { id: action.serverId } });
         }
       }
@@ -471,15 +536,8 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
         }
       }
 
-      // Force logout then disconnect active socket
-      const socketId = await getUserSocket(targetId);
-      if (socketId) {
-        const targetSocket = io.sockets.sockets.get(socketId);
-        if (targetSocket) {
-          targetSocket.emit('force:logout', { reason: 'Your account has been deleted' });
-          targetSocket.disconnect(true);
-        }
-      }
+      // Force logout then disconnect active socket (works across all nodes)
+      await forceLogoutUser(targetId, 'Your account has been deleted');
 
       // Delete user — cascade only removes ServerMember records for transferred servers
       await prisma.user.delete({ where: { id: targetId } });
@@ -503,16 +561,8 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
         }
       }
 
-      const io = getIO();
-
-      const socketId = await getUserSocket(targetId);
-      if (socketId) {
-        const targetSocket = io.sockets.sockets.get(socketId);
-        if (targetSocket) {
-          targetSocket.emit('force:logout', { reason: 'Your account has been deleted' });
-          targetSocket.disconnect(true);
-        }
-      }
+      // Force logout then disconnect active socket (works across all nodes)
+      await forceLogoutUser(targetId, 'Your account has been deleted');
 
       await prisma.user.delete({ where: { id: targetId } });
 
@@ -565,6 +615,44 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
     });
 
     res.json({ success: true, message: `User "${target.username}" role changed to ${role}` });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Supporter Badge ────────────────────────────────────────────────────────
+
+adminRouter.patch('/users/:userId/supporter', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { userId: targetId } = req.params;
+    const { isSupporter, supporterTier } = req.body as { isSupporter?: boolean; supporterTier?: string | null };
+
+    if (typeof isSupporter !== 'boolean') {
+      throw new BadRequestError('isSupporter must be a boolean');
+    }
+
+    // Validate supporterTier if provided
+    const validTiers = ['first', 'top', null];
+    if (supporterTier !== undefined && !validTiers.includes(supporterTier)) {
+      throw new BadRequestError('supporterTier must be "first", "top", or null');
+    }
+
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      select: { id: true, username: true, isSupporter: true, supporterTier: true },
+    });
+    if (!target) throw new NotFoundError('User');
+
+    await prisma.user.update({
+      where: { id: targetId },
+      data: {
+        isSupporter,
+        supporterTier: isSupporter ? (supporterTier !== undefined ? supporterTier : target.supporterTier) : null,
+        supporterSince: isSupporter ? (target.isSupporter ? undefined : new Date()) : null,
+      },
+    });
+
+    res.json({ success: true, message: `Supporter badge ${isSupporter ? 'granted to' : 'removed from'} "${target.username}"` });
   } catch (err) {
     next(err);
   }
@@ -660,14 +748,8 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
     // Notify members
     io.to(`server:${server.id}`).emit('server:deleted', { serverId: server.id });
 
-    // Remove all sockets from the server room
-    const room = io.sockets.adapter.rooms.get(`server:${server.id}`);
-    if (room) {
-      for (const socketId of room) {
-        const socket = io.sockets.sockets.get(socketId);
-        if (socket) socket.leave(`server:${server.id}`);
-      }
-    }
+    // Remove all sockets from the server room (works across all nodes)
+    await clearServerRoom(server.id);
 
     // Cascade delete
     await prisma.server.delete({ where: { id: server.id } });
@@ -684,6 +766,105 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
   } catch (err) {
     next(err);
   }
+});
+
+// ─── Resource Limits ────────────────────────────────────────────────────────
+
+// Get global resource limits
+adminRouter.get('/limits/global', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const limits = await getGlobalLimits();
+    res.json({ success: true, data: limits });
+  } catch (err) { next(err); }
+});
+
+// Update global resource limits
+adminRouter.put('/limits/global', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer } = req.body;
+    const data: Record<string, number> = {};
+    if (maxChannelsPerServer !== undefined) data.maxChannelsPerServer = Math.max(1, Math.min(500, Number(maxChannelsPerServer)));
+    if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = Math.max(1, Math.min(500, Number(maxVoiceUsersPerChannel)));
+    if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = Math.max(1, Math.min(200, Number(maxCategoriesPerServer)));
+    if (maxMembersPerServer !== undefined) data.maxMembersPerServer = Math.max(0, Math.min(100000, Number(maxMembersPerServer)));
+
+    const config = await prisma.globalConfig.upsert({
+      where: { id: 'global' },
+      create: { id: 'global', ...data },
+      update: data,
+    });
+
+    res.json({ success: true, data: {
+      maxChannelsPerServer: config.maxChannelsPerServer,
+      maxVoiceUsersPerChannel: config.maxVoiceUsersPerChannel,
+      maxCategoriesPerServer: config.maxCategoriesPerServer,
+      maxMembersPerServer: config.maxMembersPerServer,
+    }});
+  } catch (err) { next(err); }
+});
+
+// Get per-server limits (returns null fields for "use global")
+adminRouter.get('/limits/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const limits = await prisma.serverLimits.findUnique({ where: { serverId: req.params.serverId } });
+    res.json({ success: true, data: limits ? {
+      maxChannelsPerServer: limits.maxChannelsPerServer,
+      maxVoiceUsersPerChannel: limits.maxVoiceUsersPerChannel,
+      maxCategoriesPerServer: limits.maxCategoriesPerServer,
+      maxMembersPerServer: limits.maxMembersPerServer,
+    } : {
+      maxChannelsPerServer: null,
+      maxVoiceUsersPerChannel: null,
+      maxCategoriesPerServer: null,
+      maxMembersPerServer: null,
+    }});
+  } catch (err) { next(err); }
+});
+
+// Update per-server limits (null = use global default)
+adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const server = await prisma.server.findUnique({ where: { id: req.params.serverId }, select: { id: true } });
+    if (!server) throw new NotFoundError('Server');
+
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer } = req.body;
+    const toInt = (v: unknown): number | null => {
+      if (v === null || v === undefined || v === '') return null;
+      const n = Number(v);
+      return isNaN(n) ? null : n;
+    };
+
+    const data = {
+      maxChannelsPerServer: maxChannelsPerServer !== undefined ? (toInt(maxChannelsPerServer) !== null ? Math.max(1, Math.min(500, toInt(maxChannelsPerServer)!)) : null) : undefined,
+      maxVoiceUsersPerChannel: maxVoiceUsersPerChannel !== undefined ? (toInt(maxVoiceUsersPerChannel) !== null ? Math.max(1, Math.min(500, toInt(maxVoiceUsersPerChannel)!)) : null) : undefined,
+      maxCategoriesPerServer: maxCategoriesPerServer !== undefined ? (toInt(maxCategoriesPerServer) !== null ? Math.max(1, Math.min(200, toInt(maxCategoriesPerServer)!)) : null) : undefined,
+      maxMembersPerServer: maxMembersPerServer !== undefined ? (toInt(maxMembersPerServer) !== null ? Math.max(0, Math.min(100000, toInt(maxMembersPerServer)!)) : null) : undefined,
+    };
+
+    // Remove undefined keys
+    const cleanData = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
+
+    const limits = await prisma.serverLimits.upsert({
+      where: { serverId: req.params.serverId },
+      create: { serverId: req.params.serverId, ...cleanData },
+      update: cleanData,
+    });
+
+    res.json({ success: true, data: {
+      maxChannelsPerServer: limits.maxChannelsPerServer,
+      maxVoiceUsersPerChannel: limits.maxVoiceUsersPerChannel,
+      maxCategoriesPerServer: limits.maxCategoriesPerServer,
+      maxMembersPerServer: limits.maxMembersPerServer,
+    }});
+  } catch (err) { next(err); }
+});
+
+// Reset per-server limits (remove all overrides)
+adminRouter.delete('/limits/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    await prisma.serverLimits.deleteMany({ where: { serverId: req.params.serverId } });
+    res.json({ success: true, message: 'Server limits reset to global defaults' });
+  } catch (err) { next(err); }
 });
 
 // ─── Ban Management ─────────────────────────────────────────────────────────
@@ -895,26 +1076,31 @@ adminRouter.get('/top-servers', async (req: Request, res: Response, next: NextFu
 
 // ─── Storage Management ──────────────────────────────────────────────────────
 
-function classifyKey(key: string): 'avatar' | 'server-icon' {
-  return key.startsWith('server-icons/') ? 'server-icon' : 'avatar';
+function classifyKey(key: string): 'avatar' | 'server-icon' | 'attachment' {
+  if (key.startsWith('server-icons/')) return 'server-icon';
+  if (key.startsWith('attachments/')) return 'attachment';
+  return 'avatar';
 }
 
 adminRouter.get('/storage/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const [objects, usersWithAvatar, serversWithIcon] = await Promise.all([
+    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys] = await Promise.all([
       listAllS3Objects(),
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
+      prisma.messageAttachment.findMany({ where: { expired: false }, select: { s3Key: true } }),
     ]);
 
     const referencedKeys = new Set<string>();
     for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
     for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
+    for (const a of attachmentKeys) referencedKeys.add(a.s3Key);
 
     const stats: StorageStats = {
       totalFiles: 0, totalSize: 0,
       avatarCount: 0, avatarSize: 0,
       serverIconCount: 0, serverIconSize: 0,
+      attachmentCount: 0, attachmentSize: 0,
       orphanCount: 0, orphanSize: 0,
     };
 
@@ -926,9 +1112,12 @@ adminRouter.get('/storage/stats', async (_req: Request, res: Response, next: Nex
       if (type === 'avatar') {
         stats.avatarCount++;
         stats.avatarSize += obj.size;
-      } else {
+      } else if (type === 'server-icon') {
         stats.serverIconCount++;
         stats.serverIconSize += obj.size;
+      } else {
+        stats.attachmentCount++;
+        stats.attachmentSize += obj.size;
       }
 
       if (!referencedKeys.has(obj.key)) {
@@ -952,10 +1141,9 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
       return res.json({ success: true, data: topUploadersCache.data });
     }
 
+    // ── 1. S3-based aggregation for avatars & server-icons ──
     const objects = await listAllS3Objects();
-
-    // Aggregate by entity ID parsed from S3 keys
-    const entityMap = new Map<string, { type: 'user' | 'server'; fileCount: number; totalSize: number }>();
+    const s3EntityMap = new Map<string, { type: 'user' | 'server'; fileCount: number; totalSize: number }>();
 
     for (const obj of objects) {
       let type: 'user' | 'server';
@@ -968,38 +1156,121 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
         filename = obj.key.slice('server-icons/'.length);
         type = 'server';
       } else {
-        continue;
+        continue; // attachments handled via DB below
       }
 
-      // Key format: {entityId}-{timestamp}.webp — split on last hyphen to get the entity ID
       const lastDash = filename.lastIndexOf('-');
       if (lastDash <= 0) continue;
       const entityId = filename.slice(0, lastDash);
 
-      const existing = entityMap.get(entityId);
+      const existing = s3EntityMap.get(entityId);
       if (existing) {
         existing.fileCount++;
         existing.totalSize += obj.size;
       } else {
-        entityMap.set(entityId, { type, fileCount: 1, totalSize: obj.size });
+        s3EntityMap.set(entityId, { type, fileCount: 1, totalSize: obj.size });
       }
     }
 
-    // Collect user IDs and server IDs
-    const userIds: string[] = [];
-    const serverIds: string[] = [];
-    for (const [id, info] of entityMap) {
-      if (info.type === 'user') userIds.push(id);
-      else serverIds.push(id);
+    // ── 2. DB-based aggregation for attachments ──
+    // Top users by attachment storage (grouped by message author)
+    const userAttachments = await prisma.messageAttachment.groupBy({
+      by: ['messageId'],
+      _count: { id: true },
+      _sum: { fileSize: true },
+      where: { expired: false },
+    });
+
+    // Resolve messageId → authorId
+    const messageIds = userAttachments.map((g) => g.messageId);
+    const messagesWithAuthor = messageIds.length > 0
+      ? await prisma.message.findMany({
+          where: { id: { in: messageIds } },
+          select: { id: true, authorId: true, channelId: true, channel: { select: { serverId: true } } },
+        })
+      : [];
+    const messageInfoMap = new Map(messagesWithAuthor.map((m) => [m.id, m]));
+
+    // Aggregate attachments per user and per server
+    const userAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>();
+    const serverAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>();
+
+    for (const group of userAttachments) {
+      const msgInfo = messageInfoMap.get(group.messageId);
+      if (!msgInfo) continue;
+      const count = group._count.id;
+      const size = group._sum.fileSize ?? 0;
+
+      // Per-user
+      const userEntry = userAttachmentMap.get(msgInfo.authorId);
+      if (userEntry) {
+        userEntry.fileCount += count;
+        userEntry.totalSize += size;
+      } else {
+        userAttachmentMap.set(msgInfo.authorId, { fileCount: count, totalSize: size });
+      }
+
+      // Per-server (only for channel messages)
+      if (msgInfo.channel) {
+        const serverId = msgInfo.channel.serverId;
+        const serverEntry = serverAttachmentMap.get(serverId);
+        if (serverEntry) {
+          serverEntry.fileCount += count;
+          serverEntry.totalSize += size;
+        } else {
+          serverAttachmentMap.set(serverId, { fileCount: count, totalSize: size });
+        }
+      }
     }
 
-    // Fetch names from DB
+    // ── 3. Merge S3 + attachment data ──
+    const mergedUsers = new Map<string, { fileCount: number; totalSize: number }>();
+    const mergedServers = new Map<string, { fileCount: number; totalSize: number }>();
+
+    // S3 avatars → users, S3 server-icons → servers
+    for (const [entityId, info] of s3EntityMap) {
+      const target = info.type === 'user' ? mergedUsers : mergedServers;
+      const existing = target.get(entityId);
+      if (existing) {
+        existing.fileCount += info.fileCount;
+        existing.totalSize += info.totalSize;
+      } else {
+        target.set(entityId, { fileCount: info.fileCount, totalSize: info.totalSize });
+      }
+    }
+
+    // Attachment data → users
+    for (const [userId, info] of userAttachmentMap) {
+      const existing = mergedUsers.get(userId);
+      if (existing) {
+        existing.fileCount += info.fileCount;
+        existing.totalSize += info.totalSize;
+      } else {
+        mergedUsers.set(userId, { fileCount: info.fileCount, totalSize: info.totalSize });
+      }
+    }
+
+    // Attachment data → servers
+    for (const [serverId, info] of serverAttachmentMap) {
+      const existing = mergedServers.get(serverId);
+      if (existing) {
+        existing.fileCount += info.fileCount;
+        existing.totalSize += info.totalSize;
+      } else {
+        mergedServers.set(serverId, { fileCount: info.fileCount, totalSize: info.totalSize });
+      }
+    }
+
+    // ── 4. Resolve names ──
+    const allUserIds = [...mergedUsers.keys()];
+    const allServerIds = [...mergedServers.keys()];
+
     const [users, servers] = await Promise.all([
-      userIds.length > 0
-        ? prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } })
+      allUserIds.length > 0
+        ? prisma.user.findMany({ where: { id: { in: allUserIds } }, select: { id: true, username: true } })
         : [],
-      serverIds.length > 0
-        ? prisma.server.findMany({ where: { id: { in: serverIds } }, select: { id: true, name: true } })
+      allServerIds.length > 0
+        ? prisma.server.findMany({ where: { id: { in: allServerIds } }, select: { id: true, name: true } })
         : [],
     ]);
 
@@ -1007,13 +1278,22 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
     for (const u of users) nameMap.set(u.id, u.username);
     for (const s of servers) nameMap.set(s.id, s.name);
 
-    // Build result, sort by totalSize desc, limit to 10
+    // ── 5. Build result ──
     const result: StorageTopUploader[] = [];
-    for (const [entityId, info] of entityMap) {
+    for (const [entityId, info] of mergedUsers) {
       result.push({
         entityId,
         entityName: nameMap.get(entityId) ?? 'Deleted',
-        type: info.type,
+        type: 'user',
+        fileCount: info.fileCount,
+        totalSize: info.totalSize,
+      });
+    }
+    for (const [entityId, info] of mergedServers) {
+      result.push({
+        entityId,
+        entityName: nameMap.get(entityId) ?? 'Deleted',
+        type: 'server',
         fileCount: info.fileCount,
         totalSize: info.totalSize,
       });
@@ -1035,24 +1315,31 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
     const filter = (req.query.filter as string) || 'all';
 
-    const prefix = filter === 'avatars' ? 'avatars/' : filter === 'server-icons' ? 'server-icons/' : undefined;
+    const prefix = filter === 'avatars' ? 'avatars/'
+      : filter === 'server-icons' ? 'server-icons/'
+      : filter === 'attachments' ? 'attachments/'
+      : undefined;
     const objects = await listAllS3Objects(prefix);
 
-    const [usersWithAvatar, serversWithIcon] = await Promise.all([
+    const [usersWithAvatar, serversWithIcon, attachmentRecords] = await Promise.all([
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { id: true, username: true, avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { id: true, name: true, iconUrl: true } }),
+      prisma.messageAttachment.findMany({ select: { s3Key: true, fileName: true, messageId: true, expired: true } }),
     ]);
 
     const keyToUser = new Map<string, { id: string; name: string }>();
     for (const u of usersWithAvatar) if (u.avatarUrl) keyToUser.set(u.avatarUrl, { id: u.id, name: u.username });
     const keyToServer = new Map<string, { id: string; name: string }>();
     for (const s of serversWithIcon) if (s.iconUrl) keyToServer.set(s.iconUrl, { id: s.id, name: s.name });
+    const keyToAttachment = new Map<string, { id: string; name: string; expired: boolean }>();
+    for (const a of attachmentRecords) keyToAttachment.set(a.s3Key, { id: a.messageId, name: a.fileName, expired: a.expired });
 
     let files: StorageFile[] = objects.map((obj) => {
       const type = classifyKey(obj.key);
       const userRef = keyToUser.get(obj.key);
       const serverRef = keyToServer.get(obj.key);
-      const linked = userRef ?? serverRef ?? null;
+      const attachRef = keyToAttachment.get(obj.key);
+      const linked = userRef ?? serverRef ?? (attachRef ? { id: attachRef.id, name: attachRef.name } : null);
 
       return {
         key: obj.key,
@@ -1062,6 +1349,7 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
         linkedEntity: linked?.name ?? null,
         linkedEntityId: linked?.id ?? null,
         isOrphan: !linked,
+        isExpired: attachRef?.expired ?? false,
       };
     });
 
@@ -1088,13 +1376,17 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
 adminRouter.delete('/storage/files/*', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const key = (req.params as Record<string, string>)[0];
-    if (!key || !VALID_S3_KEY_RE.test(key)) throw new BadRequestError('Invalid file key');
+    if (!key || (!VALID_S3_KEY_RE.test(key) && !VALID_ATTACHMENT_KEY_RE.test(key))) {
+      throw new BadRequestError('Invalid file key');
+    }
 
-    // Nullify DB reference
+    // Nullify or expire DB reference
     if (key.startsWith('avatars/')) {
       await prisma.user.updateMany({ where: { avatarUrl: key }, data: { avatarUrl: null } });
     } else if (key.startsWith('server-icons/')) {
       await prisma.server.updateMany({ where: { iconUrl: key }, data: { iconUrl: null } });
+    } else if (key.startsWith('attachments/')) {
+      await prisma.messageAttachment.updateMany({ where: { s3Key: key }, data: { expired: true } });
     }
 
     await deleteFromS3(key);
@@ -1301,7 +1593,7 @@ adminRouter.get('/export/users', async (_req: Request, res: Response, next: Next
     const users = await prisma.user.findMany({
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
-        role: true, status: true, bannedAt: true, banReason: true, createdAt: true,
+        role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -1612,15 +1904,17 @@ adminRouter.delete('/announcements/:id', async (req: Request<{ id: string }>, re
 
 adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const [objects, usersWithAvatar, serversWithIcon] = await Promise.all([
+    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys] = await Promise.all([
       listAllS3Objects(),
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
+      prisma.messageAttachment.findMany({ where: { expired: false }, select: { s3Key: true } }),
     ]);
 
     const referencedKeys = new Set<string>();
     for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
     for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
+    for (const a of attachmentKeys) referencedKeys.add(a.s3Key);
 
     const orphans = objects.filter((obj) => !referencedKeys.has(obj.key));
     let deleted = 0;
@@ -1817,7 +2111,7 @@ adminRouter.post('/reports/:id/dismiss', async (req: Request<{ id: string }>, re
 // ─── Support Tickets ────────────────────────────────────────────────────────
 
 const supportAuthorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true },
+  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
 };
 
 function mapSupportMessage(m: any): SupportMessageData {

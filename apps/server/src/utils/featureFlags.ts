@@ -1,4 +1,4 @@
-import { getRedis } from './redis';
+import { getRedis, getRedisPubSub, getRedisConfigSub } from './redis';
 
 // ─── Feature Flag Registry ──────────────────────────────────────────────────
 
@@ -16,6 +16,7 @@ const DEFAULTS: Record<string, FeatureFlagDef> = {
   voice:           { name: 'voice',           label: 'Voice Channels',      description: 'Allow users to join server voice channels',        enabled: true },
   dm_voice:        { name: 'dm_voice',        label: 'DM Voice Calls',      description: 'Allow users to start direct message voice calls',  enabled: true },
   support:         { name: 'support',         label: 'Support Tickets',     description: 'Allow users to open support tickets',              enabled: true },
+  community_funding: { name: 'community_funding', label: 'Community Funding', description: 'Show the community funding section on the landing page', enabled: false },
 };
 
 const REDIS_KEY = 'feature:flags';
@@ -23,7 +24,9 @@ const REDIS_KEY = 'feature:flags';
 // In-memory cache
 const overrides: Record<string, boolean> = {};
 
-/** Load overrides from Redis on server startup */
+const CONFIG_CHANNEL = 'config:feature_flags';
+
+/** Load overrides from Redis on server startup and subscribe to cross-node updates. */
 export async function loadFeatureFlags(): Promise<void> {
   try {
     const redis = getRedis();
@@ -35,6 +38,23 @@ export async function loadFeatureFlags(): Promise<void> {
     }
   } catch (err) {
     console.error('[FeatureFlags] Failed to load from Redis, using defaults:', err);
+  }
+
+  // Subscribe to config changes from other nodes
+  try {
+    const configSub = getRedisConfigSub();
+    await configSub.subscribe(CONFIG_CHANNEL, (message) => {
+      try {
+        const { name, enabled, action } = JSON.parse(message);
+        if (action === 'reset') {
+          delete overrides[name];
+        } else if (name in DEFAULTS) {
+          overrides[name] = enabled;
+        }
+      } catch { /* ignore malformed messages */ }
+    });
+  } catch (err) {
+    console.error('[FeatureFlags] Failed to subscribe to config channel:', err);
   }
 }
 
@@ -55,18 +75,24 @@ export function getAllFeatureFlags(): Array<FeatureFlagDef & { isCustom: boolean
   }));
 }
 
-/** Update a feature flag */
+/** Update a feature flag and notify all nodes. */
 export async function updateFeatureFlag(name: string, enabled: boolean): Promise<void> {
   if (!(name in DEFAULTS)) throw new Error(`Unknown feature flag: ${name}`);
   const redis = getRedis();
   await redis.hSet(REDIS_KEY, name, String(enabled));
   overrides[name] = enabled;
+  // Notify other nodes
+  const { pub } = getRedisPubSub();
+  await pub.publish(CONFIG_CHANNEL, JSON.stringify({ name, enabled, action: 'set' }));
 }
 
-/** Reset a feature flag to default */
+/** Reset a feature flag to default and notify all nodes. */
 export async function resetFeatureFlag(name: string): Promise<void> {
   if (!(name in DEFAULTS)) throw new Error(`Unknown feature flag: ${name}`);
   const redis = getRedis();
   await redis.hDel(REDIS_KEY, name);
   delete overrides[name];
+  // Notify other nodes
+  const { pub } = getRedisPubSub();
+  await pub.publish(CONFIG_CHANNEL, JSON.stringify({ name, action: 'reset' }));
 }

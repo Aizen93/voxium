@@ -81,6 +81,17 @@ export function playMessageSound(): void {
   playTone([{ freq: 880, duration: 0.15 }], 0.2);
 }
 
+/** Double-chime for @mention: 880Hz → 1047Hz (more prominent than regular message) */
+export function playMentionSound(): void {
+  playTone(
+    [
+      { freq: 880, duration: 0.1 },
+      { freq: 1047, duration: 0.15 },
+    ],
+    0.35,
+  );
+}
+
 /** Single call chime (used internally by the ringtone loop) */
 function playCallChime(): void {
   playTone(

@@ -73,7 +73,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 │           └─────────────────────────────┘                            │
 │                                                                       │
 │           ┌─────────────────────────────┐                            │
-│           │     SFU Media Server        │  ← mediasoup (future)     │
+│           │     SFU Media Server        │  ← mediasoup (active)     │
 │           │     (Voice/Video routing)   │                            │
 │           └─────────────────────────────┘                            │
 └───────────────────────────────────────────────────────────────────────┘
@@ -93,7 +93,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 | ORM | Prisma | 6.x |
 | Database | PostgreSQL | 16 |
 | Cache / Pub/Sub | Redis | 7 |
-| Voice (future) | mediasoup | 3.x |
+| Voice (SFU) | mediasoup | 3.x |
 | Auth | JWT (jsonwebtoken) | 9.x |
 | Validation | Zod + custom validators | — |
 | Password Hashing | bcryptjs | — |
@@ -140,14 +140,14 @@ apps/server/
 │   ├── app.ts              # Express app configuration, middleware, routes
 │   ├── routes/
 │   │   ├── auth.ts         # Register, login, refresh, me, forgot/reset/change password
-│   │   ├── servers.ts      # CRUD servers, join/leave, members, settings
+│   │   ├── servers.ts      # CRUD servers, join/leave, members, settings, member search
 │   │   ├── channels.ts     # CRUD channels, mark-as-read, bulk reorder
 │   │   ├── categories.ts   # CRUD categories, bulk reorder
-│   │   ├── messages.ts     # CRUD messages with pagination, reactions
+│   │   ├── messages.ts     # CRUD messages with pagination, reactions, @mention resolution
 │   │   ├── dm.ts           # DM conversations, messages, reactions, read tracking, deletion
 │   │   ├── users.ts        # User profiles, profile update with real-time broadcast
 │   │   ├── invites.ts      # Create/use/preview invites
-│   │   ├── uploads.ts      # Presigned URL generation (S3) + GET redirect proxy
+│   │   ├── uploads.ts      # Presigned URL generation (S3) + proxy streaming for attachments + GET redirect for public assets
 │   │   ├── friends.ts      # Friend requests (send/accept/decline/remove), friendship status
 │   │   ├── search.ts       # Full-text message search (server channels + DM conversations)
 │   │   ├── reports.ts      # User-facing report submission
@@ -171,9 +171,11 @@ apps/server/
 │       ├── redis.ts             # Redis client + presence helpers
 │       ├── errors.ts            # Custom error classes
 │       ├── sanitize.ts          # HTML stripping + text sanitization utility
-│       ├── s3.ts                # S3 client + presigned URL generation + delete helper + VALID_S3_KEY_RE
-│       ├── email.ts             # Nodemailer transporter + password reset email
+│       ├── s3.ts                # S3 client + presigned URL generation + delete helper + getS3Object proxy + VALID_S3_KEY_RE
+│       ├── email.ts             # Nodemailer transporter + password reset email + cleanup report email
+│       ├── attachmentCleanup.ts # Scheduled job (daily 4 AM) — expires attachments older than retention period, deletes from S3, emails report
 │       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
+│       ├── mentions.ts          # @mention extraction, resolution, batch resolution (server members only)
 │       ├── memberBroadcast.ts   # Server room join + member event broadcast
 │       ├── auditLog.ts         # Fire-and-forget audit event logger
 │       └── featureFlags.ts     # Redis-backed feature flag registry
@@ -259,7 +261,9 @@ apps/desktop/
 │   │   ├── chat/
 │   │   │   ├── ChatArea.tsx         # Server chat container
 │   │   │   ├── MessageList.tsx      # Scrollable message list
-│   │   │   ├── MessageItem.tsx      # Single message with edit/delete/reactions
+│   │   │   ├── MessageItem.tsx      # Single message with edit/delete/reactions/mention highlight
+│   │   │   ├── MessageContent.tsx   # Mention-aware content rendering (text + @mention badges)
+│   │   │   ├── MentionAutocomplete.tsx # @mention autocomplete (server-side search, keyboard nav)
 │   │   │   ├── MessageInput.tsx     # Message composer (channels + DMs)
 │   │   │   ├── ReactionDisplay.tsx  # Reaction chips (channels + DMs)
 │   │   │   └── DeleteConfirmModal.tsx # Message delete confirmation
@@ -275,6 +279,7 @@ apps/desktop/
 │   │   │   └── AddFriendForm.tsx   # Send friend request by username
 │   │   ├── voice/
 │   │   │   ├── VoicePanel.tsx          # Server voice connection controls
+│   │   │   ├── DMVoicePanel.tsx        # Global DM call status (visible from any view)
 │   │   │   ├── ScreenShareViewer.tsx   # Inline screen share viewer (replaces ChatArea)
 │   │   │   └── ScreenShareFloating.tsx # Draggable/resizable floating viewer
 │   │   └── search/
@@ -292,9 +297,9 @@ apps/desktop/
 │   │   ├── api.ts               # Axios instance with interceptors
 │   │   ├── socket.ts            # Socket.IO client manager
 │   │   ├── audioAnalyser.ts     # Speaking detection (server + DM mode)
-│   │   ├── notificationSounds.ts # Sound effects (message, join, leave, looping call ringtone)
+│   │   ├── notificationSounds.ts # Sound effects (message, mention, join, leave, looping call ringtone)
 │   │   ├── tokenStorage.ts      # Dual-storage token abstraction (localStorage/sessionStorage)
-│   │   └── notifications.ts     # Tauri native notifications with Web API fallback
+│   │   └── notifications.ts     # 3-tier notifications: WinRT toast (avatar) → Tauri plugin → Web API (blob URL avatar)
 │   ├── utils/
 │   │   └── imageProcessing.ts   # Client-side image resize + WebP via Canvas API
 │   └── styles/
@@ -302,7 +307,7 @@ apps/desktop/
 ├── src-tauri/                # Tauri Rust backend
 │   ├── src/
 │   │   ├── main.rs           # Desktop entry point
-│   │   └── lib.rs            # Tauri setup
+│   │   └── lib.rs            # Tauri setup + notify_with_avatar command (WinRT toast with circular avatar)
 │   ├── Cargo.toml
 │   └── tauri.conf.json       # Tauri configuration
 ```
@@ -447,6 +452,19 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 │ @@unique(user1Id,    │    user1Id < user2Id invariant
 │   user2Id)           │    for deduplication
 └──────────────────────┘
+
+┌──────────────────────┐    ┌──────────────────────┐
+│   GlobalConfig       │    │   ServerLimits        │
+│   (singleton)        │    │   (per-server)        │
+│                      │    │                       │
+│ id = "global" (PK)   │    │ serverId (PK,FK)      │
+│ maxChannelsPerServer │    │ maxChannelsPerServer?  │
+│ maxVoiceUsersPerCh.  │    │ maxVoiceUsersPerCh.?  │
+│ maxCategoriesPerSrv  │    │ maxCategoriesPerSrv?  │
+│ maxMembersPerServer  │    │ maxMembersPerServer?   │
+│ updatedAt            │    │ updatedAt              │
+└──────────────────────┘    └──────────────────────┘
+  Defaults: 20/12/12/0       Nullable = use global
 ```
 
 ### Key Indexes
@@ -577,27 +595,7 @@ Client                          Server
 
 ## Voice Architecture
 
-### Current Implementation (V0.1 - Mesh)
-
-```
-            ┌────────┐
-   ┌────────│ Server │────────┐
-   │        │(Signal)│        │
-   │        └───┬────┘        │
-   │            │             │
-┌──┴──┐    ┌───┴───┐    ┌────┴──┐
-│User A│<──>│User B │<──>│User C │
-│      │    │       │    │       │
-└──────┘    └───────┘    └───────┘
-  P2P WebRTC connections (mesh)
-```
-
-- Server acts as signaling relay only (ICE candidates, SDP offers/answers)
-- Peers connect directly via WebRTC
-- Works well for up to ~6-8 users per channel
-- State tracked in-memory on the server
-
-### Future Implementation (V0.4+ - SFU)
+### Current Implementation — mediasoup SFU
 
 ```
 ┌────────┐  ┌────────┐  ┌────────┐
@@ -614,22 +612,29 @@ Client                          Server
           └────────────┘
 ```
 
-- Each client sends one upstream to the SFU
-- SFU selectively forwards streams to recipients
-- Scales to 99+ users per channel
-- Supports simulcast for bandwidth adaptation
-- mediasoup workers distribute across CPU cores
+- Each client sends one upstream (Producer) to the SFU
+- SFU selectively forwards streams to recipients via Consumers
+- Each voice channel gets its own mediasoup Router (lazy-created, round-robin across Workers)
+- Each user gets 2 WebRTC transports (send + recv), each using one UDP port from shared range
+- Workers: 1 per CPU core (capped at 8), auto-restart on death
+- Configuration: `MEDIASOUP_LISTEN_IP`, `MEDIASOUP_ANNOUNCED_IP` (LAN IP), `MEDIASOUP_MIN_PORT`/`MAX_PORT`
+- Key files: `mediasoup/mediasoupManager.ts`, `mediasoup/mediasoupConfig.ts`, `websocket/voiceHandler.ts`
 
 ### Voice State Management
 
 Voice state is tracked per-channel in memory:
 
 ```typescript
-// Voice user state
+// Voice user state (includes mediasoup transports/producers/consumers)
 Map<channelId, Map<userId, {
   socketId: string;
   selfMute: boolean;
   selfDeaf: boolean;
+  sendTransport: WebRtcTransport | null;
+  recvTransport: WebRtcTransport | null;
+  producers: Map<string, Producer>;
+  consumers: Map<string, Consumer>;
+  rtpCapabilities: RtpCapabilities | null;
 }>>
 
 // Screen share state (one sharer per channel)
@@ -638,12 +643,21 @@ Map<channelId, userId>  // screenSharers
 
 For multi-node deployment, this will migrate to Redis with pub/sub for cross-node synchronization.
 
-### Screen Sharing (V0.9.6)
+### Resource Limits
+
+Server resource limits are enforced dynamically via `utils/serverLimits.ts`:
+- **Resolution order:** per-server override (`ServerLimits` table) > global config (`GlobalConfig` singleton) > hardcoded `LIMITS` constants
+- **Defaults:** maxChannelsPerServer=20, maxVoiceUsersPerChannel=12, maxCategoriesPerServer=12, maxMembersPerServer=0 (unlimited)
+- **Enforcement points:** channel creation, category creation, voice:join, invite join
+- **Admin API:** `GET/PUT /admin/limits/global`, `GET/PUT/DELETE /admin/limits/servers/:serverId`
+- **User API:** `GET /servers/:serverId/limits` (read-only, shown in ServerSettingsModal "Limits" tab)
+
+### Screen Sharing
 
 Screen sharing allows one user per voice channel to share their screen with all other participants using `getDisplayMedia` for capture:
 
 - **Capture:** Browser/WebView2 native `getDisplayMedia()` API (hardware-accelerated, supports video + optional system audio)
-- **Transport:** Video tracks added to existing WebRTC peer connections via `addTrack`/`removeTrack`, triggering `onnegotiationneeded` for SDP renegotiation
+- **Transport:** Video track produced as a mediasoup Producer with `appData: { type: 'screen' }`, consumed by all other channel users
 - **One sharer per channel:** Server enforces via `screenSharers` Map; second start request is silently dropped
 - **Late-joiner hydration:** `voice:join` handler emits `voice:screen_share:state` so users joining mid-share see the stream immediately
 - **Viewer modes:** Inline (replaces ChatArea) or floating (draggable/resizable portal)
@@ -671,7 +685,7 @@ Screen sharing allows one user per voice channel to share their screen with all 
 - In-memory state: `dmVoiceUsers` Map (conversationId → Map of userId → socketId) + `userDMCall` reverse lookup
 - System messages ("Voice call started" / "Voice call ended") persisted to DB as `type: 'system'`
 - Call offer broadcasts to `dm:{conversationId}` room; incoming call shown via `IncomingCallModal` with looping ringtone (stops on accept/decline/cancel)
-- DM call UI rendered inline in `DMChatArea` via `DMCallPanel` (separate from server `VoicePanel`)
+- DM call UI has two layers: `DMCallPanel` renders inline in `DMChatArea` (full avatars + controls when viewing the conversation), and `DMVoicePanel` is a compact global panel rendered in both `ChannelSidebar` (after `VoicePanel`) and `DMList` so the user always sees their DM call status from any view
 
 ---
 
@@ -728,17 +742,23 @@ Change Password (authenticated):
 | Layer | Protection |
 |-------|-----------|
 | Transport | HTTPS in production |
-| Headers | Helmet.js (CSP, HSTS, X-Frame, etc.) |
-| Auth | JWT with short expiry + refresh rotation + tokenVersion invalidation |
-| Passwords | bcrypt with 12 salt rounds |
+| Headers | Helmet.js (CSP, HSTS, X-Frame, etc.) + Tauri CSP (restrictive `connect-src`, `script-src`, etc.) |
+| Auth | JWT with short expiry + refresh rotation + tokenVersion invalidation + `algorithms: ['HS256']` pinning + purpose field rejection (prevents token type confusion) |
+| Passwords | bcrypt with 12 salt rounds, PASSWORD_MAX=72 (matches bcrypt's actual input limit) |
 | Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
+| Registration | Generic "Username or email already in use" error prevents email enumeration |
 | CORS | Explicit origin whitelist |
-| Input | Server-side validation on all endpoints |
+| Input | Server-side validation on all endpoints + runtime type validation on all Socket.IO payloads |
 | SQL Injection | Prisma parameterized queries |
-| WebSocket | JWT verification on connection |
+| IDOR | Message edit/delete verify channelId match + server membership; cross-channel manipulation blocked |
+| WebSocket | JWT verification on connection + purpose field rejection + runtime payload validation |
 | Input Sanitization | HTML tag stripping + trim on all user-generated text (defense-in-depth) |
-| Rate Limiting | rate-limiter-flexible with Redis (per-endpoint + per-socket), fail-open with in-memory fallback |
-| TOTP 2FA | AES-256-GCM encrypted secrets at rest (`TOTP_ENCRYPTION_KEY`), bcrypt-hashed backup codes, 30-day trusted device JWTs with tokenVersion validation, dedicated rate limiter |
+| Rate Limiting | rate-limiter-flexible with Redis (per-endpoint + per-socket), fail-open with in-memory fallback; complete coverage on all write endpoints and socket events |
+| TOTP 2FA | AES-256-GCM encrypted secrets at rest (`TOTP_ENCRYPTION_KEY`), bcrypt-hashed backup codes, 30-day trusted device JWTs with tokenVersion validation, dedicated rate limiter, Redis-based replay protection (90s TTL) |
+| Admin | Role hierarchy enforcement — admins cannot ban/delete peer admins (superadmin required) |
+| S3 Uploads | Presigned PUT URLs enforce Content-Type via `signableHeaders`; proxy streaming for attachments (S3 URL never exposed) |
+| Trust Proxy | Conditional on `NODE_ENV=production` or `TRUST_PROXY=true` — prevents IP spoofing in dev |
+| CI/CD | GitHub Actions use env vars for attacker-controlled context (never interpolated in `run:`) |
 
 ### TOTP Two-Factor Authentication Flow
 
@@ -844,14 +864,14 @@ apps/admin/
 │   │   └── adminStore.ts    # All admin state + actions (Zustand)
 │   ├── components/
 │   │   ├── AdminLayout.tsx         # Sidebar nav + content router
-│   │   ├── AdminDashboard.tsx      # Stats cards + live metrics + charts
+│   │   ├── AdminDashboard.tsx      # Stats cards + REST metrics + SFU stats + charts
 │   │   ├── AdminReports.tsx        # Moderation queue (pending/resolved/dismissed)
 │   │   ├── AdminSupportTickets.tsx # Support ticket queue + chat panel
 │   │   ├── AdminUserList.tsx       # Paginated user management
-│   │   ├── AdminServerList.tsx     # Paginated server management
+│   │   ├── AdminServerList.tsx     # Paginated server management + global/per-server resource limits
 │   │   ├── AdminBanList.tsx        # User bans + IP bans
 │   │   ├── AdminAnnouncements.tsx  # Global/targeted announcements
-│   │   ├── AdminStorage.tsx        # S3 storage stats + file browser
+│   │   ├── AdminStorage.tsx        # S3 storage stats (avatars, server icons, attachments, orphans) + file browser with type/status filters + delete/cleanup actions
 │   │   ├── AdminRateLimits.tsx     # Rate limit controls (edit/reset rules, clear user counters)
 │   │   ├── AdminFeatureFlags.tsx   # Feature flag toggles
 │   │   ├── AdminAuditLog.tsx       # Searchable/filterable audit trail
@@ -873,10 +893,83 @@ apps/admin/
 
 ### Admin Real-Time Events
 
-Socket.IO rooms for admin subscriptions:
-- `admin:metrics` — Live metrics (online users, voice channels, DM calls, messages/hour)
-- `admin:reports` — New report notifications → auto-refresh
-- `admin:support` — New ticket/message notifications → auto-refresh
+- **Dashboard metrics** — fetched via REST (`GET /admin/stats/live`, `GET /admin/stats/sfu`) with refresh buttons. SFU stats include per-worker transport counts, port utilization, producers/consumers.
+- `admin:reports` — Socket.IO subscription for new report notifications → auto-refresh
+- `admin:support` — Socket.IO subscription for new ticket/message notifications → auto-refresh
+
+### Admin Resource Limits
+
+Admins can control server resource allocation:
+- **Global limits** (`GET/PUT /admin/limits/global`) — defaults applied to all servers
+- **Per-server overrides** (`GET/PUT/DELETE /admin/limits/servers/:serverId`) — nullable fields override global (null = use global)
+- Resolution: server override > global config > hardcoded `LIMITS` constants
+- Managed in AdminServerList: collapsible global limits panel + per-server settings modal
+
+### Admin Storage Management
+
+Admin dashboard storage page provides full visibility into S3 usage:
+- **Stat cards** — Total storage, avatars, server icons, attachments, orphaned files (count + size)
+- **Top uploaders** — Users and servers ranked by total storage consumption (avatars + server icons + message attachments aggregated from S3 keys and DB records)
+- **File browser** — Filterable table (all/avatars/server-icons/attachments/orphaned) with type badges, status badges (Active/Orphaned/Expired), linked entity display, and per-file delete
+- **Bulk cleanup** — Delete all orphaned files (files in S3 not referenced by any DB record)
+- **Delete behavior** — Avatar/server-icon deletion removes from S3 and clears the DB reference; attachment deletion marks as `expired: true` in DB (soft-delete) so the chat UI shows an "Expired" placeholder instead of a broken link
+
+### Attachment Lifecycle
+
+Message attachments follow a 3-day retention lifecycle:
+
+1. **Upload** — Client requests presigned PUT URL (`POST /uploads/presign/attachment`), uploads directly to S3. Server validates file type, size, and authorization (server membership or DM participation). S3 key includes context prefix (`attachments/ch-{channelId}/` or `attachments/dm-{conversationId}/`)
+2. **Access** — Attachments are proxied through the server (`GET /uploads/attachments/*`) — S3 URLs never reach the client. Authorization is checked per-request (server member or DM participant). Self-healing: if S3 returns `NoSuchKey`, the attachment is auto-marked as expired
+3. **Expiry** — A scheduled cleanup job runs daily at 4 AM. It queries `MessageAttachment` records older than `ATTACHMENT_RETENTION_DAYS` (default: 3), marks them as `expired: true` in the DB, then deletes the S3 objects. DB records are preserved for the "Expired" UI placeholder
+4. **Report** — After each cleanup run, an email report is sent to `CLEANUP_REPORT_EMAIL` with: status, duration, files expired, storage freed, remaining active attachments, and any errors
+
+### Desktop Notifications
+
+3-tier notification system with avatar support (`services/notifications.ts`):
+
+```
+notify(title, body, avatarKey)
+  │
+  ├─ [1] Tauri: invoke('notify_with_avatar') ── Rust command ──┐
+  │       │                                                     │
+  │       │  Windows: WinRT Toast with circular avatar          │
+  │       │  ├─ Download avatar via ureq (HTTP GET ?inline)     │
+  │       │  ├─ Validate: key regex + magic bytes + 1MB limit   │
+  │       │  ├─ Cache to %TEMP%/voxium_avatars/ (symlink check) │
+  │       │  └─ Toast::icon(path, IconCrop::Circular)           │
+  │       │                                                     │
+  │       │  Other OS: returns Err → falls through              │
+  │       │                                                     │
+  ├─ [2] Tauri: sendNotification({title, body}) ── text-only    │
+  │       (plugin fallback, no avatar support)                   │
+  │                                                              │
+  └─ [3] Browser: new Notification(title, {icon: blobUrl})      │
+          ├─ fetch(API_BASE/uploads/{key}?inline)                │
+          ├─ Create blob URL (URL.createObjectURL)               │
+          ├─ Cache: Map<key, blobUrl>, max 100, LRU eviction     │
+          └─ Dedup: concurrent fetches for same key share promise│
+```
+
+**Security:**
+- All Tauri-specific code gated behind `TAURI_AVAILABLE` (`'__TAURI_INTERNALS__' in window`)
+- Avatar key validated against `VALID_AVATAR_KEY_RE` on both frontend (JS regex) and backend (Rust regex)
+- Rust: null byte rejection, control char rejection, 128-char key limit, image magic byte validation (PNG/JPEG/WebP/GIF), symlink detection on cached files
+- Server: `?inline` proxy forces `Content-Type: image/webp`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`
+
+### Presence Cleanup
+
+`clearPresenceState()` in `utils/redis.ts` prevents ghost online statuses:
+- Collects all user IDs from Redis `online_users` set
+- Deletes per-user socket sets (`user:sockets:{userId}`)
+- Clears global keys (`online_users`, `socket:users`)
+- Resets all DB users with `status: 'online'` to `'offline'`
+- Called on server startup (before accepting connections) and graceful shutdown
+
+### Email System
+
+Nodemailer transporter (`utils/email.ts`) with configurable SMTP:
+- **Password reset emails** — HTML + plaintext with reset link, 1hr expiry
+- **Cleanup report emails** — HTML + plaintext summary table sent to `CLEANUP_REPORT_EMAIL` after each daily attachment cleanup run
 
 ---
 
@@ -1006,9 +1099,9 @@ mediasoup Deployment (autoscaling)
 | **Video calls** | mediasoup SFU with video codecs (VP8/VP9/H264) |
 | **~~Screen sharing~~** | ~~mediasoup producer for screen capture~~ **Implemented (v0.9.6)** — `getDisplayMedia()` capture with WebRTC P2P track forwarding; one sharer per channel; inline + floating viewer modes |
 | **~~Direct Messages~~** | ~~New DM channel type, conversation model~~ **Implemented (v0.5.0–v0.7.0)** — 1-on-1 text + voice with `Conversation` model, real-time delivery, typing, reactions, unread tracking, WebRTC P2P calls, conversation deletion with cascade + real-time sync |
-| **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2, migrated v0.9.1)** — presigned URL direct-to-S3 uploads with client-side Canvas image processing; server generates presigned PUT/GET URLs, no file bytes touch the backend |
+| **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2, migrated v0.9.1, attachments v1.2.0)** — presigned URL direct-to-S3 uploads for avatars, server icons, and message attachments; attachments proxied through server (S3 URL never exposed); 3-day retention with daily 4 AM cleanup job + email report; soft-delete preserves DB records for "Expired" UI placeholders |
 | **~~Password reset~~** | ~~Email-based reset flow~~ **Implemented (v0.4.0)** — Nodemailer + SHA-256 hashed tokens + tokenVersion-based session invalidation |
-| **Push notifications** | FCM/APNs integration service |
+| **~~Push notifications~~** | ~~FCM/APNs integration service~~ **Partially implemented (v1.2.1)** — Native OS notifications with avatar support (WinRT toast on Windows, Web Notification API in browser); FCM/APNs for mobile remains future work |
 | **~~Message search~~** | ~~Elasticsearch / PostgreSQL full-text search~~ **Implemented (v0.9.5)** — PostgreSQL case-insensitive `contains` search across server channels and DM conversations; cursor-based pagination; "around" mode for jump-to-message with scroll + highlight |
 | **Mobile app** | React Native sharing stores/services with web |
 | **Bot API** | Gateway API for third-party integrations |

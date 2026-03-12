@@ -2,17 +2,19 @@ import { useState } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
-import { Plus, LogOut, Settings } from 'lucide-react';
+import { Plus, LogOut, Settings, Volume2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { CreateServerModal } from './CreateServerModal';
 import { Avatar } from '../common/Avatar';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useVoiceStore } from '../../stores/voiceStore';
 import { APP_VERSION } from '@voxium/shared';
 
 export function ServerSidebar() {
   const { servers, activeServerId, setActiveServer, serverUnreadCounts } = useServerStore();
   const { logout, user } = useAuthStore();
   const totalDMUnread = useDMStore((s) => Object.values(s.dmUnreadCounts).reduce((sum, c) => sum + c, 0));
+  const voiceServerId = useVoiceStore((s) => s.activeVoiceServerId);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ top: number; left: number } | null>(null);
@@ -41,8 +43,11 @@ export function ServerSidebar() {
           )}
         </button>
 
+        {/* Separator */}
+        <div className="w-8 h-[2px] rounded-full bg-vox-border" />
+
         {/* Server List */}
-        <div className="flex flex-1 flex-col items-center gap-2 overflow-y-auto overflow-x-hidden pr-1">
+        <div className="flex flex-1 flex-col items-center gap-2 overflow-y-auto overflow-x-hidden py-1 px-2">
           {servers.map((server) => (
             <div key={server.id} className="relative flex w-full items-center justify-center">
               <button
@@ -83,6 +88,11 @@ export function ServerSidebar() {
               {activeServerId !== server.id && (serverUnreadCounts[server.id] || 0) > 0 && (
                 <span className="absolute -bottom-1 -right-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-orange-500 px-1 text-[10px] font-bold text-white ring-2 ring-vox-sidebar">
                   {serverUnreadCounts[server.id] > 99 ? '99+' : serverUnreadCounts[server.id]}
+                </span>
+              )}
+              {voiceServerId === server.id && (
+                <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-vox-voice-connected ring-2 ring-vox-sidebar">
+                  <Volume2 size={10} className="text-white" />
                 </span>
               )}
             </div>

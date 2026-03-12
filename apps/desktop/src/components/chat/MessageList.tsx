@@ -1,8 +1,9 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from './MessageItem';
+import { ArrowDown } from 'lucide-react';
 
 export function MessageList() {
   const { messages, hasMore, isLoading, fetchMessages, typingUsers, targetMessageId, clearTargetMessage } = useChatStore();
@@ -12,6 +13,7 @@ export function MessageList() {
   const listRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const fetchingRef = useRef(false); // local guard against concurrent scroll fetches
+  const [showScrollButton, setShowScrollButton] = useState(false);
 
   const currentMember = members.find((m) => m.userId === user?.id);
   const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
@@ -27,6 +29,7 @@ export function MessageList() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView();
     fetchingRef.current = false;
+    setShowScrollButton(false);
   }, [activeChannelId]);
 
   // Scroll to target message (from search)
@@ -48,7 +51,9 @@ export function MessageList() {
     if (!el) return;
 
     // Check if near bottom
-    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    isNearBottomRef.current = nearBottom;
+    setShowScrollButton(!nearBottom);
 
     // Load more when scrolled to top — use local ref to prevent concurrent requests
     if (
@@ -97,55 +102,70 @@ export function MessageList() {
     return `${names[0]} and ${names.length - 1} others are typing...`;
   })();
 
+  const scrollToBottom = () => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
   return (
-    <div
-      ref={listRef}
-      className="flex-1 overflow-y-auto px-4 py-4"
-      onScroll={handleScroll}
-    >
-      {isLoading && messages.length === 0 && (
-        <div className="flex items-center justify-center py-8">
-          <div className="h-6 w-6 animate-spin rounded-full border-2 border-vox-accent-primary border-t-transparent" />
-        </div>
-      )}
-
-      {!hasMore && messages.length > 0 && (
-        <div className="mb-6 border-b border-vox-border pb-4">
-          <h4 className="text-2xl font-bold text-vox-text-primary">Welcome to the channel!</h4>
-          <p className="text-sm text-vox-text-secondary">This is the beginning of the conversation.</p>
-        </div>
-      )}
-
-      {messages.map((message, index) => {
-        const showHeader = shouldShowHeader(index);
-        const isOwn = message.author.id === user?.id;
-
-        return (
-          <MessageItem
-            key={message.id}
-            message={message}
-            showHeader={showHeader}
-            addTopMargin={showHeader && index > 0}
-            isOwn={isOwn}
-            canDelete={isOwn || isAdmin}
-            channelId={activeChannelId!}
-          />
-        );
-      })}
-
-      {/* Typing indicator */}
-      {typingText && (
-        <div className="flex items-center gap-2 px-4 py-1">
-          <div className="flex gap-0.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
-            <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
-            <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
+    <div className="relative flex-1 overflow-hidden">
+      <div
+        ref={listRef}
+        className="h-full overflow-y-auto px-4 py-4"
+        onScroll={handleScroll}
+      >
+        {isLoading && messages.length === 0 && (
+          <div className="flex items-center justify-center py-8">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-vox-accent-primary border-t-transparent" />
           </div>
-          <span className="text-xs text-vox-text-muted">{typingText}</span>
-        </div>
-      )}
+        )}
 
-      <div ref={bottomRef} />
+        {!hasMore && messages.length > 0 && (
+          <div className="mb-6 border-b border-vox-border pb-4">
+            <h4 className="text-2xl font-bold text-vox-text-primary">Welcome to the channel!</h4>
+            <p className="text-sm text-vox-text-secondary">This is the beginning of the conversation.</p>
+          </div>
+        )}
+
+        {messages.map((message, index) => {
+          const showHeader = shouldShowHeader(index);
+          const isOwn = message.author.id === user?.id;
+
+          return (
+            <MessageItem
+              key={message.id}
+              message={message}
+              showHeader={showHeader}
+              addTopMargin={showHeader && index > 0}
+              isOwn={isOwn}
+              canDelete={isOwn || isAdmin}
+              channelId={activeChannelId!}
+            />
+          );
+        })}
+
+        {/* Typing indicator */}
+        {typingText && (
+          <div className="flex items-center gap-2 px-4 py-1">
+            <div className="flex gap-0.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
+            </div>
+            <span className="text-xs text-vox-text-muted">{typingText}</span>
+          </div>
+        )}
+
+        <div ref={bottomRef} />
+      </div>
+
+      {showScrollButton && (
+        <button
+          onClick={scrollToBottom}
+          className="absolute bottom-4 left-1/2 -translate-x-1/2 flex h-8 w-8 items-center justify-center rounded-full bg-vox-bg-tertiary text-vox-text-secondary shadow-lg hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
+        >
+          <ArrowDown size={16} />
+        </button>
+      )}
     </div>
   );
 }

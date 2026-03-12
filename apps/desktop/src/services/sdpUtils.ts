@@ -1,9 +1,11 @@
+import { useSettingsStore, VOICE_QUALITY_BITRATE } from '../stores/settingsStore';
+
 /**
  * Optimizes the Opus codec parameters in an SDP offer/answer for voice chat.
  *
  * - usedtx=1        — 20x bandwidth reduction during silence (Discontinuous Transmission)
  * - useinbandfec=1   — embeds redundant audio data for packet loss recovery
- * - maxaveragebitrate — 32kbps is excellent quality for mono voice
+ * - maxaveragebitrate — set based on voice quality setting (low/medium/high)
  * - stereo=0         — mono voice halves bandwidth vs stereo
  */
 export function optimizeOpusSDP(sdp: string): string {
@@ -11,11 +13,14 @@ export function optimizeOpusSDP(sdp: string): string {
   const opusMatch = sdp.match(/a=rtpmap:(\d+) opus\/48000/);
   if (!opusMatch) return sdp;
 
+  const voiceQuality = useSettingsStore.getState().voiceQuality;
+  const bitrate = VOICE_QUALITY_BITRATE[voiceQuality];
+
   const pt = opusMatch[1];
   const opusParams: Record<string, string> = {
     usedtx: '1',
     useinbandfec: '1',
-    maxaveragebitrate: '32000',
+    maxaveragebitrate: String(bitrate),
     stereo: '0',
   };
 

@@ -1,18 +1,19 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
 import { ImageUploadButton } from '../common/ImageUploadButton';
 import { X, Lock, Unlock } from 'lucide-react';
-import type { ServerMember, MemberRole } from '@voxium/shared';
+import type { ServerMember, MemberRole, ResourceLimits } from '@voxium/shared';
+import { api } from '../../services/api';
 
 interface Props {
   serverId: string;
   onClose: () => void;
 }
 
-type Tab = 'general' | 'members';
+type Tab = 'general' | 'members' | 'limits';
 
 export function ServerSettingsModal({ serverId, onClose }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('general');
@@ -58,14 +59,26 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
           >
             Members
           </button>
+          <button
+            onClick={() => setActiveTab('limits')}
+            className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+              activeTab === 'limits'
+                ? 'text-vox-text-primary border-vox-accent-primary'
+                : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+            }`}
+          >
+            Limits
+          </button>
         </div>
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6">
           {activeTab === 'general' ? (
             <GeneralTab serverId={serverId} onClose={onClose} />
-          ) : (
+          ) : activeTab === 'members' ? (
             <MembersTab serverId={serverId} />
+          ) : (
+            <LimitsTab serverId={serverId} />
           )}
         </div>
       </div>
@@ -391,6 +404,64 @@ function MembersTab({ serverId }: { serverId: string }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function LimitsTab({ serverId }: { serverId: string }) {
+  const [limits, setLimits] = useState<ResourceLimits | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get(`/servers/${serverId}/limits`);
+        if (!cancelled) setLimits(data.data);
+      } catch {
+        if (!cancelled) toast.error('Failed to load server limits');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [serverId]);
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-8">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-vox-accent-primary border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (!limits) return null;
+
+  const items = [
+    { label: 'Max Channels', value: limits.maxChannelsPerServer, description: 'Maximum text + voice channels in this server' },
+    { label: 'Max Voice Users per Channel', value: limits.maxVoiceUsersPerChannel, description: 'Maximum users that can join a single voice channel' },
+    { label: 'Max Categories', value: limits.maxCategoriesPerServer, description: 'Maximum channel categories in this server' },
+    { label: 'Max Members', value: limits.maxMembersPerServer, description: 'Maximum members that can join this server', formatZero: 'Unlimited' },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-vox-text-muted">
+        Resource limits for this server. These are configured by platform administrators.
+      </p>
+      <div className="space-y-3">
+        {items.map((item) => (
+          <div key={item.label} className="flex items-center justify-between rounded-lg bg-vox-bg-secondary border border-vox-border px-4 py-3">
+            <div>
+              <p className="text-sm font-medium text-vox-text-primary">{item.label}</p>
+              <p className="text-xs text-vox-text-muted">{item.description}</p>
+            </div>
+            <span className="text-lg font-bold text-vox-accent-primary">
+              {item.formatZero && item.value === 0 ? item.formatZero : item.value}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

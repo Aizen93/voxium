@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Ban, ShieldOff, Trash2, Globe, ShieldCheck, ShieldMinus } from 'lucide-react';
+import { ArrowLeft, Ban, ShieldOff, Trash2, Globe, ShieldCheck, ShieldMinus, Heart, Sparkles, Crown } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminConfirmModal } from './AdminConfirmModal';
@@ -12,7 +12,7 @@ interface Props {
 }
 
 export function AdminUserDetail({ userId, onBack }: Props) {
-  const { selectedUser, fetchUserDetail, banUser, unbanUser, deleteUser, updateUserRole } = useAdminStore();
+  const { selectedUser, fetchUserDetail, banUser, unbanUser, deleteUser, updateUserRole, toggleSupporter } = useAdminStore();
   const currentUser = useAuthStore((s) => s.user);
   const isSuperAdmin = currentUser?.role === 'superadmin';
   const [confirmAction, setConfirmAction] = useState<'ban' | 'unban' | 'delete' | 'deleteWithTransfer' | 'promote' | 'demote' | null>(null);
@@ -53,6 +53,20 @@ export function AdminUserDetail({ userId, onBack }: Props) {
             }`}>
               {selectedUser.role}
             </span>
+            {selectedUser.isSupporter && (
+              <span className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${
+                selectedUser.supporterTier === 'first' ? 'bg-amber-500/20 text-amber-400' :
+                selectedUser.supporterTier === 'top' ? 'bg-purple-500/20 text-purple-400' :
+                'bg-pink-500/20 text-pink-400'
+              }`}>
+                {selectedUser.supporterTier === 'first' ? <Sparkles size={10} /> :
+                 selectedUser.supporterTier === 'top' ? <Crown size={10} /> :
+                 <Heart size={10} />}
+                {selectedUser.supporterTier === 'first' ? 'First Supporter' :
+                 selectedUser.supporterTier === 'top' ? 'Top Supporter' :
+                 'Supporter'}
+              </span>
+            )}
             {selectedUser.bannedAt && (
               <span className="text-xs px-2 py-1 rounded bg-vox-accent-danger/20 text-vox-accent-danger">BANNED</span>
             )}
@@ -136,6 +150,57 @@ export function AdminUserDetail({ userId, onBack }: Props) {
                   <ShieldCheck size={14} /> Promote to Admin
                 </button>
               )
+            )}
+
+            <button
+              onClick={async () => {
+                try {
+                  await toggleSupporter(selectedUser.id, !selectedUser.isSupporter);
+                  await fetchUserDetail(selectedUser.id);
+                  toast.success(selectedUser.isSupporter ? 'Supporter badge removed' : 'Supporter badge granted');
+                } catch {
+                  toast.error('Failed to update supporter status');
+                }
+              }}
+              className={`flex items-center gap-2 px-4 py-2 text-sm rounded-md ${
+                selectedUser.isSupporter
+                  ? 'bg-pink-500/20 text-pink-400 hover:bg-pink-500/30'
+                  : 'bg-vox-bg-tertiary text-vox-text-secondary hover:bg-vox-bg-hover'
+              }`}
+            >
+              <Heart size={14} /> {selectedUser.isSupporter ? 'Remove Supporter' : 'Grant Supporter'}
+            </button>
+
+            {selectedUser.isSupporter && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-vox-text-muted">Tier:</span>
+                {([
+                  { value: null, label: 'Regular', icon: Heart, color: 'pink' },
+                  { value: 'first', label: 'First', icon: Sparkles, color: 'amber' },
+                  { value: 'top', label: 'Top', icon: Crown, color: 'purple' },
+                ] as const).map(({ value, label, icon: Icon, color }) => (
+                  <button
+                    key={label}
+                    onClick={async () => {
+                      try {
+                        await toggleSupporter(selectedUser.id, true, value);
+                        await fetchUserDetail(selectedUser.id);
+                        toast.success(`Supporter tier set to ${label}`);
+                      } catch {
+                        toast.error('Failed to update supporter tier');
+                      }
+                    }}
+                    className={`flex items-center gap-1 px-2 py-1 text-xs rounded-md transition-colors ${
+                      (selectedUser.supporterTier ?? null) === value
+                        ? `bg-${color}-500/20 text-${color}-400 ring-1 ring-${color}-500/50`
+                        : 'bg-vox-bg-tertiary text-vox-text-muted hover:bg-vox-bg-hover'
+                    }`}
+                    title={`Set tier to ${label}`}
+                  >
+                    <Icon size={12} /> {label}
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         )}

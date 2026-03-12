@@ -12,10 +12,13 @@ export function VoicePanel() {
   const { channels } = useServerStore();
   const { user } = useAuthStore();
   const localAudioLevel = useLocalAudioLevel();
+  const servers = useServerStore((s) => s.servers);
+  const activeVoiceServerId = useVoiceStore((s) => s.activeVoiceServerId);
 
   if (!activeChannelId) return null;
 
   const channel = channels.find((c) => c.id === activeChannelId);
+  const voiceServer = activeVoiceServerId ? servers.find((s) => s.id === activeVoiceServerId) : null;
   const users = channelUsers.get(activeChannelId) || [];
 
   const latencyColor = latency === null ? 'text-vox-text-muted' :
@@ -24,7 +27,7 @@ export function VoicePanel() {
     'text-vox-accent-danger';
 
   return (
-    <div className="fixed bottom-0 left-[72px] w-60 border-t border-vox-border bg-vox-sidebar">
+    <div data-testid="voice-panel" className="border-t border-vox-border bg-vox-sidebar">
       {/* Voice Connected Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-vox-border">
         <ConnectionQuality latency={latency} />
@@ -40,7 +43,7 @@ export function VoicePanel() {
             )}
           </div>
           <p className="truncate text-[10px] text-vox-text-muted">
-            {channel?.name || 'Voice Channel'}
+            {voiceServer?.name ? `${voiceServer.name} / ` : ''}{channel?.name || 'Voice Channel'}
           </p>
         </div>
         <button

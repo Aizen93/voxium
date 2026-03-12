@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket } from '../services/socket';
-import type { Message, ReactionGroup } from '@voxium/shared';
+import type { Message, Attachment, ReactionGroup } from '@voxium/shared';
 
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -23,13 +23,13 @@ interface ChatState {
   clearReplyingTo: () => void;
   fetchMessages: (channelId: string, before?: string) => Promise<void>;
   fetchMessagesAround: (channelId: string, messageId: string) => Promise<void>;
-  sendMessage: (channelId: string, content: string) => Promise<void>;
+  sendMessage: (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   toggleReaction: (channelId: string, messageId: string, emoji: string) => Promise<void>;
   fetchDMMessages: (conversationId: string, before?: string) => Promise<void>;
   fetchDMMessagesAround: (conversationId: string, messageId: string) => Promise<void>;
-  sendDMMessage: (conversationId: string, content: string) => Promise<void>;
+  sendDMMessage: (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => Promise<void>;
   editDMMessage: (conversationId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteDMMessage: (conversationId: string, messageId: string) => Promise<void>;
   toggleDMReaction: (conversationId: string, messageId: string, emoji: string) => Promise<void>;
@@ -144,11 +144,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (channelId: string, content: string) => {
+  sendMessage: async (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => {
     try {
       const replyingTo = get().replyingTo;
-      const body: Record<string, string> = { content };
+      const body: Record<string, unknown> = { content };
       if (replyingTo) body.replyToId = replyingTo.id;
+      if (attachments?.length) body.attachments = attachments;
 
       const { data } = await api.post(`/channels/${channelId}/messages`, body);
       // The message will be added via WebSocket, but we also handle it here as fallback
@@ -269,11 +270,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendDMMessage: async (conversationId: string, content: string) => {
+  sendDMMessage: async (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => {
     try {
       const replyingTo = get().replyingTo;
-      const body: Record<string, string> = { content };
+      const body: Record<string, unknown> = { content };
       if (replyingTo) body.replyToId = replyingTo.id;
+      if (attachments?.length) body.attachments = attachments;
 
       const { data } = await api.post(`/dm/${conversationId}/messages`, body);
       const exists = get().messages.some((m) => m.id === data.data.id);

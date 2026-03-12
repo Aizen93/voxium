@@ -3,12 +3,21 @@ import { create } from 'zustand';
 const STORAGE_KEY = 'voxium_settings';
 
 type VoiceMode = 'voice_activity' | 'push_to_talk';
+export type VoiceQuality = 'low' | 'medium' | 'high';
+
+/** Opus maxBitrate in bps for each quality level */
+export const VOICE_QUALITY_BITRATE: Record<VoiceQuality, number> = {
+  low: 16_000,
+  medium: 32_000,
+  high: 64_000,
+};
 
 interface PersistedSettings {
   audioInputDeviceId: string;
   audioOutputDeviceId: string;
   noiseGateThreshold: number;
   voiceMode: VoiceMode;
+  voiceQuality: VoiceQuality;
   pushToTalkKey: string;
   enableNoiseSuppression: boolean;
   enableNotificationSounds: boolean;
@@ -23,6 +32,7 @@ interface SettingsState extends PersistedSettings {
   setAudioOutputDeviceId: (deviceId: string) => void;
   setNoiseGateThreshold: (threshold: number) => void;
   setVoiceMode: (mode: VoiceMode) => void;
+  setVoiceQuality: (quality: VoiceQuality) => void;
   setPushToTalkKey: (key: string) => void;
   setEnableNoiseSuppression: (enabled: boolean) => void;
   setEnableNotificationSounds: (enabled: boolean) => void;
@@ -39,6 +49,7 @@ function loadPersistedSettings(): PersistedSettings {
         audioOutputDeviceId: parsed.audioOutputDeviceId || '',
         noiseGateThreshold: typeof parsed.noiseGateThreshold === 'number' ? parsed.noiseGateThreshold : 0.03,
         voiceMode: parsed.voiceMode === 'push_to_talk' ? 'push_to_talk' : 'voice_activity',
+        voiceQuality: (['low', 'medium', 'high'].includes(parsed.voiceQuality) ? parsed.voiceQuality : 'medium') as VoiceQuality,
         pushToTalkKey: typeof parsed.pushToTalkKey === 'string' ? parsed.pushToTalkKey : 'Backquote',
         enableNoiseSuppression: parsed.enableNoiseSuppression !== false,
         enableNotificationSounds: parsed.enableNotificationSounds !== false,
@@ -48,7 +59,7 @@ function loadPersistedSettings(): PersistedSettings {
   } catch {
     // ignore parse errors
   }
-  return { audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.008, voiceMode: 'voice_activity', pushToTalkKey: 'Backquote', enableNoiseSuppression: true, enableNotificationSounds: true, enableDesktopNotifications: true };
+  return { audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.008, voiceMode: 'voice_activity', voiceQuality: 'medium' as VoiceQuality, pushToTalkKey: 'Backquote', enableNoiseSuppression: true, enableNotificationSounds: true, enableDesktopNotifications: true };
 }
 
 function persistSettings(state: PersistedSettings) {
@@ -58,6 +69,7 @@ function persistSettings(state: PersistedSettings) {
       audioOutputDeviceId: state.audioOutputDeviceId,
       noiseGateThreshold: state.noiseGateThreshold,
       voiceMode: state.voiceMode,
+      voiceQuality: state.voiceQuality,
       pushToTalkKey: state.pushToTalkKey,
       enableNoiseSuppression: state.enableNoiseSuppression,
       enableNotificationSounds: state.enableNotificationSounds,
@@ -98,6 +110,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setVoiceMode: (mode: VoiceMode) => {
     set({ voiceMode: mode });
+    persistSettings(get());
+  },
+
+  setVoiceQuality: (quality: VoiceQuality) => {
+    set({ voiceQuality: quality });
     persistSettings(get());
   },
 

@@ -19,14 +19,22 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+// Warn about optional but security-critical env vars
+if (!process.env.TOTP_ENCRYPTION_KEY) {
+  console.warn('\nWARNING: TOTP_ENCRYPTION_KEY is not set. TOTP secrets will be stored UNENCRYPTED in the database.');
+  console.warn('Set this to a 32-byte hex string (64 characters) for production use.\n');
+}
+
 import http from 'http';
 import { app } from './app';
 import { initSocketServer } from './websocket/socketServer';
 import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
+import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
 import { prisma } from './utils/prisma';
-import { initRedis } from './utils/redis';
+import { initRedis, clearPresenceState, NODE_ID } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
+import { initMediasoup } from './mediasoup/mediasoupManager';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -39,6 +47,10 @@ async function main() {
   await initRedis();
   console.log('[Redis] Connected');
 
+  // Reset stale presence from previous runs (crash, hot reload, etc.)
+  await clearPresenceState(prisma);
+  console.log('[Presence] Stale presence cleared');
+
   // Load rate limit overrides from Redis
   await loadRateLimitOverrides();
   console.log('[RateLimit] Overrides loaded');
@@ -46,6 +58,10 @@ async function main() {
   // Load feature flags from Redis
   await loadFeatureFlags();
   console.log('[FeatureFlags] Loaded');
+
+  // Initialize mediasoup workers
+  await initMediasoup();
+  console.log('[mediasoup] Workers initialized');
 
   // Create HTTP server
   const server = http.createServer(app);
@@ -57,15 +73,21 @@ async function main() {
   // Start admin metrics emitter
   startAdminMetricsEmitter(io);
 
+  // Start attachment cleanup (3-day retention)
+  startAttachmentCleanup();
+
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 Voxium server running on http://0.0.0.0:${PORT}\n`);
+    console.log(`\n[Node ${NODE_ID}] Voxium server running on http://0.0.0.0:${PORT}\n`);
   });
 
   // Graceful shutdown
   const shutdown = async () => {
     console.log('\nShutting down...');
     stopAdminMetricsEmitter();
+    stopAttachmentCleanup();
     server.close();
+    // Clean up presence so users don't appear online after shutdown
+    await clearPresenceState(prisma).catch(() => {});
     await prisma.$disconnect();
     process.exit(0);
   };
