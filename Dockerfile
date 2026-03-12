@@ -61,7 +61,15 @@ COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/server/prisma apps/server/prisma
 
-RUN npx prisma generate --schema=apps/server/prisma/schema.prisma
+# Copy the generated Prisma client from the build stage instead of
+# running prisma generate here (prisma CLI is a devDependency, so
+# npx would download it from the network — non-deterministic and
+# weakens supply-chain controls).
+COPY --from=build /app/node_modules/.prisma node_modules/.prisma
+# Copy Prisma CLI + engine from build stage so migrate deploy works
+# at startup without downloading anything from the network.
+COPY --from=build /app/node_modules/prisma node_modules/prisma
+COPY --from=build /app/node_modules/@prisma/engines node_modules/@prisma/engines
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh

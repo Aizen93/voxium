@@ -175,10 +175,10 @@ export function AdminUserDetail({ userId, onBack }: Props) {
               <div className="flex items-center gap-2">
                 <span className="text-xs text-vox-text-muted">Tier:</span>
                 {([
-                  { value: null, label: 'Regular', icon: Heart, color: 'pink' },
-                  { value: 'first', label: 'First', icon: Sparkles, color: 'amber' },
-                  { value: 'top', label: 'Top', icon: Crown, color: 'purple' },
-                ] as const).map(({ value, label, icon: Icon, color }) => (
+                  { value: null, label: 'Regular', icon: Heart, active: 'bg-pink-500/20 text-pink-400 ring-1 ring-pink-500/50' },
+                  { value: 'first', label: 'First', icon: Sparkles, active: 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/50' },
+                  { value: 'top', label: 'Top', icon: Crown, active: 'bg-purple-500/20 text-purple-400 ring-1 ring-purple-500/50' },
+                ] as const).map(({ value, label, icon: Icon, active }) => (
                   <button
                     key={label}
                     onClick={async () => {
@@ -192,7 +192,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
                     }}
                     className={`flex items-center gap-1 px-2 py-1 text-xs rounded-md transition-colors ${
                       (selectedUser.supporterTier ?? null) === value
-                        ? `bg-${color}-500/20 text-${color}-400 ring-1 ring-${color}-500/50`
+                        ? active
                         : 'bg-vox-bg-tertiary text-vox-text-muted hover:bg-vox-bg-hover'
                     }`}
                     title={`Set tier to ${label}`}
