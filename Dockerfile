@@ -78,7 +78,7 @@ USER voxium
 
 ENV NODE_ENV=production
 EXPOSE 3001
-EXPOSE 10000-10100/udp
-EXPOSE 10000-10100/tcp
+EXPOSE 10000-10500/udp
+EXPOSE 10000-10500/tcp
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

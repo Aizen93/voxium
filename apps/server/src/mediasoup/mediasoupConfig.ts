@@ -43,6 +43,6 @@ export const RECV_TRANSPORT_MAX_BITRATE = 1_500_000;
 // Worker settings
 export const workerSettings = {
   rtcMinPort: parseInt(process.env.MEDIASOUP_MIN_PORT || '10000', 10),
-  rtcMaxPort: parseInt(process.env.MEDIASOUP_MAX_PORT || '10100', 10),
+  rtcMaxPort: parseInt(process.env.MEDIASOUP_MAX_PORT || '10500', 10),
   logLevel: 'warn' as WorkerLogLevel,
 };
