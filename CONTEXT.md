@@ -37,7 +37,7 @@ Voxium/
 - Rate limiting (per-endpoint + socket-level, admin-editable via Redis-backed registry) and input sanitization
 - Feature flags (registration, invites, server creation, voice, DM voice, support) — Redis-backed, toggleable from admin dashboard without redeploying
 - Per-server invite lock (owners/admins can lock/unlock invites independently of global flag)
-- Tauri 2 desktop wrapper with native notifications (avatar support: WinRT circular icon on Windows, blob URL icon in browser)
+- Tauri 2 desktop wrapper with native notifications (avatar support: WinRT circular icon on Windows, blob URL icon in browser), auto-update with signed builds via `tauri-plugin-updater`
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
 - **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members; admin UI for global + per-server management; read-only limits tab in server settings
 
@@ -68,6 +68,8 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **Tauri Auto-Update** (2026-03-12) -- Auto-update system via `tauri-plugin-updater` + `tauri-plugin-process` with Discord-like modal UI (available/downloading/ready/error phases), signed builds via `tauri-apps/tauri-action@v0`, and app relaunch on install. Pubkey placeholder must be replaced before first release.
 
 - **Notification Avatars + Presence Cleanup** (2026-03-11) — 3-tier notification system with avatar support: (1) Windows WinRT toast with circular avatar via custom `notify_with_avatar` Tauri command + `ureq` download; (2) Tauri plugin fallback (text-only); (3) Web Notification API with pre-fetched blob URL via `?inline` S3 proxy. Added `?inline` query param to `GET /uploads/*` for direct image proxy (avoids S3 302 redirect CORS issues). Security hardened: Rust-side avatar key regex, magic byte validation, symlink detection, 1MB limit, forced Content-Type, nosniff. Fixed stale presence bug via `clearPresenceState()` on server startup/shutdown. Fixed `catch (s3Err: any)` → typed `unknown` cast.
 
