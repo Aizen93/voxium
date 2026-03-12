@@ -84,6 +84,7 @@ jobs:
           VITE_WS_URL: ${{ secrets.VITE_WS_URL }}
         with:
           projectPath: apps/desktop
+          tauriScript: pnpm tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'Voxium ${{ github.ref_name }}'
           releaseDraft: false
