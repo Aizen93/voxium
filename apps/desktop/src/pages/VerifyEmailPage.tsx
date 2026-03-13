@@ -51,7 +51,7 @@ export function VerifyEmailPage() {
                 <CheckCircle size={20} className="shrink-0 text-vox-voice-connected" />
                 <p className="text-sm text-vox-voice-connected">Your email has been verified successfully!</p>
               </div>
-              <Link to="/" className="btn-primary block w-full py-2.5 text-center">
+              <Link to={user ? '/' : '/login'} className="btn-primary block w-full py-2.5 text-center">
                 {user ? 'Continue to Voxium' : 'Go to Login'}
               </Link>
             </div>
