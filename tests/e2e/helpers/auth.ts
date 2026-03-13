@@ -33,6 +33,8 @@ export async function registerViaUI(
   await verifyUserEmailByEmail(user.email);
   await page.reload();
   await page.waitForURL('/', { timeout: 15_000 });
+  // Wait for main layout to confirm we're past the verification gate
+  await page.getByRole('heading', { name: 'Direct Messages' }).first().waitFor({ timeout: 10_000 });
 }
 
 /** Register via the UI WITHOUT auto-verifying. User lands on the verification pending page. */

@@ -1,11 +1,7 @@
 import { test, expect } from './helpers/fixtures';
 import { testUser } from './helpers/auth';
 import { API_URL, registerUser, registerUserUnverified, loginUser } from './helpers/api';
-import { createVerificationToken, expireVerificationToken, verifyUserEmail, disconnectDb } from './helpers/db';
-
-test.afterAll(async () => {
-  await disconnectDb();
-});
+import { createVerificationToken, expireVerificationToken, verifyUserEmail } from './helpers/db';
 
 test.describe('Email Verification', () => {
   test('unverified user sees verification pending page', async ({ page, request }) => {

@@ -9,11 +9,11 @@ export function VerifyEmailPage() {
   const { user, checkAuth } = useAuthStore();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
-  const calledRef = useRef(false);
+  const processedTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (calledRef.current) return;
-    calledRef.current = true;
+    if (processedTokenRef.current === token) return;
+    processedTokenRef.current = token ?? null;
 
     if (!token) {
       setStatus('error');

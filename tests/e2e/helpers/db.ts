@@ -78,7 +78,7 @@ export async function verifyUserEmail(userId: string) {
 /** Verify a user's email by email address (avoids JWT parsing in UI helpers). */
 export async function verifyUserEmailByEmail(email: string) {
   const db = getPrisma();
-  await db.user.updateMany({
+  await db.user.update({
     where: { email: email.toLowerCase().trim() },
     data: { emailVerified: true, emailVerificationToken: null, emailVerificationTokenExpiresAt: null },
   });
