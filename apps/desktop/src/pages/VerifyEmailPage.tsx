@@ -29,6 +29,8 @@ export function VerifyEmailPage() {
         checkAuth();
       })
       .catch((err) => {
+        // Allow retry on transient/network errors (keep in set only for server rejections)
+        if (!err.response) processedTokens.delete(token);
         setStatus('error');
         setError(err.response?.data?.error || 'Verification failed. The link may be invalid or expired.');
       });
