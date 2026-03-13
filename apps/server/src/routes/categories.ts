@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateCategoryName, WS_EVENTS } from '@voxium/shared';
@@ -11,7 +11,7 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 
 export const categoryRouter = Router({ mergeParams: true });
 
-categoryRouter.use(authenticate);
+categoryRouter.use(authenticate, requireVerifiedEmail);
 
 // Bulk reorder categories
 categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {

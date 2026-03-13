@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateServerName, LIMITS, WS_EVENTS } from '@voxium/shared';
@@ -16,7 +16,7 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 
 export const serverRouter = Router();
 
-serverRouter.use(authenticate);
+serverRouter.use(authenticate, requireVerifiedEmail);
 
 // List servers the user is a member of
 serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {

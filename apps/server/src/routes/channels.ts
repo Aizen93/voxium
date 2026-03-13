@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateChannelName, WS_EVENTS, type Channel } from '@voxium/shared';
@@ -10,7 +10,7 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 
 export const channelRouter = Router({ mergeParams: true });
 
-channelRouter.use(authenticate);
+channelRouter.use(authenticate, requireVerifiedEmail);
 
 // Bulk reorder channels (with optional category reassignment)
 channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {

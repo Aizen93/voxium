@@ -10,6 +10,7 @@ export interface AuthPayload {
   role: UserRole;
   tokenVersion: number;
   rememberMe?: boolean;
+  emailVerified?: boolean;
 }
 
 declare global {
@@ -40,7 +41,7 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     // Check account ban, token version, and current role against DB
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },
-      select: { bannedAt: true, tokenVersion: true, role: true },
+      select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true },
     });
 
     if (!user) return next(new UnauthorizedError('User not found'));
@@ -50,7 +51,7 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     }
 
     // Use DB role (not JWT role) so role changes take effect immediately
-    req.user = { ...payload, role: user.role as UserRole };
+    req.user = { ...payload, role: user.role as UserRole, emailVerified: user.emailVerified };
     next();
   } catch (err) {
     if (err instanceof ForbiddenError || err instanceof UnauthorizedError) {
@@ -58,4 +59,12 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     }
     next(new UnauthorizedError('Invalid or expired token'));
   }
+}
+
+/** Middleware that blocks unverified users. Apply after authenticate(). */
+export function requireVerifiedEmail(req: Request, _res: Response, next: NextFunction) {
+  if (!req.user?.emailVerified) {
+    return next(new ForbiddenError('Email not verified'));
+  }
+  next();
 }

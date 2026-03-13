@@ -31,6 +31,7 @@ interface AuthState {
   forgotPassword: (email: string) => Promise<string>;
   resetPassword: (token: string, password: string) => Promise<string>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<string>;
+  resendVerification: () => Promise<void>;
   setupTOTP: () => Promise<{ secret: string; qrCodeDataUrl: string }>;
   enableTOTP: (code: string) => Promise<string[]>;
   disableTOTP: (code: string) => Promise<void>;
@@ -60,7 +61,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       const { user, accessToken, refreshToken } = data.data;
       setTokens(accessToken, refreshToken, rememberMe);
-      connectSocket(accessToken);
+      if (user.emailVerified) {
+        connectSocket(accessToken);
+      }
       set({ user, isAuthenticated: true, isSubmitting: false });
     } catch (err: any) {
       set({
@@ -82,7 +85,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (trustedDeviceToken) {
         localStorage.setItem('voxium_trusted_device', trustedDeviceToken);
       }
-      connectSocket(accessToken);
+      if (user.emailVerified) {
+        connectSocket(accessToken);
+      }
       set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true });
     } catch (err: any) {
       set({
@@ -105,7 +110,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       setTokens(accessToken, refreshToken, true);
 
-      connectSocket(accessToken);
+      // Don't connect socket until email is verified
+      if (user.emailVerified) {
+        connectSocket(accessToken);
+      }
 
       set({ user, isAuthenticated: true, isSubmitting: false });
     } catch (err: any) {
@@ -132,7 +140,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     try {
       const { data } = await api.get('/auth/me');
-      connectSocket(token);
+      if (data.data.emailVerified) {
+        connectSocket(token);
+      }
       set({ user: data.data, isAuthenticated: true, isLoading: false });
     } catch {
       clearTokens();
@@ -176,7 +186,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   updateProfile: async (fields) => {
     const { data } = await api.patch('/users/me/profile', fields);
-    set({ user: data.data });
+    set((state) => ({ user: state.user ? { ...state.user, ...data.data } : null }));
   },
 
   forgotPassword: async (email) => {
@@ -196,6 +206,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       setTokens(data.data.accessToken, data.data.refreshToken);
     }
     return data.message;
+  },
+
+  resendVerification: async () => {
+    await api.post('/auth/resend-verification');
   },
 
   setupTOTP: async () => {

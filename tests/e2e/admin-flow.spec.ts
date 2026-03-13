@@ -1,13 +1,9 @@
 import { test, expect } from './helpers/fixtures';
 import { testUser } from './helpers/auth';
 import { registerUser } from './helpers/api';
-import { promoteToSuperAdmin, createReport, createSupportTicket, disconnectDb } from './helpers/db';
+import { promoteToSuperAdmin, createReport, createSupportTicket } from './helpers/db';
 
 const ADMIN_URL = 'http://localhost:8082';
-
-test.afterAll(async () => {
-  await disconnectDb();
-});
 
 test.describe('Admin flow: login -> manage users -> resolve report -> close ticket', () => {
   test('full admin flow', async ({ page, request }) => {

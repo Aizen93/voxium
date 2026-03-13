@@ -7,10 +7,12 @@ import type { AuthPayload } from '../middleware/auth';
 import type { UserRole } from '@voxium/shared';
 import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, validateUsername } from '@voxium/shared';
-import { sendPasswordResetEmail } from '../utils/email';
+import { sendPasswordResetEmail, sendVerificationEmail } from '../utils/email';
 import { sanitizeText } from '../utils/sanitize';
 
 export async function registerUser(username: string, email: string, password: string, displayName?: string) {
+  email = email.toLowerCase().trim();
+
   const usernameErr = validateUsername(username);
   if (usernameErr) throw new BadRequestError(usernameErr);
 
@@ -30,12 +32,18 @@ export async function registerUser(username: string, email: string, password: st
 
   const hashedPassword = await bcrypt.hash(password, 12);
 
+  // Generate email verification token
+  const rawVerifyToken = crypto.randomBytes(32).toString('hex');
+  const hashedVerifyToken = crypto.createHash('sha256').update(rawVerifyToken).digest('hex');
+
   const user = await prisma.user.create({
     data: {
       username,
       email,
       displayName: sanitizeText(displayName) || username,
       password: hashedPassword,
+      emailVerificationToken: hashedVerifyToken,
+      emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
     },
     select: {
       id: true,
@@ -47,10 +55,16 @@ export async function registerUser(username: string, email: string, password: st
       status: true,
       role: true,
       totpEnabled: true,
+      emailVerified: true,
       isSupporter: true, supporterTier: true,
       tokenVersion: true,
       createdAt: true,
     },
+  });
+
+  // Send verification email (fire-and-forget)
+  sendVerificationEmail(user.email, rawVerifyToken).catch((err) => {
+    console.error('[Auth] Failed to send verification email:', err);
   });
 
   const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion });
@@ -60,6 +74,8 @@ export async function registerUser(username: string, email: string, password: st
 }
 
 export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string, trustedDeviceToken?: string) {
+  email = email.toLowerCase().trim();
+
   // Normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 → 1.2.3.4) for consistent ban matching
   const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
 
@@ -83,6 +99,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
       role: true,
       password: true,
       totpEnabled: true,
+      emailVerified: true,
       isSupporter: true, supporterTier: true,
       tokenVersion: true,
       bannedAt: true,
@@ -171,6 +188,7 @@ export async function verifyLoginTOTP(totpToken: string, code: string) {
       status: true,
       role: true,
       totpEnabled: true,
+      emailVerified: true,
       isSupporter: true, supporterTier: true,
       tokenVersion: true,
       createdAt: true,
@@ -238,6 +256,8 @@ export async function refreshTokens(token: string) {
 }
 
 export async function requestPasswordReset(email: string) {
+  email = email.toLowerCase().trim();
+
   const emailErr = validateEmail(email);
   if (emailErr) throw new BadRequestError(emailErr);
 
@@ -321,4 +341,56 @@ export async function changePassword(userId: string, currentPassword: string, ne
 
   // Return fresh tokens so the current session survives the version bump
   return generateTokens({ userId: updated.id, username: updated.username, role: updated.role as UserRole, tokenVersion: updated.tokenVersion }, rememberMe);
+}
+
+export async function verifyEmail(token: string) {
+  if (!token) throw new BadRequestError('Verification token is required');
+
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+  const user = await prisma.user.findUnique({
+    where: { emailVerificationToken: hashedToken },
+    select: { id: true, emailVerificationTokenExpiresAt: true },
+  });
+
+  if (!user) throw new BadRequestError('Invalid or expired verification link');
+
+  if (user.emailVerificationTokenExpiresAt && user.emailVerificationTokenExpiresAt < new Date()) {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { emailVerificationToken: null, emailVerificationTokenExpiresAt: null },
+    });
+    throw new BadRequestError('Invalid or expired verification link');
+  }
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      emailVerified: true,
+      emailVerificationToken: null,
+      emailVerificationTokenExpiresAt: null,
+    },
+  });
+}
+
+export async function resendVerificationEmail(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, emailVerified: true },
+  });
+  if (!user) throw new UnauthorizedError('User not found');
+  if (user.emailVerified) throw new BadRequestError('Email already verified');
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      emailVerificationToken: hashedToken,
+      emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  });
+
+  await sendVerificationEmail(user.email, rawToken);
 }

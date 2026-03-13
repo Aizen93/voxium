@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitUpload, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
@@ -14,6 +14,7 @@ export const uploadRouter = Router();
 uploadRouter.post(
   '/presign/avatar',
   authenticate,
+  requireVerifiedEmail,
   rateLimitUpload,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -31,6 +32,7 @@ uploadRouter.post(
 uploadRouter.post(
   '/presign/server-icon/:serverId',
   authenticate,
+  requireVerifiedEmail,
   rateLimitUpload,
   async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
     try {
@@ -53,6 +55,7 @@ uploadRouter.post(
 uploadRouter.post(
   '/presign/attachment',
   authenticate,
+  requireVerifiedEmail,
   rateLimitUpload,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -108,6 +111,7 @@ uploadRouter.post(
 uploadRouter.get(
   '/attachments/*',
   authenticate,
+  requireVerifiedEmail,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const key = `attachments/${req.params[0]}`;

@@ -6,6 +6,8 @@ import { RegisterPage } from './pages/RegisterPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { InvitePage } from './pages/InvitePage';
+import { VerifyEmailPage } from './pages/VerifyEmailPage';
+import { EmailVerificationPendingPage } from './pages/EmailVerificationPendingPage';
 import { LandingPage } from './pages/LandingPage';
 import { TermsPage } from './pages/TermsPage';
 import { PrivacyPage } from './pages/PrivacyPage';
@@ -39,7 +41,8 @@ function SaveAndRedirect() {
 }
 
 export function App() {
-  const { isAuthenticated, checkAuth, isLoading } = useAuthStore();
+  const { isAuthenticated, checkAuth, isLoading, user } = useAuthStore();
+  const emailVerified = user?.emailVerified ?? false;
 
   useEffect(() => {
     checkAuth();
@@ -78,8 +81,15 @@ export function App() {
           />
           <Route
             path="/invite/:code"
-            element={isAuthenticated ? <InvitePage /> : <SaveAndRedirect />}
+            element={
+              isAuthenticated
+                ? emailVerified
+                  ? <InvitePage />
+                  : <EmailVerificationPendingPage />
+                : <SaveAndRedirect />
+            }
           />
+          <Route path="/verify-email/:token" element={<VerifyEmailPage />} />
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/cookies" element={<CookiePolicyPage />} />
@@ -87,7 +97,9 @@ export function App() {
             path="/"
             element={
               isAuthenticated
-                ? <MainLayout />
+                ? emailVerified
+                  ? <MainLayout />
+                  : <EmailVerificationPendingPage />
                 : isTauri
                   ? <Navigate to="/login" replace />
                   : <LandingPage />
@@ -95,7 +107,13 @@ export function App() {
           />
           <Route
             path="/*"
-            element={isAuthenticated ? <MainLayout /> : <Navigate to="/login" replace />}
+            element={
+              isAuthenticated
+                ? emailVerified
+                  ? <MainLayout />
+                  : <EmailVerificationPendingPage />
+                : <Navigate to="/login" replace />
+            }
           />
         </Routes>
       </ErrorBoundary>

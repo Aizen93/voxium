@@ -17,6 +17,7 @@ async function main() {
       email: 'alice@example.com',
       displayName: 'Alice',
       password,
+      emailVerified: true,
     },
   });
 
@@ -28,6 +29,7 @@ async function main() {
       email: 'bob@example.com',
       displayName: 'Bob',
       password,
+      emailVerified: true,
     },
   });
 
@@ -38,6 +40,7 @@ async function main() {
       username: 'charlie',
       email: 'charlie@example.com',
       displayName: 'Charlie',
+      emailVerified: true,
       password,
     },
   });

@@ -66,6 +66,49 @@ export async function createSupportTicket(userId: string, message: string) {
   return ticket.id;
 }
 
+/** Verify a user's email directly in the database (for E2E tests). */
+export async function verifyUserEmail(userId: string) {
+  const db = getPrisma();
+  await db.user.update({
+    where: { id: userId },
+    data: { emailVerified: true, emailVerificationToken: null, emailVerificationTokenExpiresAt: null },
+  });
+}
+
+/** Verify a user's email by email address (avoids JWT parsing in UI helpers). */
+export async function verifyUserEmailByEmail(email: string) {
+  const db = getPrisma();
+  await db.user.update({
+    where: { email: email.toLowerCase().trim() },
+    data: { emailVerified: true, emailVerificationToken: null, emailVerificationTokenExpiresAt: null },
+  });
+}
+
+/** Create a verification token for a user and return the raw (unhashed) token for testing. */
+export async function createVerificationToken(userId: string): Promise<string> {
+  const crypto = await import('crypto');
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const db = getPrisma();
+  await db.user.update({
+    where: { id: userId },
+    data: {
+      emailVerificationToken: hashedToken,
+      emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  });
+  return rawToken;
+}
+
+/** Set a user's verification token to an expired timestamp (for testing expired tokens). */
+export async function expireVerificationToken(userId: string): Promise<void> {
+  const db = getPrisma();
+  await db.user.update({
+    where: { id: userId },
+    data: { emailVerificationTokenExpiresAt: new Date(Date.now() - 1000) },
+  });
+}
+
 /** Disconnect Prisma (call in afterAll or global teardown). */
 export async function disconnectDb() {
   if (prisma) {

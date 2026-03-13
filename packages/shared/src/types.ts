@@ -12,6 +12,7 @@ export interface User {
   status: UserStatus;
   role: UserRole;
   totpEnabled: boolean;
+  emailVerified: boolean;
   isSupporter: boolean;
   supporterTier: SupporterTier;
   createdAt: string;
@@ -22,7 +23,7 @@ export type SupporterTier = 'first' | 'top' | null;
 export type UserStatus = 'online' | 'idle' | 'dnd' | 'offline';
 
 /** User without private fields — safe for broadcasting to other clients */
-export type PublicUser = Omit<User, 'email' | 'totpEnabled'>;
+export type PublicUser = Omit<User, 'email' | 'totpEnabled' | 'emailVerified'>;
 
 export interface UserProfile extends User {
   bio: string | null;

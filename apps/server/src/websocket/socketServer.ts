@@ -69,11 +69,12 @@ export function initSocketServer(httpServer: HttpServer) {
       // Check account ban, token version, and current role
       const user = await prisma.user.findUnique({
         where: { id: payload.userId },
-        select: { bannedAt: true, tokenVersion: true, role: true },
+        select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true },
       });
       if (!user) return next(new Error('User not found'));
       if (user.bannedAt) return next(new Error('Account banned'));
       if (user.tokenVersion !== payload.tokenVersion) return next(new Error('Session invalidated'));
+      if (!user.emailVerified) return next(new Error('Email not verified'));
 
       // Check IP ban
       const ip = getSocketIp(socket);

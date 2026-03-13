@@ -12,6 +12,11 @@ const transporter = nodemailer.createTransport({
     : {}),
 });
 
+const SENDER_FROM = {
+  name: process.env.SMTP_FROM_NAME || 'Voxium',
+  address: process.env.SMTP_FROM || 'noreply@voxium.app',
+};
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -39,7 +44,7 @@ export interface CleanupReport {
 }
 
 export async function sendCleanupReport(to: string, report: CleanupReport): Promise<void> {
-  const from = process.env.SMTP_FROM || 'noreply@voxium.app';
+  const from = SENDER_FROM;
   const duration = formatDuration(report.finishedAt.getTime() - report.startedAt.getTime());
   const status = report.error ? 'Completed with errors' : report.filesExpired > 0 ? 'Completed' : 'No action needed';
   const date = report.startedAt.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -94,12 +99,34 @@ export async function sendCleanupReport(to: string, report: CleanupReport): Prom
   });
 }
 
+export async function sendVerificationEmail(to: string, token: string): Promise<void> {
+  const clientUrl = process.env.CLIENT_URL || 'http://localhost:8080';
+  const verifyUrl = `${clientUrl}/verify-email/${token}`;
+
+  await transporter.sendMail({
+    from: SENDER_FROM,
+    to,
+    subject: 'Verify your Voxium email address',
+    text: `Welcome to Voxium! Please verify your email address by clicking the link below:\n\n${verifyUrl}\n\nThis link expires in 24 hours. If you did not create an account, ignore this email.`,
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+        <h2 style="color: #5865f2;">Welcome to Voxium!</h2>
+        <p>Please verify your email address to get started:</p>
+        <a href="${verifyUrl}" style="display: inline-block; background: #5865f2; color: #fff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; margin: 16px 0;">
+          Verify Email
+        </a>
+        <p style="font-size: 13px; color: #666;">This link expires in 24 hours. If you did not create this account, you can safely ignore this email.</p>
+      </div>
+    `,
+  });
+}
+
 export async function sendPasswordResetEmail(to: string, token: string): Promise<void> {
   const clientUrl = process.env.CLIENT_URL || 'http://localhost:8080';
   const resetUrl = `${clientUrl}/reset-password/${token}`;
 
   await transporter.sendMail({
-    from: process.env.SMTP_FROM || 'noreply@voxium.app',
+    from: SENDER_FROM,
     to,
     subject: 'Reset your Voxium password',
     text: `You requested a password reset. Click the link below to set a new password:\n\n${resetUrl}\n\nThis link expires in 1 hour. If you did not request this, ignore this email.`,

@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { nanoid } from 'nanoid';
@@ -10,7 +10,7 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 
 export const inviteRouter = Router();
 
-inviteRouter.use(authenticate);
+inviteRouter.use(authenticate, requireVerifiedEmail);
 
 // Create an invite for a server
 inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {

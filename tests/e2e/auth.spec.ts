@@ -1,13 +1,14 @@
 import { test, expect } from './helpers/fixtures';
-import { testUser, registerViaUI, loginViaUI } from './helpers/auth';
+import { testUser, registerViaUI, registerViaUIUnverified, loginViaUI } from './helpers/auth';
 import { registerUser } from './helpers/api';
 import { dmHeading } from './helpers/selectors';
 
 test.describe('Authentication', () => {
   test('register a new account', async ({ page }) => {
     const user = testUser('reg');
-    await registerViaUI(page, user);
-    await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
+    await registerViaUIUnverified(page, user);
+    // New registrations land on verification pending page (email not yet verified)
+    await expect(page.getByText('Verify your email')).toBeVisible({ timeout: 10_000 });
   });
 
   test('login with existing account', async ({ page, request }) => {
