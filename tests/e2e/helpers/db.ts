@@ -75,6 +75,15 @@ export async function verifyUserEmail(userId: string) {
   });
 }
 
+/** Verify a user's email by email address (avoids JWT parsing in UI helpers). */
+export async function verifyUserEmailByEmail(email: string) {
+  const db = getPrisma();
+  await db.user.updateMany({
+    where: { email: email.toLowerCase().trim() },
+    data: { emailVerified: true, emailVerificationToken: null, emailVerificationTokenExpiresAt: null },
+  });
+}
+
 /** Create a verification token for a user and return the raw (unhashed) token for testing. */
 export async function createVerificationToken(userId: string): Promise<string> {
   const crypto = await import('crypto');
