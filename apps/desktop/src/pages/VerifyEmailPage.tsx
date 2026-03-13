@@ -1,25 +1,26 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
 import { CheckCircle, AlertCircle } from 'lucide-react';
+
+// Module-scope: survives React StrictMode unmount/remount cycles
+const processedTokens = new Set<string>();
 
 export function VerifyEmailPage() {
   const { token } = useParams<{ token: string }>();
   const { user, checkAuth } = useAuthStore();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
-  const processedTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (processedTokenRef.current === token) return;
-    processedTokenRef.current = token ?? null;
-
     if (!token) {
       setStatus('error');
       setError('Missing verification token.');
       return;
     }
+    if (processedTokens.has(token)) return;
+    processedTokens.add(token);
 
     api.post('/auth/verify-email', { token })
       .then(() => {
