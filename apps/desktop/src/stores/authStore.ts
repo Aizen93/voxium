@@ -186,7 +186,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   updateProfile: async (fields) => {
     const { data } = await api.patch('/users/me/profile', fields);
-    set({ user: data.data });
+    set((state) => ({ user: state.user ? { ...state.user, ...data.data } : null }));
   },
 
   forgotPassword: async (email) => {

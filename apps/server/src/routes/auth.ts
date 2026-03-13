@@ -105,7 +105,7 @@ authRouter.post('/reset-password', rateLimitResetPassword, async (req: Request, 
       res.status(400).json({ success: false, error: 'Password is required' });
       return;
     }
-    await resetPassword(token, password);
+    await resetPassword(token.toLowerCase(), password);
     res.json({ success: true, message: 'Password has been reset successfully.' });
   } catch (err) {
     next(err);
@@ -140,11 +140,12 @@ authRouter.post('/verify-email', rateLimitVerifyEmail, async (req: Request, res:
       return;
     }
     // Tokens are 32 random bytes hex-encoded = 64 chars. Reject malformed tokens early.
-    if (token.length !== 64 || !/^[0-9a-f]+$/.test(token)) {
+    const normalizedToken = token.toLowerCase();
+    if (normalizedToken.length !== 64 || !/^[0-9a-f]+$/.test(normalizedToken)) {
       res.status(400).json({ success: false, error: 'Invalid or expired verification link' });
       return;
     }
-    await verifyEmail(token);
+    await verifyEmail(normalizedToken);
     res.json({ success: true, message: 'Email verified successfully.' });
   } catch (err) {
     next(err);

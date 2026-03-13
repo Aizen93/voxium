@@ -21,7 +21,7 @@ export function VerifyEmailPage() {
       .then(() => {
         setStatus('success');
         // Refresh auth state so the app knows email is now verified
-        if (user) checkAuth();
+        checkAuth();
       })
       .catch((err) => {
         setStatus('error');

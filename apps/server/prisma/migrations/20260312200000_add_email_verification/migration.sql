@@ -8,3 +8,6 @@ CREATE UNIQUE INDEX "users_email_verification_token_key" ON "users"("email_verif
 
 -- Backfill: mark all existing users as verified
 UPDATE "users" SET "email_verified" = true;
+
+-- Backfill: normalize existing emails to lowercase
+UPDATE "users" SET "email" = LOWER(TRIM("email")) WHERE "email" != LOWER(TRIM("email"));

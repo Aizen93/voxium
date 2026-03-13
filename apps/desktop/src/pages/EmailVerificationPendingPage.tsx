@@ -16,6 +16,21 @@ export function EmailVerificationPendingPage() {
     };
   }, []);
 
+  const startCooldown = (seconds: number) => {
+    setCooldown(seconds);
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    intervalRef.current = setInterval(() => {
+      setCooldown((prev) => {
+        if (prev <= 1) {
+          if (intervalRef.current) clearInterval(intervalRef.current);
+          intervalRef.current = null;
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
   const handleResend = async () => {
     setIsSending(true);
     setError(null);
@@ -23,19 +38,12 @@ export function EmailVerificationPendingPage() {
     try {
       await resendVerification();
       setMessage('Verification email sent! Check your inbox.');
-      setCooldown(60);
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      intervalRef.current = setInterval(() => {
-        setCooldown((prev) => {
-          if (prev <= 1) {
-            if (intervalRef.current) clearInterval(intervalRef.current);
-            intervalRef.current = null;
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
+      startCooldown(60);
     } catch (err: any) {
+      const retryAfter = Math.min(parseInt(err.response?.headers?.['retry-after'], 10) || 0, 300);
+      if (retryAfter > 0) {
+        startCooldown(retryAfter);
+      }
       setError(err.response?.data?.error || 'Failed to send verification email.');
     } finally {
       setIsSending(false);

@@ -12,9 +12,10 @@ const transporter = nodemailer.createTransport({
     : {}),
 });
 
-const SENDER_NAME = process.env.SMTP_FROM_NAME || 'Voxium';
-const SENDER_EMAIL = process.env.SMTP_FROM || 'noreply@voxium.app';
-const SENDER_FROM = `"${SENDER_NAME}" <${SENDER_EMAIL}>`;
+const SENDER_FROM = {
+  name: process.env.SMTP_FROM_NAME || 'Voxium',
+  address: process.env.SMTP_FROM || 'noreply@voxium.app',
+};
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
