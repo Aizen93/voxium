@@ -111,6 +111,7 @@ uploadRouter.post(
 uploadRouter.get(
   '/attachments/*',
   authenticate,
+  requireVerifiedEmail,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const key = `attachments/${req.params[0]}`;
