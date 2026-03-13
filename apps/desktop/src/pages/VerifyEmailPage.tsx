@@ -27,7 +27,7 @@ export function VerifyEmailPage() {
         setStatus('error');
         setError(err.response?.data?.error || 'Verification failed. The link may be invalid or expired.');
       });
-  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token]); // intentionally omit user/checkAuth — only re-run when token changes
 
   return (
     <div className="flex h-full items-center justify-center bg-vox-bg-primary">
