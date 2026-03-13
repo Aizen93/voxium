@@ -754,10 +754,10 @@ Registration:
   POST /auth/verify-email { token }
     → Normalize to lowercase (defensive — base64url safe)
     → Validate format (64 hex chars) — reject before DB query
-    → SHA-256 hash incoming token → findUnique by emailVerificationToken (@@unique)
+    → SHA-256 hash incoming token → findUnique by emailVerificationToken (@@unique, select: id + expiresAt only)
     → Check expiry, clear expired tokens
     → Set emailVerified=true, clear token fields
-    → Frontend useRef guard prevents React StrictMode double-POST
+    → Frontend processedTokenRef guard prevents StrictMode double-POST (tracks token string, allows different tokens)
 
   POST /auth/resend-verification (authenticated)
     → Check if already verified (reject if so)

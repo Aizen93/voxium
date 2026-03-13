@@ -350,6 +350,7 @@ export async function verifyEmail(token: string) {
 
   const user = await prisma.user.findUnique({
     where: { emailVerificationToken: hashedToken },
+    select: { id: true, emailVerificationTokenExpiresAt: true },
   });
 
   if (!user) throw new BadRequestError('Invalid or expired verification link');
@@ -373,7 +374,10 @@ export async function verifyEmail(token: string) {
 }
 
 export async function resendVerificationEmail(userId: string) {
-  const user = await prisma.user.findUnique({ where: { id: userId } });
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, emailVerified: true },
+  });
   if (!user) throw new UnauthorizedError('User not found');
   if (user.emailVerified) throw new BadRequestError('Email already verified');
 
