@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitSupport, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
@@ -11,7 +11,7 @@ import { sanitizeText } from '../utils/sanitize';
 
 export const supportRouter = Router();
 
-supportRouter.use(authenticate);
+supportRouter.use(authenticate, requireVerifiedEmail);
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },

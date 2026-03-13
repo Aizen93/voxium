@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitMessageSend, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
@@ -15,7 +15,7 @@ const attachmentSelect = {
 
 export const dmRouter = Router();
 
-dmRouter.use(authenticate);
+dmRouter.use(authenticate, requireVerifiedEmail);
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },

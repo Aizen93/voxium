@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitReport } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
@@ -9,7 +9,7 @@ import { LIMITS } from '@voxium/shared';
 
 export const reportsRouter = Router();
 
-reportsRouter.use(authenticate);
+reportsRouter.use(authenticate, requireVerifiedEmail);
 
 // ─── Submit a report ─────────────────────────────────────────────────────────
 

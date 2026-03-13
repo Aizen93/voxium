@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, NotFoundError } from '../utils/errors';
 import { validateDisplayName, validateBio, WS_EVENTS } from '@voxium/shared';
@@ -9,7 +9,7 @@ import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 
 export const userRouter = Router();
 
-userRouter.use(authenticate);
+userRouter.use(authenticate, requireVerifiedEmail);
 
 // Get user profile
 userRouter.get('/:userId', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {

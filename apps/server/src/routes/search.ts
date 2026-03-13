@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitSearch } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
@@ -8,7 +8,7 @@ import { sanitizeText } from '../utils/sanitize';
 
 export const searchRouter = Router();
 
-searchRouter.use(authenticate);
+searchRouter.use(authenticate, requireVerifiedEmail);
 searchRouter.use(rateLimitSearch);
 
 const authorSelect = {

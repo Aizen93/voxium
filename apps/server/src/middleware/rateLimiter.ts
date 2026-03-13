@@ -34,6 +34,8 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   admin:          { keyPrefix: 'rl:admin',     points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Admin' },
   report:         { keyPrefix: 'rl:report',    points: 5,   duration: 300, blockDuration: 0,   keyType: 'userId', label: 'Report' },
   support:        { keyPrefix: 'rl:support',   points: 10,  duration: 30,  blockDuration: 0,   keyType: 'userId', label: 'Support' },
+  verifyEmail:        { keyPrefix: 'rl:vfyeml', points: 5, duration: 900, blockDuration: 300, keyType: 'ip',     label: 'Verify Email' },
+  resendVerification: { keyPrefix: 'rl:verify', points: 3, duration: 300, blockDuration: 600, keyType: 'userId', label: 'Resend Verification' },
   general:        { keyPrefix: 'rl:general',   points: 100, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'General' },
 };
 
@@ -203,6 +205,8 @@ export const rateLimitAdmin = createMiddleware('admin', byUserId);
 export const rateLimitReport = createMiddleware('report', byUserId);
 export const rateLimitSupport = createMiddleware('support', byUserId);
 export const rateLimitTOTP = createMiddleware('totp', byUserId);
+export const rateLimitVerifyEmail = createMiddleware('verifyEmail', byIp);
+export const rateLimitResendVerification = createMiddleware('resendVerification', byUserId);
 export const rateLimitGeneral = createMiddleware('general', byIp);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────

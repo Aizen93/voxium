@@ -7,7 +7,8 @@ test.describe('Authentication', () => {
   test('register a new account', async ({ page }) => {
     const user = testUser('reg');
     await registerViaUI(page, user);
-    await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
+    // New registrations land on verification pending page (email not yet verified)
+    await expect(page.getByText('Verify your email')).toBeVisible({ timeout: 10_000 });
   });
 
   test('login with existing account', async ({ page, request }) => {

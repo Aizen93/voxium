@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitMessageSend, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
@@ -16,7 +16,7 @@ const attachmentSelect = {
 
 export const messageRouter = Router({ mergeParams: true });
 
-messageRouter.use(authenticate);
+messageRouter.use(authenticate, requireVerifiedEmail);
 
 // Get messages in a channel (paginated, newest first — or around a target message)
 messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {

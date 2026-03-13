@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitFriendRequest } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
@@ -8,7 +8,7 @@ import type { Friendship as FriendshipType, FriendUser } from '@voxium/shared';
 
 export const friendRouter = Router();
 
-friendRouter.use(authenticate);
+friendRouter.use(authenticate, requireVerifiedEmail);
 
 const userSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, status: true },

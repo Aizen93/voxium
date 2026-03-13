@@ -397,6 +397,8 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 │ status   │    │    Channel     │─────────┘
 │ tokenVer │
 │ resetTkn │
+│ emlVerif │
+│ emlVfyTkn│
 └────┬─────┘    │                │
      │          │ id             │
      │          │ name           │
@@ -476,6 +478,7 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 - `users(username)` UNIQUE — Username lookup
 - `users(email)` UNIQUE — Email lookup
 - `users(reset_token)` UNIQUE — Password reset token lookup
+- `users(email_verification_token)` UNIQUE — Email verification token lookup
 - `server_members(userId, serverId)` COMPOSITE PK — Membership checks
 - `channel_reads(userId, channelId)` COMPOSITE PK — Read position lookups
 - `conversations(user1Id, user2Id)` UNIQUE — Conversation dedup
@@ -737,6 +740,35 @@ Change Password (authenticated):
     → Return fresh tokens (current session survives)
 ```
 
+### Email Verification Flow
+
+```
+Registration:
+  POST /auth/register { username, email, password }
+    → Normalize email (lowercase + trim)
+    → Create user with emailVerified=false
+    → Generate crypto.randomBytes(32), store SHA-256 hash + 24hr expiry in DB
+    → Send raw token via email (fire-and-forget)
+    → Return auth tokens (user authenticated but unverified)
+
+  POST /auth/verify-email { token }
+    → Validate format (64 hex chars) — reject before DB query
+    → SHA-256 hash incoming token → findUnique by emailVerificationToken (@@unique)
+    → Check expiry, clear expired tokens
+    → Set emailVerified=true, clear token fields
+
+  POST /auth/resend-verification (authenticated)
+    → Check if already verified (reject if so)
+    → Generate new token, replace in DB
+    → Send verification email
+
+Enforcement:
+  → requireVerifiedEmail middleware on all REST routes except auth self-management
+  → Socket.IO auth middleware rejects unverified users
+  → Frontend gates unverified users to EmailVerificationPendingPage
+  → Migration backfills existing users as emailVerified=true
+```
+
 ### Security Measures
 
 | Layer | Protection |
@@ -746,7 +778,8 @@ Change Password (authenticated):
 | Auth | JWT with short expiry + refresh rotation + tokenVersion invalidation + `algorithms: ['HS256']` pinning + purpose field rejection (prevents token type confusion) |
 | Passwords | bcrypt with 12 salt rounds, PASSWORD_MAX=72 (matches bcrypt's actual input limit) |
 | Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
-| Registration | Generic "Username or email already in use" error prevents email enumeration |
+| Email Verification | SHA-256 hashed tokens, 24hr expiry, single-use, format validation (64 hex chars), `requireVerifiedEmail` middleware on all functional routes + Socket.IO |
+| Registration | Generic "Username or email already in use" error prevents email enumeration; email normalized to lowercase |
 | CORS | Explicit origin whitelist |
 | Input | Server-side validation on all endpoints + runtime type validation on all Socket.IO payloads |
 | SQL Injection | Prisma parameterized queries |

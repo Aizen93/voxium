@@ -20,7 +20,7 @@ export async function clearRateLimits() {
   }
 }
 
-/** Register a new user via the API. Returns access + refresh tokens. */
+/** Register a new user via the API. Auto-verifies email for testing. Returns access + refresh tokens. */
 export async function registerUser(
   request: APIRequestContext,
   user: { username: string; email: string; password: string },
@@ -31,7 +31,26 @@ export async function registerUser(
     throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);
   }
   const { data } = await res.json();
+
+  // Auto-verify email so tests don't get blocked by the verification gate
+  const { verifyUserEmail } = await import('./db');
+  await verifyUserEmail(data.user.id);
+
   return data as { accessToken: string; refreshToken: string; user: { id: string; username: string } };
+}
+
+/** Register a new user via the API WITHOUT auto-verifying email. For testing the verification flow. */
+export async function registerUserUnverified(
+  request: APIRequestContext,
+  user: { username: string; email: string; password: string },
+) {
+  const res = await request.post(`${API_URL}/auth/register`, { data: user });
+  if (!res.ok()) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
+  const { data } = await res.json();
+  return data as { accessToken: string; refreshToken: string; user: { id: string; username: string; email: string } };
 }
 
 /** Login via the API. Returns access + refresh tokens. */

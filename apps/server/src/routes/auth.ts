@@ -1,8 +1,8 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword } from '../services/authService';
+import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
 
@@ -68,6 +68,7 @@ authRouter.get('/me', authenticate, async (req: Request, res: Response, next: Ne
         status: true,
         role: true,
         totpEnabled: true,
+        emailVerified: true,
         isSupporter: true, supporterTier: true,
         createdAt: true,
       },
@@ -124,6 +125,36 @@ authRouter.post('/change-password', authenticate, rateLimitChangePassword, async
     }
     const tokens = await changePassword(req.user!.userId, currentPassword, newPassword, rememberMe ?? true);
     res.json({ success: true, message: 'Password changed successfully.', data: tokens });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Email Verification ─────────────────────────────────────────────────────
+
+authRouter.post('/verify-email', rateLimitVerifyEmail, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { token } = req.body;
+    if (!token || typeof token !== 'string') {
+      res.status(400).json({ success: false, error: 'Verification token is required' });
+      return;
+    }
+    // Tokens are 32 random bytes hex-encoded = 64 chars. Reject malformed tokens early.
+    if (token.length !== 64 || !/^[0-9a-f]+$/.test(token)) {
+      res.status(400).json({ success: false, error: 'Invalid or expired verification link' });
+      return;
+    }
+    await verifyEmail(token);
+    res.json({ success: true, message: 'Email verified successfully.' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.post('/resend-verification', authenticate, rateLimitResendVerification, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await resendVerificationEmail(req.user!.userId);
+    res.json({ success: true, message: 'Verification email sent.' });
   } catch (err) {
     next(err);
   }

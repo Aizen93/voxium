@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
-**Version:** 1.3.0
-**Date:** 2026-03-12
+**Version:** 1.4.0
+**Date:** 2026-03-13
 
 ## Project Structure
 
@@ -33,7 +33,7 @@ Voxium/
 - Unread indicators (channel + server level, persistent via DB)
 - Two-tier admin dashboard (admin + superadmin roles) with user/server/ban management, storage tools (avatars/server-icons/attachments with top uploaders, file browser, orphan cleanup), live metrics, audit log, moderation queue (reports), support ticket management, rate limit controls, feature flags
 - Admin user deletion with server ownership transfer
-- Comprehensive security hardening: JWT algorithm pinning (`HS256`), token purpose validation, IDOR prevention on message routes, admin role hierarchy enforcement, email enumeration prevention, TOTP replay protection (Redis), bcrypt 72-byte input limit, Tauri CSP, socket payload runtime type validation, presigned URL content-type enforcement, trust proxy conditional, GitHub Actions injection prevention
+- Comprehensive security hardening: JWT algorithm pinning (`HS256`), token purpose validation, IDOR prevention on message routes, admin role hierarchy enforcement, email enumeration prevention, email verification gate, TOTP replay protection (Redis), bcrypt 72-byte input limit, Tauri CSP, socket payload runtime type validation, presigned URL content-type enforcement, trust proxy conditional, GitHub Actions injection prevention
 - Rate limiting (per-endpoint + socket-level, admin-editable via Redis-backed registry) and input sanitization
 - Feature flags (registration, invites, server creation, voice, DM voice, support) — Redis-backed, toggleable from admin dashboard without redeploying
 - Per-server invite lock (owners/admins can lock/unlock invites independently of global flag)
@@ -68,6 +68,10 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **Email Verification + Case-Insensitive Login** (2026-03-13) — New users must verify email before accessing the platform. Backend gate via `requireVerifiedEmail` middleware on all non-auth routes + Socket.IO auth rejection. Frontend shows `EmailVerificationPendingPage` for unverified users with resend cooldown. Verification tokens: 256-bit entropy, SHA-256 hashed in DB, 24h expiry, format-validated (64 hex chars). Email addresses normalized to lowercase on registration, login, and password reset. Dedicated rate limiters for verify-email (IP-based) and resend-verification (userId-based). Existing users backfilled as verified via migration. E2E test suite: 9 tests covering verification flow, resend, case-insensitive login, expired/invalid tokens, invite gate, and logout from pending page.
+
+- **Email Sender Name + CSP Fix** (2026-03-13) — Emails now show `"Voxium" <noreply@voxium.app>` instead of bare address. Added bare domain `https://voxium.app` to Tauri CSP `connect-src` and `img-src` (wildcard `*.voxium.app` doesn't match the apex domain). Added `tauriScript: pnpm tauri` to release workflow (was defaulting to npm).
 
 - **Tauri Auto-Update** (2026-03-12) — Mandatory auto-update system via `tauri-plugin-updater` + `tauri-plugin-process`. Update modal blocks the app (no dismiss/skip — prevents client-server version mismatch). Phases: available → downloading (progress bar) → ready → restart. Signed builds via `tauri-apps/tauri-action@v0`, update manifest at GitHub releases `latest.json`. Minisign pubkey embedded in `tauri.conf.json`.
 

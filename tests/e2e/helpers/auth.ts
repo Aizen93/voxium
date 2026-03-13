@@ -15,7 +15,7 @@ export function testUser(prefix = 'user') {
   };
 }
 
-/** Register and login via the UI. Waits for the main layout to appear. */
+/** Register via the UI. Waits for the verification pending page (unverified) or main layout (if auto-verified). */
 export async function registerViaUI(
   page: Page,
   user: { username: string; email: string; password: string },
@@ -25,7 +25,7 @@ export async function registerViaUI(
   await page.getByPlaceholder('you@example.com').fill(user.email);
   await page.getByPlaceholder('At least 8 characters').fill(user.password);
   await page.getByRole('button', { name: 'Create Account' }).click();
-  // Wait for redirect to main layout (presence of server sidebar or DM area)
+  // After registration, unverified users land on the verification pending page at "/"
   await page.waitForURL('/', { timeout: 15_000 });
 }
 
