@@ -14,7 +14,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, SupportMessageData } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
 
@@ -503,7 +503,7 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           }
 
           // Emit role + server update events
-          io.to(`server:${action.serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+          io.to(`server:${action.serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
             serverId: action.serverId,
             userId: action.newOwnerId,
             role: 'owner' as MemberRole,
@@ -511,10 +511,13 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
           const updatedServer = await prisma.server.findUnique({
             where: { id: action.serverId },
-            select: { id: true, name: true, iconUrl: true, ownerId: true, createdAt: true },
+            select: { id: true, name: true, iconUrl: true, ownerId: true, invitesLocked: true, createdAt: true },
           });
           if (updatedServer) {
-            io.to(`server:${action.serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updatedServer);
+            io.to(`server:${action.serverId}`).emit(WS_EVENTS.SERVER_UPDATED, {
+              ...updatedServer,
+              createdAt: updatedServer.createdAt.toISOString(),
+            });
           }
 
           // Broadcast that the deleted user left this server
@@ -1473,7 +1476,7 @@ adminRouter.post('/rate-limits/clear-user', async (req: Request, res: Response, 
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'ratelimit.clear_user' as any,
+      action: 'ratelimit.clear_user',
       targetType: 'rate_limit',
       targetId: key.trim(),
       metadata: { keysCleared: cleared },
@@ -1499,7 +1502,7 @@ adminRouter.put('/rate-limits/:name', async (req: Request<{ name: string }>, res
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'ratelimit.update' as any,
+      action: 'ratelimit.update',
       targetType: 'rate_limit',
       targetId: name,
       metadata: { points, duration, blockDuration },
@@ -1519,7 +1522,7 @@ adminRouter.post('/rate-limits/:name/reset', async (req: Request<{ name: string 
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'ratelimit.reset' as any,
+      action: 'ratelimit.reset',
       targetType: 'rate_limit',
       targetId: name,
     });
@@ -1555,7 +1558,7 @@ adminRouter.put('/feature-flags/:name', async (req: Request<{ name: string }>, r
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'feature_flag.update' as any,
+      action: 'feature_flag.update',
       targetType: 'feature_flag',
       targetId: name,
       metadata: { enabled },
@@ -1575,7 +1578,7 @@ adminRouter.post('/feature-flags/:name/reset', async (req: Request<{ name: strin
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'feature_flag.reset' as any,
+      action: 'feature_flag.reset',
       targetType: 'feature_flag',
       targetId: name,
     });
@@ -1695,13 +1698,27 @@ adminRouter.get('/export/ip-bans', async (_req: Request, res: Response, next: Ne
 
 // ─── Announcements ──────────────────────────────────────────────────────────
 
-function mapAnnouncement(a: any): Announcement {
+interface AnnouncementRow {
+  id: string;
+  title: string;
+  content: string;
+  type: string;
+  scope: string;
+  serverIds: string[];
+  createdById: string;
+  createdBy?: { username: string };
+  publishedAt: Date | null;
+  expiresAt: Date | null;
+  createdAt: Date;
+}
+
+function mapAnnouncement(a: AnnouncementRow): Announcement {
   return {
     id: a.id,
     title: a.title,
     content: a.content,
-    type: a.type,
-    scope: a.scope,
+    type: a.type as AnnouncementType,
+    scope: a.scope as AnnouncementScope,
     serverIds: a.serverIds,
     createdById: a.createdById,
     createdByUsername: a.createdBy?.username ?? 'Deleted',
@@ -1714,10 +1731,10 @@ function mapAnnouncement(a: any): Announcement {
 function broadcastAnnouncement(announcement: Announcement) {
   const io = getIO();
   if (announcement.scope === 'global') {
-    io.emit(WS_EVENTS.ANNOUNCEMENT_NEW as any, announcement);
+    io.emit(WS_EVENTS.ANNOUNCEMENT_NEW, announcement);
   } else {
     for (const serverId of announcement.serverIds) {
-      io.to(`server:${serverId}`).emit(WS_EVENTS.ANNOUNCEMENT_NEW as any, announcement);
+      io.to(`server:${serverId}`).emit(WS_EVENTS.ANNOUNCEMENT_NEW, announcement);
     }
   }
 }
@@ -2024,9 +2041,9 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         await prisma.message.delete({ where: { id: message.id } });
         const io = getIO();
         if (message.channelId) {
-          io.to(`channel:${message.channelId}`).emit(WS_EVENTS.MESSAGE_DELETE as any, { messageId: message.id, channelId: message.channelId });
+          io.to(`channel:${message.channelId}`).emit(WS_EVENTS.MESSAGE_DELETE, { messageId: message.id, channelId: message.channelId });
         } else if (message.conversationId) {
-          io.to(`dm:${message.conversationId}`).emit(WS_EVENTS.DM_MESSAGE_DELETE as any, { messageId: message.id, conversationId: message.conversationId });
+          io.to(`dm:${message.conversationId}`).emit(WS_EVENTS.DM_MESSAGE_DELETE, { messageId: message.id, conversationId: message.conversationId });
         }
       }
     }
@@ -2114,21 +2131,39 @@ const supportAuthorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
 };
 
-function mapSupportMessage(m: any): SupportMessageData {
+interface SupportMessageRow {
+  id: string;
+  ticketId: string;
+  authorId: string;
+  content: string;
+  type: string;
+  createdAt: Date;
+  author: {
+    id: string;
+    username: string;
+    displayName: string;
+    avatarUrl: string | null;
+    role: string;
+    isSupporter: boolean;
+    supporterTier: string | null;
+  };
+}
+
+function mapSupportMessage(m: SupportMessageRow): SupportMessageData {
   return {
     id: m.id,
     ticketId: m.ticketId,
     authorId: m.authorId,
     content: m.content,
-    type: m.type,
+    type: m.type as SupportMessageData['type'],
     createdAt: m.createdAt.toISOString(),
-    author: m.author,
+    author: { ...m.author, role: m.author.role as SupportMessageData['author']['role'] },
   };
 }
 
 async function emitSupportTicketCount() {
   const total = await prisma.supportTicket.count({ where: { status: { in: ['open', 'claimed'] } } });
-  getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_TICKET_NEW as any, { total });
+  getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_TICKET_NEW, { total });
 }
 
 adminRouter.get('/support/tickets', async (req: Request, res: Response, next: NextFunction) => {
@@ -2209,11 +2244,11 @@ adminRouter.post('/support/tickets/:id/claim', async (req: Request<{ id: string 
     io.in(`user:${adminUserId}`).socketsJoin(`support:${id}`);
 
     const claimPayload = mapSupportMessage(sysMsg);
-    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, claimPayload);
-    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, claimPayload);
-    const statusPayload = { ticketId: id, status: 'claimed', claimedById: adminUserId, claimedByUsername: adminUser?.username };
-    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, statusPayload);
-    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, statusPayload);
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, claimPayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, claimPayload);
+    const statusPayload = { ticketId: id, status: 'claimed' as const, claimedById: adminUserId, claimedByUsername: adminUser?.username };
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, statusPayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, statusPayload);
 
     await emitSupportTicketCount();
 
@@ -2294,11 +2329,11 @@ adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: stri
       });
       const io = getIO();
       const autoClaimPayload = mapSupportMessage(claimMsg);
-      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, autoClaimPayload);
-      io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, autoClaimPayload);
-      const autoStatusPayload = { ticketId: id, status: 'claimed', claimedById: adminUserId, claimedByUsername: adminUser?.username };
-      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, autoStatusPayload);
-      io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, autoStatusPayload);
+      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, autoClaimPayload);
+      io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, autoClaimPayload);
+      const autoStatusPayload = { ticketId: id, status: 'claimed' as const, claimedById: adminUserId, claimedByUsername: adminUser?.username };
+      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, autoStatusPayload);
+      io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, autoStatusPayload);
 
       logAuditEvent({
         actorId: adminUserId,
@@ -2322,8 +2357,8 @@ adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: stri
     await prisma.supportTicket.update({ where: { id }, data: { updatedAt: new Date() } });
 
     const payload = mapSupportMessage(message);
-    getIO().to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, payload);
-    getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, payload);
+    getIO().to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, payload);
+    getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, payload);
     await emitSupportTicketCount();
 
     res.status(201).json({ success: true, data: payload });
@@ -2355,11 +2390,11 @@ adminRouter.post('/support/tickets/:id/close', async (req: Request<{ id: string 
 
     const io = getIO();
     const closePayload = mapSupportMessage(sysMsg);
-    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, closePayload);
-    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, closePayload);
-    const closeStatusPayload = { ticketId: id, status: 'closed' };
-    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, closeStatusPayload);
-    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, closeStatusPayload);
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, closePayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, closePayload);
+    const closeStatusPayload = { ticketId: id, status: 'closed' as const };
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, closeStatusPayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, closeStatusPayload);
 
     await emitSupportTicketCount();
 

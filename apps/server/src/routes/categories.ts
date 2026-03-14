@@ -53,7 +53,7 @@ categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ se
     });
     const io = getIO();
     for (const cat of updated) {
-      io.to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_UPDATED as any, cat as unknown as Category);
+      io.to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_UPDATED, cat as unknown as Category);
     }
 
     res.json({ success: true });
@@ -90,7 +90,7 @@ categoryRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId
       data: { name, serverId, position: categoryCount },
     });
 
-    getIO().to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_CREATED as any, category as unknown as Category);
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_CREATED, category as unknown as Category);
 
     res.status(201).json({ success: true, data: category });
   } catch (err) {
@@ -124,7 +124,7 @@ categoryRouter.patch('/:categoryId', rateLimitCategoryManage, async (req: Reques
       data: { name },
     });
 
-    getIO().to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_UPDATED as any, updated as unknown as Category);
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_UPDATED, updated as unknown as Category);
 
     res.json({ success: true, data: updated });
   } catch (err) {
@@ -158,7 +158,7 @@ categoryRouter.delete('/:categoryId', rateLimitCategoryManage, async (req: Reque
     await prisma.category.delete({ where: { id: categoryId } });
 
     const io = getIO();
-    io.to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_DELETED as any, { categoryId, serverId });
+    io.to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_DELETED, { categoryId, serverId });
 
     // Re-read the orphaned channels from DB so emitted data is fresh (categoryId is now null)
     if (affectedChannelIds.length > 0) {
@@ -166,7 +166,7 @@ categoryRouter.delete('/:categoryId', rateLimitCategoryManage, async (req: Reque
         where: { id: { in: affectedChannelIds } },
       });
       for (const ch of orphanedChannels) {
-        io.to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED as any, ch as unknown as Channel);
+        io.to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED, ch as unknown as Channel);
       }
     }
 

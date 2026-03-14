@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import axios from 'axios';
 import { api } from '../../services/api';
 import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
@@ -83,8 +84,8 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
       }
       setHasMore(data.hasMore);
       setHasSearched(true);
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Search failed:', err);
     } finally {
       setIsSearching(false);

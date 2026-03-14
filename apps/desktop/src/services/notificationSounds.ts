@@ -13,7 +13,7 @@ async function routeToOutputDevice(ctx: AudioContext): Promise<AudioNode> {
   const deviceId = useSettingsStore.getState().audioOutputDeviceId;
   if (deviceId && 'setSinkId' in ctx) {
     try {
-      await (ctx as any).setSinkId(deviceId);
+      await (ctx as unknown as { setSinkId(id: string): Promise<void> }).setSinkId(deviceId);
     } catch {
       // fall back to default output
     }

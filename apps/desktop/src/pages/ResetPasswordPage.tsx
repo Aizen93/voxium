@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { Eye, EyeOff } from 'lucide-react';
 import { LIMITS } from '@voxium/shared';
+import axios from 'axios';
 
 export function ResetPasswordPage() {
   const { token } = useParams<{ token: string }>();
@@ -32,8 +33,8 @@ export function ResetPasswordPage() {
     try {
       await resetPassword(token!, password);
       setSuccess(true);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to reset password. The link may be invalid or expired.');
+    } catch (err) {
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to reset password. The link may be invalid or expired.' : 'Failed to reset password. The link may be invalid or expired.');
     } finally {
       setIsLoading(false);
     }

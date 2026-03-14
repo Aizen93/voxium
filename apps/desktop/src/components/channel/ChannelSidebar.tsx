@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
@@ -128,7 +129,7 @@ function SortableChannelItem({
         </button>
         {isText && unread > 0 && (
           <span className="bg-vox-accent-primary text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 shrink-0">
-            {unread}
+            {unread > 99 ? '99+' : unread}
           </span>
         )}
         {isAdmin && (
@@ -369,8 +370,8 @@ export function ChannelSidebar() {
       toast.success('Channel created');
       setNewChannelName('');
       setShowCreateChannel(false);
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error || 'Failed to create channel');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to create channel' : 'Failed to create channel');
     }
   };
 

@@ -4,7 +4,7 @@ import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateChannelName, WS_EVENTS, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
-import { rateLimitCategoryManage } from '../middleware/rateLimiter';
+import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
 
@@ -71,7 +71,7 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
     });
     const io = getIO();
     for (const ch of updated) {
-      io.to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED as any, ch as unknown as Channel);
+      io.to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED, ch as unknown as Channel);
     }
 
     res.json({ success: true });
@@ -176,19 +176,16 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
 });
 
 // Mark a channel as read
-channelRouter.post('/:channelId/read', async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
+channelRouter.post('/:channelId/read', rateLimitMarkRead, async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId, channelId } = req.params;
 
-    const membership = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-    if (!membership) throw new ForbiddenError('Not a member of this server');
-
+    // Single query: verify membership + channel exists in this server
     const channel = await prisma.channel.findFirst({
-      where: { id: channelId, serverId },
+      where: { id: channelId, serverId, server: { members: { some: { userId: req.user!.userId } } } },
+      select: { id: true },
     });
-    if (!channel) throw new NotFoundError('Channel');
+    if (!channel) throw new ForbiddenError('Not authorized');
 
     await prisma.channelRead.upsert({
       where: { userId_channelId: { userId: req.user!.userId, channelId } },
@@ -235,7 +232,7 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
       data: { categoryId },
     });
 
-    getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED as any, updated as unknown as Channel);
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED, updated as unknown as Channel);
 
     res.json({ success: true, data: updated });
   } catch (err) {

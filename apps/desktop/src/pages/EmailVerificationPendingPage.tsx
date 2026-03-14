@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { Mail, RotateCw, LogOut } from 'lucide-react';
+import axios from 'axios';
 
 export function EmailVerificationPendingPage() {
   const { user, logout, resendVerification } = useAuthStore();
@@ -39,12 +40,12 @@ export function EmailVerificationPendingPage() {
       await resendVerification();
       setMessage('Verification email sent! Check your inbox.');
       startCooldown(60);
-    } catch (err: any) {
-      const retryAfter = Math.min(parseInt(err.response?.headers?.['retry-after'], 10) || 0, 300);
+    } catch (err) {
+      const retryAfter = axios.isAxiosError(err) ? Math.min(parseInt(err.response?.headers?.['retry-after'], 10) || 0, 300) : 0;
       if (retryAfter > 0) {
         startCooldown(retryAfter);
       }
-      setError(err.response?.data?.error || 'Failed to send verification email.');
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to send verification email.' : 'Failed to send verification email.');
     } finally {
       setIsSending(false);
     }

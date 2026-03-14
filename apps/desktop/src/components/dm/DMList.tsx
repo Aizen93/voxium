@@ -50,8 +50,8 @@ export function DMList() {
       await useSupportStore.getState().openTicket();
       useFriendStore.getState().setShowFriendsView(false);
       useDMStore.getState().clearActiveConversation();
-    } catch (err: any) {
-      toast.error(err?.message || 'Failed to open support ticket');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message || 'Failed to open support ticket' : 'Failed to open support ticket');
     }
   };
 

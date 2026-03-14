@@ -95,12 +95,12 @@ export function connectSocket(token: string): VoxSocket {
       'voice:signal', 'dm:voice:signal',
     ]);
 
-    socket.onAny((event: string, ...args: any[]) => {
+    socket.onAny((event: string, ...args: unknown[]) => {
       if (NOISY_EVENTS.has(event)) return;
       console.log(`[WS] ← ${event}`, args.length > 0 ? JSON.stringify(args[0]).slice(0, 120) : '');
     });
 
-    socket.onAnyOutgoing((event: string, ...args: any[]) => {
+    socket.onAnyOutgoing((event: string, ...args: unknown[]) => {
       if (NOISY_EVENTS.has(event)) return;
       console.log(`[WS] → ${event}`, args.length > 0 ? JSON.stringify(args[0]).slice(0, 120) : '');
     });

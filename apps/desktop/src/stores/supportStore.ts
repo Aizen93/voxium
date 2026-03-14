@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import type { SupportTicketStatus, SupportMessageData } from '@voxium/shared';
+import axios from 'axios';
 
 interface SupportTicketLocal {
   id: string;
@@ -42,9 +43,9 @@ export const useSupportStore = create<SupportState>((set, get) => ({
         showSupportView: true,
         isLoading: false,
       });
-    } catch (err: any) {
+    } catch (err) {
       set({ isLoading: false });
-      const msg = err?.response?.data?.error || 'Failed to open support ticket';
+      const msg = axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to open support ticket' : 'Failed to open support ticket';
       throw new Error(msg, { cause: err });
     }
   },

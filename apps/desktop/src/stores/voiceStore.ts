@@ -4,6 +4,7 @@ import type { Transport, Producer, Consumer, RtpCapabilities, IceParameters, Ice
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange } from '../services/audioAnalyser';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
+import { toast } from './toastStore';
 import { optimizeOpusSDP } from '../services/sdpUtils';
 import type { VoiceUser, TransportOptions } from '@voxium/shared';
 
@@ -56,6 +57,7 @@ const ICE_SERVERS: RTCIceServer[] = [
 ];
 
 const ICE_RESTART_DELAY_MS = 3000;
+const MAX_TRANSPORT_REJOIN_ATTEMPTS = 3;
 
 interface PeerConnection {
   pc: RTCPeerConnection;
@@ -159,6 +161,7 @@ interface VoiceState {
 
 let latencyInterval: ReturnType<typeof setInterval> | null = null;
 let pongHandler: ((timestamp: number) => void) | null = null;
+let transportRejoinAttempts = 0;
 
 // Track ICE restart timers per DM peer
 const iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -221,6 +224,7 @@ async function acquireAudioStream(): Promise<MediaStream | null> {
     return await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   } catch (err) {
     console.warn('[Voice] Microphone access denied, joining in listen-only mode:', err);
+    toast.warning('Microphone access denied — joining in listen-only mode');
     return null;
   }
 }
@@ -576,6 +580,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       get().leaveChannel();
     }
 
+    transportRejoinAttempts = 0; // Reset retry counter on explicit join
+
     const settings = useSettingsStore.getState();
     setNoiseGateThreshold(settings.noiseGateThreshold);
     setNoiseSuppression(settings.enableNoiseSuppression);
@@ -687,10 +693,27 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
         const s = getSocket();
         if (s) {
-          s.emit('voice:transport:connect', { transportId: sendTransport.id, dtlsParameters });
-          // mediasoup-client calls connect before produce, we ACK immediately
-          // (the server connect is fast and fire-and-forget from client perspective)
-          callback();
+          let settled = false;
+          const timeout = setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              console.error('[Voice SFU] Send transport connect ACK timed out');
+              toast.error('Voice connection timed out — try rejoining');
+              errback(new Error('Transport connect timeout'));
+            }
+          }, 10000);
+          s.emit('voice:transport:connect', { transportId: sendTransport.id, dtlsParameters }, (response: { error?: string }) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            if (response.error) {
+              console.error('[Voice SFU] Send transport DTLS connect failed:', response.error);
+              toast.error('Voice connection failed — try rejoining');
+              errback(new Error(response.error));
+            } else {
+              callback();
+            }
+          });
         } else {
           errback(new Error('Socket not available'));
         }
@@ -718,12 +741,71 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
         const s = getSocket();
         if (s) {
-          s.emit('voice:transport:connect', { transportId: recvTransport.id, dtlsParameters });
-          callback();
+          let settled = false;
+          const timeout = setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              console.error('[Voice SFU] Recv transport connect ACK timed out');
+              errback(new Error('Transport connect timeout'));
+            }
+          }, 10000);
+          s.emit('voice:transport:connect', { transportId: recvTransport.id, dtlsParameters }, (response: { error?: string }) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            if (response.error) {
+              console.error('[Voice SFU] Recv transport DTLS connect failed:', response.error);
+              errback(new Error(response.error));
+            } else {
+              callback();
+            }
+          });
         } else {
           errback(new Error('Socket not available'));
         }
       });
+
+      // Monitor transport connection states for failure detection + auto-rejoin.
+      // Guard: both send+recv transports share this handler — if both fire 'failed'
+      // simultaneously, the flag prevents a double-rejoin race.
+      let transportFailureHandled = false;
+      const addTransportStateMonitoring = (transport: Transport, label: string) => {
+        transport.on('connectionstatechange', (state: string) => {
+          debugLog(`[Voice SFU] ${label} transport state: ${state}`);
+          if (state === 'failed') {
+            console.error(`[Voice SFU] ${label} transport DTLS connection failed`);
+            if (transportFailureHandled) return;
+            transportFailureHandled = true;
+
+            // Auto-rejoin with retry limit to prevent infinite loops
+            const currentChannelId = get().activeChannelId;
+            const currentServerId = get().activeVoiceServerId;
+            if (currentChannelId && transportRejoinAttempts < MAX_TRANSPORT_REJOIN_ATTEMPTS) {
+              transportRejoinAttempts++;
+              toast.error(`Voice connection lost — reconnecting (attempt ${transportRejoinAttempts}/${MAX_TRANSPORT_REJOIN_ATTEMPTS})...`);
+              get().cleanupSFU();
+              const s = getSocket();
+              if (s) {
+                const { selfMute: m, selfDeaf: d } = get();
+                const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
+                s.emit('voice:join', currentChannelId, { selfMute: isPTT ? true : m, selfDeaf: d });
+                set({ activeChannelId: currentChannelId, activeVoiceServerId: currentServerId });
+              }
+            } else if (currentChannelId) {
+              toast.error('Voice connection failed — please rejoin manually');
+              get().leaveChannel();
+            }
+          } else if (state === 'connected') {
+            // Reset retry counter on successful connection
+            transportRejoinAttempts = 0;
+          } else if (state === 'disconnected') {
+            console.warn(`[Voice SFU] ${label} transport disconnected — may self-recover via ICE`);
+          }
+        });
+      };
+
+      addTransportStateMonitoring(sendTransport, 'Send');
+      addTransportStateMonitoring(recvTransport, 'Recv');
 
       set({
         msDevice: device,
@@ -766,6 +848,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
     } catch (err) {
       console.error('[Voice SFU] Failed to set up mediasoup:', err);
+      toast.error('Failed to establish voice connection');
     }
   },
 
@@ -842,6 +925,19 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const socket = getSocket();
       if (socket) {
         socket.emit('voice:consumer:resume', { consumerId: consumer.id });
+
+        // Retry resume after 2s if consumer is still paused (handles lost events)
+        if (data.kind === 'audio') {
+          const consumerId = consumer.id;
+          setTimeout(() => {
+            const entry = get().msConsumers.get(consumerId);
+            if (entry && entry.consumer.paused) {
+              debugLog('[Voice SFU] Consumer still paused after 2s, retrying resume:', consumerId);
+              const s = getSocket();
+              if (s) s.emit('voice:consumer:resume', { consumerId });
+            }
+          }, 2000);
+        }
       }
 
       debugLog('[Voice SFU] Consumer created:', consumer.id, data.kind, 'from', data.producerUserId);
@@ -1421,6 +1517,105 @@ useSettingsStore.subscribe((state, prevState) => {
   }
 });
 
+// Subscribe to input device changes — hot-swap mic while in a call
+useSettingsStore.subscribe((state, prevState) => {
+  if (state.audioInputDeviceId === prevState.audioInputDeviceId) return;
+
+  const voiceState = useVoiceStore.getState();
+  if (!voiceState.activeChannelId && !voiceState.dmCallConversationId) return;
+
+  // Re-acquire mic with the new device
+  (async () => {
+    const newStream = await acquireAudioStream();
+
+    // Re-check: user may have left the call during async mic acquisition
+    const currentState = useVoiceStore.getState();
+    if (!currentState.activeChannelId && !currentState.dmCallConversationId) {
+      newStream?.getTracks().forEach((t) => t.stop());
+      return;
+    }
+
+    // Stop old mic tracks
+    if (currentState.localStream) {
+      currentState.localStream.getTracks().forEach((t) => t.stop());
+    }
+
+    if (!newStream) {
+      useVoiceStore.setState({ localStream: null });
+      return;
+    }
+
+    // Apply mute state to new stream
+    const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
+    const shouldDisable = isPTT || currentState.selfMute;
+    newStream.getAudioTracks().forEach((track) => { track.enabled = !shouldDisable; });
+
+    // Rebuild audio pipeline with new stream
+    const mode = currentState.dmCallConversationId ? 'dm' : 'server';
+    onSpeakingChange(null); // clear old callback before rebuilding pipeline
+    stopSpeakingDetection();
+    setNoiseGateThreshold(useSettingsStore.getState().noiseGateThreshold);
+    setNoiseSuppression(useSettingsStore.getState().enableNoiseSuppression);
+    startSpeakingDetection(newStream, mode);
+
+    useVoiceStore.setState({ localStream: newStream });
+
+    // Wait briefly for the audio pipeline to stabilize (RNNoise worklet loads async)
+    // so getGatedStream() returns a connected stream
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Re-check again after pipeline setup
+    const postState = useVoiceStore.getState();
+
+    // Replace track on mediasoup producer (SFU server voice)
+    if (postState.activeChannelId) {
+      const newTrack = (getGatedStream() || newStream)?.getAudioTracks()[0];
+      if (newTrack && newTrack.readyState === 'live') {
+        for (const producer of postState.msProducers.values()) {
+          if (producer.kind === 'audio' && !producer.closed && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+            try {
+              await producer.replaceTrack({ track: newTrack });
+              debugLog('[Voice SFU] Replaced audio track on producer after input device change');
+            } catch (err) {
+              console.error('[Voice SFU] Failed to replace track on producer:', err);
+            }
+          }
+        }
+      }
+
+      // Re-register speaking change callback for the new pipeline
+      onSpeakingChange((speaking) => {
+        const s = useVoiceStore.getState();
+        if (s.selfMute) return;
+        for (const p of s.msProducers.values()) {
+          if (p.kind === 'audio' && !p.closed && (p.appData as Record<string, unknown>)?.type === 'audio') {
+            if (speaking) { p.resume(); } else { p.pause(); }
+          }
+        }
+      });
+    }
+
+    // Replace track on DM P2P peers
+    if (postState.dmCallConversationId) {
+      const newTrack = (getGatedStream() || newStream)?.getAudioTracks()[0];
+      if (newTrack && newTrack.readyState === 'live') {
+        for (const [peerId, peerConn] of postState.peers.entries()) {
+          const senders = peerConn.pc.getSenders();
+          const audioSender = senders.find((s) => s.track?.kind === 'audio');
+          if (audioSender) {
+            try {
+              await audioSender.replaceTrack(newTrack);
+              debugLog(`[DMVoice] Replaced audio track for peer ${peerId} after input device change`);
+            } catch (err) {
+              console.error(`[DMVoice] Failed to replace track for peer ${peerId}:`, err);
+            }
+          }
+        }
+      }
+    }
+  })();
+});
+
 // Handle live voice mode switching while in a voice channel or DM call
 useSettingsStore.subscribe((state, prevState) => {
   if (state.voiceMode === prevState.voiceMode) return;
@@ -1468,6 +1663,9 @@ onSocketReconnect(async () => {
 
   if (!activeChannelId && !dmCallConversationId) return;
 
+  // Reset transport rejoin counter — socket reconnect is a fresh connection
+  transportRejoinAttempts = 0;
+
   // Clean up SFU resources on reconnect (server voice)
   if (activeChannelId) {
     useVoiceStore.getState().cleanupSFU();
@@ -1514,19 +1712,8 @@ onSocketReconnect(async () => {
     localStream.getAudioTracks().forEach((track) => { track.enabled = !shouldDisable; });
   }
 
-  if (activeChannelId) {
-    debugLog('[Voice SFU] Socket reconnected — re-joining voice channel', activeChannelId);
-    // Re-emit voice:join — server will send voice:transport_created to re-establish SFU
-    socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
-  } else if (dmCallConversationId) {
-    debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
-    socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf });
-  }
-
-  // Re-start latency measurement with new socket
-  useVoiceStore.getState().startLatencyMeasurement();
-
-  // Restart the noise gate pipeline
+  // Restart the noise gate pipeline BEFORE emitting voice:join so that
+  // getGatedStream() returns the processed stream when handleTransportCreated fires
   if (localStream) {
     setNoiseGateThreshold(settings.noiseGateThreshold);
     setNoiseSuppression(settings.enableNoiseSuppression);
@@ -1545,4 +1732,16 @@ onSocketReconnect(async () => {
       });
     }
   }
+
+  if (activeChannelId) {
+    debugLog('[Voice SFU] Socket reconnected — re-joining voice channel', activeChannelId);
+    // Re-emit voice:join — server will send voice:transport_created to re-establish SFU
+    socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+  } else if (dmCallConversationId) {
+    debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
+    socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+  }
+
+  // Re-start latency measurement with new socket
+  useVoiceStore.getState().startLatencyMeasurement();
 });

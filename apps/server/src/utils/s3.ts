@@ -122,8 +122,10 @@ export async function deleteFromS3(key: string): Promise<void> {
     await s3.send(
       new DeleteObjectCommand({ Bucket: BUCKET, Key: key }),
     );
-  } catch (err: any) {
-    if (err.name !== 'NoSuchKey') throw err;
+  } catch (err: unknown) {
+    // Rethrow everything except NoSuchKey (idempotent delete)
+    const isNoSuchKey = err instanceof Error && err.name === 'NoSuchKey';
+    if (!isNoSuchKey) throw err;
   }
 }
 

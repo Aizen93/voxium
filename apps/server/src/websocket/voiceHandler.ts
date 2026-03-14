@@ -274,14 +274,26 @@ export function handleVoiceEvents(
   });
 
   // ── voice:transport:connect ───────────────────────────────────────────
-  socket.on('voice:transport:connect', async (data: { transportId: string; dtlsParameters: unknown }) => {
-    if (!socketRateLimit(socket, 'voice:transport:connect', 30)) return;
-    if (!data || typeof data !== 'object' || !isString(data.transportId) || !data.dtlsParameters || typeof data.dtlsParameters !== 'object') return;
+  socket.on('voice:transport:connect', async (data: { transportId: string; dtlsParameters: unknown }, ackCallback) => {
+    if (!socketRateLimit(socket, 'voice:transport:connect', 30)) {
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Rate limited' });
+      return;
+    }
+    if (!data || typeof data !== 'object' || !isString(data.transportId) || !data.dtlsParameters || typeof data.dtlsParameters !== 'object') {
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Invalid parameters' });
+      return;
+    }
     const channelId = socket.data.voiceChannelId as string;
-    if (!channelId) return;
+    if (!channelId) {
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Not in a voice channel' });
+      return;
+    }
 
     const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
-    if (!userMedia) return;
+    if (!userMedia) {
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Voice state not found' });
+      return;
+    }
 
     const transport =
       userMedia.sendTransport?.id === data.transportId ? userMedia.sendTransport :
@@ -290,13 +302,16 @@ export function handleVoiceEvents(
 
     if (!transport) {
       console.warn(`[Voice] Transport ${data.transportId} not found for user ${userId}`);
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Transport not found' });
       return;
     }
 
     try {
       await transport.connect({ dtlsParameters: data.dtlsParameters as DtlsParameters });
+      if (typeof ackCallback === 'function') ackCallback({});
     } catch (err) {
       console.error(`[Voice] transport.connect failed for ${userId}:`, err);
+      if (typeof ackCallback === 'function') ackCallback({ error: 'DTLS connect failed' });
     }
   });
 

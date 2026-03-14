@@ -27,6 +27,10 @@ export function ChatArea() {
       }
       clearMessages();
       fetchMessages(channelId);
+      // Ensure unread is cleared and server is notified — covers reconnect scenarios
+      // where unread:init may restore stale counts from a previously failed markChannelRead
+      useServerStore.getState().clearUnread(channelId);
+      useServerStore.getState().markChannelRead(channelId);
     },
     [clearMessages, fetchMessages]
   );

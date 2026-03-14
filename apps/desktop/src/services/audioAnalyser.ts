@@ -15,6 +15,7 @@ let currentLevel = 0;
 
 const SILENCE_DELAY_MS = 300;
 const TICK_INTERVAL_MS = 20; // 50 checks/sec — won't be throttled in background like rAF
+const GAIN_RAMP_SEC = 0.03; // 30ms ramp for smooth gain transitions (no-RNNoise only)
 let threshold = 0.008;
 let speakingMode: 'server' | 'dm' = 'server';
 
@@ -64,6 +65,12 @@ function rebuildPipeline() {
   try { analyserNode.disconnect(); } catch { /* already disconnected */ }
   try { gainNode.disconnect(); } catch { /* already disconnected */ }
 
+  // When RNNoise is active, bypass the gain gate — RNNoise already suppresses noise,
+  // and the gain gate causes robot voice (double-gating effect cuts mid-speech).
+  if (noiseSuppEnabled && rnnoiseNode) {
+    gainNode.gain.value = 1.0;
+  }
+
   // Rebuild pipeline
   if (noiseSuppEnabled && rnnoiseNode) {
     // ML pipeline: source → RNNoise → analyser → gain → destination
@@ -95,6 +102,11 @@ export function setNoiseSuppression(enabled: boolean) {
     return;
   }
 
+  // Switching from RNNoise to basic: reset gain to gated (will be opened by tick)
+  if (!enabled && gainNode) {
+    gainNode.gain.value = 0;
+  }
+
   rebuildPipeline();
   if (import.meta.env.DEV) console.log(`[AudioAnalyser] Noise suppression ${enabled ? 'enabled' : 'disabled'}`);
 }
@@ -122,13 +134,22 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
     analyserNode.fftSize = 2048;
 
     gainNode = audioContext.createGain();
-    gainNode.gain.value = 0; // start gated (silent) until speech detected
+    // When RNNoise is enabled, keep gain at 1.0 (bypass gate).
+    // When disabled, start gated (silent) until speech detected.
+    gainNode.gain.value = noiseSuppEnabled ? 1.0 : 0;
     destinationNode = audioContext.createMediaStreamDestination();
 
     sourceNode = audioContext.createMediaStreamSource(stream);
   } catch (err) {
     console.warn('[AudioAnalyser] Failed to create AudioContext:', err);
     return;
+  }
+
+  // Resume AudioContext if suspended (browser autoplay policy)
+  if (audioContext.state === 'suspended') {
+    audioContext.resume().catch((err) => {
+      console.warn('[AudioAnalyser] Failed to resume AudioContext:', err);
+    });
   }
 
   // Build the initial pipeline (source → analyser → gain → destination)
@@ -153,7 +174,8 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
   const dataArray = new Float32Array(analyserNode.fftSize);
 
   function tick() {
-    if (!analyserNode || !gainNode) return;
+    const ctx = audioContext; // capture reference for null safety
+    if (!analyserNode || !gainNode || !ctx) return;
 
     analyserNode.getFloatTimeDomainData(dataArray);
 
@@ -166,11 +188,17 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
     currentLevel = Math.min(rms / 0.15, 1); // normalize to 0-1 range
 
     const now = Date.now();
+    const rnnoiseActive = noiseSuppEnabled && rnnoiseNode != null;
 
     if (rms > threshold) {
       silenceStart = 0;
       // Open the noise gate — let audio through
-      gainNode.gain.value = 1;
+      // When RNNoise is active, gain stays at 1.0 (bypass gate to prevent robot voice)
+      if (!rnnoiseActive) {
+        // Smooth ramp to avoid clicks/pops
+        gainNode.gain.cancelScheduledValues(ctx.currentTime);
+        gainNode.gain.linearRampToValueAtTime(1, ctx.currentTime + GAIN_RAMP_SEC);
+      }
       if (!isSpeaking) {
         isSpeaking = true;
         emitSpeaking(true);
@@ -182,7 +210,11 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
           silenceStart = now;
         } else if (now - silenceStart > SILENCE_DELAY_MS) {
           // Close the noise gate — send silence
-          gainNode.gain.value = 0;
+          // When RNNoise is active, skip gain gating (RNNoise handles suppression)
+          if (!rnnoiseActive) {
+            gainNode.gain.cancelScheduledValues(ctx.currentTime);
+            gainNode.gain.linearRampToValueAtTime(0, ctx.currentTime + GAIN_RAMP_SEC);
+          }
           isSpeaking = false;
           emitSpeaking(false);
           speakingChangeCallback?.(false);

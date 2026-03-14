@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
 import { X, Copy, Check } from 'lucide-react';
 
@@ -23,8 +24,8 @@ export function InviteModal({ serverId, onClose }: Props) {
         setInviteCode(code);
         setLoading(false);
       })
-      .catch((err: any) => {
-        setError(err.response?.data?.error || 'Failed to create invite');
+      .catch((err: unknown) => {
+        setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to create invite' : 'Failed to create invite');
         setLoading(false);
       });
   }, [serverId, createInvite]);

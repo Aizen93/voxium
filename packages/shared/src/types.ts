@@ -341,7 +341,7 @@ export interface ClientToServerEvents {
   'voice:deaf': (deafened: boolean) => void;
   'voice:speaking': (speaking: boolean) => void;
   'voice:signal': (data: { to: string; signal: unknown }) => void;
-  'voice:transport:connect': (data: { transportId: string; dtlsParameters: unknown }) => void;
+  'voice:transport:connect': (data: { transportId: string; dtlsParameters: unknown }, callback: (response: { error?: string }) => void) => void;
   'voice:produce': (
     data: { kind: 'audio' | 'video'; rtpParameters: unknown; appData?: Record<string, unknown> },
     callback: (response: { producerId: string }) => void,

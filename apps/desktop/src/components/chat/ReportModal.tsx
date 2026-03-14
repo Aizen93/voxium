@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
+import axios from 'axios';
 import { X, Flag } from 'lucide-react';
 import { api } from '../../services/api';
 import { toast } from '../../stores/toastStore';
@@ -41,8 +42,8 @@ export function ReportModal({ type, reportedUserId, messageId, onClose }: Props)
       });
       toast.success('Report submitted. Thank you!');
       onClose();
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to submit report');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to submit report' : 'Failed to submit report');
     } finally {
       setSubmitting(false);
     }

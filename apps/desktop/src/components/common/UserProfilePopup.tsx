@@ -1,4 +1,5 @@
 import { useRef, useState, useCallback, useLayoutEffect, useEffect, useMemo } from 'react';
+import axios from 'axios';
 import { createPortal } from 'react-dom';
 import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
@@ -67,7 +68,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
 
   useEffect(() => {
     if (member) return;
-    api.get(`/users/${userId}`).then((res: any) => {
+    api.get(`/users/${userId}`).then((res) => {
       if (res.data?.data) setFetchedUser(res.data.data);
     }).catch(() => {});
   }, [userId, member]);
@@ -165,8 +166,8 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     try {
       const status = await useFriendStore.getState().sendRequest(username);
       toast.success(status === 'accepted' ? `You and ${username} are now friends!` : 'Friend request sent');
-    } catch (err: any) {
-      const msg = err.response?.data?.error || 'Failed to send friend request';
+    } catch (err) {
+      const msg = axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to send friend request' : 'Failed to send friend request';
       toast.error(msg);
     }
   };

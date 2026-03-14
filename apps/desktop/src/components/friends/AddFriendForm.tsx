@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import axios from 'axios';
 import { useFriendStore } from '../../stores/friendStore';
 import { toast } from '../../stores/toastStore';
 import { UserPlus } from 'lucide-react';
@@ -18,8 +19,8 @@ export function AddFriendForm() {
       const status = await sendRequest(trimmed);
       toast.success(status === 'accepted' ? `You and ${trimmed} are now friends!` : `Friend request sent to ${trimmed}`);
       setUsername('');
-    } catch (err: any) {
-      const msg = err.response?.data?.error || 'Failed to send friend request';
+    } catch (err) {
+      const msg = axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to send friend request' : 'Failed to send friend request';
       toast.error(msg);
     } finally {
       setIsLoading(false);

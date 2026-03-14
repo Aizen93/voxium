@@ -316,21 +316,29 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.join(`channel:${ch.id}`);
       }
 
-      // Compute unread counts across all text channels in a single query
+      // Compute unread counts across all text channels in a single query.
+      // Uses LATERAL JOIN with LIMIT 100 to cap per-channel scanning — the frontend
+      // shows "99+" anyway, so exact counts beyond 100 are unnecessary. This prevents
+      // full table scans on channels with thousands of unread messages.
       if (textChannels.length > 0) {
         const textChannelIds = textChannels.map((ch) => ch.id);
         const unreads = await prisma.$queryRawUnsafe<
-          Array<{ channel_id: string; server_id: string; cnt: bigint }>
+          Array<{ channel_id: string; server_id: string; cnt: number }>
         >(
-          `SELECT c.id AS channel_id, c.server_id, COUNT(m.id) AS cnt
+          `SELECT c.id AS channel_id, c.server_id, cnt.val AS cnt
            FROM channels c
            LEFT JOIN channel_reads cr ON cr.channel_id = c.id AND cr.user_id = $1
-           INNER JOIN messages m ON m.channel_id = c.id
-             AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
-             AND m.author_id != $1
+           CROSS JOIN LATERAL (
+             SELECT COUNT(*)::int AS val FROM (
+               SELECT 1 FROM messages m
+               WHERE m.channel_id = c.id
+                 AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
+                 AND m.author_id != $1
+               LIMIT 100
+             ) sub
+           ) cnt
            WHERE c.id = ANY($2::text[])
-           GROUP BY c.id, c.server_id
-           HAVING COUNT(m.id) > 0`,
+             AND cnt.val > 0`,
           userId,
           textChannelIds
         );
@@ -340,7 +348,7 @@ export function initSocketServer(httpServer: HttpServer) {
             unreads: unreads.map((r) => ({
               channelId: r.channel_id,
               serverId: r.server_id,
-              count: Number(r.cnt),
+              count: r.cnt,
             })),
           });
         }
@@ -355,20 +363,25 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.join(`dm:${conv.id}`);
       }
 
-      // Compute DM unread counts
+      // Compute DM unread counts — same LATERAL + LIMIT 100 optimization as channels
       if (conversations.length > 0) {
         const convIds = conversations.map((c) => c.id);
         const dmUnreads = await prisma.$queryRawUnsafe<
-          Array<{ conversation_id: string; cnt: bigint }>
+          Array<{ conversation_id: string; cnt: number }>
         >(
-          `SELECT m.conversation_id, COUNT(m.id) AS cnt
-           FROM messages m
-           LEFT JOIN conversation_reads cr ON cr.conversation_id = m.conversation_id AND cr.user_id = $1
-           WHERE m.conversation_id = ANY($2::text[])
-             AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
-             AND m.author_id != $1
-           GROUP BY m.conversation_id
-           HAVING COUNT(m.id) > 0`,
+          `SELECT conv.id AS conversation_id, cnt.val AS cnt
+           FROM unnest($2::text[]) AS conv(id)
+           LEFT JOIN conversation_reads cr ON cr.conversation_id = conv.id AND cr.user_id = $1
+           CROSS JOIN LATERAL (
+             SELECT COUNT(*)::int AS val FROM (
+               SELECT 1 FROM messages m
+               WHERE m.conversation_id = conv.id
+                 AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
+                 AND m.author_id != $1
+               LIMIT 100
+             ) sub
+           ) cnt
+           WHERE cnt.val > 0`,
           userId,
           convIds
         );
@@ -377,7 +390,7 @@ export function initSocketServer(httpServer: HttpServer) {
           socket.emit('dm:unread:init', {
             unreads: dmUnreads.map((r) => ({
               conversationId: r.conversation_id,
-              count: Number(r.cnt),
+              count: r.cnt,
             })),
           });
         }

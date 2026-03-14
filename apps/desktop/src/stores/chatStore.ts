@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import axios from 'axios';
 import { api } from '../services/api';
 import { getSocket } from '../services/socket';
 import type { Message, Attachment, ReactionGroup } from '@voxium/shared';
@@ -98,8 +99,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         set({ messages: newMessages, hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
       }
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Failed to fetch messages:', err);
       set({ isLoading: false });
     } finally {
@@ -133,8 +134,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         targetMessageId: data.targetMessageId ?? messageId,
         isLoading: false,
       });
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Failed to fetch messages around:', err);
       set({ isLoading: false });
     } finally {
@@ -224,8 +225,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         set({ messages: newMessages, hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
       }
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Failed to fetch DM messages:', err);
       set({ isLoading: false });
     } finally {
@@ -259,8 +260,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         targetMessageId: data.targetMessageId ?? messageId,
         isLoading: false,
       });
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Failed to fetch DM messages around:', err);
       set({ isLoading: false });
     } finally {

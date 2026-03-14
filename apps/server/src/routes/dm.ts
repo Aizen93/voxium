@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
-import { rateLimitMessageSend, rateLimitGeneral } from '../middleware/rateLimiter';
+import { rateLimitMessageSend, rateLimitGeneral, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
 import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, type Message } from '@voxium/shared';
@@ -504,7 +504,7 @@ dmRouter.delete('/:conversationId', rateLimitGeneral, async (req: Request<{ conv
 
 // ─── Mark conversation as read ───────────────────────────────────────────────
 
-dmRouter.post('/:conversationId/read', async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
+dmRouter.post('/:conversationId/read', rateLimitMarkRead, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;

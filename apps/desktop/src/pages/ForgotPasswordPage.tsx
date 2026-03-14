@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
+import axios from 'axios';
 
 export function ForgotPasswordPage() {
   const { forgotPassword } = useAuthStore();
@@ -16,8 +17,8 @@ export function ForgotPasswordPage() {
     try {
       await forgotPassword(email);
       setSuccess(true);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Something went wrong. Please try again.');
+    } catch (err) {
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Something went wrong. Please try again.' : 'Something went wrong. Please try again.');
     } finally {
       setIsLoading(false);
     }

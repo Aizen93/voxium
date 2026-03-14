@@ -81,13 +81,47 @@ export function MainLayout() {
     fetchServers();
   }, [fetchServers]);
 
+  // Re-mark current channel/conversation as read when tab/window regains visibility.
+  // This covers cases where the socket reconnected in the background and unread:init
+  // restored stale counts because a previous markChannelRead API call failed.
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      const serverState = useServerStore.getState();
+      if (serverState.activeChannelId) {
+        serverState.clearUnread(serverState.activeChannelId);
+        serverState.markChannelRead(serverState.activeChannelId);
+      }
+      if (!serverState.activeServerId) {
+        const dmState = useDMStore.getState();
+        if (dmState.activeConversationId) {
+          dmState.clearDMUnread(dmState.activeConversationId);
+          dmState.markConversationRead(dmState.activeConversationId);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
+
   // Set up WebSocket event listeners with proper function references
   useEffect(() => {
+    // Debounce timers for marking channels/conversations as read while viewing
+    let markReadTimer: ReturnType<typeof setTimeout> | null = null;
+    let markDMReadTimer: ReturnType<typeof setTimeout> | null = null;
+
     // Store function references so cleanup actually works
     const handlers = {
       messageNew: (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
         if (message.channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().addMessage(message);
+          // Debounced mark-as-read so lastReadAt stays current while viewing
+          // Capture serverId now — channels array may change if user switches servers before timer fires
+          const capturedServerId = message.serverId;
+          if (markReadTimer) clearTimeout(markReadTimer);
+          markReadTimer = setTimeout(() => {
+            useServerStore.getState().markChannelRead(message.channelId!, capturedServerId);
+          }, 2000);
         }
         const currentUser = useAuthStore.getState().user;
         if (message.author?.id === currentUser?.id) return;
@@ -259,6 +293,11 @@ export function MainLayout() {
 
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().addMessage(message);
+          // Debounced mark-as-read so lastReadAt stays current while viewing
+          if (markDMReadTimer) clearTimeout(markDMReadTimer);
+          markDMReadTimer = setTimeout(() => {
+            useDMStore.getState().markConversationRead(message.conversationId!);
+          }, 2000);
         } else if (message.conversationId) {
           const currentUser = useAuthStore.getState().user;
           if (message.author?.id !== currentUser?.id) {
@@ -646,6 +685,8 @@ export function MainLayout() {
       }
       if (socket && socket !== s) socket.off('connect', handleConnected);
       unsubStatus();
+      if (markReadTimer) clearTimeout(markReadTimer);
+      if (markDMReadTimer) clearTimeout(markDMReadTimer);
     };
 
     return () => {

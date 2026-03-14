@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useServerStore } from '../stores/serverStore';
 import { api } from '../services/api';
 import { Users } from 'lucide-react';
+import axios from 'axios';
 
 interface InvitePreview {
   code: string;
@@ -30,8 +31,8 @@ export function InvitePage() {
         setPreview(data.data);
         setLoading(false);
       })
-      .catch((err: any) => {
-        setError(err.response?.data?.error || 'This invite is invalid or has expired');
+      .catch((err: unknown) => {
+        setError(axios.isAxiosError(err) ? err.response?.data?.error || 'This invite is invalid or has expired' : 'This invite is invalid or has expired');
         setLoading(false);
       });
   }, [code]);
@@ -46,8 +47,8 @@ export function InvitePage() {
         await setActiveServer(preview.server.id);
       }
       navigate('/', { replace: true });
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to join server');
+    } catch (err) {
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to join server' : 'Failed to join server');
       setJoining(false);
     }
   };

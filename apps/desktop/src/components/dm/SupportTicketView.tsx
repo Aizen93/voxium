@@ -52,8 +52,8 @@ export function SupportTicketView() {
   const handleReopen = async () => {
     try {
       await openTicket();
-    } catch (err: any) {
-      toast.error(err?.message || 'Failed to reopen ticket');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message || 'Failed to reopen ticket' : 'Failed to reopen ticket');
     }
   };
 

@@ -36,6 +36,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   support:        { keyPrefix: 'rl:support',   points: 10,  duration: 30,  blockDuration: 0,   keyType: 'userId', label: 'Support' },
   verifyEmail:        { keyPrefix: 'rl:vfyeml', points: 5, duration: 900, blockDuration: 300, keyType: 'ip',     label: 'Verify Email' },
   resendVerification: { keyPrefix: 'rl:verify', points: 3, duration: 300, blockDuration: 300, keyType: 'userId', label: 'Resend Verification' },
+  markRead:       { keyPrefix: 'rl:markread',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Mark Read' },
   general:        { keyPrefix: 'rl:general',   points: 100, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'General' },
 };
 
@@ -116,7 +117,7 @@ export async function loadRateLimitOverrides(): Promise<void> {
 
 /** Get all rate limit rules (defaults merged with overrides) */
 export function getAllRateLimits(): Array<RateLimitDef & { name: string; isCustom: boolean }> {
-  return Object.entries(DEFAULTS).map(([name, def]) => ({
+  return Object.entries(DEFAULTS).map(([name, _def]) => ({
     name,
     ...getConfig(name),
     isCustom: !!overrides[name],
@@ -207,6 +208,7 @@ export const rateLimitSupport = createMiddleware('support', byUserId);
 export const rateLimitTOTP = createMiddleware('totp', byUserId);
 export const rateLimitVerifyEmail = createMiddleware('verifyEmail', byIp);
 export const rateLimitResendVerification = createMiddleware('resendVerification', byUserId);
+export const rateLimitMarkRead = createMiddleware('markRead', byUserId);
 export const rateLimitGeneral = createMiddleware('general', byIp);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────

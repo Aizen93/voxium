@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
@@ -14,11 +15,10 @@ interface Props {
 export function MemberContextMenu({ member, position, onClose }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
   const currentUser = useAuthStore((s) => s.user);
-  const { members, activeServerId, servers } = useServerStore();
+  const { members, activeServerId } = useServerStore();
   const [confirmAction, setConfirmAction] = useState<'kick' | 'transfer' | null>(null);
 
   const currentMember = members.find((m) => m.userId === currentUser?.id);
-  const server = servers.find((s) => s.id === activeServerId);
 
   const isOwner = currentMember?.role === 'owner';
   const isAdmin = currentMember?.role === 'admin';
@@ -70,8 +70,8 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
     try {
       await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'admin');
       onClose();
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to promote member');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to promote member' : 'Failed to promote member');
     }
   }
 
@@ -79,8 +79,8 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
     try {
       await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'member');
       onClose();
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to demote member');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to demote member' : 'Failed to demote member');
     }
   }
 
@@ -92,8 +92,8 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
     try {
       await useServerStore.getState().kickMember(activeServerId!, member.userId);
       onClose();
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to kick member');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to kick member' : 'Failed to kick member');
     }
   }
 
@@ -105,8 +105,8 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
     try {
       await useServerStore.getState().transferOwnership(activeServerId!, member.userId);
       onClose();
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to transfer ownership');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to transfer ownership' : 'Failed to transfer ownership');
     }
   }
 

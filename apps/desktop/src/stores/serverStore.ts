@@ -39,7 +39,7 @@ interface ServerState {
   incrementUnread: (channelId: string, serverId: string) => void;
   clearUnread: (channelId: string) => void;
   initUnreadCounts: (unreads: UnreadCount[]) => void;
-  markChannelRead: (channelId: string) => void;
+  markChannelRead: (channelId: string, hintServerId?: string) => void;
   uploadServerIcon: (serverId: string, file: File) => Promise<void>;
   updateServer: (serverId: string, fields: { name?: string }) => Promise<void>;
   updateServerData: (server: Server) => void;
@@ -56,6 +56,11 @@ interface ServerState {
   handleMemberKicked: (serverId: string) => void;
   handleServerDeleted: (serverId: string) => void;
 }
+
+// Dedup: prevent redundant mark-as-read API calls when multiple code paths
+// fire within a short window (e.g. setActiveChannel + joinAndFetch on channel switch)
+let _lastMarkedChannel = '';
+let _lastMarkedAt = 0;
 
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
@@ -78,6 +83,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   setActiveServer: async (serverId: string) => {
+    // Mark the previous channel as read before switching servers
+    const prevChannelId = get().activeChannelId;
+    if (prevChannelId) {
+      get().markChannelRead(prevChannelId);
+    }
+
     set({ activeServerId: serverId, isLoading: true });
     try {
       const { data } = await api.get(`/servers/${serverId}`);
@@ -92,6 +103,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
         isLoading: false,
       });
 
+      // Clear unread and mark as read for the auto-selected first channel
+      if (firstTextChannel) {
+        get().clearUnread(firstTextChannel.id);
+        get().markChannelRead(firstTextChannel.id);
+      }
+
       // Fetch members in the background
       get().fetchMembers(serverId);
     } catch (err) {
@@ -101,6 +118,13 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   setActiveChannel: (channelId: string) => {
+    const prevChannelId = get().activeChannelId;
+    // No-op if clicking the already-active channel
+    if (prevChannelId === channelId) return;
+    // Mark the previous channel as read (captures messages received while viewing)
+    if (prevChannelId) {
+      get().markChannelRead(prevChannelId);
+    }
     set({ activeChannelId: channelId });
     get().clearUnread(channelId);
     get().markChannelRead(channelId);
@@ -268,7 +292,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // Find which server this channel belongs to
     const channel = get().channels.find((c) => c.id === channelId);
     set((state) => {
-      const { [channelId]: _, ...restUnread } = state.unreadCounts;
+      const restUnread = { ...state.unreadCounts };
+      delete restUnread[channelId];
       const newServerUnread = { ...state.serverUnreadCounts };
       const sid = channel?.serverId || state.activeServerId;
       if (sid && newServerUnread[sid]) {
@@ -289,13 +314,22 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set({ unreadCounts, serverUnreadCounts });
   },
 
-  markChannelRead: (channelId: string) => {
-    // Find the serverId for this channel
+  markChannelRead: (channelId: string, hintServerId?: string) => {
+    // Dedup: skip if same channel was marked within the last 2s (multiple code paths
+    // can trigger this near-simultaneously on channel switch and reconnect)
+    const now = Date.now();
+    if (channelId === _lastMarkedChannel && now - _lastMarkedAt < 2000) return;
+    _lastMarkedChannel = channelId;
+    _lastMarkedAt = now;
+    // Find the serverId for this channel — use hint when channels array may have changed (e.g. after server switch)
     const channel = get().channels.find((c) => c.id === channelId);
-    const serverId = channel?.serverId || get().activeServerId;
+    const serverId = channel?.serverId || hintServerId || get().activeServerId;
     if (!serverId) return;
-    // Fire-and-forget
-    api.post(`/servers/${serverId}/channels/${channelId}/read`).catch(() => {});
+    // Retry once on failure to prevent stale lastReadAt causing phantom unreads on reconnect
+    const url = `/servers/${serverId}/channels/${channelId}/read`;
+    api.post(url).catch(() => {
+      setTimeout(() => api.post(url).catch(() => {}), 2000);
+    });
   },
 
   uploadServerIcon: async (serverId: string, file: File) => {
@@ -429,7 +463,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
       const isActive = state.activeServerId === serverId;
 
       // Clean up server-level unread count
-      const { [serverId]: _, ...restServerUnread } = state.serverUnreadCounts;
+      const restServerUnread = { ...state.serverUnreadCounts };
+      delete restServerUnread[serverId];
 
       // Clean up channel-level unread counts if this was the active server
       let newUnreadCounts = state.unreadCounts;

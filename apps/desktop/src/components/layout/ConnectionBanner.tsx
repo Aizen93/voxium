@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getConnectionStatus, onConnectionStatusChange } from '../../services/socket';
-import { Wifi, WifiOff, Loader2 } from 'lucide-react';
+import { WifiOff, Loader2 } from 'lucide-react';
 
 export function ConnectionBanner() {
   const [status, setStatus] = useState(getConnectionStatus);

@@ -6,6 +6,7 @@ import { Avatar } from '../common/Avatar';
 import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio } from 'lucide-react';
 import type { VoiceQuality } from '../../stores/settingsStore';
 import { LIMITS } from '@voxium/shared';
+import axios from 'axios';
 
 interface DeviceInfo {
   deviceId: string;
@@ -114,8 +115,8 @@ function ChangePasswordForm() {
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');
-    } catch (err: any) {
-      setPasswordError(err.response?.data?.error || 'Failed to change password');
+    } catch (err) {
+      setPasswordError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to change password' : 'Failed to change password');
     } finally {
       setChangingPassword(false);
     }
@@ -219,8 +220,8 @@ function ProfileTab() {
     try {
       await uploadAvatar(file);
       toast.success('Avatar updated');
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to upload avatar');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to upload avatar' : 'Failed to upload avatar');
     } finally {
       setUploading(false);
     }
@@ -234,8 +235,8 @@ function ProfileTab() {
         bio: bio.trim(),
       });
       toast.success('Profile updated');
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to update profile');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to update profile' : 'Failed to update profile');
     } finally {
       setSaving(false);
     }
@@ -343,8 +344,8 @@ function TwoFactorSection() {
       setQrCodeDataUrl(data.qrCodeDataUrl);
       setSecret(data.secret);
       setStep('setup');
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to set up 2FA');
+    } catch (err) {
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to set up 2FA' : 'Failed to set up 2FA');
     } finally {
       setLoading(false);
     }
@@ -359,8 +360,8 @@ function TwoFactorSection() {
       setBackupCodes(codes);
       setStep('backup');
       setCode('');
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Invalid verification code');
+    } catch (err) {
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Invalid verification code' : 'Invalid verification code');
     } finally {
       setLoading(false);
     }
@@ -375,8 +376,8 @@ function TwoFactorSection() {
       toast.success('Two-factor authentication disabled');
       setStep('idle');
       setCode('');
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Invalid verification code');
+    } catch (err) {
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Invalid verification code' : 'Invalid verification code');
     } finally {
       setLoading(false);
     }

@@ -1,5 +1,6 @@
 import { getIO } from '../websocket/socketServer';
 import { prisma } from './prisma';
+import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
 
 /**
  * After a user joins a server:
@@ -35,9 +36,9 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
       user: {
         ...joinedUser,
         bio: joinedUser.bio ?? null,
-        status: joinedUser.status as any,
-        role: joinedUser.role as any,
-        supporterTier: joinedUser.supporterTier as any,
+        status: joinedUser.status as UserStatus,
+        role: joinedUser.role as UserRole,
+        supporterTier: joinedUser.supporterTier as SupporterTier,
         createdAt: joinedUser.createdAt.toISOString(),
       },
     });

@@ -112,7 +112,7 @@ userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFu
       const io = getIO();
       const payload = { userId: updated.id, displayName: updated.displayName, avatarUrl: updated.avatarUrl };
       for (const { serverId } of memberships) {
-        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED as any, payload);
+        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED, payload);
       }
     }
 

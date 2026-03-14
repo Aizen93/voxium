@@ -54,6 +54,10 @@ export function DMChatArea() {
         socket.emit('dm:join', conversationId);
       }
       fetchDMMessages(conversationId);
+      // Ensure unread is cleared and server is notified — covers reconnect scenarios
+      // where dm:unread:init may restore stale counts from a previously failed markConversationRead
+      useDMStore.getState().clearDMUnread(conversationId);
+      useDMStore.getState().markConversationRead(conversationId);
     },
     [fetchDMMessages]
   );

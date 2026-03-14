@@ -3,7 +3,9 @@ import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateServerName, LIMITS, WS_EVENTS } from '@voxium/shared';
-import type { MemberRole } from '@voxium/shared';
+import type { MemberRole, Server } from '@voxium/shared';
+import type { Socket } from 'socket.io';
+import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
 import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
@@ -367,7 +369,7 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
       deleteFromS3(oldIconUrl).catch(() => {});
     }
 
-    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updated);
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
 
     res.json({ success: true, data: updated });
   } catch (err) {
@@ -399,7 +401,7 @@ serverRouter.patch('/:serverId/invites-lock', rateLimitMemberManage, async (req:
       data: { invitesLocked: locked },
     });
 
-    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updated);
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
 
     res.json({ success: true, data: updated });
   } catch (err) {
@@ -419,10 +421,10 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
     const io = getIO();
 
     // 1. Silently eject all users from voice channels (no voice:user_left events — clients handle via server:deleted)
-    cleanupServerVoice(io as any, serverId);
+    cleanupServerVoice(io, serverId);
 
     // 2. Notify all members before removing them from rooms
-    io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_DELETED as any, { serverId });
+    io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_DELETED, { serverId });
 
     // 3. Remove all sockets from server room and channel rooms
     const channels = await prisma.channel.findMany({
@@ -484,7 +486,7 @@ serverRouter.patch(
         data: { role: newRole },
       });
 
-      getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+      getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
         serverId,
         userId: memberId,
         role: newRole as MemberRole,
@@ -532,7 +534,7 @@ serverRouter.post(
             select: { serverId: true },
           });
           if (voiceChannel?.serverId === serverId) {
-            leaveCurrentVoiceChannel(io as any, s as any, memberId);
+            leaveCurrentVoiceChannel(io, s as unknown as Socket<ClientToServerEvents, ServerToClientEvents>, memberId);
           }
         }
       }
@@ -559,7 +561,7 @@ serverRouter.post(
       const kickedSockets = await io.fetchSockets();
       for (const s of kickedSockets) {
         if (s.data.userId === memberId) {
-          s.emit(WS_EVENTS.MEMBER_KICKED as any, { serverId, userId: memberId });
+          s.emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
         }
       }
 
@@ -608,12 +610,12 @@ serverRouter.post(
       const io = getIO();
 
       // Emit role updates for both users
-      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
         serverId,
         userId: targetUserId,
         role: 'owner' as MemberRole,
       });
-      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
         serverId,
         userId: req.user!.userId,
         role: 'admin' as MemberRole,
@@ -625,7 +627,7 @@ serverRouter.post(
         select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
       });
       if (updatedServer) {
-        io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updatedServer);
+        io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updatedServer as unknown as Server);
       }
 
       res.json({ success: true, message: 'Ownership transferred' });

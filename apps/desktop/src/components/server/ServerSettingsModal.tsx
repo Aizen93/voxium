@@ -6,6 +6,7 @@ import { Avatar } from '../common/Avatar';
 import { ImageUploadButton } from '../common/ImageUploadButton';
 import { X, Lock, Unlock } from 'lucide-react';
 import type { ServerMember, MemberRole, ResourceLimits } from '@voxium/shared';
+import axios from 'axios';
 import { api } from '../../services/api';
 
 interface Props {
@@ -111,8 +112,8 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
     try {
       await toggleInvitesLock(serverId, !server.invitesLocked);
       toast.success(server.invitesLocked ? 'Invites unlocked' : 'Invites locked');
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to toggle invites lock');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to toggle invites lock' : 'Failed to toggle invites lock');
     } finally {
       setTogglingLock(false);
     }
@@ -126,8 +127,8 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
         try {
           await uploadServerIcon(serverId, iconFile);
           setIconFile(null);
-        } catch (err: any) {
-          toast.error(err.response?.data?.error || 'Failed to upload icon');
+        } catch (err) {
+          toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to upload icon' : 'Failed to upload icon');
           setSaving(false);
           setUploading(false);
           return;
@@ -141,8 +142,8 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
 
       toast.success('Server updated');
       onClose();
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to update server');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to update server' : 'Failed to update server');
     } finally {
       setSaving(false);
     }
@@ -156,8 +157,8 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
       await deleteServer(serverId);
       onClose();
       // No toast here — the server:deleted socket event shows one for all clients (including the owner)
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to delete server');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to delete server' : 'Failed to delete server');
     } finally {
       setDeleting(false);
     }
@@ -279,9 +280,8 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
 }
 
 function MembersTab({ serverId }: { serverId: string }) {
-  const { members, servers } = useServerStore();
+  const { members } = useServerStore();
   const currentUser = useAuthStore((s) => s.user);
-  const server = servers.find((s) => s.id === serverId);
   const currentMember = members.find((m) => m.userId === currentUser?.id);
   const [confirmAction, setConfirmAction] = useState<{ type: 'kick' | 'transfer'; userId: string } | null>(null);
 
@@ -296,8 +296,8 @@ function MembersTab({ serverId }: { serverId: string }) {
   async function handleRoleChange(memberId: string, newRole: MemberRole) {
     try {
       await useServerStore.getState().updateMemberRole(serverId, memberId, newRole);
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to update role');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to update role' : 'Failed to update role');
     }
   }
 
@@ -309,8 +309,8 @@ function MembersTab({ serverId }: { serverId: string }) {
     try {
       await useServerStore.getState().kickMember(serverId, memberId);
       setConfirmAction(null);
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to kick member');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to kick member' : 'Failed to kick member');
     }
   }
 
@@ -322,8 +322,8 @@ function MembersTab({ serverId }: { serverId: string }) {
     try {
       await useServerStore.getState().transferOwnership(serverId, targetUserId);
       setConfirmAction(null);
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to transfer ownership');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to transfer ownership' : 'Failed to transfer ownership');
     }
   }
 

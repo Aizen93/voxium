@@ -83,8 +83,8 @@ app.get('/health', async (_req, res) => {
     const { prisma } = await import('./utils/prisma');
     await prisma.$queryRaw`SELECT 1`;
     checks.database = { status: 'ok', latency: Date.now() - dbStart };
-  } catch (err: any) {
-    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : err.message;
+  } catch (err: unknown) {
+    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : (err instanceof Error ? err.message : String(err));
     checks.database = { status: 'error', latency: Date.now() - dbStart, error: msg };
     healthy = false;
   }
@@ -96,8 +96,8 @@ app.get('/health', async (_req, res) => {
     const redis = getRedis();
     await redis.ping();
     checks.redis = { status: 'ok', latency: Date.now() - redisStart };
-  } catch (err: any) {
-    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : err.message;
+  } catch (err: unknown) {
+    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : (err instanceof Error ? err.message : String(err));
     checks.redis = { status: 'error', latency: Date.now() - redisStart, error: msg };
     healthy = false;
   }

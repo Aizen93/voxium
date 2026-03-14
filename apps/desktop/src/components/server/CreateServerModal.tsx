@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { ImageUploadButton } from '../common/ImageUploadButton';
@@ -34,8 +35,8 @@ export function CreateServerModal({ onClose }: Props) {
       await setActiveServer(server.id);
       toast.success('Server created!');
       onClose();
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to create server');
+    } catch (err) {
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to create server' : 'Failed to create server');
     } finally {
       setLoading(false);
     }
@@ -54,8 +55,8 @@ export function CreateServerModal({ onClose }: Props) {
       await joinServer(code);
       toast.success('Joined server!');
       onClose();
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to join server');
+    } catch (err) {
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to join server' : 'Failed to join server');
     } finally {
       setLoading(false);
     }
