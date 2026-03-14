@@ -4,6 +4,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { toast } from '../../stores/toastStore';
 import { startCallRingtone, stopCallRingtone } from '../../services/notificationSounds';
 import { Avatar } from '../common/Avatar';
 import { Phone, PhoneOff } from 'lucide-react';
@@ -20,19 +21,24 @@ function IncomingCallContent({ incomingCall }: { incomingCall: { conversationId:
   }, []);
 
   const handleAccept = async () => {
-    const { conversationId } = incomingCall;
-    await acceptCall();
+    try {
+      const { conversationId } = incomingCall;
+      await acceptCall();
 
-    // Ensure the conversation is in the local store (it may not be if this is a new DM)
-    const dmStore = useDMStore.getState();
-    if (!dmStore.conversations.some((c) => c.id === conversationId)) {
-      await dmStore.fetchConversations();
+      // Ensure the conversation is in the local store (it may not be if this is a new DM)
+      const dmStore = useDMStore.getState();
+      if (!dmStore.conversations.some((c) => c.id === conversationId)) {
+        await dmStore.fetchConversations();
+      }
+
+      // Navigate to the DM conversation so the user sees the call UI
+      useServerStore.setState({ activeServerId: null, activeChannelId: null });
+      useFriendStore.getState().setShowFriendsView(false);
+      dmStore.setActiveConversation(conversationId);
+    } catch (err) {
+      console.error('Failed to accept call:', err);
+      toast.error('Failed to accept call');
     }
-
-    // Navigate to the DM conversation so the user sees the call UI
-    useServerStore.setState({ activeServerId: null, activeChannelId: null });
-    useFriendStore.getState().setShowFriendsView(false);
-    dmStore.setActiveConversation(conversationId);
   };
 
   return (

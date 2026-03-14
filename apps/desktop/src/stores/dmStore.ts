@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { useChatStore } from './chatStore';
+import { toast } from './toastStore';
 import type { Conversation, DMUnreadCount, UserStatus } from '@voxium/shared';
 
 interface DMState {
@@ -41,9 +42,24 @@ export const useDMStore = create<DMState>((set, get) => ({
     set({ isLoading: true });
     try {
       const { data } = await api.get('/dm');
-      set({ conversations: data.data, isLoading: false });
+      const conversations = data.data;
+
+      // Initialize participant statuses from the conversation data
+      const statuses: Record<string, import('@voxium/shared').UserStatus> = {};
+      for (const conv of conversations) {
+        if (conv.participant?.status) {
+          statuses[conv.participant.id] = conv.participant.status;
+        }
+      }
+
+      set((state) => ({
+        conversations,
+        participantStatuses: { ...state.participantStatuses, ...statuses },
+        isLoading: false,
+      }));
     } catch (err) {
       console.error('Failed to fetch conversations:', err);
+      toast.error('Failed to load conversations');
       set({ isLoading: false });
     }
   },

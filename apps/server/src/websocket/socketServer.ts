@@ -262,15 +262,24 @@ export function initSocketServer(httpServer: HttpServer) {
         // Only broadcast offline and update DB if the user has no remaining
         // sockets on any node (1:many presence model).
         if (result?.fullyOffline) {
-          const membershipList = await prisma.serverMember.findMany({
-            where: { userId },
-            select: { serverId: true },
-          });
+          const [membershipList, dmConversations] = await Promise.all([
+            prisma.serverMember.findMany({
+              where: { userId },
+              select: { serverId: true },
+            }),
+            prisma.conversation.findMany({
+              where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
+              select: { id: true },
+            }),
+          ]);
 
           await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
 
           for (const m of membershipList) {
             socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
+          }
+          for (const c of dmConversations) {
+            socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'offline' });
           }
         }
       } catch (err) {
@@ -455,6 +464,19 @@ export function initSocketServer(httpServer: HttpServer) {
       // Broadcast online status to all servers
       for (const m of memberships) {
         socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
+      }
+
+      // Broadcast online status to all DM conversation rooms
+      try {
+        const dmConversations = await prisma.conversation.findMany({
+          where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
+          select: { id: true },
+        });
+        for (const c of dmConversations) {
+          socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
+        }
+      } catch (dmPresErr) {
+        console.error(`[WS] Error broadcasting DM presence for ${userId}:`, dmPresErr);
       }
 
       // Send existing voice channel users for all servers (reads from Redis for cross-node visibility)

@@ -134,9 +134,9 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
     analyserNode.fftSize = 2048;
 
     gainNode = audioContext.createGain();
-    // When RNNoise is enabled, keep gain at 1.0 (bypass gate).
-    // When disabled, start gated (silent) until speech detected.
-    gainNode.gain.value = noiseSuppEnabled ? 1.0 : 0;
+    // DM P2P: always bypass gain gate (no producers to pause — gating only helps SFU bandwidth).
+    // Server SFU: bypass when RNNoise active (it handles suppression), gate when disabled.
+    gainNode.gain.value = (mode === 'dm' || noiseSuppEnabled) ? 1.0 : 0;
     destinationNode = audioContext.createMediaStreamDestination();
 
     sourceNode = audioContext.createMediaStreamSource(stream);
@@ -189,12 +189,13 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
 
     const now = Date.now();
     const rnnoiseActive = noiseSuppEnabled && rnnoiseNode != null;
+    // DM P2P: never gate audio (no SFU producers to pause — gating breaks WebRTC track)
+    const bypassGate = speakingMode === 'dm' || rnnoiseActive;
 
     if (rms > threshold) {
       silenceStart = 0;
       // Open the noise gate — let audio through
-      // When RNNoise is active, gain stays at 1.0 (bypass gate to prevent robot voice)
-      if (!rnnoiseActive) {
+      if (!bypassGate) {
         // Smooth ramp to avoid clicks/pops
         gainNode.gain.cancelScheduledValues(ctx.currentTime);
         gainNode.gain.linearRampToValueAtTime(1, ctx.currentTime + GAIN_RAMP_SEC);
@@ -210,8 +211,7 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
           silenceStart = now;
         } else if (now - silenceStart > SILENCE_DELAY_MS) {
           // Close the noise gate — send silence
-          // When RNNoise is active, skip gain gating (RNNoise handles suppression)
-          if (!rnnoiseActive) {
+          if (!bypassGate) {
             gainNode.gain.cancelScheduledValues(ctx.currentTime);
             gainNode.gain.linearRampToValueAtTime(0, ctx.currentTime + GAIN_RAMP_SEC);
           }

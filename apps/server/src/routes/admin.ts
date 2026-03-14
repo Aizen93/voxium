@@ -617,6 +617,24 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
       metadata: { oldRole: target.role, newRole: role, username: target.username },
     });
 
+    // Broadcast badge change to all servers the user is in + DM conversations
+    try {
+      const io = getIO();
+      const payload = { userId: targetId, role };
+      const [memberships, conversations] = await Promise.all([
+        prisma.serverMember.findMany({ where: { userId: targetId }, select: { serverId: true } }),
+        prisma.conversation.findMany({ where: { OR: [{ user1Id: targetId }, { user2Id: targetId }] }, select: { id: true } }),
+      ]);
+      for (const { serverId } of memberships) {
+        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED, payload);
+      }
+      for (const { id } of conversations) {
+        io.to(`dm:${id}`).emit(WS_EVENTS.USER_UPDATED, payload);
+      }
+    } catch (broadcastErr) {
+      console.error('[Admin] Failed to broadcast role change:', broadcastErr);
+    }
+
     res.json({ success: true, message: `User "${target.username}" role changed to ${role}` });
   } catch (err) {
     next(err);
@@ -654,6 +672,25 @@ adminRouter.patch('/users/:userId/supporter', async (req: Request<{ userId: stri
         supporterSince: isSupporter ? (target.isSupporter ? undefined : new Date()) : null,
       },
     });
+
+    // Broadcast badge change to all servers the user is in + DM conversations
+    try {
+      const io = getIO();
+      const finalTier = isSupporter ? (supporterTier !== undefined ? supporterTier : target.supporterTier) : null;
+      const payload = { userId: targetId, isSupporter, supporterTier: finalTier };
+      const [memberships, conversations] = await Promise.all([
+        prisma.serverMember.findMany({ where: { userId: targetId }, select: { serverId: true } }),
+        prisma.conversation.findMany({ where: { OR: [{ user1Id: targetId }, { user2Id: targetId }] }, select: { id: true } }),
+      ]);
+      for (const { serverId } of memberships) {
+        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED, payload);
+      }
+      for (const { id } of conversations) {
+        io.to(`dm:${id}`).emit(WS_EVENTS.USER_UPDATED, payload);
+      }
+    } catch (broadcastErr) {
+      console.error('[Admin] Failed to broadcast supporter change:', broadcastErr);
+    }
 
     res.json({ success: true, message: `Supporter badge ${isSupporter ? 'granted to' : 'removed from'} "${target.username}"` });
   } catch (err) {
@@ -1378,7 +1415,8 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
 
 adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const key = req.params.path as string;
+    const pathSegments = req.params.path;
+    const key = Array.isArray(pathSegments) ? pathSegments.join('/') : pathSegments as string;
     if (!key || (!VALID_S3_KEY_RE.test(key) && !VALID_ATTACHMENT_KEY_RE.test(key))) {
       throw new BadRequestError('Invalid file key');
     }

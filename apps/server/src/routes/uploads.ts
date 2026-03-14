@@ -114,7 +114,9 @@ uploadRouter.get(
   requireVerifiedEmail,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const key = `attachments/${req.params.path as string}`;
+      const pathSegments = req.params.path;
+      const pathStr = Array.isArray(pathSegments) ? pathSegments.join('/') : pathSegments as string;
+      const key = `attachments/${pathStr}`;
       if (!key || key.includes('..') || !VALID_ATTACHMENT_KEY_RE.test(key)) {
         throw new BadRequestError('Invalid key');
       }
@@ -189,7 +191,8 @@ uploadRouter.get(
   rateLimitGeneral,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const key = req.params.path as string;
+      const pathSegments = req.params.path;
+      const key = Array.isArray(pathSegments) ? pathSegments.join('/') : pathSegments as string;
       if (!key || key.includes('..') || !VALID_S3_KEY_RE.test(key)) {
         throw new BadRequestError('Invalid key');
       }

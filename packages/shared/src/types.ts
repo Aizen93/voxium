@@ -289,7 +289,7 @@ export interface ServerToClientEvents {
     reactions: ReactionGroup[];
   }) => void;
   'server:updated': (server: Server) => void;
-  'user:updated': (data: { userId: string; displayName: string; avatarUrl: string | null }) => void;
+  'user:updated': (data: { userId: string; displayName?: string; avatarUrl?: string | null; role?: string; isSupporter?: boolean; supporterTier?: string | null }) => void;
   'unread:init': (data: { unreads: UnreadCount[] }) => void;
   'dm:message:new': (message: Message) => void;
   'dm:message:update': (message: Message) => void;

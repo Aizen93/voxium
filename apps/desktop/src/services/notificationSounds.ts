@@ -27,7 +27,8 @@ function playTone(
 ): void {
   try {
     const ctx = getAudioContext();
-    ctx.resume();
+    // Fire-and-forget: resume may reject if user hasn't interacted yet
+    ctx.resume().catch(() => {});
 
     routeToOutputDevice(ctx).then((destination) => {
       const gainNode = ctx.createGain();
@@ -48,7 +49,8 @@ function playTone(
 
       gainNode.gain.setValueAtTime(gain, ctx.currentTime);
       gainNode.gain.linearRampToValueAtTime(0, ctx.currentTime + totalDuration);
-    });
+    // Fire-and-forget: audio routing errors are non-critical
+    }).catch(() => {});
   } catch {
     // ignore audio errors
   }

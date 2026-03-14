@@ -77,15 +77,16 @@ app.use(cors({
   },
   credentials: true,
 }));
-// Deferred: morgan format resolved at first request, not at module scope
-let _morganSetUp = false;
-app.use((req, res, next) => {
-  if (!_morganSetUp) {
-    _morganSetUp = true;
+// Deferred: morgan handler resolved at first request, not at module scope.
+// We create the morgan middleware lazily and invoke it inline (not via app.use())
+// so it stays at the correct position in the middleware stack.
+let _morganHandler: express.RequestHandler | null = null;
+function getMorganHandler(): express.RequestHandler {
+  if (!_morganHandler) {
     const fmt = process.env.LOG_FORMAT || (process.env.NODE_ENV === 'production' ? 'json' : 'dev');
     if (fmt === 'json') {
       morgan.token('body-size', (_rq, rs) => rs.getHeader('content-length') as string || '0');
-      app.use(morgan((tokens, rq, rs) => JSON.stringify({
+      _morganHandler = morgan((tokens, rq, rs) => JSON.stringify({
         ts: new Date().toISOString(),
         method: tokens.method(rq, rs),
         url: tokens.url(rq, rs),
@@ -93,12 +94,15 @@ app.use((req, res, next) => {
         ms: Number(tokens['response-time'](rq, rs)),
         bytes: Number(tokens['body-size'](rq, rs)) || 0,
         ip: rq.ip,
-      })));
+      }));
     } else {
-      app.use(morgan('dev'));
+      _morganHandler = morgan('dev');
     }
   }
-  next();
+  return _morganHandler;
+}
+app.use((req, res, next) => {
+  getMorganHandler()(req, res, next);
 });
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());

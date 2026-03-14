@@ -99,6 +99,12 @@ export function MainLayout() {
           dmState.markConversationRead(dmState.activeConversationId);
         }
       }
+      // Re-fetch data that may have become stale while the tab was hidden
+      // (socket events are lost during background disconnects)
+      useDMStore.getState().fetchConversations();
+      if (serverState.activeServerId) {
+        serverState.fetchMembers(serverState.activeServerId);
+      }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -253,9 +259,18 @@ export function MainLayout() {
       serverUpdated: (server: Server) => {
         useServerStore.getState().updateServerData(server);
       },
-      userUpdated: ({ userId, displayName, avatarUrl }: { userId: string; displayName: string; avatarUrl: string | null }) => {
-        useServerStore.getState().updateMemberProfile(userId, { displayName, avatarUrl });
-        useChatStore.getState().updateAuthorProfile(userId, { displayName, avatarUrl });
+      userUpdated: (data: { userId: string; displayName?: string; avatarUrl?: string | null; role?: string; isSupporter?: boolean; supporterTier?: string | null }) => {
+        const { userId, ...fields } = data;
+        useServerStore.getState().updateMemberProfile(userId, fields);
+        useChatStore.getState().updateAuthorProfile(userId, fields);
+        // Update DM conversation participant badges/profile
+        const dmConvs = useDMStore.getState().conversations;
+        const updated = dmConvs.map((c) =>
+          c.participant?.id === userId ? { ...c, participant: { ...c.participant, ...fields } as typeof c.participant } : c
+        );
+        if (updated.some((c, i) => c !== dmConvs[i])) {
+          useDMStore.setState({ conversations: updated });
+        }
       },
       messageReactionUpdate: ({ messageId, channelId, reactions }: { messageId: string; channelId: string; reactions: ReactionGroup[] }) => {
         if (channelId === useServerStore.getState().activeChannelId) {

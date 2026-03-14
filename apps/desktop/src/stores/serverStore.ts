@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
+import { toast } from './toastStore';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole } from '@voxium/shared';
 
 interface ServerState {
@@ -44,7 +45,7 @@ interface ServerState {
   updateServer: (serverId: string, fields: { name?: string }) => Promise<void>;
   updateServerData: (server: Server) => void;
   updateMemberAvatar: (userId: string, avatarUrl: string | null) => void;
-  updateMemberProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => void;
+  updateMemberProfile: (userId: string, fields: Record<string, unknown>) => void;
   reorderCategories: (serverId: string, order: { id: string; position: number }[]) => Promise<void>;
   reorderChannels: (serverId: string, order: { id: string; position: number; categoryId: string | null }[]) => Promise<void>;
   updateMemberRole: (serverId: string, memberId: string, role: MemberRole) => Promise<void>;
@@ -79,6 +80,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       set({ servers: data.data });
     } catch (err) {
       console.error('Failed to fetch servers:', err);
+      toast.error('Failed to load servers');
     }
   },
 
@@ -113,6 +115,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       get().fetchMembers(serverId);
     } catch (err) {
       console.error('Failed to fetch server:', err);
+      toast.error('Failed to load server');
       set({ isLoading: false });
     }
   },
@@ -270,6 +273,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       set({ members: data.data });
     } catch (err) {
       console.error('Failed to fetch members:', err);
+      toast.error('Failed to load members');
     }
   },
 
@@ -374,7 +378,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     }));
   },
 
-  updateMemberProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => {
+  updateMemberProfile: (userId: string, fields: Record<string, unknown>) => {
     set((state) => ({
       members: state.members.map((m) =>
         m.userId === userId ? { ...m, user: { ...m.user, ...fields } } : m

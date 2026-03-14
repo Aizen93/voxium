@@ -63,10 +63,11 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 
 | Layer | Technologies |
 |-------|-------------|
-| Backend | Node.js, Express, Socket.IO, Prisma, PostgreSQL, Redis |
-| Frontend | React 19, TypeScript, Vite, Zustand, Tailwind CSS |
+| Backend | Node.js, Express 5, Socket.IO, Prisma 7, PostgreSQL, Redis 5 |
+| Frontend | React 19, TypeScript, Vite 7, Zustand, Tailwind CSS 4 |
 | Desktop | Tauri 2 (Rust) |
 | Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM, Web Audio API |
+| Testing | Vitest, Supertest, Playwright (E2E) |
 | Infrastructure | S3-compatible storage, Nodemailer (SMTP) |
 
 ---
@@ -509,6 +510,60 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 
 ---
 
+## Testing
+
+Voxium has a comprehensive test suite with 401 unit and integration tests covering API routes, middleware, utilities, voice handlers, and security edge cases.
+
+### Running Tests
+
+```bash
+# Run all server tests (unit + integration, ~1.6s)
+pnpm test
+
+# Watch mode (re-runs on file changes)
+pnpm test:watch
+
+# Run with coverage report
+pnpm --filter @voxium/server test:coverage
+
+# Run E2E tests (requires backend + frontend + Redis running)
+pnpm test:e2e               # Headless
+pnpm test:e2e:ui             # Interactive UI mode
+pnpm test:e2e:headed         # Visible browser
+```
+
+### Test Coverage
+
+| Category | Tests | What's Covered |
+|----------|-------|----------------|
+| **Lazy Init Regression** | 44 | Prisma, S3, email, Redis, mediasoup, CORS — catches module-scope env var bugs |
+| **Auth Routes** | 25 | Register, login, refresh, me, change-password, forgot-password, TOTP flow |
+| **Auth Middleware** | 16 | JWT validation, HS256 algorithm pinning, token purpose rejection, email verification gate |
+| **Error Handler** | 16 | Error-to-HTTP mapping, all error classes, production mode |
+| **Server Routes** | 29 | CRUD, membership, permissions, feature flags, socket events |
+| **Channel Routes** | 24 | CRUD, resource limits, categories, socket events |
+| **Message Routes** | 26 | CRUD, IDOR prevention, sanitization, pagination, admin delete |
+| **Invite Routes** | 16 | Create, join (single-use), preview, expiry, member limits |
+| **DM Routes** | 18 | Conversations, messages, cascade delete, authorization |
+| **Upload Routes** | 19 | S3 redirect/proxy, Express 5 wildcards, path traversal prevention |
+| **Voice Handler** | 29 | Transport ACK on all code paths, join validation, mute/deaf/speaking |
+| **Auth Service** | 22 | Registration, login, tokens, password reset, email normalization |
+| **TOTP Service** | 19 | Setup, enable, verify, disable, encrypt/decrypt roundtrip, backup codes |
+| **Pure Utilities** | 75 | Sanitization, error classes, mentions, reactions, rate limiting |
+| **Server Limits** | 10 | 3-tier resolution (server > global > hardcoded), fallthrough |
+| **Feature Flags** | 6 | Defaults, overrides, unknown flags |
+| **Attachment Cleanup** | 7 | 4 AM scheduling, timer lifecycle |
+
+### Test Architecture
+
+- **Framework:** [Vitest](https://vitest.dev/) — fast, TypeScript-native, ESM-compatible
+- **HTTP Testing:** [Supertest](https://github.com/ladjs/supertest) for Express route testing without starting a server
+- **Mocking:** Prisma, Redis, S3, Socket.IO, and rate limiters are mocked for isolation
+- **E2E:** [Playwright](https://playwright.dev/) with Chromium against the real dev stack
+- **Test location:** `apps/server/src/__tests__/` (excluded from production `tsc` and `eslint`)
+
+---
+
 ## Scripts Reference
 
 | Script | Description |
@@ -523,6 +578,9 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 | `pnpm build:desktop` | Build frontend for production |
 | `pnpm typecheck` | Run TypeScript type checking across all packages |
 | `pnpm lint` | Run ESLint across all packages |
+| `pnpm test` | Run all server unit + integration tests |
+| `pnpm test:watch` | Run tests in watch mode |
+| `pnpm test:e2e` | Run Playwright E2E tests |
 | `pnpm db:migrate` | Run Prisma migrations |
 | `pnpm db:seed` | Seed database with demo data |
 | `pnpm db:studio` | Open Prisma Studio |

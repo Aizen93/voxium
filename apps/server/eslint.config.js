@@ -11,5 +11,5 @@ module.exports = tseslint.config(
       '@typescript-eslint/no-namespace': 'off',
     },
   },
-  { ignores: ['dist/'] },
+  { ignores: ['dist/', 'src/__tests__/'] },
 );

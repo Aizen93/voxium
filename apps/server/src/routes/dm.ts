@@ -18,7 +18,7 @@ export const dmRouter = Router();
 dmRouter.use(authenticate, requireVerifiedEmail);
 
 const authorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
+  select: { id: true, username: true, displayName: true, avatarUrl: true, status: true, role: true, isSupporter: true, supporterTier: true },
 };
 
 const replyToSelect = {

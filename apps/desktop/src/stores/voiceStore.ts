@@ -259,10 +259,14 @@ function createPeerInternal(
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const peerConn: PeerConnection = { pc, makingOffer: false };
 
-  const audioStream = getGatedStream() || localStream;
-  if (audioStream) {
-    audioStream.getAudioTracks().forEach((track) => {
-      pc.addTrack(track, audioStream);
+  // DM P2P: use the raw mic stream, NOT the gated/processed stream.
+  // WebRTC in WebView2/Tauri may not handle synthesized MediaStreamAudioDestinationNode
+  // tracks properly. The gated stream is only needed for SFU (mediasoup producer).
+  // Browser-level echoCancellation + noiseSuppression from getUserMedia constraints
+  // still apply to the raw stream.
+  if (localStream) {
+    localStream.getAudioTracks().forEach((track) => {
+      pc.addTrack(track, localStream);
     });
   }
 
@@ -1595,9 +1599,9 @@ useSettingsStore.subscribe((state, prevState) => {
       });
     }
 
-    // Replace track on DM P2P peers
+    // Replace track on DM P2P peers — use raw stream (not gated) for WebRTC compat
     if (postState.dmCallConversationId) {
-      const newTrack = (getGatedStream() || newStream)?.getAudioTracks()[0];
+      const newTrack = newStream?.getAudioTracks()[0];
       if (newTrack && newTrack.readyState === 'live') {
         for (const [peerId, peerConn] of postState.peers.entries()) {
           const senders = peerConn.pc.getSenders();
