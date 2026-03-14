@@ -77,7 +77,7 @@ async function main() {
   startAttachmentCleanup();
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n[Node ${NODE_ID}] Voxium server running on http://0.0.0.0:${PORT}\n`);
+    console.log(`\n[Node ${NODE_ID()}] Voxium server running on http://0.0.0.0:${PORT}\n`);
   });
 
   // Graceful shutdown

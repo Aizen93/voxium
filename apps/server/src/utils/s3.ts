@@ -8,17 +8,27 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-const s3 = new S3Client({
-  endpoint: process.env.S3_ASSETS_ENDPOINT!,
-  region: process.env.S3_ASSETS_REGION!,
-  credentials: {
-    accessKeyId: process.env.S3_ACCESS_KEY!,
-    secretAccessKey: process.env.S3_SECRET_KEY!,
-  },
-  forcePathStyle: true,
-});
+// Lazy-initialized to avoid reading env vars at module load time
+// (ES import hoisting means this file executes before dotenv.config())
+let _s3: S3Client | null = null;
+function getS3Client(): S3Client {
+  if (!_s3) {
+    _s3 = new S3Client({
+      endpoint: process.env.S3_ASSETS_ENDPOINT!,
+      region: process.env.S3_ASSETS_REGION!,
+      credentials: {
+        accessKeyId: process.env.S3_ACCESS_KEY!,
+        secretAccessKey: process.env.S3_SECRET_KEY!,
+      },
+      forcePathStyle: true,
+    });
+  }
+  return _s3;
+}
 
-const BUCKET = process.env.S3_ASSETS_BUCKET!;
+function getBucket(): string {
+  return process.env.S3_ASSETS_BUCKET!;
+}
 
 /** Regex matching valid S3 asset keys (e.g. avatars/userId-timestamp.webp) */
 export const VALID_S3_KEY_RE = /^(avatars|server-icons)\/[\w-]+\.webp$/;
@@ -36,13 +46,13 @@ export async function generatePresignedPutUrl(
   expiresIn = 300,
 ): Promise<string> {
   const command = new PutObjectCommand({
-    Bucket: BUCKET,
+    Bucket: getBucket(),
     Key: key,
     ContentType: contentType,
     CacheControl: 'public, max-age=31536000, immutable',
   });
 
-  return getSignedUrl(s3, command, {
+  return getSignedUrl(getS3Client(), command, {
     expiresIn,
     signableHeaders: new Set(['content-type']),
   });
@@ -57,12 +67,12 @@ export async function generatePresignedGetUrl(
   expiresIn = 3600,
 ): Promise<string> {
   const command = new GetObjectCommand({
-    Bucket: BUCKET,
+    Bucket: getBucket(),
     Key: key,
     ResponseCacheControl: 'public, max-age=31536000, immutable',
   });
 
-  return getSignedUrl(s3, command, { expiresIn });
+  return getSignedUrl(getS3Client(), command, { expiresIn });
 }
 
 export interface S3ObjectInfo {
@@ -81,12 +91,12 @@ export async function listAllS3Objects(prefix?: string): Promise<S3ObjectInfo[]>
 
   do {
     const command = new ListObjectsV2Command({
-      Bucket: BUCKET,
+      Bucket: getBucket(),
       Prefix: prefix,
       ContinuationToken: continuationToken,
     });
 
-    const response = await s3.send(command);
+    const response = await getS3Client().send(command);
 
     if (response.Contents) {
       for (const obj of response.Contents) {
@@ -110,8 +120,8 @@ export async function listAllS3Objects(prefix?: string): Promise<S3ObjectInfo[]>
  * Fetch an object from S3 for proxy streaming. Returns metadata + body stream.
  */
 export async function getS3Object(key: string) {
-  const command = new GetObjectCommand({ Bucket: BUCKET, Key: key });
-  return s3.send(command);
+  const command = new GetObjectCommand({ Bucket: getBucket(), Key: key });
+  return getS3Client().send(command);
 }
 
 /**
@@ -119,8 +129,8 @@ export async function getS3Object(key: string) {
  */
 export async function deleteFromS3(key: string): Promise<void> {
   try {
-    await s3.send(
-      new DeleteObjectCommand({ Bucket: BUCKET, Key: key }),
+    await getS3Client().send(
+      new DeleteObjectCommand({ Bucket: getBucket(), Key: key }),
     );
   } catch (err: unknown) {
     // Rethrow everything except NoSuchKey (idempotent delete)
@@ -136,9 +146,9 @@ export async function deleteMultipleFromS3(keys: string[]): Promise<void> {
   if (keys.length === 0) return;
   for (let i = 0; i < keys.length; i += 1000) {
     const batch = keys.slice(i, i + 1000);
-    const response = await s3.send(
+    const response = await getS3Client().send(
       new DeleteObjectsCommand({
-        Bucket: BUCKET,
+        Bucket: getBucket(),
         Delete: { Objects: batch.map((key) => ({ Key: key })) },
       }),
     );

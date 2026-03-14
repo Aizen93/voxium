@@ -31,7 +31,8 @@ COPY packages/shared/ packages/shared/
 COPY apps/server/ apps/server/
 
 RUN npx tsc --project packages/shared/tsconfig.json
-RUN npx prisma generate --schema=apps/server/prisma/schema.prisma
+# Prisma 7: generate from server directory where prisma.config.ts lives
+RUN cd apps/server && npx prisma generate
 RUN npx tsc --project apps/server/tsconfig.json
 
 # ── Stage 2: Production ─────────────────────────────────────────────────────
@@ -60,12 +61,9 @@ RUN mkdir -p node_modules/@voxium && \
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/server/prisma apps/server/prisma
+# Prisma 7: config file needed for migrate deploy at runtime
+COPY --from=build /app/apps/server/prisma.config.ts apps/server/prisma.config.ts
 
-# Copy the generated Prisma client from the build stage instead of
-# running prisma generate here (prisma CLI is a devDependency, so
-# npx would download it from the network — non-deterministic and
-# weakens supply-chain controls).
-COPY --from=build /app/node_modules/.prisma node_modules/.prisma
 # Copy Prisma CLI + engine from build stage so migrate deploy works
 # at startup without downloading anything from the network.
 COPY --from=build /app/node_modules/prisma node_modules/prisma

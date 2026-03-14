@@ -88,15 +88,16 @@ Voxium is a real-time communication platform enabling users to create communitie
 |-------|-----------|---------|
 | Runtime | Node.js | 20+ |
 | Language | TypeScript | 5.6+ |
-| HTTP Framework | Express.js | 4.x |
+| HTTP Framework | Express.js | 5.x |
 | WebSocket | Socket.IO | 4.8 |
-| ORM | Prisma | 6.x |
+| ORM | Prisma | 7.x (driver adapter pattern) |
 | Database | PostgreSQL | 16 |
-| Cache / Pub/Sub | Redis | 7 |
+| DB Driver | @prisma/adapter-pg | 7.x |
+| Cache / Pub/Sub | Redis (node-redis) | 5.x |
 | Voice (SFU) | mediasoup | 3.x |
 | Auth | JWT (jsonwebtoken) | 9.x |
-| Validation | Zod + custom validators | — |
-| Password Hashing | bcryptjs | — |
+| Rate Limiting | rate-limiter-flexible | 9.x |
+| Password Hashing | bcryptjs | 3.x |
 | File Storage | S3-compatible (OVH) | — |
 | S3 Presigning | @aws-sdk/s3-request-presigner | — |
 | Email | Nodemailer | 8.x |
@@ -106,9 +107,9 @@ Voxium is a real-time communication platform enabling users to create communitie
 |-------|-----------|---------|
 | Framework | React | 19 |
 | Language | TypeScript | 5.6+ |
-| Build Tool | Vite | 6.x |
+| Build Tool | Vite | 7.x |
 | Desktop Shell | Tauri | 2.x |
-| Styling | Tailwind CSS | 3.4 |
+| Styling | Tailwind CSS | 4.x (CSS-first `@theme` config) |
 | State | Zustand | 5.x |
 | Routing | React Router | 7.x |
 | HTTP Client | Axios | 1.x |
@@ -121,7 +122,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 |-----------|-----------|
 | Containers | Docker + Docker Compose |
 | Orchestration (future) | Kubernetes |
-| CI/CD (future) | GitHub Actions |
+| CI/CD | GitHub Actions (lint, typecheck, build, release, Docker) |
 | Monitoring (future) | Prometheus + Grafana |
 
 ---
@@ -167,7 +168,7 @@ apps/server/
 │   │   ├── dmVoiceHandler.ts # DM call signaling + system messages
 │   │   └── adminMetrics.ts  # Live metrics emitter for admin dashboard
 │   └── utils/
-│       ├── prisma.ts            # Prisma client singleton
+│       ├── prisma.ts            # Prisma client singleton (v7 adapter pattern via @prisma/adapter-pg)
 │       ├── redis.ts             # Redis client + presence helpers
 │       ├── errors.ts            # Custom error classes
 │       ├── sanitize.ts          # HTML stripping + text sanitization utility

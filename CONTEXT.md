@@ -5,7 +5,7 @@
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
 **Version:** 1.4.0
-**Date:** 2026-03-13
+**Date:** 2026-03-14
 
 ## Project Structure
 
@@ -45,8 +45,8 @@ Voxium/
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Node.js, Express, TypeScript, Prisma, PostgreSQL, Redis, Socket.IO |
-| Frontend | React 19, Vite 6, Zustand, Tailwind CSS, Tauri 2 |
+| Backend | Node.js, Express 5, TypeScript, Prisma 7, PostgreSQL, Redis, Socket.IO |
+| Frontend | React 19, Vite 7, Zustand, Tailwind CSS 4, Tauri 2 |
 | Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM noise suppression |
 | Storage | S3-compatible (presigned URL upload, proxy streaming for attachments) |
 | Admin | React 19, Vite, Zustand (standalone app, port 8082) |
@@ -68,6 +68,8 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **Dependency Upgrades** (2026-03-14) -- Prisma 6->7 (adapter pattern via `@prisma/adapter-pg`, `prisma.config.ts`, generated client at `src/generated/prisma/client`), Express 4->5, Redis 4->5 (`sIsMember` returns number, `multi().exec()` type changes), Tailwind 3->4 (CSS-first `@theme` config, `@tailwindcss/vite` plugin, removed `tailwind.config.js`/`postcss.config.js`), Vite 6->7 with `@vitejs/plugin-react` 5, bcryptjs 2->3 (ships own types), dotenv 16->17, rate-limiter-flexible 5->9, lucide-react 0.469->0.577; removed nanoid (replaced with `crypto.randomBytes`), zod (unused), `@types/bcryptjs` (bundled), autoprefixer+postcss (built into Tailwind 4). Updated Dockerfile + docker-entrypoint.sh + CI workflows for Prisma 7.
 
 - **Voice System Hardening + ESLint Zero Warnings** (2026-03-14) -- Transport connect ACK, auto-rejoin on DTLS failure (max 3 attempts), RNNoise gain gate bypass, consumer resume retry, live input device switching, voice cleanup on logout, toast notifications for voice errors. ESLint 153 warnings eliminated across all packages. Unread counter improvements: dedup mark-as-read calls, debounced while-viewing mark, tab-focus re-mark, lateral-join capped unread queries, rate-limited mark-read endpoints.
 

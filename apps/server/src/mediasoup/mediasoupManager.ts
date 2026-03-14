@@ -2,7 +2,7 @@ import * as mediasoup from 'mediasoup';
 import type { Worker, Router, WebRtcTransport } from 'mediasoup/node/lib/types';
 import type { SfuStats, SfuWorkerStats } from '@voxium/shared';
 import os from 'os';
-import { mediaCodecs, workerSettings, webRtcTransportOptions } from './mediasoupConfig';
+import { mediaCodecs, getWorkerSettings, getWebRtcTransportOptions } from './mediasoupConfig';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ export function releaseRouter(channelId: string): void {
  * Create a WebRtcTransport on the given Router.
  */
 export async function createWebRtcTransport(router: Router): Promise<WebRtcTransport> {
-  const transport = await router.createWebRtcTransport(webRtcTransportOptions);
+  const transport = await router.createWebRtcTransport(getWebRtcTransportOptions());
   return transport;
 }
 
@@ -130,8 +130,8 @@ export async function getSfuStats(channelTransports?: Map<string, number>): Prom
     }),
   );
 
-  const portMin = workerSettings.rtcMinPort;
-  const portMax = workerSettings.rtcMaxPort;
+  const portMin = getWorkerSettings().rtcMinPort;
+  const portMax = getWorkerSettings().rtcMaxPort;
 
   return {
     workers: workerStats,
@@ -156,9 +156,9 @@ function getNextWorker(): Worker {
 
 async function createWorker(): Promise<Worker> {
   const worker = await mediasoup.createWorker({
-    logLevel: workerSettings.logLevel,
-    rtcMinPort: workerSettings.rtcMinPort,
-    rtcMaxPort: workerSettings.rtcMaxPort,
+    logLevel: getWorkerSettings().logLevel,
+    rtcMinPort: getWorkerSettings().rtcMinPort,
+    rtcMaxPort: getWorkerSettings().rtcMaxPort,
   });
 
   worker.on('died', (error) => {

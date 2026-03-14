@@ -1376,9 +1376,9 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
   }
 });
 
-adminRouter.delete('/storage/files/*', async (req: Request, res: Response, next: NextFunction) => {
+adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const key = (req.params as Record<string, string>)[0];
+    const key = req.params.path as string;
     if (!key || (!VALID_S3_KEY_RE.test(key) && !VALID_ATTACHMENT_KEY_RE.test(key))) {
       throw new BadRequestError('Invalid file key');
     }

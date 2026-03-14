@@ -39,7 +39,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Generate Prisma client
+      - name: Generate Prisma client (v7 — reads prisma.config.ts)
         working-directory: apps/server
         run: npx prisma generate
 
@@ -78,7 +78,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Generate Prisma client
+      - name: Generate Prisma client (v7 — reads prisma.config.ts)
         working-directory: apps/server
         run: npx prisma generate
 

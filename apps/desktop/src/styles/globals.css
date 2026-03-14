@@ -1,6 +1,66 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  /* Discord-inspired dark theme colors */
+  --color-vox-bg-primary: #1a1a2e;
+  --color-vox-bg-secondary: #16213e;
+  --color-vox-bg-tertiary: #0f3460;
+  --color-vox-bg-hover: #1f2b4d;
+  --color-vox-bg-active: #253356;
+  --color-vox-bg-floating: #111827;
+
+  --color-vox-sidebar: #12122a;
+  --color-vox-channel: #151530;
+  --color-vox-chat: #1a1a3e;
+
+  --color-vox-text-primary: #e4e6eb;
+  --color-vox-text-secondary: #a0a3b1;
+  --color-vox-text-muted: #6b7089;
+  --color-vox-text-link: #5b9cf4;
+
+  --color-vox-accent-primary: #5b5bf7;
+  --color-vox-accent-hover: #4a4ae0;
+  --color-vox-accent-success: #3eba68;
+  --color-vox-accent-warning: #f5a623;
+  --color-vox-accent-danger: #ed4245;
+  --color-vox-accent-info: #5b9cf4;
+
+  --color-vox-border: #2a2a4a;
+
+  --color-vox-voice-connected: #3eba68;
+  --color-vox-voice-speaking: #3eba68;
+  --color-vox-voice-muted: #ed4245;
+
+  /* Fonts */
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+  /* Animations */
+  --animate-pulse-ring: pulse-ring 1.5s ease-out infinite;
+  --animate-fade-in: fade-in 0.2s ease-out;
+  --animate-slide-up: slide-up 0.2s ease-out;
+  --animate-slide-in-right: slide-in-right 0.3s ease-out;
+
+  @keyframes pulse-ring {
+    0% { transform: scale(0.95); opacity: 1; }
+    100% { transform: scale(1.3); opacity: 0; }
+  }
+
+  @keyframes fade-in {
+    0% { opacity: 0; }
+    100% { opacity: 1; }
+  }
+
+  @keyframes slide-up {
+    0% { opacity: 0; transform: translateY(8px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes slide-in-right {
+    0% { opacity: 0; transform: translateX(100%); }
+    100% { opacity: 1; transform: translateX(0); }
+  }
+}
 
 @layer base {
   * {
@@ -54,38 +114,36 @@
   }
 }
 
-@layer components {
-  .btn {
-    @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium
-           transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-vox-accent-primary
-           focus:ring-offset-2 focus:ring-offset-vox-bg-primary disabled:opacity-50 disabled:cursor-not-allowed;
-  }
+@utility btn {
+  @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium
+         transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-vox-accent-primary
+         focus:ring-offset-2 focus:ring-offset-vox-bg-primary disabled:opacity-50 disabled:cursor-not-allowed;
+}
 
-  .btn-primary {
-    @apply btn bg-vox-accent-primary text-white hover:bg-vox-accent-hover;
-  }
+@utility btn-primary {
+  @apply btn bg-vox-accent-primary text-white hover:bg-vox-accent-hover;
+}
 
-  .btn-secondary {
-    @apply btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover;
-  }
+@utility btn-secondary {
+  @apply btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover;
+}
 
-  .btn-danger {
-    @apply btn bg-vox-accent-danger text-white hover:bg-red-600;
-  }
+@utility btn-danger {
+  @apply btn bg-vox-accent-danger text-white hover:bg-red-600;
+}
 
-  .btn-ghost {
-    @apply btn bg-transparent text-vox-text-secondary hover:bg-vox-bg-hover hover:text-vox-text-primary;
-  }
+@utility btn-ghost {
+  @apply btn bg-transparent text-vox-text-secondary hover:bg-vox-bg-hover hover:text-vox-text-primary;
+}
 
-  .input {
-    @apply w-full rounded-md border border-vox-border bg-vox-bg-floating px-3 py-2 text-sm
-           text-vox-text-primary placeholder:text-vox-text-muted
-           focus:border-vox-accent-primary focus:outline-none focus:ring-1 focus:ring-vox-accent-primary
-           transition-colors duration-150;
-  }
+@utility input {
+  @apply w-full rounded-md border border-vox-border bg-vox-bg-floating px-3 py-2 text-sm
+         text-vox-text-primary placeholder:text-vox-text-muted
+         focus:border-vox-accent-primary focus:outline-none focus:ring-1 focus:ring-vox-accent-primary
+         transition-colors duration-150;
+}
 
-  .tooltip {
-    @apply absolute z-50 rounded-md bg-vox-bg-floating px-2 py-1 text-xs text-vox-text-primary
-           shadow-lg border border-vox-border animate-fade-in pointer-events-none;
-  }
+@utility tooltip {
+  @apply absolute z-50 rounded-md bg-vox-bg-floating px-2 py-1 text-xs text-vox-text-primary
+         shadow-lg border border-vox-border animate-fade-in pointer-events-none;
 }

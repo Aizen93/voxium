@@ -23,51 +23,83 @@ import { rateLimitGeneral } from './middleware/rateLimiter';
 
 export const app = express();
 
-// Enable trust proxy so req.ip reflects the real client IP behind reverse proxies
-// Only trust proxy headers in production where a reverse proxy is expected
-if (process.env.TRUST_PROXY === 'true' || process.env.NODE_ENV === 'production') {
-  app.set('trust proxy', 1);
-}
+// Enable trust proxy lazily (env vars not available at module scope due to import hoisting)
+let _trustProxySet = false;
+app.use((req, _res, next) => {
+  if (!_trustProxySet) {
+    _trustProxySet = true;
+    if (process.env.TRUST_PROXY === 'true' || process.env.NODE_ENV === 'production') {
+      req.app.set('trust proxy', 1);
+    }
+  }
+  next();
+});
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
-const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:8080')
-  .split(',')
-  .map((o) => o.trim());
+// Lazy getter: env vars may not be loaded yet at module scope (ES import hoisting)
+let _allowedOrigins: string[] | null = null;
+function getAllowedOrigins(): string[] {
+  if (!_allowedOrigins) {
+    _allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:8080')
+      .split(',')
+      .map((o) => o.trim());
+  }
+  return _allowedOrigins;
+}
 
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' },
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      imgSrc: ["'self'", 'data:', ...allowedOrigins],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", 'https:', "'unsafe-inline'"],
-      fontSrc: ["'self'", 'https:', 'data:'],
-      connectSrc: ["'self'", ...allowedOrigins],
+app.use((req, res, next) => {
+  // Defer helmet to request time so env vars are available
+  const origins = getAllowedOrigins();
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:', ...origins],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", 'https:', "'unsafe-inline'"],
+        fontSrc: ["'self'", 'https:', 'data:'],
+        connectSrc: ["'self'", ...origins],
+      },
     },
-  },
-}));
+  })(req, res, next);
+});
 
 app.use(cors({
-  origin: allowedOrigins,
+  origin: (origin, callback) => {
+    const origins = getAllowedOrigins();
+    if (!origin || origins.includes(origin)) {
+      callback(null, origin || true);
+    } else {
+      callback(null, false);
+    }
+  },
   credentials: true,
 }));
-const logFormat = process.env.LOG_FORMAT || (process.env.NODE_ENV === 'production' ? 'json' : 'dev');
-if (logFormat === 'json') {
-  morgan.token('body-size', (_req, res) => res.getHeader('content-length') as string || '0');
-  app.use(morgan((tokens, req, res) => JSON.stringify({
-    ts: new Date().toISOString(),
-    method: tokens.method(req, res),
-    url: tokens.url(req, res),
-    status: Number(tokens.status(req, res)),
-    ms: Number(tokens['response-time'](req, res)),
-    bytes: Number(tokens['body-size'](req, res)) || 0,
-    ip: req.ip,
-  })));
-} else {
-  app.use(morgan('dev'));
-}
+// Deferred: morgan format resolved at first request, not at module scope
+let _morganSetUp = false;
+app.use((req, res, next) => {
+  if (!_morganSetUp) {
+    _morganSetUp = true;
+    const fmt = process.env.LOG_FORMAT || (process.env.NODE_ENV === 'production' ? 'json' : 'dev');
+    if (fmt === 'json') {
+      morgan.token('body-size', (_rq, rs) => rs.getHeader('content-length') as string || '0');
+      app.use(morgan((tokens, rq, rs) => JSON.stringify({
+        ts: new Date().toISOString(),
+        method: tokens.method(rq, rs),
+        url: tokens.url(rq, rs),
+        status: Number(tokens.status(rq, rs)),
+        ms: Number(tokens['response-time'](rq, rs)),
+        bytes: Number(tokens['body-size'](rq, rs)) || 0,
+        ip: rq.ip,
+      })));
+    } else {
+      app.use(morgan('dev'));
+    }
+  }
+  next();
+});
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 

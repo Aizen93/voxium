@@ -50,9 +50,9 @@ const screenSharers = new Map<string, string>();
 
 function mirrorVoiceJoin(channelId: string, serverId: string, userId: string, selfMute: boolean, selfDeaf: boolean): void {
   getRedis().multi()
-    .hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, nodeId: NODE_ID }))
+    .hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, nodeId: NODE_ID() }))
     .set(`voice:channel:server:${channelId}`, serverId)
-    .set(`voice:channel:node:${channelId}`, NODE_ID)
+    .set(`voice:channel:node:${channelId}`, NODE_ID())
     .set(`voice:user:${userId}`, channelId)
     .sAdd('voice:active', channelId)
     .exec().catch(() => {});
@@ -75,7 +75,7 @@ function mirrorVoiceLeave(channelId: string, userId: string, channelEmpty: boole
 }
 
 function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean): void {
-  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, nodeId: NODE_ID })).catch(() => {});
+  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, nodeId: NODE_ID() })).catch(() => {});
 }
 
 function mirrorScreenShare(channelId: string, userId: string | null): void {
@@ -856,7 +856,7 @@ export async function getVoiceStateForServer(serverId: string): Promise<{ channe
   const serverIdsRaw = await serverPipeline.exec();
 
   // Filter to channels belonging to this server, then fetch user data
-  const matchingChannels = activeChannels.filter((_, i) => serverIdsRaw[i] === serverId);
+  const matchingChannels = activeChannels.filter((_, i) => String(serverIdsRaw[i]) === serverId);
   if (matchingChannels.length === 0) return [];
 
   const usersPipeline = redis.multi();

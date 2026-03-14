@@ -2,7 +2,13 @@ import { createClient, type RedisClientType } from 'redis';
 import crypto from 'crypto';
 
 /** Unique identifier for this server node (for multi-node coordination). */
-export const NODE_ID = process.env.NODE_ID || crypto.randomUUID().slice(0, 8);
+let _nodeId: string | null = null;
+export function NODE_ID(): string {
+  if (!_nodeId) {
+    _nodeId = process.env.NODE_ID || crypto.randomUUID().slice(0, 8);
+  }
+  return _nodeId;
+}
 
 let redisClient: RedisClientType;
 let redisPub: RedisClientType;
@@ -81,7 +87,7 @@ export async function setUserOffline(socketId: string): Promise<{ userId: string
 
 export async function isUserOnline(userId: string): Promise<boolean> {
   const redis = getRedis();
-  return await redis.sIsMember('online_users', userId);
+  return Boolean(await redis.sIsMember('online_users', userId));
 }
 
 export async function getOnlineUsers(): Promise<string[]> {

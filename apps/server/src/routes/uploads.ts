@@ -109,12 +109,12 @@ uploadRouter.post(
 
 // GET /uploads/attachments/* — authorized proxy for attachments
 uploadRouter.get(
-  '/attachments/*',
+  '/attachments/*path',
   authenticate,
   requireVerifiedEmail,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const key = `attachments/${req.params[0]}`;
+      const key = `attachments/${req.params.path as string}`;
       if (!key || key.includes('..') || !VALID_ATTACHMENT_KEY_RE.test(key)) {
         throw new BadRequestError('Invalid key');
       }
@@ -185,11 +185,11 @@ uploadRouter.get(
 // Append ?inline to proxy the image directly instead of 302→S3.
 // Used by browser notifications where the S3 redirect fails due to CORS.
 uploadRouter.get(
-  '/*',
+  '/*path',
   rateLimitGeneral,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const key = req.params[0];
+      const key = req.params.path as string;
       if (!key || key.includes('..') || !VALID_S3_KEY_RE.test(key)) {
         throw new BadRequestError('Invalid key');
       }

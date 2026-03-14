@@ -43,11 +43,12 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.58.2",
+    "@prisma/adapter-pg": "^7.5.0",
     "@roamhq/wrtc": "^0.10.0",
     "eslint": "^10.0.3",
     "mediasoup-client": "^3.18.7",
     "otpauth": "^9.5.0",
-    "redis": "^4.7.1",
+    "redis": "^5.11.0",
     "typescript-eslint": "^8.57.0"
   }
 }

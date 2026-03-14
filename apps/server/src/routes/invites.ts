@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { nanoid } from 'nanoid';
+import crypto from 'crypto';
 import { INVITE_CODE_LENGTH } from '@voxium/shared';
 import { broadcastMemberJoined } from '../utils/memberBroadcast';
 import { isFeatureEnabled } from '../utils/featureFlags';
@@ -28,7 +28,7 @@ inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }
 
     const invite = await prisma.invite.create({
       data: {
-        code: nanoid(INVITE_CODE_LENGTH),
+        code: crypto.randomBytes(INVITE_CODE_LENGTH).toString('base64url').slice(0, INVITE_CODE_LENGTH),
         serverId,
         createdBy: req.user!.userId,
       },
