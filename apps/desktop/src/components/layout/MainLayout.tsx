@@ -18,7 +18,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
 import { playJoinSound, playLeaveSound, playMessageSound, playMentionSound } from '../../services/notificationSounds';
 import { toast } from '../../stores/toastStore';
-import { stopSpeakingDetection } from '../../services/audioAnalyser';
+import { stopSpeakingDetection, stopNoiseSuppression } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
 import { SupportTicketView } from '../dm/SupportTicketView';
@@ -402,6 +402,7 @@ export function MainLayout() {
           // back to the server (call was already ended server-side)
           voiceState.stopLatencyMeasurement();
           stopSpeakingDetection();
+          stopNoiseSuppression();
           if (voiceState.localStream) {
             voiceState.localStream.getTracks().forEach((track) => track.stop());
           }

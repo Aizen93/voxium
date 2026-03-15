@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { Device } from 'mediasoup-client';
 import type { Transport, Producer, Consumer, RtpCapabilities, IceParameters, IceCandidate, DtlsParameters, RtpParameters } from 'mediasoup-client/types';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange } from '../services/audioAnalyser';
+import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression } from '../services/audioAnalyser';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
 import { optimizeOpusSDP } from '../services/sdpUtils';
@@ -49,12 +49,11 @@ function persistVoicePrefs(prefs: VoicePrefs) {
 
 const initialVoicePrefs = loadPersistedVoicePrefs();
 
-// ─── DM P2P WebRTC configuration (unchanged) ────────────────────────────────
+// ─── DM P2P WebRTC configuration ─────────────────────────────────────────────
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-];
+// No third-party STUN/TURN servers — privacy first.
+// WebRTC host candidates handle LAN/same-network connectivity automatically.
+const ICE_SERVERS: RTCIceServer[] = [];
 
 const ICE_RESTART_DELAY_MS = 3000;
 const MAX_TRANSPORT_REJOIN_ATTEMPTS = 3;
@@ -259,14 +258,14 @@ function createPeerInternal(
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const peerConn: PeerConnection = { pc, makingOffer: false };
 
-  // DM P2P: use the raw mic stream, NOT the gated/processed stream.
-  // WebRTC in WebView2/Tauri may not handle synthesized MediaStreamAudioDestinationNode
-  // tracks properly. The gated stream is only needed for SFU (mediasoup producer).
-  // Browser-level echoCancellation + noiseSuppression from getUserMedia constraints
-  // still apply to the raw stream.
-  if (localStream) {
-    localStream.getAudioTracks().forEach((track) => {
-      pc.addTrack(track, localStream);
+  // Use the best available processed stream:
+  // - DM P2P: suppressed stream (clean RNNoise pipeline: source → worklet → dest)
+  // - SFU: gated stream (suppressed + gain gate for producer pause/resume)
+  // Falls back to raw mic if neither is ready.
+  const audioStream = getSuppressedStream() || getGatedStream() || localStream;
+  if (audioStream) {
+    audioStream.getAudioTracks().forEach((track) => {
+      pc.addTrack(track, audioStream);
     });
   }
 
@@ -596,7 +595,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      startSpeakingDetection(stream);
+      // Apply RNNoise noise suppression (clean isolated pipeline)
+      await applyNoiseSuppression(stream);
+      // Speaking detection uses the suppressed stream (falls back to raw if suppression unavailable)
+      startSpeakingDetection(getSuppressedStream() || stream);
 
       // Pause/resume audio producer based on noise gate speaking detection
       onSpeakingChange((speaking) => {
@@ -1388,7 +1390,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      startSpeakingDetection(stream, 'dm');
+      // Apply RNNoise noise suppression (Jitsi/Matrix pattern: clean isolated pipeline)
+      const suppressedStream = await applyNoiseSuppression(stream);
+      // Speaking detection taps into the suppressed stream (read-only side-chain)
+      startSpeakingDetection(suppressedStream, 'dm');
 
       if (isPTT) {
         stream.getAudioTracks().forEach((track) => { track.enabled = false; });
@@ -1421,6 +1426,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     get().stopLatencyMeasurement();
     onSpeakingChange(null);
     stopSpeakingDetection();
+    stopNoiseSuppression();
 
     if (localStream) {
       localStream.getTracks().forEach((track) => track.stop());
@@ -1556,17 +1562,18 @@ useSettingsStore.subscribe((state, prevState) => {
 
     // Rebuild audio pipeline with new stream
     const mode = currentState.dmCallConversationId ? 'dm' : 'server';
-    onSpeakingChange(null); // clear old callback before rebuilding pipeline
+    onSpeakingChange(null);
     stopSpeakingDetection();
+    stopNoiseSuppression();
     setNoiseGateThreshold(useSettingsStore.getState().noiseGateThreshold);
     setNoiseSuppression(useSettingsStore.getState().enableNoiseSuppression);
-    startSpeakingDetection(newStream, mode);
+
+    // Apply RNNoise noise suppression (clean isolated pipeline)
+    const suppressedStream = await applyNoiseSuppression(newStream);
+    // Speaking detection uses the suppressed stream
+    startSpeakingDetection(suppressedStream, mode);
 
     useVoiceStore.setState({ localStream: newStream });
-
-    // Wait briefly for the audio pipeline to stabilize (RNNoise worklet loads async)
-    // so getGatedStream() returns a connected stream
-    await new Promise((r) => setTimeout(r, 100));
 
     // Re-check again after pipeline setup
     const postState = useVoiceStore.getState();
@@ -1599,9 +1606,9 @@ useSettingsStore.subscribe((state, prevState) => {
       });
     }
 
-    // Replace track on DM P2P peers — use raw stream (not gated) for WebRTC compat
+    // Replace track on DM P2P peers — use RNNoise-suppressed stream
     if (postState.dmCallConversationId) {
-      const newTrack = newStream?.getAudioTracks()[0];
+      const newTrack = (getSuppressedStream() || newStream)?.getAudioTracks()[0];
       if (newTrack && newTrack.readyState === 'live') {
         for (const [peerId, peerConn] of postState.peers.entries()) {
           const senders = peerConn.pc.getSenders();
@@ -1613,6 +1620,70 @@ useSettingsStore.subscribe((state, prevState) => {
             } catch (err) {
               console.error(`[DMVoice] Failed to replace track for peer ${peerId}:`, err);
             }
+          }
+        }
+      }
+    }
+  })();
+});
+
+// Handle live noise suppression toggle while in a call
+useSettingsStore.subscribe((state, prevState) => {
+  if (state.enableNoiseSuppression === prevState.enableNoiseSuppression) return;
+
+  const voiceState = useVoiceStore.getState();
+  if (!voiceState.activeChannelId && !voiceState.dmCallConversationId) return;
+  if (!voiceState.localStream) return;
+
+  const localStream = voiceState.localStream;
+
+  (async () => {
+    // Rebuild the suppression pipeline with new setting
+    stopNoiseSuppression();
+    setNoiseSuppression(state.enableNoiseSuppression);
+    const suppressedStream = await applyNoiseSuppression(localStream);
+
+    // Re-check: user may have left during async work
+    const current = useVoiceStore.getState();
+    if (!current.activeChannelId && !current.dmCallConversationId) return;
+
+    // Rebuild speaking detection on the (now suppressed or raw) stream
+    const mode = current.dmCallConversationId ? 'dm' : 'server';
+    onSpeakingChange(null);
+    stopSpeakingDetection();
+    startSpeakingDetection(suppressedStream, mode);
+
+    // Re-register SFU producer pause/resume callback
+    if (current.activeChannelId) {
+      onSpeakingChange((speaking) => {
+        const s = useVoiceStore.getState();
+        if (s.selfMute) return;
+        for (const p of s.msProducers.values()) {
+          if (p.kind === 'audio' && !p.closed && (p.appData as Record<string, unknown>)?.type === 'audio') {
+            if (speaking) { p.resume(); } else { p.pause(); }
+          }
+        }
+      });
+
+      // Replace SFU producer track with new processed stream
+      const newTrack = (getGatedStream() || suppressedStream)?.getAudioTracks()[0];
+      if (newTrack && newTrack.readyState === 'live') {
+        for (const producer of current.msProducers.values()) {
+          if (producer.kind === 'audio' && !producer.closed && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+            try { await producer.replaceTrack({ track: newTrack }); } catch { /* noop */ }
+          }
+        }
+      }
+    }
+
+    // Replace DM P2P peer tracks with new processed stream
+    if (current.dmCallConversationId) {
+      const newTrack = (getSuppressedStream() || localStream)?.getAudioTracks()[0];
+      if (newTrack && newTrack.readyState === 'live') {
+        for (const [, peerConn] of current.peers.entries()) {
+          const sender = peerConn.pc.getSenders().find((s) => s.track?.kind === 'audio');
+          if (sender) {
+            try { await sender.replaceTrack(newTrack); } catch { /* noop */ }
           }
         }
       }
@@ -1716,12 +1787,12 @@ onSocketReconnect(async () => {
     localStream.getAudioTracks().forEach((track) => { track.enabled = !shouldDisable; });
   }
 
-  // Restart the noise gate pipeline BEFORE emitting voice:join so that
-  // getGatedStream() returns the processed stream when handleTransportCreated fires
+  // Restart audio pipelines BEFORE emitting voice:join
   if (localStream) {
     setNoiseGateThreshold(settings.noiseGateThreshold);
     setNoiseSuppression(settings.enableNoiseSuppression);
-    startSpeakingDetection(localStream, dmCallConversationId ? 'dm' : 'server');
+    const suppressedStream = await applyNoiseSuppression(localStream);
+    startSpeakingDetection(suppressedStream, dmCallConversationId ? 'dm' : 'server');
 
     // Re-register producer pause/resume callback for silence detection (server voice only)
     if (activeChannelId) {
