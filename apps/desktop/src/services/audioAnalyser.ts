@@ -67,10 +67,25 @@ export function getSuppressedStream(): MediaStream | null {
 
 /** Tear down the noise suppression pipeline. */
 export function stopNoiseSuppression() {
-  if (nsSource) { try { nsSource.disconnect(); } catch { /* noop */ } nsSource = null; }
-  if (nsWorklet) { try { nsWorklet.disconnect(); } catch { /* noop */ } nsWorklet = null; }
+  if (nsSource) {
+    try { nsSource.disconnect(); } catch (err) {
+      console.warn('[NoiseSuppression] Source disconnect error (already disconnected):', err);
+    }
+    nsSource = null;
+  }
+  if (nsWorklet) {
+    try { nsWorklet.disconnect(); } catch (err) {
+      console.warn('[NoiseSuppression] Worklet disconnect error (already disconnected):', err);
+    }
+    nsWorklet = null;
+  }
   nsDestination = null;
-  if (nsContext) { nsContext.close().catch(() => {}); nsContext = null; }
+  if (nsContext) {
+    nsContext.close().catch((err) => {
+      console.warn('[NoiseSuppression] AudioContext close error:', err);
+    });
+    nsContext = null;
+  }
 }
 
 // ─── Speaking Detection (separate from noise suppression) ────────────────────
@@ -230,7 +245,9 @@ export function stopSpeakingDetection() {
   if (sdSource) { sdSource.disconnect(); sdSource = null; }
 
   if (sdContext) {
-    sdContext.close().catch(() => {});
+    sdContext.close().catch((err) => {
+      console.warn('[SpeakingDetection] AudioContext close error:', err);
+    });
     sdContext = null;
   }
 

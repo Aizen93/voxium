@@ -30,8 +30,8 @@ function loadPersistedVoicePrefs(): VoicePrefs {
         selfDeaf: typeof parsed.selfDeaf === 'boolean' ? parsed.selfDeaf : false,
       };
     }
-  } catch {
-    // ignore parse errors
+  } catch (err) {
+    console.warn('[Voice] Failed to parse persisted voice prefs, using defaults:', err);
   }
   return { selfMute: false, selfDeaf: false };
 }
@@ -42,8 +42,8 @@ function persistVoicePrefs(prefs: VoicePrefs) {
       selfMute: prefs.selfMute,
       selfDeaf: prefs.selfDeaf,
     }));
-  } catch {
-    // ignore storage errors
+  } catch (err) {
+    console.warn('[Voice] Failed to persist voice prefs:', err);
   }
 }
 
@@ -70,6 +70,8 @@ interface VoiceState {
   localUserId: string | null;
   selfMute: boolean;
   selfDeaf: boolean;
+  /** True while the push-to-talk key is held (overrides selfMute for speaking indicator). */
+  pttActive: boolean;
   localStream: MediaStream | null;
   latency: number | null;
 
@@ -539,6 +541,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   activeVoiceServerId: null,
   selfMute: initialVoicePrefs.selfMute,
   selfDeaf: initialVoicePrefs.selfDeaf,
+  pttActive: false,
   localStream: null,
   latency: null,
   channelUsers: new Map(),
@@ -642,6 +645,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     get().stopLatencyMeasurement();
     onSpeakingChange(null);
     stopSpeakingDetection();
+    stopNoiseSuppression();
 
     // Immediately remove local user from channelUsers
     if (activeChannelId && localUserId) {
@@ -1670,7 +1674,11 @@ useSettingsStore.subscribe((state, prevState) => {
       if (newTrack && newTrack.readyState === 'live') {
         for (const producer of current.msProducers.values()) {
           if (producer.kind === 'audio' && !producer.closed && (producer.appData as Record<string, unknown>)?.type === 'audio') {
-            try { await producer.replaceTrack({ track: newTrack }); } catch { /* noop */ }
+            try {
+              await producer.replaceTrack({ track: newTrack });
+            } catch (err) {
+              console.error('[Voice SFU] Failed to replace track after noise suppression toggle:', err);
+            }
           }
         }
       }
@@ -1683,7 +1691,11 @@ useSettingsStore.subscribe((state, prevState) => {
         for (const [, peerConn] of current.peers.entries()) {
           const sender = peerConn.pc.getSenders().find((s) => s.track?.kind === 'audio');
           if (sender) {
-            try { await sender.replaceTrack(newTrack); } catch { /* noop */ }
+            try {
+              await sender.replaceTrack(newTrack);
+            } catch (err) {
+              console.error('[DMVoice] Failed to replace track after noise suppression toggle:', err);
+            }
           }
         }
       }

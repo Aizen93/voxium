@@ -69,6 +69,8 @@ Voxium/
 
 ## Recent Changes
 
+- **Audio Pipeline Refactor + PTT for DM Calls + Privacy** (2026-03-16) -- Separated noise suppression (Jitsi/Matrix RNNoise pattern) from speaking detection into clean isolated pipelines; extended push-to-talk to DM calls with PTT speaking indicator; removed Google STUN servers for privacy (host candidates only); live noise suppression toggle mid-call.
+
 - **Unit Test Suite** (2026-03-14) -- 401 unit tests across 26 files covering utils, middleware, routes, services, websocket, and mediasoup config. Vitest with process isolation (`pool: 'forks'`). CI pipeline updated to run tests.
 
 - **Dependency Upgrades** (2026-03-14) -- Prisma 6->7 (adapter pattern via `@prisma/adapter-pg`, `prisma.config.ts`, generated client at `src/generated/prisma/client`), Express 4->5, Redis 4->5 (`sIsMember` returns number, `multi().exec()` type changes), Tailwind 3->4 (CSS-first `@theme` config, `@tailwindcss/vite` plugin, removed `tailwind.config.js`/`postcss.config.js`), Vite 6->7 with `@vitejs/plugin-react` 5, bcryptjs 2->3 (ships own types), dotenv 16->17, rate-limiter-flexible 5->9, lucide-react 0.469->0.577; removed nanoid (replaced with `crypto.randomBytes`), zod (unused), `@types/bcryptjs` (bundled), autoprefixer+postcss (built into Tailwind 4). Updated Dockerfile + docker-entrypoint.sh + CI workflows for Prisma 7.

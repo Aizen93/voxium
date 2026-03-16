@@ -8,7 +8,7 @@ import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff } 
 import { clsx } from 'clsx';
 
 export function VoicePanel() {
-  const { activeChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf, leaveChannel, latency, isScreenSharing, screenSharingUserId, startScreenShare, stopScreenShare } = useVoiceStore();
+  const { activeChannelId, channelUsers, selfMute, selfDeaf, pttActive, toggleMute, toggleDeaf, leaveChannel, latency, isScreenSharing, screenSharingUserId, startScreenShare, stopScreenShare } = useVoiceStore();
   const { channels } = useServerStore();
   const { user } = useAuthStore();
   const localAudioLevel = useLocalAudioLevel();
@@ -60,7 +60,7 @@ export function VoicePanel() {
         <div className="max-h-32 overflow-y-auto px-2 py-1">
           {users.map((voiceUser) => {
             const isLocal = voiceUser.id === user?.id;
-            const isSpeaking = isLocal ? (localAudioLevel > 0.05 && !selfMute) : voiceUser.speaking;
+            const isSpeaking = isLocal ? (localAudioLevel > 0.05 && (!selfMute || pttActive)) : voiceUser.speaking;
 
             return (
               <UserHoverTarget key={voiceUser.id} userId={voiceUser.id}>

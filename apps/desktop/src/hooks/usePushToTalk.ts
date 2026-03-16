@@ -23,25 +23,30 @@ export function usePushToTalk() {
     function release() {
       if (!pressedRef.current) return;
       pressedRef.current = false;
+      useVoiceStore.setState({ pttActive: false });
 
-      const { localStream, activeChannelId } = useVoiceStore.getState();
-      if (!activeChannelId || !localStream) return;
+      const { localStream, activeChannelId, dmCallConversationId } = useVoiceStore.getState();
+      if ((!activeChannelId && !dmCallConversationId) || !localStream) return;
 
-      // Disable raw mic tracks — the noise gate pipeline stays running
-      // but the AudioContext source outputs silence when tracks are disabled
+      // Disable raw mic tracks
       localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
 
-      // Pause SFU audio producer to stop forwarding RTP packets
-      const { msProducers } = useVoiceStore.getState();
-      for (const producer of msProducers.values()) {
-        if (producer.kind === 'audio') producer.pause();
+      // Pause SFU audio producer (server voice only)
+      if (activeChannelId) {
+        const { msProducers } = useVoiceStore.getState();
+        for (const producer of msProducers.values()) {
+          if (producer.kind === 'audio') producer.pause();
+        }
       }
 
       // Debounce the mute emission to avoid flooding on rapid key taps
       if (muteTimeoutRef.current) clearTimeout(muteTimeoutRef.current);
       muteTimeoutRef.current = setTimeout(() => {
         const socket = getSocket();
-        if (socket) socket.emit('voice:mute', true);
+        if (socket) {
+          if (activeChannelId) socket.emit('voice:mute', true);
+          else if (dmCallConversationId) socket.emit('dm:voice:mute', true);
+        }
         muteTimeoutRef.current = null;
       }, 150);
     }
@@ -51,11 +56,13 @@ export function usePushToTalk() {
       if (e.repeat) return;
       if (isTextInput(document.activeElement)) return;
 
-      const { activeChannelId, selfMute, localStream } = useVoiceStore.getState();
-      if (!activeChannelId || selfMute || !localStream) return;
+      const { activeChannelId, dmCallConversationId, localStream } = useVoiceStore.getState();
+      // PTT overrides mute — no selfMute check. The key press temporarily unmutes.
+      if ((!activeChannelId && !dmCallConversationId) || !localStream) return;
 
       e.preventDefault();
       pressedRef.current = true;
+      useVoiceStore.setState({ pttActive: true });
 
       // Cancel any pending mute so we don't send mute→unmute back-to-back
       if (muteTimeoutRef.current) {
@@ -63,17 +70,22 @@ export function usePushToTalk() {
         muteTimeoutRef.current = null;
       }
 
-      // Enable raw mic tracks — noise gate pipeline handles the rest
+      // Enable raw mic tracks
       localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
 
-      // Resume SFU audio producer to start forwarding RTP packets
-      const { msProducers } = useVoiceStore.getState();
-      for (const producer of msProducers.values()) {
-        if (producer.kind === 'audio') producer.resume();
+      // Resume SFU audio producer (server voice only)
+      if (activeChannelId) {
+        const { msProducers } = useVoiceStore.getState();
+        for (const producer of msProducers.values()) {
+          if (producer.kind === 'audio') producer.resume();
+        }
       }
 
       const socket = getSocket();
-      if (socket) socket.emit('voice:mute', false);
+      if (socket) {
+        if (activeChannelId) socket.emit('voice:mute', false);
+        else if (dmCallConversationId) socket.emit('dm:voice:mute', false);
+      }
     }
 
     function onKeyUp(e: KeyboardEvent) {
@@ -94,7 +106,6 @@ export function usePushToTalk() {
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
       if (muteTimeoutRef.current) clearTimeout(muteTimeoutRef.current);
-      // Release on cleanup in case key is held when mode changes
       release();
     };
   }, [voiceMode, pushToTalkKey]);

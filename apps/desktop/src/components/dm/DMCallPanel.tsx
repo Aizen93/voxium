@@ -6,7 +6,7 @@ import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export function DMCallPanel() {
-  const { dmCallUsers, selfMute, selfDeaf, toggleMute, toggleDeaf, leaveDMCall } = useVoiceStore();
+  const { dmCallUsers, selfMute, selfDeaf, pttActive, toggleMute, toggleDeaf, leaveDMCall } = useVoiceStore();
   const { user } = useAuthStore();
   const localAudioLevel = useLocalAudioLevel();
 
@@ -19,7 +19,7 @@ export function DMCallPanel() {
         {dmCallUsers.map((voiceUser) => {
           const isLocal = voiceUser.id === user?.id;
           const isSpeaking = isLocal
-            ? (localAudioLevel > 0.05 && !selfMute)
+            ? (localAudioLevel > 0.05 && (!selfMute || pttActive))
             : voiceUser.speaking;
 
           return (

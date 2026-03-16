@@ -17,6 +17,7 @@ export function DMVoicePanel() {
   const dmCallUsers = useVoiceStore((s) => s.dmCallUsers);
   const selfMute = useVoiceStore((s) => s.selfMute);
   const selfDeaf = useVoiceStore((s) => s.selfDeaf);
+  const pttActive = useVoiceStore((s) => s.pttActive);
   const toggleMute = useVoiceStore((s) => s.toggleMute);
   const toggleDeaf = useVoiceStore((s) => s.toggleDeaf);
   const leaveDMCall = useVoiceStore((s) => s.leaveDMCall);
@@ -73,7 +74,7 @@ export function DMVoicePanel() {
         <div className="max-h-24 overflow-y-auto px-2 py-1">
           {dmCallUsers.map((voiceUser) => {
             const isLocal = voiceUser.id === user?.id;
-            const isSpeaking = isLocal ? (localAudioLevel > 0.05 && !selfMute) : voiceUser.speaking;
+            const isSpeaking = isLocal ? (localAudioLevel > 0.05 && (!selfMute || pttActive)) : voiceUser.speaking;
 
             return (
               <UserHoverTarget key={voiceUser.id} userId={voiceUser.id}>
