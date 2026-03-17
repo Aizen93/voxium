@@ -10,5 +10,22 @@ services:
     volumes:
       - redisdata:/data
 
+  # Self-hosted STUN server for DM P2P NAT traversal (cross-internet calls).
+  # STUN-only mode: stateless UDP request/response (~100 bytes each way).
+  # No relay, no auth, no media passes through — just tells each peer its public IP.
+  stun:
+    image: coturn/coturn:alpine
+    container_name: voxium-stun
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --stun-only
+      - --no-auth
+      - --no-tls
+      - --no-dtls
+      - --listening-port=3478
+      - --log-file=stdout
+      - --no-multicast-peers
+
 volumes:
   redisdata:

@@ -51,9 +51,17 @@ const initialVoicePrefs = loadPersistedVoicePrefs();
 
 // ─── DM P2P WebRTC configuration ─────────────────────────────────────────────
 
-// No third-party STUN/TURN servers — privacy first.
-// WebRTC host candidates handle LAN/same-network connectivity automatically.
-const ICE_SERVERS: RTCIceServer[] = [];
+// Self-hosted STUN server (coturn in STUN-only mode) for NAT traversal.
+// STUN is a stateless UDP request/response (~100 bytes each way) that tells
+// each peer their own public IP:port — no media flows through it. Privacy-first.
+// Derives hostname from VITE_WS_URL so it points to the same Voxium server.
+const STUN_HOST = (() => {
+  try { return new URL(import.meta.env.VITE_WS_URL || 'http://localhost:3001').hostname; }
+  catch (err) { console.warn('[Voice] Failed to parse VITE_WS_URL for STUN host:', err); return 'localhost'; }
+})();
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: `stun:${STUN_HOST}:3478` },
+];
 
 const ICE_RESTART_DELAY_MS = 3000;
 const MAX_TRANSPORT_REJOIN_ATTEMPTS = 3;
@@ -216,6 +224,10 @@ async function acquireAudioStream(): Promise<MediaStream | null> {
     const settings = useSettingsStore.getState();
     const audioConstraints: MediaTrackConstraints = {
       echoCancellation: true,
+      // Invert: when our RNNoise ML suppression is enabled, disable the browser's
+      // built-in noiseSuppression to avoid double-processing (two noise gates in
+      // series degrade voice quality). When RNNoise is off, enable the browser's
+      // built-in as a fallback.
       noiseSuppression: !settings.enableNoiseSuppression,
       autoGainControl: true,
     };
@@ -668,6 +680,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       activeVoiceServerId: null,
       localStream: null,
       latency: null,
+      pttActive: false,
       screenStream: null,
       isScreenSharing: false,
       screenSharingUserId: null,
@@ -1447,6 +1460,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       dmCallUsers: [],
       localStream: null,
       latency: null,
+      pttActive: false,
     });
   },
 
@@ -1632,6 +1646,9 @@ useSettingsStore.subscribe((state, prevState) => {
 });
 
 // Handle live noise suppression toggle while in a call
+/** Generation counter — prevents stale async overlaps on rapid toggles. */
+let nsToggleGeneration = 0;
+
 useSettingsStore.subscribe((state, prevState) => {
   if (state.enableNoiseSuppression === prevState.enableNoiseSuppression) return;
 
@@ -1640,12 +1657,16 @@ useSettingsStore.subscribe((state, prevState) => {
   if (!voiceState.localStream) return;
 
   const localStream = voiceState.localStream;
+  const gen = ++nsToggleGeneration;
 
   (async () => {
     // Rebuild the suppression pipeline with new setting
     stopNoiseSuppression();
     setNoiseSuppression(state.enableNoiseSuppression);
     const suppressedStream = await applyNoiseSuppression(localStream);
+
+    // Abort if a newer toggle happened during the await
+    if (gen !== nsToggleGeneration) return;
 
     // Re-check: user may have left during async work
     const current = useVoiceStore.getState();
@@ -1679,6 +1700,7 @@ useSettingsStore.subscribe((state, prevState) => {
             } catch (err) {
               console.error('[Voice SFU] Failed to replace track after noise suppression toggle:', err);
             }
+            if (gen !== nsToggleGeneration) return;
           }
         }
       }
@@ -1696,6 +1718,7 @@ useSettingsStore.subscribe((state, prevState) => {
             } catch (err) {
               console.error('[DMVoice] Failed to replace track after noise suppression toggle:', err);
             }
+            if (gen !== nsToggleGeneration) return;
           }
         }
       }
