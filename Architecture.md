@@ -27,6 +27,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 - **Low latency:** Voice and messaging prioritize sub-100ms delivery
 - **Horizontal scalability:** Stateless services behind load balancers
 - **Cross-platform:** Single codebase serves Windows, macOS, Linux (and future mobile)
+- **Privacy-first:** No third-party services — all traffic stays on user's own infrastructure
 - **Security:** JWT auth, input validation, rate limiting, CORS protection
 
 ---
@@ -363,7 +364,7 @@ Eight independent stores, each managing a domain:
 | `authStore` | User session, login/register/logout, token management, avatar upload (presigned URL + client-side processing), profile editing, forgot/reset/change password |
 | `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync, persistent unread tracking (via `ChannelRead` DB table + `unread:init` socket event) |
 | `chatStore` | Messages for active channel/conversation, typing indicators, pagination, author profile sync, reply-to-message state (shared by server channels and DMs) |
-| `voiceStore` | Server voice channel connection, DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`), mute/deaf, peer management (WebRTC). Server and DM voice are mutually exclusive. |
+| `voiceStore` | Server voice channel connection, DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`), mute/deaf, `pttActive` (PTT override), peer management (WebRTC), noise suppression pipeline lifecycle. Server and DM voice are mutually exclusive. |
 | `dmStore` | DM conversation list, active conversation, participant online/offline status, DM unread counts (persisted via `ConversationRead` + `dm:unread:init`), conversation deletion. Owns `clearMessages()` calls for DM view transitions. |
 | `friendStore` | Friends list (accepted/pending incoming/pending outgoing), friend request CRUD, real-time friend event handlers, friendship status lookups, `showFriendsView` toggle |
 | `settingsStore` | Audio devices, noise gate, notification prefs, PTT key (persisted to localStorage) |
@@ -683,13 +684,34 @@ Screen sharing allows one user per voice channel to share their screen with all 
        └──────────┘
 ```
 
-- Same WebRTC mesh approach as server voice (1-on-1 only)
+- WebRTC P2P (1-on-1 only) with self-hosted STUN for NAT traversal
+- **Self-hosted STUN server** — coturn in STUN-only mode (`--stun-only --no-auth`) runs alongside the Voxium backend via docker-compose. STUN is stateless UDP (~100 bytes each way) that tells each peer its public IP:port — no media flows through it. Privacy-first: no third-party STUN/TURN servers. Frontend derives STUN URL from `VITE_WS_URL` hostname + port 3478.
 - **Perfect Negotiation pattern** — resolves offer glare (both peers sending offers simultaneously) via polite/impolite roles based on userId comparison
 - **Mutually exclusive** with server voice — joining one leaves the other (cross-cleanup on both server and client)
 - In-memory state: `dmVoiceUsers` Map (conversationId → Map of userId → socketId) + `userDMCall` reverse lookup
 - System messages ("Voice call started" / "Voice call ended") persisted to DB as `type: 'system'`
 - Call offer broadcasts to `dm:{conversationId}` room; incoming call shown via `IncomingCallModal` with looping ringtone (stops on accept/decline/cancel)
 - DM call UI has two layers: `DMCallPanel` renders inline in `DMChatArea` (full avatars + controls when viewing the conversation), and `DMVoicePanel` is a compact global panel rendered in both `ChannelSidebar` (after `VoicePanel`) and `DMList` so the user always sees their DM call status from any view
+
+### Audio Processing Pipeline
+
+Two cleanly separated pipelines (follows Jitsi/Matrix pattern):
+
+1. **Noise Suppression** (clean, isolated — `applyNoiseSuppression()`):
+   ```
+   mic → RNNoise WASM AudioWorklet → destination
+   ```
+   Uses `@timephy/rnnoise-wasm` (fork of `@jitsi/rnnoise-wasm`) with the Jitsi `NoiseSuppressorWorklet` (circular buffer, LCM-based sizing, 480-sample frame handling). Nothing else in the audio path. Returns a clean suppressed stream used by both SFU producers and DM P2P peers.
+
+2. **Speaking Detection** (read-only side-chain — `startSpeakingDetection()`):
+   ```
+   suppressed stream → AnalyserNode → GainNode → destination (SFU only)
+   ```
+   Taps into the already-suppressed stream. The gain gate only matters for SFU producer pause/resume (saves bandwidth). DM mode bypasses the gain gate — DM uses the suppressed stream directly.
+
+- **Live toggle:** Noise suppression can be enabled/disabled mid-call. A generation counter prevents race conditions on rapid toggles.
+- **Push-to-talk:** Works in both server voice and DM calls. PTT overrides mute — pressing the key temporarily enables the mic regardless of mute state. `pttActive` store state drives the speaking indicator so the green ring shows during PTT even when muted.
+- **Browser noiseSuppression inversion:** When RNNoise is enabled, the browser's built-in `noiseSuppression` getUserMedia constraint is disabled to avoid double-processing.
 
 ---
 

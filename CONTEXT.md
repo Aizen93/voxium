@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
-**Version:** 1.4.0
-**Date:** 2026-03-14
+**Version:** 1.5.0
+**Date:** 2026-03-17
 
 ## Project Structure
 
@@ -17,7 +17,7 @@ Voxium/
 │   └── admin/            # Standalone admin dashboard (React + Vite, port 8082)
 ├── packages/
 │   └── shared/           # TypeScript types, validators, constants
-├── docker-compose.yml    # PostgreSQL + Redis
+├── docker-compose.yml    # Redis + coturn STUN server
 └── CLAUDE.md             # Conventions and commands
 ```
 
@@ -33,7 +33,7 @@ Voxium/
 - Unread indicators (channel + server level, persistent via DB)
 - Two-tier admin dashboard (admin + superadmin roles) with user/server/ban management, storage tools (avatars/server-icons/attachments with top uploaders, file browser, orphan cleanup), live metrics, audit log, moderation queue (reports), support ticket management, rate limit controls, feature flags
 - Admin user deletion with server ownership transfer
-- Comprehensive security hardening: JWT algorithm pinning (`HS256`), token purpose validation, IDOR prevention on message routes, admin role hierarchy enforcement, email enumeration prevention, email verification gate, TOTP replay protection (Redis), bcrypt 72-byte input limit, Tauri CSP, socket payload runtime type validation, presigned URL content-type enforcement, trust proxy conditional, GitHub Actions injection prevention
+- Comprehensive security hardening: JWT algorithm pinning (`HS256`), token purpose validation, IDOR prevention on message routes, admin role hierarchy enforcement, email enumeration prevention (generic registration errors + timing-safe password reset), email verification gate, TOTP replay protection (Redis), bcrypt 72-byte input limit, Tauri CSP, socket payload runtime type validation, presigned URL content-type enforcement, trust proxy conditional, GitHub Actions injection prevention
 - Rate limiting (per-endpoint + socket-level, admin-editable via Redis-backed registry) and input sanitization
 - Feature flags (registration, invites, server creation, voice, DM voice, support) — Redis-backed, toggleable from admin dashboard without redeploying
 - Per-server invite lock (owners/admins can lock/unlock invites independently of global flag)
@@ -69,7 +69,11 @@ Voxium/
 
 ## Recent Changes
 
-- **Audio Pipeline Refactor + PTT for DM Calls + Privacy** (2026-03-16) -- Separated noise suppression (Jitsi/Matrix RNNoise pattern) from speaking detection into clean isolated pipelines; extended push-to-talk to DM calls with PTT speaking indicator; removed Google STUN servers for privacy (host candidates only); live noise suppression toggle mid-call.
+- **Security: Timing Side-Channel Fix** (2026-03-17) — `requestPasswordReset` now performs crypto work (token generation + hashing) regardless of whether the email exists in the DB. Prevents attackers from measuring response time differences to enumerate registered email addresses.
+
+- **Self-Hosted STUN + Desktop Test Suite** (2026-03-17) — Added coturn STUN-only server to docker-compose for cross-internet DM P2P calls (stateless NAT discovery, no media relay, privacy-first). STUN host auto-derived from `VITE_WS_URL`. Set up Vitest + jsdom for desktop app with 53 unit tests covering audio pipeline, voice store (pttActive lifecycle, DM user CRUD, peer cleanup), PTT logic (guard conditions, DM event routing, speaking indicator formula, STUN URL derivation, generation counter).
+
+- **Audio Pipeline Refactor + PTT for DM Calls + Privacy** (2026-03-16) — Separated noise suppression (Jitsi/Matrix RNNoise pattern: clean `source → AudioWorklet → destination` pipeline) from speaking detection into isolated pipelines. Extended push-to-talk to DM calls with PTT speaking indicator override (`pttActive` state). Removed Google STUN servers (privacy-first). Live noise suppression toggle mid-call with generation counter to prevent race conditions. All empty catch blocks replaced with proper error logging.
 
 - **Unit Test Suite** (2026-03-14) -- 401 unit tests across 26 files covering utils, middleware, routes, services, websocket, and mediasoup config. Vitest with process isolation (`pool: 'forks'`). CI pipeline updated to run tests.
 
