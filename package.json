@@ -34,9 +34,10 @@
     ],
     "overrides": {
       "rollup": ">=4.59.0",
-      "fast-xml-parser": ">=5.4.1",
+      "fast-xml-parser": ">=5.5.6",
       "tar": ">=7.5.11",
-      "flatted": ">=3.4.2"
+      "flatted": ">=3.4.2",
+      "socket.io-parser": ">=4.2.6"
     }
   },
   "engines": {
