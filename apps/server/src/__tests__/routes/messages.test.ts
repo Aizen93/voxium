@@ -17,6 +17,26 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
+// Permission calculator — mock before any route imports
+const mockHasServerPermission = vi.fn().mockResolvedValue(true);
+const mockHasChannelPermission = vi.fn().mockResolvedValue(true);
+const mockGetHighestRolePosition = vi.fn().mockResolvedValue(Infinity);
+const mockGetEffectivePermissions = vi.fn().mockResolvedValue({ permissions: '1048575', source: 'owner' });
+
+vi.mock('../../utils/permissionCalculator', () => ({
+  hasServerPermission: (...args: unknown[]) => mockHasServerPermission(...args),
+  hasChannelPermission: (...args: unknown[]) => mockHasChannelPermission(...args),
+  getHighestRolePosition: (...args: unknown[]) => mockGetHighestRolePosition(...args),
+  getEffectivePermissions: (...args: unknown[]) => mockGetEffectivePermissions(...args),
+  Permissions: {
+    MANAGE_CHANNELS: 1n << 4n,
+    MANAGE_SERVER: 1n << 5n,
+    SEND_MESSAGES: 1n << 11n,
+    MANAGE_MESSAGES: 1n << 13n,
+  },
+  hasPermission: vi.fn().mockReturnValue(true),
+}));
+
 const prismaMock: Record<string, any> = {
   user: {
     findUnique: vi.fn(),
@@ -156,6 +176,10 @@ describe('Message Routes', () => {
     vi.clearAllMocks();
     app = createApp();
     mockAuthUser();
+    // Default: permission checks pass
+    mockHasServerPermission.mockResolvedValue(true);
+    mockHasChannelPermission.mockResolvedValue(true);
+    mockGetHighestRolePosition.mockResolvedValue(Infinity);
   });
 
   // ── GET /api/v1/channels/:channelId/messages ───────────────────────────
@@ -598,11 +622,7 @@ describe('Message Routes', () => {
       prismaMock.message.findUnique.mockResolvedValue(
         makeMockMessage({ authorId: 'user-2' }),
       );
-      prismaMock.serverMember.findUnique.mockResolvedValue({
-        userId: 'user-1',
-        serverId: 'srv-1',
-        role: 'admin',
-      });
+      // hasServerPermission(MANAGE_MESSAGES) returns true (default)
       prismaMock.message.delete.mockResolvedValue({});
 
       const res = await request(app)
@@ -617,11 +637,7 @@ describe('Message Routes', () => {
       prismaMock.message.findUnique.mockResolvedValue(
         makeMockMessage({ authorId: 'user-2' }),
       );
-      prismaMock.serverMember.findUnique.mockResolvedValue({
-        userId: 'user-1',
-        serverId: 'srv-1',
-        role: 'owner',
-      });
+      // hasServerPermission(MANAGE_MESSAGES) returns true (default)
       prismaMock.message.delete.mockResolvedValue({});
 
       const res = await request(app)
@@ -636,11 +652,8 @@ describe('Message Routes', () => {
       prismaMock.message.findUnique.mockResolvedValue(
         makeMockMessage({ authorId: 'user-2' }),
       );
-      prismaMock.serverMember.findUnique.mockResolvedValue({
-        userId: 'user-1',
-        serverId: 'srv-1',
-        role: 'member',
-      });
+      // No MANAGE_MESSAGES permission
+      mockHasServerPermission.mockResolvedValue(false);
 
       const res = await request(app)
         .delete('/api/v1/channels/ch-1/messages/msg-1')

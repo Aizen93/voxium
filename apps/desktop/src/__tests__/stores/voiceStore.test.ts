@@ -129,7 +129,7 @@ describe('voiceStore', () => {
     it('should set incoming call data', () => {
       const callData = {
         conversationId: 'conv-1',
-        from: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, speaking: false },
+        from: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false },
       };
       useVoiceStore.getState().setIncomingCall(callData);
       expect(useVoiceStore.getState().incomingCall).toEqual(callData);
@@ -146,7 +146,7 @@ describe('voiceStore', () => {
       useVoiceStore.setState({
         incomingCall: {
           conversationId: 'conv-1',
-          from: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, speaking: false },
+          from: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false },
         },
       });
       useVoiceStore.getState().declineCall();
@@ -157,7 +157,7 @@ describe('voiceStore', () => {
   describe('addDMCallUser', () => {
     it('should add a user to dmCallUsers', () => {
       useVoiceStore.setState({ dmCallConversationId: 'conv-1', localUserId: 'user-1' });
-      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, speaking: false };
+      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false };
       useVoiceStore.getState().addDMCallUser(user);
       expect(useVoiceStore.getState().dmCallUsers).toHaveLength(1);
       expect(useVoiceStore.getState().dmCallUsers[0].id).toBe('user-2');
@@ -165,7 +165,7 @@ describe('voiceStore', () => {
 
     it('should not add duplicate users', () => {
       useVoiceStore.setState({ dmCallConversationId: 'conv-1', localUserId: 'user-1' });
-      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, speaking: false };
+      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false };
       useVoiceStore.getState().addDMCallUser(user);
       useVoiceStore.getState().addDMCallUser(user);
       expect(useVoiceStore.getState().dmCallUsers).toHaveLength(1);
@@ -174,7 +174,7 @@ describe('voiceStore', () => {
 
   describe('removeDMCallUser', () => {
     it('should remove a user from dmCallUsers', () => {
-      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, speaking: false };
+      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false };
       useVoiceStore.setState({ dmCallUsers: [user] });
       useVoiceStore.getState().removeDMCallUser('user-2');
       expect(useVoiceStore.getState().dmCallUsers).toHaveLength(0);
@@ -183,7 +183,7 @@ describe('voiceStore', () => {
 
   describe('updateDMCallUserState', () => {
     it('should update mute/deaf state for a DM call user', () => {
-      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, speaking: false };
+      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false };
       useVoiceStore.setState({ dmCallUsers: [user] });
       useVoiceStore.getState().updateDMCallUserState('user-2', true, true);
       const updated = useVoiceStore.getState().dmCallUsers[0];
@@ -194,7 +194,7 @@ describe('voiceStore', () => {
 
   describe('setDMCallUserSpeaking', () => {
     it('should update speaking state for a DM call user', () => {
-      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, speaking: false };
+      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false };
       useVoiceStore.setState({ dmCallUsers: [user] });
       useVoiceStore.getState().setDMCallUserSpeaking('user-2', true);
       expect(useVoiceStore.getState().dmCallUsers[0].speaking).toBe(true);

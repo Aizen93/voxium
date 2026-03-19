@@ -9,6 +9,8 @@ import { handleVoiceEvents, getVoiceStateForServer, getScreenShareState } from '
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
+import { Permissions } from '@voxium/shared';
+import { hasChannelPermission } from '../utils/permissionCalculator';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -133,6 +135,9 @@ export function initSocketServer(httpServer: HttpServer) {
           },
         });
         if (!channel || channel.server.members.length === 0) return;
+        // Check VIEW_CHANNEL permission
+        const canView = await hasChannelPermission(userId, channelId, channel.serverId, Permissions.VIEW_CHANNEL);
+        if (!canView) return;
         socket.join(`channel:${channelId}`);
         console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
       } catch (err) {
@@ -149,10 +154,19 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     // ─── Typing indicators ──────────────────────────────────────────
-    socket.on('typing:start', (channelId: string) => {
+    socket.on('typing:start', async (channelId: string) => {
       if (!socketRateLimit(socket, 'typing', 30)) return;
       if (typeof channelId !== 'string' || !channelId) return;
       if (!socket.rooms.has(`channel:${channelId}`)) return;
+      // Check SEND_MESSAGES — user shouldn't appear to type in channels they can't send to
+      try {
+        const ch = await prisma.channel.findUnique({ where: { id: channelId }, select: { serverId: true } });
+        if (!ch) return;
+        const canSend = await hasChannelPermission(userId, channelId, ch.serverId, Permissions.SEND_MESSAGES);
+        if (!canSend) return;
+      } catch {
+        return;
+      }
       socket.to(`channel:${channelId}`).emit('typing:start', {
         channelId,
         userId,
@@ -316,11 +330,24 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.join(`server:${m.serverId}`);
       }
 
-      // Auto-join all text channel rooms so message:new events reach all members
-      const textChannels = await prisma.channel.findMany({
+      // Auto-join text channel rooms the user can view
+      const allTextChannels = await prisma.channel.findMany({
         where: { serverId: { in: memberships.map((m) => m.serverId) }, type: 'text' },
         select: { id: true, serverId: true },
       });
+      // Group channels by server for efficient batch filtering
+      const channelsByServer = new Map<string, typeof allTextChannels>();
+      for (const ch of allTextChannels) {
+        const list = channelsByServer.get(ch.serverId) || [];
+        list.push(ch);
+        channelsByServer.set(ch.serverId, list);
+      }
+      const { filterVisibleChannels } = await import('../utils/permissionCalculator');
+      const textChannels: typeof allTextChannels = [];
+      for (const [serverId, channels] of channelsByServer) {
+        const visible = await filterVisibleChannels(userId, serverId, channels);
+        textChannels.push(...visible);
+      }
       for (const ch of textChannels) {
         socket.join(`channel:${ch.id}`);
       }
@@ -493,6 +520,8 @@ export function initSocketServer(httpServer: HttpServer) {
               ...u,
               selfMute: state?.selfMute ?? false,
               selfDeaf: state?.selfDeaf ?? false,
+              serverMuted: state?.serverMuted ?? false,
+              serverDeafened: state?.serverDeafened ?? false,
               speaking: false,
             };
           });

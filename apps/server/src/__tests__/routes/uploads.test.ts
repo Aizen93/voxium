@@ -39,6 +39,16 @@ vi.mock('../../utils/s3', () => ({
   VALID_ATTACHMENT_KEY_RE: /^attachments\/(ch|dm)-[\w-]+\/[\w]+-[\w][\w.-]*$/,
 }));
 
+// Mock permission calculator — allow by default
+vi.mock('../../utils/permissionCalculator', () => ({
+  hasServerPermission: vi.fn().mockResolvedValue(true),
+  hasChannelPermission: vi.fn().mockResolvedValue(true),
+  Permissions: {
+    MANAGE_SERVER: 1n << 3n,
+    ATTACH_FILES: 1n << 11n,
+  },
+}));
+
 // Mock Prisma
 vi.mock('../../utils/prisma', () => ({
   prisma: {
@@ -287,10 +297,12 @@ describe('uploads — POST /presign/server-icon/:serverId', () => {
     expect(res.body.data.key).toMatch(/^server-icons\/srv-1-\d+\.webp$/);
   });
 
-  it('returns 403 for non-owner', async () => {
+  it('returns 403 for user without MANAGE_SERVER permission', async () => {
     vi.mocked(prisma.server.findUnique).mockResolvedValueOnce({
       id: 'srv-1', ownerId: 'other-user', name: 'Test Server',
     } as any);
+    const { hasServerPermission } = await import('../../utils/permissionCalculator');
+    vi.mocked(hasServerPermission).mockResolvedValueOnce(false);
 
     const app = createApp();
     const res = await request(app).post('/api/v1/uploads/presign/server-icon/srv-1');

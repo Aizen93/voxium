@@ -234,7 +234,7 @@ export function handleDMVoiceEvents(
 
     if (!user) return;
 
-    const voiceUser = { ...user, selfMute: initialMute, selfDeaf: initialDeaf, speaking: false };
+    const voiceUser = { ...user, selfMute: initialMute, selfDeaf: initialDeaf, serverMuted: false, serverDeafened: false, speaking: false };
     const callUsers = await getDMVoiceUsers(conversationId);
 
     if (callUsers.size === 1) {
@@ -279,7 +279,7 @@ export function handleDMVoiceEvents(
         });
         const existingVoiceUsers = existingUserInfos.map((u) => {
           const uState = callUsers.get(u.id);
-          return { ...u, selfMute: uState?.selfMute ?? false, selfDeaf: uState?.selfDeaf ?? false, speaking: false };
+          return { ...u, selfMute: uState?.selfMute ?? false, selfDeaf: uState?.selfDeaf ?? false, serverMuted: false, serverDeafened: false, speaking: false };
         });
         // Send as joined events to the new joiner so they know who's already there
         for (const vu of existingVoiceUsers) {

@@ -110,6 +110,7 @@ vi.mock('../../routes/reports', () => ({ reportsRouter: Router() }));
 vi.mock('../../routes/stats', () => ({ statsRouter: Router() }));
 vi.mock('../../routes/admin', () => ({ adminRouter: Router() }));
 vi.mock('../../routes/support', () => ({ supportRouter: Router() }));
+vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 
 // Mock rate limiters — pass through all requests for most tests
 vi.mock('../../middleware/rateLimiter', () => ({

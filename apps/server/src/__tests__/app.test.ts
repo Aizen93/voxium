@@ -22,6 +22,7 @@ vi.mock('../routes/reports', () => ({ reportsRouter: Router() }));
 vi.mock('../routes/stats', () => ({ statsRouter: Router() }));
 vi.mock('../routes/admin', () => ({ adminRouter: Router() }));
 vi.mock('../routes/support', () => ({ supportRouter: Router() }));
+vi.mock('../routes/roles', () => ({ roleRouter: Router() }));
 
 // Mock error handler
 vi.mock('../middleware/errorHandler', () => ({

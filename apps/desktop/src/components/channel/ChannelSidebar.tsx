@@ -1,13 +1,16 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor } from 'lucide-react';
+import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
+import { ChannelPermissionsEditor } from '../server/ChannelPermissionsEditor';
 import { VoicePanel } from '../voice/VoicePanel';
+import { MemberContextMenu } from '../server/MemberContextMenu';
 import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
@@ -62,17 +65,22 @@ function SortableChannelItem({
   onSelectText,
   onJoinVoice,
   onDelete,
+  onContextMenu,
+  onVoiceUserContextMenu,
 }: {
   channel: Channel;
   isAdmin: boolean;
   isActive: boolean;
   isVoiceActive: boolean;
   unread: number;
-  voiceUsers: { id: string; displayName: string; avatarUrl: string | null; selfMute: boolean; speaking: boolean; screenSharing?: boolean }[];
+  voiceUsers: { id: string; displayName: string; avatarUrl: string | null; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean; speaking: boolean; screenSharing?: boolean }[];
   currentUserId: string | undefined;
+  // members lookup for nickname resolution is done via store hook below
   onSelectText: (id: string) => void;
   onJoinVoice: (id: string) => void;
   onDelete: (id: string) => void;
+  onContextMenu?: (e: React.MouseEvent, channel: Channel) => void;
+  onVoiceUserContextMenu?: (e: React.MouseEvent, userId: string) => void;
 }) {
   const {
     attributes,
@@ -94,6 +102,7 @@ function SortableChannelItem({
   return (
     <div ref={setNodeRef} style={style}>
       <div
+        onContextMenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, channel); } }}
         className={clsx(
           'group flex w-full items-center gap-1 rounded-md px-1 py-1.5 text-sm transition-colors',
           isText
@@ -145,30 +154,65 @@ function SortableChannelItem({
 
       {/* Voice users */}
       {!isText && voiceUsers.length > 0 && (
-        <div className="ml-4 mt-0.5 space-y-0.5">
-          {voiceUsers.map((vu) => (
-            <UserHoverTarget key={vu.id} userId={vu.id}>
-              <div className="flex items-center gap-1.5 rounded px-2 py-1">
-                <Avatar
-                  avatarUrl={vu.avatarUrl}
-                  displayName={vu.displayName}
-                  size="xs"
-                  speaking={vu.speaking}
-                />
-                <span className={clsx(
-                  'text-xs truncate',
-                  vu.id === currentUserId ? 'text-vox-text-primary font-medium' : 'text-vox-text-secondary'
-                )}>
-                  {vu.displayName}
-                  {vu.id === currentUserId && ' (you)'}
-                </span>
-                {vu.screenSharing && <Monitor size={10} className="text-vox-voice-connected shrink-0" />}
-                {vu.selfMute && <MicOff size={10} className="text-vox-voice-muted shrink-0" />}
-              </div>
-            </UserHoverTarget>
-          ))}
-        </div>
+        <VoiceUserList voiceUsers={voiceUsers} currentUserId={currentUserId} onContextMenu={onVoiceUserContextMenu || (() => {})} />
       )}
+    </div>
+  );
+}
+
+// ─── Sortable Category Header ───────────────────────────────────────────────
+
+// ─── Voice User List (with nickname resolution) ─────────────────────────────
+
+function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
+  voiceUsers: { id: string; displayName: string; avatarUrl: string | null; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean; speaking: boolean; screenSharing?: boolean }[];
+  currentUserId: string | undefined;
+  onContextMenu: (e: React.MouseEvent, userId: string) => void;
+}) {
+  const members = useServerStore((s) => s.members);
+
+  return (
+    <div className="ml-4 mt-0.5 space-y-0.5">
+      {voiceUsers.map((vu) => {
+        const member = members.find((m) => m.userId === vu.id);
+        const name = member?.nickname || vu.displayName;
+        const roleColor = member?.roles?.length
+          ? [...member.roles].sort((a, b) => b.position - a.position)[0]?.color
+          : null;
+
+        return (
+          <UserHoverTarget key={vu.id} userId={vu.id}>
+            <div
+              className="flex items-center gap-1.5 rounded px-2 py-1 hover:bg-vox-bg-hover/50 cursor-default"
+              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, vu.id); }}
+            >
+              <Avatar
+                avatarUrl={vu.avatarUrl}
+                displayName={vu.displayName}
+                size="xs"
+                speaking={vu.speaking}
+              />
+              <span
+                className={clsx(
+                  'text-xs truncate flex-1',
+                  vu.id === currentUserId ? 'font-medium' : ''
+                )}
+                style={roleColor ? { color: roleColor } : undefined}
+              >
+                {name}
+                {vu.id === currentUserId && ' (you)'}
+              </span>
+              <div className="flex items-center gap-0.5 shrink-0">
+                {vu.screenSharing && <Monitor size={10} className="text-vox-voice-connected" />}
+                {vu.serverMuted && <span title="Server muted"><MicOff size={10} className="text-vox-accent-danger" /></span>}
+                {vu.selfMute && !vu.serverMuted && <MicOff size={10} className="text-vox-voice-muted" />}
+                {vu.serverDeafened && <span title="Server deafened"><HeadphoneOff size={10} className="text-vox-accent-danger" /></span>}
+                {vu.selfDeaf && !vu.serverDeafened && <HeadphoneOff size={10} className="text-vox-voice-muted" />}
+              </div>
+            </div>
+          </UserHoverTarget>
+        );
+      })}
     </div>
   );
 }
@@ -295,6 +339,12 @@ export function ChannelSidebar() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  const [channelContextMenu, setChannelContextMenu] = useState<{ channel: Channel; position: { x: number; y: number } } | null>(null);
+  const [voiceUserCtx, setVoiceUserCtx] = useState<{ userId: string; position: { x: number; y: number } } | null>(null);
+  const [permissionsEditorChannel, setPermissionsEditorChannel] = useState<{ id: string; name: string } | null>(null);
+  const [editingNickname, setEditingNickname] = useState(false);
+  const [nicknameInput, setNicknameInput] = useState('');
+  const ctxRef = useRef<HTMLDivElement>(null);
 
   const activeServer = servers.find((s) => s.id === activeServerId);
   const currentMember = members.find((m) => m.userId === user?.id);
@@ -317,6 +367,52 @@ export function ChannelSidebar() {
       return next;
     });
   }, []);
+
+  // Close channel context menu on outside click or Escape
+  useEffect(() => {
+    if (!channelContextMenu) return;
+    function handleClick(e: MouseEvent) {
+      if (ctxRef.current && !ctxRef.current.contains(e.target as Node)) {
+        setChannelContextMenu(null);
+      }
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setChannelContextMenu(null);
+    }
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [channelContextMenu]);
+
+  // Adjust context menu position to stay within viewport
+  useEffect(() => {
+    if (channelContextMenu && ctxRef.current) {
+      const rect = ctxRef.current.getBoundingClientRect();
+      let x = channelContextMenu.position.x;
+      let y = channelContextMenu.position.y;
+      if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+      if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+      if (x < 0) x = 8;
+      if (y < 0) y = 8;
+      if (x !== channelContextMenu.position.x || y !== channelContextMenu.position.y) {
+        setChannelContextMenu({ ...channelContextMenu, position: { x, y } });
+      }
+    }
+  }, [channelContextMenu]);
+
+  const handleVoiceUserContextMenu = useCallback((e: React.MouseEvent, userId: string) => {
+    // Close channel context menu if open
+    setChannelContextMenu(null);
+    setVoiceUserCtx({ userId, position: { x: e.clientX, y: e.clientY } });
+  }, []);
+
+  const handleChannelContextMenu = useCallback((e: React.MouseEvent, channel: Channel) => {
+    if (!isAdmin) return;
+    setChannelContextMenu({ channel, position: { x: e.clientX, y: e.clientY } });
+  }, [isAdmin]);
 
   // Sort channels within each group by position
   const channelsByCategory = useMemo(() => {
@@ -601,6 +697,8 @@ export function ChannelSidebar() {
                     onSelectText={handleSelectTextChannel}
                     onJoinVoice={handleJoinVoice}
                     onDelete={handleDeleteChannel}
+                    onContextMenu={handleChannelContextMenu}
+                    onVoiceUserContextMenu={handleVoiceUserContextMenu}
                   />
                 ))}
               </SortableContext>
@@ -637,6 +735,8 @@ export function ChannelSidebar() {
                         onSelectText={handleSelectTextChannel}
                         onJoinVoice={handleJoinVoice}
                         onDelete={handleDeleteChannel}
+                        onContextMenu={handleChannelContextMenu}
+                        onVoiceUserContextMenu={handleVoiceUserContextMenu}
                       />
                     ))}
                   </SortableContext>
@@ -731,7 +831,45 @@ export function ChannelSidebar() {
         <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="sm" />
         <div className="min-w-0 flex-1">
           <p className="truncate text-xs font-medium text-vox-text-primary">{user?.displayName || 'User'}</p>
-          <p className="truncate text-[10px] text-vox-text-muted">Online</p>
+          {activeServerId && !editingNickname && (
+            <button
+              onClick={() => { setEditingNickname(true); setNicknameInput(currentMember?.nickname || ''); }}
+              className="truncate text-[10px] text-vox-text-muted hover:text-vox-text-secondary transition-colors"
+            >
+              {currentMember?.nickname ? currentMember.nickname : 'Set nickname'}
+            </button>
+          )}
+          {activeServerId && editingNickname && (
+            <input
+              type="text"
+              value={nicknameInput}
+              onChange={(e) => setNicknameInput(e.target.value)}
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  try {
+                    await useServerStore.getState().setNickname(activeServerId, nicknameInput.trim() || null);
+                    toast.success(nicknameInput.trim() ? 'Nickname set' : 'Nickname cleared');
+                  } catch { toast.error('Failed to set nickname'); }
+                  setEditingNickname(false);
+                } else if (e.key === 'Escape') {
+                  setEditingNickname(false);
+                }
+              }}
+              onBlur={async () => {
+                try {
+                  await useServerStore.getState().setNickname(activeServerId, nicknameInput.trim() || null);
+                } catch { /* ignore on blur */ }
+                setEditingNickname(false);
+              }}
+              placeholder="Nickname"
+              className="w-full rounded border border-vox-border bg-vox-bg-secondary px-1 py-0.5 text-[10px] text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
+              autoFocus
+            />
+          )}
+          {!activeServerId && (
+            <p className="truncate text-[10px] text-vox-text-muted">Online</p>
+          )}
         </div>
         <button
           onClick={toggleMute}
@@ -764,6 +902,56 @@ export function ChannelSidebar() {
       )}
       {showServerSettings && activeServerId && (
         <ServerSettingsModal serverId={activeServerId} onClose={() => setShowServerSettings(false)} />
+      )}
+
+      {/* Channel right-click context menu */}
+      {channelContextMenu && isAdmin && createPortal(
+        <div
+          ref={ctxRef}
+          className="fixed z-[9999] min-w-44 rounded-lg border border-vox-border bg-vox-bg-floating p-1.5 shadow-xl animate-fade-in"
+          style={{ left: channelContextMenu.position.x, top: channelContextMenu.position.y }}
+        >
+          <button
+            onClick={() => {
+              setPermissionsEditorChannel({ id: channelContextMenu.channel.id, name: channelContextMenu.channel.name });
+              setChannelContextMenu(null);
+            }}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+          >
+            <Shield size={16} className="text-vox-accent-primary" />
+            Edit Permissions
+          </button>
+          <button
+            onClick={() => {
+              handleDeleteChannel(channelContextMenu.channel.id);
+              setChannelContextMenu(null);
+            }}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
+          >
+            <Trash2 size={16} />
+            Delete Channel
+          </button>
+        </div>,
+        document.body
+      )}
+
+      {/* Channel permissions editor */}
+      {permissionsEditorChannel && activeServerId && (
+        <ChannelPermissionsEditor
+          serverId={activeServerId}
+          channelId={permissionsEditorChannel.id}
+          channelName={permissionsEditorChannel.name}
+          onClose={() => setPermissionsEditorChannel(null)}
+        />
+      )}
+
+      {/* Voice user right-click menu */}
+      {voiceUserCtx && members.find((m) => m.userId === voiceUserCtx.userId) && (
+        <MemberContextMenu
+          member={members.find((m) => m.userId === voiceUserCtx.userId)!}
+          position={voiceUserCtx.position}
+          onClose={() => setVoiceUserCtx(null)}
+        />
       )}
     </div>
   );

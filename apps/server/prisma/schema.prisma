@@ -76,6 +76,7 @@ model Server {
   channels   Channel[]
   categories Category[]
   members    ServerMember[]
+  roles      Role[]
   invites    Invite[]
   limits     ServerLimits?
 
@@ -114,13 +115,67 @@ model ServerMember {
   userId   String   @map("user_id")
   serverId String   @map("server_id")
   role     String   @default("member")
+  nickname String?
   joinedAt DateTime @default(now()) @map("joined_at")
 
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  memberRoles MemberRole[]
 
   @@id([userId, serverId])
   @@map("server_members")
+}
+
+// ─── Roles ──────────────────────────────────────────────────────────────────
+
+model Role {
+  id          String   @id @default(cuid())
+  serverId    String   @map("server_id")
+  name        String
+  color       String?
+  position    Int      @default(0)
+  permissions String   @default("0")
+  isDefault   Boolean  @default(false) @map("is_default")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  server    Server                     @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  members   MemberRole[]
+  channelOverrides ChannelPermissionOverride[]
+
+  @@unique([serverId, name])
+  @@index([serverId, position])
+  @@map("roles")
+}
+
+model MemberRole {
+  userId   String @map("user_id")
+  serverId String @map("server_id")
+  roleId   String @map("role_id")
+
+  member ServerMember @relation(fields: [userId, serverId], references: [userId, serverId], onDelete: Cascade)
+  role   Role         @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, serverId, roleId])
+  @@index([roleId])
+  @@map("member_roles")
+}
+
+// ─── Channel Permission Overrides ───────────────────────────────────────────
+
+model ChannelPermissionOverride {
+  id        String @id @default(cuid())
+  channelId String @map("channel_id")
+  roleId    String @map("role_id")
+  allow     String @default("0")
+  deny      String @default("0")
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  role    Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, roleId])
+  @@index([channelId])
+  @@map("channel_permission_overrides")
 }
 
 // ─── Categories ─────────────────────────────────────────────────────────────
@@ -155,6 +210,7 @@ model Channel {
   category Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   messages Message[]
   reads    ChannelRead[]
+  permissionOverrides ChannelPermissionOverride[]
 
   @@map("channels")
 }

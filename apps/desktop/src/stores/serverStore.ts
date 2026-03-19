@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
-import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole } from '@voxium/shared';
+import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride } from '@voxium/shared';
 
 interface ServerState {
   servers: Server[];
@@ -11,6 +11,7 @@ interface ServerState {
   categories: Category[];
   activeChannelId: string | null;
   members: ServerMember[];
+  roles: Role[];
   isLoading: boolean;
   unreadCounts: Record<string, number>;
   serverUnreadCounts: Record<string, number>;
@@ -56,6 +57,32 @@ interface ServerState {
   handleMemberRoleUpdated: (serverId: string, userId: string, role: MemberRole) => void;
   handleMemberKicked: (serverId: string) => void;
   handleServerDeleted: (serverId: string) => void;
+
+  // Roles
+  fetchRoles: (serverId: string) => Promise<void>;
+  createRole: (serverId: string, name: string, color?: string, permissions?: string) => Promise<Role>;
+  updateRole: (serverId: string, roleId: string, fields: { name?: string; color?: string | null; permissions?: string }) => Promise<void>;
+  deleteRole: (serverId: string, roleId: string) => Promise<void>;
+  reorderRoles: (serverId: string, order: { id: string; position: number }[]) => Promise<void>;
+  assignMemberRoles: (serverId: string, memberId: string, roleIds: string[]) => Promise<void>;
+  handleRoleCreated: (serverId: string, role: Role) => void;
+  handleRoleUpdated: (serverId: string, role: Role) => void;
+  handleRoleDeleted: (serverId: string, roleId: string) => void;
+  handleRoleReordered: (serverId: string, roles: { id: string; position: number }[]) => void;
+  handleMemberRolesUpdated: (serverId: string, userId: string, roleIds: string[]) => void;
+
+  // Channel permissions
+  fetchChannelPermissions: (serverId: string, channelId: string) => Promise<ChannelPermissionOverride[]>;
+  setChannelPermissionOverride: (serverId: string, channelId: string, roleId: string, allow: string, deny: string) => Promise<void>;
+  deleteChannelPermissionOverride: (serverId: string, channelId: string, roleId: string) => Promise<void>;
+
+  // Permission calculator
+  fetchEffectivePermissions: (serverId: string, channelId?: string) => Promise<string>;
+
+  // Nicknames
+  setNickname: (serverId: string, nickname: string | null) => Promise<void>;
+  setMemberNickname: (serverId: string, memberId: string, nickname: string | null) => Promise<void>;
+  handleNicknameUpdated: (serverId: string, userId: string, nickname: string | null) => void;
 }
 
 // Dedup: prevent redundant mark-as-read API calls when multiple code paths
@@ -70,6 +97,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   categories: [],
   activeChannelId: null,
   members: [],
+  roles: [],
   isLoading: false,
   unreadCounts: {},
   serverUnreadCounts: {},
@@ -96,11 +124,13 @@ export const useServerStore = create<ServerState>((set, get) => ({
       const { data } = await api.get(`/servers/${serverId}`);
       const channels = data.data.channels || [];
       const categories = data.data.categories || [];
+      const roles = data.data.roles || [];
       const firstTextChannel = channels.find((c: Channel) => c.type === 'text');
 
       set({
         channels,
         categories,
+        roles,
         activeChannelId: firstTextChannel?.id || null,
         isLoading: false,
       });
@@ -184,7 +214,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
         userId: user.id,
         serverId,
         role: 'member',
+        nickname: null,
         joinedAt: new Date().toISOString(),
+        roles: [],
         user: {
           id: user.id,
           username: user.username,
@@ -485,10 +517,131 @@ export const useServerStore = create<ServerState>((set, get) => ({
         channels: isActive ? [] : state.channels,
         categories: isActive ? [] : state.categories,
         members: isActive ? [] : state.members,
+        roles: isActive ? [] : state.roles,
         activeChannelId: isActive ? null : state.activeChannelId,
         unreadCounts: newUnreadCounts,
         serverUnreadCounts: restServerUnread,
       };
     });
+  },
+
+  // ─── Roles ──────────────────────────────────────────────────────────────────
+
+  fetchRoles: async (serverId: string) => {
+    try {
+      const { data } = await api.get(`/servers/${serverId}/roles`);
+      set({ roles: data.data });
+    } catch (err) {
+      console.error('Failed to fetch roles:', err);
+    }
+  },
+
+  createRole: async (serverId: string, name: string, color?: string, permissions?: string) => {
+    const { data } = await api.post(`/servers/${serverId}/roles`, { name, color, permissions });
+    return data.data;
+  },
+
+  updateRole: async (serverId: string, roleId: string, fields) => {
+    await api.patch(`/servers/${serverId}/roles/${roleId}`, fields);
+  },
+
+  deleteRole: async (serverId: string, roleId: string) => {
+    await api.delete(`/servers/${serverId}/roles/${roleId}`);
+  },
+
+  reorderRoles: async (serverId: string, order) => {
+    await api.put(`/servers/${serverId}/roles/reorder`, { order });
+  },
+
+  assignMemberRoles: async (serverId: string, memberId: string, roleIds: string[]) => {
+    await api.patch(`/servers/${serverId}/roles/members/${memberId}`, { roleIds });
+  },
+
+  handleRoleCreated: (serverId: string, role: Role) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => {
+      if (state.roles.some((r) => r.id === role.id)) return state;
+      return { roles: [...state.roles, role].sort((a, b) => a.position - b.position) };
+    });
+  },
+
+  handleRoleUpdated: (serverId: string, role: Role) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      roles: state.roles.map((r) => (r.id === role.id ? role : r)),
+    }));
+  },
+
+  handleRoleDeleted: (serverId: string, roleId: string) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      roles: state.roles.filter((r) => r.id !== roleId),
+      // Remove role from members
+      members: state.members.map((m) => ({
+        ...m,
+        roles: m.roles?.filter((r) => r.id !== roleId),
+      })),
+    }));
+  },
+
+  handleRoleReordered: (serverId: string, roles: { id: string; position: number }[]) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      roles: state.roles.map((r) => {
+        const updated = roles.find((u) => u.id === r.id);
+        return updated ? { ...r, position: updated.position } : r;
+      }).sort((a, b) => a.position - b.position),
+    }));
+  },
+
+  handleMemberRolesUpdated: (serverId: string, userId: string, roleIds: string[]) => {
+    if (get().activeServerId !== serverId) return;
+    const allRoles = get().roles;
+    const assignedRoles = allRoles.filter((r) => roleIds.includes(r.id));
+    set((state) => ({
+      members: state.members.map((m) =>
+        m.userId === userId ? { ...m, roles: assignedRoles } : m
+      ),
+    }));
+  },
+
+  // ─── Channel Permissions ──────────────────────────────────────────────────
+
+  fetchChannelPermissions: async (serverId: string, channelId: string) => {
+    const { data } = await api.get(`/servers/${serverId}/roles/channels/${channelId}/permissions`);
+    return data.data;
+  },
+
+  setChannelPermissionOverride: async (serverId: string, channelId: string, roleId: string, allow: string, deny: string) => {
+    await api.put(`/servers/${serverId}/roles/channels/${channelId}/permissions/${roleId}`, { allow, deny });
+  },
+
+  deleteChannelPermissionOverride: async (serverId: string, channelId: string, roleId: string) => {
+    await api.delete(`/servers/${serverId}/roles/channels/${channelId}/permissions/${roleId}`);
+  },
+
+  fetchEffectivePermissions: async (serverId: string, channelId?: string) => {
+    const params = channelId ? `?channelId=${channelId}` : '';
+    const { data } = await api.get(`/servers/${serverId}/roles/permissions/effective${params}`);
+    return data.data.permissions;
+  },
+
+  // ─── Nicknames ──────────────────────────────────────────────────────────────
+
+  setNickname: async (serverId: string, nickname: string | null) => {
+    await api.patch(`/servers/${serverId}/nickname`, { nickname });
+  },
+
+  setMemberNickname: async (serverId: string, memberId: string, nickname: string | null) => {
+    await api.patch(`/servers/${serverId}/members/${memberId}/nickname`, { nickname });
+  },
+
+  handleNicknameUpdated: (serverId: string, userId: string, nickname: string | null) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      members: state.members.map((m) =>
+        m.userId === userId ? { ...m, nickname } : m
+      ),
+    }));
   },
 }));

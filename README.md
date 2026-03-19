@@ -20,6 +20,41 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 
 ---
 
+## Key Highlights
+
+<table>
+<tr>
+<td width="50%">
+
+### Advanced Permission System
+Discord-style role-based access control with 20 granular permission flags, per-channel overrides (allow/deny/inherit), role hierarchy enforcement, and a permission calculator that resolves @everyone → role permissions → channel overrides. Admins manage roles, assign them to members, and configure channel-specific restrictions — all through the UI.
+
+</td>
+<td width="50%">
+
+### Production-Ready Voice
+mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing, and voice quality selector. Voice moderation: server mute/deafen persists across reconnects via Redis, cross-channel force-move.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### Privacy-First Architecture
+Zero third-party services — no Google STUN, no analytics, no CDNs. Self-hosted STUN via coturn, all media stays on your infrastructure. No phone number or ID required to sign up.
+
+</td>
+<td width="50%">
+
+### Full-Stack Security
+JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte limit, timing-safe auth flows, IDOR prevention, runtime socket payload validation, rate limiting on every endpoint, email verification gate, and comprehensive input sanitization.
+
+</td>
+</tr>
+</table>
+
+---
+
 ## Features
 
 | Category | Feature | Description |
@@ -38,9 +73,15 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 | | Opus Optimization | DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate |
 | | Push-to-Talk | Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode |
 | | Audio Settings | Input/output device selection, live mic level meter, noise suppression toggle, persisted preferences |
-| | Mute/Deaf Controls | Always-visible controls that persist across channel switches, server switches, and app restarts |
+| | Mute/Deaf Controls | Self mute/deaf persisted across sessions; server force-mute/deafen by moderators (persists via Redis, cannot be bypassed) |
+| | Voice Moderation | Server mute/deafen (persists across reconnect via Redis), cross-channel force-move, role hierarchy enforcement |
+| **Permissions** | Custom Roles | Create unlimited custom roles with names, colors, and granular permissions; role hierarchy enforcement prevents privilege escalation |
+| | 20 Permission Flags | VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, and 12 more |
+| | Channel Overrides | Per-channel permission overrides with allow/deny/inherit tri-state per role — restrict #announcements to read-only, hide #staff channels |
+| | Permission Calculator | Discord-style resolution: @everyone base → OR all role permissions → channel overrides; ADMINISTRATOR bypasses everything |
+| | Voice Moderation | Server mute/deafen (persists across reconnect via Redis), cross-channel force-move, role hierarchy enforcement |
+| | Per-Server Nicknames | Members can set server-specific display names; admins can manage others' nicknames |
 | **Social** | Friend System | Send, accept, decline, and remove friend requests with real-time notifications |
-| | Roles & Permissions | Owner/Admin/Member hierarchy; role changes, member kicks, ownership transfer |
 | | User Profiles | Avatars with online/offline status, display names, bios with real-time sync across all clients |
 | | Presence | Real-time online/offline status for all server members and DM participants |
 | **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/server/ban management, storage management (avatars/icons/attachments with top uploaders and orphan cleanup), live metrics, audit log, moderation queue |
@@ -512,7 +553,7 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 
 ## Testing
 
-Voxium has a comprehensive test suite with 401 unit and integration tests covering API routes, middleware, utilities, voice handlers, and security edge cases.
+Voxium has a comprehensive test suite with 635 unit and integration tests covering API routes, middleware, utilities, voice handlers, permission system, and security edge cases.
 
 ### Running Tests
 
@@ -540,13 +581,14 @@ pnpm test:e2e:headed         # Visible browser
 | **Auth Routes** | 25 | Register, login, refresh, me, change-password, forgot-password, TOTP flow |
 | **Auth Middleware** | 16 | JWT validation, HS256 algorithm pinning, token purpose rejection, email verification gate |
 | **Error Handler** | 16 | Error-to-HTTP mapping, all error classes, production mode |
-| **Server Routes** | 29 | CRUD, membership, permissions, feature flags, socket events |
+| **Server Routes** | 31 | CRUD, membership, permissions, feature flags, socket events |
 | **Channel Routes** | 24 | CRUD, resource limits, categories, socket events |
 | **Message Routes** | 26 | CRUD, IDOR prevention, sanitization, pagination, admin delete |
 | **Invite Routes** | 16 | Create, join (single-use), preview, expiry, member limits |
 | **DM Routes** | 18 | Conversations, messages, cascade delete, authorization |
 | **Upload Routes** | 19 | S3 redirect/proxy, Express 5 wildcards, path traversal prevention |
-| **Voice Handler** | 29 | Transport ACK on all code paths, join validation, mute/deaf/speaking |
+| **Permission System** | 119 | Role CRUD, hierarchy enforcement, channel overrides, permission calculator, bitmask utilities |
+| **Voice Handler** | 45 | Transport ACK on all code paths, join validation, mute/deaf/speaking, server_mute/deafen/force_move + deafen-implies-mute |
 | **Auth Service** | 22 | Registration, login, tokens, password reset, email normalization |
 | **TOTP Service** | 19 | Setup, enable, verify, disable, encrypt/decrypt roundtrip, backup codes |
 | **Pure Utilities** | 75 | Sanitization, error classes, mentions, reactions, rate limiting |
@@ -584,6 +626,8 @@ pnpm test:e2e:headed         # Visible browser
 | `pnpm db:migrate` | Run Prisma migrations |
 | `pnpm db:seed` | Seed database with demo data |
 | `pnpm db:studio` | Open Prisma Studio |
+| `npx tsx scripts/test-permissions.ts` | Run permission system integration test (73 assertions, 11 phases) |
+| `npx tsx scripts/load-test-voice.ts` | Voice channel load test with real WebRTC media |
 
 ---
 

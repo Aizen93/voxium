@@ -3,10 +3,11 @@ import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import crypto from 'crypto';
-import { INVITE_CODE_LENGTH } from '@voxium/shared';
+import { INVITE_CODE_LENGTH, Permissions } from '@voxium/shared';
 import { broadcastMemberJoined } from '../utils/memberBroadcast';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
+import { hasServerPermission } from '../utils/permissionCalculator';
 
 export const inviteRouter = Router();
 
@@ -18,10 +19,8 @@ inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }
     if (!isFeatureEnabled('invites')) throw new ForbiddenError('Server invites are currently disabled');
     const { serverId } = req.params;
 
-    const membership = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-    if (!membership) throw new ForbiddenError('Not a member of this server');
+    const canInvite = await hasServerPermission(req.user!.userId, serverId, Permissions.CREATE_INVITES);
+    if (!canInvite) throw new ForbiddenError('You do not have permission to create invites');
 
     const server = await prisma.server.findUnique({ where: { id: serverId }, select: { invitesLocked: true } });
     if (server?.invitesLocked) throw new ForbiddenError('Invites are locked for this server');

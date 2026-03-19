@@ -18,6 +18,7 @@ import { reportsRouter } from './routes/reports';
 import { statsRouter } from './routes/stats';
 import { adminRouter } from './routes/admin';
 import { supportRouter } from './routes/support';
+import { roleRouter } from './routes/roles';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 
@@ -168,6 +169,7 @@ api.use('/users', userRouter);
 api.use('/servers', serverRouter);
 api.use('/servers/:serverId/channels', channelRouter);
 api.use('/servers/:serverId/categories', categoryRouter);
+api.use('/servers/:serverId/roles', roleRouter);
 api.use('/channels/:channelId/messages', messageRouter);
 api.use('/invites', inviteRouter);
 api.use('/uploads', uploadRouter);

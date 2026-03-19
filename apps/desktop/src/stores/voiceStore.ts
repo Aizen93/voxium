@@ -126,7 +126,11 @@ interface VoiceState {
   setChannelUsers: (channelId: string, users: VoiceUser[]) => void;
   addUserToChannel: (channelId: string, user: VoiceUser) => void;
   removeUserFromChannel: (channelId: string, userId: string) => void;
-  updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean) => void;
+  updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => void;
+  handleForceMove: (targetChannelId: string) => void;
+  serverMuteUser: (targetUserId: string, muted: boolean) => void;
+  serverDeafenUser: (targetUserId: string, deafened: boolean) => void;
+  forceMoveUser: (targetUserId: string, targetChannelId: string) => void;
   setUserSpeaking: (channelId: string, userId: string, speaking: boolean) => void;
   handleSignal: (from: string, signal: unknown) => void;
   createPeer: (targetUserId: string, initiator: boolean) => void;
@@ -1091,15 +1095,60 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     });
   },
 
-  updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean) => {
+  updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => {
+    const { localUserId } = get();
+
     set((state) => {
       const newMap = new Map(state.channelUsers);
       const existing = newMap.get(channelId) || [];
       newMap.set(channelId, existing.map((u) =>
-        u.id === userId ? { ...u, selfMute, selfDeaf } : u
+        u.id === userId ? { ...u, selfMute, selfDeaf, serverMuted, serverDeafened } : u
       ));
       return { channelUsers: newMap };
     });
+
+    // If WE were server-muted/deafened, update local state + mute audio
+    if (userId === localUserId) {
+      if (serverMuted && !get().selfMute) {
+        // Force our local mute state on — pause producers
+        for (const producer of get().msProducers.values()) {
+          if (producer.kind === 'audio') producer.pause();
+        }
+        set({ selfMute: true });
+      }
+      if (serverDeafened && !get().selfDeaf) {
+        // Force our local deaf state on — mute all remote audio
+        const remoteAudios = document.querySelectorAll<HTMLAudioElement>('audio[data-voice-remote]');
+        remoteAudios.forEach((a) => { a.muted = true; });
+        set({ selfDeaf: true });
+      }
+    }
+  },
+
+  handleForceMove: (targetChannelId: string) => {
+    const { activeChannelId, activeVoiceServerId } = get();
+    if (!activeChannelId || !activeVoiceServerId) return;
+    // Leave current channel and join the target one
+    get().leaveChannel();
+    // Small delay to let cleanup complete before rejoining
+    setTimeout(() => {
+      get().joinChannel(targetChannelId, activeVoiceServerId);
+    }, 300);
+  },
+
+  serverMuteUser: (targetUserId: string, muted: boolean) => {
+    const socket = getSocket();
+    if (socket) socket.emit('voice:server_mute', { userId: targetUserId, muted });
+  },
+
+  serverDeafenUser: (targetUserId: string, deafened: boolean) => {
+    const socket = getSocket();
+    if (socket) socket.emit('voice:server_deafen', { userId: targetUserId, deafened });
+  },
+
+  forceMoveUser: (targetUserId: string, targetChannelId: string) => {
+    const socket = getSocket();
+    if (socket) socket.emit('voice:force_move', { userId: targetUserId, targetChannelId });
   },
 
   setUserSpeaking: (channelId: string, userId: string, speaking: boolean) => {
@@ -1119,8 +1168,18 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   toggleMute: () => {
     const socket = getSocket();
-    const { selfMute, localStream, msProducers, activeChannelId, dmCallConversationId } = get();
+    const { selfMute, localStream, msProducers, activeChannelId, dmCallConversationId, localUserId, channelUsers } = get();
     const newMute = !selfMute;
+
+    // If trying to unmute but server-muted, block it
+    if (!newMute && activeChannelId && localUserId) {
+      const users = channelUsers.get(activeChannelId) || [];
+      const me = users.find((u) => u.id === localUserId);
+      if (me?.serverMuted) {
+        toast.warning('You have been muted by a moderator');
+        return;
+      }
+    }
     const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
 
     if (localStream) {
@@ -1158,12 +1217,37 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   toggleDeaf: () => {
     const socket = getSocket();
-    const { selfDeaf, remoteAudios } = get();
+    const { selfDeaf, remoteAudios, activeChannelId, localUserId, channelUsers } = get();
     const newDeaf = !selfDeaf;
+
+    // If trying to undeafen but server-deafened, block it
+    if (!newDeaf && activeChannelId && localUserId) {
+      const users = channelUsers.get(activeChannelId) || [];
+      const me = users.find((u) => u.id === localUserId);
+      if (me?.serverDeafened) {
+        toast.warning('You have been deafened by a moderator');
+        return;
+      }
+    }
 
     remoteAudios.forEach((audio) => {
       audio.muted = newDeaf;
     });
+
+    // Deafen implies mute — if deafening and not already muted, also mute
+    const { selfMute, msProducers, localStream } = get();
+    if (newDeaf && !selfMute) {
+      // Pause audio producers
+      if (get().activeChannelId) {
+        for (const producer of msProducers.values()) {
+          if (producer.kind === 'audio') producer.pause();
+        }
+      }
+      if (localStream) {
+        localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
+      }
+      set({ selfMute: true });
+    }
 
     if (socket) {
       if (get().activeChannelId) {

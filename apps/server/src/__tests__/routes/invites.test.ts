@@ -17,6 +17,28 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
+// Permission calculator — mock before any route imports
+const mockHasServerPermission = vi.fn().mockResolvedValue(true);
+const mockHasChannelPermission = vi.fn().mockResolvedValue(true);
+const mockGetHighestRolePosition = vi.fn().mockResolvedValue(Infinity);
+const mockGetEffectivePermissions = vi.fn().mockResolvedValue({ permissions: '1048575', source: 'owner' });
+
+vi.mock('../../utils/permissionCalculator', () => ({
+  hasServerPermission: (...args: unknown[]) => mockHasServerPermission(...args),
+  hasChannelPermission: (...args: unknown[]) => mockHasChannelPermission(...args),
+  getHighestRolePosition: (...args: unknown[]) => mockGetHighestRolePosition(...args),
+  getEffectivePermissions: (...args: unknown[]) => mockGetEffectivePermissions(...args),
+  Permissions: {
+    MANAGE_CHANNELS: 1n << 4n,
+    MANAGE_SERVER: 1n << 5n,
+    KICK_MEMBERS: 1n << 1n,
+    SEND_MESSAGES: 1n << 11n,
+    MANAGE_MESSAGES: 1n << 13n,
+    CREATE_INVITES: 1n << 0n,
+  },
+  hasPermission: vi.fn().mockReturnValue(true),
+}));
+
 const prismaMock: Record<string, any> = {
   user: {
     findUnique: vi.fn(),
@@ -141,6 +163,10 @@ describe('Invite Routes', () => {
     vi.clearAllMocks();
     app = createApp();
     mockAuthUser();
+    // Default: permission checks pass
+    mockHasServerPermission.mockResolvedValue(true);
+    mockHasChannelPermission.mockResolvedValue(true);
+    mockGetHighestRolePosition.mockResolvedValue(Infinity);
   });
 
   // ── POST /api/v1/invites/servers/:serverId ──────────────────────────────
@@ -175,14 +201,15 @@ describe('Invite Routes', () => {
 
     it('returns 403 for non-member', async () => {
       const token = makeToken();
-      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      // No CREATE_INVITES permission (non-member)
+      mockHasServerPermission.mockResolvedValue(false);
 
       const res = await request(app)
         .post('/api/v1/invites/servers/srv-1')
         .set('Authorization', `Bearer ${token}`);
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain('Not a member');
+      expect(res.body.error).toContain('permission');
     });
 
     it('returns 403 when invites are locked', async () => {

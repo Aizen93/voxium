@@ -16,6 +16,7 @@ import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
 import { ReportModal } from './ReportModal';
 import { useAuthStore } from '../../stores/authStore';
+import { useServerStore } from '../../stores/serverStore';
 
 interface Props {
   message: Message;
@@ -136,6 +137,14 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
   const isSystemMessage = message.type === 'system';
   const currentUserId = useAuthStore((s) => s.user?.id);
   const isMentioned = !!(message.mentions && currentUserId && message.mentions.some((m) => m.id === currentUserId));
+
+  // Look up member for nickname and role color (only applies in server context)
+  const members = useServerStore((s) => s.members);
+  const authorMember = channelId ? members.find((m) => m.userId === message.author.id) : null;
+  const authorDisplayName = authorMember?.nickname || message.author.displayName;
+  const authorRoleColor = authorMember?.roles?.length
+    ? [...authorMember.roles].sort((a, b) => b.position - a.position)[0]?.color ?? null
+    : null;
 
   const handleReply = () => {
     useChatStore.getState().setReplyingTo(message);
@@ -261,11 +270,14 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
                   <UserHoverTarget userId={message.author.id} className="inline">
-                    <span className={clsx(
-                      'text-sm font-semibold cursor-pointer hover:underline',
-                      isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary'
-                    )}>
-                      {message.author.displayName}
+                    <span
+                      className={clsx(
+                        'text-sm font-semibold cursor-pointer hover:underline',
+                        !authorRoleColor && (isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary')
+                      )}
+                      style={authorRoleColor ? { color: authorRoleColor } : undefined}
+                    >
+                      {authorDisplayName}
                     </span>
                   </UserHoverTarget>
                   {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}

@@ -17,6 +17,28 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
+// Permission calculator — mock before any route imports
+const mockHasServerPermission = vi.fn().mockResolvedValue(true);
+const mockHasChannelPermission = vi.fn().mockResolvedValue(true);
+const mockGetHighestRolePosition = vi.fn().mockResolvedValue(Infinity);
+const mockGetEffectivePermissions = vi.fn().mockResolvedValue({ permissions: '1048575', source: 'owner' });
+const mockFilterVisibleChannels = vi.fn().mockImplementation((_uid: unknown, _sid: unknown, channels: unknown[]) => Promise.resolve(channels));
+
+vi.mock('../../utils/permissionCalculator', () => ({
+  hasServerPermission: (...args: unknown[]) => mockHasServerPermission(...args),
+  hasChannelPermission: (...args: unknown[]) => mockHasChannelPermission(...args),
+  getHighestRolePosition: (...args: unknown[]) => mockGetHighestRolePosition(...args),
+  getEffectivePermissions: (...args: unknown[]) => mockGetEffectivePermissions(...args),
+  filterVisibleChannels: (...args: unknown[]) => mockFilterVisibleChannels(...args),
+  Permissions: {
+    MANAGE_CHANNELS: 1n << 4n,
+    MANAGE_SERVER: 1n << 5n,
+    SEND_MESSAGES: 1n << 11n,
+    MANAGE_MESSAGES: 1n << 13n,
+  },
+  hasPermission: vi.fn().mockReturnValue(true),
+}));
+
 const prismaMock: Record<string, any> = {
   user: {
     findUnique: vi.fn(),
@@ -125,6 +147,10 @@ describe('Channel Routes', () => {
     vi.clearAllMocks();
     app = createApp();
     mockAuthUser();
+    // Default: permission checks pass
+    mockHasServerPermission.mockResolvedValue(true);
+    mockHasChannelPermission.mockResolvedValue(true);
+    mockGetHighestRolePosition.mockResolvedValue(Infinity);
   });
 
   // ── GET /api/v1/servers/:serverId/channels ──────────────────────────────
@@ -229,11 +255,7 @@ describe('Channel Routes', () => {
 
     it('returns 403 for regular member', async () => {
       const token = makeToken();
-      prismaMock.serverMember.findUnique.mockResolvedValue({
-        userId: 'user-1',
-        serverId: 'srv-1',
-        role: 'member',
-      });
+      mockHasServerPermission.mockResolvedValue(false);
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/channels')
@@ -241,12 +263,12 @@ describe('Channel Routes', () => {
         .send({ name: 'new-channel', type: 'text' });
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain('Only admins');
+      expect(res.body.error).toContain('permission');
     });
 
     it('returns 403 for non-member', async () => {
       const token = makeToken();
-      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      mockHasServerPermission.mockResolvedValue(false);
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/channels')
@@ -438,11 +460,7 @@ describe('Channel Routes', () => {
 
     it('returns 403 for regular member', async () => {
       const token = makeToken();
-      prismaMock.serverMember.findUnique.mockResolvedValue({
-        userId: 'user-1',
-        serverId: 'srv-1',
-        role: 'member',
-      });
+      mockHasServerPermission.mockResolvedValue(false);
 
       const res = await request(app)
         .patch('/api/v1/servers/srv-1/channels/ch-1')
@@ -520,11 +538,7 @@ describe('Channel Routes', () => {
 
     it('returns 403 for regular member', async () => {
       const token = makeToken();
-      prismaMock.serverMember.findUnique.mockResolvedValue({
-        userId: 'user-1',
-        serverId: 'srv-1',
-        role: 'member',
-      });
+      mockHasServerPermission.mockResolvedValue(false);
 
       const res = await request(app)
         .delete('/api/v1/servers/srv-1/channels/ch-1')

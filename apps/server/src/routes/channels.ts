@@ -2,11 +2,12 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateChannelName, WS_EVENTS, type Channel } from '@voxium/shared';
+import { validateChannelName, WS_EVENTS, Permissions, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
+import { hasServerPermission, hasChannelPermission, filterVisibleChannels } from '../utils/permissionCalculator';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -17,12 +18,8 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
   try {
     const { serverId } = req.params;
 
-    const membership = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-    if (!membership || !['owner', 'admin'].includes(membership.role)) {
-      throw new ForbiddenError('Only admins can reorder channels');
-    }
+    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
+    if (!canManage) throw new ForbiddenError('You do not have permission to manage channels');
 
     const { order } = req.body;
     if (!Array.isArray(order) || order.length === 0) {
@@ -90,10 +87,12 @@ channelRouter.get('/', async (req: Request<{ serverId: string }>, res: Response,
     });
     if (!membership) throw new ForbiddenError('Not a member of this server');
 
-    const channels = await prisma.channel.findMany({
+    const allChannels = await prisma.channel.findMany({
       where: { serverId },
       orderBy: { position: 'asc' },
     });
+
+    const channels = await filterVisibleChannels(req.user!.userId, serverId, allChannels);
 
     res.json({ success: true, data: channels });
   } catch (err) {
@@ -108,12 +107,8 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
     const { type = 'text', categoryId } = req.body;
     const name = sanitizeText(req.body.name ?? '');
 
-    const membership = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-    if (!membership || !['owner', 'admin'].includes(membership.role)) {
-      throw new ForbiddenError('Only admins can create channels');
-    }
+    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
+    if (!canManage) throw new ForbiddenError('You do not have permission to create channels');
 
     const nameErr = validateChannelName(name);
     if (nameErr) throw new BadRequestError(nameErr);
@@ -204,12 +199,8 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
   try {
     const { serverId, channelId } = req.params;
 
-    const membership = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-    if (!membership || !['owner', 'admin'].includes(membership.role)) {
-      throw new ForbiddenError('Only admins can update channels');
-    }
+    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
+    if (!canManage) throw new ForbiddenError('You do not have permission to update channels');
 
     const channel = await prisma.channel.findFirst({
       where: { id: channelId, serverId },
@@ -245,12 +236,8 @@ channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; chan
   try {
     const { serverId, channelId } = req.params;
 
-    const membership = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-    if (!membership || !['owner', 'admin'].includes(membership.role)) {
-      throw new ForbiddenError('Only admins can delete channels');
-    }
+    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
+    if (!canManage) throw new ForbiddenError('You do not have permission to delete channels');
 
     const channel = await prisma.channel.findFirst({
       where: { id: channelId, serverId },

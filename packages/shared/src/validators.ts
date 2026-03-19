@@ -1,4 +1,5 @@
 import { LIMITS } from './constants.js';
+import { ROLE_COLOR_REGEX } from './permissions.js';
 
 export function validateUsername(username: string): string | null {
   if (username.length < LIMITS.USERNAME_MIN) return `Username must be at least ${LIMITS.USERNAME_MIN} characters`;
@@ -65,5 +66,22 @@ export function validateCategoryName(name: string): string | null {
 export function validateSearchQuery(query: string): string | null {
   if (query.length < LIMITS.SEARCH_QUERY_MIN) return `Search query must be at least ${LIMITS.SEARCH_QUERY_MIN} characters`;
   if (query.length > LIMITS.SEARCH_QUERY_MAX) return `Search query must be at most ${LIMITS.SEARCH_QUERY_MAX} characters`;
+  return null;
+}
+
+export function validateRoleName(name: string): string | null {
+  if (name.length < LIMITS.ROLE_NAME_MIN) return `Role name must be at least ${LIMITS.ROLE_NAME_MIN} character`;
+  if (name.length > LIMITS.ROLE_NAME_MAX) return `Role name must be at most ${LIMITS.ROLE_NAME_MAX} characters`;
+  return null;
+}
+
+export function validateNickname(nickname: string): string | null {
+  if (nickname.trim().length === 0) return 'Nickname cannot be empty';
+  if (nickname.length > LIMITS.NICKNAME_MAX) return `Nickname must be at most ${LIMITS.NICKNAME_MAX} characters`;
+  return null;
+}
+
+export function validateRoleColor(color: string): string | null {
+  if (!ROLE_COLOR_REGEX.test(color)) return 'Color must be a valid hex color (e.g., #FF5733)';
   return null;
 }

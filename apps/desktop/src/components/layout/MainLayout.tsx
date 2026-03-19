@@ -32,7 +32,7 @@ import { AnnouncementBanner } from './AnnouncementBanner';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
-  MemberRole, Announcement, SupportMessageData, SupportTicketStatus,
+  MemberRole, Role, Announcement, SupportMessageData, SupportTicketStatus,
   ReactionGroup,
 } from '@voxium/shared';
 
@@ -214,8 +214,12 @@ export function MainLayout() {
         if (voiceState.activeChannelId !== channelId) return;
         if (useSettingsStore.getState().enableNotificationSounds) playLeaveSound();
       },
-      voiceStateUpdate: ({ channelId, userId, selfMute, selfDeaf }: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => {
-        useVoiceStore.getState().updateUserState(channelId, userId, selfMute, selfDeaf);
+      voiceStateUpdate: ({ channelId, userId, selfMute, selfDeaf, serverMuted, serverDeafened }: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => {
+        useVoiceStore.getState().updateUserState(channelId, userId, selfMute, selfDeaf, serverMuted ?? false, serverDeafened ?? false);
+      },
+      voiceForceMove: ({ targetChannelId }: { channelId: string; userId: string; targetChannelId: string }) => {
+        useVoiceStore.getState().handleForceMove(targetChannelId);
+        toast.info('You were moved to another voice channel');
       },
       voiceSpeaking: ({ channelId, userId, speaking }: { channelId: string; userId: string; speaking: boolean }) => {
         useVoiceStore.getState().setUserSpeaking(channelId, userId, speaking);
@@ -462,6 +466,24 @@ export function MainLayout() {
       memberRoleUpdated: ({ serverId, userId, role }: { serverId: string; userId: string; role: MemberRole }) => {
         useServerStore.getState().handleMemberRoleUpdated(serverId, userId, role);
       },
+      roleCreated: ({ serverId, role }: { serverId: string; role: Role }) => {
+        useServerStore.getState().handleRoleCreated(serverId, role);
+      },
+      roleUpdated: ({ serverId, role }: { serverId: string; role: Role }) => {
+        useServerStore.getState().handleRoleUpdated(serverId, role);
+      },
+      roleDeleted: ({ serverId, roleId }: { serverId: string; roleId: string }) => {
+        useServerStore.getState().handleRoleDeleted(serverId, roleId);
+      },
+      roleReordered: ({ serverId, roles }: { serverId: string; roles: { id: string; position: number }[] }) => {
+        useServerStore.getState().handleRoleReordered(serverId, roles);
+      },
+      memberRolesUpdated: ({ serverId, userId, roleIds }: { serverId: string; userId: string; roleIds: string[] }) => {
+        useServerStore.getState().handleMemberRolesUpdated(serverId, userId, roleIds);
+      },
+      memberNicknameUpdated: ({ serverId, userId, nickname }: { serverId: string; userId: string; nickname: string | null }) => {
+        useServerStore.getState().handleNicknameUpdated(serverId, userId, nickname);
+      },
       memberKicked: ({ serverId }: { serverId: string }) => {
         // Leave voice if the active voice channel belongs to the kicked server
         const voiceState = useVoiceStore.getState();
@@ -558,6 +580,7 @@ export function MainLayout() {
       ['voice:user_joined', handlers.voiceUserJoined],
       ['voice:user_left', handlers.voiceUserLeft],
       ['voice:state_update', handlers.voiceStateUpdate],
+      ['voice:force_moved', handlers.voiceForceMove],
       ['voice:speaking', handlers.voiceSpeaking],
       ['voice:signal', handlers.voiceSignal],
       ['voice:transport_created', handlers.voiceTransportCreated],
@@ -598,6 +621,12 @@ export function MainLayout() {
       ['friend:request_accepted', handlers.friendRequestAccepted],
       ['friend:removed', handlers.friendRemoved],
       ['member:role_updated', handlers.memberRoleUpdated],
+      ['role:created', handlers.roleCreated],
+      ['role:updated', handlers.roleUpdated],
+      ['role:deleted', handlers.roleDeleted],
+      ['role:reordered', handlers.roleReordered],
+      ['member:roles_updated', handlers.memberRolesUpdated],
+      ['member:nickname_updated', handlers.memberNicknameUpdated],
       ['member:kicked', handlers.memberKicked],
       ['server:deleted', handlers.serverDeleted],
       ['announcement:init', handlers.announcementInit],

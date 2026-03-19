@@ -4,9 +4,10 @@ import { rateLimitUpload, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize } from '@voxium/shared';
+import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions } from '@voxium/shared';
 import crypto from 'crypto';
 import { Readable } from 'stream';
+import { hasServerPermission, hasChannelPermission } from '../utils/permissionCalculator';
 
 export const uploadRouter = Router();
 
@@ -39,7 +40,8 @@ uploadRouter.post(
       const { serverId } = req.params;
       const server = await prisma.server.findUnique({ where: { id: serverId } });
       if (!server) throw new NotFoundError('Server');
-      if (server.ownerId !== req.user!.userId) throw new ForbiddenError('Only the server owner can change the icon');
+      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_SERVER);
+      if (!canManage) throw new ForbiddenError('You do not have permission to change the server icon');
 
       const key = `server-icons/${serverId}-${Date.now()}.webp`;
       const uploadUrl = await generatePresignedPutUrl(key, 'image/webp');
@@ -86,6 +88,8 @@ uploadRouter.post(
           where: { userId_serverId: { userId: req.user!.userId, serverId: channel.serverId } },
         });
         if (!membership) throw new ForbiddenError('Not a member of this server');
+        const canAttach = await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.ATTACH_FILES);
+        if (!canAttach) throw new ForbiddenError('You do not have permission to attach files in this channel');
       } else {
         const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
         if (!conv) throw new NotFoundError('Conversation');

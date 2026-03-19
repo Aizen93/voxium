@@ -73,6 +73,13 @@ vi.mock('../../utils/featureFlags', () => ({
   isFeatureEnabled: vi.fn().mockReturnValue(true),
 }));
 
+// Mock permission calculator — allow by default
+vi.mock('../../utils/permissionCalculator', () => ({
+  hasChannelPermission: vi.fn().mockResolvedValue(true),
+  hasServerPermission: vi.fn().mockResolvedValue(true),
+  Permissions: { CONNECT: 1n << 14n },
+}));
+
 // Mock mediasoup manager
 vi.mock('../../mediasoup/mediasoupManager', () => ({
   getOrCreateRouter: vi.fn().mockResolvedValue(mockRouter),
@@ -433,7 +440,7 @@ describe('voiceHandler — leaveCurrentVoiceChannel', () => {
 });
 
 describe('voiceHandler — handler registration', () => {
-  it('registers all expected event handlers', () => {
+  it('registers all 16 expected event handlers', () => {
     const { socket, handlers } = createMockSocket();
     const io = createMockIO();
     handleVoiceEvents(io as any, socket as any);
@@ -448,14 +455,212 @@ describe('voiceHandler — handler registration', () => {
       'voice:mute',
       'voice:deaf',
       'voice:speaking',
+      'voice:server_mute',
+      'voice:server_deafen',
+      'voice:force_move',
       'voice:signal',
       'voice:screen_share:start',
       'voice:screen_share:stop',
       'disconnecting',
     ];
 
+    expect(expectedEvents.length).toBe(16);
+    expect(handlers.size).toBe(16);
+
     for (const event of expectedEvents) {
       expect(handlers.has(event)).toBe(true);
     }
+  });
+});
+
+// ─── voice:server_mute ──────────────────────────────────────────────────────
+
+describe('voiceHandler — voice:server_mute', () => {
+  let socket: ReturnType<typeof createMockSocket>['socket'];
+  let handlers: ReturnType<typeof createMockSocket>['handlers'];
+  let io: ReturnType<typeof createMockIO>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const created = createMockSocket();
+    socket = created.socket;
+    handlers = created.handlers;
+    io = createMockIO();
+    handleVoiceEvents(io as any, socket as any);
+  });
+
+  it('returns early when rate limited', () => {
+    vi.mocked(socketRateLimit).mockReturnValueOnce(false);
+    const handler = handlers.get('voice:server_mute')!;
+    handler({ userId: 'user-2', muted: true });
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-object payload', () => {
+    const handler = handlers.get('voice:server_mute')!;
+    handler('invalid');
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  it('rejects payload with wrong types', () => {
+    const handler = handlers.get('voice:server_mute')!;
+    handler({ userId: 123, muted: 'yes' });
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  it('returns early when actor not in a voice channel', () => {
+    socket.data.voiceChannelId = undefined;
+    const handler = handlers.get('voice:server_mute')!;
+    handler({ userId: 'user-2', muted: true });
+    expect(io.to).not.toHaveBeenCalled();
+  });
+});
+
+// ─── voice:server_deafen ────────────────────────────────────────────────────
+
+describe('voiceHandler — voice:server_deafen', () => {
+  let socket: ReturnType<typeof createMockSocket>['socket'];
+  let handlers: ReturnType<typeof createMockSocket>['handlers'];
+  let io: ReturnType<typeof createMockIO>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const created = createMockSocket();
+    socket = created.socket;
+    handlers = created.handlers;
+    io = createMockIO();
+    handleVoiceEvents(io as any, socket as any);
+  });
+
+  it('returns early when rate limited', () => {
+    vi.mocked(socketRateLimit).mockReturnValueOnce(false);
+    const handler = handlers.get('voice:server_deafen')!;
+    handler({ userId: 'user-2', deafened: true });
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-object payload', () => {
+    const handler = handlers.get('voice:server_deafen')!;
+    handler(null);
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  it('rejects payload with wrong types', () => {
+    const handler = handlers.get('voice:server_deafen')!;
+    handler({ userId: 'user-2', deafened: 'true' });
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  it('returns early when actor not in a voice channel', () => {
+    socket.data.voiceChannelId = undefined;
+    const handler = handlers.get('voice:server_deafen')!;
+    handler({ userId: 'user-2', deafened: true });
+    expect(io.to).not.toHaveBeenCalled();
+  });
+});
+
+// ─── voice:force_move ───────────────────────────────────────────────────────
+
+describe('voiceHandler — voice:force_move', () => {
+  let socket: ReturnType<typeof createMockSocket>['socket'];
+  let handlers: ReturnType<typeof createMockSocket>['handlers'];
+  let io: ReturnType<typeof createMockIO>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const created = createMockSocket();
+    socket = created.socket;
+    handlers = created.handlers;
+    io = createMockIO();
+    handleVoiceEvents(io as any, socket as any);
+  });
+
+  it('returns early when rate limited', () => {
+    vi.mocked(socketRateLimit).mockReturnValueOnce(false);
+    const handler = handlers.get('voice:force_move')!;
+    handler({ userId: 'user-2', targetChannelId: 'ch-2' });
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-object payload', () => {
+    const handler = handlers.get('voice:force_move')!;
+    handler(42);
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  it('rejects payload with wrong types', () => {
+    const handler = handlers.get('voice:force_move')!;
+    handler({ userId: 123, targetChannelId: true });
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  it('does NOT require actor to be in a voice channel (cross-channel move)', async () => {
+    // Actor is NOT in any voice channel
+    socket.data.voiceChannelId = undefined;
+    const handler = handlers.get('voice:force_move')!;
+    // The handler should still proceed (not return early) and emit voice:error
+    // because the target user is not in any voice channel (voiceChannelUsers is empty)
+    await handler({ userId: 'user-2', targetChannelId: 'ch-2' });
+    // It should emit voice:error "User is not in a voice channel." for the target,
+    // NOT silently return like mute/deaf do for actor-not-in-channel
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', { message: 'User is not in a voice channel.' });
+  });
+
+  it('emits error when target user is not in any voice channel', async () => {
+    // Actor can be in any state — force_move searches all channels for target
+    socket.data.voiceChannelId = 'ch-1';
+    const handler = handlers.get('voice:force_move')!;
+    await handler({ userId: 'user-99', targetChannelId: 'ch-2' });
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', { message: 'User is not in a voice channel.' });
+  });
+});
+
+// ─── deafen-implies-mute ────────────────────────────────────────────────────
+
+describe('voiceHandler — deafen-implies-mute (voice:deaf)', () => {
+  let socket: ReturnType<typeof createMockSocket>['socket'];
+  let handlers: ReturnType<typeof createMockSocket>['handlers'];
+  let io: ReturnType<typeof createMockIO>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const created = createMockSocket();
+    socket = created.socket;
+    handlers = created.handlers;
+    io = createMockIO();
+    handleVoiceEvents(io as any, socket as any);
+  });
+
+  it('returns early when not in a voice channel (no crash)', () => {
+    socket.data.voiceChannelId = undefined;
+    const handler = handlers.get('voice:deaf')!;
+    handler(true);
+    // Should not throw or emit
+    expect(io.to).not.toHaveBeenCalled();
+  });
+});
+
+// ─── server-muted blocks unmute ─────────────────────────────────────────────
+
+describe('voiceHandler — server-muted blocks self-unmute (voice:mute)', () => {
+  let socket: ReturnType<typeof createMockSocket>['socket'];
+  let handlers: ReturnType<typeof createMockSocket>['handlers'];
+  let io: ReturnType<typeof createMockIO>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const created = createMockSocket();
+    socket = created.socket;
+    handlers = created.handlers;
+    io = createMockIO();
+    handleVoiceEvents(io as any, socket as any);
+  });
+
+  it('returns early when not in a voice channel', () => {
+    socket.data.voiceChannelId = undefined;
+    const handler = handlers.get('voice:mute')!;
+    // Trying to unmute
+    handler(false);
+    expect(io.to).not.toHaveBeenCalled();
   });
 });

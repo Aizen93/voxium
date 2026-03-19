@@ -44,6 +44,10 @@ export const LIMITS = {
   MAX_ATTACHMENT_SIZE: 8 * 1024 * 1024, // 8 MB (default for non-video files)
   MAX_VIDEO_ATTACHMENT_SIZE: 12 * 1024 * 1024, // 12 MB (for video files)
   ATTACHMENT_RETENTION_DAYS: 3,
+  MAX_ROLES_PER_SERVER: 25,
+  ROLE_NAME_MIN: 1,
+  ROLE_NAME_MAX: 100,
+  NICKNAME_MAX: 32,
 } as const;
 
 export const ALLOWED_ATTACHMENT_TYPES = [
@@ -129,6 +133,10 @@ export const WS_EVENTS = {
   MEMBER_ROLE_UPDATED: 'member:role_updated',
   MEMBER_KICKED: 'member:kicked',
   SERVER_DELETED: 'server:deleted',
+  VOICE_SERVER_MUTE: 'voice:server_mute',
+  VOICE_SERVER_DEAFEN: 'voice:server_deafen',
+  VOICE_FORCE_MOVE: 'voice:force_move',
+  VOICE_FORCE_MOVED: 'voice:force_moved',
   VOICE_SCREEN_SHARE_START: 'voice:screen_share:start',
   VOICE_SCREEN_SHARE_STOP: 'voice:screen_share:stop',
   VOICE_SCREEN_SHARE_STATE: 'voice:screen_share:state',
@@ -146,4 +154,12 @@ export const WS_EVENTS = {
   ADMIN_SUBSCRIBE_SUPPORT: 'admin:subscribe_support',
   ADMIN_UNSUBSCRIBE_SUPPORT: 'admin:unsubscribe_support',
   FORCE_LOGOUT: 'force:logout',
+  // Roles & Permissions
+  ROLE_CREATED: 'role:created',
+  ROLE_UPDATED: 'role:updated',
+  ROLE_DELETED: 'role:deleted',
+  ROLE_REORDERED: 'role:reordered',
+  MEMBER_ROLES_UPDATED: 'member:roles_updated',
+  CHANNEL_PERMISSIONS_UPDATED: 'channel:permissions_updated',
+  MEMBER_NICKNAME_UPDATED: 'member:nickname_updated',
 } as const;

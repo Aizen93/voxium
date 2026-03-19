@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
-**Version:** 1.5.0
-**Date:** 2026-03-17
+**Version:** 1.6.0
+**Date:** 2026-03-19
 
 ## Project Structure
 
@@ -26,6 +26,9 @@ Voxium/
 - Real-time text messaging with editing, deletion, reactions, replies, search, @mentions with server-side autocomplete search + styled mention badges + mention highlight + distinct notification sound
 - **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls with global call status panel (visible from any view), push-to-talk, noise suppression, screen sharing, silence detection (producer pause/resume), voice quality selector (low/medium/high bitrate), adaptive bandwidth caps
 - Server/channel/category management with drag-and-drop reordering
+- **Advanced permission system** — Discord-style bitmask roles with 20 permission flags (VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, etc.), role hierarchy enforcement (actors cannot modify roles at or above their position), channel-level permission overrides (allow/deny/inherit tri-state per role), @everyone default role per server with restricted defaults (no ATTACH_FILES, CREATE_INVITES, CHANGE_NICKNAME), permission calculator resolves @everyone base → OR all role permissions → channel overrides (ADMINISTRATOR bypasses everything), VIEW_CHANNEL enforcement on channel list filtering, message access, and socket auto-join, role CRUD + member role assignment + channel override management UI
+- **Voice moderation** — server mute/deafen with Redis persistence (`voice:server_muted:{serverId}:{userId}`), re-applied on voice:join, cannot be self-bypassed, deafen implies mute (both server-side and client-side), cross-channel force-move, role hierarchy enforcement on moderation actions
+- **Per-server nicknames** — `ServerMember.nickname` nullable field, CHANGE_NICKNAME permission for self-nickname, MANAGE_NICKNAMES for managing others, displayed in MemberSidebar, voice panel, and message author names (falls back to displayName)
 - JWT auth with refresh tokens, password reset, Remember Me
 - S3 file uploads (avatars, server icons, message attachments) with presigned URLs; attachments proxied through server (S3 URL never exposed to client); `?inline` proxy for avatars/server-icons (used by notifications); 3-day retention with daily 4 AM cleanup job + email report; expired attachments show placeholder in chat
 - Direct messages with typing indicators, reactions, unread tracking
@@ -69,13 +72,15 @@ Voxium/
 
 ## Recent Changes
 
+- **Advanced Permission System** (2026-03-19) — Discord-style bitmask roles with 20 permission flags (VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, etc.), role hierarchy enforcement, channel-level permission overrides (allow/deny/inherit tri-state), @everyone default role with restricted defaults, permission calculator (base → roles → channel overrides), VIEW_CHANNEL enforcement on channel list/messages/socket auto-join, voice moderation (server mute/deafen with Redis persistence, cross-channel force-move), per-server nicknames (CHANGE_NICKNAME/MANAGE_NICKNAMES), full CRUD API with role management UI in server settings + channel permission editor + member context menu for voice moderation. 119 permission system tests + 16 additional voice handler tests. Integration test script: `scripts/test-permissions.ts` (73 assertions, 11 phases).
+
 - **Security: Timing Side-Channel Fix** (2026-03-17) — `requestPasswordReset` now performs crypto work (token generation + hashing) regardless of whether the email exists in the DB. Prevents attackers from measuring response time differences to enumerate registered email addresses.
 
 - **Self-Hosted STUN + Desktop Test Suite** (2026-03-17) — Added coturn STUN-only server to docker-compose for cross-internet DM P2P calls (stateless NAT discovery, no media relay, privacy-first). STUN host auto-derived from `VITE_WS_URL`. Set up Vitest + jsdom for desktop app with 53 unit tests covering audio pipeline, voice store (pttActive lifecycle, DM user CRUD, peer cleanup), PTT logic (guard conditions, DM event routing, speaking indicator formula, STUN URL derivation, generation counter).
 
 - **Audio Pipeline Refactor + PTT for DM Calls + Privacy** (2026-03-16) — Separated noise suppression (Jitsi/Matrix RNNoise pattern: clean `source → AudioWorklet → destination` pipeline) from speaking detection into isolated pipelines. Extended push-to-talk to DM calls with PTT speaking indicator override (`pttActive` state). Removed Google STUN servers (privacy-first). Live noise suppression toggle mid-call with generation counter to prevent race conditions. All empty catch blocks replaced with proper error logging.
 
-- **Unit Test Suite** (2026-03-14) -- 401 unit tests across 26 files covering utils, middleware, routes, services, websocket, and mediasoup config. Vitest with process isolation (`pool: 'forks'`). CI pipeline updated to run tests.
+- **Unit Test Suite** (2026-03-14) -- 635 unit and integration tests (582 server + 53 desktop) covering utils, middleware, routes, services, websocket, mediasoup config, and permission system. Vitest with process isolation (`pool: 'forks'`). CI pipeline updated to run tests.
 
 - **Dependency Upgrades** (2026-03-14) -- Prisma 6->7 (adapter pattern via `@prisma/adapter-pg`, `prisma.config.ts`, generated client at `src/generated/prisma/client`), Express 4->5, Redis 4->5 (`sIsMember` returns number, `multi().exec()` type changes), Tailwind 3->4 (CSS-first `@theme` config, `@tailwindcss/vite` plugin, removed `tailwind.config.js`/`postcss.config.js`), Vite 6->7 with `@vitejs/plugin-react` 5, bcryptjs 2->3 (ships own types), dotenv 16->17, rate-limiter-flexible 5->9, lucide-react 0.469->0.577; removed nanoid (replaced with `crypto.randomBytes`), zod (unused), `@types/bcryptjs` (bundled), autoprefixer+postcss (built into Tailwind 4). Updated Dockerfile + docker-entrypoint.sh + CI workflows for Prisma 7.
 

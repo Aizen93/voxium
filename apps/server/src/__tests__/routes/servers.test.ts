@@ -17,6 +17,30 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
+// Permission calculator — mock before any route imports
+const mockHasServerPermission = vi.fn().mockResolvedValue(true);
+const mockHasChannelPermission = vi.fn().mockResolvedValue(true);
+const mockGetHighestRolePosition = vi.fn().mockResolvedValue(Infinity);
+const mockGetEffectivePermissions = vi.fn().mockResolvedValue({ permissions: '1048575', source: 'owner' });
+const mockFilterVisibleChannels = vi.fn().mockImplementation((_uid: unknown, _sid: unknown, channels: unknown[]) => Promise.resolve(channels));
+
+vi.mock('../../utils/permissionCalculator', () => ({
+  hasServerPermission: (...args: unknown[]) => mockHasServerPermission(...args),
+  hasChannelPermission: (...args: unknown[]) => mockHasChannelPermission(...args),
+  getHighestRolePosition: (...args: unknown[]) => mockGetHighestRolePosition(...args),
+  getEffectivePermissions: (...args: unknown[]) => mockGetEffectivePermissions(...args),
+  filterVisibleChannels: (...args: unknown[]) => mockFilterVisibleChannels(...args),
+  Permissions: {
+    MANAGE_CHANNELS: 1n << 4n,
+    MANAGE_SERVER: 1n << 5n,
+    KICK_MEMBERS: 1n << 1n,
+    SEND_MESSAGES: 1n << 11n,
+    MANAGE_MESSAGES: 1n << 13n,
+    CREATE_INVITES: 1n << 0n,
+  },
+  hasPermission: vi.fn().mockReturnValue(true),
+}));
+
 // Prisma
 const prismaMock: Record<string, any> = {
   user: {
@@ -49,6 +73,14 @@ const prismaMock: Record<string, any> = {
     create: vi.fn(),
     createMany: vi.fn(),
     deleteMany: vi.fn(),
+  },
+  role: {
+    create: vi.fn(),
+    findFirst: vi.fn(),
+    findMany: vi.fn(),
+  },
+  memberRole: {
+    findMany: vi.fn(),
   },
   globalConfig: {
     findUnique: vi.fn(),
@@ -162,6 +194,10 @@ describe('Server Routes', () => {
     vi.clearAllMocks();
     app = createApp();
     mockAuthUser();
+    // Default: permission checks pass
+    mockHasServerPermission.mockResolvedValue(true);
+    mockHasChannelPermission.mockResolvedValue(true);
+    mockGetHighestRolePosition.mockResolvedValue(Infinity);
   });
 
   // ── Authentication ──────────────────────────────────────────────────────
@@ -270,6 +306,7 @@ describe('Server Routes', () => {
               .mockResolvedValueOnce({ id: 'cat-2', name: 'Voice Channels', serverId: 'srv-new', position: 1 }),
           },
           channel: { createMany: vi.fn().mockResolvedValue({ count: 2 }) },
+          role: { create: vi.fn().mockResolvedValue({ id: 'role-everyone', name: 'everyone', serverId: 'srv-new', position: 0, isDefault: true }) },
         });
       });
       prismaMock.channelRead.create.mockResolvedValue({});
@@ -361,6 +398,7 @@ describe('Server Routes', () => {
             create: vi.fn().mockResolvedValue({ id: 'cat-1', name: 'Text Channels', serverId: 'srv-new', position: 0 }),
           },
           channel: { createMany: vi.fn().mockResolvedValue({ count: 1 }) },
+          role: { create: vi.fn().mockResolvedValue({ id: 'role-everyone', name: 'everyone', serverId: 'srv-new', position: 0, isDefault: true }) },
         });
       });
       prismaMock.channelRead.create.mockResolvedValue({});
@@ -395,6 +433,7 @@ describe('Server Routes', () => {
         createdAt: new Date(),
         channels: [],
         categories: [],
+        roles: [],
         _count: { members: 3 },
       });
 
@@ -457,6 +496,8 @@ describe('Server Routes', () => {
         iconUrl: null,
         ownerId: 'user-1',
       });
+      // No MANAGE_SERVER permission
+      mockHasServerPermission.mockResolvedValue(false);
 
       const res = await request(app)
         .patch('/api/v1/servers/srv-1')
@@ -464,7 +505,7 @@ describe('Server Routes', () => {
         .send({ name: 'New Name' });
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain('owner');
+      expect(res.body.error).toContain('permission');
     });
 
     it('returns 400 when no update fields provided', async () => {
@@ -652,6 +693,7 @@ describe('Server Routes', () => {
             supporterTier: null,
             createdAt: new Date(),
           },
+          memberRoles: [],
         },
       ]);
       prismaMock.serverMember.count.mockResolvedValue(1);

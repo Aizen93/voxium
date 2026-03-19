@@ -175,6 +175,8 @@ export interface VoiceUser {
   avatarUrl: string | null;
   selfMute: boolean;
   selfDeaf: boolean;
+  serverMuted: boolean;
+  serverDeafened: boolean;
   speaking: boolean;
   screenSharing?: boolean;
 }
@@ -266,9 +268,10 @@ export interface ServerToClientEvents {
   'voice:channel_users': (data: { channelId: string; users: VoiceUser[] }) => void;
   'voice:user_joined': (data: { channelId: string; user: VoiceUser }) => void;
   'voice:user_left': (data: { channelId: string; userId: string }) => void;
-  'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => void;
+  'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => void;
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;
   'voice:signal': (data: { from: string; signal: unknown }) => void;
+  'voice:force_moved': (data: { channelId: string; userId: string; targetChannelId: string }) => void;
   'voice:error': (data: { message: string }) => void;
   'voice:transport_created': (data: {
     routerRtpCapabilities: unknown;
@@ -317,6 +320,13 @@ export interface ServerToClientEvents {
   'friend:request_accepted': (data: { friendship: Friendship }) => void;
   'friend:removed': (data: { userId: string }) => void;
   'member:role_updated': (data: { serverId: string; userId: string; role: MemberRole }) => void;
+  'member:roles_updated': (data: { serverId: string; userId: string; roleIds: string[] }) => void;
+  'role:created': (data: { serverId: string; role: Role }) => void;
+  'role:updated': (data: { serverId: string; role: Role }) => void;
+  'role:deleted': (data: { serverId: string; roleId: string }) => void;
+  'role:reordered': (data: { serverId: string; roles: { id: string; position: number }[] }) => void;
+  'channel:permissions_updated': (data: { serverId: string; channelId: string; overrides: ChannelPermissionOverride[] }) => void;
+  'member:nickname_updated': (data: { serverId: string; userId: string; nickname: string | null }) => void;
   'member:kicked': (data: { serverId: string; userId: string }) => void;
   'server:deleted': (data: { serverId: string }) => void;
   'voice:screen_share:start': (data: { channelId: string; userId: string }) => void;
@@ -361,6 +371,9 @@ export interface ClientToServerEvents {
   'dm:voice:speaking': (speaking: boolean) => void;
   'dm:voice:signal': (data: { to: string; signal: unknown }) => void;
   'dm:voice:decline': (conversationId: string) => void;
+  'voice:server_mute': (data: { userId: string; muted: boolean }) => void;
+  'voice:server_deafen': (data: { userId: string; deafened: boolean }) => void;
+  'voice:force_move': (data: { userId: string; targetChannelId: string }) => void;
   'voice:screen_share:start': () => void;
   'voice:screen_share:stop': () => void;
   'admin:subscribe_metrics': () => void;
@@ -395,8 +408,37 @@ export interface ServerMember {
   userId: string;
   serverId: string;
   role: MemberRole;
+  nickname: string | null;
   joinedAt: string;
   user: PublicUser;
+  roles?: Role[];
+}
+
+// ─── Roles & Permissions ────────────────────────────────────────────────────
+
+export interface Role {
+  id: string;
+  serverId: string;
+  name: string;
+  color: string | null;
+  position: number;
+  permissions: string; // bigint as decimal string
+  isDefault: boolean;
+  createdAt: string;
+}
+
+export interface ChannelPermissionOverride {
+  id: string;
+  channelId: string;
+  roleId: string;
+  allow: string; // bigint as decimal string
+  deny: string;  // bigint as decimal string
+  role?: Role;
+}
+
+export interface EffectivePermissions {
+  permissions: string; // bigint as decimal string
+  source: 'owner' | 'computed';
 }
 
 // ─── Search ─────────────────────────────────────────────────────────────────
