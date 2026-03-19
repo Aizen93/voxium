@@ -484,6 +484,13 @@ export function MainLayout() {
       memberNicknameUpdated: ({ serverId, userId, nickname }: { serverId: string; userId: string; nickname: string | null }) => {
         useServerStore.getState().handleNicknameUpdated(serverId, userId, nickname);
       },
+      channelPermissionsUpdated: ({ serverId }: { serverId: string; channelId: string }) => {
+        // Re-fetch server detail to get updated channel visibility
+        const state = useServerStore.getState();
+        if (state.activeServerId === serverId) {
+          state.setActiveServer(serverId);
+        }
+      },
       memberKicked: ({ serverId }: { serverId: string }) => {
         // Leave voice if the active voice channel belongs to the kicked server
         const voiceState = useVoiceStore.getState();
@@ -627,6 +634,7 @@ export function MainLayout() {
       ['role:reordered', handlers.roleReordered],
       ['member:roles_updated', handlers.memberRolesUpdated],
       ['member:nickname_updated', handlers.memberNicknameUpdated],
+      ['channel:permissions_updated', handlers.channelPermissionsUpdated],
       ['member:kicked', handlers.memberKicked],
       ['server:deleted', handlers.serverDeleted],
       ['announcement:init', handlers.announcementInit],

@@ -507,9 +507,14 @@ export function initSocketServer(httpServer: HttpServer) {
       }
 
       // Send existing voice channel users for all servers (reads from Redis for cross-node visibility)
+      // Only send for channels the user has VIEW_CHANNEL permission for
       for (const m of memberships) {
         const voiceState = await getVoiceStateForServer(m.serverId);
         for (const { channelId, userIds, userStates } of voiceState) {
+          // Check VIEW_CHANNEL before revealing voice channel occupants
+          const canView = await hasChannelPermission(userId, channelId, m.serverId, Permissions.VIEW_CHANNEL);
+          if (!canView) continue;
+
           const userInfos = await prisma.user.findMany({
             where: { id: { in: userIds } },
             select: { id: true, username: true, displayName: true, avatarUrl: true },

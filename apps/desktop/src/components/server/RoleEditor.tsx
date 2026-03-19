@@ -134,7 +134,7 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
       <div className="flex-1 min-w-0 overflow-y-auto">
         {effectiveRole ? (
           <RoleDetailEditor
-            key={effectiveRole.id}
+            key={`${effectiveRole.id}-${effectiveRole.permissions}-${effectiveRole.color}-${effectiveRole.name}`}
             serverId={serverId}
             role={effectiveRole}
             canManageRoles={canManageRoles}

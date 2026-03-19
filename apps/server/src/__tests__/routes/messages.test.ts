@@ -652,8 +652,8 @@ describe('Message Routes', () => {
       prismaMock.message.findUnique.mockResolvedValue(
         makeMockMessage({ authorId: 'user-2' }),
       );
-      // No MANAGE_MESSAGES permission
-      mockHasServerPermission.mockResolvedValue(false);
+      // No MANAGE_MESSAGES permission (channel-level check)
+      mockHasChannelPermission.mockResolvedValue(false);
 
       const res = await request(app)
         .delete('/api/v1/channels/ch-1/messages/msg-1')

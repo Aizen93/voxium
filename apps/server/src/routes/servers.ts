@@ -395,7 +395,7 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
 
     // Delete old icon from S3 after DB update confirmed
     if (updateData.iconUrl !== undefined && oldIconUrl && oldIconUrl !== updateData.iconUrl) {
-      deleteFromS3(oldIconUrl).catch(() => {});
+      deleteFromS3(oldIconUrl).catch((err) => console.warn('[S3] Failed to delete old asset:', err));
     }
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
@@ -470,7 +470,7 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
 
     // 5. Clean up S3 icon if exists
     if (server.iconUrl) {
-      deleteFromS3(server.iconUrl).catch(() => {});
+      deleteFromS3(server.iconUrl).catch((err) => console.warn('[S3] Failed to delete old asset:', err));
     }
 
     res.json({ success: true, message: 'Server deleted' });

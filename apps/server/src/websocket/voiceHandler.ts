@@ -397,6 +397,15 @@ export function handleVoiceEvents(
     const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
     if (!userMedia?.sendTransport) return;
 
+    // Check SPEAK permission for audio producers (screen-share audio/video are separate)
+    if (data.kind === 'audio' && (!data.appData || data.appData.type !== 'screen-audio')) {
+      const serverId = channelServerMap.get(channelId);
+      if (serverId) {
+        const canSpeak = await hasChannelPermission(userId, channelId, serverId, Permissions.SPEAK);
+        if (!canSpeak) return;
+      }
+    }
+
     // Cap at 4 producers per user (1 mic audio + 1 screen video + 1 screen audio + 1 spare)
     if (userMedia.producers.size >= 4) {
       console.warn(`[Voice] User ${userId} exceeded max producers`);
@@ -587,6 +596,9 @@ export function handleVoiceEvents(
       }
     }
 
+    // Don't broadcast speaking indicator if server-muted (prevents UI deception by modified clients)
+    if (userMedia?.serverMuted) return;
+
     const serverId = channelServerMap.get(channelId);
     if (serverId) {
       io.to(`server:${serverId}`).emit('voice:speaking', { channelId, userId, speaking });
@@ -727,6 +739,15 @@ export function handleVoiceEvents(
     });
     if (!targetChannel || targetChannel.type !== 'voice' || targetChannel.serverId !== serverId) {
       socket.emit('voice:error', { message: 'Invalid target voice channel.' });
+      return;
+    }
+
+    // Check that the target user has CONNECT permission on the destination channel.
+    // Without this check, force_move could be abused to place users in channels they
+    // are not allowed to join (effectively a voice-kick disguised as a move).
+    const targetCanConnect = await hasChannelPermission(targetId, targetChannelId, serverId, Permissions.CONNECT);
+    if (!targetCanConnect) {
+      socket.emit('voice:error', { message: 'Target user does not have permission to join that channel.' });
       return;
     }
 

@@ -6,6 +6,7 @@ import { Avatar } from '../common/Avatar';
 import { ImageUploadButton } from '../common/ImageUploadButton';
 import { X, Lock, Unlock, Shield } from 'lucide-react';
 import type { ServerMember, MemberRole, ResourceLimits } from '@voxium/shared';
+import { outranksRole } from '../../utils/roles';
 import { Permissions, permissionsFromString, hasPermission } from '@voxium/shared';
 import { RoleEditor } from './RoleEditor';
 import axios from 'axios';
@@ -753,7 +754,3 @@ function RoleBadge({ role }: { role: MemberRole }) {
   return null;
 }
 
-function outranksRole(actor: MemberRole, target: MemberRole): boolean {
-  const levels: Record<MemberRole, number> = { owner: 3, admin: 2, member: 1 };
-  return levels[actor] > levels[target];
-}

@@ -7,6 +7,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import type { ServerMember, MemberRole, VoiceUser } from '@voxium/shared';
 import { Shield, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, ArrowRightLeft, Pencil } from 'lucide-react';
+import { outranksRole } from '../../utils/roles';
 
 interface Props {
   member: ServerMember;
@@ -455,7 +456,3 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
 }
 
 
-function outranksRole(actor: MemberRole, target: MemberRole): boolean {
-  const levels: Record<MemberRole, number> = { owner: 3, admin: 2, member: 1 };
-  return levels[actor] > levels[target];
-}

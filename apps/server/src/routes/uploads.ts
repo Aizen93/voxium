@@ -141,7 +141,7 @@ uploadRouter.get(
       if (!attachment) throw new NotFoundError('Attachment');
       if (attachment.expired) throw new NotFoundError('Attachment expired');
 
-      // Authorize: server member or DM participant
+      // Authorize: server member with VIEW_CHANNEL, or DM participant
       if (attachment.message.channelId && attachment.message.channel) {
         const membership = await prisma.serverMember.findUnique({
           where: {
@@ -152,6 +152,14 @@ uploadRouter.get(
           },
         });
         if (!membership) throw new ForbiddenError('Not a member');
+        // Check VIEW_CHANNEL permission — prevents downloading attachments from restricted channels
+        const canView = await hasChannelPermission(
+          req.user!.userId,
+          attachment.message.channelId,
+          attachment.message.channel.serverId,
+          Permissions.VIEW_CHANNEL,
+        );
+        if (!canView) throw new ForbiddenError('Not authorized');
       } else if (attachment.message.conversationId) {
         const conv = await prisma.conversation.findUnique({
           where: { id: attachment.message.conversationId },

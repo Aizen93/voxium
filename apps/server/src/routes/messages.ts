@@ -195,6 +195,12 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
     const canSend = await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.SEND_MESSAGES);
     if (!canSend) throw new ForbiddenError('You do not have permission to send messages in this channel');
 
+    // Check ATTACH_FILES permission if attachments are present
+    if (attachments?.length) {
+      const canAttach = await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.ATTACH_FILES);
+      if (!canAttach) throw new ForbiddenError('You do not have permission to attach files in this channel');
+    }
+
     // Validate optional replyToId
     const replyToId = req.body.replyToId as string | undefined;
     if (replyToId) {
@@ -392,7 +398,7 @@ messageRouter.delete('/:messageId', rateLimitGeneral, async (req: Request<{ chan
 
     const isAuthor = message.authorId === req.user!.userId;
     if (!isAuthor) {
-      const canManageMessages = await hasServerPermission(req.user!.userId, message.channel!.serverId, Permissions.MANAGE_MESSAGES);
+      const canManageMessages = await hasChannelPermission(req.user!.userId, message.channelId!, message.channel!.serverId, Permissions.MANAGE_MESSAGES);
       if (!canManageMessages) throw new ForbiddenError('You can only delete your own messages');
     }
 
