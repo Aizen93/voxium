@@ -4,7 +4,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
 import { ImageUploadButton } from '../common/ImageUploadButton';
-import { X, Lock, Unlock, Shield } from 'lucide-react';
+import { X, Lock, Unlock } from 'lucide-react';
 import type { ServerMember, MemberRole, ResourceLimits } from '@voxium/shared';
 import { outranksRole } from '../../utils/roles';
 import { Permissions, permissionsFromString, hasPermission } from '@voxium/shared';

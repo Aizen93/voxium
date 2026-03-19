@@ -5,7 +5,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
-import type { ServerMember, MemberRole, VoiceUser } from '@voxium/shared';
+import type { ServerMember, VoiceUser } from '@voxium/shared';
 import { Shield, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, ArrowRightLeft, Pencil } from 'lucide-react';
 import { outranksRole } from '../../utils/roles';
 

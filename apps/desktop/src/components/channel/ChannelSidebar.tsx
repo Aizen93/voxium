@@ -341,7 +341,7 @@ export function ChannelSidebar() {
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
   const [channelContextMenu, setChannelContextMenu] = useState<{ channel: Channel; position: { x: number; y: number } } | null>(null);
   const [voiceUserCtx, setVoiceUserCtx] = useState<{ userId: string; position: { x: number; y: number } } | null>(null);
-  const [permissionsEditorChannel, setPermissionsEditorChannel] = useState<{ id: string; name: string } | null>(null);
+  const [permissionsEditorChannel, setPermissionsEditorChannel] = useState<{ id: string; name: string; type: 'text' | 'voice' } | null>(null);
   const [editingNickname, setEditingNickname] = useState(false);
   const [nicknameInput, setNicknameInput] = useState('');
   const ctxRef = useRef<HTMLDivElement>(null);
@@ -913,7 +913,7 @@ export function ChannelSidebar() {
         >
           <button
             onClick={() => {
-              setPermissionsEditorChannel({ id: channelContextMenu.channel.id, name: channelContextMenu.channel.name });
+              setPermissionsEditorChannel({ id: channelContextMenu.channel.id, name: channelContextMenu.channel.name, type: channelContextMenu.channel.type as 'text' | 'voice' });
               setChannelContextMenu(null);
             }}
             className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
@@ -941,6 +941,7 @@ export function ChannelSidebar() {
           serverId={activeServerId}
           channelId={permissionsEditorChannel.id}
           channelName={permissionsEditorChannel.name}
+          channelType={permissionsEditorChannel.type}
           onClose={() => setPermissionsEditorChannel(null)}
         />
       )}

@@ -6,15 +6,15 @@ import {
   PERMISSION_LIST,
   permissionsFromString,
   permissionsToString,
-  Permissions,
   hasPermission,
 } from '@voxium/shared';
-import type { Role, ChannelPermissionOverride, PermissionInfo } from '@voxium/shared';
+import type { ChannelPermissionOverride, PermissionInfo } from '@voxium/shared';
 
 interface ChannelPermissionsEditorProps {
   serverId: string;
   channelId: string;
   channelName: string;
+  channelType: 'text' | 'voice';
   onClose: () => void;
 }
 
@@ -71,8 +71,20 @@ export function ChannelPermissionsEditor({
   serverId,
   channelId,
   channelName,
+  channelType,
   onClose,
 }: ChannelPermissionsEditorProps) {
+  // Filter permissions and categories by channel type:
+  // Text channels: general + membership + text (no voice permissions)
+  // Voice channels: general + membership + voice (no text permissions)
+  const relevantCategories = CATEGORIES.filter((c) =>
+    c.key === 'general' || c.key === 'membership' ||
+    (channelType === 'text' ? c.key === 'text' : c.key === 'voice')
+  );
+  const relevantPermissions = CHANNEL_PERMISSIONS.filter((p) =>
+    p.category === 'general' || p.category === 'membership' ||
+    (channelType === 'text' ? p.category === 'text' : p.category === 'voice')
+  );
   const roles = useServerStore((s) => s.roles);
   const fetchChannelPermissions = useServerStore((s) => s.fetchChannelPermissions);
   const setChannelPermissionOverride = useServerStore((s) => s.setChannelPermissionOverride);
@@ -84,7 +96,7 @@ export function ChannelPermissionsEditor({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
-    new Set(CATEGORIES.map((c) => c.key)),
+    new Set(relevantCategories.map((c) => c.key)),
   );
 
   const sortedRoles = [...roles].sort((a, b) => a.position - b.position);
@@ -352,8 +364,8 @@ export function ChannelPermissionsEditor({
 
                   {/* Permission categories */}
                   <div className="space-y-2">
-                    {CATEGORIES.map((cat) => {
-                      const perms = CHANNEL_PERMISSIONS.filter(
+                    {relevantCategories.map((cat) => {
+                      const perms = relevantPermissions.filter(
                         (p) => p.category === cat.key,
                       );
                       if (perms.length === 0) return null;
