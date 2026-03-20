@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut, Flag, LifeBuoy, Gauge, Zap, Globe } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../stores/authStore';
@@ -39,8 +39,27 @@ const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashbo
 export function AdminLayout() {
   const { logout, user } = useAuthStore();
   const isSuperAdmin = user?.role === 'superadmin';
-  const [view, setView] = useState<AdminView>('dashboard');
+  // Sync view with URL hash so it persists across page reloads
+  const validViews = new Set<string>(NAV_ITEMS.map((n) => n.id));
+  const getViewFromHash = useCallback((): AdminView => {
+    const hash = window.location.hash.replace('#', '');
+    return validViews.has(hash) ? (hash as AdminView) : 'dashboard';
+  }, []);
+
+  const [view, setViewState] = useState<AdminView>(getViewFromHash);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+
+  const setView = useCallback((v: AdminView) => {
+    setViewState(v);
+    window.location.hash = v === 'dashboard' ? '' : v;
+  }, []);
+
+  // Handle browser back/forward
+  useEffect(() => {
+    const onHashChange = () => setViewState(getViewFromHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, [getViewFromHash]);
 
   const handleSelectUser = (userId: string) => {
     setSelectedUserId(userId);

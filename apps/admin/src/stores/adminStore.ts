@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
+import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
 
 // Untyped socket interface for admin-specific events not in the shared event maps
 interface AdminSocket {
@@ -129,6 +129,9 @@ interface AdminState {
     isCustom: boolean;
   }>;
 
+  // Infrastructure Servers
+  infraServers: InfraServer[];
+
   // SFU
   sfuStats: (SfuStats & SfuMediaCounts) | null;
 
@@ -224,6 +227,12 @@ interface AdminState {
   deleteStorageFile: (key: string) => Promise<void>;
   cleanupOrphans: () => Promise<{ found: number; deleted: number }>;
 
+  // Infrastructure Servers
+  fetchInfraServers: () => Promise<void>;
+  createInfraServer: (data: Omit<InfraServer, 'id' | 'createdAt'>) => Promise<void>;
+  updateInfraServer: (id: string, data: Partial<Omit<InfraServer, 'id' | 'createdAt'>>) => Promise<void>;
+  deleteInfraServer: (id: string) => Promise<void>;
+
   // Export
   exportUsers: () => Promise<AdminUser[]>;
   exportServers: () => Promise<AdminServer[]>;
@@ -281,6 +290,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   supportTicketsFilter: 'all',
   activeTicket: null,
   activeTicketMessages: [],
+  infraServers: [],
   sfuStats: null,
   globalLimits: null,
   serverLimits: null,
@@ -908,6 +918,30 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const { data } = await api.post('/admin/storage/cleanup-orphans');
     await Promise.all([get().fetchStorageStats(), get().fetchStorageFiles()]);
     return data.data;
+  },
+
+  fetchInfraServers: async () => {
+    try {
+      const { data } = await api.get('/admin/infra-servers');
+      set({ infraServers: data.data });
+    } catch {
+      console.error('Failed to fetch infrastructure servers');
+    }
+  },
+
+  createInfraServer: async (serverData) => {
+    await api.post('/admin/infra-servers', serverData);
+    await get().fetchInfraServers();
+  },
+
+  updateInfraServer: async (id, serverData) => {
+    await api.patch(`/admin/infra-servers/${id}`, serverData);
+    await get().fetchInfraServers();
+  },
+
+  deleteInfraServer: async (id) => {
+    await api.delete(`/admin/infra-servers/${id}`);
+    set((s) => ({ infraServers: s.infraServers.filter((srv) => srv.id !== id) }));
   },
 
   exportUsers: async () => {

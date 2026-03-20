@@ -109,6 +109,22 @@ model ServerLimits {
   @@map("server_limits")
 }
 
+// ─── Infrastructure Server Locations ──────────────────────────────────────────
+
+model InfraServer {
+  id        String   @id @default(cuid())
+  name      String
+  country   String
+  city      String
+  provider  String   // OVH, AWS, Azure, GCP, Hetzner, etc.
+  latitude  Float
+  longitude Float
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("infra_servers")
+}
+
 // ─── Server Members ──────────────────────────────────────────────────────────
 
 model ServerMember {

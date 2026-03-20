@@ -562,6 +562,19 @@ export interface SfuMediaCounts {
   totalConsumers: number;
 }
 
+// ─── Infrastructure Server Locations ─────────────────────────────────────
+
+export interface InfraServer {
+  id: string;
+  name: string;
+  country: string;
+  city: string;
+  provider: string;
+  latitude: number;
+  longitude: number;
+  createdAt: string;
+}
+
 // ─── Resource Limits ─────────────────────────────────────────────────────
 
 export interface ResourceLimits {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import createGlobe from 'cobe';
-import type { GeoStat } from '@voxium/shared';
+import type { GeoStat, InfraServer } from '@voxium/shared';
 
 /** Approximate centroids for ISO 3166-1 alpha-2 country codes */
 const COUNTRY_CENTROIDS: Record<string, [number, number]> = {
@@ -67,6 +67,7 @@ function CountryFlag({ code, size = 20 }: { code: string; size?: number }) {
 
 interface AdminGlobeProps {
   geoStats: GeoStat[];
+  infraServers: InfraServer[];
   fullPage?: boolean;
 }
 
@@ -100,8 +101,9 @@ function project(
   };
 }
 
-export function AdminGlobe({ geoStats, fullPage }: AdminGlobeProps) {
+export function AdminGlobe({ geoStats, infraServers, fullPage }: AdminGlobeProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
   // Initial rotation: center on Europe (~15°E). Center longitude = -(phi + π/2)
   const phiRef = useRef(-Math.PI / 2 - (15 * Math.PI) / 180);
   const thetaRef = useRef(0.3);
@@ -152,12 +154,22 @@ export function AdminGlobe({ geoStats, fullPage }: AdminGlobeProps) {
       }
     }
 
+    // Check infra servers too
+    for (const s of infraServers) {
+      const p = project(s.latitude, s.longitude, phiRef.current, thetaRef.current, scaleRef.current, cx, cy, radius);
+      if (!p.visible) continue;
+      const dist = Math.sqrt((mouseX - p.x) ** 2 + (mouseY - p.y) ** 2);
+      if (dist < 16 && (!closest || dist < closest.dist)) {
+        closest = { dist, stat: { countryCode: '', country: `${s.name} (${s.provider})`, count: 0 } as GeoStat, x: p.x, y: p.y };
+      }
+    }
+
     if (closest) {
       setTooltip({ x: closest.x, y: closest.y, stat: closest.stat });
     } else {
       setTooltip(null);
     }
-  }, [statsWithCoords, maxCount]);
+  }, [statsWithCoords, maxCount, infraServers]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -190,10 +202,27 @@ export function AdminGlobe({ geoStats, fullPage }: AdminGlobeProps) {
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointermove', onPointerMove);
 
-    const markers = statsWithCoords.map((g) => ({
+    // Small markers at each country (tiny dots)
+    const userMarkers = statsWithCoords.map((g) => ({
       location: [g.lat, g.lng] as [number, number],
-      size: 0.04 + (g.count / maxCount) * 0.12,
+      size: 0.02 + (g.count / maxCount) * 0.04,
     }));
+
+    const markers = userMarkers;
+
+    // GitHub-style arcs: lines from the top country (hub) to all others
+    const hub = statsWithCoords.length > 0
+      ? statsWithCoords.reduce((a, b) => (a.count > b.count ? a : b))
+      : null;
+    const arcs = hub
+      ? statsWithCoords
+          .filter((g) => g.countryCode !== hub.countryCode)
+          .map((g) => ({
+            from: [hub.lat, hub.lng] as [number, number],
+            to: [g.lat, g.lng] as [number, number],
+            color: [0.36, 0.36, 0.97] as [number, number, number],
+          }))
+      : [];
 
     const dpr = Math.min(window.devicePixelRatio, 2);
 
@@ -211,24 +240,67 @@ export function AdminGlobe({ geoStats, fullPage }: AdminGlobeProps) {
       markerColor: [0.36, 0.36, 0.97],
       glowColor: [0.2, 0.18, 0.4],
       markers,
+      markerElevation: 0,
+      arcs,
+      arcColor: [0.36, 0.36, 0.97],
+      arcWidth: 0.3,
+      arcHeight: 0.15,
       scale: 1,
-      onRender: (state) => {
-        state.phi = phiRef.current;
-        state.theta = thetaRef.current;
-        state.width = globeSize * dpr;
-        state.height = globeSize * dpr;
-        (state as Record<string, unknown>).scale = scaleRef.current;
-      },
     });
 
+    // Animation loop — update globe + project infra server overlays each frame
+    let animFrame: number;
+    const animate = () => {
+      globe.update({
+        phi: phiRef.current,
+        theta: thetaRef.current,
+        width: globeSize * dpr,
+        height: globeSize * dpr,
+        scale: scaleRef.current,
+      });
+
+      // Project infra server positions onto the overlay
+      const overlay = overlayRef.current;
+      if (overlay) {
+        const cx = globeSize / 2;
+        const cy = globeSize / 2;
+        const radius = globeSize / 2;
+        const children = overlay.children;
+        for (let i = 0; i < infraServers.length; i++) {
+          const s = infraServers[i];
+          const el = children[i] as HTMLElement | undefined;
+          if (!el) continue;
+          const p = project(s.latitude, s.longitude, phiRef.current, thetaRef.current, scaleRef.current, cx, cy, radius);
+          if (p.visible) {
+            el.style.display = '';
+            el.style.left = `${p.x}px`;
+            el.style.top = `${p.y}px`;
+            // Scale the coverage ring with zoom so it stays proportional to the globe
+            const ring = el.firstElementChild as HTMLElement | null;
+            if (ring) {
+              const ringSize = globeSize * 0.22 * scaleRef.current;
+              ring.style.width = `${ringSize}px`;
+              ring.style.height = `${ringSize}px`;
+            }
+          } else {
+            el.style.display = 'none';
+          }
+        }
+      }
+
+      animFrame = requestAnimationFrame(animate);
+    };
+    animFrame = requestAnimationFrame(animate);
+
     return () => {
+      cancelAnimationFrame(animFrame);
       globe.destroy();
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('wheel', onWheel);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointermove', onPointerMove);
     };
-  }, [statsWithCoords, maxCount, fullPage, globeSize]);
+  }, [statsWithCoords, maxCount, fullPage, globeSize, infraServers]);
 
   const sorted = [...geoStats].sort((a, b) => b.count - a.count);
   const totalUsers = geoStats.reduce((sum, g) => sum + g.count, 0);
@@ -256,6 +328,34 @@ export function AdminGlobe({ geoStats, fullPage }: AdminGlobeProps) {
               onMouseMove={handleCanvasMove}
               onMouseLeave={() => setTooltip(null)}
             />
+            {/* HTML overlay for infra server icons + coverage rings */}
+            <div
+              ref={overlayRef}
+              className="absolute inset-0 pointer-events-none"
+              style={{ width: globeSize, height: globeSize }}
+            >
+              {infraServers.map((s) => (
+                <div
+                  key={s.id}
+                  className="absolute -translate-x-1/2 -translate-y-1/2"
+                  style={{ display: 'none' /* positioned by animation loop */ }}
+                >
+                  {/* Coverage radius ring — ~120ms RTT ≈ 2500km (size set dynamically by animation loop) */}
+                  <div
+                    className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-emerald-400/40 bg-emerald-400/8"
+                  />
+                  {/* Server icon */}
+                  <div className="relative z-10 flex items-center justify-center h-5 w-5 rounded bg-emerald-500/90 shadow-lg shadow-emerald-500/30">
+                    <svg className="h-3 w-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="2" y="2" width="20" height="8" rx="2" />
+                      <rect x="2" y="14" width="20" height="8" rx="2" />
+                      <circle cx="6" cy="6" r="1" fill="currentColor" stroke="none" />
+                      <circle cx="6" cy="18" r="1" fill="currentColor" stroke="none" />
+                    </svg>
+                  </div>
+                </div>
+              ))}
+            </div>
             {tooltip && (
               <div
                 className="absolute z-10 pointer-events-none bg-vox-bg-tertiary/95 border border-vox-border rounded-lg px-3 py-2 shadow-lg"
@@ -265,9 +365,14 @@ export function AdminGlobe({ geoStats, fullPage }: AdminGlobeProps) {
                   transform: 'translateX(-50%)',
                 }}
               >
-                <p className="text-sm font-semibold text-vox-text-primary whitespace-nowrap flex items-center gap-1.5"><CountryFlag code={tooltip.stat.countryCode} size={16} /> {tooltip.stat.country}</p>
+                <p className="text-sm font-semibold text-vox-text-primary whitespace-nowrap flex items-center gap-1.5">
+                  {tooltip.stat.countryCode ? <CountryFlag code={tooltip.stat.countryCode} size={16} /> : <span className="h-2 w-2 rounded-full bg-green-500 inline-block" />}
+                  {tooltip.stat.country}
+                </p>
                 <p className="text-xs text-vox-text-muted">
-                  {tooltip.stat.count} user{tooltip.stat.count !== 1 ? 's' : ''}
+                  {tooltip.stat.countryCode
+                    ? `${tooltip.stat.count} user${tooltip.stat.count !== 1 ? 's' : ''}`
+                    : 'Infrastructure server'}
                 </p>
               </div>
             )}

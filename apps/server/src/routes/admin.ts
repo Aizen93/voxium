@@ -907,6 +907,67 @@ adminRouter.delete('/limits/servers/:serverId', async (req: Request<{ serverId: 
   } catch (err) { next(err); }
 });
 
+// ─── Infrastructure Server Locations ──────────────────────────────────────────
+
+// GET /admin/infra-servers — list all
+adminRouter.get('/infra-servers', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const servers = await prisma.infraServer.findMany({ orderBy: { createdAt: 'asc' } });
+    res.json({ success: true, data: servers });
+  } catch (err) { next(err); }
+});
+
+// POST /admin/infra-servers — create (superadmin only)
+adminRouter.post('/infra-servers', requireSuperAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { name, country, city, provider, latitude, longitude } = req.body;
+    if (!name || typeof name !== 'string') throw new BadRequestError('name is required');
+    if (!country || typeof country !== 'string') throw new BadRequestError('country is required');
+    if (!city || typeof city !== 'string') throw new BadRequestError('city is required');
+    if (!provider || typeof provider !== 'string') throw new BadRequestError('provider is required');
+    if (typeof latitude !== 'number' || latitude < -90 || latitude > 90) throw new BadRequestError('latitude must be between -90 and 90');
+    if (typeof longitude !== 'number' || longitude < -180 || longitude > 180) throw new BadRequestError('longitude must be between -180 and 180');
+
+    const server = await prisma.infraServer.create({
+      data: { name: sanitizeText(name), country: sanitizeText(country), city: sanitizeText(city), provider: sanitizeText(provider), latitude, longitude },
+    });
+    res.status(201).json({ success: true, data: server });
+  } catch (err) { next(err); }
+});
+
+// PATCH /admin/infra-servers/:id — update (superadmin only)
+adminRouter.patch('/infra-servers/:id', requireSuperAdmin, async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.infraServer.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('Infrastructure server');
+
+    const updateData: Record<string, unknown> = {};
+    if (req.body.name !== undefined) { if (typeof req.body.name !== 'string') throw new BadRequestError('name must be a string'); updateData.name = sanitizeText(req.body.name); }
+    if (req.body.country !== undefined) { if (typeof req.body.country !== 'string') throw new BadRequestError('country must be a string'); updateData.country = sanitizeText(req.body.country); }
+    if (req.body.city !== undefined) { if (typeof req.body.city !== 'string') throw new BadRequestError('city must be a string'); updateData.city = sanitizeText(req.body.city); }
+    if (req.body.provider !== undefined) { if (typeof req.body.provider !== 'string') throw new BadRequestError('provider must be a string'); updateData.provider = sanitizeText(req.body.provider); }
+    if (req.body.latitude !== undefined) { if (typeof req.body.latitude !== 'number' || req.body.latitude < -90 || req.body.latitude > 90) throw new BadRequestError('latitude must be between -90 and 90'); updateData.latitude = req.body.latitude; }
+    if (req.body.longitude !== undefined) { if (typeof req.body.longitude !== 'number' || req.body.longitude < -180 || req.body.longitude > 180) throw new BadRequestError('longitude must be between -180 and 180'); updateData.longitude = req.body.longitude; }
+
+    if (Object.keys(updateData).length === 0) throw new BadRequestError('No fields to update');
+
+    const updated = await prisma.infraServer.update({ where: { id }, data: updateData });
+    res.json({ success: true, data: updated });
+  } catch (err) { next(err); }
+});
+
+// DELETE /admin/infra-servers/:id — delete (superadmin only)
+adminRouter.delete('/infra-servers/:id', requireSuperAdmin, async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.infraServer.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('Infrastructure server');
+    await prisma.infraServer.delete({ where: { id } });
+    res.json({ success: true, message: 'Infrastructure server deleted' });
+  } catch (err) { next(err); }
+});
+
 // ─── Ban Management ─────────────────────────────────────────────────────────
 
 adminRouter.get('/bans', async (req: Request, res: Response, next: NextFunction) => {
