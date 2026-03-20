@@ -206,8 +206,8 @@ describe('voiceStore', () => {
       const mockPc = { close: vi.fn() };
       const mockAudio = { pause: vi.fn(), srcObject: {}, remove: vi.fn() };
       useVoiceStore.setState({
-        peers: new Map([['user-2', { pc: mockPc as any, makingOffer: false }]]),
-        remoteAudios: new Map([['user-2', mockAudio as any]]),
+        peers: new Map([['user-2', { pc: mockPc as unknown as RTCPeerConnection, makingOffer: false }]]),
+        remoteAudios: new Map([['user-2', mockAudio as unknown as HTMLAudioElement]]),
       });
       useVoiceStore.getState().destroyPeer('user-2');
       expect(useVoiceStore.getState().peers.size).toBe(0);
@@ -227,8 +227,8 @@ describe('voiceStore', () => {
       const mockPc2 = { close: vi.fn() };
       useVoiceStore.setState({
         peers: new Map([
-          ['user-2', { pc: mockPc1 as any, makingOffer: false }],
-          ['user-3', { pc: mockPc2 as any, makingOffer: false }],
+          ['user-2', { pc: mockPc1 as unknown as RTCPeerConnection, makingOffer: false }],
+          ['user-3', { pc: mockPc2 as unknown as RTCPeerConnection, makingOffer: false }],
         ]),
       });
       useVoiceStore.getState().destroyAllPeers();

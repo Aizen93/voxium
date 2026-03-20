@@ -7,7 +7,7 @@ import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { hasServerPermission, hasChannelPermission, filterVisibleChannels } from '../utils/permissionCalculator';
+import { hasServerPermission, filterVisibleChannels } from '../utils/permissionCalculator';
 
 export const channelRouter = Router({ mergeParams: true });
 

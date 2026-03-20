@@ -8,7 +8,6 @@ import {
   LIMITS,
   WS_EVENTS,
   Permissions,
-  DEFAULT_EVERYONE_PERMISSIONS,
   permissionsFromString,
   permissionsToString,
   ALL_PERMISSIONS,

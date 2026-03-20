@@ -779,4 +779,28 @@ describe('Server Routes', () => {
       expect(res.body.error).toContain('own role');
     });
   });
+
+  describe('POST /api/v1/servers/:serverId/transfer-ownership', () => {
+    it('returns 400 when targetUserId is missing', async () => {
+      const token = makeToken();
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/transfer-ownership')
+        .set('Authorization', `Bearer ${token}`)
+        .send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/targetUserId/i);
+    });
+
+    it('returns 400 when targetUserId is not a string', async () => {
+      const token = makeToken();
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/transfer-ownership')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ targetUserId: 12345 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/targetUserId/i);
+    });
+  });
 });

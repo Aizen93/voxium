@@ -289,6 +289,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
 
     // Validate optional replyToId
     const replyToId = req.body.replyToId as string | undefined;
+    if (replyToId !== undefined && typeof replyToId !== 'string') throw new BadRequestError('replyToId must be a string');
     if (replyToId) {
       const parent = await prisma.message.findUnique({ where: { id: replyToId }, select: { conversationId: true } });
       if (!parent || parent.conversationId !== conversationId) throw new BadRequestError('Invalid replyToId');

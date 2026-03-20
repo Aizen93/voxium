@@ -484,6 +484,18 @@ describe('DM routes — POST /:conversationId/messages', () => {
 
     expect(res.status).toBe(403);
   });
+
+  it('returns 400 when replyToId is not a string', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/dm/conv-1/messages')
+      .send({ content: 'Hello', replyToId: 12345 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/replyToId must be a string/);
+  });
 });
 
 describe('DM routes — DELETE /:conversationId', () => {

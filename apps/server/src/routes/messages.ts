@@ -9,7 +9,7 @@ import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
 import { extractMentionIds, resolveMentionsForServer, batchResolveMentions, attachMentions } from '../utils/mentions';
-import { hasServerPermission, hasChannelPermission } from '../utils/permissionCalculator';
+import { hasChannelPermission } from '../utils/permissionCalculator';
 
 const attachmentSelect = {
   select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
@@ -203,6 +203,7 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
 
     // Validate optional replyToId
     const replyToId = req.body.replyToId as string | undefined;
+    if (replyToId !== undefined && typeof replyToId !== 'string') throw new BadRequestError('replyToId must be a string');
     if (replyToId) {
       const parent = await prisma.message.findUnique({ where: { id: replyToId }, select: { channelId: true } });
       if (!parent || parent.channelId !== channelId) throw new BadRequestError('Invalid replyToId');

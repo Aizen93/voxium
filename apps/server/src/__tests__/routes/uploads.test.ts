@@ -433,4 +433,34 @@ describe('uploads — POST /presign/attachment', () => {
 
     expect(res.status).toBe(400);
   });
+
+  it('returns 400 when channelId is not a string', async () => {
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/uploads/presign/attachment')
+      .send({ fileName: 'file.pdf', fileSize: 1024, mimeType: 'application/pdf', channelId: 123 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/channelId must be a string/);
+  });
+
+  it('returns 400 when conversationId is not a string', async () => {
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/uploads/presign/attachment')
+      .send({ fileName: 'file.pdf', fileSize: 1024, mimeType: 'application/pdf', conversationId: 456 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/conversationId must be a string/);
+  });
+
+  it('returns 400 when mimeType is missing', async () => {
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/uploads/presign/attachment')
+      .send({ fileName: 'file.pdf', fileSize: 1024, channelId: 'ch-1' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/mimeType required/);
+  });
 });

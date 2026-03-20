@@ -11,7 +11,6 @@ import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
-import { outranks, isAdminOrOwner } from '../utils/permissions';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
 import { leaveCurrentVoiceChannel, cleanupServerVoice } from '../websocket/voiceHandler';
@@ -713,7 +712,7 @@ serverRouter.post(
       const { serverId } = req.params;
       const { targetUserId } = req.body as { targetUserId: string };
 
-      if (!targetUserId) throw new BadRequestError('targetUserId is required');
+      if (!targetUserId || typeof targetUserId !== 'string') throw new BadRequestError('targetUserId is required');
       if (targetUserId === req.user!.userId) throw new BadRequestError('Cannot transfer ownership to yourself');
 
       const actorMembership = await prisma.serverMember.findUnique({

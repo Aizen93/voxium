@@ -64,12 +64,15 @@ uploadRouter.post(
       const { fileName, fileSize, mimeType, channelId, conversationId } = req.body;
 
       // Validate exactly one context
+      if (channelId !== undefined && typeof channelId !== 'string') throw new BadRequestError('channelId must be a string');
+      if (conversationId !== undefined && typeof conversationId !== 'string') throw new BadRequestError('conversationId must be a string');
       if ((!channelId && !conversationId) || (channelId && conversationId)) {
         throw new BadRequestError('Provide exactly one of channelId or conversationId');
       }
 
       if (!fileName || typeof fileName !== 'string') throw new BadRequestError('fileName required');
-      if (!ALLOWED_ATTACHMENT_TYPES.includes(mimeType)) {
+      if (!mimeType || typeof mimeType !== 'string') throw new BadRequestError('mimeType required');
+      if (!ALLOWED_ATTACHMENT_TYPES.includes(mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) {
         throw new BadRequestError('File type not allowed');
       }
       const maxSize = getMaxAttachmentSize(mimeType);

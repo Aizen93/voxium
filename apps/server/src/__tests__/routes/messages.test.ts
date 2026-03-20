@@ -461,6 +461,17 @@ describe('Message Routes', () => {
       expect(res.body.error).toContain('replyToId');
     });
 
+    it('returns 400 when replyToId is not a string', async () => {
+      const token = makeToken();
+      const res = await request(app)
+        .post('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'Hello', replyToId: 12345 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/replyToId must be a string/);
+    });
+
     it('emits message:new socket event', async () => {
       const token = makeToken();
       prismaMock.channel.findUnique.mockResolvedValue({

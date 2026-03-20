@@ -165,7 +165,6 @@ describe('audioAnalyser', () => {
       startSpeakingDetection(mockStream, 'server');
       // The gated stream comes from MediaStreamDestinationNode.stream
       // which is created via the AudioContext mock
-      const gated = getGatedStream();
       // May be null or the mock stream depending on AudioContext mock fidelity
       // The important thing is it doesn't throw
       expect(() => getGatedStream()).not.toThrow();

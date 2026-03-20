@@ -70,29 +70,29 @@ describe('Push-to-Talk logic', () => {
   });
 
   describe('speaking indicator with PTT override', () => {
+    // Formula: audioLevel > threshold && (!selfMute || pttActive)
+    function computeSpeaking(audioLevel: number, selfMute: boolean, pttActive: boolean): boolean {
+      return audioLevel > 0.05 && (!selfMute || pttActive);
+    }
+
     it('should show speaking when pttActive overrides selfMute', () => {
-      const isSpeaking = 0.1 > 0.05 && (!true || true); // audioLevel > threshold && (!selfMute || pttActive)
-      expect(isSpeaking).toBe(true);
+      expect(computeSpeaking(0.1, true, true)).toBe(true);
     });
 
     it('should not show speaking when muted without PTT', () => {
-      const isSpeaking = 0.1 > 0.05 && (!true || false);
-      expect(isSpeaking).toBe(false);
+      expect(computeSpeaking(0.1, true, false)).toBe(false);
     });
 
     it('should show speaking when unmuted (normal voice activity)', () => {
-      const isSpeaking = 0.1 > 0.05 && (!false || false);
-      expect(isSpeaking).toBe(true);
+      expect(computeSpeaking(0.1, false, false)).toBe(true);
     });
 
     it('should not show speaking when audio level is below threshold', () => {
-      const isSpeaking = 0.01 > 0.05 && (!false || false);
-      expect(isSpeaking).toBe(false);
+      expect(computeSpeaking(0.01, false, false)).toBe(false);
     });
 
     it('should not show speaking when pttActive but audio is silent', () => {
-      const isSpeaking = 0.01 > 0.05 && (!true || true);
-      expect(isSpeaking).toBe(false);
+      expect(computeSpeaking(0.01, true, true)).toBe(false);
     });
   });
 

@@ -254,10 +254,9 @@ describe('POST /api/v1/auth/register', () => {
         password: 'password123',
       });
 
-    // Missing username causes a TypeError (undefined.length) which the error
-    // handler maps to 500. The request should not succeed regardless.
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Username is required');
   });
 
   it('rejects missing email', async () => {
@@ -268,8 +267,9 @@ describe('POST /api/v1/auth/register', () => {
         password: 'password123',
       });
 
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Email is required');
   });
 
   it('rejects missing password', async () => {
@@ -280,8 +280,9 @@ describe('POST /api/v1/auth/register', () => {
         email: 'test@example.com',
       });
 
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Password is required');
   });
 
   it('rejects password longer than 72 chars (bcrypt limit)', async () => {
@@ -609,6 +610,26 @@ describe('POST /api/v1/auth/refresh', () => {
     // so banned users get 401 on refresh (not 403)
     expect(res.status).toBe(401);
     expect(res.body.success).toBe(false);
+  });
+
+  it('returns 400 when refreshToken is missing', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/refresh')
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toMatch(/refresh token/i);
+  });
+
+  it('returns 400 when refreshToken is not a string', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/refresh')
+      .send({ refreshToken: 12345 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toMatch(/refresh token/i);
   });
 });
 
