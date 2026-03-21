@@ -618,20 +618,37 @@ function AppearanceTab() {
             >
               {/* Theme preview */}
               {(() => {
-                const p: Record<string, { bg: string; sidebar: string; channel: string; line: string }> = {
+                const p: Record<string, { bg: string; sidebar: string; channel: string; line: string; accent?: string }> = {
                   dark:     { bg: '#1a1a2e', sidebar: '#12122a', channel: '#151530', line: '#2a2a4a' },
                   light:    { bg: '#f2f3f5', sidebar: '#e3e5eb', channel: '#ebedf2', line: '#c8c8d8' },
                   midnight: { bg: '#0a0a12', sidebar: '#060610', channel: '#0c0c18', line: '#1a1a30' },
+                  tactical: { bg: '#1a1c1a', sidebar: '#121412', channel: '#181a18', line: '#2a2c28', accent: '#4ade50' },
                 };
                 const c = p[t.id] || p.dark;
                 return (
-                  <div className="w-full h-16 rounded-lg overflow-hidden flex" style={{ background: c.bg }}>
+                  <div className="w-full h-16 rounded-lg overflow-hidden flex relative" style={{ background: c.bg }}>
                     <div className="w-1/4 h-full" style={{ background: c.sidebar }} />
                     <div className="w-1/4 h-full" style={{ background: c.channel }} />
                     <div className="flex-1 h-full p-1.5 flex flex-col justify-end gap-0.5">
                       <div className="h-1.5 w-3/4 rounded-full" style={{ background: c.line }} />
                       <div className="h-1.5 w-1/2 rounded-full" style={{ background: c.line }} />
                     </div>
+                    {/* Tactical theme: diagonal hazard stripes accent */}
+                    {c.accent && (
+                      <div
+                        className="absolute bottom-0 left-0 right-0 h-1"
+                        style={{
+                          background: `repeating-linear-gradient(
+                            -45deg,
+                            ${c.accent},
+                            ${c.accent} 3px,
+                            transparent 3px,
+                            transparent 6px
+                          )`,
+                          opacity: 0.6,
+                        }}
+                      />
+                    )}
                   </div>
                 );
               })()}

@@ -6,12 +6,13 @@ type VoiceMode = 'voice_activity' | 'push_to_talk';
 export type VoiceQuality = 'low' | 'medium' | 'high';
 
 /** Built-in themes. Future custom themes will extend this. */
-export type ThemeId = 'dark' | 'light' | 'midnight';
+export type ThemeId = 'dark' | 'light' | 'midnight' | 'tactical';
 
 export const THEMES: { id: ThemeId; label: string }[] = [
   { id: 'dark', label: 'Dark' },
   { id: 'light', label: 'Light' },
   { id: 'midnight', label: 'Midnight' },
+  { id: 'tactical', label: 'Tactical' },
 ];
 
 /** Opus maxBitrate in bps for each quality level */
@@ -56,7 +57,7 @@ function loadPersistedSettings(): PersistedSettings {
     if (raw) {
       const parsed = JSON.parse(raw);
       return {
-        theme: (['dark', 'light', 'midnight'].includes(parsed.theme) ? parsed.theme : 'dark') as ThemeId,
+        theme: (['dark', 'light', 'midnight', 'tactical'].includes(parsed.theme) ? parsed.theme : 'dark') as ThemeId,
         audioInputDeviceId: parsed.audioInputDeviceId || '',
         audioOutputDeviceId: parsed.audioOutputDeviceId || '',
         noiseGateThreshold: typeof parsed.noiseGateThreshold === 'number' ? parsed.noiseGateThreshold : 0.03,
