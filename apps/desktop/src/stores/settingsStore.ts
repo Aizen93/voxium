@@ -5,6 +5,15 @@ const STORAGE_KEY = 'voxium_settings';
 type VoiceMode = 'voice_activity' | 'push_to_talk';
 export type VoiceQuality = 'low' | 'medium' | 'high';
 
+/** Built-in themes. Future custom themes will extend this. */
+export type ThemeId = 'dark' | 'light' | 'midnight';
+
+export const THEMES: { id: ThemeId; label: string }[] = [
+  { id: 'dark', label: 'Dark' },
+  { id: 'light', label: 'Light' },
+  { id: 'midnight', label: 'Midnight' },
+];
+
 /** Opus maxBitrate in bps for each quality level */
 export const VOICE_QUALITY_BITRATE: Record<VoiceQuality, number> = {
   low: 16_000,
@@ -13,6 +22,7 @@ export const VOICE_QUALITY_BITRATE: Record<VoiceQuality, number> = {
 };
 
 interface PersistedSettings {
+  theme: ThemeId;
   audioInputDeviceId: string;
   audioOutputDeviceId: string;
   noiseGateThreshold: number;
@@ -28,6 +38,7 @@ interface SettingsState extends PersistedSettings {
   isSettingsOpen: boolean;
   openSettings: () => void;
   closeSettings: () => void;
+  setTheme: (theme: ThemeId) => void;
   setAudioInputDeviceId: (deviceId: string) => void;
   setAudioOutputDeviceId: (deviceId: string) => void;
   setNoiseGateThreshold: (threshold: number) => void;
@@ -45,6 +56,7 @@ function loadPersistedSettings(): PersistedSettings {
     if (raw) {
       const parsed = JSON.parse(raw);
       return {
+        theme: (['dark', 'light', 'midnight'].includes(parsed.theme) ? parsed.theme : 'dark') as ThemeId,
         audioInputDeviceId: parsed.audioInputDeviceId || '',
         audioOutputDeviceId: parsed.audioOutputDeviceId || '',
         noiseGateThreshold: typeof parsed.noiseGateThreshold === 'number' ? parsed.noiseGateThreshold : 0.03,
@@ -59,12 +71,13 @@ function loadPersistedSettings(): PersistedSettings {
   } catch {
     // ignore parse errors
   }
-  return { audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.008, voiceMode: 'voice_activity', voiceQuality: 'medium' as VoiceQuality, pushToTalkKey: 'Backquote', enableNoiseSuppression: true, enableNotificationSounds: true, enableDesktopNotifications: true };
+  return { theme: 'dark' as ThemeId, audioInputDeviceId: '', audioOutputDeviceId: '', noiseGateThreshold: 0.008, voiceMode: 'voice_activity', voiceQuality: 'medium' as VoiceQuality, pushToTalkKey: 'Backquote', enableNoiseSuppression: true, enableNotificationSounds: true, enableDesktopNotifications: true };
 }
 
 function persistSettings(state: PersistedSettings) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      theme: state.theme,
       audioInputDeviceId: state.audioInputDeviceId,
       audioOutputDeviceId: state.audioOutputDeviceId,
       noiseGateThreshold: state.noiseGateThreshold,
@@ -82,12 +95,23 @@ function persistSettings(state: PersistedSettings) {
 
 const initial = loadPersistedSettings();
 
+/** Apply theme to the document root element */
+function applyTheme(theme: ThemeId) {
+  document.documentElement.setAttribute('data-theme', theme);
+}
+
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   ...initial,
   isSettingsOpen: false,
 
   openSettings: () => set({ isSettingsOpen: true }),
   closeSettings: () => set({ isSettingsOpen: false }),
+
+  setTheme: (theme: ThemeId) => {
+    applyTheme(theme);
+    set({ theme });
+    persistSettings(get());
+  },
 
   setAudioInputDeviceId: (deviceId: string) => {
     set({ audioInputDeviceId: deviceId });
@@ -142,3 +166,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     persistSettings(get());
   },
 }));
+
+// Apply persisted theme on app startup (before React renders)
+applyTheme(useSettingsStore.getState().theme);

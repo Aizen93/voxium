@@ -3,7 +3,8 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio } from 'lucide-react';
+import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio, Palette } from 'lucide-react';
+import { THEMES } from '../../stores/settingsStore';
 import type { VoiceQuality } from '../../stores/settingsStore';
 import { LIMITS } from '@voxium/shared';
 import axios from 'axios';
@@ -13,7 +14,7 @@ interface DeviceInfo {
   label: string;
 }
 
-type SettingsTab = 'account' | 'security' | 'audio';
+type SettingsTab = 'account' | 'security' | 'appearance' | 'audio';
 
 function formatKeyCode(code: string): string {
   const map: Record<string, string> = {
@@ -595,6 +596,67 @@ function SecurityTab() {
 
 // ─── Audio Tab ────────────────────────────────────────────────────────────────
 
+function AppearanceTab() {
+  const { theme, setTheme } = useSettingsStore();
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-sm font-semibold text-vox-text-primary mb-1">Theme</h3>
+        <p className="text-xs text-vox-text-muted mb-3">Choose how Voxium looks to you</p>
+        <div className="flex gap-3">
+          {THEMES.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTheme(t.id)}
+              className={`relative flex flex-col items-center gap-2 rounded-xl border-2 p-3 transition-colors ${
+                theme === t.id
+                  ? 'border-vox-accent-primary bg-vox-accent-primary/10'
+                  : 'border-vox-border hover:border-vox-text-muted'
+              }`}
+              style={{ width: 120 }}
+            >
+              {/* Theme preview */}
+              {(() => {
+                const p: Record<string, { bg: string; sidebar: string; channel: string; line: string }> = {
+                  dark:     { bg: '#1a1a2e', sidebar: '#12122a', channel: '#151530', line: '#2a2a4a' },
+                  light:    { bg: '#f2f3f5', sidebar: '#e3e5eb', channel: '#ebedf2', line: '#c8c8d8' },
+                  midnight: { bg: '#0a0a12', sidebar: '#060610', channel: '#0c0c18', line: '#1a1a30' },
+                };
+                const c = p[t.id] || p.dark;
+                return (
+                  <div className="w-full h-16 rounded-lg overflow-hidden flex" style={{ background: c.bg }}>
+                    <div className="w-1/4 h-full" style={{ background: c.sidebar }} />
+                    <div className="w-1/4 h-full" style={{ background: c.channel }} />
+                    <div className="flex-1 h-full p-1.5 flex flex-col justify-end gap-0.5">
+                      <div className="h-1.5 w-3/4 rounded-full" style={{ background: c.line }} />
+                      <div className="h-1.5 w-1/2 rounded-full" style={{ background: c.line }} />
+                    </div>
+                  </div>
+                );
+              })()}
+              <span className={`text-xs font-medium ${theme === t.id ? 'text-vox-accent-primary' : 'text-vox-text-secondary'}`}>
+                {t.label}
+              </span>
+              {theme === t.id && (
+                <div className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-vox-accent-primary flex items-center justify-center">
+                  <Check size={12} className="text-white" />
+                </div>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-vox-border bg-vox-bg-secondary/50 p-4">
+        <p className="text-xs text-vox-text-muted">
+          More themes coming soon — including community-created custom themes.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function AudioTab() {
   const {
     audioInputDeviceId,
@@ -970,6 +1032,7 @@ export function SettingsModal() {
   const tabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
     { id: 'account', label: 'My Account', icon: User },
     { id: 'security', label: 'Security', icon: Shield },
+    { id: 'appearance', label: 'Appearance', icon: Palette },
     { id: 'audio', label: 'Audio & Video', icon: Headphones },
   ];
 
@@ -1012,6 +1075,7 @@ export function SettingsModal() {
 
           {activeTab === 'account' && <ProfileTab />}
           {activeTab === 'security' && <SecurityTab />}
+          {activeTab === 'appearance' && <AppearanceTab />}
           {activeTab === 'audio' && <AudioTab />}
         </div>
       </div>

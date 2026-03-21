@@ -77,14 +77,14 @@ export function TitleBar() {
 
   return (
     <div
-      className="flex h-8 shrink-0 items-center bg-[#1e1e3a] select-none"
+      className="flex h-8 shrink-0 items-center bg-vox-sidebar select-none"
       onMouseDown={handleDragStart}
       onDoubleClick={handleDoubleClick}
     >
       {/* App icon + name */}
       <div className="flex items-center gap-2 pl-3">
         <img src="/logo.svg" alt="Voxium" className="h-4 w-4" draggable={false} />
-        <span className="text-xs font-semibold text-white tracking-wide">Voxium</span>
+        <span className="text-xs font-semibold text-vox-text-primary tracking-wide">Voxium</span>
       </div>
 
       {/* Spacer — draggable area */}

@@ -1,35 +1,38 @@
 @import "tailwindcss";
+@import "./themes.css";
 
 @theme {
-  /* Discord-inspired dark theme colors */
-  --color-vox-bg-primary: #1a1a2e;
-  --color-vox-bg-secondary: #16213e;
-  --color-vox-bg-tertiary: #0f3460;
-  --color-vox-bg-hover: #1f2b4d;
-  --color-vox-bg-active: #253356;
-  --color-vox-bg-floating: #111827;
+  /* Map Tailwind color classes to CSS custom properties from the active theme.
+   * The actual values are defined in themes.css per [data-theme] selector.
+   * This indirection enables runtime theme switching without rebuilding CSS. */
+  --color-vox-bg-primary: var(--vox-bg-primary);
+  --color-vox-bg-secondary: var(--vox-bg-secondary);
+  --color-vox-bg-tertiary: var(--vox-bg-tertiary);
+  --color-vox-bg-hover: var(--vox-bg-hover);
+  --color-vox-bg-active: var(--vox-bg-active);
+  --color-vox-bg-floating: var(--vox-bg-floating);
 
-  --color-vox-sidebar: #12122a;
-  --color-vox-channel: #151530;
-  --color-vox-chat: #1a1a3e;
+  --color-vox-sidebar: var(--vox-sidebar);
+  --color-vox-channel: var(--vox-channel);
+  --color-vox-chat: var(--vox-chat);
 
-  --color-vox-text-primary: #e4e6eb;
-  --color-vox-text-secondary: #a0a3b1;
-  --color-vox-text-muted: #6b7089;
-  --color-vox-text-link: #5b9cf4;
+  --color-vox-text-primary: var(--vox-text-primary);
+  --color-vox-text-secondary: var(--vox-text-secondary);
+  --color-vox-text-muted: var(--vox-text-muted);
+  --color-vox-text-link: var(--vox-text-link);
 
-  --color-vox-accent-primary: #5b5bf7;
-  --color-vox-accent-hover: #4a4ae0;
-  --color-vox-accent-success: #3eba68;
-  --color-vox-accent-warning: #f5a623;
-  --color-vox-accent-danger: #ed4245;
-  --color-vox-accent-info: #5b9cf4;
+  --color-vox-accent-primary: var(--vox-accent-primary);
+  --color-vox-accent-hover: var(--vox-accent-hover);
+  --color-vox-accent-success: var(--vox-accent-success);
+  --color-vox-accent-warning: var(--vox-accent-warning);
+  --color-vox-accent-danger: var(--vox-accent-danger);
+  --color-vox-accent-info: var(--vox-accent-info);
 
-  --color-vox-border: #2a2a4a;
+  --color-vox-border: var(--vox-border);
 
-  --color-vox-voice-connected: #3eba68;
-  --color-vox-voice-speaking: #3eba68;
-  --color-vox-voice-muted: #ed4245;
+  --color-vox-voice-connected: var(--vox-voice-connected);
+  --color-vox-voice-speaking: var(--vox-voice-speaking);
+  --color-vox-voice-muted: var(--vox-voice-muted);
 
   /* Fonts */
   --font-sans: "Inter", system-ui, -apple-system, sans-serif;
@@ -105,18 +108,18 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background: #2a2a4a;
+    background: var(--vox-scrollbar-thumb);
     border-radius: 4px;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: #3a3a5a;
+    background: var(--vox-scrollbar-thumb-hover);
   }
 
   /* Selection */
   ::selection {
-    background: rgba(91, 91, 247, 0.3);
-    color: #e4e6eb;
+    background: var(--vox-selection-bg);
+    color: var(--vox-selection-text);
   }
 }
 

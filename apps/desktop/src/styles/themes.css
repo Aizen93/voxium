@@ -1,0 +1,128 @@
+/*
+ * Voxium Theme System
+ *
+ * All UI colors are defined as CSS custom properties scoped to [data-theme].
+ * The app reads these via Tailwind's --color-vox-* mapping in globals.css.
+ *
+ * To add a custom theme:
+ * 1. Add a new [data-theme="your-theme"] block below with all --vox-* variables
+ * 2. Register it in the THEMES array in stores/settingsStore.ts
+ * 3. Users can select it from Settings > Appearance
+ *
+ * Future: custom themes could be loaded from JSON (user-uploaded or community-shared)
+ * by injecting CSS variables at runtime via document.documentElement.style.setProperty().
+ */
+
+/* ─── Dark Theme (default) ─────────────────────────────────────────────────── */
+
+[data-theme="dark"] {
+  --vox-bg-primary: #1a1a2e;
+  --vox-bg-secondary: #16213e;
+  --vox-bg-tertiary: #0f3460;
+  --vox-bg-hover: #1f2b4d;
+  --vox-bg-active: #253356;
+  --vox-bg-floating: #111827;
+
+  --vox-sidebar: #12122a;
+  --vox-channel: #151530;
+  --vox-chat: #1a1a3e;
+
+  --vox-text-primary: #e4e6eb;
+  --vox-text-secondary: #a0a3b1;
+  --vox-text-muted: #6b7089;
+  --vox-text-link: #5b9cf4;
+
+  --vox-accent-primary: #5b5bf7;
+  --vox-accent-hover: #4a4ae0;
+  --vox-accent-success: #3eba68;
+  --vox-accent-warning: #f5a623;
+  --vox-accent-danger: #ed4245;
+  --vox-accent-info: #5b9cf4;
+
+  --vox-border: #2a2a4a;
+
+  --vox-voice-connected: #3eba68;
+  --vox-voice-speaking: #3eba68;
+  --vox-voice-muted: #ed4245;
+
+  --vox-scrollbar-thumb: #2a2a4a;
+  --vox-scrollbar-thumb-hover: #3a3a5a;
+  --vox-selection-bg: rgba(91, 91, 247, 0.3);
+  --vox-selection-text: #e4e6eb;
+}
+
+/* ─── Light Theme ──────────────────────────────────────────────────────────── */
+
+[data-theme="light"] {
+  --vox-bg-primary: #f2f3f5;
+  --vox-bg-secondary: #d4d6dc;
+  --vox-bg-tertiary: #c5c8d0;
+  --vox-bg-hover: #dcddea;
+  --vox-bg-active: #d0d2de;
+  --vox-bg-floating: #ffffff;
+
+  --vox-sidebar: #e3e5eb;
+  --vox-channel: #ebedf2;
+  --vox-chat: #f8f9fc;
+
+  --vox-text-primary: #1a1a2e;
+  --vox-text-secondary: #4a4a60;
+  --vox-text-muted: #8888a0;
+  --vox-text-link: #4040d0;
+
+  --vox-accent-primary: #5b5bf7;
+  --vox-accent-hover: #4a4ae0;
+  --vox-accent-success: #2ea55a;
+  --vox-accent-warning: #d4900e;
+  --vox-accent-danger: #d83c3f;
+  --vox-accent-info: #4080e0;
+
+  --vox-border: #c8c8d8;
+
+  --vox-voice-connected: #2ea55a;
+  --vox-voice-speaking: #2ea55a;
+  --vox-voice-muted: #d83c3f;
+
+  --vox-scrollbar-thumb: #c0c0d0;
+  --vox-scrollbar-thumb-hover: #a0a0b8;
+  --vox-selection-bg: rgba(91, 91, 247, 0.2);
+  --vox-selection-text: #1a1a2e;
+}
+
+/* ─── Midnight Theme ───────────────────────────────────────────────────────── */
+
+[data-theme="midnight"] {
+  --vox-bg-primary: #0a0a12;
+  --vox-bg-secondary: #111119;
+  --vox-bg-tertiary: #18182a;
+  --vox-bg-hover: #1a1a2a;
+  --vox-bg-active: #222238;
+  --vox-bg-floating: #08080e;
+
+  --vox-sidebar: #060610;
+  --vox-channel: #0c0c18;
+  --vox-chat: #0e0e16;
+
+  --vox-text-primary: #e8eaf0;
+  --vox-text-secondary: #9098b0;
+  --vox-text-muted: #505878;
+  --vox-text-link: #38a0ff;
+
+  --vox-accent-primary: #2090ff;
+  --vox-accent-hover: #1878e0;
+  --vox-accent-success: #30d070;
+  --vox-accent-warning: #f0a020;
+  --vox-accent-danger: #f04050;
+  --vox-accent-info: #38a0ff;
+
+  --vox-border: #1a1a30;
+
+  --vox-voice-connected: #30d070;
+  --vox-voice-speaking: #30d070;
+  --vox-voice-muted: #f04050;
+
+  --vox-scrollbar-thumb: #1a1a30;
+  --vox-scrollbar-thumb-hover: #282848;
+  --vox-selection-bg: rgba(32, 144, 255, 0.3);
+  --vox-selection-text: #e8eaf0;
+}
