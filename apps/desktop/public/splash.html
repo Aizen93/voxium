@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+      overflow: hidden;
+    }
+    .logo {
+      width: 56px;
+      height: 56px;
+      margin-bottom: 16px;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .name {
+      font-size: 18px;
+      font-weight: 600;
+      color: #e4e6eb;
+      letter-spacing: -0.3px;
+      margin-bottom: 24px;
+    }
+    .bar-track {
+      width: 160px;
+      height: 3px;
+      background: rgba(91, 91, 247, 0.15);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      width: 40%;
+      height: 100%;
+      background: #5b5bf7;
+      border-radius: 2px;
+      animation: slide 1.2s ease-in-out infinite;
+    }
+    @keyframes slide {
+      0% { transform: translateX(-100%); }
+      50% { transform: translateX(200%); }
+      100% { transform: translateX(-100%); }
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+  </style>
+</head>
+<body>
+  <img src="/logo.svg" alt="Voxium" class="logo" />
+  <div class="name">Voxium</div>
+  <div class="bar-track">
+    <div class="bar-fill"></div>
+  </div>
+</body>
+</html>

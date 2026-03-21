@@ -87,7 +87,7 @@ async function main() {
     stopAttachmentCleanup();
     server.close();
     // Clean up presence so users don't appear online after shutdown
-    await clearPresenceState(prisma).catch(() => {});
+    await clearPresenceState(prisma).catch((err) => console.warn('[Shutdown] Presence cleanup failed:', err));
     await prisma.$disconnect();
     process.exit(0);
   };

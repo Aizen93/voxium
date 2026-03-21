@@ -12,15 +12,31 @@
   "app": {
     "windows": [
       {
+        "label": "splash",
+        "title": "Voxium",
+        "url": "splash.html",
+        "width": 360,
+        "height": 240,
+        "resizable": false,
+        "decorations": false,
+        "transparent": false,
+        "center": true,
+        "alwaysOnTop": true,
+        "backgroundColor": "#1a1a2e"
+      },
+      {
+        "label": "main",
         "title": "Voxium",
         "width": 1280,
         "height": 800,
         "minWidth": 940,
         "minHeight": 560,
         "resizable": true,
-        "decorations": true,
+        "visible": false,
+        "decorations": false,
         "transparent": false,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "backgroundColor": "#1a1a2e"
       }
     ],
     "security": {

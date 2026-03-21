@@ -128,7 +128,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
       where: { userId_ip: { userId: user.id, ip } },
       update: { lastSeenAt: new Date(), ...geoFields },
       create: { userId: user.id, ip, ...geoFields },
-    }).catch(() => {}); // Non-critical
+    }).catch((err) => console.warn('[Auth] IP record upsert failed:', err));
   }
 
   // If TOTP is enabled, check for trusted device token

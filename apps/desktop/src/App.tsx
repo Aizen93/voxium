@@ -16,6 +16,7 @@ import { MainLayout } from './components/layout/MainLayout';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { ToastContainer } from './components/layout/ToastContainer';
 import { UpdateChecker } from './components/updater/UpdateChecker';
+import { TitleBar } from './components/layout/TitleBar';
 
 const isTauri = '__TAURI_INTERNALS__' in window;
 
@@ -56,12 +57,19 @@ export function App({ onReady }: { onReady?: () => void }) {
   }, [isLoading, onReady]);
 
   if (isLoading) {
-    // Splash screen is still visible — render nothing to avoid double spinner
-    return null;
+    // Show title bar during loading so the frameless window can still be moved/closed
+    return (
+      <div className="flex h-screen flex-col overflow-hidden bg-vox-bg-primary">
+        <TitleBar />
+        <div className="flex-1" />
+      </div>
+    );
   }
 
   return (
-    <>
+    <div className="flex h-screen flex-col overflow-hidden">
+      <TitleBar />
+      <div className="flex-1 overflow-hidden">
       <ErrorBoundary>
         <Routes>
           <Route
@@ -118,8 +126,9 @@ export function App({ onReady }: { onReady?: () => void }) {
           />
         </Routes>
       </ErrorBoundary>
+      </div>
       <ToastContainer />
       <UpdateChecker />
-    </>
+    </div>
   );
 }

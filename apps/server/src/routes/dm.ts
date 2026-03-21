@@ -397,7 +397,7 @@ dmRouter.delete('/:conversationId/messages/:messageId', rateLimitGeneral, async 
 
     // Fire-and-forget S3 cleanup
     if (message.attachments.length > 0) {
-      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch(() => {});
+      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete DM attachments:', err));
     }
 
     getIO().to(`dm:${conversationId}`).emit('dm:message:delete', { messageId, conversationId });
@@ -484,7 +484,7 @@ dmRouter.delete('/:conversationId', rateLimitGeneral, async (req: Request<{ conv
 
     // Fire-and-forget S3 cleanup
     if (attachments.length > 0) {
-      deleteMultipleFromS3(attachments.map((a) => a.s3Key)).catch(() => {});
+      deleteMultipleFromS3(attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete DM conversation attachments:', err));
     }
 
     // Notify the other participant

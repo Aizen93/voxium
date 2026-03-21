@@ -153,8 +153,8 @@ export function DMList() {
                     {conv.participant.displayName}
                   </span>
                   {(conv.participant.role === 'admin' || conv.participant.role === 'superadmin') && <StaffBadge />}
-                  {conv.participant.isSupporter && <SupporterBadge tier={conv.participant.supporterTier} />}
                 </div>
+                {conv.participant.isSupporter && <SupporterBadge tier={conv.participant.supporterTier} />}
                 {conv.lastMessage && (
                   <p className="truncate text-[11px] text-vox-text-muted">
                     {conv.lastMessage.content}

@@ -976,9 +976,9 @@ export function SettingsModal() {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in">
       <div className="absolute inset-0 bg-black/60" onClick={closeSettings} />
-      <div className="relative flex w-full max-w-2xl rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up" style={{ maxHeight: '85vh' }}>
+      <div className="relative flex w-full max-w-4xl rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up" style={{ maxHeight: '85vh' }}>
         {/* Left sidebar nav */}
-        <div className="w-40 shrink-0 border-r border-vox-border p-3">
+        <div className="w-48 shrink-0 border-r border-vox-border p-4">
           <h2 className="mb-3 px-2 text-xs font-bold uppercase tracking-wide text-vox-text-muted">Settings</h2>
           {tabs.map((tab) => (
             <button

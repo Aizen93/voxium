@@ -37,23 +37,27 @@ export function VoicePanel() {
   return (
     <div data-testid="voice-panel" className="border-t border-vox-border bg-vox-sidebar">
       {/* Connection info row */}
-      <div className="flex items-center gap-2 px-3 py-2">
-        <ConnectionQuality latency={latency} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <p className="text-xs font-semibold text-vox-voice-connected">
-              Voice Connected
-            </p>
-            {latency !== null && (
-              <span className={clsx('text-[10px] font-medium', latencyColor)}>
-                {latency}ms
-              </span>
-            )}
-          </div>
-          <p className="truncate text-[10px] text-vox-text-muted">
+      <div className="px-3 py-2">
+        <div className="flex items-center gap-1.5">
+          <ConnectionQuality latency={latency} />
+          <p className="text-xs font-semibold text-vox-voice-connected">
+            Voice Connected
+          </p>
+          {latency !== null && (
+            <span className={clsx('text-[10px] font-medium', latencyColor)}>
+              {latency}ms
+            </span>
+          )}
+        </div>
+        <div className="min-w-0">
+          <button
+            onClick={() => { if (activeVoiceServerId) useServerStore.getState().setActiveServer(activeVoiceServerId).catch((err) => console.warn('[VoicePanel] Failed to navigate to voice server:', err)); }}
+            className="truncate text-[10px] text-vox-text-muted hover:text-vox-text-primary transition-colors text-left"
+            title="Go to voice channel"
+          >
             {voiceServer?.name ? `${voiceServer.name} / ` : ''}{channel?.name || 'Voice Channel'}
             <span className="ml-1 text-vox-text-muted/60">({users.length})</span>
-          </p>
+          </button>
         </div>
       </div>
 

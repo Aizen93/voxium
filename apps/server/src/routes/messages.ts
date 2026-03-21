@@ -407,7 +407,7 @@ messageRouter.delete('/:messageId', rateLimitGeneral, async (req: Request<{ chan
 
     // Fire-and-forget S3 cleanup
     if (message.attachments.length > 0) {
-      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch(() => {});
+      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete attachments on message delete:', err));
     }
 
     getIO().to(`channel:${message.channelId!}`).emit('message:delete', {

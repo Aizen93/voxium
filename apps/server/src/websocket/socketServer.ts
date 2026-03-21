@@ -318,7 +318,7 @@ export function initSocketServer(httpServer: HttpServer) {
           where: { userId_ip: { userId, ip: connectIp } },
           update: { lastSeenAt: new Date() },
           create: { userId, ip: connectIp },
-        }).catch(() => {}); // Non-critical
+        }).catch((err) => console.warn('[WS] IP record upsert failed:', err));
       }
 
       // Join rooms for all servers the user is a member of

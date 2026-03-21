@@ -167,7 +167,6 @@ function MemberGroupSection({
                     member.user.status === 'offline' ? 'text-vox-text-muted' : 'text-vox-text-primary'
                   )}
                   style={
-                    // Color the name by highest role color
                     member.roles?.length
                       ? { color: [...member.roles].sort((a, b) => b.position - a.position)[0]?.color || undefined }
                       : undefined
@@ -176,8 +175,8 @@ function MemberGroupSection({
                   {member.nickname || member.user.displayName}
                 </p>
                 {(member.user.role === 'admin' || member.user.role === 'superadmin') && <StaffBadge />}
-                {member.user.isSupporter && <SupporterBadge tier={member.user.supporterTier} />}
               </div>
+              {member.user.isSupporter && <SupporterBadge tier={member.user.supporterTier} />}
             </div>
           </button>
         </UserHoverTarget>

@@ -59,7 +59,7 @@ function mirrorVoiceJoin(channelId: string, serverId: string, userId: string, se
     .set(`voice:channel:node:${channelId}`, NODE_ID())
     .set(`voice:user:${userId}`, channelId)
     .sAdd('voice:active', channelId)
-    .exec().catch(() => {});
+    .exec().catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
 
 function mirrorVoiceLeave(channelId: string, userId: string, channelEmpty: boolean): void {
@@ -75,11 +75,11 @@ function mirrorVoiceLeave(channelId: string, userId: string, channelEmpty: boole
       .sRem('voice:active', channelId)
       .del(`voice:screen:${channelId}`);
   }
-  pipeline.exec().catch(() => {});
+  pipeline.exec().catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
 
 function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false): void {
-  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID() })).catch(() => {});
+  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID() })).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
 
 // ─── Persistent server-mute/deafen (survives reconnect) ─────────────────────
@@ -87,18 +87,18 @@ function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boo
 async function setServerMutePersist(serverId: string, userId: string, muted: boolean): Promise<void> {
   const redis = getRedis();
   if (muted) {
-    await redis.set(`voice:server_muted:${serverId}:${userId}`, '1').catch(() => {});
+    await redis.set(`voice:server_muted:${serverId}:${userId}`, '1').catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   } else {
-    await redis.del(`voice:server_muted:${serverId}:${userId}`).catch(() => {});
+    await redis.del(`voice:server_muted:${serverId}:${userId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   }
 }
 
 async function setServerDeafenPersist(serverId: string, userId: string, deafened: boolean): Promise<void> {
   const redis = getRedis();
   if (deafened) {
-    await redis.set(`voice:server_deafened:${serverId}:${userId}`, '1').catch(() => {});
+    await redis.set(`voice:server_deafened:${serverId}:${userId}`, '1').catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   } else {
-    await redis.del(`voice:server_deafened:${serverId}:${userId}`).catch(() => {});
+    await redis.del(`voice:server_deafened:${serverId}:${userId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   }
 }
 
@@ -114,9 +114,9 @@ async function getPersistedServerMuteDeaf(serverId: string, userId: string): Pro
 function mirrorScreenShare(channelId: string, userId: string | null): void {
   const redis = getRedis();
   if (userId) {
-    redis.set(`voice:screen:${channelId}`, userId).catch(() => {});
+    redis.set(`voice:screen:${channelId}`, userId).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   } else {
-    redis.del(`voice:screen:${channelId}`).catch(() => {});
+    redis.del(`voice:screen:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   }
 }
 
@@ -985,7 +985,7 @@ export function cleanupServerVoice(
         }
 
         // Clean up Redis mirror for this user
-        getRedis().del(`voice:user:${uid}`).catch(() => {});
+        getRedis().del(`voice:user:${uid}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
       }
       voiceChannelUsers.delete(channelId);
     }
@@ -993,11 +993,11 @@ export function cleanupServerVoice(
     channelServerMap.delete(channelId);
     // Clean up Redis mirror for the entire channel
     const redis = getRedis();
-    redis.del(`voice:channel:users:${channelId}`).catch(() => {});
-    redis.del(`voice:channel:server:${channelId}`).catch(() => {});
-    redis.del(`voice:channel:node:${channelId}`).catch(() => {});
-    redis.sRem('voice:active', channelId).catch(() => {});
-    redis.del(`voice:screen:${channelId}`).catch(() => {});
+    redis.del(`voice:channel:users:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+    redis.del(`voice:channel:server:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+    redis.del(`voice:channel:node:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+    redis.sRem('voice:active', channelId).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+    redis.del(`voice:screen:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   }
 
   // Release mediasoup Routers for these channels

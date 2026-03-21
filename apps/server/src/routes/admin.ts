@@ -925,8 +925,13 @@ adminRouter.post('/infra-servers', requireSuperAdmin, async (req: Request, res: 
     if (!country || typeof country !== 'string') throw new BadRequestError('country is required');
     if (!city || typeof city !== 'string') throw new BadRequestError('city is required');
     if (!provider || typeof provider !== 'string') throw new BadRequestError('provider is required');
+    if (name.length > 100) throw new BadRequestError('name must be at most 100 characters');
+    if (country.length > 100) throw new BadRequestError('country must be at most 100 characters');
+    if (city.length > 100) throw new BadRequestError('city must be at most 100 characters');
+    if (provider.length > 100) throw new BadRequestError('provider must be at most 100 characters');
     if (typeof latitude !== 'number' || latitude < -90 || latitude > 90) throw new BadRequestError('latitude must be between -90 and 90');
     if (typeof longitude !== 'number' || longitude < -180 || longitude > 180) throw new BadRequestError('longitude must be between -180 and 180');
+    if (!isFinite(latitude) || !isFinite(longitude)) throw new BadRequestError('latitude and longitude must be finite numbers');
 
     const server = await prisma.infraServer.create({
       data: { name: sanitizeText(name), country: sanitizeText(country), city: sanitizeText(city), provider: sanitizeText(provider), latitude, longitude },
@@ -943,12 +948,12 @@ adminRouter.patch('/infra-servers/:id', requireSuperAdmin, async (req: Request<{
     if (!existing) throw new NotFoundError('Infrastructure server');
 
     const updateData: Record<string, unknown> = {};
-    if (req.body.name !== undefined) { if (typeof req.body.name !== 'string') throw new BadRequestError('name must be a string'); updateData.name = sanitizeText(req.body.name); }
-    if (req.body.country !== undefined) { if (typeof req.body.country !== 'string') throw new BadRequestError('country must be a string'); updateData.country = sanitizeText(req.body.country); }
-    if (req.body.city !== undefined) { if (typeof req.body.city !== 'string') throw new BadRequestError('city must be a string'); updateData.city = sanitizeText(req.body.city); }
-    if (req.body.provider !== undefined) { if (typeof req.body.provider !== 'string') throw new BadRequestError('provider must be a string'); updateData.provider = sanitizeText(req.body.provider); }
-    if (req.body.latitude !== undefined) { if (typeof req.body.latitude !== 'number' || req.body.latitude < -90 || req.body.latitude > 90) throw new BadRequestError('latitude must be between -90 and 90'); updateData.latitude = req.body.latitude; }
-    if (req.body.longitude !== undefined) { if (typeof req.body.longitude !== 'number' || req.body.longitude < -180 || req.body.longitude > 180) throw new BadRequestError('longitude must be between -180 and 180'); updateData.longitude = req.body.longitude; }
+    if (req.body.name !== undefined) { if (typeof req.body.name !== 'string' || req.body.name.length > 100) throw new BadRequestError('name must be a string (max 100 chars)'); updateData.name = sanitizeText(req.body.name); }
+    if (req.body.country !== undefined) { if (typeof req.body.country !== 'string' || req.body.country.length > 100) throw new BadRequestError('country must be a string (max 100 chars)'); updateData.country = sanitizeText(req.body.country); }
+    if (req.body.city !== undefined) { if (typeof req.body.city !== 'string' || req.body.city.length > 100) throw new BadRequestError('city must be a string (max 100 chars)'); updateData.city = sanitizeText(req.body.city); }
+    if (req.body.provider !== undefined) { if (typeof req.body.provider !== 'string' || req.body.provider.length > 100) throw new BadRequestError('provider must be a string (max 100 chars)'); updateData.provider = sanitizeText(req.body.provider); }
+    if (req.body.latitude !== undefined) { if (typeof req.body.latitude !== 'number' || !isFinite(req.body.latitude) || req.body.latitude < -90 || req.body.latitude > 90) throw new BadRequestError('latitude must be a finite number between -90 and 90'); updateData.latitude = req.body.latitude; }
+    if (req.body.longitude !== undefined) { if (typeof req.body.longitude !== 'number' || !isFinite(req.body.longitude) || req.body.longitude < -180 || req.body.longitude > 180) throw new BadRequestError('longitude must be a finite number between -180 and 180'); updateData.longitude = req.body.longitude; }
 
     if (Object.keys(updateData).length === 0) throw new BadRequestError('No fields to update');
 

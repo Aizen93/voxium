@@ -39,7 +39,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className={`relative flex w-full flex-col rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up ${activeTab === 'roles' ? 'max-w-3xl' : 'max-w-lg'}`} style={{ maxHeight: '80vh' }}>
+      <div className={`relative flex w-full flex-col rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up ${activeTab === 'roles' ? 'max-w-4xl' : 'max-w-2xl'}`} style={{ maxHeight: '80vh' }}>
         {/* Header */}
         <div className="flex items-center justify-between border-b border-vox-border px-6 py-4">
           <h2 className="text-lg font-bold text-vox-text-primary">Server Settings</h2>

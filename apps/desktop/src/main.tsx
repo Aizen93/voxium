@@ -17,11 +17,33 @@ window.addEventListener('error', (event) => {
 });
 
 // ─── Remove splash screen after React mounts ────────────────────────────────
-function removeSplash() {
+async function removeSplash() {
+  // Remove inline HTML splash (for browser mode)
   const splash = document.getElementById('splash');
   if (splash) {
     splash.classList.add('hidden');
-    setTimeout(() => splash.remove(), 300); // wait for fade-out transition
+    setTimeout(() => splash.remove(), 300);
+  }
+
+  // In Tauri: show the main window and close the splash window
+  if ('__TAURI_INTERNALS__' in window) {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+
+      // Show main window first
+      const main = getCurrentWindow();
+      await main.show();
+      await main.setFocus();
+
+      // Then close the splash window
+      const splashWin = await WebviewWindow.getByLabel('splash');
+      if (splashWin) {
+        await splashWin.close();
+      }
+    } catch (err) {
+      console.warn('[Splash] Failed to swap windows:', err);
+    }
   }
 }
 

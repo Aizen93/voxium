@@ -237,6 +237,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         await sendMessage(channelId, trimmed, attachments.length ? attachments : undefined);
       }
       setContent('');
+      // Reset textarea height to single row
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
       // Clean up previews
       for (const pf of pendingFiles) {
         if (pf.previewUrl) URL.revokeObjectURL(pf.previewUrl);

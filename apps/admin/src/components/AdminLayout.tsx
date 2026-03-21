@@ -36,15 +36,16 @@ const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashbo
   { id: 'export', label: 'Data Tools', icon: Download },
 ];
 
+const VALID_VIEWS = new Set<string>(NAV_ITEMS.map((n) => n.id));
+
+function getViewFromHash(): AdminView {
+  const hash = window.location.hash.replace('#', '');
+  return VALID_VIEWS.has(hash) ? (hash as AdminView) : 'dashboard';
+}
+
 export function AdminLayout() {
   const { logout, user } = useAuthStore();
   const isSuperAdmin = user?.role === 'superadmin';
-  // Sync view with URL hash so it persists across page reloads
-  const validViews = new Set<string>(NAV_ITEMS.map((n) => n.id));
-  const getViewFromHash = useCallback((): AdminView => {
-    const hash = window.location.hash.replace('#', '');
-    return validViews.has(hash) ? (hash as AdminView) : 'dashboard';
-  }, []);
 
   const [view, setViewState] = useState<AdminView>(getViewFromHash);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
@@ -59,7 +60,7 @@ export function AdminLayout() {
     const onHashChange = () => setViewState(getViewFromHash());
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
-  }, [getViewFromHash]);
+  }, []);
 
   const handleSelectUser = (userId: string) => {
     setSelectedUserId(userId);

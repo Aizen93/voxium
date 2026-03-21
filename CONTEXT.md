@@ -43,6 +43,7 @@ Voxium/
 - Tauri 2 desktop wrapper with native notifications (avatar support: WinRT circular icon on Windows, blob URL icon in browser), auto-update with signed builds via `tauri-plugin-updater`
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
 - **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members; admin UI for global + per-server management; read-only limits tab in server settings
+- Custom frameless title bar with system tray (close-to-tray), splash screen window, infrastructure server management with interactive 3D globe visualization in admin geography dashboard
 
 ## Tech Stack
 
@@ -71,6 +72,8 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **Desktop UX + Admin Globe + Permission Enforcement** (2026-03-21) — Custom frameless title bar, system tray (close-to-tray), splash screen; admin infra server CRUD with cobe v2 globe; permission checks on voice produce/SPEAK, attachment proxy/VIEW_CHANNEL, force-move/CONNECT; input validation hardening on auth and infra routes.
 
 - **Advanced Permission System** (2026-03-19) — Discord-style bitmask roles with 20 permission flags (VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, etc.), role hierarchy enforcement, channel-level permission overrides (allow/deny/inherit tri-state), @everyone default role with restricted defaults, permission calculator (base → roles → channel overrides), VIEW_CHANNEL enforcement on channel list/messages/socket auto-join, voice moderation (server mute/deafen with Redis persistence, cross-channel force-move), per-server nicknames (CHANGE_NICKNAME/MANAGE_NICKNAMES), full CRUD API with role management UI in server settings + channel permission editor + member context menu for voice moderation. 119 permission system tests + 16 additional voice handler tests. Integration test script: `scripts/test-permissions.ts` (73 assertions, 11 phases).
 

@@ -100,7 +100,7 @@ userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFu
 
     // Delete old avatar from S3 after DB update confirmed
     if (avatarUrl !== undefined && oldAvatarUrl && oldAvatarUrl !== avatarUrl) {
-      deleteFromS3(oldAvatarUrl).catch(() => {});
+      deleteFromS3(oldAvatarUrl).catch((err) => console.warn('[S3] Failed to delete old avatar:', err));
     }
 
     // Broadcast profile change to all servers the user is in
