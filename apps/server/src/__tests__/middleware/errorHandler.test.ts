@@ -191,13 +191,12 @@ describe('errorHandler middleware', () => {
   });
 
   it('logs to console.error for non-AppError errors', async () => {
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const error = new Error('Unexpected failure');
     const app = buildApp(error);
 
     await request(app).get('/test');
 
-    expect(consoleSpy).toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalled();
   });
 
   it('handles TypeError (non-operational) as 500', async () => {

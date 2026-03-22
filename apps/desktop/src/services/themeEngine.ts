@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import { THEME_COLOR_KEYS } from '@voxium/shared';
 import type { ThemeColors, ThemePatterns, ThemePattern, CommunityThemeData } from '@voxium/shared';
 import { validateThemeColors, validateThemeName, validateThemePatterns, sanitizeSvg } from '@voxium/shared';
@@ -121,12 +122,10 @@ function generatePatternCSS(pattern: ThemePattern): string | null {
 }
 
 /**
- * Inject fill color and opacity into SVG if not already set.
- * Wraps content in a <g> with the desired fill and opacity.
+ * Wrap SVG inner content in a <g> with the desired fill color and opacity.
+ * This applies the theme's pattern color uniformly to all shapes.
  */
 function injectSvgColorAndOpacity(svg: string, color: string, opacity: number): string {
-  // If the SVG already has fill attributes in the root <g>, leave it alone
-  // Otherwise, wrap the inner content
   return svg.replace(
     /(<svg[^>]*>)([\s\S]*)(<\/svg>)/i,
     (_, open, inner, close) =>
@@ -138,7 +137,7 @@ function injectSvgColorAndOpacity(svg: string, color: string, opacity: number): 
  * Convert a ThemePattern to a React CSSProperties object for inline style use.
  * Used by the MiniPreview to render patterns without touching the document root.
  */
-export function getPatternStyle(pattern: ThemePattern | undefined): React.CSSProperties {
+export function getPatternStyle(pattern: ThemePattern | undefined): CSSProperties {
   if (!pattern || pattern.type === 'none') return {};
   const css = generatePatternCSS(pattern);
   if (!css) return {};
@@ -156,7 +155,7 @@ export function getPatternStyle(pattern: ThemePattern | undefined): React.CSSPro
     const camel = prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
     style[camel] = val;
   }
-  return style as React.CSSProperties;
+  return style as CSSProperties;
 }
 
 /**

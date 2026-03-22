@@ -31,12 +31,15 @@ vi.mock('../middleware/errorHandler', () => ({
   },
 }));
 
-// Mock rate limiter (app.ts imports rateLimitGeneral)
-vi.mock('../middleware/rateLimiter', () => {
+// Mock rate limiter (app.ts imports rateLimitGeneral + route-specific limiters)
+vi.mock('../middleware/rateLimiter', async (importOriginal) => {
+  const original = await importOriginal<Record<string, unknown>>();
   const passthrough = (_req: unknown, _res: unknown, next: () => void) => next();
-  return {
-    rateLimitGeneral: passthrough,
-  };
+  const mocked: Record<string, unknown> = {};
+  for (const key of Object.keys(original)) {
+    mocked[key] = key === 'socketRateLimit' ? vi.fn().mockReturnValue(true) : passthrough;
+  }
+  return mocked;
 });
 
 // Mock prisma and redis used by health check (dynamic imports in app.ts)
