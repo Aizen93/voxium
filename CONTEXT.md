@@ -44,6 +44,7 @@ Voxium/
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
 - **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members; admin UI for global + per-server management; read-only limits tab in server settings
 - Custom frameless title bar with system tray (close-to-tray), splash screen window, infrastructure server management with interactive 3D globe visualization in admin geography dashboard
+- **Community themes** — create, publish, browse, install/uninstall themes with live preview editor, JSON import/export, marketplace with search/sort/tag filtering, admin moderation (remove)
 
 ## Tech Stack
 
@@ -72,6 +73,10 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **Community Themes Review** (2026-03-21) -- Review found: patterns dropped on install (BUG), patterns not restored after preview (BUG), version not bumped for pattern-only changes, search missing debounce, empty catch blocks; see CONTEXT_CHANGELOG.md for full findings.
+
+- **Community Themes** (2026-03-21) -- Theme creation, marketplace browsing, JSON import/export, live preview editor, install/uninstall tracking; backend CRUD + admin moderation + 49 tests.
 
 - **Desktop UX + Admin Globe + Permission Enforcement** (2026-03-21) — Custom frameless title bar, system tray (close-to-tray), splash screen; admin infra server CRUD with cobe v2 globe; permission checks on voice produce/SPEAK, attachment proxy/VIEW_CHANNEL, force-move/CONNECT; input validation hardening on auth and infra routes.
 

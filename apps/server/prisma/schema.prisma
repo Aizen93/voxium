@@ -57,6 +57,7 @@ model User {
   supportTickets        SupportTicket[]  @relation("SupportTicketUser")
   supportTicketsClaimed SupportTicket[]  @relation("SupportTicketClaimer")
   supportMessages       SupportMessage[] @relation("SupportMessageAuthor")
+  communityThemes       CommunityTheme[]
 
   @@map("users")
 }
@@ -471,6 +472,31 @@ model Report {
   @@index([status])
   @@index([createdAt])
   @@map("reports")
+}
+
+// ─── Community Themes ────────────────────────────────────────────────────────
+
+model CommunityTheme {
+  id            String   @id @default(cuid())
+  name          String
+  description   String   @default("")
+  tags          String[] @default([])
+  colors        Json
+  patterns      Json?
+  version       Int      @default(1)
+  status        String   @default("draft") // "draft" | "published" | "removed"
+  installCount  Int      @default(0) @map("install_count")
+  authorId      String   @map("author_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@unique([authorId, name])
+  @@index([status, installCount])
+  @@index([status, createdAt])
+  @@index([authorId])
+  @@map("community_themes")
 }
 
 // ─── Support Tickets ─────────────────────────────────────────────────────────

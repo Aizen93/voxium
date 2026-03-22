@@ -5,6 +5,7 @@ build/
 .env
 .env.local
 .env.*.local
+.mcp.json
 *.log
 .DS_Store
 Thumbs.db

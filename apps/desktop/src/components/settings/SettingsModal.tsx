@@ -3,10 +3,14 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio, Palette } from 'lucide-react';
+import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio, Palette, Plus, Globe, Upload, Pencil, Trash2 } from 'lucide-react';
 import { THEMES } from '../../stores/settingsStore';
-import type { VoiceQuality } from '../../stores/settingsStore';
+import type { VoiceQuality, ThemeId } from '../../stores/settingsStore';
 import { LIMITS } from '@voxium/shared';
+import { importTheme } from '../../services/themeEngine';
+import { ThemeEditor } from './ThemeEditor';
+import { ThemeBrowser } from './ThemeBrowser';
+import { api } from '../../services/api';
 import axios from 'axios';
 
 interface DeviceInfo {
@@ -597,12 +601,85 @@ function SecurityTab() {
 // ─── Audio Tab ────────────────────────────────────────────────────────────────
 
 function AppearanceTab() {
-  const { theme, setTheme } = useSettingsStore();
+  const { theme, setTheme, customThemes, deleteLocalTheme, setThemeRemoteId } = useSettingsStore();
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [editingTheme, setEditingTheme] = useState<{ localId: string; data: import('@voxium/shared').CommunityThemeData } | undefined>();
+  const [publishing, setPublishing] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const data = await importTheme(file);
+      setEditingTheme({ localId: '', data });
+      setEditorOpen(true);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to import theme');
+    }
+    // Reset input so same file can be re-selected
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, []);
+
+  const handleEdit = useCallback((localId: string) => {
+    const ct = customThemes.find((t) => t.localId === localId);
+    if (!ct) return;
+    setEditingTheme({ localId, data: ct.data });
+    setEditorOpen(true);
+  }, [customThemes]);
+
+  const handleDelete = useCallback((localId: string) => {
+    deleteLocalTheme(localId);
+    toast.success('Theme deleted');
+  }, [deleteLocalTheme]);
+
+  const handlePublish = useCallback(async (localId: string) => {
+    const ct = customThemes.find((t) => t.localId === localId);
+    if (!ct) return;
+    setPublishing(localId);
+    try {
+      if (ct.remoteId) {
+        await api.post(`/themes/${ct.remoteId}/publish`);
+      } else {
+        const createRes = await api.post('/themes', {
+          name: ct.data.name,
+          description: ct.data.description,
+          tags: ct.data.tags,
+          colors: ct.data.colors,
+          patterns: ct.data.patterns,
+        });
+        const remoteId = createRes.data.data.id;
+        setThemeRemoteId(localId, remoteId);
+        await api.post(`/themes/${remoteId}/publish`);
+      }
+      toast.success('Theme published to marketplace');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to publish theme' : 'Failed to publish theme');
+    } finally {
+      setPublishing(null);
+    }
+  }, [customThemes, setThemeRemoteId]);
+
+  const handleUnpublish = useCallback(async (localId: string) => {
+    const ct = customThemes.find((t) => t.localId === localId);
+    if (!ct?.remoteId) return;
+    setPublishing(localId);
+    try {
+      await api.post(`/themes/${ct.remoteId}/unpublish`);
+      toast.success('Theme unpublished from marketplace');
+    } catch (err) {
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to unpublish' : 'Failed to unpublish');
+    } finally {
+      setPublishing(null);
+    }
+  }, [customThemes]);
 
   return (
     <div className="space-y-6">
+      {/* Built-in Themes */}
       <div>
-        <h3 className="text-sm font-semibold text-vox-text-primary mb-1">Theme</h3>
+        <h3 className="text-sm font-semibold text-vox-text-primary mb-1">Built-in Themes</h3>
         <p className="text-xs text-vox-text-muted mb-3">Choose how Voxium looks to you</p>
         <div className="flex gap-3">
           {THEMES.map((t) => (
@@ -616,7 +693,6 @@ function AppearanceTab() {
               }`}
               style={{ width: 120 }}
             >
-              {/* Theme preview */}
               {(() => {
                 const p: Record<string, { bg: string; sidebar: string; channel: string; line: string; accent?: string }> = {
                   dark:     { bg: '#1a1a2e', sidebar: '#12122a', channel: '#151530', line: '#2a2a4a' },
@@ -633,18 +709,11 @@ function AppearanceTab() {
                       <div className="h-1.5 w-3/4 rounded-full" style={{ background: c.line }} />
                       <div className="h-1.5 w-1/2 rounded-full" style={{ background: c.line }} />
                     </div>
-                    {/* Tactical theme: diagonal hazard stripes accent */}
                     {c.accent && (
                       <div
                         className="absolute bottom-0 left-0 right-0 h-1"
                         style={{
-                          background: `repeating-linear-gradient(
-                            -45deg,
-                            ${c.accent},
-                            ${c.accent} 3px,
-                            transparent 3px,
-                            transparent 6px
-                          )`,
+                          background: `repeating-linear-gradient(-45deg, ${c.accent}, ${c.accent} 3px, transparent 3px, transparent 6px)`,
                           opacity: 0.6,
                         }}
                       />
@@ -665,11 +734,141 @@ function AppearanceTab() {
         </div>
       </div>
 
-      <div className="rounded-lg border border-vox-border bg-vox-bg-secondary/50 p-4">
-        <p className="text-xs text-vox-text-muted">
-          More themes coming soon — including community-created custom themes.
-        </p>
+      {/* Custom Themes */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-sm font-semibold text-vox-text-primary">Custom Themes</h3>
+            <p className="text-xs text-vox-text-muted mt-0.5">Create, import, or browse community themes</p>
+          </div>
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex gap-2 mb-3">
+          <button
+            onClick={() => { setEditingTheme(undefined); setEditorOpen(true); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white transition-colors bg-vox-accent-primary hover:bg-vox-accent-hover"
+          >
+            <Plus size={13} /> Create Theme
+          </button>
+          <button
+            onClick={() => setBrowserOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-vox-border text-vox-text-secondary hover:border-vox-text-muted transition-colors"
+          >
+            <Globe size={13} /> Browse Marketplace
+          </button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-vox-border text-vox-text-secondary hover:border-vox-text-muted transition-colors"
+          >
+            <Upload size={13} /> Import JSON
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,.voxtheme.json"
+            onChange={handleImport}
+            className="hidden"
+          />
+        </div>
+
+        {/* Installed custom themes grid */}
+        {customThemes.length > 0 ? (
+          <div className="grid grid-cols-2 gap-2">
+            {customThemes.map((ct) => {
+              const isActive = theme === (`custom:${ct.localId}` as ThemeId);
+              const c = ct.data.colors;
+              return (
+                <div
+                  key={ct.localId}
+                  className={`relative flex items-center gap-3 rounded-lg border-2 p-2.5 transition-colors cursor-pointer ${
+                    isActive
+                      ? 'border-vox-accent-primary bg-vox-accent-primary/10'
+                      : 'border-vox-border hover:border-vox-text-muted'
+                  }`}
+                  onClick={() => setTheme(`custom:${ct.localId}`)}
+                >
+                  {/* Mini color preview */}
+                  <div className="w-14 h-10 rounded-md overflow-hidden flex shrink-0" style={{ border: `1px solid ${c.border}` }}>
+                    <div className="w-1/3 h-full" style={{ background: c.sidebar }} />
+                    <div className="w-1/3 h-full" style={{ background: c.channel }} />
+                    <div className="flex-1 h-full" style={{ background: c.chat }} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-vox-text-primary truncate">{ct.data.name}</p>
+                    <p className="text-[10px] text-vox-text-muted">
+                      {ct.source === 'installed' ? 'Installed' : ct.remoteId ? 'Published' : 'Local'}
+                    </p>
+                  </div>
+                  {/* Actions */}
+                  <div className="flex gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    {ct.source === 'created' && (
+                      ct.remoteId ? (
+                        <button
+                          onClick={() => handleUnpublish(ct.localId)}
+                          disabled={publishing === ct.localId}
+                          className="px-1.5 py-0.5 rounded text-[9px] font-medium border border-vox-border text-vox-text-muted hover:text-vox-accent-danger hover:border-vox-accent-danger transition-colors"
+                          title="Unpublish from marketplace"
+                        >
+                          {publishing === ct.localId ? '...' : 'Unpublish'}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handlePublish(ct.localId)}
+                          disabled={publishing === ct.localId}
+                          className="px-1.5 py-0.5 rounded text-[9px] font-medium border border-vox-accent-primary text-vox-accent-primary hover:bg-vox-accent-primary/10 transition-colors"
+                          title="Publish to marketplace"
+                        >
+                          {publishing === ct.localId ? '...' : 'Publish'}
+                        </button>
+                      )
+                    )}
+                    <button
+                      onClick={() => handleEdit(ct.localId)}
+                      className="p-1 rounded text-vox-text-muted hover:text-vox-text-primary transition-colors"
+                      title="Edit"
+                    >
+                      <Pencil size={12} />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(ct.localId)}
+                      className="p-1 rounded text-vox-text-muted hover:text-vox-accent-danger transition-colors"
+                      title="Delete"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                  {isActive && (
+                    <div className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-vox-accent-primary flex items-center justify-center">
+                      <Check size={12} className="text-white" />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="rounded-lg border border-vox-border bg-vox-bg-secondary/50 p-4 text-center">
+            <p className="text-xs text-vox-text-muted">
+              No custom themes yet. Create one, browse the marketplace, or import a JSON file.
+            </p>
+          </div>
+        )}
       </div>
+
+      {/* Theme Editor Modal */}
+      {editorOpen && (
+        <ThemeEditor
+          onClose={() => { setEditorOpen(false); setEditingTheme(undefined); }}
+          editTheme={editingTheme && editingTheme.localId ? editingTheme : undefined}
+          initialData={editingTheme && !editingTheme.localId ? editingTheme.data : undefined}
+        />
+      )}
+
+      {/* Theme Browser Modal */}
+      {browserOpen && (
+        <ThemeBrowser onClose={() => setBrowserOpen(false)} />
+      )}
     </div>
   );
 }
@@ -1054,7 +1253,7 @@ export function SettingsModal() {
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in">
+    <div id="vox-settings-modal" className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in">
       <div className="absolute inset-0 bg-black/60" onClick={closeSettings} />
       <div className="relative flex w-full max-w-4xl rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up" style={{ maxHeight: '85vh' }}>
         {/* Left sidebar nav */}

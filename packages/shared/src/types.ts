@@ -340,6 +340,10 @@ export interface ServerToClientEvents {
   'support:message:new': (message: SupportMessageData) => void;
   'support:status_change': (data: { ticketId: string; status: SupportTicketStatus; claimedById?: string; claimedByUsername?: string }) => void;
   'support:ticket:new': (data: { total: number }) => void;
+  // Community Themes
+  'theme:published': (theme: CommunityTheme) => void;
+  'theme:updated': (theme: CommunityTheme) => void;
+  'theme:removed': (data: { themeId: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -684,6 +688,43 @@ export interface SupportMessageData {
     avatarUrl: string | null;
     role: UserRole;
   };
+}
+
+// ─── Community Themes ────────────────────────────────────────────────────────
+
+export type ThemeColors = Record<import('./constants.js').ThemeColorKey, string>;
+
+export type ThemeStatus = 'draft' | 'published' | 'removed';
+
+export interface ThemePattern {
+  type: import('./constants.js').ThemePatternType;
+  color: string;
+  opacity: number;
+  size?: number;
+  angle?: number;
+  svgData?: string;
+}
+
+export type ThemePatterns = Partial<Record<import('./constants.js').ThemePatternArea, ThemePattern>>;
+
+export interface CommunityThemeData {
+  name: string;
+  description: string;
+  tags: string[];
+  colors: ThemeColors;
+  patterns?: ThemePatterns;
+  version: number;
+}
+
+export interface CommunityTheme extends CommunityThemeData {
+  id: string;
+  authorId: string;
+  authorUsername: string;
+  authorDisplayName: string;
+  status: ThemeStatus;
+  installCount: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ import { statsRouter } from './routes/stats';
 import { adminRouter } from './routes/admin';
 import { supportRouter } from './routes/support';
 import { roleRouter } from './routes/roles';
+import { themeRouter } from './routes/themes';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 
@@ -180,6 +181,7 @@ api.use('/reports', reportsRouter);
 api.use('/stats', statsRouter);
 api.use('/admin', adminRouter);
 api.use('/support', supportRouter);
+api.use('/themes', themeRouter);
 
 app.use('/api/v1', api);
 

@@ -39,6 +39,8 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   markRead:       { keyPrefix: 'rl:markread',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Mark Read' },
   roleManage:     { keyPrefix: 'rl:role',      points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Role Manage' },
   general:        { keyPrefix: 'rl:general',   points: 100, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'General' },
+  themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
+  themeBrowse:    { keyPrefix: 'rl:themebr',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Browse' },
 };
 
 // Overrides loaded from Redis on init, updated via admin API
@@ -212,6 +214,8 @@ export const rateLimitResendVerification = createMiddleware('resendVerification'
 export const rateLimitMarkRead = createMiddleware('markRead', byUserId);
 export const rateLimitRoleManage = createMiddleware('roleManage', byUserId);
 export const rateLimitGeneral = createMiddleware('general', byIp);
+export const rateLimitThemeManage = createMiddleware('themeManage', byUserId);
+export const rateLimitThemeBrowse = createMiddleware('themeBrowse', byUserId);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────
 
