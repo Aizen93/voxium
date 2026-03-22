@@ -60,6 +60,7 @@ RUN mkdir -p node_modules/@voxium && \
 
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/apps/server/dist apps/server/dist
+COPY --from=build /app/apps/server/src/generated/prisma apps/server/src/generated/prisma
 COPY --from=build /app/apps/server/prisma apps/server/prisma
 # Prisma 7: config file needed for migrate deploy at runtime
 COPY --from=build /app/apps/server/prisma.config.ts apps/server/prisma.config.ts

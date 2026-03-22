@@ -61,7 +61,7 @@ export function applyCustomPatterns(patterns: ThemePatterns | undefined): void {
 }
 
 /** Remove the injected pattern <style> tag. */
-export function clearCustomPatterns(): void {
+function clearCustomPatterns(): void {
   const existing = document.getElementById(PATTERN_STYLE_ID);
   if (existing) existing.remove();
 }

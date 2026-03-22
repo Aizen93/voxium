@@ -7,8 +7,10 @@ import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStat
 // Untyped socket interface for admin-specific events not in the shared event maps
 interface AdminSocket {
   emit(ev: string, ...args: unknown[]): void;
-  on(ev: string, fn: (...args: never[]) => void): void;
-  off(ev: string, fn: (...args: never[]) => void): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on(ev: string, fn: (...args: any[]) => void): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  off(ev: string, fn: (...args: any[]) => void): void;
 }
 
 // Module-level refs for metrics subscription cleanup

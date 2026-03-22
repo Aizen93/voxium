@@ -96,6 +96,7 @@ export function TitleBar() {
           onClick={handleMinimize}
           className="flex h-full w-11 items-center justify-center text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
           tabIndex={-1}
+          aria-label="Minimize"
         >
           <Minus size={14} />
         </button>
@@ -103,6 +104,7 @@ export function TitleBar() {
           onClick={handleMaximize}
           className="flex h-full w-11 items-center justify-center text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
           tabIndex={-1}
+          aria-label={maximized ? 'Restore' : 'Maximize'}
         >
           {maximized ? <Square size={12} /> : <Maximize2 size={13} />}
         </button>
@@ -110,6 +112,7 @@ export function TitleBar() {
           onClick={handleClose}
           className="flex h-full w-11 items-center justify-center text-vox-text-muted hover:bg-red-600 hover:text-white transition-colors"
           tabIndex={-1}
+          aria-label="Close"
         >
           <X size={14} />
         </button>

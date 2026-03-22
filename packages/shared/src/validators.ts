@@ -171,7 +171,7 @@ export function sanitizeSvg(raw: string): string | null {
   return result;
 }
 
-export function validateThemePattern(pattern: Record<string, unknown>): string | null {
+function validateThemePattern(pattern: Record<string, unknown>): string | null {
   if (!pattern || typeof pattern !== 'object') return 'Pattern must be an object';
 
   const type = pattern.type;

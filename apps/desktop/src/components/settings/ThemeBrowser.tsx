@@ -93,7 +93,6 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
       const settingsEl = document.getElementById('vox-settings-modal');
       if (settingsEl) settingsEl.style.display = '';
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handlePreview = useCallback((theme: CommunityTheme) => {

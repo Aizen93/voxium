@@ -48,17 +48,6 @@ const COLOR_LABELS: Record<string, string> = {
   'selection-text': 'Text',
 };
 
-const GROUP_ICONS: Record<string, string> = {
-  Backgrounds: 'bg',
-  Layout: 'ly',
-  Text: 'Tx',
-  Accents: 'Ac',
-  Borders: 'Bd',
-  Voice: 'Vc',
-  Scrollbar: 'Sb',
-  Selection: 'Se',
-};
-
 function rgbaToHex(value: string): string {
   if (value.startsWith('#')) return value.slice(0, 7);
   const match = value.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
@@ -285,7 +274,6 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
                 <ColorGroup
                   key={groupName}
                   name={groupName}
-                  icon={GROUP_ICONS[groupName] || '??'}
                   keys={keys as string[]}
                   colors={colors}
                   expanded={expandedGroup === groupName}
@@ -348,7 +336,6 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
 
 function ColorGroup({
   name,
-  icon,
   keys,
   colors,
   expanded,
@@ -356,7 +343,6 @@ function ColorGroup({
   onColorChange,
 }: {
   name: string;
-  icon: string;
   keys: string[];
   colors: ThemeColors;
   expanded: boolean;

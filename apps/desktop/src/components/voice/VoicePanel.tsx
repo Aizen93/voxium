@@ -77,6 +77,7 @@ export function VoicePanel() {
           {/* Mute */}
           <button
             onClick={toggleMute}
+            disabled={isServerMuted}
             className={clsx(
               'rounded-full p-2 transition-colors',
               isServerMuted
@@ -93,6 +94,7 @@ export function VoicePanel() {
           {/* Deafen */}
           <button
             onClick={toggleDeaf}
+            disabled={isServerDeafened}
             className={clsx(
               'rounded-full p-2 transition-colors',
               isServerDeafened

@@ -8,7 +8,7 @@ const STORAGE_KEY = 'voxium_settings';
 type VoiceMode = 'voice_activity' | 'push_to_talk';
 export type VoiceQuality = 'low' | 'medium' | 'high';
 
-export type BuiltInThemeId = (typeof BUILT_IN_THEME_IDS)[number];
+type BuiltInThemeId = (typeof BUILT_IN_THEME_IDS)[number];
 
 /** Theme identifier: built-in ID or 'custom:<localId>' for community themes */
 export type ThemeId = BuiltInThemeId | `custom:${string}`;
@@ -27,7 +27,7 @@ export const VOICE_QUALITY_BITRATE: Record<VoiceQuality, number> = {
   high: 64_000,
 };
 
-export interface LocalCustomTheme {
+interface LocalCustomTheme {
   localId: string;
   remoteId?: string;
   data: CommunityThemeData;
