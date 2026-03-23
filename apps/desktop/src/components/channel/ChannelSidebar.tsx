@@ -5,7 +5,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield } from 'lucide-react';
+import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
 import { ChannelPermissionsEditor } from '../server/ChannelPermissionsEditor';
@@ -15,6 +15,7 @@ import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { toast } from '../../stores/toastStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { clsx } from 'clsx';
 import {
   DndContext,
@@ -665,7 +666,7 @@ export function ChannelSidebar() {
               className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
               title="Server Settings"
             >
-              <ChevronRight size={16} className="rotate-90" />
+              <Settings size={16} />
             </button>
           )}
         </div>
@@ -829,7 +830,9 @@ export function ChannelSidebar() {
 
       {/* User area at bottom */}
       <div className="flex items-center gap-2 border-t border-vox-border bg-vox-sidebar px-2 py-2">
-        <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="sm" />
+        <button onClick={() => useSettingsStore.getState().openSettings()} title="Settings" className="shrink-0 rounded-full hover:opacity-80 transition-opacity">
+          <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="sm" />
+        </button>
         <div className="min-w-0 flex-1">
           <p className="truncate text-xs font-medium text-vox-text-primary">{user?.displayName || 'User'}</p>
           {activeServerId && !editingNickname && (
