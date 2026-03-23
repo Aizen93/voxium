@@ -1,0 +1,9 @@
+# Gitleaks configuration — allowlist for false positives
+
+[allowlist]
+  description = "Allow dummy test keys"
+  paths = [
+    '''__tests__/''',
+    '''\.test\.ts$''',
+    '''\.spec\.ts$''',
+  ]

@@ -125,8 +125,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   const hasPosition = position !== null;
   useEffect(() => {
     if (hasPosition) updatePosition();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPosition]);
+  }, [hasPosition]); // intentionally excludes updatePosition — it calls setPosition which would loop
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
