@@ -34,7 +34,7 @@ vi.mock('@timephy/rnnoise-wasm/NoiseSuppressorWorklet?worker&url', () => ({
   default: 'mock-url',
 }));
 
-vi.mock('./settingsStore', async () => {
+vi.mock('../../stores/settingsStore', async () => {
   const { create } = await import('zustand');
   const store = create(() => ({
     audioInputDeviceId: '',

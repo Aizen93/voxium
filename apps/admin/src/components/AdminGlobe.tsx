@@ -48,20 +48,18 @@ const COUNTRY_CENTROIDS: Record<string, [number, number]> = {
   GF: [4, -53], NC: [-22.3, 166.5], PF: [-17.7, -149.4],
 };
 
-/** Render a country flag via Twemoji CDN (converts country code to regional indicator emoji codepoints) */
+/** Render a country flag as native emoji (no third-party CDN — privacy-first) */
 function CountryFlag({ code, size = 20 }: { code: string; size?: number }) {
-  // Regional indicator codepoints: A=1F1E6, B=1F1E7, etc.
-  const cp1 = (0x1f1e6 + code.toUpperCase().charCodeAt(0) - 65).toString(16);
-  const cp2 = (0x1f1e6 + code.toUpperCase().charCodeAt(1) - 65).toString(16);
+  // Convert country code to regional indicator emoji: "US" → 🇺🇸
+  const flag = code
+    .toUpperCase()
+    .split('')
+    .map((c) => String.fromCodePoint(0x1f1e6 + c.charCodeAt(0) - 65))
+    .join('');
   return (
-    <img
-      src={`https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/svg/${cp1}-${cp2}.svg`}
-      alt={code}
-      width={size}
-      height={size}
-      className="inline-block"
-      loading="lazy"
-    />
+    <span role="img" aria-label={`${code} flag`} style={{ fontSize: size }} className="leading-none">
+      {flag}
+    </span>
   );
 }
 

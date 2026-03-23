@@ -943,7 +943,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
           set({ remoteScreenStream: stream });
 
           consumer.track.onended = () => {
-            set({ remoteScreenStream: null });
+            set({ remoteScreenStream: null, screenSharingUserId: null });
           };
         }
       }
@@ -1006,9 +1006,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       set({ remoteAudios: newAudios });
     }
 
-    // Clear remote screen stream if this producer was the screen sharer
+    // Clear screen share state if this producer was the screen sharer
     if (get().screenSharingUserId === data.producerUserId) {
-      set({ remoteScreenStream: null });
+      set({ remoteScreenStream: null, screenSharingUserId: null });
     }
 
     debugLog('[Voice SFU] Producer closed, consumer removed:', data.consumerId);
@@ -1058,7 +1058,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set((state) => {
       const newMap = new Map(state.channelUsers);
       newMap.set(channelId, users);
-      return { channelUsers: newMap };
+      // If the screen sharer is no longer in the channel, clear the stale reference
+      const sharerGone = state.screenSharingUserId
+        && channelId === state.activeChannelId
+        && !users.some((u) => u.id === state.screenSharingUserId);
+      const screenFix = sharerGone
+        ? { screenSharingUserId: null, remoteScreenStream: null } as const
+        : {};
+      return { channelUsers: newMap, ...screenFix };
     });
     // No peer creation needed — SFU handles media routing via consumers
   },
@@ -1091,7 +1098,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       } else {
         newMap.set(channelId, filtered);
       }
-      return { channelUsers: newMap };
+      // If the departing user was screen sharing, clear the stale reference
+      const screenFix = state.screenSharingUserId === userId
+        ? { screenSharingUserId: null, remoteScreenStream: null } as const
+        : {};
+      return { channelUsers: newMap, ...screenFix };
     });
   },
 
@@ -1369,8 +1380,19 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   startScreenShare: async () => {
     const socket = getSocket();
-    const { activeChannelId, msSendTransport, msDevice } = get();
+    const { activeChannelId, msSendTransport, msDevice, isScreenSharing, screenStream } = get();
     if (!socket || !activeChannelId || !msSendTransport || !msDevice) return;
+
+    // If stale state says we're sharing but the stream is dead, clean up before proceeding
+    if (isScreenSharing) {
+      const alive = screenStream?.getVideoTracks().some((t) => t.readyState === 'live');
+      if (!alive) {
+        // Tell server to clear stale screen share entry before we start a new one
+        get().stopScreenShare();
+      } else {
+        return; // genuinely still sharing
+      }
+    }
 
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -1416,6 +1438,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       });
     } catch (err) {
       console.warn('[Voice] Screen share cancelled or failed:', err);
+      // Ensure state is clean even if getDisplayMedia was cancelled or produce failed mid-way
+      set({ screenStream: null, isScreenSharing: false });
     }
   },
 
@@ -1445,6 +1469,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({
       screenStream: null,
       isScreenSharing: false,
+      screenSharingUserId: null,
     });
   },
 
@@ -1865,19 +1890,17 @@ onSocketReconnect(async () => {
     useVoiceStore.getState().cleanupSFU();
   }
 
-  // Stop screen sharing (stale state)
-  if (useVoiceStore.getState().isScreenSharing) {
-    const { screenStream } = useVoiceStore.getState();
-    if (screenStream) {
-      screenStream.getTracks().forEach((track) => track.stop());
-    }
-    useVoiceStore.setState({
-      screenStream: null,
-      isScreenSharing: false,
-      screenSharingUserId: null,
-      remoteScreenStream: null,
-    });
+  // Clear ALL screen share state on reconnect (both local and remote are stale)
+  const { isScreenSharing, screenStream } = useVoiceStore.getState();
+  if (isScreenSharing && screenStream) {
+    screenStream.getTracks().forEach((track) => track.stop());
   }
+  useVoiceStore.setState({
+    screenStream: null,
+    isScreenSharing: false,
+    screenSharingUserId: null,
+    remoteScreenStream: null,
+  });
 
   // For DM calls, destroy stale P2P peers
   if (dmCallConversationId) {

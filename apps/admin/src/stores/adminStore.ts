@@ -926,8 +926,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     try {
       const { data } = await api.get('/admin/infra-servers');
       set({ infraServers: data.data });
-    } catch {
-      console.error('Failed to fetch infrastructure servers');
+    } catch (err) {
+      console.error('[Admin] Failed to fetch infrastructure servers:', err);
     }
   },
 

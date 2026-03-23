@@ -39,39 +39,29 @@ export function MemberSidebar() {
     const colorMap = new Map<string, string | null>();
 
     for (const m of members) {
-      let groupKey: string;
+      // Compute top role once (used for both grouping and color)
+      let topRoleId: string | null = null;
+      let topRoleColor: string | null = null;
+      let topPosition = -1;
+      if (m.roles?.length) {
+        for (const r of m.roles) {
+          const info = roleInfoMap.get(r.id);
+          if (info && info.position > topPosition) {
+            topPosition = info.position;
+            topRoleId = r.id;
+            topRoleColor = info.color;
+          }
+        }
+        colorMap.set(m.userId, topRoleColor);
+      }
 
+      let groupKey: string;
       if (m.role === 'owner') {
         groupKey = '_owner';
       } else if (m.role === 'admin') {
         groupKey = '_admin';
       } else {
-        let topRoleId: string | null = null;
-        let topPosition = -1;
-        if (m.roles?.length) {
-          for (const r of m.roles) {
-            const info = roleInfoMap.get(r.id);
-            if (info && info.position > topPosition) {
-              topPosition = info.position;
-              topRoleId = r.id;
-            }
-          }
-        }
         groupKey = topRoleId ?? (m.user.status !== 'offline' ? '_online' : '_offline');
-      }
-
-      // Compute top role color
-      if (m.roles?.length) {
-        let bestColor: string | null = null;
-        let bestPos = -1;
-        for (const r of m.roles) {
-          const info = roleInfoMap.get(r.id);
-          if (info && info.position > bestPos) {
-            bestPos = info.position;
-            bestColor = info.color;
-          }
-        }
-        colorMap.set(m.userId, bestColor);
       }
 
       let bucket = buckets.get(groupKey);

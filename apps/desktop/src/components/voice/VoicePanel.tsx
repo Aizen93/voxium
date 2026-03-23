@@ -87,6 +87,7 @@ export function VoicePanel() {
                   : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
             )}
             title={isServerMuted ? 'Muted by moderator' : selfMute ? 'Unmute' : 'Mute'}
+            aria-label={isServerMuted ? 'Muted by moderator' : selfMute ? 'Unmute' : 'Mute'}
           >
             {selfMute || isServerMuted ? <MicOff size={16} /> : <Mic size={16} />}
           </button>
@@ -104,6 +105,7 @@ export function VoicePanel() {
                   : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
             )}
             title={isServerDeafened ? 'Deafened by moderator' : selfDeaf ? 'Undeafen' : 'Deafen'}
+            aria-label={isServerDeafened ? 'Deafened by moderator' : selfDeaf ? 'Undeafen' : 'Deafen'}
           >
             {selfDeaf || isServerDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}
           </button>
@@ -121,6 +123,7 @@ export function VoicePanel() {
                   : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
             )}
             title={isScreenSharing ? 'Stop Sharing' : otherSharing ? 'Someone is already sharing' : 'Share Screen'}
+            aria-label={isScreenSharing ? 'Stop screen share' : otherSharing ? 'Someone is already sharing' : 'Share screen'}
           >
             {isScreenSharing ? <MonitorOff size={16} /> : <Monitor size={16} />}
           </button>
@@ -131,6 +134,7 @@ export function VoicePanel() {
           onClick={leaveChannel}
           className="rounded-full p-2 bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30 transition-colors"
           title="Disconnect"
+          aria-label="Disconnect from voice"
         >
           <PhoneOff size={16} />
         </button>
