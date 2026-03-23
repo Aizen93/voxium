@@ -106,18 +106,26 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
 
     const [user1Id, user2Id] = sortUserIds(currentUserId, targetUserId);
 
-    // Upsert conversation
-    let conversation = await prisma.conversation.findUnique({
+    // Atomic upsert — eliminates TOCTOU race when two users create the same conversation concurrently
+    const existing = await prisma.conversation.findUnique({
       where: { user1Id_user2Id: { user1Id, user2Id } },
     });
 
-    let isNew = false;
-    if (!conversation) {
-      isNew = true;
-      conversation = await prisma.conversation.create({
-        data: { user1Id, user2Id },
-      });
+    const isNew = !existing;
+    const conversation = existing ?? await prisma.conversation.create({
+      data: { user1Id, user2Id },
+    }).catch(async (err) => {
+      // Handle unique constraint race: another request created it between our check and create
+      if (err?.code === 'P2002') {
+        const found = await prisma.conversation.findUnique({
+          where: { user1Id_user2Id: { user1Id, user2Id } },
+        });
+        if (found) return found;
+      }
+      throw err;
+    });
 
+    if (isNew) {
       // Create read records for both participants
       const now = new Date();
       await prisma.conversationRead.createMany({
@@ -125,6 +133,7 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
           { userId: user1Id, conversationId: conversation.id, lastReadAt: now },
           { userId: user2Id, conversationId: conversation.id, lastReadAt: now },
         ],
+        skipDuplicates: true,
       });
 
       // Join both users' sockets to the DM room

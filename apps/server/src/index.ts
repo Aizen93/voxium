@@ -78,6 +78,8 @@ async function main() {
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n[Node ${NODE_ID()}] Voxium server running on http://0.0.0.0:${PORT}\n`);
+    // Signal readiness probe after full initialization (migrations, Redis, mediasoup)
+    import('./app').then(({ markServerReady }) => markServerReady());
   });
 
   // Graceful shutdown

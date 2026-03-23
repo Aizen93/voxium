@@ -29,7 +29,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   const [effectivePerms, setEffectivePerms] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchEffectivePermissions(serverId).then(setEffectivePerms).catch(() => {});
+    fetchEffectivePermissions(serverId).then(setEffectivePerms).catch((err) => { console.warn('[ServerSettings] Failed to fetch permissions:', err); });
   }, [serverId, fetchEffectivePermissions]);
 
   const canManageRoles = isOwner || (effectivePerms !== null && hasPermission(permissionsFromString(effectivePerms), Permissions.MANAGE_ROLES));

@@ -364,7 +364,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // Retry once on failure to prevent stale lastReadAt causing phantom unreads on reconnect
     const url = `/servers/${serverId}/channels/${channelId}/read`;
     api.post(url).catch(() => {
-      setTimeout(() => api.post(url).catch(() => {}), 2000);
+      setTimeout(() => api.post(url).catch((err) => { console.warn('[Server] Mark-read retry failed:', err); }), 2000);
     });
   },
 

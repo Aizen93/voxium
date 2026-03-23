@@ -79,6 +79,7 @@ export function ScreenShareViewer() {
             autoPlay
             playsInline
             muted
+            preload="none"
             className="max-h-full max-w-full object-contain"
           />
         ) : (

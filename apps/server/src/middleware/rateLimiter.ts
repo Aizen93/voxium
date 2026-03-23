@@ -181,7 +181,8 @@ function createMiddleware(
         res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
         return;
       }
-      // Redis error or unexpected — fail open
+      // Redis error or unexpected — fail open but log for visibility
+      console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
       next();
     }
   };

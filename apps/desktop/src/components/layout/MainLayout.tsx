@@ -26,6 +26,7 @@ import { useSupportStore } from '../../stores/supportStore';
 import { SearchModal } from '../search/SearchModal';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
+import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
@@ -266,7 +267,7 @@ export function MainLayout() {
       userUpdated: (data: { userId: string; displayName?: string; avatarUrl?: string | null; role?: string; isSupporter?: boolean; supporterTier?: string | null }) => {
         const { userId, ...fields } = data;
         useServerStore.getState().updateMemberProfile(userId, fields);
-        useChatStore.getState().updateAuthorProfile(userId, fields);
+        useChatStore.getState().updateAuthorProfile(userId, fields as Partial<import('@voxium/shared').MessageAuthor>);
         // Update DM conversation participant badges/profile
         const dmConvs = useDMStore.getState().conversations;
         const updated = dmConvs.map((c) =>
@@ -755,6 +756,7 @@ export function MainLayout() {
       <div className="flex flex-1 min-h-0">
         <ServerSidebar />
         {activeServerId ? <ChannelSidebar /> : <DMList />}
+        <ErrorBoundary inline>
         <div className="flex flex-1 flex-col overflow-hidden">
           {activeServerId ? (
             screenSharingUserId && voiceActiveChannelId ? (
@@ -779,7 +781,8 @@ export function MainLayout() {
             <DMWelcome />
           )}
         </div>
-        {activeServerId && <MemberSidebar />}
+        </ErrorBoundary>
+        {activeServerId && <ErrorBoundary inline><MemberSidebar /></ErrorBoundary>}
         {isSettingsOpen && <SettingsModal />}
         <IncomingCallModal />
         {showGlobalSearch && (() => {

@@ -70,7 +70,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     if (member) return;
     api.get(`/users/${userId}`).then((res) => {
       if (res.data?.data) setFetchedUser(res.data.data);
-    }).catch(() => {});
+    }).catch((err) => { console.warn('[UserProfilePopup] Failed to fetch user:', err); });
   }, [userId, member]);
 
   // Find voice channel this user is in
@@ -119,10 +119,14 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     return () => window.removeEventListener('resize', updatePosition);
   }, [updatePosition]);
 
-  // Re-measure after first render when we have the actual popup height
+  // Re-measure once after first render when we have the actual popup height.
+  // Keyed on boolean transition (null → non-null) to avoid infinite loop
+  // (updatePosition sets position, so position itself can't be a dependency).
+  const hasPosition = position !== null;
   useEffect(() => {
-    if (position) updatePosition();
-  }, [position !== null]);
+    if (hasPosition) updatePosition();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasPosition]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {

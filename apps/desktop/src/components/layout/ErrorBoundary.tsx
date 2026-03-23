@@ -2,6 +2,8 @@ import { Component, type ReactNode } from 'react';
 
 interface Props {
   children: ReactNode;
+  /** If true, renders a compact inline fallback instead of a full-page error. */
+  inline?: boolean;
 }
 
 interface State {
@@ -30,6 +32,21 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
+      // Compact inline fallback for feature-level boundaries
+      if (this.props.inline) {
+        return (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+            <p className="text-sm text-vox-text-secondary">This section encountered an error.</p>
+            <button
+              onClick={this.handleRecover}
+              className="rounded-md bg-vox-bg-hover px-3 py-1.5 text-xs font-medium text-vox-text-primary hover:bg-vox-bg-active transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        );
+      }
+
       return (
         <div className="flex h-full flex-col items-center justify-center bg-vox-bg-primary p-8">
           <div className="flex flex-col items-center gap-4 text-center max-w-md">

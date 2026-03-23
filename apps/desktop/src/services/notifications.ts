@@ -44,8 +44,8 @@ export async function initNotifications(): Promise<void> {
   if ('Notification' in window && Notification.permission === 'default') {
     try {
       await Notification.requestPermission();
-    } catch {
-      // Permission request failed — notifications will be unavailable
+    } catch (err) {
+      console.warn('[Notifications] Permission request failed:', err);
     }
   }
 }

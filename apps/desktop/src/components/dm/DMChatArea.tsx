@@ -77,7 +77,7 @@ export function DMChatArea() {
       if (data.data?.status) {
         useDMStore.getState().updateParticipantStatus(participantId, data.data.status);
       }
-    }).catch(() => {});
+    }).catch((err) => { console.warn('[DMChatArea] Failed to fetch participant status:', err); });
   }, [participantId]);
 
   // Re-join on reconnect

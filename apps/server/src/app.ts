@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
+import crypto from 'crypto';
 import { authRouter } from './routes/auth';
 import { serverRouter } from './routes/servers';
 import { channelRouter } from './routes/channels';
@@ -53,6 +54,7 @@ function getAllowedOrigins(): string[] {
 app.use((req, res, next) => {
   // Defer helmet to request time so env vars are available
   const origins = getAllowedOrigins();
+  const isProd = process.env.NODE_ENV === 'production';
   helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },
     contentSecurityPolicy: {
@@ -63,8 +65,14 @@ app.use((req, res, next) => {
         styleSrc: ["'self'", 'https:', "'unsafe-inline'"],
         fontSrc: ["'self'", 'https:', 'data:'],
         connectSrc: ["'self'", ...origins],
+        frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        // Only upgrade HTTP→HTTPS in production (breaks local HTTP dev)
+        ...(isProd ? { upgradeInsecureRequests: [] } : {}),
       },
     },
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   })(req, res, next);
 });
 
@@ -78,7 +86,17 @@ app.use(cors({
     }
   },
   credentials: true,
+  maxAge: 86400, // Cache preflight responses for 24 hours
 }));
+
+// X-Request-ID for log correlation — must be BEFORE morgan so the ID is available for logging
+app.use((req, res, next) => {
+  const id = (req.headers['x-request-id'] as string) || crypto.randomUUID();
+  req.id = id;
+  res.setHeader('X-Request-ID', id);
+  next();
+});
+
 // Deferred: morgan handler resolved at first request, not at module scope.
 // We create the morgan middleware lazily and invoke it inline (not via app.use())
 // so it stays at the correct position in the middleware stack.
@@ -90,6 +108,7 @@ function getMorganHandler(): express.RequestHandler {
       morgan.token('body-size', (_rq, rs) => rs.getHeader('content-length') as string || '0');
       _morganHandler = morgan((tokens, rq, rs) => JSON.stringify({
         ts: new Date().toISOString(),
+        rid: rq.id,
         method: tokens.method(rq, rs),
         url: tokens.url(rq, rs),
         status: Number(tokens.status(rq, rs)),
@@ -106,12 +125,18 @@ function getMorganHandler(): express.RequestHandler {
 app.use((req, res, next) => {
   getMorganHandler()(req, res, next);
 });
+
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
 // ─── Health Check ────────────────────────────────────────────────────────────
 
+// readyFlag is set once the server has fully started (set from index.ts after listen())
+let _serverReady = false;
+export function markServerReady() { _serverReady = true; }
+
 app.get('/health', async (_req, res) => {
+  const isProd = process.env.NODE_ENV === 'production';
   const checks: Record<string, { status: string; latency?: number; error?: string }> = {};
   let healthy = true;
 
@@ -120,10 +145,10 @@ app.get('/health', async (_req, res) => {
   try {
     const { prisma } = await import('./utils/prisma');
     await prisma.$queryRaw`SELECT 1`;
-    checks.database = { status: 'ok', latency: Date.now() - dbStart };
+    checks.database = { status: 'ok', ...(isProd ? {} : { latency: Date.now() - dbStart }) };
   } catch (err: unknown) {
-    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : (err instanceof Error ? err.message : String(err));
-    checks.database = { status: 'error', latency: Date.now() - dbStart, error: msg };
+    const msg = isProd ? 'connection failed' : (err instanceof Error ? err.message : String(err));
+    checks.database = { status: 'error', error: msg };
     healthy = false;
   }
 
@@ -133,20 +158,24 @@ app.get('/health', async (_req, res) => {
     const { getRedis } = await import('./utils/redis');
     const redis = getRedis();
     await redis.ping();
-    checks.redis = { status: 'ok', latency: Date.now() - redisStart };
+    checks.redis = { status: 'ok', ...(isProd ? {} : { latency: Date.now() - redisStart }) };
   } catch (err: unknown) {
-    const msg = process.env.NODE_ENV === 'production' ? 'connection failed' : (err instanceof Error ? err.message : String(err));
-    checks.redis = { status: 'error', latency: Date.now() - redisStart, error: msg };
+    const msg = isProd ? 'connection failed' : (err instanceof Error ? err.message : String(err));
+    checks.redis = { status: 'error', error: msg };
     healthy = false;
   }
 
   const statusCode = healthy ? 200 : 503;
   res.status(statusCode).json({
     status: healthy ? 'ok' : 'degraded',
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor(process.uptime()),
+    ...(isProd ? {} : { timestamp: new Date().toISOString(), uptime: Math.floor(process.uptime()) }),
     checks,
   });
+});
+
+// Readiness probe — returns 503 until server is fully initialized
+app.get('/ready', (_req, res) => {
+  res.status(_serverReady ? 200 : 503).json({ ready: _serverReady });
 });
 
 // ─── Public Feature Flags (unauthenticated, for landing page) ────────────────

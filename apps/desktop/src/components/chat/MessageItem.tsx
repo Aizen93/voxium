@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, useMemo, memo, type KeyboardEvent } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { toast } from '../../stores/toastStore';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
@@ -35,7 +35,7 @@ function formatMessageTime(dateStr: string) {
   return format(date, 'MM/dd/yyyy h:mm a');
 }
 
-export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId }: Props) {
+export const MessageItem = memo(function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId }: Props) {
   const { editMessage, editDMMessage } = useChatStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -140,11 +140,17 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
 
   // Look up member for nickname and role color (only applies in server context)
   const members = useServerStore((s) => s.members);
-  const authorMember = channelId ? members.find((m) => m.userId === message.author.id) : null;
+  const authorMember = useMemo(
+    () => channelId ? members.find((m) => m.userId === message.author.id) ?? null : null,
+    [members, channelId, message.author.id],
+  );
   const authorDisplayName = authorMember?.nickname || message.author.displayName;
-  const authorRoleColor = authorMember?.roles?.length
-    ? [...authorMember.roles].sort((a, b) => b.position - a.position)[0]?.color ?? null
-    : null;
+  const authorRoleColor = useMemo(
+    () => authorMember?.roles?.length
+      ? [...authorMember.roles].sort((a, b) => b.position - a.position)[0]?.color ?? null
+      : null,
+    [authorMember],
+  );
 
   const handleReply = () => {
     useChatStore.getState().setReplyingTo(message);
@@ -365,4 +371,4 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
       )}
     </>
   );
-}
+});

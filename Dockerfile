@@ -80,4 +80,7 @@ EXPOSE 3001
 EXPOSE 10000-10500/udp
 EXPOSE 10000-10500/tcp
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://localhost:3001/health').then(r=>{if(!r.ok)throw 1})" || exit 1
+
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

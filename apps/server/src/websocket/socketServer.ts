@@ -164,7 +164,8 @@ export function initSocketServer(httpServer: HttpServer) {
         if (!ch) return;
         const canSend = await hasChannelPermission(userId, channelId, ch.serverId, Permissions.SEND_MESSAGES);
         if (!canSend) return;
-      } catch {
+      } catch (err) {
+        console.warn('[Socket] typing:start permission check failed:', err instanceof Error ? err.message : err);
         return;
       }
       socket.to(`channel:${channelId}`).emit('typing:start', {

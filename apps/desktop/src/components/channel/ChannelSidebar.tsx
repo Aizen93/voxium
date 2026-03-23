@@ -195,7 +195,8 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
               <span
                 className={clsx(
                   'text-xs truncate flex-1',
-                  vu.id === currentUserId ? 'font-medium' : ''
+                  vu.id === currentUserId ? 'font-medium' : '',
+                  !roleColor && 'text-vox-text-secondary'
                 )}
                 style={roleColor ? { color: roleColor } : undefined}
               >

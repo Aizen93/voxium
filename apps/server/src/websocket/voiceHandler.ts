@@ -772,7 +772,7 @@ export function handleVoiceEvents(
   // ── voice:signal (kept as no-op for backward compat) ──────────────────
   // No-op: kept for backward compat (SFU replaced P2P). Rate-limited to prevent spam.
   socket.on('voice:signal', () => {
-    socketRateLimit(socket, 'voice:signal', 10);
+    if (!socketRateLimit(socket, 'voice:signal', 10)) return;
   });
 
   // ── Screen sharing ────────────────────────────────────────────────────

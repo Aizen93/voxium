@@ -82,7 +82,7 @@ export function connectSocket(token: string): VoxSocket {
     auth: { token },
     transports: ['polling', 'websocket'],
     reconnection: true,
-    reconnectionAttempts: Infinity,
+    reconnectionAttempts: 50,
     reconnectionDelay: 1000,
     reconnectionDelayMax: 10000,
   });

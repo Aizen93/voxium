@@ -1140,7 +1140,7 @@ export function LandingPage() {
       .then((res) => {
         if (res.success && res.data.community_funding) setShowFunding(true);
       })
-      .catch(() => {});
+      .catch((err) => { console.warn('[Landing] Failed to fetch feature flags:', err); });
   }, []);
 
   return (

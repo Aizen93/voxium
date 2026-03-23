@@ -162,7 +162,7 @@ export const useDMStore = create<DMState>((set, get) => ({
     // Retry once on failure to prevent stale lastReadAt causing phantom unreads on reconnect
     const url = `/dm/${conversationId}/read`;
     api.post(url).catch(() => {
-      setTimeout(() => api.post(url).catch(() => {}), 2000);
+      setTimeout(() => api.post(url).catch((err) => { console.warn('[DM] Mark-read retry failed:', err); }), 2000);
     });
   },
 
