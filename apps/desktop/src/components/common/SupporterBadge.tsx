@@ -1,4 +1,5 @@
 import { Heart, Sparkles, Crown } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { SupporterTier } from '@voxium/shared';
 
 interface Props {
@@ -18,18 +19,22 @@ export function SupporterBadge({ tier }: Props) {
 }
 
 function RegularSupporterBadge() {
+  const { t } = useTranslation();
+
   return (
     <span
       className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[10px] font-semibold bg-pink-500/20 text-pink-400"
-      title="Supporter"
+      title={t('badges.supporter')}
     >
       <Heart size={10} />
-      Supporter
+      {t('badges.supporter')}
     </span>
   );
 }
 
 function FirstSupporterBadge() {
+  const { t } = useTranslation();
+
   return (
     <>
       <style>{`
@@ -57,16 +62,18 @@ function FirstSupporterBadge() {
       `}</style>
       <span
         className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 border border-amber-500/30"
-        title="First Supporter — The very first to believe in Voxium"
+        title={t('badges.firstSupporterTooltip')}
       >
         <Sparkles size={10} className="first-supporter-icon shrink-0" />
-        <span className="first-supporter-badge">First Supporter</span>
+        <span className="first-supporter-badge">{t('badges.firstSupporter')}</span>
       </span>
     </>
   );
 }
 
 function TopSupporterBadge() {
+  const { t } = useTranslation();
+
   return (
     <>
       <style>{`
@@ -94,10 +101,10 @@ function TopSupporterBadge() {
       `}</style>
       <span
         className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 border border-purple-500/30"
-        title="Top Supporter — The most generous supporter of Voxium"
+        title={t('badges.topSupporterTooltip')}
       >
         <Crown size={10} className="top-supporter-icon shrink-0" />
-        <span className="top-supporter-badge">Top Supporter</span>
+        <span className="top-supporter-badge">{t('badges.topSupporter')}</span>
       </span>
     </>
   );

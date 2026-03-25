@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
-import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole } from '@voxium/shared';
+import { toast } from './toastStore';
+import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride } from '@voxium/shared';
 
 interface ServerState {
   servers: Server[];
@@ -10,6 +11,7 @@ interface ServerState {
   categories: Category[];
   activeChannelId: string | null;
   members: ServerMember[];
+  roles: Role[];
   isLoading: boolean;
   unreadCounts: Record<string, number>;
   serverUnreadCounts: Record<string, number>;
@@ -39,12 +41,12 @@ interface ServerState {
   incrementUnread: (channelId: string, serverId: string) => void;
   clearUnread: (channelId: string) => void;
   initUnreadCounts: (unreads: UnreadCount[]) => void;
-  markChannelRead: (channelId: string) => void;
+  markChannelRead: (channelId: string, hintServerId?: string) => void;
   uploadServerIcon: (serverId: string, file: File) => Promise<void>;
   updateServer: (serverId: string, fields: { name?: string }) => Promise<void>;
   updateServerData: (server: Server) => void;
   updateMemberAvatar: (userId: string, avatarUrl: string | null) => void;
-  updateMemberProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => void;
+  updateMemberProfile: (userId: string, fields: Record<string, unknown>) => void;
   reorderCategories: (serverId: string, order: { id: string; position: number }[]) => Promise<void>;
   reorderChannels: (serverId: string, order: { id: string; position: number; categoryId: string | null }[]) => Promise<void>;
   updateMemberRole: (serverId: string, memberId: string, role: MemberRole) => Promise<void>;
@@ -55,7 +57,38 @@ interface ServerState {
   handleMemberRoleUpdated: (serverId: string, userId: string, role: MemberRole) => void;
   handleMemberKicked: (serverId: string) => void;
   handleServerDeleted: (serverId: string) => void;
+
+  // Roles
+  fetchRoles: (serverId: string) => Promise<void>;
+  createRole: (serverId: string, name: string, color?: string, permissions?: string) => Promise<Role>;
+  updateRole: (serverId: string, roleId: string, fields: { name?: string; color?: string | null; permissions?: string }) => Promise<void>;
+  deleteRole: (serverId: string, roleId: string) => Promise<void>;
+  reorderRoles: (serverId: string, order: { id: string; position: number }[]) => Promise<void>;
+  assignMemberRoles: (serverId: string, memberId: string, roleIds: string[]) => Promise<void>;
+  handleRoleCreated: (serverId: string, role: Role) => void;
+  handleRoleUpdated: (serverId: string, role: Role) => void;
+  handleRoleDeleted: (serverId: string, roleId: string) => void;
+  handleRoleReordered: (serverId: string, roles: { id: string; position: number }[]) => void;
+  handleMemberRolesUpdated: (serverId: string, userId: string, roleIds: string[]) => void;
+
+  // Channel permissions
+  fetchChannelPermissions: (serverId: string, channelId: string) => Promise<ChannelPermissionOverride[]>;
+  setChannelPermissionOverride: (serverId: string, channelId: string, roleId: string, allow: string, deny: string) => Promise<void>;
+  deleteChannelPermissionOverride: (serverId: string, channelId: string, roleId: string) => Promise<void>;
+
+  // Permission calculator
+  fetchEffectivePermissions: (serverId: string, channelId?: string) => Promise<string>;
+
+  // Nicknames
+  setNickname: (serverId: string, nickname: string | null) => Promise<void>;
+  setMemberNickname: (serverId: string, memberId: string, nickname: string | null) => Promise<void>;
+  handleNicknameUpdated: (serverId: string, userId: string, nickname: string | null) => void;
 }
+
+// Dedup: prevent redundant mark-as-read API calls when multiple code paths
+// fire within a short window (e.g. setActiveChannel + joinAndFetch on channel switch)
+let _lastMarkedChannel = '';
+let _lastMarkedAt = 0;
 
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
@@ -64,6 +97,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   categories: [],
   activeChannelId: null,
   members: [],
+  roles: [],
   isLoading: false,
   unreadCounts: {},
   serverUnreadCounts: {},
@@ -74,33 +108,56 @@ export const useServerStore = create<ServerState>((set, get) => ({
       set({ servers: data.data });
     } catch (err) {
       console.error('Failed to fetch servers:', err);
+      toast.error('Failed to load servers');
     }
   },
 
   setActiveServer: async (serverId: string) => {
+    // Mark the previous channel as read before switching servers
+    const prevChannelId = get().activeChannelId;
+    if (prevChannelId) {
+      get().markChannelRead(prevChannelId);
+    }
+
     set({ activeServerId: serverId, isLoading: true });
     try {
       const { data } = await api.get(`/servers/${serverId}`);
       const channels = data.data.channels || [];
       const categories = data.data.categories || [];
+      const roles = data.data.roles || [];
       const firstTextChannel = channels.find((c: Channel) => c.type === 'text');
 
       set({
         channels,
         categories,
+        roles,
         activeChannelId: firstTextChannel?.id || null,
         isLoading: false,
       });
+
+      // Clear unread and mark as read for the auto-selected first channel
+      if (firstTextChannel) {
+        get().clearUnread(firstTextChannel.id);
+        get().markChannelRead(firstTextChannel.id);
+      }
 
       // Fetch members in the background
       get().fetchMembers(serverId);
     } catch (err) {
       console.error('Failed to fetch server:', err);
+      toast.error('Failed to load server');
       set({ isLoading: false });
     }
   },
 
   setActiveChannel: (channelId: string) => {
+    const prevChannelId = get().activeChannelId;
+    // No-op if clicking the already-active channel
+    if (prevChannelId === channelId) return;
+    // Mark the previous channel as read (captures messages received while viewing)
+    if (prevChannelId) {
+      get().markChannelRead(prevChannelId);
+    }
     set({ activeChannelId: channelId });
     get().clearUnread(channelId);
     get().markChannelRead(channelId);
@@ -157,7 +214,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
         userId: user.id,
         serverId,
         role: 'member',
+        nickname: null,
         joinedAt: new Date().toISOString(),
+        roles: [],
         user: {
           id: user.id,
           username: user.username,
@@ -246,6 +305,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       set({ members: data.data });
     } catch (err) {
       console.error('Failed to fetch members:', err);
+      toast.error('Failed to load members');
     }
   },
 
@@ -268,7 +328,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // Find which server this channel belongs to
     const channel = get().channels.find((c) => c.id === channelId);
     set((state) => {
-      const { [channelId]: _, ...restUnread } = state.unreadCounts;
+      const restUnread = { ...state.unreadCounts };
+      delete restUnread[channelId];
       const newServerUnread = { ...state.serverUnreadCounts };
       const sid = channel?.serverId || state.activeServerId;
       if (sid && newServerUnread[sid]) {
@@ -289,13 +350,22 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set({ unreadCounts, serverUnreadCounts });
   },
 
-  markChannelRead: (channelId: string) => {
-    // Find the serverId for this channel
+  markChannelRead: (channelId: string, hintServerId?: string) => {
+    // Dedup: skip if same channel was marked within the last 2s (multiple code paths
+    // can trigger this near-simultaneously on channel switch and reconnect)
+    const now = Date.now();
+    if (channelId === _lastMarkedChannel && now - _lastMarkedAt < 2000) return;
+    _lastMarkedChannel = channelId;
+    _lastMarkedAt = now;
+    // Find the serverId for this channel — use hint when channels array may have changed (e.g. after server switch)
     const channel = get().channels.find((c) => c.id === channelId);
-    const serverId = channel?.serverId || get().activeServerId;
+    const serverId = channel?.serverId || hintServerId || get().activeServerId;
     if (!serverId) return;
-    // Fire-and-forget
-    api.post(`/servers/${serverId}/channels/${channelId}/read`).catch(() => {});
+    // Retry once on failure to prevent stale lastReadAt causing phantom unreads on reconnect
+    const url = `/servers/${serverId}/channels/${channelId}/read`;
+    api.post(url).catch(() => {
+      setTimeout(() => api.post(url).catch((err) => { console.warn('[Server] Mark-read retry failed:', err); }), 2000);
+    });
   },
 
   uploadServerIcon: async (serverId: string, file: File) => {
@@ -340,7 +410,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     }));
   },
 
-  updateMemberProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => {
+  updateMemberProfile: (userId: string, fields: Record<string, unknown>) => {
     set((state) => ({
       members: state.members.map((m) =>
         m.userId === userId ? { ...m, user: { ...m.user, ...fields } } : m
@@ -429,7 +499,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
       const isActive = state.activeServerId === serverId;
 
       // Clean up server-level unread count
-      const { [serverId]: _, ...restServerUnread } = state.serverUnreadCounts;
+      const restServerUnread = { ...state.serverUnreadCounts };
+      delete restServerUnread[serverId];
 
       // Clean up channel-level unread counts if this was the active server
       let newUnreadCounts = state.unreadCounts;
@@ -446,10 +517,131 @@ export const useServerStore = create<ServerState>((set, get) => ({
         channels: isActive ? [] : state.channels,
         categories: isActive ? [] : state.categories,
         members: isActive ? [] : state.members,
+        roles: isActive ? [] : state.roles,
         activeChannelId: isActive ? null : state.activeChannelId,
         unreadCounts: newUnreadCounts,
         serverUnreadCounts: restServerUnread,
       };
     });
+  },
+
+  // ─── Roles ──────────────────────────────────────────────────────────────────
+
+  fetchRoles: async (serverId: string) => {
+    try {
+      const { data } = await api.get(`/servers/${serverId}/roles`);
+      set({ roles: data.data });
+    } catch (err) {
+      console.error('Failed to fetch roles:', err);
+    }
+  },
+
+  createRole: async (serverId: string, name: string, color?: string, permissions?: string) => {
+    const { data } = await api.post(`/servers/${serverId}/roles`, { name, color, permissions });
+    return data.data;
+  },
+
+  updateRole: async (serverId: string, roleId: string, fields) => {
+    await api.patch(`/servers/${serverId}/roles/${roleId}`, fields);
+  },
+
+  deleteRole: async (serverId: string, roleId: string) => {
+    await api.delete(`/servers/${serverId}/roles/${roleId}`);
+  },
+
+  reorderRoles: async (serverId: string, order) => {
+    await api.put(`/servers/${serverId}/roles/reorder`, { order });
+  },
+
+  assignMemberRoles: async (serverId: string, memberId: string, roleIds: string[]) => {
+    await api.patch(`/servers/${serverId}/roles/members/${memberId}`, { roleIds });
+  },
+
+  handleRoleCreated: (serverId: string, role: Role) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => {
+      if (state.roles.some((r) => r.id === role.id)) return state;
+      return { roles: [...state.roles, role].sort((a, b) => a.position - b.position) };
+    });
+  },
+
+  handleRoleUpdated: (serverId: string, role: Role) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      roles: state.roles.map((r) => (r.id === role.id ? role : r)),
+    }));
+  },
+
+  handleRoleDeleted: (serverId: string, roleId: string) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      roles: state.roles.filter((r) => r.id !== roleId),
+      // Remove role from members
+      members: state.members.map((m) => ({
+        ...m,
+        roles: m.roles?.filter((r) => r.id !== roleId),
+      })),
+    }));
+  },
+
+  handleRoleReordered: (serverId: string, roles: { id: string; position: number }[]) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      roles: state.roles.map((r) => {
+        const updated = roles.find((u) => u.id === r.id);
+        return updated ? { ...r, position: updated.position } : r;
+      }).sort((a, b) => a.position - b.position),
+    }));
+  },
+
+  handleMemberRolesUpdated: (serverId: string, userId: string, roleIds: string[]) => {
+    if (get().activeServerId !== serverId) return;
+    const allRoles = get().roles;
+    const assignedRoles = allRoles.filter((r) => roleIds.includes(r.id));
+    set((state) => ({
+      members: state.members.map((m) =>
+        m.userId === userId ? { ...m, roles: assignedRoles } : m
+      ),
+    }));
+  },
+
+  // ─── Channel Permissions ──────────────────────────────────────────────────
+
+  fetchChannelPermissions: async (serverId: string, channelId: string) => {
+    const { data } = await api.get(`/servers/${serverId}/roles/channels/${channelId}/permissions`);
+    return data.data;
+  },
+
+  setChannelPermissionOverride: async (serverId: string, channelId: string, roleId: string, allow: string, deny: string) => {
+    await api.put(`/servers/${serverId}/roles/channels/${channelId}/permissions/${roleId}`, { allow, deny });
+  },
+
+  deleteChannelPermissionOverride: async (serverId: string, channelId: string, roleId: string) => {
+    await api.delete(`/servers/${serverId}/roles/channels/${channelId}/permissions/${roleId}`);
+  },
+
+  fetchEffectivePermissions: async (serverId: string, channelId?: string) => {
+    const params = channelId ? `?channelId=${channelId}` : '';
+    const { data } = await api.get(`/servers/${serverId}/roles/permissions/effective${params}`);
+    return data.data.permissions;
+  },
+
+  // ─── Nicknames ──────────────────────────────────────────────────────────────
+
+  setNickname: async (serverId: string, nickname: string | null) => {
+    await api.patch(`/servers/${serverId}/nickname`, { nickname });
+  },
+
+  setMemberNickname: async (serverId: string, memberId: string, nickname: string | null) => {
+    await api.patch(`/servers/${serverId}/members/${memberId}/nickname`, { nickname });
+  },
+
+  handleNicknameUpdated: (serverId: string, userId: string, nickname: string | null) => {
+    if (get().activeServerId !== serverId) return;
+    set((state) => ({
+      members: state.members.map((m) =>
+        m.userId === userId ? { ...m, nickname } : m
+      ),
+    }));
   },
 }));

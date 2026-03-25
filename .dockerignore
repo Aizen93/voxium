@@ -3,8 +3,12 @@ dist
 build
 target
 .git
-.env
-.env.*
+.github
+# Exclude .env files in ALL directories (not just root)
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.production.example
 *.log
 .DS_Store
 Thumbs.db
@@ -14,11 +18,12 @@ coverage
 test-results
 playwright-report
 blob-report
-CLAUDE.md
+tests
+**/__tests__
+**/*.test.ts
+**/*.spec.ts
+scripts
+*.md
 .claude
-DEPLOYMENT.md
-TODO-LIST.md
-CONTEXT_CHANGELOG.md
-communication_platform_analysis.md
 apps/desktop
 apps/admin

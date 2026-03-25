@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
@@ -13,10 +14,12 @@ import { clsx } from 'clsx';
  * so the user always sees their active DM call.
  */
 export function DMVoicePanel() {
+  const { t } = useTranslation();
   const dmCallConversationId = useVoiceStore((s) => s.dmCallConversationId);
   const dmCallUsers = useVoiceStore((s) => s.dmCallUsers);
   const selfMute = useVoiceStore((s) => s.selfMute);
   const selfDeaf = useVoiceStore((s) => s.selfDeaf);
+  const pttActive = useVoiceStore((s) => s.pttActive);
   const toggleMute = useVoiceStore((s) => s.toggleMute);
   const toggleDeaf = useVoiceStore((s) => s.toggleDeaf);
   const leaveDMCall = useVoiceStore((s) => s.leaveDMCall);
@@ -52,7 +55,7 @@ export function DMVoicePanel() {
           <Phone size={14} className="shrink-0 text-vox-voice-connected" />
           <div className="min-w-0 flex-1">
             <p className="text-xs font-semibold text-vox-voice-connected">
-              {waiting ? 'Calling...' : 'In a Call'}
+              {waiting ? t('dm.calling') : t('dm.inACall')}
             </p>
             <p className="truncate text-[10px] text-vox-text-muted">
               {participantName}
@@ -62,7 +65,8 @@ export function DMVoicePanel() {
         <button
           onClick={leaveDMCall}
           className="shrink-0 rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-accent-danger transition-colors"
-          title="Disconnect"
+          title={t('voice.disconnect')}
+          aria-label={t('voice.disconnect')}
         >
           <PhoneOff size={16} />
         </button>
@@ -73,7 +77,7 @@ export function DMVoicePanel() {
         <div className="max-h-24 overflow-y-auto px-2 py-1">
           {dmCallUsers.map((voiceUser) => {
             const isLocal = voiceUser.id === user?.id;
-            const isSpeaking = isLocal ? (localAudioLevel > 0.05 && !selfMute) : voiceUser.speaking;
+            const isSpeaking = isLocal ? (localAudioLevel > 0.05 && (!selfMute || pttActive)) : voiceUser.speaking;
 
             return (
               <UserHoverTarget key={voiceUser.id} userId={voiceUser.id}>
@@ -112,6 +116,7 @@ export function DMVoicePanel() {
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
           )}
           title={selfMute ? 'Unmute' : 'Mute'}
+          aria-label={selfMute ? t('voice.unmute') : t('voice.mute')}
         >
           {selfMute ? <MicOff size={18} /> : <Mic size={18} />}
         </button>
@@ -125,6 +130,7 @@ export function DMVoicePanel() {
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
           )}
           title={selfDeaf ? 'Undeafen' : 'Deafen'}
+          aria-label={selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
         >
           {selfDeaf ? <HeadphoneOff size={18} /> : <Headphones size={18} />}
         </button>

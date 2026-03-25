@@ -1,18 +1,32 @@
-import { createClient, type RedisClientType } from 'redis';
+import { createClient, type RedisClientType, type RedisFunctions, type RedisModules, type RedisScripts } from 'redis';
+import type { RedisClientOptions } from 'redis';
 import crypto from 'crypto';
 
 /** Unique identifier for this server node (for multi-node coordination). */
-export const NODE_ID = process.env.NODE_ID || crypto.randomUUID().slice(0, 8);
+let _nodeId: string | null = null;
+export function NODE_ID(): string {
+  if (!_nodeId) {
+    _nodeId = process.env.NODE_ID || crypto.randomUUID().slice(0, 8);
+  }
+  return _nodeId;
+}
 
 let redisClient: RedisClientType;
 let redisPub: RedisClientType;
 let redisSub: RedisClientType;
 let redisConfigSub: RedisClientType;
 
+/** Shared socket options for all Redis clients — exponential backoff, keepalive, timeout. */
+const REDIS_SOCKET_OPTIONS: NonNullable<RedisClientOptions<RedisModules, RedisFunctions, RedisScripts>['socket']> = {
+  reconnectStrategy: (retries: number) => Math.min(retries * 50, 2000),
+  keepAlive: true,
+  connectTimeout: 10000,
+};
+
 export async function initRedis(): Promise<RedisClientType> {
   const url = process.env.REDIS_URL || 'redis://localhost:6379';
 
-  redisClient = createClient({ url });
+  redisClient = createClient({ url, socket: REDIS_SOCKET_OPTIONS });
   redisClient.on('error', (err) => console.error('[Redis] Error:', err));
   await redisClient.connect();
 
@@ -81,7 +95,7 @@ export async function setUserOffline(socketId: string): Promise<{ userId: string
 
 export async function isUserOnline(userId: string): Promise<boolean> {
   const redis = getRedis();
-  return await redis.sIsMember('online_users', userId);
+  return Boolean(await redis.sIsMember('online_users', userId));
 }
 
 export async function getOnlineUsers(): Promise<string[]> {

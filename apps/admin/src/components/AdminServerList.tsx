@@ -221,7 +221,7 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
 
 function ServerLimitsModal({
   serverName,
-  serverId,
+  serverId: _serverId,
   serverLimits,
   globalLimits,
   onSave,

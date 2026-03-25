@@ -1,21 +1,31 @@
 import nodemailer from 'nodemailer';
+import type { Transporter } from 'nodemailer';
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'localhost',
-  port: parseInt(process.env.SMTP_PORT || '1025', 10),
-  secure: process.env.SMTP_SECURE === 'true',
-  ...(process.env.SMTP_SECURE !== 'true' && process.env.SMTP_REQUIRE_TLS === 'true'
-    ? { requireTLS: true }
-    : {}),
-  ...(process.env.SMTP_USER && process.env.SMTP_PASS
-    ? { auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } }
-    : {}),
-});
+// Lazy-initialized to avoid reading env vars at module scope (ES import hoisting)
+let _transporter: Transporter | null = null;
+function getTransporter(): Transporter {
+  if (!_transporter) {
+    _transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'localhost',
+      port: parseInt(process.env.SMTP_PORT || '1025', 10),
+      secure: process.env.SMTP_SECURE === 'true',
+      ...(process.env.SMTP_SECURE !== 'true' && process.env.SMTP_REQUIRE_TLS === 'true'
+        ? { requireTLS: true }
+        : {}),
+      ...(process.env.SMTP_USER && process.env.SMTP_PASS
+        ? { auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } }
+        : {}),
+    });
+  }
+  return _transporter;
+}
 
-const SENDER_FROM = {
-  name: process.env.SMTP_FROM_NAME || 'Voxium',
-  address: process.env.SMTP_FROM || 'noreply@voxium.app',
-};
+function getSenderFrom() {
+  return {
+    name: process.env.SMTP_FROM_NAME || 'Voxium',
+    address: process.env.SMTP_FROM || 'noreply@voxium.app',
+  };
+}
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
@@ -44,7 +54,7 @@ export interface CleanupReport {
 }
 
 export async function sendCleanupReport(to: string, report: CleanupReport): Promise<void> {
-  const from = SENDER_FROM;
+  const from = getSenderFrom();
   const duration = formatDuration(report.finishedAt.getTime() - report.startedAt.getTime());
   const status = report.error ? 'Completed with errors' : report.filesExpired > 0 ? 'Completed' : 'No action needed';
   const date = report.startedAt.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -90,7 +100,7 @@ export async function sendCleanupReport(to: string, report: CleanupReport): Prom
     </div>
   `;
 
-  await transporter.sendMail({
+  await getTransporter().sendMail({
     from,
     to,
     subject: `[Voxium] Cleanup Report — ${report.filesExpired} file${report.filesExpired !== 1 ? 's' : ''} expired`,
@@ -103,8 +113,8 @@ export async function sendVerificationEmail(to: string, token: string): Promise<
   const clientUrl = process.env.CLIENT_URL || 'http://localhost:8080';
   const verifyUrl = `${clientUrl}/verify-email/${token}`;
 
-  await transporter.sendMail({
-    from: SENDER_FROM,
+  await getTransporter().sendMail({
+    from: getSenderFrom(),
     to,
     subject: 'Verify your Voxium email address',
     text: `Welcome to Voxium! Please verify your email address by clicking the link below:\n\n${verifyUrl}\n\nThis link expires in 24 hours. If you did not create an account, ignore this email.`,
@@ -125,8 +135,8 @@ export async function sendPasswordResetEmail(to: string, token: string): Promise
   const clientUrl = process.env.CLIENT_URL || 'http://localhost:8080';
   const resetUrl = `${clientUrl}/reset-password/${token}`;
 
-  await transporter.sendMail({
-    from: SENDER_FROM,
+  await getTransporter().sendMail({
+    from: getSenderFrom(),
     to,
     subject: 'Reset your Voxium password',
     text: `You requested a password reset. Click the link below to set a new password:\n\n${resetUrl}\n\nThis link expires in 1 hour. If you did not request this, ignore this email.`,

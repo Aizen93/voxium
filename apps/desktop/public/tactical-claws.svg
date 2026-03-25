@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" fill="none">
+  <g stroke="#4ade50" stroke-linecap="round">
+
+    <!-- Set 1: top-left, slight right tilt -->
+    <g transform="translate(30, 20) rotate(5, 50, 50)">
+      <path d="M 5 5 Q 15 25 30 65 Q 32 72 28 70" stroke-width="3.5"/>
+      <path d="M 15 3 Q 22 22 42 58 Q 46 66 42 64" stroke-width="3"/>
+      <path d="M 25 2 Q 30 18 55 52 Q 60 60 56 58" stroke-width="2.5"/>
+      <path d="M 36 2 Q 38 16 66 45 Q 72 53 68 51" stroke-width="2"/>
+    </g>
+
+    <!-- Set 2: right side, tilted left -->
+    <g transform="translate(320, 80) rotate(-15, 40, 40)">
+      <path d="M 5 5 Q 15 25 30 65 Q 32 72 28 70" stroke-width="3.5"/>
+      <path d="M 15 3 Q 22 22 42 58 Q 46 66 42 64" stroke-width="3"/>
+      <path d="M 25 2 Q 30 18 55 52 Q 60 60 56 58" stroke-width="2.5"/>
+      <path d="M 36 2 Q 38 16 66 45 Q 72 53 68 51" stroke-width="2"/>
+    </g>
+
+    <!-- Set 3: center, steep angle -->
+    <g transform="translate(180, 190) rotate(25, 40, 40) scale(0.85)">
+      <path d="M 5 5 Q 15 25 30 65 Q 32 72 28 70" stroke-width="3.5"/>
+      <path d="M 15 3 Q 22 22 42 58 Q 46 66 42 64" stroke-width="3"/>
+      <path d="M 25 2 Q 30 18 55 52 Q 60 60 56 58" stroke-width="2.5"/>
+      <path d="M 36 2 Q 38 16 66 45 Q 72 53 68 51" stroke-width="2"/>
+    </g>
+
+    <!-- Set 4: bottom-left, slight tilt -->
+    <g transform="translate(50, 350) rotate(-8, 40, 40) scale(1.1)">
+      <path d="M 5 5 Q 15 25 30 65 Q 32 72 28 70" stroke-width="3.5"/>
+      <path d="M 15 3 Q 22 22 42 58 Q 46 66 42 64" stroke-width="3"/>
+      <path d="M 25 2 Q 30 18 55 52 Q 60 60 56 58" stroke-width="2.5"/>
+      <path d="M 36 2 Q 38 16 66 45 Q 72 53 68 51" stroke-width="2"/>
+    </g>
+
+    <!-- Set 5: bottom-right, opposite angle -->
+    <g transform="translate(340, 330) rotate(18, 40, 40) scale(0.75)">
+      <path d="M 5 5 Q 15 25 30 65 Q 32 72 28 70" stroke-width="3.5"/>
+      <path d="M 15 3 Q 22 22 42 58 Q 46 66 42 64" stroke-width="3"/>
+      <path d="M 25 2 Q 30 18 55 52 Q 60 60 56 58" stroke-width="2.5"/>
+      <path d="M 36 2 Q 38 16 66 45 Q 72 53 68 51" stroke-width="2"/>
+    </g>
+
+    <!-- Set 6: top-center, small, nearly vertical -->
+    <g transform="translate(220, 40) rotate(-3, 30, 30) scale(0.65)">
+      <path d="M 5 5 Q 15 25 30 65 Q 32 72 28 70" stroke-width="3.5"/>
+      <path d="M 15 3 Q 22 22 42 58 Q 46 66 42 64" stroke-width="3"/>
+      <path d="M 25 2 Q 30 18 55 52 Q 60 60 56 58" stroke-width="2.5"/>
+      <path d="M 36 2 Q 38 16 66 45 Q 72 53 68 51" stroke-width="2"/>
+    </g>
+
+    <!-- Set 7: far right center, large, steep -->
+    <g transform="translate(400, 220) rotate(-22, 40, 40) scale(0.9)">
+      <path d="M 5 5 Q 15 25 30 65 Q 32 72 28 70" stroke-width="3.5"/>
+      <path d="M 15 3 Q 22 22 42 58 Q 46 66 42 64" stroke-width="3"/>
+      <path d="M 25 2 Q 30 18 55 52 Q 60 60 56 58" stroke-width="2.5"/>
+      <path d="M 36 2 Q 38 16 66 45 Q 72 53 68 51" stroke-width="2"/>
+    </g>
+
+    <!-- Set 8: center-bottom, medium -->
+    <g transform="translate(250, 420) rotate(12, 40, 40) scale(0.8)">
+      <path d="M 5 5 Q 15 25 30 65 Q 32 72 28 70" stroke-width="3.5"/>
+      <path d="M 15 3 Q 22 22 42 58 Q 46 66 42 64" stroke-width="3"/>
+      <path d="M 25 2 Q 30 18 55 52 Q 60 60 56 58" stroke-width="2.5"/>
+      <path d="M 36 2 Q 38 16 66 45 Q 72 53 68 51" stroke-width="2"/>
+    </g>
+
+  </g>
+</svg>

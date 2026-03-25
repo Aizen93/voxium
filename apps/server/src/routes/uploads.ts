@@ -4,9 +4,10 @@ import { rateLimitUpload, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize } from '@voxium/shared';
+import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions } from '@voxium/shared';
 import crypto from 'crypto';
 import { Readable } from 'stream';
+import { hasServerPermission, hasChannelPermission } from '../utils/permissionCalculator';
 
 export const uploadRouter = Router();
 
@@ -39,7 +40,8 @@ uploadRouter.post(
       const { serverId } = req.params;
       const server = await prisma.server.findUnique({ where: { id: serverId } });
       if (!server) throw new NotFoundError('Server');
-      if (server.ownerId !== req.user!.userId) throw new ForbiddenError('Only the server owner can change the icon');
+      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_SERVER);
+      if (!canManage) throw new ForbiddenError('You do not have permission to change the server icon');
 
       const key = `server-icons/${serverId}-${Date.now()}.webp`;
       const uploadUrl = await generatePresignedPutUrl(key, 'image/webp');
@@ -62,12 +64,15 @@ uploadRouter.post(
       const { fileName, fileSize, mimeType, channelId, conversationId } = req.body;
 
       // Validate exactly one context
+      if (channelId !== undefined && typeof channelId !== 'string') throw new BadRequestError('channelId must be a string');
+      if (conversationId !== undefined && typeof conversationId !== 'string') throw new BadRequestError('conversationId must be a string');
       if ((!channelId && !conversationId) || (channelId && conversationId)) {
         throw new BadRequestError('Provide exactly one of channelId or conversationId');
       }
 
       if (!fileName || typeof fileName !== 'string') throw new BadRequestError('fileName required');
-      if (!ALLOWED_ATTACHMENT_TYPES.includes(mimeType)) {
+      if (!mimeType || typeof mimeType !== 'string') throw new BadRequestError('mimeType required');
+      if (!ALLOWED_ATTACHMENT_TYPES.includes(mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) {
         throw new BadRequestError('File type not allowed');
       }
       const maxSize = getMaxAttachmentSize(mimeType);
@@ -86,6 +91,8 @@ uploadRouter.post(
           where: { userId_serverId: { userId: req.user!.userId, serverId: channel.serverId } },
         });
         if (!membership) throw new ForbiddenError('Not a member of this server');
+        const canAttach = await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.ATTACH_FILES);
+        if (!canAttach) throw new ForbiddenError('You do not have permission to attach files in this channel');
       } else {
         const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
         if (!conv) throw new NotFoundError('Conversation');
@@ -109,12 +116,14 @@ uploadRouter.post(
 
 // GET /uploads/attachments/* — authorized proxy for attachments
 uploadRouter.get(
-  '/attachments/*',
+  '/attachments/*path',
   authenticate,
   requireVerifiedEmail,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const key = `attachments/${req.params[0]}`;
+      const pathSegments = req.params.path;
+      const pathStr = Array.isArray(pathSegments) ? pathSegments.join('/') : pathSegments as string;
+      const key = `attachments/${pathStr}`;
       if (!key || key.includes('..') || !VALID_ATTACHMENT_KEY_RE.test(key)) {
         throw new BadRequestError('Invalid key');
       }
@@ -135,7 +144,7 @@ uploadRouter.get(
       if (!attachment) throw new NotFoundError('Attachment');
       if (attachment.expired) throw new NotFoundError('Attachment expired');
 
-      // Authorize: server member or DM participant
+      // Authorize: server member with VIEW_CHANNEL, or DM participant
       if (attachment.message.channelId && attachment.message.channel) {
         const membership = await prisma.serverMember.findUnique({
           where: {
@@ -146,6 +155,14 @@ uploadRouter.get(
           },
         });
         if (!membership) throw new ForbiddenError('Not a member');
+        // Check VIEW_CHANNEL permission — prevents downloading attachments from restricted channels
+        const canView = await hasChannelPermission(
+          req.user!.userId,
+          attachment.message.channelId,
+          attachment.message.channel.serverId,
+          Permissions.VIEW_CHANNEL,
+        );
+        if (!canView) throw new ForbiddenError('Not authorized');
       } else if (attachment.message.conversationId) {
         const conv = await prisma.conversation.findUnique({
           where: { id: attachment.message.conversationId },
@@ -185,11 +202,12 @@ uploadRouter.get(
 // Append ?inline to proxy the image directly instead of 302→S3.
 // Used by browser notifications where the S3 redirect fails due to CORS.
 uploadRouter.get(
-  '/*',
+  '/*path',
   rateLimitGeneral,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const key = req.params[0];
+      const pathSegments = req.params.path;
+      const key = Array.isArray(pathSegments) ? pathSegments.join('/') : pathSegments as string;
       if (!key || key.includes('..') || !VALID_S3_KEY_RE.test(key)) {
         throw new BadRequestError('Invalid key');
       }

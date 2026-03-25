@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
-import { rateLimitMessageSend, rateLimitGeneral } from '../middleware/rateLimiter';
+import { rateLimitMessageSend, rateLimitGeneral, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
 import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, type Message } from '@voxium/shared';
@@ -18,7 +18,7 @@ export const dmRouter = Router();
 dmRouter.use(authenticate, requireVerifiedEmail);
 
 const authorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
+  select: { id: true, username: true, displayName: true, avatarUrl: true, status: true, role: true, isSupporter: true, supporterTier: true },
 };
 
 const replyToSelect = {
@@ -106,18 +106,26 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
 
     const [user1Id, user2Id] = sortUserIds(currentUserId, targetUserId);
 
-    // Upsert conversation
-    let conversation = await prisma.conversation.findUnique({
+    // Atomic upsert — eliminates TOCTOU race when two users create the same conversation concurrently
+    const existing = await prisma.conversation.findUnique({
       where: { user1Id_user2Id: { user1Id, user2Id } },
     });
 
-    let isNew = false;
-    if (!conversation) {
-      isNew = true;
-      conversation = await prisma.conversation.create({
-        data: { user1Id, user2Id },
-      });
+    const isNew = !existing;
+    const conversation = existing ?? await prisma.conversation.create({
+      data: { user1Id, user2Id },
+    }).catch(async (err) => {
+      // Handle unique constraint race: another request created it between our check and create
+      if (err?.code === 'P2002') {
+        const found = await prisma.conversation.findUnique({
+          where: { user1Id_user2Id: { user1Id, user2Id } },
+        });
+        if (found) return found;
+      }
+      throw err;
+    });
 
+    if (isNew) {
       // Create read records for both participants
       const now = new Date();
       await prisma.conversationRead.createMany({
@@ -125,6 +133,7 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
           { userId: user1Id, conversationId: conversation.id, lastReadAt: now },
           { userId: user2Id, conversationId: conversation.id, lastReadAt: now },
         ],
+        skipDuplicates: true,
       });
 
       // Join both users' sockets to the DM room
@@ -159,7 +168,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, LIMITS.MESSAGES_PER_PAGE);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, LIMITS.MESSAGES_PER_PAGE);
     const before = req.query.before as string | undefined;
     const around = req.query.around as string | undefined;
 
@@ -289,6 +298,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
 
     // Validate optional replyToId
     const replyToId = req.body.replyToId as string | undefined;
+    if (replyToId !== undefined && typeof replyToId !== 'string') throw new BadRequestError('replyToId must be a string');
     if (replyToId) {
       const parent = await prisma.message.findUnique({ where: { id: replyToId }, select: { conversationId: true } });
       if (!parent || parent.conversationId !== conversationId) throw new BadRequestError('Invalid replyToId');
@@ -396,7 +406,7 @@ dmRouter.delete('/:conversationId/messages/:messageId', rateLimitGeneral, async 
 
     // Fire-and-forget S3 cleanup
     if (message.attachments.length > 0) {
-      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch(() => {});
+      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete DM attachments:', err));
     }
 
     getIO().to(`dm:${conversationId}`).emit('dm:message:delete', { messageId, conversationId });
@@ -483,7 +493,7 @@ dmRouter.delete('/:conversationId', rateLimitGeneral, async (req: Request<{ conv
 
     // Fire-and-forget S3 cleanup
     if (attachments.length > 0) {
-      deleteMultipleFromS3(attachments.map((a) => a.s3Key)).catch(() => {});
+      deleteMultipleFromS3(attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete DM conversation attachments:', err));
     }
 
     // Notify the other participant
@@ -504,7 +514,7 @@ dmRouter.delete('/:conversationId', rateLimitGeneral, async (req: Request<{ conv
 
 // ─── Mark conversation as read ───────────────────────────────────────────────
 
-dmRouter.post('/:conversationId/read', async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
+dmRouter.post('/:conversationId/read', rateLimitMarkRead, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;

@@ -1,5 +1,7 @@
 import { useRef, useState, useCallback, useLayoutEffect, useEffect, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
+import { getTranslatedError } from '../../utils/serverErrors';
 import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -28,12 +30,7 @@ interface Props {
   onClose: () => void;
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  online: 'Online',
-  idle: 'Idle',
-  dnd: 'Do Not Disturb',
-  offline: 'Offline',
-};
+// STATUS_LABELS moved inside component for i18n access
 
 const STATUS_COLORS: Record<string, string> = {
   online: 'bg-vox-accent-success',
@@ -50,8 +47,16 @@ const STATUS_TEXT_COLORS: Record<string, string> = {
 };
 
 export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Props) {
+  const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+
+  const STATUS_LABELS: Record<string, string> = {
+    online: t('userProfile.status.online'),
+    idle: t('userProfile.status.idle'),
+    dnd: t('userProfile.status.dnd'),
+    offline: t('userProfile.status.offline'),
+  };
 
   const member = useServerStore((s) => s.members.find((m) => m.userId === userId));
   const channels = useServerStore((s) => s.channels);
@@ -67,9 +72,9 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
 
   useEffect(() => {
     if (member) return;
-    api.get(`/users/${userId}`).then((res: any) => {
+    api.get(`/users/${userId}`).then((res) => {
       if (res.data?.data) setFetchedUser(res.data.data);
-    }).catch(() => {});
+    }).catch((err) => { console.warn('[UserProfilePopup] Failed to fetch user:', err); });
   }, [userId, member]);
 
   // Find voice channel this user is in
@@ -118,10 +123,13 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     return () => window.removeEventListener('resize', updatePosition);
   }, [updatePosition]);
 
-  // Re-measure after first render when we have the actual popup height
+  // Re-measure once after first render when we have the actual popup height.
+  // Keyed on boolean transition (null → non-null) to avoid infinite loop
+  // (updatePosition sets position, so position itself can't be a dependency).
+  const hasPosition = position !== null;
   useEffect(() => {
-    if (position) updatePosition();
-  }, [position !== null]);
+    if (hasPosition) updatePosition();
+  }, [hasPosition]); // intentionally excludes updatePosition — it calls setPosition which would loop
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -141,7 +149,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
       useDMStore.getState().setActiveConversation(conversationId);
       onClose();
     } catch {
-      toast.error('Failed to open conversation');
+      toast.error(t('userProfile.failedToOpenConversation'));
     }
   };
 
@@ -164,10 +172,9 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     if (!username) return;
     try {
       const status = await useFriendStore.getState().sendRequest(username);
-      toast.success(status === 'accepted' ? `You and ${username} are now friends!` : 'Friend request sent');
-    } catch (err: any) {
-      const msg = err.response?.data?.error || 'Failed to send friend request';
-      toast.error(msg);
+      toast.success(status === 'accepted' ? t('friends.addFriend.nowFriends', { name: username }) : t('userProfile.friendRequestSent'));
+    } catch (err) {
+      toast.error(getTranslatedError(err, t, 'userProfile.failedToSendRequest'));
     }
   };
 
@@ -176,7 +183,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     try {
       await useFriendStore.getState().acceptRequest(friendshipInfo.friendshipId);
     } catch {
-      toast.error('Failed to accept friend request');
+      toast.error(t('userProfile.failedToAccept'));
     }
   };
 
@@ -185,7 +192,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     try {
       await useFriendStore.getState().removeFriendship(friendshipInfo.friendshipId);
     } catch {
-      toast.error('Failed to decline friend request');
+      toast.error(t('userProfile.failedToDecline'));
     }
   };
 
@@ -194,7 +201,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     try {
       await useFriendStore.getState().removeFriendship(friendshipInfo.friendshipId);
     } catch {
-      toast.error('Failed to remove friend');
+      toast.error(t('userProfile.failedToRemove'));
     }
   };
 
@@ -272,7 +279,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
               className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-accent-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors"
             >
               <MessageSquare size={12} />
-              Message
+              {t('userProfile.message')}
             </button>
             {friendshipInfo.status === 'none' && (
               <button
@@ -280,7 +287,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
                 className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-accent-success px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-success/80 transition-colors"
               >
                 <UserPlus size={12} />
-                Add Friend
+                {t('userProfile.addFriend')}
               </button>
             )}
             {friendshipInfo.status === 'pending_outgoing' && (
@@ -289,7 +296,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
                 className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-bg-hover px-3 py-1.5 text-xs font-medium text-vox-text-muted cursor-not-allowed"
               >
                 <Clock size={12} />
-                Pending
+                {t('userProfile.pending')}
               </button>
             )}
             {friendshipInfo.status === 'pending_incoming' && (
@@ -299,7 +306,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
                   className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-accent-success px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-success/80 transition-colors"
                 >
                   <Check size={12} />
-                  Accept
+                  {t('userProfile.accept')}
                 </button>
                 <button
                   onClick={handleDeclineFriend}
@@ -315,7 +322,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
                 className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-vox-bg-hover px-3 py-1.5 text-xs font-medium text-vox-text-muted hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger transition-colors"
               >
                 <UserMinus size={12} />
-                Unfriend
+                {t('userProfile.unfriend')}
               </button>
             )}
           </div>
@@ -328,7 +335,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
           {/* Bio */}
           {user.bio && (
             <div>
-              <h4 className="text-[10px] font-bold uppercase tracking-wide text-vox-text-muted mb-1">About Me</h4>
+              <h4 className="text-[10px] font-bold uppercase tracking-wide text-vox-text-muted mb-1">{t('userProfile.aboutMe')}</h4>
               <p className="text-xs text-vox-text-secondary leading-relaxed">{user.bio}</p>
             </div>
           )}
@@ -337,14 +344,14 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
           {voiceChannelName && (
             <div className="flex items-center gap-1.5 text-xs text-vox-voice-connected">
               <Volume2 size={14} className="shrink-0" />
-              <span>In: #{voiceChannelName}</span>
+              <span>{t('userProfile.inServer')} #{voiceChannelName}</span>
             </div>
           )}
 
           {/* Dates */}
           {user.createdAt && !isNaN(new Date(user.createdAt).getTime()) && (
             <div>
-              <h4 className="text-[10px] font-bold uppercase tracking-wide text-vox-text-muted mb-1">Voxium Member Since</h4>
+              <h4 className="text-[10px] font-bold uppercase tracking-wide text-vox-text-muted mb-1">{t('userProfile.memberSince')}</h4>
               <p className="text-xs text-vox-text-secondary">
                 {format(new Date(user.createdAt), 'MMM d, yyyy')}
               </p>
@@ -352,7 +359,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
           )}
           {joinedAt && !isNaN(new Date(joinedAt).getTime()) && (
             <div>
-              <h4 className="text-[10px] font-bold uppercase tracking-wide text-vox-text-muted mb-1">Joined Server</h4>
+              <h4 className="text-[10px] font-bold uppercase tracking-wide text-vox-text-muted mb-1">{t('userProfile.joinedServer')}</h4>
               <p className="text-xs text-vox-text-secondary">
                 {format(new Date(joinedAt), 'MMM d, yyyy')}
               </p>
@@ -367,7 +374,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
               onClick={() => setShowReport(true)}
               className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-md text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
             >
-              <Flag size={12} /> Report User
+              <Flag size={12} /> {t('userProfile.reportUser')}
             </button>
           </div>
         )}

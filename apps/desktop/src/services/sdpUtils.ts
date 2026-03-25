@@ -9,6 +9,15 @@ import { useSettingsStore, VOICE_QUALITY_BITRATE } from '../stores/settingsStore
  * - stereo=0         — mono voice halves bandwidth vs stereo
  */
 export function optimizeOpusSDP(sdp: string): string {
+  try {
+    return _optimizeOpusSDP(sdp);
+  } catch (err) {
+    console.warn('[SDP] Opus optimization failed, using original SDP:', err);
+    return sdp;
+  }
+}
+
+function _optimizeOpusSDP(sdp: string): string {
   // Find the Opus codec payload type (e.g., "a=rtpmap:111 opus/48000/2")
   const opusMatch = sdp.match(/a=rtpmap:(\d+) opus\/48000/);
   if (!opusMatch) return sdp;

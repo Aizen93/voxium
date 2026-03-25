@@ -14,7 +14,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, SupportMessageData } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
 
@@ -151,8 +151,8 @@ adminRouter.get('/stats/geo', async (_req: Request, res: Response, next: NextFun
 
 adminRouter.get('/users', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const search = (req.query.search as string)?.trim() || '';
     const filter = (req.query.filter as string) || 'all';
     const sort = (req.query.sort as string) || 'newest';
@@ -503,7 +503,7 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           }
 
           // Emit role + server update events
-          io.to(`server:${action.serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+          io.to(`server:${action.serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
             serverId: action.serverId,
             userId: action.newOwnerId,
             role: 'owner' as MemberRole,
@@ -511,10 +511,13 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
           const updatedServer = await prisma.server.findUnique({
             where: { id: action.serverId },
-            select: { id: true, name: true, iconUrl: true, ownerId: true, createdAt: true },
+            select: { id: true, name: true, iconUrl: true, ownerId: true, invitesLocked: true, createdAt: true },
           });
           if (updatedServer) {
-            io.to(`server:${action.serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updatedServer);
+            io.to(`server:${action.serverId}`).emit(WS_EVENTS.SERVER_UPDATED, {
+              ...updatedServer,
+              createdAt: updatedServer.createdAt.toISOString(),
+            });
           }
 
           // Broadcast that the deleted user left this server
@@ -614,6 +617,24 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
       metadata: { oldRole: target.role, newRole: role, username: target.username },
     });
 
+    // Broadcast badge change to all servers the user is in + DM conversations
+    try {
+      const io = getIO();
+      const payload = { userId: targetId, role };
+      const [memberships, conversations] = await Promise.all([
+        prisma.serverMember.findMany({ where: { userId: targetId }, select: { serverId: true } }),
+        prisma.conversation.findMany({ where: { OR: [{ user1Id: targetId }, { user2Id: targetId }] }, select: { id: true } }),
+      ]);
+      for (const { serverId } of memberships) {
+        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED, payload);
+      }
+      for (const { id } of conversations) {
+        io.to(`dm:${id}`).emit(WS_EVENTS.USER_UPDATED, payload);
+      }
+    } catch (broadcastErr) {
+      console.error('[Admin] Failed to broadcast role change:', broadcastErr);
+    }
+
     res.json({ success: true, message: `User "${target.username}" role changed to ${role}` });
   } catch (err) {
     next(err);
@@ -652,6 +673,25 @@ adminRouter.patch('/users/:userId/supporter', async (req: Request<{ userId: stri
       },
     });
 
+    // Broadcast badge change to all servers the user is in + DM conversations
+    try {
+      const io = getIO();
+      const finalTier = isSupporter ? (supporterTier !== undefined ? supporterTier : target.supporterTier) : null;
+      const payload = { userId: targetId, isSupporter, supporterTier: finalTier };
+      const [memberships, conversations] = await Promise.all([
+        prisma.serverMember.findMany({ where: { userId: targetId }, select: { serverId: true } }),
+        prisma.conversation.findMany({ where: { OR: [{ user1Id: targetId }, { user2Id: targetId }] }, select: { id: true } }),
+      ]);
+      for (const { serverId } of memberships) {
+        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED, payload);
+      }
+      for (const { id } of conversations) {
+        io.to(`dm:${id}`).emit(WS_EVENTS.USER_UPDATED, payload);
+      }
+    } catch (broadcastErr) {
+      console.error('[Admin] Failed to broadcast supporter change:', broadcastErr);
+    }
+
     res.json({ success: true, message: `Supporter badge ${isSupporter ? 'granted to' : 'removed from'} "${target.username}"` });
   } catch (err) {
     next(err);
@@ -662,8 +702,8 @@ adminRouter.patch('/users/:userId/supporter', async (req: Request<{ userId: stri
 
 adminRouter.get('/servers', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const search = (req.query.search as string)?.trim() || '';
 
     const where: Record<string, unknown> = {};
@@ -867,12 +907,78 @@ adminRouter.delete('/limits/servers/:serverId', async (req: Request<{ serverId: 
   } catch (err) { next(err); }
 });
 
+// ─── Infrastructure Server Locations ──────────────────────────────────────────
+
+// GET /admin/infra-servers — list all
+adminRouter.get('/infra-servers', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const servers = await prisma.infraServer.findMany({ orderBy: { createdAt: 'asc' } });
+    res.json({ success: true, data: servers });
+  } catch (err) { next(err); }
+});
+
+// POST /admin/infra-servers — create (superadmin only)
+adminRouter.post('/infra-servers', requireSuperAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { name, country, city, provider, latitude, longitude } = req.body;
+    if (!name || typeof name !== 'string') throw new BadRequestError('name is required');
+    if (!country || typeof country !== 'string') throw new BadRequestError('country is required');
+    if (!city || typeof city !== 'string') throw new BadRequestError('city is required');
+    if (!provider || typeof provider !== 'string') throw new BadRequestError('provider is required');
+    if (name.length > 100) throw new BadRequestError('name must be at most 100 characters');
+    if (country.length > 100) throw new BadRequestError('country must be at most 100 characters');
+    if (city.length > 100) throw new BadRequestError('city must be at most 100 characters');
+    if (provider.length > 100) throw new BadRequestError('provider must be at most 100 characters');
+    if (typeof latitude !== 'number' || latitude < -90 || latitude > 90) throw new BadRequestError('latitude must be between -90 and 90');
+    if (typeof longitude !== 'number' || longitude < -180 || longitude > 180) throw new BadRequestError('longitude must be between -180 and 180');
+    if (!isFinite(latitude) || !isFinite(longitude)) throw new BadRequestError('latitude and longitude must be finite numbers');
+
+    const server = await prisma.infraServer.create({
+      data: { name: sanitizeText(name), country: sanitizeText(country), city: sanitizeText(city), provider: sanitizeText(provider), latitude, longitude },
+    });
+    res.status(201).json({ success: true, data: server });
+  } catch (err) { next(err); }
+});
+
+// PATCH /admin/infra-servers/:id — update (superadmin only)
+adminRouter.patch('/infra-servers/:id', requireSuperAdmin, async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.infraServer.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('Infrastructure server');
+
+    const updateData: Record<string, unknown> = {};
+    if (req.body.name !== undefined) { if (typeof req.body.name !== 'string' || req.body.name.length > 100) throw new BadRequestError('name must be a string (max 100 chars)'); updateData.name = sanitizeText(req.body.name); }
+    if (req.body.country !== undefined) { if (typeof req.body.country !== 'string' || req.body.country.length > 100) throw new BadRequestError('country must be a string (max 100 chars)'); updateData.country = sanitizeText(req.body.country); }
+    if (req.body.city !== undefined) { if (typeof req.body.city !== 'string' || req.body.city.length > 100) throw new BadRequestError('city must be a string (max 100 chars)'); updateData.city = sanitizeText(req.body.city); }
+    if (req.body.provider !== undefined) { if (typeof req.body.provider !== 'string' || req.body.provider.length > 100) throw new BadRequestError('provider must be a string (max 100 chars)'); updateData.provider = sanitizeText(req.body.provider); }
+    if (req.body.latitude !== undefined) { if (typeof req.body.latitude !== 'number' || !isFinite(req.body.latitude) || req.body.latitude < -90 || req.body.latitude > 90) throw new BadRequestError('latitude must be a finite number between -90 and 90'); updateData.latitude = req.body.latitude; }
+    if (req.body.longitude !== undefined) { if (typeof req.body.longitude !== 'number' || !isFinite(req.body.longitude) || req.body.longitude < -180 || req.body.longitude > 180) throw new BadRequestError('longitude must be a finite number between -180 and 180'); updateData.longitude = req.body.longitude; }
+
+    if (Object.keys(updateData).length === 0) throw new BadRequestError('No fields to update');
+
+    const updated = await prisma.infraServer.update({ where: { id }, data: updateData });
+    res.json({ success: true, data: updated });
+  } catch (err) { next(err); }
+});
+
+// DELETE /admin/infra-servers/:id — delete (superadmin only)
+adminRouter.delete('/infra-servers/:id', requireSuperAdmin, async (req: Request<{ id: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.infraServer.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('Infrastructure server');
+    await prisma.infraServer.delete({ where: { id } });
+    res.json({ success: true, message: 'Infrastructure server deleted' });
+  } catch (err) { next(err); }
+});
+
 // ─── Ban Management ─────────────────────────────────────────────────────────
 
 adminRouter.get('/bans', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
 
     const [bans, total] = await Promise.all([
       prisma.user.findMany({
@@ -893,8 +999,8 @@ adminRouter.get('/bans', async (req: Request, res: Response, next: NextFunction)
 
 adminRouter.get('/ip-bans', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
 
     const [ipBans, total] = await Promise.all([
       prisma.ipBan.findMany({
@@ -975,7 +1081,7 @@ adminRouter.delete('/ip-bans/:id', async (req: Request<{ id: string }>, res: Res
 
 adminRouter.get('/signups', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const days = Math.min(90, Math.max(1, parseInt(req.query.days as string) || 30));
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days as string, 10) || 30));
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
     const signups = await prisma.$queryRawUnsafe<Array<{ day: string; count: bigint }>>(
@@ -998,7 +1104,7 @@ adminRouter.get('/signups', async (req: Request, res: Response, next: NextFuncti
 
 adminRouter.get('/messages-per-hour', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const hours = Math.min(168, Math.max(1, parseInt(req.query.hours as string) || 24));
+    const hours = Math.min(168, Math.max(1, parseInt(req.query.hours as string, 10) || 24));
     const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
     const messages = await prisma.$queryRawUnsafe<Array<{ hour: string; count: bigint }>>(
@@ -1021,7 +1127,7 @@ adminRouter.get('/messages-per-hour', async (req: Request, res: Response, next: 
 
 adminRouter.get('/server-growth', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const days = Math.min(90, Math.max(1, parseInt(req.query.days as string) || 30));
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days as string, 10) || 30));
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
     const rows = await prisma.$queryRawUnsafe<Array<{ day: string; count: bigint }>>(
@@ -1044,7 +1150,7 @@ adminRouter.get('/server-growth', async (req: Request, res: Response, next: Next
 
 adminRouter.get('/top-servers', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit as string) || 10));
+    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit as string, 10) || 10));
 
     const rows = await prisma.$queryRawUnsafe<Array<{ id: string; name: string; message_count: bigint; member_count: bigint }>>(
       `SELECT s.id, s.name,
@@ -1311,8 +1417,8 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
 
 adminRouter.get('/storage/files', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const filter = (req.query.filter as string) || 'all';
 
     const prefix = filter === 'avatars' ? 'avatars/'
@@ -1373,9 +1479,10 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
   }
 });
 
-adminRouter.delete('/storage/files/*', async (req: Request, res: Response, next: NextFunction) => {
+adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const key = (req.params as Record<string, string>)[0];
+    const pathSegments = req.params.path;
+    const key = Array.isArray(pathSegments) ? pathSegments.join('/') : pathSegments as string;
     if (!key || (!VALID_S3_KEY_RE.test(key) && !VALID_ATTACHMENT_KEY_RE.test(key))) {
       throw new BadRequestError('Invalid file key');
     }
@@ -1408,8 +1515,8 @@ adminRouter.delete('/storage/files/*', async (req: Request, res: Response, next:
 
 adminRouter.get('/audit-logs', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const action = (req.query.action as string)?.trim() || '';
     const search = (req.query.search as string)?.trim() || '';
 
@@ -1473,7 +1580,7 @@ adminRouter.post('/rate-limits/clear-user', async (req: Request, res: Response, 
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'ratelimit.clear_user' as any,
+      action: 'ratelimit.clear_user',
       targetType: 'rate_limit',
       targetId: key.trim(),
       metadata: { keysCleared: cleared },
@@ -1499,7 +1606,7 @@ adminRouter.put('/rate-limits/:name', async (req: Request<{ name: string }>, res
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'ratelimit.update' as any,
+      action: 'ratelimit.update',
       targetType: 'rate_limit',
       targetId: name,
       metadata: { points, duration, blockDuration },
@@ -1519,7 +1626,7 @@ adminRouter.post('/rate-limits/:name/reset', async (req: Request<{ name: string 
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'ratelimit.reset' as any,
+      action: 'ratelimit.reset',
       targetType: 'rate_limit',
       targetId: name,
     });
@@ -1555,7 +1662,7 @@ adminRouter.put('/feature-flags/:name', async (req: Request<{ name: string }>, r
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'feature_flag.update' as any,
+      action: 'feature_flag.update',
       targetType: 'feature_flag',
       targetId: name,
       metadata: { enabled },
@@ -1575,7 +1682,7 @@ adminRouter.post('/feature-flags/:name/reset', async (req: Request<{ name: strin
 
     logAuditEvent({
       actorId: req.user!.userId,
-      action: 'feature_flag.reset' as any,
+      action: 'feature_flag.reset',
       targetType: 'feature_flag',
       targetId: name,
     });
@@ -1695,13 +1802,27 @@ adminRouter.get('/export/ip-bans', async (_req: Request, res: Response, next: Ne
 
 // ─── Announcements ──────────────────────────────────────────────────────────
 
-function mapAnnouncement(a: any): Announcement {
+interface AnnouncementRow {
+  id: string;
+  title: string;
+  content: string;
+  type: string;
+  scope: string;
+  serverIds: string[];
+  createdById: string;
+  createdBy?: { username: string };
+  publishedAt: Date | null;
+  expiresAt: Date | null;
+  createdAt: Date;
+}
+
+function mapAnnouncement(a: AnnouncementRow): Announcement {
   return {
     id: a.id,
     title: a.title,
     content: a.content,
-    type: a.type,
-    scope: a.scope,
+    type: a.type as AnnouncementType,
+    scope: a.scope as AnnouncementScope,
     serverIds: a.serverIds,
     createdById: a.createdById,
     createdByUsername: a.createdBy?.username ?? 'Deleted',
@@ -1714,18 +1835,18 @@ function mapAnnouncement(a: any): Announcement {
 function broadcastAnnouncement(announcement: Announcement) {
   const io = getIO();
   if (announcement.scope === 'global') {
-    io.emit(WS_EVENTS.ANNOUNCEMENT_NEW as any, announcement);
+    io.emit(WS_EVENTS.ANNOUNCEMENT_NEW, announcement);
   } else {
     for (const serverId of announcement.serverIds) {
-      io.to(`server:${serverId}`).emit(WS_EVENTS.ANNOUNCEMENT_NEW as any, announcement);
+      io.to(`server:${serverId}`).emit(WS_EVENTS.ANNOUNCEMENT_NEW, announcement);
     }
   }
 }
 
 adminRouter.get('/announcements', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const filter = (req.query.filter as string) || 'all';
 
     const now = new Date();
@@ -1945,8 +2066,8 @@ adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response,
 
 adminRouter.get('/reports', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const filter = (req.query.filter as string) || 'all';
 
     const where: Record<string, unknown> = {};
@@ -2024,9 +2145,9 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         await prisma.message.delete({ where: { id: message.id } });
         const io = getIO();
         if (message.channelId) {
-          io.to(`channel:${message.channelId}`).emit(WS_EVENTS.MESSAGE_DELETE as any, { messageId: message.id, channelId: message.channelId });
+          io.to(`channel:${message.channelId}`).emit(WS_EVENTS.MESSAGE_DELETE, { messageId: message.id, channelId: message.channelId });
         } else if (message.conversationId) {
-          io.to(`dm:${message.conversationId}`).emit(WS_EVENTS.DM_MESSAGE_DELETE as any, { messageId: message.id, conversationId: message.conversationId });
+          io.to(`dm:${message.conversationId}`).emit(WS_EVENTS.DM_MESSAGE_DELETE, { messageId: message.id, conversationId: message.conversationId });
         }
       }
     }
@@ -2114,27 +2235,45 @@ const supportAuthorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
 };
 
-function mapSupportMessage(m: any): SupportMessageData {
+interface SupportMessageRow {
+  id: string;
+  ticketId: string;
+  authorId: string;
+  content: string;
+  type: string;
+  createdAt: Date;
+  author: {
+    id: string;
+    username: string;
+    displayName: string;
+    avatarUrl: string | null;
+    role: string;
+    isSupporter: boolean;
+    supporterTier: string | null;
+  };
+}
+
+function mapSupportMessage(m: SupportMessageRow): SupportMessageData {
   return {
     id: m.id,
     ticketId: m.ticketId,
     authorId: m.authorId,
     content: m.content,
-    type: m.type,
+    type: m.type as SupportMessageData['type'],
     createdAt: m.createdAt.toISOString(),
-    author: m.author,
+    author: { ...m.author, role: m.author.role as SupportMessageData['author']['role'] },
   };
 }
 
 async function emitSupportTicketCount() {
   const total = await prisma.supportTicket.count({ where: { status: { in: ['open', 'claimed'] } } });
-  getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_TICKET_NEW as any, { total });
+  getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_TICKET_NEW, { total });
 }
 
 adminRouter.get('/support/tickets', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const status = (req.query.status as string) || 'all';
 
     const where: Record<string, unknown> = {};
@@ -2209,11 +2348,11 @@ adminRouter.post('/support/tickets/:id/claim', async (req: Request<{ id: string 
     io.in(`user:${adminUserId}`).socketsJoin(`support:${id}`);
 
     const claimPayload = mapSupportMessage(sysMsg);
-    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, claimPayload);
-    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, claimPayload);
-    const statusPayload = { ticketId: id, status: 'claimed', claimedById: adminUserId, claimedByUsername: adminUser?.username };
-    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, statusPayload);
-    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, statusPayload);
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, claimPayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, claimPayload);
+    const statusPayload = { ticketId: id, status: 'claimed' as const, claimedById: adminUserId, claimedByUsername: adminUser?.username };
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, statusPayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, statusPayload);
 
     await emitSupportTicketCount();
 
@@ -2235,7 +2374,7 @@ adminRouter.get('/support/tickets/:id/messages', async (req: Request<{ id: strin
   try {
     const { id } = req.params;
     const before = req.query.before as string | undefined;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
 
     const ticket = await prisma.supportTicket.findUnique({ where: { id } });
     if (!ticket) throw new NotFoundError('Ticket');
@@ -2294,11 +2433,11 @@ adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: stri
       });
       const io = getIO();
       const autoClaimPayload = mapSupportMessage(claimMsg);
-      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, autoClaimPayload);
-      io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, autoClaimPayload);
-      const autoStatusPayload = { ticketId: id, status: 'claimed', claimedById: adminUserId, claimedByUsername: adminUser?.username };
-      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, autoStatusPayload);
-      io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, autoStatusPayload);
+      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, autoClaimPayload);
+      io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, autoClaimPayload);
+      const autoStatusPayload = { ticketId: id, status: 'claimed' as const, claimedById: adminUserId, claimedByUsername: adminUser?.username };
+      io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, autoStatusPayload);
+      io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, autoStatusPayload);
 
       logAuditEvent({
         actorId: adminUserId,
@@ -2322,8 +2461,8 @@ adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: stri
     await prisma.supportTicket.update({ where: { id }, data: { updatedAt: new Date() } });
 
     const payload = mapSupportMessage(message);
-    getIO().to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, payload);
-    getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, payload);
+    getIO().to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, payload);
+    getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, payload);
     await emitSupportTicketCount();
 
     res.status(201).json({ success: true, data: payload });
@@ -2355,11 +2494,11 @@ adminRouter.post('/support/tickets/:id/close', async (req: Request<{ id: string 
 
     const io = getIO();
     const closePayload = mapSupportMessage(sysMsg);
-    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, closePayload);
-    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, closePayload);
-    const closeStatusPayload = { ticketId: id, status: 'closed' };
-    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, closeStatusPayload);
-    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, closeStatusPayload);
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, closePayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, closePayload);
+    const closeStatusPayload = { ticketId: id, status: 'closed' as const };
+    io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, closeStatusPayload);
+    io.to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, closeStatusPayload);
 
     await emitSupportTicketCount();
 

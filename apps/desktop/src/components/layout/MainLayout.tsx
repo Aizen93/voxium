@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { translateServerError } from '../../utils/serverErrors';
+import i18n from '../../i18n';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore } from '../../stores/voiceStore';
@@ -18,7 +21,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
 import { playJoinSound, playLeaveSound, playMessageSound, playMentionSound } from '../../services/notificationSounds';
 import { toast } from '../../stores/toastStore';
-import { stopSpeakingDetection } from '../../services/audioAnalyser';
+import { stopSpeakingDetection, stopNoiseSuppression } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
 import { SupportTicketView } from '../dm/SupportTicketView';
@@ -26,13 +29,14 @@ import { useSupportStore } from '../../stores/supportStore';
 import { SearchModal } from '../search/SearchModal';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
+import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
-  MemberRole, Announcement, SupportMessageData, SupportTicketStatus,
+  MemberRole, Role, Announcement, SupportMessageData, SupportTicketStatus,
   ReactionGroup,
 } from '@voxium/shared';
 
@@ -81,13 +85,53 @@ export function MainLayout() {
     fetchServers();
   }, [fetchServers]);
 
+  // Re-mark current channel/conversation as read when tab/window regains visibility.
+  // This covers cases where the socket reconnected in the background and unread:init
+  // restored stale counts because a previous markChannelRead API call failed.
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      const serverState = useServerStore.getState();
+      if (serverState.activeChannelId) {
+        serverState.clearUnread(serverState.activeChannelId);
+        serverState.markChannelRead(serverState.activeChannelId);
+      }
+      if (!serverState.activeServerId) {
+        const dmState = useDMStore.getState();
+        if (dmState.activeConversationId) {
+          dmState.clearDMUnread(dmState.activeConversationId);
+          dmState.markConversationRead(dmState.activeConversationId);
+        }
+      }
+      // Re-fetch data that may have become stale while the tab was hidden
+      // (socket events are lost during background disconnects)
+      useDMStore.getState().fetchConversations();
+      if (serverState.activeServerId) {
+        serverState.fetchMembers(serverState.activeServerId);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
+
   // Set up WebSocket event listeners with proper function references
   useEffect(() => {
+    // Debounce timers for marking channels/conversations as read while viewing
+    let markReadTimer: ReturnType<typeof setTimeout> | null = null;
+    let markDMReadTimer: ReturnType<typeof setTimeout> | null = null;
+
     // Store function references so cleanup actually works
     const handlers = {
       messageNew: (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
         if (message.channelId === useServerStore.getState().activeChannelId) {
           useChatStore.getState().addMessage(message);
+          // Debounced mark-as-read so lastReadAt stays current while viewing
+          // Capture serverId now — channels array may change if user switches servers before timer fires
+          const capturedServerId = message.serverId;
+          if (markReadTimer) clearTimeout(markReadTimer);
+          markReadTimer = setTimeout(() => {
+            useServerStore.getState().markChannelRead(message.channelId!, capturedServerId);
+          }, 2000);
         }
         const currentUser = useAuthStore.getState().user;
         if (message.author?.id === currentUser?.id) return;
@@ -174,8 +218,12 @@ export function MainLayout() {
         if (voiceState.activeChannelId !== channelId) return;
         if (useSettingsStore.getState().enableNotificationSounds) playLeaveSound();
       },
-      voiceStateUpdate: ({ channelId, userId, selfMute, selfDeaf }: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => {
-        useVoiceStore.getState().updateUserState(channelId, userId, selfMute, selfDeaf);
+      voiceStateUpdate: ({ channelId, userId, selfMute, selfDeaf, serverMuted, serverDeafened }: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => {
+        useVoiceStore.getState().updateUserState(channelId, userId, selfMute, selfDeaf, serverMuted ?? false, serverDeafened ?? false);
+      },
+      voiceForceMove: ({ targetChannelId }: { channelId: string; userId: string; targetChannelId: string }) => {
+        useVoiceStore.getState().handleForceMove(targetChannelId);
+        toast.info('You were moved to another voice channel');
       },
       voiceSpeaking: ({ channelId, userId, speaking }: { channelId: string; userId: string; speaking: boolean }) => {
         useVoiceStore.getState().setUserSpeaking(channelId, userId, speaking);
@@ -219,9 +267,18 @@ export function MainLayout() {
       serverUpdated: (server: Server) => {
         useServerStore.getState().updateServerData(server);
       },
-      userUpdated: ({ userId, displayName, avatarUrl }: { userId: string; displayName: string; avatarUrl: string | null }) => {
-        useServerStore.getState().updateMemberProfile(userId, { displayName, avatarUrl });
-        useChatStore.getState().updateAuthorProfile(userId, { displayName, avatarUrl });
+      userUpdated: (data: { userId: string; displayName?: string; avatarUrl?: string | null; role?: string; isSupporter?: boolean; supporterTier?: string | null }) => {
+        const { userId, ...fields } = data;
+        useServerStore.getState().updateMemberProfile(userId, fields);
+        useChatStore.getState().updateAuthorProfile(userId, fields as Partial<import('@voxium/shared').MessageAuthor>);
+        // Update DM conversation participant badges/profile
+        const dmConvs = useDMStore.getState().conversations;
+        const updated = dmConvs.map((c) =>
+          c.participant?.id === userId ? { ...c, participant: { ...c.participant, ...fields } as typeof c.participant } : c
+        );
+        if (updated.some((c, i) => c !== dmConvs[i])) {
+          useDMStore.setState({ conversations: updated });
+        }
       },
       messageReactionUpdate: ({ messageId, channelId, reactions }: { messageId: string; channelId: string; reactions: ReactionGroup[] }) => {
         if (channelId === useServerStore.getState().activeChannelId) {
@@ -259,6 +316,11 @@ export function MainLayout() {
 
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().addMessage(message);
+          // Debounced mark-as-read so lastReadAt stays current while viewing
+          if (markDMReadTimer) clearTimeout(markDMReadTimer);
+          markDMReadTimer = setTimeout(() => {
+            useDMStore.getState().markConversationRead(message.conversationId!);
+          }, 2000);
         } else if (message.conversationId) {
           const currentUser = useAuthStore.getState().user;
           if (message.author?.id !== currentUser?.id) {
@@ -348,6 +410,7 @@ export function MainLayout() {
           // back to the server (call was already ended server-side)
           voiceState.stopLatencyMeasurement();
           stopSpeakingDetection();
+          stopNoiseSuppression();
           if (voiceState.localStream) {
             voiceState.localStream.getTracks().forEach((track) => track.stop());
           }
@@ -406,6 +469,31 @@ export function MainLayout() {
       },
       memberRoleUpdated: ({ serverId, userId, role }: { serverId: string; userId: string; role: MemberRole }) => {
         useServerStore.getState().handleMemberRoleUpdated(serverId, userId, role);
+      },
+      roleCreated: ({ serverId, role }: { serverId: string; role: Role }) => {
+        useServerStore.getState().handleRoleCreated(serverId, role);
+      },
+      roleUpdated: ({ serverId, role }: { serverId: string; role: Role }) => {
+        useServerStore.getState().handleRoleUpdated(serverId, role);
+      },
+      roleDeleted: ({ serverId, roleId }: { serverId: string; roleId: string }) => {
+        useServerStore.getState().handleRoleDeleted(serverId, roleId);
+      },
+      roleReordered: ({ serverId, roles }: { serverId: string; roles: { id: string; position: number }[] }) => {
+        useServerStore.getState().handleRoleReordered(serverId, roles);
+      },
+      memberRolesUpdated: ({ serverId, userId, roleIds }: { serverId: string; userId: string; roleIds: string[] }) => {
+        useServerStore.getState().handleMemberRolesUpdated(serverId, userId, roleIds);
+      },
+      memberNicknameUpdated: ({ serverId, userId, nickname }: { serverId: string; userId: string; nickname: string | null }) => {
+        useServerStore.getState().handleNicknameUpdated(serverId, userId, nickname);
+      },
+      channelPermissionsUpdated: ({ serverId }: { serverId: string; channelId: string }) => {
+        // Re-fetch server detail to get updated channel visibility
+        const state = useServerStore.getState();
+        if (state.activeServerId === serverId) {
+          state.setActiveServer(serverId);
+        }
       },
       memberKicked: ({ serverId }: { serverId: string }) => {
         // Leave voice if the active voice channel belongs to the kicked server
@@ -487,7 +575,7 @@ export function MainLayout() {
         const vs = useVoiceStore.getState();
         if (vs.activeChannelId) vs.leaveChannel();
         if (vs.dmCallConversationId) vs.leaveDMCall();
-        toast.error(data.message);
+        toast.error(translateServerError(data.message, i18n.t, 'common.somethingWentWrong'));
       },
     };
 
@@ -503,6 +591,7 @@ export function MainLayout() {
       ['voice:user_joined', handlers.voiceUserJoined],
       ['voice:user_left', handlers.voiceUserLeft],
       ['voice:state_update', handlers.voiceStateUpdate],
+      ['voice:force_moved', handlers.voiceForceMove],
       ['voice:speaking', handlers.voiceSpeaking],
       ['voice:signal', handlers.voiceSignal],
       ['voice:transport_created', handlers.voiceTransportCreated],
@@ -543,6 +632,13 @@ export function MainLayout() {
       ['friend:request_accepted', handlers.friendRequestAccepted],
       ['friend:removed', handlers.friendRemoved],
       ['member:role_updated', handlers.memberRoleUpdated],
+      ['role:created', handlers.roleCreated],
+      ['role:updated', handlers.roleUpdated],
+      ['role:deleted', handlers.roleDeleted],
+      ['role:reordered', handlers.roleReordered],
+      ['member:roles_updated', handlers.memberRolesUpdated],
+      ['member:nickname_updated', handlers.memberNicknameUpdated],
+      ['channel:permissions_updated', handlers.channelPermissionsUpdated],
       ['member:kicked', handlers.memberKicked],
       ['server:deleted', handlers.serverDeleted],
       ['announcement:init', handlers.announcementInit],
@@ -573,7 +669,7 @@ export function MainLayout() {
       }
 
       attachedGeneration.current = gen;
-      console.log('[MainLayout] Listeners attached (generation', gen + ')');
+      if (import.meta.env.DEV) console.log('[MainLayout] Listeners attached (generation', gen + ')');
     }
 
     function detachListeners(socket: NonNullable<ReturnType<typeof getSocket>>) {
@@ -597,7 +693,7 @@ export function MainLayout() {
       if (socket.id === handledSocketId) return;
       handledSocketId = socket.id;
 
-      console.log(`[MainLayout] Connection established (id=${socket.id}) — attaching listeners & re-fetching`);
+      if (import.meta.env.DEV) console.log(`[MainLayout] Connection established (id=${socket.id}) — attaching listeners & re-fetching`);
       ensureListeners(socket);
 
       // Re-fetch servers and members (presence may have changed)
@@ -646,6 +742,8 @@ export function MainLayout() {
       }
       if (socket && socket !== s) socket.off('connect', handleConnected);
       unsubStatus();
+      if (markReadTimer) clearTimeout(markReadTimer);
+      if (markDMReadTimer) clearTimeout(markDMReadTimer);
     };
 
     return () => {
@@ -661,6 +759,7 @@ export function MainLayout() {
       <div className="flex flex-1 min-h-0">
         <ServerSidebar />
         {activeServerId ? <ChannelSidebar /> : <DMList />}
+        <ErrorBoundary inline>
         <div className="flex flex-1 flex-col overflow-hidden">
           {activeServerId ? (
             screenSharingUserId && voiceActiveChannelId ? (
@@ -685,7 +784,8 @@ export function MainLayout() {
             <DMWelcome />
           )}
         </div>
-        {activeServerId && <MemberSidebar />}
+        </ErrorBoundary>
+        {activeServerId && <ErrorBoundary inline><MemberSidebar /></ErrorBoundary>}
         {isSettingsOpen && <SettingsModal />}
         <IncomingCallModal />
         {showGlobalSearch && (() => {
@@ -716,6 +816,8 @@ export function MainLayout() {
 }
 
 function DMWelcome() {
+  const { t } = useTranslation();
+
   return (
     <div className="flex h-full flex-col items-center justify-center bg-vox-bg-primary">
       <div className="flex flex-col items-center gap-4 text-center animate-fade-in">
@@ -726,9 +828,9 @@ function DMWelcome() {
             />
           </svg>
         </div>
-        <h2 className="text-2xl font-bold text-vox-text-primary">Direct Messages</h2>
+        <h2 className="text-2xl font-bold text-vox-text-primary">{t('dm.title')}</h2>
         <p className="max-w-md text-vox-text-secondary">
-          Select a conversation from the sidebar, or click on a member in any server to start a new one.
+          {t('dm.welcomeMessage')}
         </p>
       </div>
     </div>

@@ -61,6 +61,7 @@ export function ReactionDisplay({ reactions, messageId, channelId, conversationI
         onClick={() => setShowPicker(!showPicker)}
         className="flex items-center justify-center rounded-full w-6 h-6 border border-vox-border bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
         title="Add reaction"
+        aria-label="Add reaction"
       >
         <Plus size={12} />
       </button>

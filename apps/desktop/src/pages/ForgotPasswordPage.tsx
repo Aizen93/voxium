@@ -1,8 +1,11 @@
 import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../stores/authStore';
+import { getTranslatedError } from '../utils/serverErrors';
 
 export function ForgotPasswordPage() {
+  const { t } = useTranslation();
   const { forgotPassword } = useAuthStore();
   const [email, setEmail] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -16,8 +19,8 @@ export function ForgotPasswordPage() {
     try {
       await forgotPassword(email);
       setSuccess(true);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Something went wrong. Please try again.');
+    } catch (err) {
+      setError(getTranslatedError(err, t));
     } finally {
       setIsLoading(false);
     }
@@ -30,9 +33,9 @@ export function ForgotPasswordPage() {
           {/* Logo */}
           <div className="mb-8 flex flex-col items-center">
             <img src="/logo.svg" alt="Voxium" className="h-16 w-16 rounded-2xl shadow-lg shadow-vox-accent-primary/20" />
-            <h1 className="mt-4 text-2xl font-bold text-vox-text-primary">Forgot Password</h1>
+            <h1 className="mt-4 text-2xl font-bold text-vox-text-primary">{t('auth.forgotPassword.title')}</h1>
             <p className="mt-1 text-center text-vox-text-secondary">
-              Enter your email and we'll send you a link to reset your password.
+              {t('auth.forgotPassword.subtitle')}
             </p>
           </div>
 
@@ -45,24 +48,24 @@ export function ForgotPasswordPage() {
           {success ? (
             <div className="space-y-4">
               <div className="rounded-lg bg-vox-voice-connected/10 border border-vox-voice-connected/20 px-4 py-3 text-sm text-vox-voice-connected">
-                If an account with that email exists, a reset link has been sent. Check your inbox.
+                {t('auth.forgotPassword.successMessage')}
               </div>
               <Link to="/login" className="btn-primary block w-full py-2.5 text-center">
-                Back to Login
+                {t('auth.forgotPassword.backToLogin')}
               </Link>
             </div>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
-                  Email
+                  {t('auth.forgotPassword.email')}
                 </label>
                 <input
                   type="email"
                   className="input"
                   value={email}
                   onChange={(e) => { setEmail(e.target.value); setError(null); }}
-                  placeholder="you@example.com"
+                  placeholder={t('auth.login.emailPlaceholder')}
                   required
                   autoFocus
                 />
@@ -73,16 +76,16 @@ export function ForgotPasswordPage() {
                 disabled={isLoading}
                 className="btn-primary w-full py-2.5"
               >
-                {isLoading ? 'Sending...' : 'Send Reset Link'}
+                {isLoading ? t('auth.forgotPassword.sending') : t('auth.forgotPassword.sendResetLink')}
               </button>
             </form>
           )}
 
           {!success && (
             <p className="mt-6 text-center text-sm text-vox-text-secondary">
-              Remember your password?{' '}
+              {t('auth.forgotPassword.rememberPassword')}{' '}
               <Link to="/login" className="text-vox-text-link hover:underline">
-                Sign in
+                {t('auth.forgotPassword.signIn')}
               </Link>
             </p>
           )}

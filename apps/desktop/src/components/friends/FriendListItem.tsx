@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { Avatar } from '../common/Avatar';
 import { useFriendStore } from '../../stores/friendStore';
 import { useDMStore } from '../../stores/dmStore';
@@ -20,6 +21,7 @@ interface Props {
 }
 
 export function FriendListItem({ friendship, variant }: Props) {
+  const { t } = useTranslation();
   const { user } = friendship;
   const status = user.status || 'offline';
 
@@ -30,7 +32,7 @@ export function FriendListItem({ friendship, variant }: Props) {
       useFriendStore.getState().setShowFriendsView(false);
       useDMStore.getState().setActiveConversation(conversationId);
     } catch {
-      toast.error('Failed to open conversation');
+      toast.error(t('friends.failedToOpenConversation'));
     }
   };
 
@@ -38,7 +40,7 @@ export function FriendListItem({ friendship, variant }: Props) {
     try {
       await useFriendStore.getState().acceptRequest(friendship.id);
     } catch {
-      toast.error('Failed to accept friend request');
+      toast.error(t('friends.failedToAccept'));
     }
   };
 
@@ -46,7 +48,7 @@ export function FriendListItem({ friendship, variant }: Props) {
     try {
       await useFriendStore.getState().removeFriendship(friendship.id);
     } catch {
-      toast.error('Failed to remove friendship');
+      toast.error(t('friends.failedToRemove'));
     }
   };
 
@@ -80,14 +82,16 @@ export function FriendListItem({ friendship, variant }: Props) {
             <button
               onClick={handleMessage}
               className="rounded-full p-1.5 text-vox-text-muted hover:bg-vox-bg-active hover:text-vox-text-primary transition-colors"
-              title="Message"
+              title={t('friends.message')}
+              aria-label={t('friends.message')}
             >
               <MessageSquare size={16} />
             </button>
             <button
               onClick={handleRemove}
               className="rounded-full p-1.5 text-vox-text-muted opacity-0 group-hover:opacity-100 hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger transition-all"
-              title="Remove Friend"
+              title={t('friends.removeFriend')}
+              aria-label={t('friends.removeFriend')}
             >
               <Trash2 size={16} />
             </button>
@@ -99,14 +103,16 @@ export function FriendListItem({ friendship, variant }: Props) {
             <button
               onClick={handleAccept}
               className="rounded-full p-1.5 text-vox-text-muted hover:bg-vox-accent-success/20 hover:text-vox-accent-success transition-colors"
-              title="Accept"
+              title={t('friends.accept')}
+              aria-label={t('friends.accept')}
             >
               <Check size={16} />
             </button>
             <button
               onClick={handleRemove}
               className="rounded-full p-1.5 text-vox-text-muted hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger transition-colors"
-              title="Decline"
+              title={t('friends.decline')}
+              aria-label={t('friends.decline')}
             >
               <X size={16} />
             </button>
@@ -117,7 +123,8 @@ export function FriendListItem({ friendship, variant }: Props) {
           <button
             onClick={handleRemove}
             className="rounded-full p-1.5 text-vox-text-muted hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger transition-colors"
-            title="Cancel"
+            title={t('common.cancel')}
+            aria-label={t('common.cancel')}
           >
             <X size={16} />
           </button>

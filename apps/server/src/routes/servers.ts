@@ -2,14 +2,17 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateServerName, LIMITS, WS_EVENTS } from '@voxium/shared';
-import type { MemberRole } from '@voxium/shared';
+import { validateServerName, validateNickname, LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, permissionsToString } from '@voxium/shared';
+import type { MemberRole, Server } from '@voxium/shared';
+import type { Socket } from 'socket.io';
+import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
 import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
-import { outranks, isAdminOrOwner } from '../utils/permissions';
+import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
+import { Permissions } from '@voxium/shared';
 import { leaveCurrentVoiceChannel, cleanupServerVoice } from '../websocket/voiceHandler';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
@@ -75,6 +78,17 @@ serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
         data: { name: 'Voice Channels', serverId: srv.id, position: 1 },
       });
 
+      // Create @everyone default role
+      await tx.role.create({
+        data: {
+          serverId: srv.id,
+          name: 'everyone',
+          position: 0,
+          permissions: permissionsToString(DEFAULT_EVERYONE_PERMISSIONS),
+          isDefault: true,
+        },
+      });
+
       // Create default channels linked to categories
       await tx.channel.createMany({
         data: [
@@ -129,15 +143,19 @@ serverRouter.get('/:serverId', async (req: Request<{ serverId: string }>, res: R
       include: {
         channels: { orderBy: { position: 'asc' } },
         categories: { orderBy: { position: 'asc' } },
+        roles: { orderBy: { position: 'asc' } },
         _count: { select: { members: true } },
       },
     });
 
     if (!server) throw new NotFoundError('Server');
 
+    // Filter channels by VIEW_CHANNEL permission
+    const visibleChannels = await filterVisibleChannels(req.user!.userId, serverId, server.channels);
+
     res.json({
       success: true,
-      data: { ...server, memberCount: server._count.members },
+      data: { ...server, channels: visibleChannels, memberCount: server._count.members },
     });
   } catch (err) {
     next(err);
@@ -164,8 +182,8 @@ serverRouter.get('/:serverId/limits', async (req: Request<{ serverId: string }>,
 serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 100, LIMITS.MEMBERS_PER_PAGE);
+    const page = parseInt(req.query.page as string, 10) || 1;
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, LIMITS.MEMBERS_PER_PAGE);
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
@@ -179,6 +197,9 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
           user: {
             select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, isSupporter: true, supporterTier: true, createdAt: true },
           },
+          memberRoles: {
+            include: { role: true },
+          },
         },
         skip: (page - 1) * limit,
         take: limit,
@@ -187,9 +208,16 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
       prisma.serverMember.count({ where: { serverId } }),
     ]);
 
+    // Flatten memberRoles to roles array for the response
+    const membersWithRoles = members.map((m) => ({
+      ...m,
+      roles: m.memberRoles.map((mr) => mr.role),
+      memberRoles: undefined,
+    }));
+
     res.json({
       success: true,
-      data: members,
+      data: membersWithRoles,
       total,
       page,
       limit,
@@ -325,7 +353,9 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
 
     const server = await prisma.server.findUnique({ where: { id: serverId } });
     if (!server) throw new NotFoundError('Server');
-    if (server.ownerId !== req.user!.userId) throw new ForbiddenError('Only the server owner can update settings');
+
+    const canManageServer = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_SERVER);
+    if (!canManageServer) throw new ForbiddenError('You do not have permission to manage server settings');
 
     const updateData: Record<string, unknown> = {};
 
@@ -364,10 +394,10 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
 
     // Delete old icon from S3 after DB update confirmed
     if (updateData.iconUrl !== undefined && oldIconUrl && oldIconUrl !== updateData.iconUrl) {
-      deleteFromS3(oldIconUrl).catch(() => {});
+      deleteFromS3(oldIconUrl).catch((err) => console.warn('[S3] Failed to delete old asset:', err));
     }
 
-    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updated);
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
 
     res.json({ success: true, data: updated });
   } catch (err) {
@@ -386,12 +416,8 @@ serverRouter.patch('/:serverId/invites-lock', rateLimitMemberManage, async (req:
     const server = await prisma.server.findUnique({ where: { id: serverId } });
     if (!server) throw new NotFoundError('Server');
 
-    const membership = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-    if (!membership || !isAdminOrOwner(membership.role as MemberRole)) {
-      throw new ForbiddenError('Only the server owner or admin can toggle invites');
-    }
+    const canManageServer = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_SERVER);
+    if (!canManageServer) throw new ForbiddenError('You do not have permission to manage server settings');
 
     const updated = await prisma.server.update({
       where: { id: serverId },
@@ -399,7 +425,7 @@ serverRouter.patch('/:serverId/invites-lock', rateLimitMemberManage, async (req:
       data: { invitesLocked: locked },
     });
 
-    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updated);
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
 
     res.json({ success: true, data: updated });
   } catch (err) {
@@ -419,10 +445,10 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
     const io = getIO();
 
     // 1. Silently eject all users from voice channels (no voice:user_left events — clients handle via server:deleted)
-    cleanupServerVoice(io as any, serverId);
+    cleanupServerVoice(io, serverId);
 
     // 2. Notify all members before removing them from rooms
-    io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_DELETED as any, { serverId });
+    io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_DELETED, { serverId });
 
     // 3. Remove all sockets from server room and channel rooms
     const channels = await prisma.channel.findMany({
@@ -443,7 +469,7 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
 
     // 5. Clean up S3 icon if exists
     if (server.iconUrl) {
-      deleteFromS3(server.iconUrl).catch(() => {});
+      deleteFromS3(server.iconUrl).catch((err) => console.warn('[S3] Failed to delete old asset:', err));
     }
 
     res.json({ success: true, message: 'Server deleted' });
@@ -484,7 +510,7 @@ serverRouter.patch(
         data: { role: newRole },
       });
 
-      getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+      getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
         serverId,
         userId: memberId,
         role: newRole as MemberRole,
@@ -507,17 +533,18 @@ serverRouter.post(
 
       if (memberId === req.user!.userId) throw new BadRequestError('Cannot kick yourself');
 
-      const actorMembership = await prisma.serverMember.findUnique({
-        where: { userId_serverId: { userId: req.user!.userId, serverId } },
-      });
-      if (!actorMembership) throw new NotFoundError('Server');
-      if (!isAdminOrOwner(actorMembership.role as MemberRole)) throw new ForbiddenError('Only admins and the owner can kick members');
+      const canKick = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+      if (!canKick) throw new ForbiddenError('You do not have permission to kick members');
 
       const targetMembership = await prisma.serverMember.findUnique({
         where: { userId_serverId: { userId: memberId, serverId } },
       });
       if (!targetMembership) throw new NotFoundError('Member');
-      if (!outranks(actorMembership.role as MemberRole, targetMembership.role as MemberRole)) {
+
+      // Role hierarchy check: actor must outrank target
+      const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
+      const targetHighest = await getHighestRolePosition(memberId, serverId);
+      if (actorHighest <= targetHighest) {
         throw new ForbiddenError('Cannot kick a member with an equal or higher role');
       }
 
@@ -532,7 +559,7 @@ serverRouter.post(
             select: { serverId: true },
           });
           if (voiceChannel?.serverId === serverId) {
-            leaveCurrentVoiceChannel(io as any, s as any, memberId);
+            leaveCurrentVoiceChannel(io, s as unknown as Socket<ClientToServerEvents, ServerToClientEvents>, memberId);
           }
         }
       }
@@ -559,11 +586,117 @@ serverRouter.post(
       const kickedSockets = await io.fetchSockets();
       for (const s of kickedSockets) {
         if (s.data.userId === memberId) {
-          s.emit(WS_EVENTS.MEMBER_KICKED as any, { serverId, userId: memberId });
+          s.emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
         }
       }
 
       res.json({ success: true, message: 'Member kicked' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Set own nickname (requires CHANGE_NICKNAME permission)
+serverRouter.patch(
+  '/:serverId/nickname',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId } = req.params;
+      const { nickname } = req.body as { nickname: string | null };
+
+      const membership = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId: req.user!.userId, serverId } },
+      });
+      if (!membership) throw new NotFoundError('Server');
+
+      // Setting to null (clearing) always allowed; setting a new nickname requires permission
+      if (nickname !== null) {
+        const canChange = await hasServerPermission(req.user!.userId, serverId, Permissions.CHANGE_NICKNAME);
+        if (!canChange) throw new ForbiddenError('You do not have permission to change your nickname');
+
+        if (typeof nickname !== 'string') throw new BadRequestError('nickname must be a string');
+        const sanitized = sanitizeText(nickname);
+        const err = validateNickname(sanitized);
+        if (err) throw new BadRequestError(err);
+
+        await prisma.serverMember.update({
+          where: { userId_serverId: { userId: req.user!.userId, serverId } },
+          data: { nickname: sanitized },
+        });
+
+        getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
+          serverId,
+          userId: req.user!.userId,
+          nickname: sanitized,
+        });
+
+        res.json({ success: true, data: { nickname: sanitized } });
+      } else {
+        await prisma.serverMember.update({
+          where: { userId_serverId: { userId: req.user!.userId, serverId } },
+          data: { nickname: null },
+        });
+
+        getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
+          serverId,
+          userId: req.user!.userId,
+          nickname: null,
+        });
+
+        res.json({ success: true, data: { nickname: null } });
+      }
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Set another member's nickname (requires MANAGE_NICKNAMES permission)
+serverRouter.patch(
+  '/:serverId/members/:memberId/nickname',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string; memberId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId, memberId } = req.params;
+      const { nickname } = req.body as { nickname: string | null };
+
+      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_NICKNAMES);
+      if (!canManage) throw new ForbiddenError('You do not have permission to manage nicknames');
+
+      const targetMember = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId: memberId, serverId } },
+      });
+      if (!targetMember) throw new NotFoundError('Member');
+
+      // Hierarchy check: can't manage nicknames of users with equal/higher roles
+      const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
+      const targetHighest = await getHighestRolePosition(memberId, serverId);
+      if (actorHighest <= targetHighest && actorHighest !== Infinity) {
+        throw new ForbiddenError('Cannot manage the nickname of a member with an equal or higher role');
+      }
+
+      let sanitized: string | null = null;
+      if (nickname !== null) {
+        if (typeof nickname !== 'string') throw new BadRequestError('nickname must be a string');
+        sanitized = sanitizeText(nickname);
+        const err = validateNickname(sanitized);
+        if (err) throw new BadRequestError(err);
+      }
+
+      await prisma.serverMember.update({
+        where: { userId_serverId: { userId: memberId, serverId } },
+        data: { nickname: sanitized },
+      });
+
+      getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
+        serverId,
+        userId: memberId,
+        nickname: sanitized,
+      });
+
+      res.json({ success: true, data: { nickname: sanitized } });
     } catch (err) {
       next(err);
     }
@@ -579,7 +712,7 @@ serverRouter.post(
       const { serverId } = req.params;
       const { targetUserId } = req.body as { targetUserId: string };
 
-      if (!targetUserId) throw new BadRequestError('targetUserId is required');
+      if (!targetUserId || typeof targetUserId !== 'string') throw new BadRequestError('targetUserId is required');
       if (targetUserId === req.user!.userId) throw new BadRequestError('Cannot transfer ownership to yourself');
 
       const actorMembership = await prisma.serverMember.findUnique({
@@ -608,12 +741,12 @@ serverRouter.post(
       const io = getIO();
 
       // Emit role updates for both users
-      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
         serverId,
         userId: targetUserId,
         role: 'owner' as MemberRole,
       });
-      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED as any, {
+      io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
         serverId,
         userId: req.user!.userId,
         role: 'admin' as MemberRole,
@@ -625,7 +758,7 @@ serverRouter.post(
         select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
       });
       if (updatedServer) {
-        io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED as any, updatedServer);
+        io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updatedServer as unknown as Server);
       }
 
       res.json({ success: true, message: 'Ownership transferred' });

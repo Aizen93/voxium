@@ -31,7 +31,7 @@ function setStatus(status: ConnectionStatus) {
   if (currentStatus === status) return;
   const prev = currentStatus;
   currentStatus = status;
-  console.log(`[WS] Status: ${prev} → ${status} (${statusListeners.size} listener(s))`);
+  if (import.meta.env.DEV) console.log(`[WS] Status: ${prev} → ${status} (${statusListeners.size} listener(s))`);
   statusListeners.forEach((fn) => fn(status));
 }
 
@@ -82,7 +82,7 @@ export function connectSocket(token: string): VoxSocket {
     auth: { token },
     transports: ['polling', 'websocket'],
     reconnection: true,
-    reconnectionAttempts: Infinity,
+    reconnectionAttempts: 50,
     reconnectionDelay: 1000,
     reconnectionDelayMax: 10000,
   });
@@ -95,12 +95,12 @@ export function connectSocket(token: string): VoxSocket {
       'voice:signal', 'dm:voice:signal',
     ]);
 
-    socket.onAny((event: string, ...args: any[]) => {
+    socket.onAny((event: string, ...args: unknown[]) => {
       if (NOISY_EVENTS.has(event)) return;
       console.log(`[WS] ← ${event}`, args.length > 0 ? JSON.stringify(args[0]).slice(0, 120) : '');
     });
 
-    socket.onAnyOutgoing((event: string, ...args: any[]) => {
+    socket.onAnyOutgoing((event: string, ...args: unknown[]) => {
       if (NOISY_EVENTS.has(event)) return;
       console.log(`[WS] → ${event}`, args.length > 0 ? JSON.stringify(args[0]).slice(0, 120) : '');
     });
@@ -109,7 +109,7 @@ export function connectSocket(token: string): VoxSocket {
   socket.on('connect', () => {
     connecting = false;
     setStatus('connected');
-    console.log('[WS] Connected, socket id:', socket!.id);
+    if (import.meta.env.DEV) console.log('[WS] Connected, socket id:', socket!.id);
 
     if (!hasConnectedOnce) {
       // First connect — flush one-shot ready callbacks only
@@ -119,13 +119,13 @@ export function connectSocket(token: string): VoxSocket {
     } else {
       // Actual reconnect — fire reconnect callbacks
       // (ready callbacks were already consumed on first connect)
-      console.log('[WS] Reconnect detected — firing reconnect callbacks');
+      if (import.meta.env.DEV) console.log('[WS] Reconnect detected — firing reconnect callbacks');
       reconnectCallbacks.forEach((fn) => fn());
     }
   });
 
   socket.on('force:logout', (data) => {
-    console.log('[WS] Force logout received:', data?.reason);
+    if (import.meta.env.DEV) console.log('[WS] Force logout received:', data?.reason);
     import('../stores/authStore').then(({ useAuthStore }) => {
       useAuthStore.getState().logout();
       const reason = data?.reason;
@@ -134,7 +134,7 @@ export function connectSocket(token: string): VoxSocket {
   });
 
   socket.on('disconnect', (reason) => {
-    console.log('[WS] Disconnected:', reason);
+    if (import.meta.env.DEV) console.log('[WS] Disconnected:', reason);
     setStatus('disconnected');
 
     // Only fully leave voice when the server explicitly kicks us.
@@ -155,7 +155,7 @@ export function connectSocket(token: string): VoxSocket {
 
   socket.io.on('reconnect_attempt', (attempt) => {
     setStatus('connecting');
-    console.log(`[WS] Reconnection attempt ${attempt}`);
+    if (import.meta.env.DEV) console.log(`[WS] Reconnection attempt ${attempt}`);
 
     // Refresh auth token on each reconnect attempt
     // so we don't use an expired token
@@ -166,7 +166,7 @@ export function connectSocket(token: string): VoxSocket {
   });
 
   socket.io.on('reconnect', () => {
-    console.log('[WS] Reconnected successfully');
+    if (import.meta.env.DEV) console.log('[WS] Reconnected successfully');
     // 'connect' event will fire and handle callbacks
   });
 

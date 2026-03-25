@@ -1,16 +1,22 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import { createPortal } from 'react-dom';
 import { useServerStore } from '../../stores/serverStore';
+import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor } from 'lucide-react';
+import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
+import { ChannelPermissionsEditor } from '../server/ChannelPermissionsEditor';
 import { VoicePanel } from '../voice/VoicePanel';
+import { MemberContextMenu } from '../server/MemberContextMenu';
 import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { toast } from '../../stores/toastStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { clsx } from 'clsx';
 import {
   DndContext,
@@ -61,18 +67,24 @@ function SortableChannelItem({
   onSelectText,
   onJoinVoice,
   onDelete,
+  onContextMenu,
+  onVoiceUserContextMenu,
 }: {
   channel: Channel;
   isAdmin: boolean;
   isActive: boolean;
   isVoiceActive: boolean;
   unread: number;
-  voiceUsers: { id: string; displayName: string; avatarUrl: string | null; selfMute: boolean; speaking: boolean; screenSharing?: boolean }[];
+  voiceUsers: { id: string; displayName: string; avatarUrl: string | null; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean; speaking: boolean; screenSharing?: boolean }[];
   currentUserId: string | undefined;
+  // members lookup for nickname resolution is done via store hook below
   onSelectText: (id: string) => void;
   onJoinVoice: (id: string) => void;
   onDelete: (id: string) => void;
+  onContextMenu?: (e: React.MouseEvent, channel: Channel) => void;
+  onVoiceUserContextMenu?: (e: React.MouseEvent, userId: string) => void;
 }) {
+  const { t } = useTranslation();
   const {
     attributes,
     listeners,
@@ -93,6 +105,7 @@ function SortableChannelItem({
   return (
     <div ref={setNodeRef} style={style}>
       <div
+        onContextMenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, channel); } }}
         className={clsx(
           'group flex w-full items-center gap-1 rounded-md px-1 py-1.5 text-sm transition-colors',
           isText
@@ -128,14 +141,15 @@ function SortableChannelItem({
         </button>
         {isText && unread > 0 && (
           <span className="bg-vox-accent-primary text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 shrink-0">
-            {unread}
+            {unread > 99 ? '99+' : unread}
           </span>
         )}
         {isAdmin && (
           <button
             onClick={() => onDelete(channel.id)}
             className="shrink-0 opacity-0 group-hover:opacity-100 text-vox-text-muted hover:text-vox-accent-danger transition-all"
-            title="Delete channel"
+            title={t('channel.deleteChannel')}
+            aria-label={t('channel.deleteChannel')}
           >
             <Trash2 size={12} />
           </button>
@@ -144,30 +158,67 @@ function SortableChannelItem({
 
       {/* Voice users */}
       {!isText && voiceUsers.length > 0 && (
-        <div className="ml-4 mt-0.5 space-y-0.5">
-          {voiceUsers.map((vu) => (
-            <UserHoverTarget key={vu.id} userId={vu.id}>
-              <div className="flex items-center gap-1.5 rounded px-2 py-1">
-                <Avatar
-                  avatarUrl={vu.avatarUrl}
-                  displayName={vu.displayName}
-                  size="xs"
-                  speaking={vu.speaking}
-                />
-                <span className={clsx(
-                  'text-xs truncate',
-                  vu.id === currentUserId ? 'text-vox-text-primary font-medium' : 'text-vox-text-secondary'
-                )}>
-                  {vu.displayName}
-                  {vu.id === currentUserId && ' (you)'}
-                </span>
-                {vu.screenSharing && <Monitor size={10} className="text-vox-voice-connected shrink-0" />}
-                {vu.selfMute && <MicOff size={10} className="text-vox-voice-muted shrink-0" />}
-              </div>
-            </UserHoverTarget>
-          ))}
-        </div>
+        <VoiceUserList voiceUsers={voiceUsers} currentUserId={currentUserId} onContextMenu={onVoiceUserContextMenu || (() => {})} />
       )}
+    </div>
+  );
+}
+
+// ─── Sortable Category Header ───────────────────────────────────────────────
+
+// ─── Voice User List (with nickname resolution) ─────────────────────────────
+
+function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
+  voiceUsers: { id: string; displayName: string; avatarUrl: string | null; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean; speaking: boolean; screenSharing?: boolean }[];
+  currentUserId: string | undefined;
+  onContextMenu: (e: React.MouseEvent, userId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const members = useServerStore((s) => s.members);
+
+  return (
+    <div className="ml-4 mt-0.5 space-y-0.5">
+      {voiceUsers.map((vu) => {
+        const member = members.find((m) => m.userId === vu.id);
+        const name = member?.nickname || vu.displayName;
+        const roleColor = member?.roles?.length
+          ? [...member.roles].sort((a, b) => b.position - a.position)[0]?.color
+          : null;
+
+        return (
+          <UserHoverTarget key={vu.id} userId={vu.id}>
+            <div
+              className="flex items-center gap-1.5 rounded px-2 py-1 hover:bg-vox-bg-hover/50 cursor-default"
+              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, vu.id); }}
+            >
+              <Avatar
+                avatarUrl={vu.avatarUrl}
+                displayName={vu.displayName}
+                size="xs"
+                speaking={vu.speaking}
+              />
+              <span
+                className={clsx(
+                  'text-xs truncate flex-1',
+                  vu.id === currentUserId ? 'font-medium' : '',
+                  !roleColor && 'text-vox-text-secondary'
+                )}
+                style={roleColor ? { color: roleColor } : undefined}
+              >
+                {name}
+                {vu.id === currentUserId && ` ${t('channel.you')}`}
+              </span>
+              <div className="flex items-center gap-0.5 shrink-0">
+                {vu.screenSharing && <Monitor size={10} className="text-vox-voice-connected" />}
+                {vu.serverMuted && <span title={t('channel.serverMuted')}><MicOff size={10} className="text-vox-accent-danger" /></span>}
+                {vu.selfMute && !vu.serverMuted && <MicOff size={10} className="text-vox-voice-muted" />}
+                {vu.serverDeafened && <span title={t('channel.serverDeafened')}><HeadphoneOff size={10} className="text-vox-accent-danger" /></span>}
+                {vu.selfDeaf && !vu.serverDeafened && <HeadphoneOff size={10} className="text-vox-voice-muted" />}
+              </div>
+            </div>
+          </UserHoverTarget>
+        );
+      })}
     </div>
   );
 }
@@ -191,6 +242,7 @@ function SortableCategoryHeader({
   onDelete: (catId: string) => void;
   children: React.ReactNode;
 }) {
+  const { t } = useTranslation();
   const {
     attributes,
     listeners,
@@ -234,14 +286,16 @@ function SortableCategoryHeader({
             <button
               onClick={() => onCreateChannel(category.id)}
               className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
-              title="Create channel"
+              title={t('channel.createChannel')}
+              aria-label={t('channel.createChannel')}
             >
               <Plus size={14} />
             </button>
             <button
               onClick={() => onDelete(category.id)}
               className="text-vox-text-muted hover:text-vox-accent-danger transition-colors"
-              title="Delete category"
+              title={t('channel.deleteCategory')}
+              aria-label={t('channel.deleteCategory')}
             >
               <Trash2 size={12} />
             </button>
@@ -280,6 +334,7 @@ function CategoryOverlay({ category }: { category: Category }) {
 // ─── Main Component ─────────────────────────────────────────────────────────
 
 export function ChannelSidebar() {
+  const { t } = useTranslation();
   const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, unreadCounts, reorderCategories, reorderChannels } = useServerStore();
   const { joinChannel, activeChannelId: voiceChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
@@ -294,6 +349,12 @@ export function ChannelSidebar() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  const [channelContextMenu, setChannelContextMenu] = useState<{ channel: Channel; position: { x: number; y: number } } | null>(null);
+  const [voiceUserCtx, setVoiceUserCtx] = useState<{ userId: string; position: { x: number; y: number } } | null>(null);
+  const [permissionsEditorChannel, setPermissionsEditorChannel] = useState<{ id: string; name: string; type: 'text' | 'voice' } | null>(null);
+  const [editingNickname, setEditingNickname] = useState(false);
+  const [nicknameInput, setNicknameInput] = useState('');
+  const ctxRef = useRef<HTMLDivElement>(null);
 
   const activeServer = servers.find((s) => s.id === activeServerId);
   const currentMember = members.find((m) => m.userId === user?.id);
@@ -316,6 +377,52 @@ export function ChannelSidebar() {
       return next;
     });
   }, []);
+
+  // Close channel context menu on outside click or Escape
+  useEffect(() => {
+    if (!channelContextMenu) return;
+    function handleClick(e: MouseEvent) {
+      if (ctxRef.current && !ctxRef.current.contains(e.target as Node)) {
+        setChannelContextMenu(null);
+      }
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setChannelContextMenu(null);
+    }
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [channelContextMenu]);
+
+  // Adjust context menu position to stay within viewport
+  useEffect(() => {
+    if (channelContextMenu && ctxRef.current) {
+      const rect = ctxRef.current.getBoundingClientRect();
+      let x = channelContextMenu.position.x;
+      let y = channelContextMenu.position.y;
+      if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+      if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+      if (x < 0) x = 8;
+      if (y < 0) y = 8;
+      if (x !== channelContextMenu.position.x || y !== channelContextMenu.position.y) {
+        setChannelContextMenu({ ...channelContextMenu, position: { x, y } });
+      }
+    }
+  }, [channelContextMenu]);
+
+  const handleVoiceUserContextMenu = useCallback((e: React.MouseEvent, userId: string) => {
+    // Close channel context menu if open
+    setChannelContextMenu(null);
+    setVoiceUserCtx({ userId, position: { x: e.clientX, y: e.clientY } });
+  }, []);
+
+  const handleChannelContextMenu = useCallback((e: React.MouseEvent, channel: Channel) => {
+    if (!isAdmin) return;
+    setChannelContextMenu({ channel, position: { x: e.clientX, y: e.clientY } });
+  }, [isAdmin]);
 
   // Sort channels within each group by position
   const channelsByCategory = useMemo(() => {
@@ -366,11 +473,11 @@ export function ChannelSidebar() {
     if (!activeServerId || !newChannelName.trim()) return;
     try {
       await createChannel(activeServerId, newChannelName.trim(), newChannelType, createChannelCategoryId || undefined);
-      toast.success('Channel created');
+      toast.success(t('channel.channelCreated'));
       setNewChannelName('');
       setShowCreateChannel(false);
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error || 'Failed to create channel');
+    } catch (err) {
+      toast.error(getTranslatedError(err, t, 'channel.failedToCreateChannel'));
     }
   };
 
@@ -378,9 +485,9 @@ export function ChannelSidebar() {
     if (!activeServerId) return;
     try {
       await deleteChannel(activeServerId, channelId);
-      toast.success('Channel deleted');
+      toast.success(t('channel.channelDeleted'));
     } catch {
-      toast.error('Failed to delete channel');
+      toast.error(t('channel.failedToDeleteChannel'));
     }
   };
 
@@ -388,11 +495,11 @@ export function ChannelSidebar() {
     if (!activeServerId || !newCategoryName.trim()) return;
     try {
       await createCategory(activeServerId, newCategoryName.trim());
-      toast.success('Category created');
+      toast.success(t('channel.categoryCreated'));
       setNewCategoryName('');
       setShowCreateCategory(false);
     } catch {
-      toast.error('Failed to create category');
+      toast.error(t('channel.failedToCreateCategory'));
     }
   };
 
@@ -400,9 +507,9 @@ export function ChannelSidebar() {
     if (!activeServerId) return;
     try {
       await deleteCategory(activeServerId, categoryId);
-      toast.success('Category deleted');
+      toast.success(t('channel.categoryDeleted'));
     } catch {
-      toast.error('Failed to delete category');
+      toast.error(t('channel.failedToDeleteCategory'));
     }
   };
 
@@ -551,13 +658,14 @@ export function ChannelSidebar() {
       {/* Server name header */}
       <div className="flex h-12 items-center justify-between border-b border-vox-border px-4 shadow-sm">
         <h2 className="truncate text-sm font-semibold text-vox-text-primary">
-          {activeServer?.name || 'Server'}
+          {activeServer?.name || t('channel.server')}
         </h2>
         <div className="flex items-center gap-1">
           <button
             onClick={() => setShowInviteModal(true)}
             className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
-            title="Invite People"
+            title={t('channel.invitePeople')}
+            aria-label={t('channel.invitePeople')}
           >
             <UserPlus size={16} />
           </button>
@@ -565,9 +673,10 @@ export function ChannelSidebar() {
             <button
               onClick={() => setShowServerSettings(true)}
               className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
-              title="Server Settings"
+              title={t('channel.serverSettings')}
+              aria-label={t('channel.serverSettings')}
             >
-              <ChevronRight size={16} className="rotate-90" />
+              <Settings size={16} />
             </button>
           )}
         </div>
@@ -600,6 +709,8 @@ export function ChannelSidebar() {
                     onSelectText={handleSelectTextChannel}
                     onJoinVoice={handleJoinVoice}
                     onDelete={handleDeleteChannel}
+                    onContextMenu={handleChannelContextMenu}
+                    onVoiceUserContextMenu={handleVoiceUserContextMenu}
                   />
                 ))}
               </SortableContext>
@@ -636,6 +747,8 @@ export function ChannelSidebar() {
                         onSelectText={handleSelectTextChannel}
                         onJoinVoice={handleJoinVoice}
                         onDelete={handleDeleteChannel}
+                        onContextMenu={handleChannelContextMenu}
+                        onVoiceUserContextMenu={handleVoiceUserContextMenu}
                       />
                     ))}
                   </SortableContext>
@@ -655,7 +768,7 @@ export function ChannelSidebar() {
             <input
               type="text"
               className="input mb-2 text-sm"
-              placeholder={`New ${newChannelType} channel`}
+              placeholder={t('channel.newChannelPlaceholder', { type: newChannelType === 'text' ? t('channel.text').toLowerCase() : t('channel.voiceType').toLowerCase() })}
               value={newChannelName}
               onChange={(e) => setNewChannelName(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleCreateChannel()}
@@ -666,21 +779,21 @@ export function ChannelSidebar() {
                 onClick={() => setNewChannelType('text')}
                 className={clsx('flex-1 py-1 text-xs rounded', newChannelType === 'text' ? 'btn-primary' : 'btn-ghost')}
               >
-                Text
+                {t('channel.text')}
               </button>
               <button
                 onClick={() => setNewChannelType('voice')}
                 className={clsx('flex-1 py-1 text-xs rounded', newChannelType === 'voice' ? 'btn-primary' : 'btn-ghost')}
               >
-                Voice
+                {t('channel.voiceType')}
               </button>
             </div>
             <div className="flex gap-2">
               <button onClick={handleCreateChannel} className="btn-primary flex-1 py-1 text-xs">
-                Create
+                {t('channel.create')}
               </button>
               <button onClick={() => setShowCreateChannel(false)} className="btn-ghost flex-1 py-1 text-xs">
-                Cancel
+                {t('common.cancel')}
               </button>
             </div>
           </div>
@@ -692,7 +805,7 @@ export function ChannelSidebar() {
             <input
               type="text"
               className="input mb-2 text-sm"
-              placeholder="New category name"
+              placeholder={t('channel.newCategoryName')}
               value={newCategoryName}
               onChange={(e) => setNewCategoryName(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleCreateCategory()}
@@ -700,10 +813,10 @@ export function ChannelSidebar() {
             />
             <div className="flex gap-2">
               <button onClick={handleCreateCategory} className="btn-primary flex-1 py-1 text-xs">
-                Create
+                {t('channel.create')}
               </button>
               <button onClick={() => setShowCreateCategory(false)} className="btn-ghost flex-1 py-1 text-xs">
-                Cancel
+                {t('common.cancel')}
               </button>
             </div>
           </div>
@@ -716,7 +829,7 @@ export function ChannelSidebar() {
             className="mt-2 flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-vox-text-muted hover:text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
           >
             <FolderPlus size={14} />
-            <span>Create Category</span>
+            <span>{t('channel.createCategory')}</span>
           </button>
         )}
       </div>
@@ -727,10 +840,50 @@ export function ChannelSidebar() {
 
       {/* User area at bottom */}
       <div className="flex items-center gap-2 border-t border-vox-border bg-vox-sidebar px-2 py-2">
-        <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="sm" />
+        <button onClick={() => useSettingsStore.getState().openSettings()} title={t('common.settings')} aria-label={t('common.settings')} className="shrink-0 rounded-full hover:opacity-80 transition-opacity">
+          <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="sm" />
+        </button>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-xs font-medium text-vox-text-primary">{user?.displayName || 'User'}</p>
-          <p className="truncate text-[10px] text-vox-text-muted">Online</p>
+          <p className="truncate text-xs font-medium text-vox-text-primary">{user?.displayName || t('channel.user')}</p>
+          {activeServerId && !editingNickname && (
+            <button
+              onClick={() => { setEditingNickname(true); setNicknameInput(currentMember?.nickname || ''); }}
+              className="truncate text-[10px] text-vox-text-muted hover:text-vox-text-secondary transition-colors"
+            >
+              {currentMember?.nickname ? currentMember.nickname : t('channel.setNickname')}
+            </button>
+          )}
+          {activeServerId && editingNickname && (
+            <input
+              type="text"
+              value={nicknameInput}
+              onChange={(e) => setNicknameInput(e.target.value)}
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  try {
+                    await useServerStore.getState().setNickname(activeServerId, nicknameInput.trim() || null);
+                    toast.success(nicknameInput.trim() ? t('channel.nicknameSet') : t('channel.nicknameCleared'));
+                  } catch { toast.error(t('channel.failedToSetNickname')); }
+                  setEditingNickname(false);
+                } else if (e.key === 'Escape') {
+                  setEditingNickname(false);
+                }
+              }}
+              onBlur={async () => {
+                try {
+                  await useServerStore.getState().setNickname(activeServerId, nicknameInput.trim() || null);
+                } catch { /* ignore on blur */ }
+                setEditingNickname(false);
+              }}
+              placeholder={t('channel.nickname')}
+              className="w-full rounded border border-vox-border bg-vox-bg-secondary px-1 py-0.5 text-[10px] text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
+              autoFocus
+            />
+          )}
+          {!activeServerId && (
+            <p className="truncate text-[10px] text-vox-text-muted">{t('channel.online')}</p>
+          )}
         </div>
         <button
           onClick={toggleMute}
@@ -740,7 +893,8 @@ export function ChannelSidebar() {
               ? 'text-vox-accent-danger hover:bg-vox-accent-danger/20'
               : 'text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover'
           )}
-          title={selfMute ? 'Unmute' : 'Mute'}
+          title={selfMute ? t('voice.unmute') : t('voice.mute')}
+          aria-label={selfMute ? t('voice.unmute') : t('voice.mute')}
         >
           {selfMute ? <MicOff size={14} /> : <Mic size={14} />}
         </button>
@@ -752,7 +906,8 @@ export function ChannelSidebar() {
               ? 'text-vox-accent-danger hover:bg-vox-accent-danger/20'
               : 'text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover'
           )}
-          title={selfDeaf ? 'Undeafen' : 'Deafen'}
+          title={selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
+          aria-label={selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
         >
           {selfDeaf ? <HeadphoneOff size={14} /> : <Headphones size={14} />}
         </button>
@@ -763,6 +918,57 @@ export function ChannelSidebar() {
       )}
       {showServerSettings && activeServerId && (
         <ServerSettingsModal serverId={activeServerId} onClose={() => setShowServerSettings(false)} />
+      )}
+
+      {/* Channel right-click context menu */}
+      {channelContextMenu && isAdmin && createPortal(
+        <div
+          ref={ctxRef}
+          className="fixed z-[9999] min-w-44 rounded-lg border border-vox-border bg-vox-bg-floating p-1.5 shadow-xl animate-fade-in"
+          style={{ left: channelContextMenu.position.x, top: channelContextMenu.position.y }}
+        >
+          <button
+            onClick={() => {
+              setPermissionsEditorChannel({ id: channelContextMenu.channel.id, name: channelContextMenu.channel.name, type: channelContextMenu.channel.type as 'text' | 'voice' });
+              setChannelContextMenu(null);
+            }}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+          >
+            <Shield size={16} className="text-vox-accent-primary" />
+            {t('channel.editPermissions')}
+          </button>
+          <button
+            onClick={() => {
+              handleDeleteChannel(channelContextMenu.channel.id);
+              setChannelContextMenu(null);
+            }}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
+          >
+            <Trash2 size={16} />
+            {t('channel.deleteChannel')}
+          </button>
+        </div>,
+        document.body
+      )}
+
+      {/* Channel permissions editor */}
+      {permissionsEditorChannel && activeServerId && (
+        <ChannelPermissionsEditor
+          serverId={activeServerId}
+          channelId={permissionsEditorChannel.id}
+          channelName={permissionsEditorChannel.name}
+          channelType={permissionsEditorChannel.type}
+          onClose={() => setPermissionsEditorChannel(null)}
+        />
+      )}
+
+      {/* Voice user right-click menu */}
+      {voiceUserCtx && members.find((m) => m.userId === voiceUserCtx.userId) && (
+        <MemberContextMenu
+          member={members.find((m) => m.userId === voiceUserCtx.userId)!}
+          position={voiceUserCtx.position}
+          onClose={() => setVoiceUserCtx(null)}
+        />
       )}
     </div>
   );

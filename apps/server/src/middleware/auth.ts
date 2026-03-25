@@ -17,6 +17,8 @@ declare global {
   namespace Express {
     interface Request {
       user?: AuthPayload;
+      /** Unique request identifier for log correlation (set by X-Request-ID middleware) */
+      id?: string;
     }
   }
 }

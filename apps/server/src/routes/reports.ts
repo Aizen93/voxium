@@ -23,6 +23,11 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       throw new BadRequestError('Invalid report type');
     }
 
+    // Validate reportedUserId
+    if (!reportedUserId || typeof reportedUserId !== 'string') {
+      throw new BadRequestError('reportedUserId is required');
+    }
+
     // Validate reason
     const reason = sanitizeText(rawReason ?? '');
     if (reason.length < LIMITS.REPORT_REASON_MIN) {
@@ -63,7 +68,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
     let serverId: string | null = null;
 
     if (type === 'message') {
-      if (!messageId) throw new BadRequestError('messageId is required for message reports');
+      if (!messageId || typeof messageId !== 'string') throw new BadRequestError('messageId is required for message reports');
 
       const message = await prisma.message.findUnique({
         where: { id: messageId },

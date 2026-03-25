@@ -1,9 +1,12 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useFriendStore } from '../../stores/friendStore';
 import { toast } from '../../stores/toastStore';
 import { UserPlus } from 'lucide-react';
+import { getTranslatedError } from '../../utils/serverErrors';
 
 export function AddFriendForm() {
+  const { t } = useTranslation();
   const [username, setUsername] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const sendRequest = useFriendStore((s) => s.sendRequest);
@@ -16,11 +19,10 @@ export function AddFriendForm() {
     setIsLoading(true);
     try {
       const status = await sendRequest(trimmed);
-      toast.success(status === 'accepted' ? `You and ${trimmed} are now friends!` : `Friend request sent to ${trimmed}`);
+      toast.success(status === 'accepted' ? t('friends.addFriend.nowFriends', { name: trimmed }) : t('friends.addFriend.requestSent', { name: trimmed }));
       setUsername('');
-    } catch (err: any) {
-      const msg = err.response?.data?.error || 'Failed to send friend request';
-      toast.error(msg);
+    } catch (err) {
+      toast.error(getTranslatedError(err, t, 'friends.addFriend.failedToSend'));
     } finally {
       setIsLoading(false);
     }
@@ -29,10 +31,10 @@ export function AddFriendForm() {
   return (
     <div className="p-6">
       <h3 className="text-sm font-bold uppercase tracking-wide text-vox-text-primary">
-        Add Friend
+        {t('friends.addFriend.title')}
       </h3>
       <p className="mt-1 text-xs text-vox-text-muted">
-        You can add friends with their Voxium username.
+        {t('friends.addFriend.description')}
       </p>
 
       <form onSubmit={handleSubmit} className="mt-4 flex gap-2">
@@ -41,7 +43,7 @@ export function AddFriendForm() {
             type="text"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            placeholder="Enter a username"
+            placeholder={t('friends.addFriend.placeholder')}
             className="w-full rounded-md border border-vox-border bg-vox-bg-primary px-3 py-2 text-sm text-vox-text-primary placeholder-vox-text-muted outline-none focus:border-vox-accent-primary"
             disabled={isLoading}
           />
@@ -52,7 +54,7 @@ export function AddFriendForm() {
           className="flex shrink-0 items-center gap-1.5 rounded-md bg-vox-accent-success px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-vox-accent-success/80 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <UserPlus size={14} />
-          Send Friend Request
+          {t('friends.addFriend.sendRequest')}
         </button>
       </form>
     </div>

@@ -1,7 +1,9 @@
 import { create } from 'zustand';
+import axios from 'axios';
 import { api } from '../services/api';
 import { getSocket } from '../services/socket';
-import type { Message, Attachment, ReactionGroup } from '@voxium/shared';
+import { toast } from './toastStore';
+import type { Message, MessageAuthor, Attachment, ReactionGroup } from '@voxium/shared';
 
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -42,7 +44,7 @@ interface ChatState {
   setTypingUser: (userId: string, username: string) => void;
   removeTypingUser: (userId: string) => void;
   updateAuthorAvatar: (userId: string, avatarUrl: string | null) => void;
-  updateAuthorProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => void;
+  updateAuthorProfile: (userId: string, fields: Partial<MessageAuthor>) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -98,9 +100,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         set({ messages: newMessages, hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
       }
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Failed to fetch messages:', err);
+      toast.error('Failed to load messages');
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -133,9 +136,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         targetMessageId: data.targetMessageId ?? messageId,
         isLoading: false,
       });
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Failed to fetch messages around:', err);
+      toast.error('Failed to load messages');
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -224,9 +228,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         set({ messages: newMessages, hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
       }
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Failed to fetch DM messages:', err);
+      toast.error('Failed to load messages');
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -259,9 +264,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         targetMessageId: data.targetMessageId ?? messageId,
         isLoading: false,
       });
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Failed to fetch DM messages around:', err);
+      toast.error('Failed to load messages');
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -399,7 +405,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  updateAuthorProfile: (userId: string, fields: { displayName: string; avatarUrl: string | null }) => {
+  updateAuthorProfile: (userId: string, fields: Partial<MessageAuthor>) => {
     set((state) => ({
       messages: state.messages.map((m) =>
         m.author.id === userId ? { ...m, author: { ...m.author, ...fields } } : m

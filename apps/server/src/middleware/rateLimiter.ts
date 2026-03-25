@@ -36,7 +36,11 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   support:        { keyPrefix: 'rl:support',   points: 10,  duration: 30,  blockDuration: 0,   keyType: 'userId', label: 'Support' },
   verifyEmail:        { keyPrefix: 'rl:vfyeml', points: 5, duration: 900, blockDuration: 300, keyType: 'ip',     label: 'Verify Email' },
   resendVerification: { keyPrefix: 'rl:verify', points: 3, duration: 300, blockDuration: 300, keyType: 'userId', label: 'Resend Verification' },
+  markRead:       { keyPrefix: 'rl:markread',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Mark Read' },
+  roleManage:     { keyPrefix: 'rl:role',      points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Role Manage' },
   general:        { keyPrefix: 'rl:general',   points: 100, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'General' },
+  themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
+  themeBrowse:    { keyPrefix: 'rl:themebr',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Browse' },
 };
 
 // Overrides loaded from Redis on init, updated via admin API
@@ -116,7 +120,7 @@ export async function loadRateLimitOverrides(): Promise<void> {
 
 /** Get all rate limit rules (defaults merged with overrides) */
 export function getAllRateLimits(): Array<RateLimitDef & { name: string; isCustom: boolean }> {
-  return Object.entries(DEFAULTS).map(([name, def]) => ({
+  return Object.entries(DEFAULTS).map(([name, _def]) => ({
     name,
     ...getConfig(name),
     isCustom: !!overrides[name],
@@ -177,7 +181,8 @@ function createMiddleware(
         res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
         return;
       }
-      // Redis error or unexpected — fail open
+      // Redis error or unexpected — fail open but log for visibility
+      console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
       next();
     }
   };
@@ -207,7 +212,11 @@ export const rateLimitSupport = createMiddleware('support', byUserId);
 export const rateLimitTOTP = createMiddleware('totp', byUserId);
 export const rateLimitVerifyEmail = createMiddleware('verifyEmail', byIp);
 export const rateLimitResendVerification = createMiddleware('resendVerification', byUserId);
+export const rateLimitMarkRead = createMiddleware('markRead', byUserId);
+export const rateLimitRoleManage = createMiddleware('roleManage', byUserId);
 export const rateLimitGeneral = createMiddleware('general', byIp);
+export const rateLimitThemeManage = createMiddleware('themeManage', byUserId);
+export const rateLimitThemeBrowse = createMiddleware('themeBrowse', byUserId);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────
 

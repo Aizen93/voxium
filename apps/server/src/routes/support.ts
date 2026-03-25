@@ -17,21 +17,39 @@ const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
 };
 
-function mapMessage(m: any): SupportMessageData {
+interface SupportMessageRow {
+  id: string;
+  ticketId: string;
+  authorId: string;
+  content: string;
+  type: string;
+  createdAt: Date;
+  author: {
+    id: string;
+    username: string;
+    displayName: string;
+    avatarUrl: string | null;
+    role: string;
+    isSupporter: boolean;
+    supporterTier: string | null;
+  };
+}
+
+function mapMessage(m: SupportMessageRow): SupportMessageData {
   return {
     id: m.id,
     ticketId: m.ticketId,
     authorId: m.authorId,
     content: m.content,
-    type: m.type,
+    type: m.type as SupportMessageData['type'],
     createdAt: m.createdAt.toISOString(),
-    author: m.author,
+    author: { ...m.author, role: m.author.role as SupportMessageData['author']['role'] },
   };
 }
 
 async function emitTicketCount() {
   const total = await prisma.supportTicket.count({ where: { status: { in: ['open', 'claimed'] } } });
-  getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_TICKET_NEW as any, { total });
+  getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_TICKET_NEW, { total });
 }
 
 // ─── Open / Reopen ticket ────────────────────────────────────────────────────
@@ -56,12 +74,12 @@ supportRouter.post('/open', rateLimitGeneral, async (req: Request, res: Response
         include: { author: authorSelect },
       });
       const mapped = mapMessage(sysMsg);
-      getIO().to(`support:${ticket.id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, mapped);
-      getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, mapped);
-      getIO().to(`support:${ticket.id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, {
+      getIO().to(`support:${ticket.id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, mapped);
+      getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, mapped);
+      getIO().to(`support:${ticket.id}`).emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, {
         ticketId: ticket.id, status: 'open',
       });
-      getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE as any, {
+      getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_STATUS_CHANGE, {
         ticketId: ticket.id, status: 'open',
       });
     } else if (!ticket) {
@@ -73,8 +91,8 @@ supportRouter.post('/open', rateLimitGeneral, async (req: Request, res: Response
         include: { author: authorSelect },
       });
       const mapped = mapMessage(sysMsg);
-      getIO().to(`support:${ticket.id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, mapped);
-      getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, mapped);
+      getIO().to(`support:${ticket.id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, mapped);
+      getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, mapped);
     }
 
     // Join socket to support room via per-user room
@@ -119,7 +137,7 @@ supportRouter.get('/ticket', rateLimitGeneral, async (req: Request, res: Respons
     }
 
     const before = req.query.before as string | undefined;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
 
     const where: Record<string, unknown> = { ticketId: ticket.id };
     if (before) {
@@ -179,8 +197,8 @@ supportRouter.post('/messages', rateLimitSupport, async (req: Request, res: Resp
     await prisma.supportTicket.update({ where: { id: ticket.id }, data: { updatedAt: new Date() } });
 
     const payload = mapMessage(message);
-    getIO().to(`support:${ticket.id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, payload);
-    getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW as any, payload);
+    getIO().to(`support:${ticket.id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, payload);
+    getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, payload);
     await emitTicketCount();
 
     res.status(201).json({ success: true, data: payload });

@@ -128,7 +128,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
       where: { userId_ip: { userId: user.id, ip } },
       update: { lastSeenAt: new Date(), ...geoFields },
       create: { userId: user.id, ip, ...geoFields },
-    }).catch(() => {}); // Non-critical
+    }).catch((err) => console.warn('[Auth] IP record upsert failed:', err));
   }
 
   // If TOTP is enabled, check for trusted device token
@@ -262,10 +262,14 @@ export async function requestPasswordReset(email: string) {
   if (emailErr) throw new BadRequestError(emailErr);
 
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user) return; // Silent return to prevent email enumeration
 
+  // Always do the expensive crypto work regardless of whether the user exists.
+  // This prevents timing side-channel attacks that could enumerate email addresses
+  // by measuring response time differences (crypto work vs early return).
   const rawToken = crypto.randomBytes(32).toString('hex');
   const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+  if (!user) return; // Silent return - attacker sees same timing as a real reset
 
   await prisma.user.update({
     where: { id: user.id },

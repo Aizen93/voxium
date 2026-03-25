@@ -100,7 +100,7 @@ userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFu
 
     // Delete old avatar from S3 after DB update confirmed
     if (avatarUrl !== undefined && oldAvatarUrl && oldAvatarUrl !== avatarUrl) {
-      deleteFromS3(oldAvatarUrl).catch(() => {});
+      deleteFromS3(oldAvatarUrl).catch((err) => console.warn('[S3] Failed to delete old avatar:', err));
     }
 
     // Broadcast profile change to all servers the user is in
@@ -112,7 +112,7 @@ userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFu
       const io = getIO();
       const payload = { userId: updated.id, displayName: updated.displayName, avatarUrl: updated.avatarUrl };
       for (const { serverId } of memberships) {
-        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED as any, payload);
+        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED, payload);
       }
     }
 

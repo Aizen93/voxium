@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
-import { Plus, LogOut, Settings, Volume2 } from 'lucide-react';
+import { Plus, LogOut, Volume2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { CreateServerModal } from './CreateServerModal';
 import { Avatar } from '../common/Avatar';
@@ -103,6 +103,7 @@ export function ServerSidebar() {
             className="flex h-12 w-12 items-center justify-center rounded-2xl bg-vox-bg-secondary text-vox-accent-success
                        hover:rounded-xl hover:bg-vox-accent-success hover:text-white transition-all duration-200"
             onClick={() => setShowCreateModal(true)}
+            aria-label="Create or join server"
           >
             <Plus size={24} />
           </button>
@@ -110,18 +111,21 @@ export function ServerSidebar() {
 
         {/* User section at bottom */}
         <div className="flex flex-col items-center gap-2 pt-2 border-t border-vox-border">
-          <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="md" />
-          <button
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
-            onClick={() => useSettingsStore.getState().openSettings()}
-            title="Settings"
-          >
-            <Settings size={16} />
-          </button>
+          {!activeServerId && (
+            <button
+              onClick={() => useSettingsStore.getState().openSettings()}
+              title="Settings"
+              aria-label="Settings"
+              className="rounded-full hover:opacity-80 transition-opacity"
+            >
+              <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="md" />
+            </button>
+          )}
           <button
             className="flex h-8 w-8 items-center justify-center rounded-lg text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-accent-danger transition-colors"
             onClick={logout}
             title="Logout"
+            aria-label="Logout"
           >
             <LogOut size={16} />
           </button>
