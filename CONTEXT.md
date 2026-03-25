@@ -45,6 +45,7 @@ Voxium/
 - **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members; admin UI for global + per-server management; read-only limits tab in server settings
 - Custom frameless title bar with system tray (close-to-tray), splash screen window, infrastructure server management with interactive 3D globe visualization in admin geography dashboard
 - **Community themes** — create, publish, browse, install/uninstall themes with live preview editor, JSON import/export, marketplace with search/sort/tag filtering, admin moderation (remove)
+- **Internationalization (i18n)** — 11 languages (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar) with RTL support for Arabic, browser language detection, localStorage persistence, language settings tab
 
 ## Tech Stack
 
@@ -73,6 +74,8 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **Internationalization (i18n)** (2026-03-23) -- 11-language support (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar) with RTL for Arabic; language selector in settings; i18next with browser detection and localStorage persistence.
 
 - **Community Themes Review** (2026-03-21) -- Review found: patterns dropped on install (BUG), patterns not restored after preview (BUG), version not bumped for pattern-only changes, search missing debounce, empty catch blocks; see CONTEXT_CHANGELOG.md for full findings.
 

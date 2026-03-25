@@ -137,7 +137,7 @@ supportRouter.get('/ticket', rateLimitGeneral, async (req: Request, res: Respons
     }
 
     const before = req.query.before as string | undefined;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
 
     const where: Record<string, unknown> = { ticketId: ticket.id };
     if (before) {

@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -126,6 +127,7 @@ app.use((req, res, next) => {
   getMorganHandler()(req, res, next);
 });
 
+app.use(compression());
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 

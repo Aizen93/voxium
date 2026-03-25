@@ -182,8 +182,8 @@ serverRouter.get('/:serverId/limits', async (req: Request<{ serverId: string }>,
 serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 100, LIMITS.MEMBERS_PER_PAGE);
+    const page = parseInt(req.query.page as string, 10) || 1;
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, LIMITS.MEMBERS_PER_PAGE);
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId: req.user!.userId, serverId } },

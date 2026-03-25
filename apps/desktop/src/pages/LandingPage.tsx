@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   Mic2,
   MessageSquare,
@@ -21,6 +22,7 @@ import {
 } from 'lucide-react';
 import { APP_VERSION } from '@voxium/shared';
 import { SoundWaveCanvas } from '../components/landing/SoundWaveCanvas';
+import { SUPPORTED_LANGUAGES } from '../i18n';
 
 /* ─── Animated SVG Illustrations ─── */
 
@@ -197,58 +199,11 @@ const DOWNLOAD_URLS = {
   releases: 'https://github.com/Aizen93/voxium/releases',
 };
 
-/* ─── Data ─── */
-
-const features = [
-  {
-    icon: Mic2,
-    title: 'Crystal-Clear Voice',
-    description: 'SFU-powered server voice for 25+ users per channel. DM calls go direct peer-to-peer — no middleman.',
-  },
-  {
-    icon: BrainCircuit,
-    title: 'AI Noise Suppression',
-    description: 'ML-powered RNNoise filter removes keyboard, mouse, and background noise in real time — so only your voice comes through.',
-  },
-  {
-    icon: MessageSquare,
-    title: 'Real-Time Messaging',
-    description: 'Instant delivery, reactions, typing indicators, and direct messages — all in real time.',
-  },
-  {
-    icon: Shield,
-    title: 'Privacy First',
-    description: 'No ads, no tracking, no data harvesting. Your conversations stay yours.',
-  },
-  {
-    icon: Users,
-    title: 'Servers & Communities',
-    description: 'Create servers, organize channels, invite friends — everything you need to build a community.',
-  },
-  {
-    icon: PhoneCall,
-    title: 'Direct Voice Calls',
-    description: '1-on-1 voice calls with WebRTC peer-to-peer. Crystal clear, zero latency.',
-  },
-  {
-    icon: Zap,
-    title: 'Fast & Lightweight',
-    description: 'Built with React 19, Vite, and Redis-backed presence. Snappy on any hardware.',
-  },
-];
-
-const highlights = [
-  'No ads or tracking',
-  'Open source & transparent',
-  'Free voice calls forever',
-  'AI noise suppression',
-  'Self-hostable',
-  'Scalable SFU voice',
-];
-
 /* ─── Section Components ─── */
 
 function Navbar() {
+  const { t, i18n } = useTranslation();
+
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 bg-vox-bg-primary/80 backdrop-blur-md border-b border-vox-border">
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
@@ -257,11 +212,22 @@ function Navbar() {
           <span className="text-xl font-bold text-vox-text-primary">Voxium</span>
         </a>
         <div className="flex items-center gap-3">
+          <select
+            value={i18n.language}
+            onChange={(e) => { i18n.changeLanguage(e.target.value); localStorage.setItem('voxium_language', e.target.value); }}
+            className="bg-transparent border border-vox-border rounded-md px-2 py-1 text-xs text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary cursor-pointer"
+          >
+            {SUPPORTED_LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code} className="bg-vox-bg-primary text-vox-text-primary">
+                {lang.nativeName}
+              </option>
+            ))}
+          </select>
           <Link to="/login" className="btn-ghost text-sm">
-            Sign In
+            {t('landing.nav.signIn')}
           </Link>
           <Link to="/register" className="btn-primary text-sm">
-            Get Started <ArrowRight className="ml-1 h-4 w-4" />
+            {t('landing.nav.getStarted')} <ArrowRight className="ml-1 h-4 w-4" />
           </Link>
         </div>
       </div>
@@ -270,6 +236,8 @@ function Navbar() {
 }
 
 function Hero() {
+  const { t } = useTranslation();
+
   return (
     <section
       id="hero"
@@ -286,17 +254,16 @@ function Hero() {
             <img src="/logo.svg" alt="" className="h-16 w-16 sm:h-20 sm:w-20 rounded-2xl" />
           </div>
           <h1 className="text-4xl sm:text-5xl md:text-7xl font-extrabold text-vox-text-primary leading-tight animate-fade-in">
-            Talk. Connect.{' '}
+            {t('landing.hero.headlinePart1')}{' '}
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#5B21B6] to-[#3B82F6]">
-              Build.
+              {t('landing.hero.headlinePart2')}
             </span>
           </h1>
           <p
             className="mt-6 text-lg sm:text-xl max-w-xl mx-auto lg:mx-0 animate-slide-up"
             style={{ animationDelay: '0.1s', animationFillMode: 'backwards' }}
           >
-            The open, privacy-first voice and text platform for communities that
-            value freedom and transparency.
+            {t('landing.hero.subtitle')}
           </p>
 
           {/* Download buttons */}
@@ -313,7 +280,7 @@ function Hero() {
               <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/>
               </svg>
-              Download for Windows
+              {t('landing.hero.downloadWindows')}
             </a>
             <a
               href={DOWNLOAD_URLS.macos}
@@ -324,7 +291,7 @@ function Hero() {
               <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
               </svg>
-              Download for macOS
+              {t('landing.hero.downloadMac')}
             </a>
             <a
               href={DOWNLOAD_URLS.linux}
@@ -335,7 +302,7 @@ function Hero() {
               <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M17.61.455a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zM12.92.8C8.923.777 5.137 2.941 3.148 6.451a4.5 4.5 0 0 1 .26-.007 4.92 4.92 0 0 1 2.585.737A8.316 8.316 0 0 1 12.688 3.6 4.944 4.944 0 0 1 13.723.834 11.008 11.008 0 0 0 12.92.8zm9.226 4.994a4.915 4.915 0 0 1-1.918 2.246 8.36 8.36 0 0 1-.273 8.303 4.89 4.89 0 0 1 1.632 2.54 11.156 11.156 0 0 0 .559-13.089zM3.41 7.932A3.41 3.41 0 0 0 0 11.342a3.41 3.41 0 0 0 3.41 3.409 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zm2.027 7.866a4.908 4.908 0 0 1-2.915.358 11.1 11.1 0 0 0 7.991 6.698 11.234 11.234 0 0 0 2.422.249 4.879 4.879 0 0 1-.999-2.85 8.484 8.484 0 0 1-.836-.136 8.304 8.304 0 0 1-5.663-4.32zm11.405.928a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41z"/>
               </svg>
-              Download for Linux
+              {t('landing.hero.downloadLinux')}
             </a>
           </div>
 
@@ -343,9 +310,9 @@ function Hero() {
             className="mt-4 text-sm text-vox-text-muted animate-slide-up"
             style={{ animationDelay: '0.3s', animationFillMode: 'backwards' }}
           >
-            Or{' '}
+            {t('landing.hero.orLaunch')}{' '}
             <Link to="/register" className="text-vox-accent-primary hover:underline">
-              launch in your browser
+              {t('landing.hero.launchBrowser')}
             </Link>
           </p>
 
@@ -559,6 +526,7 @@ function formatNumber(n: number): string {
 /* ─── Stats Section ─── */
 
 function StatsSection() {
+  const { t } = useTranslation();
   const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
   const [stats, setStats] = useState<{ users: number; servers: number; messages: number } | null>(null);
   const [visible, setVisible] = useState(false);
@@ -600,9 +568,9 @@ function StatsSection() {
   const messagesCount = useCountUp(visible && stats ? stats.messages : 0);
 
   const cards = [
-    { icon: Users, label: 'Users Registered', value: usersCount, gradient: 'from-[#5B21B6] to-[#7C3AED]' },
-    { icon: Server, label: 'Servers Created', value: serversCount, gradient: 'from-[#3B82F6] to-[#60A5FA]' },
-    { icon: MessageSquare, label: 'Messages Sent', value: messagesCount, gradient: 'from-[#5b5bf7] to-[#A78BFA]' },
+    { icon: Users, label: t('landing.stats.users'), value: usersCount, gradient: 'from-[#5B21B6] to-[#7C3AED]' },
+    { icon: Server, label: t('landing.stats.servers'), value: serversCount, gradient: 'from-[#3B82F6] to-[#60A5FA]' },
+    { icon: MessageSquare, label: t('landing.stats.messages'), value: messagesCount, gradient: 'from-[#5b5bf7] to-[#A78BFA]' },
   ];
 
   return (
@@ -615,10 +583,10 @@ function StatsSection() {
 
       <div className="relative z-10 max-w-5xl mx-auto px-6">
         <h2 className="text-2xl sm:text-3xl font-bold text-vox-text-primary text-center mb-3">
-          Growing Together
+          {t('landing.stats.title')}
         </h2>
         <p className="text-vox-text-secondary text-center mb-12 max-w-lg mx-auto text-sm">
-          Real numbers from the Voxium community — updated live.
+          {t('landing.stats.subtitle')}
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
@@ -650,28 +618,54 @@ function StatsSection() {
 }
 
 function Features() {
+  const { t, i18n } = useTranslation();
   const sectionRef = useRef<HTMLDivElement>(null);
   const [visibleCards, setVisibleCards] = useState<Set<number>>(new Set());
 
+  const features = [
+    { icon: Mic2, title: t('landing.features.voice'), description: t('landing.features.voiceDesc') },
+    { icon: BrainCircuit, title: t('landing.features.noiseSuppression'), description: t('landing.features.noiseSuppressionDesc') },
+    { icon: MessageSquare, title: t('landing.features.messaging'), description: t('landing.features.messagingDesc') },
+    { icon: Shield, title: t('landing.features.privacy'), description: t('landing.features.privacyDesc') },
+    { icon: Users, title: t('landing.features.servers'), description: t('landing.features.serversDesc') },
+    { icon: PhoneCall, title: t('landing.features.calls'), description: t('landing.features.callsDesc') },
+    { icon: Zap, title: t('landing.features.fast'), description: t('landing.features.fastDesc') },
+  ];
+
+  const currentLang = i18n.language;
+
   useEffect(() => {
+    setVisibleCards(new Set());
+
     const el = sectionRef.current;
     if (!el) return;
-    const cards = el.querySelectorAll('[data-feature-card]');
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            const idx = Number((entry.target as HTMLElement).dataset.featureCard);
-            setVisibleCards((prev) => new Set(prev).add(idx));
-            observer.unobserve(entry.target);
-          }
-        });
-      },
-      { threshold: 0.15 },
-    );
-    cards.forEach((card) => observer.observe(card));
-    return () => observer.disconnect();
-  }, []);
+
+    // Defer observer setup to next frame so React has time to render the new cards
+    const raf = requestAnimationFrame(() => {
+      const cards = el.querySelectorAll('[data-feature-card]');
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              const idx = Number((entry.target as HTMLElement).dataset.featureCard);
+              setVisibleCards((prev) => new Set(prev).add(idx));
+              observer.unobserve(entry.target);
+            }
+          });
+        },
+        { threshold: 0.15 },
+      );
+      cards.forEach((card) => observer.observe(card));
+      // Store observer for cleanup
+      (el as HTMLElement & { _obs?: IntersectionObserver })._obs = observer;
+    });
+
+    return () => {
+      cancelAnimationFrame(raf);
+      const obs = (el as HTMLElement & { _obs?: IntersectionObserver })._obs;
+      if (obs) obs.disconnect();
+    };
+  }, [currentLang]);
 
   return (
     <section className="relative bg-vox-bg-secondary py-24">
@@ -680,16 +674,16 @@ function Features() {
 
       <div ref={sectionRef} className="max-w-7xl mx-auto px-6">
         <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary text-center mb-4">
-          Everything you need
+          {t('landing.features.title')}
         </h2>
         <p className="text-vox-text-secondary text-center mb-16 max-w-2xl mx-auto">
-          Voice, text, and community — all in one place, with no compromises on privacy or performance.
+          {t('landing.features.subtitle')}
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {features.map((f, i) => (
             <div
-              key={f.title}
+              key={i}
               data-feature-card={i}
               className={`group rounded-xl border border-vox-border bg-vox-bg-primary p-6
                 hover:border-vox-accent-primary/60 hover:-translate-y-2 hover:shadow-xl hover:shadow-vox-accent-primary/10
@@ -722,24 +716,6 @@ function Features() {
 
 type CellValue = true | false | string;
 
-const comparisonData: { feature: string; voxium: CellValue; discord: CellValue; teamspeak: CellValue; matrix: CellValue }[] = [
-  { feature: 'Open Source',           voxium: true,            discord: false,          teamspeak: false,          matrix: true },
-  { feature: 'Self-Hostable',         voxium: true,            discord: false,          teamspeak: true,           matrix: true },
-  { feature: 'Free Voice Chat',       voxium: true,            discord: true,           teamspeak: true,           matrix: true },
-  { feature: 'SFU Voice (25+ users)', voxium: true,            discord: true,           teamspeak: true,           matrix: 'Via Jitsi' },
-  { feature: 'DM Voice Calls',        voxium: true,            discord: true,           teamspeak: false,          matrix: true },
-  { feature: 'AI Noise Suppression',  voxium: 'RNNoise ML',    discord: 'Krisp',        teamspeak: 'Basic',        matrix: false },
-  { feature: 'Screen Sharing',        voxium: true,            discord: true,           teamspeak: false,          matrix: 'Via Jitsi' },
-  { feature: 'Message Reactions',     voxium: true,            discord: true,           teamspeak: false,          matrix: true },
-  { feature: 'File Sharing',          voxium: true,            discord: true,           teamspeak: true,           matrix: true },
-  { feature: 'No Ads / No Tracking',  voxium: true,            discord: false,          teamspeak: true,           matrix: true },
-  { feature: 'Desktop App',           voxium: true,            discord: true,           teamspeak: true,           matrix: true },
-  { feature: 'Lightweight Client',    voxium: 'Tauri (~10MB)',  discord: 'Electron',     teamspeak: 'Native',       matrix: 'Electron' },
-  { feature: 'Encryption',            voxium: 'TLS + Planned E2E', discord: 'TLS',      teamspeak: 'AES',          matrix: 'E2E (Olm)' },
-  { feature: 'Custom Bots / API',     voxium: 'Planned',       discord: true,           teamspeak: 'Plugins + SDK', matrix: true },
-  { feature: 'Mobile App',            voxium: 'Planned',       discord: true,           teamspeak: true,           matrix: true },
-];
-
 function ComparisonCell({ value }: { value: CellValue }) {
   if (value === true) return <Check className="h-5 w-5 text-vox-accent-success mx-auto" />;
   if (value === false) return <X className="h-5 w-5 text-vox-text-muted/40 mx-auto" />;
@@ -747,21 +723,41 @@ function ComparisonCell({ value }: { value: CellValue }) {
 }
 
 function ComparisonTable() {
+  const { t } = useTranslation();
+
+  const comparisonData: { feature: string; voxium: CellValue; discord: CellValue; teamspeak: CellValue; matrix: CellValue }[] = [
+    { feature: t('landing.comparison.openSource'),        voxium: true,                discord: false,          teamspeak: false,          matrix: true },
+    { feature: t('landing.comparison.selfHostable'),      voxium: true,                discord: false,          teamspeak: true,           matrix: true },
+    { feature: t('landing.comparison.freeVoiceChat'),     voxium: true,                discord: true,           teamspeak: true,           matrix: true },
+    { feature: t('landing.comparison.sfuVoice'),          voxium: true,                discord: true,           teamspeak: true,           matrix: t('landing.comparison.viaJitsi') },
+    { feature: t('landing.comparison.dmVoiceCalls'),      voxium: true,                discord: true,           teamspeak: false,          matrix: true },
+    { feature: t('landing.comparison.noiseSuppression'),  voxium: 'RNNoise ML',        discord: 'Krisp',        teamspeak: t('landing.comparison.basic'), matrix: false },
+    { feature: t('landing.comparison.screenSharing'),     voxium: true,                discord: true,           teamspeak: false,          matrix: t('landing.comparison.viaJitsi') },
+    { feature: t('landing.comparison.messageReactions'),  voxium: true,                discord: true,           teamspeak: false,          matrix: true },
+    { feature: t('landing.comparison.fileSharing'),       voxium: true,                discord: true,           teamspeak: true,           matrix: true },
+    { feature: t('landing.comparison.noAdsTracking'),     voxium: true,                discord: false,          teamspeak: true,           matrix: true },
+    { feature: t('landing.comparison.desktopApp'),        voxium: true,                discord: true,           teamspeak: true,           matrix: true },
+    { feature: t('landing.comparison.lightweightClient'), voxium: 'Tauri (~10MB)',      discord: 'Electron',     teamspeak: 'Native',       matrix: 'Electron' },
+    { feature: t('landing.comparison.encryption'),        voxium: 'TLS + Planned E2E', discord: 'TLS',          teamspeak: 'AES',          matrix: 'E2E (Olm)' },
+    { feature: t('landing.comparison.customBots'),        voxium: t('landing.comparison.planned'), discord: true, teamspeak: 'Plugins + SDK', matrix: true },
+    { feature: t('landing.comparison.mobileApp'),         voxium: t('landing.comparison.planned'), discord: true, teamspeak: true,           matrix: true },
+  ];
+
   return (
     <section className="bg-vox-bg-secondary py-24">
       <div className="max-w-5xl mx-auto px-6">
         <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary text-center mb-4">
-          How Voxium compares
+          {t('landing.comparison.title')}
         </h2>
         <p className="text-vox-text-secondary text-center mb-14 max-w-2xl mx-auto">
-          See how Voxium stacks up against the alternatives. We believe communication software should be open, private, and community-owned.
+          {t('landing.comparison.subtitle')}
         </p>
 
         <div className="overflow-x-auto rounded-xl border border-vox-border">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-vox-bg-tertiary">
-                <th className="text-left px-5 py-4 text-vox-text-primary font-semibold min-w-[180px]">Feature</th>
+                <th className="text-left px-5 py-4 text-vox-text-primary font-semibold min-w-[180px]">{t('landing.comparison.feature')}</th>
                 <th className="px-5 py-4 text-center min-w-[110px]">
                   <span className="font-bold text-vox-accent-primary">Voxium</span>
                 </th>
@@ -785,7 +781,7 @@ function ComparisonTable() {
         </div>
 
         <p className="text-xs text-vox-text-muted text-center mt-6">
-          Comparison based on free tiers as of March 2026. Features marked "Planned" are on the roadmap.
+          {t('landing.comparison.footnote')}
         </p>
       </div>
     </section>
@@ -793,6 +789,17 @@ function ComparisonTable() {
 }
 
 function WhyVoxium() {
+  const { t } = useTranslation();
+
+  const highlights = [
+    t('landing.highlights.noAds'),
+    t('landing.highlights.openSource'),
+    t('landing.highlights.freeVoice'),
+    t('landing.highlights.noiseSuppression'),
+    t('landing.highlights.selfHostable'),
+    t('landing.highlights.sfuVoice'),
+  ];
+
   return (
     <section className="relative bg-vox-bg-primary py-24 overflow-hidden">
       {/* Decorative orbit rings */}
@@ -800,7 +807,7 @@ function WhyVoxium() {
 
       <div className="relative z-10 max-w-7xl mx-auto px-6">
         <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary text-center mb-16">
-          Why Voxium?
+          {t('landing.why.title')}
         </h2>
 
         {/* Value props */}
@@ -808,18 +815,18 @@ function WhyVoxium() {
           {[
             {
               icon: Lock,
-              title: 'You Own Your Data',
-              description: 'Self-host or use our servers — either way, your data belongs to you. No mining, no selling.',
+              title: t('landing.why.ownData'),
+              description: t('landing.why.ownDataDesc'),
             },
             {
               icon: Code2,
-              title: 'Open Source',
-              description: 'Every line of code is public. Audit it, fork it, contribute to it. Full transparency.',
+              title: t('landing.why.openSource'),
+              description: t('landing.why.openSourceDesc'),
             },
             {
               icon: HeartHandshake,
-              title: 'Community-Driven',
-              description: 'Built by the community, for the community. Features are shaped by the people who use them.',
+              title: t('landing.why.communityDriven'),
+              description: t('landing.why.communityDrivenDesc'),
             },
           ].map((v) => (
             <div key={v.title} className="text-center">
@@ -836,7 +843,7 @@ function WhyVoxium() {
         <div className="flex flex-col md:flex-row items-center justify-center gap-12 max-w-3xl mx-auto">
           <ShieldSvg className="w-28 h-32 shrink-0" />
           <div>
-            <h3 className="text-xl font-semibold text-vox-text-primary mb-4">Built different</h3>
+            <h3 className="text-xl font-semibold text-vox-text-primary mb-4">{t('landing.why.builtDifferent')}</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {highlights.map((h) => (
                 <div key={h} className="flex items-center gap-2">
@@ -908,6 +915,7 @@ function PulsingHeartSvg({ className }: { className?: string }) {
 }
 
 function CommunityFunding() {
+  const { t } = useTranslation();
   const sectionRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
 
@@ -923,9 +931,9 @@ function CommunityFunding() {
   }, []);
 
   const cards = [
-    { icon: Code2, value: '100%', label: 'Open Source', color: 'from-pink-500/20 to-purple-500/20' },
-    { icon: Users, value: 'You', label: 'Decide the Roadmap', color: 'from-purple-500/20 to-blue-500/20' },
-    { icon: Shield, value: 'Zero', label: 'Ads or Tracking', color: 'from-blue-500/20 to-pink-500/20' },
+    { icon: Code2, value: '100%', label: t('landing.funding.openSource'), color: 'from-pink-500/20 to-purple-500/20' },
+    { icon: Users, value: 'You', label: t('landing.funding.youDecide'), color: 'from-purple-500/20 to-blue-500/20' },
+    { icon: Shield, value: 'Zero', label: t('landing.funding.zeroAds'), color: 'from-blue-500/20 to-pink-500/20' },
   ];
 
   return (
@@ -948,7 +956,7 @@ function CommunityFunding() {
         >
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-pink-500/10 border border-pink-500/20 text-pink-400 text-sm font-medium mb-6">
             <Heart size={14} className="animate-pulse" />
-            Community Powered
+            {t('landing.funding.badge')}
             <Sparkles size={14} />
           </div>
 
@@ -956,11 +964,10 @@ function CommunityFunding() {
             <PulsingHeartSvg className="w-32 h-32 sm:w-40 sm:h-40 shrink-0" />
             <div className="text-left">
               <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary">
-                Funded by the Community
+                {t('landing.funding.title')}
               </h2>
               <p className="text-vox-text-secondary mt-2 text-lg max-w-xl">
-                No ads. No data harvesting. No strings attached.
-                Voxium is funded entirely by the people who use it.
+                {t('landing.funding.subtitle')}
               </p>
             </div>
           </div>
@@ -1008,7 +1015,7 @@ function CommunityFunding() {
                          hover:shadow-lg hover:shadow-pink-500/20 hover:scale-105 active:scale-[0.98] transition-all duration-200"
             >
               <Heart size={18} className="group-hover:animate-pulse" />
-              Sponsor on GitHub
+              {t('landing.funding.sponsorGithub')}
               <ArrowRight size={16} className="opacity-0 -ml-4 group-hover:opacity-100 group-hover:ml-0 transition-all duration-200" />
             </a>
             <a
@@ -1019,13 +1026,13 @@ function CommunityFunding() {
                          hover:scale-105 active:scale-[0.98] transition-all duration-200"
             >
               <HeartHandshake size={18} />
-              Open Collective
+              {t('landing.funding.openCollective')}
             </a>
           </div>
 
           <p className="text-sm text-vox-text-muted flex items-center justify-center gap-1.5">
             <Sparkles size={14} className="text-pink-400" />
-            Supporters get a special in-app badge to show their contribution
+            {t('landing.funding.supporterBadge')}
           </p>
         </div>
       </div>
@@ -1034,6 +1041,8 @@ function CommunityFunding() {
 }
 
 function FinalCTA() {
+  const { t } = useTranslation();
+
   return (
     <section className="relative py-24 overflow-hidden">
       <div className="absolute inset-0 bg-gradient-to-br from-[#5B21B6]/20 via-vox-bg-primary to-vox-bg-secondary" />
@@ -1043,17 +1052,17 @@ function FinalCTA() {
       <div className="relative z-10 max-w-3xl mx-auto px-6 text-center">
         <img src="/logo.svg" alt="" className="h-16 w-16 rounded-2xl mx-auto mb-8" />
         <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary mb-4">
-          Ready to experience communication, reimagined?
+          {t('landing.cta.title')}
         </h2>
         <p className="text-vox-text-secondary mb-10 text-lg">
-          Join the open communication revolution. No credit card. No subscription.
+          {t('landing.cta.subtitle')}
         </p>
         <div className="flex flex-wrap gap-4 justify-center">
           <Link to="/register" className="btn-primary px-8 py-3 text-base">
-            Get Started — It's Free
+            {t('landing.cta.getStarted')}
           </Link>
           <a href="#hero" className="btn-secondary px-8 py-3 text-base">
-            Download the App
+            {t('landing.cta.downloadApp')}
           </a>
         </div>
       </div>
@@ -1062,6 +1071,8 @@ function FinalCTA() {
 }
 
 function Footer() {
+  const { t } = useTranslation();
+
   return (
     <footer className="bg-vox-bg-secondary border-t border-vox-border">
       <div className="max-w-7xl mx-auto px-6 py-16">
@@ -1073,36 +1084,36 @@ function Footer() {
               <span className="text-lg font-bold text-vox-text-primary">Voxium</span>
             </div>
             <p className="text-sm text-vox-text-muted leading-relaxed">
-              Open, privacy-first voice and text communication.
+              {t('landing.footer.tagline')}
             </p>
           </div>
 
           {/* Product */}
           <div>
-            <h4 className="text-sm font-semibold text-vox-text-primary mb-3">Product</h4>
+            <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.product')}</h4>
             <ul className="space-y-2">
-              <li><a href="#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Download</a></li>
-              <li><a href="https://github.com/Aizen93/voxium/releases" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Changelog</a></li>
-              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Status</a></li>
+              <li><a href="#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.download')}</a></li>
+              <li><a href="https://github.com/Aizen93/voxium/releases" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.changelog')}</a></li>
+              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.status')}</a></li>
             </ul>
           </div>
 
           {/* Legal */}
           <div>
-            <h4 className="text-sm font-semibold text-vox-text-primary mb-3">Legal</h4>
+            <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.legal')}</h4>
             <ul className="space-y-2">
-              <li><Link to="/privacy" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Privacy Policy</Link></li>
-              <li><Link to="/terms" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Terms of Service</Link></li>
-              <li><Link to="/cookies" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Cookie Policy</Link></li>
+              <li><Link to="/privacy" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.privacyPolicy')}</Link></li>
+              <li><Link to="/terms" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.termsOfService')}</Link></li>
+              <li><Link to="/cookies" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.cookiePolicy')}</Link></li>
             </ul>
           </div>
 
           {/* Community */}
           <div>
-            <h4 className="text-sm font-semibold text-vox-text-primary mb-3">Community</h4>
+            <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.community')}</h4>
             <ul className="space-y-2">
               <li><a href="https://github.com/Aizen93/voxium" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">GitHub</a></li>
-              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">Contributing</a></li>
+              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.contributing')}</a></li>
             </ul>
           </div>
         </div>
@@ -1112,7 +1123,7 @@ function Footer() {
       <div className="border-t border-vox-border">
         <div className="max-w-7xl mx-auto px-6 py-4">
           <p className="text-xs text-vox-text-muted text-center">
-            &copy; 2026 Voxium. All rights reserved.
+            {t('landing.footer.copyright')}
           </p>
         </div>
       </div>
@@ -1129,8 +1140,17 @@ export function LandingPage() {
 
   useEffect(() => {
     document.documentElement.classList.add('landing-scroll');
+
+    // Landing page was designed for the dark theme — force it while mounted
+    // and restore the user's chosen theme on unmount.
+    const previousTheme = document.documentElement.getAttribute('data-theme');
+    document.documentElement.setAttribute('data-theme', 'dark');
+
     return () => {
       document.documentElement.classList.remove('landing-scroll');
+      if (previousTheme) {
+        document.documentElement.setAttribute('data-theme', previousTheme);
+      }
     };
   }, []);
 

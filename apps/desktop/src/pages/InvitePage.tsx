@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useServerStore } from '../stores/serverStore';
 import { api } from '../services/api';
@@ -16,6 +17,7 @@ interface InvitePreview {
 }
 
 export function InvitePage() {
+  const { t } = useTranslation();
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
   const { joinServer, setActiveServer } = useServerStore();
@@ -60,13 +62,13 @@ export function InvitePage() {
           {/* Logo */}
           <div className="mb-6 flex flex-col items-center">
             <img src="/logo.svg" alt="Voxium" className="h-16 w-16 rounded-2xl shadow-lg shadow-vox-accent-primary/20" />
-            <h1 className="mt-4 text-xl font-bold text-vox-text-primary">You've been invited!</h1>
+            <h1 className="mt-4 text-xl font-bold text-vox-text-primary">{t('invite.youveBeenInvited')}</h1>
           </div>
 
           {loading && (
             <div className="flex items-center justify-center py-8">
               <div className="h-6 w-6 animate-spin rounded-full border-2 border-vox-accent-primary border-t-transparent" />
-              <span className="ml-3 text-sm text-vox-text-secondary">Loading invite...</span>
+              <span className="ml-3 text-sm text-vox-text-secondary">{t('invite.loadingInvite')}</span>
             </div>
           )}
 
@@ -76,7 +78,7 @@ export function InvitePage() {
                 {error}
               </div>
               <button onClick={() => navigate('/', { replace: true })} className="btn-primary w-full">
-                Go Home
+                {t('invite.goHome')}
               </button>
             </div>
           )}
@@ -91,7 +93,7 @@ export function InvitePage() {
                 <h2 className="mt-3 text-lg font-bold text-vox-text-primary">{preview.server.name}</h2>
                 <div className="mt-1 flex items-center gap-1 text-sm text-vox-text-secondary">
                   <Users size={14} />
-                  <span>{preview.server.memberCount} {preview.server.memberCount === 1 ? 'member' : 'members'}</span>
+                  <span>{preview.server.memberCount} {preview.server.memberCount === 1 ? t('invite.member') : t('invite.members')}</span>
                 </div>
               </div>
 
@@ -106,7 +108,7 @@ export function InvitePage() {
                 disabled={joining}
                 className="btn-primary w-full py-2.5"
               >
-                {joining ? 'Joining...' : `Join ${preview.server.name}`}
+                {joining ? t('invite.joining') : t('invite.join', { name: preview.server.name })}
               </button>
             </div>
           )}

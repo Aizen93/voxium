@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore } from '../../stores/voiceStore';
@@ -666,7 +667,7 @@ export function MainLayout() {
       }
 
       attachedGeneration.current = gen;
-      console.log('[MainLayout] Listeners attached (generation', gen + ')');
+      if (import.meta.env.DEV) console.log('[MainLayout] Listeners attached (generation', gen + ')');
     }
 
     function detachListeners(socket: NonNullable<ReturnType<typeof getSocket>>) {
@@ -690,7 +691,7 @@ export function MainLayout() {
       if (socket.id === handledSocketId) return;
       handledSocketId = socket.id;
 
-      console.log(`[MainLayout] Connection established (id=${socket.id}) — attaching listeners & re-fetching`);
+      if (import.meta.env.DEV) console.log(`[MainLayout] Connection established (id=${socket.id}) — attaching listeners & re-fetching`);
       ensureListeners(socket);
 
       // Re-fetch servers and members (presence may have changed)
@@ -813,6 +814,8 @@ export function MainLayout() {
 }
 
 function DMWelcome() {
+  const { t } = useTranslation();
+
   return (
     <div className="flex h-full flex-col items-center justify-center bg-vox-bg-primary">
       <div className="flex flex-col items-center gap-4 text-center animate-fade-in">
@@ -823,9 +826,9 @@ function DMWelcome() {
             />
           </svg>
         </div>
-        <h2 className="text-2xl font-bold text-vox-text-primary">Direct Messages</h2>
+        <h2 className="text-2xl font-bold text-vox-text-primary">{t('dm.title')}</h2>
         <p className="max-w-md text-vox-text-secondary">
-          Select a conversation from the sidebar, or click on a member in any server to start a new one.
+          {t('dm.welcomeMessage')}
         </p>
       </div>
     </div>

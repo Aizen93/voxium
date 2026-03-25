@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -6,6 +7,7 @@ import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff } 
 import { clsx } from 'clsx';
 
 export function VoicePanel() {
+  const { t } = useTranslation();
   const {
     activeChannelId, channelUsers, selfMute, selfDeaf,
     toggleMute, toggleDeaf, leaveChannel, latency,
@@ -41,7 +43,7 @@ export function VoicePanel() {
         <div className="flex items-center gap-1.5">
           <ConnectionQuality latency={latency} />
           <p className="text-xs font-semibold text-vox-voice-connected">
-            Voice Connected
+            {t('voice.connected')}
           </p>
           {latency !== null && (
             <span className={clsx('text-[10px] font-medium', latencyColor)}>
@@ -53,9 +55,9 @@ export function VoicePanel() {
           <button
             onClick={() => { if (activeVoiceServerId) useServerStore.getState().setActiveServer(activeVoiceServerId).catch((err) => console.warn('[VoicePanel] Failed to navigate to voice server:', err)); }}
             className="truncate text-[10px] text-vox-text-muted hover:text-vox-text-primary transition-colors text-left"
-            title="Go to voice channel"
+            title={t('voice.goToChannel')}
           >
-            {voiceServer?.name ? `${voiceServer.name} / ` : ''}{channel?.name || 'Voice Channel'}
+            {voiceServer?.name ? `${voiceServer.name} / ` : ''}{channel?.name || t('voice.voiceChannel')}
             <span className="ml-1 text-vox-text-muted/60">({users.length})</span>
           </button>
         </div>
@@ -65,9 +67,9 @@ export function VoicePanel() {
       {(isServerMuted || isServerDeafened) && (
         <div className="mx-3 mb-2 rounded-md bg-vox-accent-danger/10 border border-vox-accent-danger/20 px-2.5 py-1.5">
           <p className="text-[11px] text-vox-accent-danger font-medium">
-            {isServerDeafened ? 'You are server deafened and muted' : 'You are server muted'}
+            {isServerDeafened ? t('voice.serverDeafenedAndMuted') : t('voice.serverMuted')}
           </p>
-          <p className="text-[10px] text-vox-text-muted">A moderator has restricted your audio</p>
+          <p className="text-[10px] text-vox-text-muted">{t('voice.moderatorRestricted')}</p>
         </div>
       )}
 
@@ -86,8 +88,8 @@ export function VoicePanel() {
                   ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
                   : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
             )}
-            title={isServerMuted ? 'Muted by moderator' : selfMute ? 'Unmute' : 'Mute'}
-            aria-label={isServerMuted ? 'Muted by moderator' : selfMute ? 'Unmute' : 'Mute'}
+            title={isServerMuted ? t('voice.mutedByModerator') : selfMute ? t('voice.unmute') : t('voice.mute')}
+            aria-label={isServerMuted ? t('voice.mutedByModerator') : selfMute ? t('voice.unmute') : t('voice.mute')}
           >
             {selfMute || isServerMuted ? <MicOff size={16} /> : <Mic size={16} />}
           </button>
@@ -104,8 +106,8 @@ export function VoicePanel() {
                   ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
                   : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
             )}
-            title={isServerDeafened ? 'Deafened by moderator' : selfDeaf ? 'Undeafen' : 'Deafen'}
-            aria-label={isServerDeafened ? 'Deafened by moderator' : selfDeaf ? 'Undeafen' : 'Deafen'}
+            title={isServerDeafened ? t('voice.deafenedByModerator') : selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
+            aria-label={isServerDeafened ? t('voice.deafenedByModerator') : selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
           >
             {selfDeaf || isServerDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}
           </button>
@@ -122,8 +124,8 @@ export function VoicePanel() {
                   ? 'bg-vox-bg-hover text-vox-text-muted cursor-not-allowed opacity-50'
                   : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
             )}
-            title={isScreenSharing ? 'Stop Sharing' : otherSharing ? 'Someone is already sharing' : 'Share Screen'}
-            aria-label={isScreenSharing ? 'Stop screen share' : otherSharing ? 'Someone is already sharing' : 'Share screen'}
+            title={isScreenSharing ? t('voice.stopSharing') : otherSharing ? t('voice.someoneSharing') : t('voice.shareScreen')}
+            aria-label={isScreenSharing ? t('voice.stopSharing') : otherSharing ? t('voice.someoneSharing') : t('voice.shareScreen')}
           >
             {isScreenSharing ? <MonitorOff size={16} /> : <Monitor size={16} />}
           </button>
@@ -133,8 +135,8 @@ export function VoicePanel() {
         <button
           onClick={leaveChannel}
           className="rounded-full p-2 bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30 transition-colors"
-          title="Disconnect"
-          aria-label="Disconnect from voice"
+          title={t('voice.disconnect')}
+          aria-label={t('voice.disconnectFromVoice')}
         >
           <PhoneOff size={16} />
         </button>

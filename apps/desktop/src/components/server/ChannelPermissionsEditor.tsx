@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { X, Check, Minus, Shield, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
@@ -25,12 +26,7 @@ interface OverrideState {
   deny: bigint;
 }
 
-const CATEGORIES = [
-  { key: 'general', label: 'General' },
-  { key: 'membership', label: 'Membership' },
-  { key: 'text', label: 'Text' },
-  { key: 'voice', label: 'Voice' },
-] as const;
+const CATEGORY_KEYS = ['general', 'membership', 'text', 'voice'] as const;
 
 // ADMINISTRATOR and special permissions are not valid channel overrides
 const CHANNEL_PERMISSIONS = PERMISSION_LIST.filter(
@@ -74,6 +70,16 @@ export function ChannelPermissionsEditor({
   channelType,
   onClose,
 }: ChannelPermissionsEditorProps) {
+  const { t } = useTranslation();
+
+  const CATEGORIES = CATEGORY_KEYS.map((key) => ({
+    key,
+    label: key === 'general' ? t('roles.categories.general')
+      : key === 'membership' ? t('roles.categories.membership')
+      : key === 'text' ? t('roles.categories.text')
+      : t('roles.categories.voice'),
+  }));
+
   // Filter permissions and categories by channel type:
   // Text channels: general + membership + text (no voice permissions)
   // Voice channels: general + membership + voice (no text permissions)
@@ -133,7 +139,7 @@ export function ChannelPermissionsEditor({
       } catch (err) {
         if (!cancelled) {
           console.error('Failed to fetch channel permissions:', err);
-          toast.error('Failed to load channel permissions');
+          toast.error(t('channelPermissions.failedToLoad'));
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -195,10 +201,10 @@ export function ChannelPermissionsEditor({
         ...prev,
         [selectedRoleId]: override || { allow: 0n, deny: 0n },
       }));
-      toast.success('Channel permissions updated');
+      toast.success(t('channelPermissions.updated'));
     } catch (err) {
       console.error('Failed to save channel permissions:', err);
-      toast.error('Failed to save channel permissions');
+      toast.error(t('channelPermissions.failedToSave'));
     } finally {
       setSaving(false);
     }
@@ -250,7 +256,7 @@ export function ChannelPermissionsEditor({
             <Shield size={18} className="text-vox-accent-primary" />
             <div>
               <h2 className="text-lg font-bold text-vox-text-primary">
-                Channel Permissions
+                {t('channelPermissions.title')}
               </h2>
               <p className="text-xs text-vox-text-muted">
                 #{channelName}
@@ -277,7 +283,7 @@ export function ChannelPermissionsEditor({
             {/* Role list sidebar */}
             <div className="w-48 shrink-0 border-r border-vox-border overflow-y-auto p-3">
               <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-vox-text-muted">
-                Roles
+                {t('channelPermissions.roles')}
               </p>
               <div className="space-y-0.5">
                 {sortedRoles.map((role) => {
@@ -330,13 +336,12 @@ export function ChannelPermissionsEditor({
                       </h3>
                       {selectedRole.isDefault && (
                         <span className="rounded bg-vox-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-vox-text-muted">
-                          @everyone
+                          {t('channelPermissions.everyone')}
                         </span>
                       )}
                     </div>
                     <p className="mt-1 text-xs text-vox-text-muted">
-                      Configure channel-specific permission overrides for this
-                      role. Overrides take priority over role permissions.
+                      {t('channelPermissions.description')}
                     </p>
                   </div>
 
@@ -345,19 +350,19 @@ export function ChannelPermissionsEditor({
                     <div className="flex items-center gap-1.5">
                       <TriStateIcon state="allow" size={14} />
                       <span className="text-xs text-vox-text-secondary">
-                        Allow
+                        {t('channelPermissions.allow')}
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <TriStateIcon state="deny" size={14} />
                       <span className="text-xs text-vox-text-secondary">
-                        Deny
+                        {t('channelPermissions.deny')}
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <TriStateIcon state="inherit" size={14} />
                       <span className="text-xs text-vox-text-secondary">
-                        Inherit
+                        {t('channelPermissions.inherit')}
                       </span>
                     </div>
                   </div>
@@ -413,7 +418,7 @@ export function ChannelPermissionsEditor({
                 </>
               ) : (
                 <div className="flex items-center justify-center py-16 text-sm text-vox-text-muted">
-                  Select a role to configure permissions
+                  {t('channelPermissions.selectRole')}
                 </div>
               )}
             </div>
@@ -425,8 +430,8 @@ export function ChannelPermissionsEditor({
           <div className="flex items-center justify-between border-t border-vox-border px-6 py-3">
             <p className="text-xs text-vox-text-muted">
               {hasChanges
-                ? 'You have unsaved changes'
-                : 'No unsaved changes'}
+                ? t('roles.unsavedChanges')
+                : t('roles.noUnsavedChanges')}
             </p>
             <div className="flex items-center gap-2">
               <button
@@ -434,14 +439,14 @@ export function ChannelPermissionsEditor({
                 disabled={!hasChanges || saving}
                 className="rounded-lg border border-vox-border px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors disabled:opacity-50"
               >
-                Reset
+                {t('common.reset')}
               </button>
               <button
                 onClick={handleSave}
                 disabled={!hasChanges || saving}
                 className="rounded-lg bg-vox-accent-primary px-4 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors disabled:opacity-50"
               >
-                {saving ? 'Saving...' : 'Save'}
+                {saving ? t('common.saving') : t('common.save')}
               </button>
             </div>
           </div>
@@ -486,6 +491,7 @@ function PermissionRow({
   rolePermissions: bigint;
   onToggle: () => void;
 }) {
+  const { t } = useTranslation();
   const isGrantedByRole = hasPermission(rolePermissions, permission.flag);
 
   return (
@@ -493,7 +499,7 @@ function PermissionRow({
       <div className="min-w-0 flex-1 mr-3">
         <div className="flex items-center gap-2">
           <p className="text-sm font-medium text-vox-text-primary">
-            {permission.name}
+            {t(`permissions.${permission.key}.name`)}
           </p>
           {state === 'inherit' && (
             <span
@@ -503,19 +509,19 @@ function PermissionRow({
                   : 'bg-red-500/10 text-red-400/70'
               }`}
             >
-              {isGrantedByRole ? 'Role: Allowed' : 'Role: Denied'}
+              {isGrantedByRole ? t('channelPermissions.roleAllowed') : t('channelPermissions.roleDenied')}
             </span>
           )}
         </div>
         <p className="text-xs text-vox-text-muted leading-relaxed">
-          {permission.description}
+          {t(`permissions.${permission.key}.description`)}
         </p>
       </div>
 
       <button
         onClick={onToggle}
         className="shrink-0 rounded-md p-1 hover:bg-vox-bg-active transition-colors"
-        title={`Current: ${state}. Click to cycle.`}
+        title={`${t('channelPermissions.current')} ${state}. ${t('channelPermissions.clickToCycle')}`}
       >
         <TriStateIcon state={state} size={18} />
       </button>

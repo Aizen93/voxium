@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import type { CommunityThemeData } from '@voxium/shared';
 import { BUILT_IN_THEME_IDS } from '@voxium/shared';
 import { applyCustomThemeColors, clearCustomThemeColors, applyCustomPatterns } from '../services/themeEngine';
+import i18n from '../i18n';
+import { applyLanguageDirection } from '../i18n';
 
 const STORAGE_KEY = 'voxium_settings';
 
@@ -37,6 +39,7 @@ interface LocalCustomTheme {
 interface PersistedSettings {
   theme: ThemeId;
   customThemes: LocalCustomTheme[];
+  language: string;
   audioInputDeviceId: string;
   audioOutputDeviceId: string;
   noiseGateThreshold: number;
@@ -53,6 +56,7 @@ interface SettingsState extends PersistedSettings {
   openSettings: () => void;
   closeSettings: () => void;
   setTheme: (theme: ThemeId) => void;
+  setLanguage: (lang: string) => void;
   setAudioInputDeviceId: (deviceId: string) => void;
   setAudioOutputDeviceId: (deviceId: string) => void;
   setNoiseGateThreshold: (threshold: number) => void;
@@ -114,6 +118,7 @@ function loadPersistedSettings(): PersistedSettings {
       return {
         theme,
         customThemes,
+        language: typeof parsed.language === 'string' ? parsed.language : '',
         audioInputDeviceId: parsed.audioInputDeviceId || '',
         audioOutputDeviceId: parsed.audioOutputDeviceId || '',
         noiseGateThreshold: typeof parsed.noiseGateThreshold === 'number' ? parsed.noiseGateThreshold : 0.03,
@@ -131,6 +136,7 @@ function loadPersistedSettings(): PersistedSettings {
   return {
     theme: 'dark',
     customThemes: [],
+    language: '',
     audioInputDeviceId: '',
     audioOutputDeviceId: '',
     noiseGateThreshold: 0.008,
@@ -148,6 +154,7 @@ function persistSettings(state: PersistedSettings) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       theme: state.theme,
       customThemes: state.customThemes,
+      language: state.language,
       audioInputDeviceId: state.audioInputDeviceId,
       audioOutputDeviceId: state.audioOutputDeviceId,
       noiseGateThreshold: state.noiseGateThreshold,
@@ -198,6 +205,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setTheme: (theme: ThemeId) => {
     applyTheme(theme, get().customThemes);
     set({ theme });
+    persistSettings(get());
+  },
+
+  setLanguage: (lang: string) => {
+    i18n.changeLanguage(lang);
+    applyLanguageDirection(lang);
+    set({ language: lang });
     persistSettings(get());
   },
 

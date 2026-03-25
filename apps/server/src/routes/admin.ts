@@ -151,8 +151,8 @@ adminRouter.get('/stats/geo', async (_req: Request, res: Response, next: NextFun
 
 adminRouter.get('/users', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const search = (req.query.search as string)?.trim() || '';
     const filter = (req.query.filter as string) || 'all';
     const sort = (req.query.sort as string) || 'newest';
@@ -702,8 +702,8 @@ adminRouter.patch('/users/:userId/supporter', async (req: Request<{ userId: stri
 
 adminRouter.get('/servers', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const search = (req.query.search as string)?.trim() || '';
 
     const where: Record<string, unknown> = {};
@@ -977,8 +977,8 @@ adminRouter.delete('/infra-servers/:id', requireSuperAdmin, async (req: Request<
 
 adminRouter.get('/bans', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
 
     const [bans, total] = await Promise.all([
       prisma.user.findMany({
@@ -999,8 +999,8 @@ adminRouter.get('/bans', async (req: Request, res: Response, next: NextFunction)
 
 adminRouter.get('/ip-bans', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
 
     const [ipBans, total] = await Promise.all([
       prisma.ipBan.findMany({
@@ -1081,7 +1081,7 @@ adminRouter.delete('/ip-bans/:id', async (req: Request<{ id: string }>, res: Res
 
 adminRouter.get('/signups', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const days = Math.min(90, Math.max(1, parseInt(req.query.days as string) || 30));
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days as string, 10) || 30));
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
     const signups = await prisma.$queryRawUnsafe<Array<{ day: string; count: bigint }>>(
@@ -1104,7 +1104,7 @@ adminRouter.get('/signups', async (req: Request, res: Response, next: NextFuncti
 
 adminRouter.get('/messages-per-hour', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const hours = Math.min(168, Math.max(1, parseInt(req.query.hours as string) || 24));
+    const hours = Math.min(168, Math.max(1, parseInt(req.query.hours as string, 10) || 24));
     const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
     const messages = await prisma.$queryRawUnsafe<Array<{ hour: string; count: bigint }>>(
@@ -1127,7 +1127,7 @@ adminRouter.get('/messages-per-hour', async (req: Request, res: Response, next: 
 
 adminRouter.get('/server-growth', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const days = Math.min(90, Math.max(1, parseInt(req.query.days as string) || 30));
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days as string, 10) || 30));
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
     const rows = await prisma.$queryRawUnsafe<Array<{ day: string; count: bigint }>>(
@@ -1150,7 +1150,7 @@ adminRouter.get('/server-growth', async (req: Request, res: Response, next: Next
 
 adminRouter.get('/top-servers', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit as string) || 10));
+    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit as string, 10) || 10));
 
     const rows = await prisma.$queryRawUnsafe<Array<{ id: string; name: string; message_count: bigint; member_count: bigint }>>(
       `SELECT s.id, s.name,
@@ -1417,8 +1417,8 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
 
 adminRouter.get('/storage/files', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const filter = (req.query.filter as string) || 'all';
 
     const prefix = filter === 'avatars' ? 'avatars/'
@@ -1515,8 +1515,8 @@ adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, n
 
 adminRouter.get('/audit-logs', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const action = (req.query.action as string)?.trim() || '';
     const search = (req.query.search as string)?.trim() || '';
 
@@ -1845,8 +1845,8 @@ function broadcastAnnouncement(announcement: Announcement) {
 
 adminRouter.get('/announcements', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const filter = (req.query.filter as string) || 'all';
 
     const now = new Date();
@@ -2066,8 +2066,8 @@ adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response,
 
 adminRouter.get('/reports', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const filter = (req.query.filter as string) || 'all';
 
     const where: Record<string, unknown> = {};
@@ -2272,8 +2272,8 @@ async function emitSupportTicketCount() {
 
 adminRouter.get('/support/tickets', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const status = (req.query.status as string) || 'all';
 
     const where: Record<string, unknown> = {};
@@ -2374,7 +2374,7 @@ adminRouter.get('/support/tickets/:id/messages', async (req: Request<{ id: strin
   try {
     const { id } = req.params;
     const before = req.query.before as string | undefined;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
 
     const ticket = await prisma.supportTicket.findUnique({ where: { id } });
     if (!ticket) throw new NotFoundError('Ticket');

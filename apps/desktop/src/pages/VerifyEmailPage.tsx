@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { api } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
 import { CheckCircle, AlertCircle } from 'lucide-react';
@@ -8,6 +9,7 @@ import { CheckCircle, AlertCircle } from 'lucide-react';
 const processedTokens = new Set<string>();
 
 export function VerifyEmailPage() {
+  const { t } = useTranslation();
   const { token } = useParams<{ token: string }>();
   const { user, checkAuth } = useAuthStore();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
@@ -16,7 +18,7 @@ export function VerifyEmailPage() {
   useEffect(() => {
     if (!token) {
       setStatus('error');
-      setError('Missing verification token.');
+      setError(t('auth.verifyEmail.missingToken'));
       return;
     }
     if (processedTokens.has(token)) return;
@@ -32,7 +34,7 @@ export function VerifyEmailPage() {
         // Allow retry on transient/network errors (keep in set only for server rejections)
         if (!err.response) processedTokens.delete(token);
         setStatus('error');
-        setError(err.response?.data?.error || 'Verification failed. The link may be invalid or expired.');
+        setError(err.response?.data?.error || t('auth.verifyEmail.failed'));
       });
   }, [token]); // intentionally omit user/checkAuth — only re-run when token changes
 
@@ -42,13 +44,13 @@ export function VerifyEmailPage() {
         <div className="rounded-2xl border border-vox-border bg-vox-bg-secondary p-8 shadow-2xl">
           <div className="mb-6 flex flex-col items-center">
             <img src="/logo.svg" alt="Voxium" className="h-16 w-16 rounded-2xl shadow-lg shadow-vox-accent-primary/20" />
-            <h1 className="mt-4 text-2xl font-bold text-vox-text-primary">Email Verification</h1>
+            <h1 className="mt-4 text-2xl font-bold text-vox-text-primary">{t('auth.verifyEmail.title')}</h1>
           </div>
 
           {status === 'loading' && (
             <div className="flex flex-col items-center gap-4 py-4">
               <div className="h-8 w-8 animate-spin rounded-full border-4 border-vox-accent-primary border-t-transparent" />
-              <p className="text-sm text-vox-text-secondary">Verifying your email...</p>
+              <p className="text-sm text-vox-text-secondary">{t('auth.verifyEmail.verifying')}</p>
             </div>
           )}
 
@@ -56,10 +58,10 @@ export function VerifyEmailPage() {
             <div className="space-y-4">
               <div className="flex items-center gap-3 rounded-lg bg-vox-voice-connected/10 border border-vox-voice-connected/20 px-4 py-3">
                 <CheckCircle size={20} className="shrink-0 text-vox-voice-connected" />
-                <p className="text-sm text-vox-voice-connected">Your email has been verified successfully!</p>
+                <p className="text-sm text-vox-voice-connected">{t('auth.verifyEmail.success')}</p>
               </div>
               <Link to={user ? '/' : '/login'} className="btn-primary block w-full py-2.5 text-center">
-                {user ? 'Continue to Voxium' : 'Go to Login'}
+                {user ? t('auth.verifyEmail.continueToVoxium') : t('auth.verifyEmail.goToLogin')}
               </Link>
             </div>
           )}
@@ -71,7 +73,7 @@ export function VerifyEmailPage() {
                 <p className="text-sm text-vox-accent-danger">{error}</p>
               </div>
               <Link to={user ? '/' : '/login'} className="btn-primary block w-full py-2.5 text-center">
-                {user ? 'Go Back' : 'Go to Login'}
+                {user ? t('auth.verifyEmail.goBack') : t('auth.verifyEmail.goToLogin')}
               </Link>
             </div>
           )}

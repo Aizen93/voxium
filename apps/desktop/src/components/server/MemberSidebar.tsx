@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
@@ -21,6 +22,7 @@ interface MemberGroup {
 }
 
 export function MemberSidebar() {
+  const { t } = useTranslation();
   const { members, roles } = useServerStore();
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
@@ -81,22 +83,22 @@ export function MemberSidebar() {
       }
     };
 
-    addGroup('_owner', 'Owner', null);
+    addGroup('_owner', t('members.owner'), null);
     const adminCount = buckets.get('_admin')?.length ?? 0;
-    if (adminCount > 0) addGroup('_admin', `Admins - ${adminCount}`, null);
+    if (adminCount > 0) addGroup('_admin', t('members.adminsCount', { count: adminCount }), null);
 
     for (const role of sortedRoles) {
       const count = buckets.get(role.id)?.length ?? 0;
-      if (count > 0) addGroup(role.id, `${role.name} - ${count}`, role.color);
+      if (count > 0) addGroup(role.id, t('members.roleCount', { role: role.name, count }), role.color);
     }
 
     const onlineCount = buckets.get('_online')?.length ?? 0;
-    if (onlineCount > 0) addGroup('_online', `Online - ${onlineCount}`, null);
+    if (onlineCount > 0) addGroup('_online', t('members.onlineCount', { count: onlineCount }), null);
     const offlineCount = buckets.get('_offline')?.length ?? 0;
-    if (offlineCount > 0) addGroup('_offline', `Offline - ${offlineCount}`, null);
+    if (offlineCount > 0) addGroup('_offline', t('members.offlineCount', { count: offlineCount }), null);
 
     return { groups: result, topRoleColorMap: colorMap };
-  }, [members, roles]);
+  }, [members, roles, t]);
 
   function handleContextMenu(e: React.MouseEvent, member: ServerMember) {
     e.preventDefault();

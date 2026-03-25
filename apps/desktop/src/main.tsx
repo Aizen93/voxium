@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './App';
 import './styles/globals.css';
+import './i18n';
 
 // ─── Global error handlers ──────────────────────────────────────────────────
 // Catch unhandled promise rejections (e.g., forgotten .catch())

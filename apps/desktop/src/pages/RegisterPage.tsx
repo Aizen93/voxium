@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef, useCallback, useEffect, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../stores/authStore';
 import { Eye, EyeOff } from 'lucide-react';
 import { AuthBackground } from '../components/auth/AuthBackground';
@@ -21,6 +22,7 @@ function getPasswordStrength(pw: string): { level: 'weak' | 'medium' | 'strong';
 }
 
 export function RegisterPage() {
+  const { t } = useTranslation();
   const { register, error, clearError, isSubmitting } = useAuthStore();
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
@@ -78,13 +80,13 @@ export function RegisterPage() {
               className="mt-4 text-2xl font-bold text-vox-text-primary animate-slide-up"
               style={{ animationDelay: '0.1s', animationFillMode: 'backwards' }}
             >
-              Create an account
+              {t('auth.register.title')}
             </h1>
             <p
               className="mt-1 text-vox-text-secondary animate-slide-up"
               style={{ animationDelay: '0.15s', animationFillMode: 'backwards' }}
             >
-              Join the Voxium community
+              {t('auth.register.subtitle')}
             </p>
           </div>
 
@@ -101,14 +103,14 @@ export function RegisterPage() {
               style={{ animationDelay: '0.2s', animationFillMode: 'backwards' }}
             >
               <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
-                Username
+                {t('auth.register.username')}
               </label>
               <input
                 type="text"
                 className="input transition-all duration-200 focus:shadow-[0_0_0_3px_rgba(91,91,247,0.15)]"
                 value={username}
                 onChange={(e) => { setUsername(e.target.value); clearError(); }}
-                placeholder="Pick a username"
+                placeholder={t('auth.register.usernamePlaceholder')}
                 required
                 autoFocus
               />
@@ -119,14 +121,14 @@ export function RegisterPage() {
               style={{ animationDelay: '0.25s', animationFillMode: 'backwards' }}
             >
               <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
-                Email
+                {t('auth.register.email')}
               </label>
               <input
                 type="email"
                 className="input transition-all duration-200 focus:shadow-[0_0_0_3px_rgba(91,91,247,0.15)]"
                 value={email}
                 onChange={(e) => { setEmail(e.target.value); clearError(); }}
-                placeholder="you@example.com"
+                placeholder={t('auth.register.emailPlaceholder')}
                 required
               />
             </div>
@@ -136,7 +138,7 @@ export function RegisterPage() {
               style={{ animationDelay: '0.3s', animationFillMode: 'backwards' }}
             >
               <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
-                Password
+                {t('auth.register.password')}
               </label>
               <div className="relative">
                 <input
@@ -146,7 +148,7 @@ export function RegisterPage() {
                   onChange={(e) => handlePasswordChange(e.target.value)}
                   onFocus={() => setIsPasswordFocused(true)}
                   onBlur={() => setIsPasswordFocused(false)}
-                  placeholder="At least 8 characters"
+                  placeholder={t('auth.register.passwordPlaceholder')}
                   required
                   minLength={8}
                 />
@@ -169,9 +171,9 @@ export function RegisterPage() {
                     />
                   </div>
                   <p className="mt-1 text-[11px] transition-colors duration-300" style={{ color: strength.color }}>
-                    {strength.level === 'weak' && 'Weak password'}
-                    {strength.level === 'medium' && 'Medium strength'}
-                    {strength.level === 'strong' && 'Strong password'}
+                    {strength.level === 'weak' && t('auth.register.passwordWeak')}
+                    {strength.level === 'medium' && t('auth.register.passwordMedium')}
+                    {strength.level === 'strong' && t('auth.register.passwordStrong')}
                   </p>
                 </div>
               )}
@@ -186,7 +188,7 @@ export function RegisterPage() {
                 disabled={isSubmitting}
                 className="btn-primary w-full py-2.5 transition-all duration-150 active:scale-[0.98] hover:shadow-lg hover:shadow-vox-accent-primary/20"
               >
-                {isSubmitting ? 'Creating account...' : 'Create Account'}
+                {isSubmitting ? t('auth.register.creatingAccount') : t('auth.register.createAccount')}
               </button>
             </div>
           </form>
@@ -195,9 +197,9 @@ export function RegisterPage() {
             className="mt-6 text-center text-sm text-vox-text-secondary animate-slide-up"
             style={{ animationDelay: '0.4s', animationFillMode: 'backwards' }}
           >
-            Already have an account?{' '}
+            {t('auth.register.hasAccount')}{' '}
             <Link to="/login" className="text-vox-text-link hover:underline">
-              Sign in
+              {t('auth.register.signIn')}
             </Link>
           </p>
           </div>

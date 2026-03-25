@@ -97,8 +97,33 @@ describe('utils/redis — lazy initialization', () => {
     const mod = await import('../../utils/redis');
     await mod.initRedis();
 
-    expect(createClient).toHaveBeenCalledWith({ url: 'redis://test-host:6380' });
+    expect(createClient).toHaveBeenCalledWith({
+      url: 'redis://test-host:6380',
+      socket: {
+        reconnectStrategy: expect.any(Function),
+        keepAlive: true,
+        connectTimeout: 10000,
+      },
+    });
     delete process.env.REDIS_URL;
+  });
+
+  it('reconnectStrategy uses exponential backoff capped at 2000ms', async () => {
+    const { createClient } = await import('redis');
+    vi.mocked(createClient).mockClear();
+
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+
+    // Extract the reconnectStrategy from the createClient call
+    const callArgs = vi.mocked(createClient).mock.calls[0][0] as { socket: { reconnectStrategy: (retries: number) => number } };
+    const strategy = callArgs.socket.reconnectStrategy;
+
+    // Exponential: retries * 50, capped at 2000
+    expect(strategy(1)).toBe(50);
+    expect(strategy(10)).toBe(500);
+    expect(strategy(40)).toBe(2000);
+    expect(strategy(100)).toBe(2000); // capped
   });
 });
 

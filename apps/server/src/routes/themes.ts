@@ -62,8 +62,8 @@ const authorSelect = { username: true, displayName: true } as const;
 
 themeRouter.get('/', rateLimitThemeBrowse, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(LIMITS.THEMES_PER_PAGE, Math.max(1, parseInt(req.query.limit as string) || LIMITS.THEMES_PER_PAGE));
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(LIMITS.THEMES_PER_PAGE, Math.max(1, parseInt(req.query.limit as string, 10) || LIMITS.THEMES_PER_PAGE));
     const sort = req.query.sort as string || 'newest';
     const search = req.query.search as string || '';
     const tag = req.query.tag as string || '';

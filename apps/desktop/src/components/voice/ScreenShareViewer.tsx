@@ -49,6 +49,7 @@ export function ScreenShareViewer() {
             onClick={handleFullscreen}
             className="rounded p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
             title="Fullscreen"
+            aria-label="Fullscreen"
           >
             <Maximize size={16} />
           </button>
@@ -56,6 +57,7 @@ export function ScreenShareViewer() {
             onClick={() => setViewMode('floating')}
             className="rounded p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
             title="Pop out to floating panel"
+            aria-label="Pop out to floating panel"
           >
             <PictureInPicture2 size={16} />
           </button>
@@ -64,6 +66,7 @@ export function ScreenShareViewer() {
               onClick={stopScreenShare}
               className="rounded p-1.5 text-vox-accent-danger hover:bg-vox-accent-danger/20 transition-colors"
               title="Stop sharing"
+              aria-label="Stop sharing"
             >
               <MonitorOff size={16} />
             </button>

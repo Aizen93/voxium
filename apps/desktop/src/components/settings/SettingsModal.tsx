@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio, Palette, Plus, Globe, Upload, Pencil, Trash2 } from 'lucide-react';
+import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio, Palette, Plus, Globe, Upload, Pencil, Trash2, Languages } from 'lucide-react';
 import { THEMES } from '../../stores/settingsStore';
 import type { VoiceQuality, ThemeId } from '../../stores/settingsStore';
 import { LIMITS } from '@voxium/shared';
@@ -12,13 +13,14 @@ import { ThemeEditor } from './ThemeEditor';
 import { ThemeBrowser } from './ThemeBrowser';
 import { api } from '../../services/api';
 import axios from 'axios';
+import { SUPPORTED_LANGUAGES } from '../../i18n';
 
 interface DeviceInfo {
   deviceId: string;
   label: string;
 }
 
-type SettingsTab = 'account' | 'security' | 'appearance' | 'audio';
+type SettingsTab = 'account' | 'security' | 'appearance' | 'audio' | 'language';
 
 function formatKeyCode(code: string): string {
   const map: Record<string, string> = {
@@ -53,6 +55,7 @@ function formatKeyCode(code: string): string {
 }
 
 function KeyBindingPicker({ value, onChange }: { value: string; onChange: (code: string) => void }) {
+  const { t } = useTranslation();
   const [listening, setListening] = useState(false);
 
   useEffect(() => {
@@ -84,7 +87,7 @@ function KeyBindingPicker({ value, onChange }: { value: string; onChange: (code:
       }`}
     >
       <Keyboard size={14} />
-      {listening ? 'Press a key...' : formatKeyCode(value)}
+      {listening ? t('settings.audio.pressAKey') : formatKeyCode(value)}
     </button>
   );
 }
@@ -92,6 +95,7 @@ function KeyBindingPicker({ value, onChange }: { value: string; onChange: (code:
 // ─── Change Password Form ────────────────────────────────────────────────────
 
 function ChangePasswordForm() {
+  const { t } = useTranslation();
   const { changePassword } = useAuthStore();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -104,24 +108,24 @@ function ChangePasswordForm() {
     setPasswordError(null);
 
     if (newPassword.length < LIMITS.PASSWORD_MIN) {
-      setPasswordError(`New password must be at least ${LIMITS.PASSWORD_MIN} characters.`);
+      setPasswordError(t('settings.security.passwordMinLength', { min: LIMITS.PASSWORD_MIN }));
       return;
     }
 
     if (newPassword !== confirmNewPassword) {
-      setPasswordError('New passwords do not match.');
+      setPasswordError(t('settings.security.passwordsDoNotMatch'));
       return;
     }
 
     setChangingPassword(true);
     try {
       await changePassword(currentPassword, newPassword);
-      toast.success('Password changed successfully');
+      toast.success(t('settings.security.passwordChanged'));
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');
     } catch (err) {
-      setPasswordError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to change password' : 'Failed to change password');
+      setPasswordError(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.security.failedToChangePassword') : t('settings.security.failedToChangePassword'));
     } finally {
       setChangingPassword(false);
     }
@@ -131,7 +135,7 @@ function ChangePasswordForm() {
     <div>
       <div className="flex items-center gap-2 mb-4">
         <Lock size={16} className="text-vox-text-muted" />
-        <h3 className="text-sm font-semibold text-vox-text-primary">Change Password</h3>
+        <h3 className="text-sm font-semibold text-vox-text-primary">{t('settings.security.changePassword')}</h3>
       </div>
 
       {passwordError && (
@@ -143,7 +147,7 @@ function ChangePasswordForm() {
       <div className="space-y-3">
         <div>
           <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-            Current Password
+            {t('settings.security.currentPassword')}
           </label>
           <div className="relative">
             <input
@@ -151,12 +155,13 @@ function ChangePasswordForm() {
               value={currentPassword}
               onChange={(e) => { setCurrentPassword(e.target.value); setPasswordError(null); }}
               className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 pr-10 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
-              placeholder="Current password"
+              placeholder={t('settings.security.currentPasswordPlaceholder')}
             />
             <button
               type="button"
               onClick={() => setShowPasswords(!showPasswords)}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-vox-text-muted hover:text-vox-text-secondary"
+              aria-label={showPasswords ? t('settings.security.hidePasswords') : t('settings.security.showPasswords')}
             >
               {showPasswords ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>
@@ -165,27 +170,27 @@ function ChangePasswordForm() {
 
         <div>
           <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-            New Password
+            {t('settings.security.newPassword')}
           </label>
           <input
             type={showPasswords ? 'text' : 'password'}
             value={newPassword}
             onChange={(e) => { setNewPassword(e.target.value); setPasswordError(null); }}
             className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
-            placeholder="New password"
+            placeholder={t('settings.security.newPasswordPlaceholder')}
           />
         </div>
 
         <div>
           <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-            Confirm New Password
+            {t('settings.security.confirmNewPassword')}
           </label>
           <input
             type={showPasswords ? 'text' : 'password'}
             value={confirmNewPassword}
             onChange={(e) => { setConfirmNewPassword(e.target.value); setPasswordError(null); }}
             className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
-            placeholder="Confirm new password"
+            placeholder={t('settings.security.confirmPasswordPlaceholder')}
           />
         </div>
 
@@ -194,7 +199,7 @@ function ChangePasswordForm() {
           disabled={changingPassword || !currentPassword || !newPassword || !confirmNewPassword}
           className="btn-primary w-full disabled:opacity-50"
         >
-          {changingPassword ? 'Changing...' : 'Change Password'}
+          {changingPassword ? t('settings.security.changingPassword') : t('common.changePassword')}
         </button>
       </div>
     </div>
@@ -204,6 +209,7 @@ function ChangePasswordForm() {
 // ─── Profile Tab ──────────────────────────────────────────────────────────────
 
 function ProfileTab() {
+  const { t } = useTranslation();
   const { user, uploadAvatar, updateProfile } = useAuthStore();
   const [displayName, setDisplayName] = useState(user?.displayName || '');
   const [bio, setBio] = useState(user?.bio || '');
@@ -224,9 +230,9 @@ function ProfileTab() {
     setUploading(true);
     try {
       await uploadAvatar(file);
-      toast.success('Avatar updated');
+      toast.success(t('settings.profile.avatarUpdated'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to upload avatar' : 'Failed to upload avatar');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.profile.failedToUploadAvatar') : t('settings.profile.failedToUploadAvatar'));
     } finally {
       setUploading(false);
     }
@@ -239,9 +245,9 @@ function ProfileTab() {
         displayName: displayName.trim() || undefined,
         bio: bio.trim(),
       });
-      toast.success('Profile updated');
+      toast.success(t('settings.profile.profileUpdated'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to update profile' : 'Failed to update profile');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.profile.failedToUpdateProfile') : t('settings.profile.failedToUpdateProfile'));
     } finally {
       setSaving(false);
     }
@@ -267,7 +273,7 @@ function ProfileTab() {
           ) : (
             <div className="absolute inset-0 flex items-center justify-center rounded-full bg-black/0 group-hover:bg-black/40 transition-colors">
               <span className="text-xs font-medium text-white opacity-0 group-hover:opacity-100 transition-opacity">
-                Change
+                {t('common.change')}
               </span>
             </div>
           )}
@@ -279,13 +285,13 @@ function ProfileTab() {
           onChange={handleFileChange}
           className="hidden"
         />
-        <p className="text-[10px] text-vox-text-muted">Click to change avatar</p>
+        <p className="text-[10px] text-vox-text-muted">{t('settings.profile.clickToChangeAvatar')}</p>
       </div>
 
       {/* Display Name */}
       <div>
         <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-          Display Name
+          {t('settings.profile.displayName')}
         </label>
         <input
           type="text"
@@ -300,7 +306,7 @@ function ProfileTab() {
       {/* Bio */}
       <div>
         <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-          About Me
+          {t('settings.profile.aboutMe')}
         </label>
         <textarea
           value={bio}
@@ -308,7 +314,7 @@ function ProfileTab() {
           maxLength={LIMITS.BIO_MAX}
           rows={3}
           className="w-full resize-none rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
-          placeholder="Tell others about yourself"
+          placeholder={t('settings.profile.aboutMePlaceholder')}
         />
         <p className="mt-1 text-right text-[10px] text-vox-text-muted">
           {bio.length}/{LIMITS.BIO_MAX}
@@ -321,7 +327,7 @@ function ProfileTab() {
         disabled={!hasChanges || saving}
         className="btn-primary w-full disabled:opacity-50"
       >
-        {saving ? 'Saving...' : 'Save Changes'}
+        {saving ? t('settings.profile.saving') : t('settings.profile.saveChanges')}
       </button>
 
     </div>
@@ -331,6 +337,7 @@ function ProfileTab() {
 // ─── Two-Factor Authentication ──────────────────────────────────────────────
 
 function TwoFactorSection() {
+  const { t } = useTranslation();
   const { user, setupTOTP, enableTOTP, disableTOTP } = useAuthStore();
   const [step, setStep] = useState<'idle' | 'setup' | 'backup' | 'disable'>('idle');
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState('');
@@ -350,7 +357,7 @@ function TwoFactorSection() {
       setSecret(data.secret);
       setStep('setup');
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to set up 2FA' : 'Failed to set up 2FA');
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.security.failedToSetup2FA') : t('settings.security.failedToSetup2FA'));
     } finally {
       setLoading(false);
     }
@@ -366,7 +373,7 @@ function TwoFactorSection() {
       setStep('backup');
       setCode('');
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Invalid verification code' : 'Invalid verification code');
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.security.invalidCode') : t('settings.security.invalidCode'));
     } finally {
       setLoading(false);
     }
@@ -378,11 +385,11 @@ function TwoFactorSection() {
     setError(null);
     try {
       await disableTOTP(code);
-      toast.success('Two-factor authentication disabled');
+      toast.success(t('settings.security.twoFactorDisabledSuccess'));
       setStep('idle');
       setCode('');
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Invalid verification code' : 'Invalid verification code');
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.security.invalidCode') : t('settings.security.invalidCode'));
     } finally {
       setLoading(false);
     }
@@ -408,7 +415,7 @@ function TwoFactorSection() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error('Unable to copy backup codes to clipboard');
+      toast.error(t('settings.security.failedToCopyBackup'));
     }
   };
 
@@ -418,10 +425,10 @@ function TwoFactorSection() {
     <div className="border-t border-vox-border pt-5">
       <div className="flex items-center gap-2 mb-4">
         <ShieldCheck size={16} className="text-vox-text-muted" />
-        <h3 className="text-sm font-semibold text-vox-text-primary">Two-Factor Authentication</h3>
+        <h3 className="text-sm font-semibold text-vox-text-primary">{t('settings.security.twoFactor')}</h3>
         {isEnabled && (
           <span className="ml-auto rounded-full bg-vox-voice-connected/20 px-2 py-0.5 text-[10px] font-medium text-vox-voice-connected">
-            Enabled
+            {t('common.enabled')}
           </span>
         )}
       </div>
@@ -435,10 +442,10 @@ function TwoFactorSection() {
       {step === 'idle' && !isEnabled && (
         <div>
           <p className="text-xs text-vox-text-muted mb-3">
-            Add an extra layer of security to your account by requiring a verification code from an authenticator app when you sign in.
+            {t('settings.security.twoFactorDisabled')}
           </p>
           <button onClick={handleSetup} disabled={loading} className="btn-primary w-full disabled:opacity-50">
-            {loading ? 'Setting up...' : 'Enable Two-Factor Authentication'}
+            {loading ? t('settings.security.settingUp') : t('settings.security.enableTwoFactor')}
           </button>
         </div>
       )}
@@ -446,14 +453,14 @@ function TwoFactorSection() {
       {step === 'idle' && isEnabled && (
         <div>
           <p className="text-xs text-vox-text-muted mb-3">
-            Two-factor authentication is currently enabled. You will be asked for a verification code each time you sign in.
+            {t('settings.security.twoFactorEnabled')}
           </p>
           <button
             onClick={() => { setStep('disable'); setError(null); setCode(''); }}
             className="flex items-center gap-2 rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/10 px-3 py-2 text-xs text-vox-accent-danger hover:bg-vox-accent-danger/20 transition-colors w-full justify-center"
           >
             <ShieldOff size={14} />
-            Disable Two-Factor Authentication
+            {t('settings.security.disableTwoFactor')}
           </button>
         </div>
       )}
@@ -461,7 +468,7 @@ function TwoFactorSection() {
       {step === 'setup' && (
         <div className="space-y-4">
           <p className="text-xs text-vox-text-muted">
-            Scan the QR code below with your authenticator app (Google Authenticator, Authy, etc.), then enter the 6-digit code to verify.
+            {t('settings.security.scanQRCode')}
           </p>
 
           <div className="flex justify-center">
@@ -471,7 +478,7 @@ function TwoFactorSection() {
           </div>
 
           <div>
-            <p className="text-[10px] text-vox-text-muted mb-1">Can't scan? Enter this key manually:</p>
+            <p className="text-[10px] text-vox-text-muted mb-1">{t('settings.security.cantScan')}</p>
             <code className="block rounded-lg bg-vox-bg-secondary border border-vox-border px-3 py-2 text-xs text-vox-text-primary font-mono break-all select-all">
               {secret}
             </code>
@@ -479,7 +486,7 @@ function TwoFactorSection() {
 
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-              Verification Code
+              {t('settings.security.verificationCode')}
             </label>
             <input
               type="text"
@@ -498,14 +505,14 @@ function TwoFactorSection() {
               onClick={() => { setStep('idle'); setCode(''); setError(null); }}
               className="flex-1 rounded-lg border border-vox-border px-3 py-2 text-xs text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
             >
-              Cancel
+              {t('common.cancel')}
             </button>
             <button
               onClick={handleEnable}
               disabled={loading || code.length < 6}
               className="btn-primary flex-1 disabled:opacity-50"
             >
-              {loading ? 'Verifying...' : 'Enable'}
+              {loading ? t('auth.totp.verifying') : t('common.enable')}
             </button>
           </div>
         </div>
@@ -514,9 +521,9 @@ function TwoFactorSection() {
       {step === 'backup' && (
         <div className="space-y-4">
           <div className="rounded-lg bg-vox-accent-warning/10 border border-vox-accent-warning/20 px-3 py-2">
-            <p className="text-xs text-vox-accent-warning font-medium">Save your backup codes!</p>
+            <p className="text-xs text-vox-accent-warning font-medium">{t('settings.security.saveBackupCodes')}</p>
             <p className="text-[10px] text-vox-accent-warning/80 mt-1">
-              These codes can be used to access your account if you lose your authenticator device. Each code can only be used once. Store them somewhere safe.
+              {t('settings.security.backupCodesDescription')}
             </p>
           </div>
 
@@ -533,14 +540,14 @@ function TwoFactorSection() {
             className="flex items-center justify-center gap-2 w-full rounded-lg border border-vox-border px-3 py-2 text-xs text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
           >
             {copied ? <Check size={14} className="text-vox-voice-connected" /> : <Copy size={14} />}
-            {copied ? 'Copied!' : 'Copy all codes'}
+            {copied ? t('common.copied') : t('settings.security.copyAllCodes')}
           </button>
 
           <button
             onClick={() => { setStep('idle'); setBackupCodes([]); }}
             className="btn-primary w-full"
           >
-            I've saved my backup codes
+            {t('settings.security.savedBackupCodes')}
           </button>
         </div>
       )}
@@ -548,12 +555,12 @@ function TwoFactorSection() {
       {step === 'disable' && (
         <div className="space-y-4">
           <p className="text-xs text-vox-text-muted">
-            Enter a verification code from your authenticator app or a backup code to disable two-factor authentication.
+            {t('settings.security.enterCodeToDisable')}
           </p>
 
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-              Verification Code
+              {t('settings.security.verificationCode')}
             </label>
             <input
               type="text"
@@ -571,14 +578,14 @@ function TwoFactorSection() {
               onClick={() => { setStep('idle'); setCode(''); setError(null); }}
               className="flex-1 rounded-lg border border-vox-border px-3 py-2 text-xs text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
             >
-              Cancel
+              {t('common.cancel')}
             </button>
             <button
               onClick={handleDisable}
               disabled={loading || code.length < 6}
               className="flex-1 rounded-lg bg-vox-accent-danger px-3 py-2 text-xs text-white hover:bg-vox-accent-danger/80 disabled:opacity-50 transition-colors"
             >
-              {loading ? 'Disabling...' : 'Disable'}
+              {loading ? t('settings.security.disabling') : t('common.disable')}
             </button>
           </div>
         </div>
@@ -601,6 +608,7 @@ function SecurityTab() {
 // ─── Audio Tab ────────────────────────────────────────────────────────────────
 
 function AppearanceTab() {
+  const { t } = useTranslation();
   const { theme, setTheme, customThemes, deleteLocalTheme, setThemeRemoteId } = useSettingsStore();
   const [editorOpen, setEditorOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
@@ -616,7 +624,7 @@ function AppearanceTab() {
       setEditingTheme({ localId: '', data });
       setEditorOpen(true);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to import theme');
+      toast.error(err instanceof Error ? err.message : t('settings.appearance.failedToImport'));
     }
     // Reset input so same file can be re-selected
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -631,7 +639,7 @@ function AppearanceTab() {
 
   const handleDelete = useCallback((localId: string) => {
     deleteLocalTheme(localId);
-    toast.success('Theme deleted');
+    toast.success(t('settings.appearance.themeDeleted'));
   }, [deleteLocalTheme]);
 
   const handlePublish = useCallback(async (localId: string) => {
@@ -653,9 +661,9 @@ function AppearanceTab() {
         setThemeRemoteId(localId, remoteId);
         await api.post(`/themes/${remoteId}/publish`);
       }
-      toast.success('Theme published to marketplace');
+      toast.success(t('settings.appearance.themePublished'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to publish theme' : 'Failed to publish theme');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.appearance.failedToPublish') : t('settings.appearance.failedToPublish'));
     } finally {
       setPublishing(null);
     }
@@ -667,9 +675,9 @@ function AppearanceTab() {
     setPublishing(localId);
     try {
       await api.post(`/themes/${ct.remoteId}/unpublish`);
-      toast.success('Theme unpublished from marketplace');
+      toast.success(t('settings.appearance.themeUnpublished'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to unpublish' : 'Failed to unpublish');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.appearance.failedToUnpublish') : t('settings.appearance.failedToUnpublish'));
     } finally {
       setPublishing(null);
     }
@@ -679,8 +687,8 @@ function AppearanceTab() {
     <div className="space-y-6">
       {/* Built-in Themes */}
       <div>
-        <h3 className="text-sm font-semibold text-vox-text-primary mb-1">Built-in Themes</h3>
-        <p className="text-xs text-vox-text-muted mb-3">Choose how Voxium looks to you</p>
+        <h3 className="text-sm font-semibold text-vox-text-primary mb-1">{t('settings.appearance.builtInThemes')}</h3>
+        <p className="text-xs text-vox-text-muted mb-3">{t('settings.appearance.builtInThemesDesc')}</p>
         <div className="flex gap-3">
           {THEMES.map((t) => (
             <button
@@ -738,8 +746,8 @@ function AppearanceTab() {
       <div>
         <div className="flex items-center justify-between mb-3">
           <div>
-            <h3 className="text-sm font-semibold text-vox-text-primary">Custom Themes</h3>
-            <p className="text-xs text-vox-text-muted mt-0.5">Create, import, or browse community themes</p>
+            <h3 className="text-sm font-semibold text-vox-text-primary">{t('settings.appearance.customThemes')}</h3>
+            <p className="text-xs text-vox-text-muted mt-0.5">{t('settings.appearance.customThemesDesc')}</p>
           </div>
         </div>
 
@@ -749,19 +757,19 @@ function AppearanceTab() {
             onClick={() => { setEditingTheme(undefined); setEditorOpen(true); }}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white transition-colors bg-vox-accent-primary hover:bg-vox-accent-hover"
           >
-            <Plus size={13} /> Create Theme
+            <Plus size={13} /> {t('settings.appearance.createTheme')}
           </button>
           <button
             onClick={() => setBrowserOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-vox-border text-vox-text-secondary hover:border-vox-text-muted transition-colors"
           >
-            <Globe size={13} /> Browse Marketplace
+            <Globe size={13} /> {t('settings.appearance.browseMarketplace')}
           </button>
           <button
             onClick={() => fileInputRef.current?.click()}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-vox-border text-vox-text-secondary hover:border-vox-text-muted transition-colors"
           >
-            <Upload size={13} /> Import JSON
+            <Upload size={13} /> {t('settings.appearance.importJSON')}
           </button>
           <input
             ref={fileInputRef}
@@ -797,7 +805,7 @@ function AppearanceTab() {
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-medium text-vox-text-primary truncate">{ct.data.name}</p>
                     <p className="text-[10px] text-vox-text-muted">
-                      {ct.source === 'installed' ? 'Installed' : ct.remoteId ? 'Published' : 'Local'}
+                      {ct.source === 'installed' ? t('settings.appearance.installed') : ct.remoteId ? t('settings.appearance.published') : t('settings.appearance.local')}
                     </p>
                   </div>
                   {/* Actions */}
@@ -810,7 +818,7 @@ function AppearanceTab() {
                           className="px-1.5 py-0.5 rounded text-[9px] font-medium border border-vox-border text-vox-text-muted hover:text-vox-accent-danger hover:border-vox-accent-danger transition-colors"
                           title="Unpublish from marketplace"
                         >
-                          {publishing === ct.localId ? '...' : 'Unpublish'}
+                          {publishing === ct.localId ? '...' : t('settings.appearance.unpublish')}
                         </button>
                       ) : (
                         <button
@@ -819,7 +827,7 @@ function AppearanceTab() {
                           className="px-1.5 py-0.5 rounded text-[9px] font-medium border border-vox-accent-primary text-vox-accent-primary hover:bg-vox-accent-primary/10 transition-colors"
                           title="Publish to marketplace"
                         >
-                          {publishing === ct.localId ? '...' : 'Publish'}
+                          {publishing === ct.localId ? '...' : t('settings.appearance.publish')}
                         </button>
                       )
                     )}
@@ -850,7 +858,7 @@ function AppearanceTab() {
         ) : (
           <div className="rounded-lg border border-vox-border bg-vox-bg-secondary/50 p-4 text-center">
             <p className="text-xs text-vox-text-muted">
-              No custom themes yet. Create one, browse the marketplace, or import a JSON file.
+              {t('settings.appearance.noCustomThemes')}
             </p>
           </div>
         )}
@@ -874,6 +882,7 @@ function AppearanceTab() {
 }
 
 function AudioTab() {
+  const { t } = useTranslation();
   const {
     audioInputDeviceId,
     audioOutputDeviceId,
@@ -924,7 +933,7 @@ function AudioTab() {
     stopMicPreview();
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      setError('Microphone access not available (insecure context?)');
+      setError(t('settings.audio.micNotAvailable'));
       return;
     }
 
@@ -957,15 +966,15 @@ function AudioTab() {
       rafRef.current = requestAnimationFrame(tick);
       setError(null);
     } catch {
-      toast.error('Could not access microphone');
-      setError('Could not access microphone');
+      toast.error(t('settings.audio.couldNotAccessMic'));
+      setError(t('settings.audio.couldNotAccessMic'));
     }
   }, [stopMicPreview]);
 
   useEffect(() => {
     async function loadDevices() {
       if (!navigator.mediaDevices?.enumerateDevices) {
-        setError('Device enumeration not available');
+        setError(t('settings.audio.deviceEnumNotAvailable'));
         return;
       }
 
@@ -988,7 +997,7 @@ function AudioTab() {
         );
       } catch (err) {
         console.warn('[Settings] enumerateDevices failed:', err);
-        setError('Could not list audio devices');
+        setError(t('settings.audio.couldNotListDevices'));
       }
     }
 
@@ -1011,14 +1020,14 @@ function AudioTab() {
       {/* Input Device */}
       <div className="mb-5">
         <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-          Input Device
+          {t('settings.audio.inputDevice')}
         </label>
         <select
           value={audioInputDeviceId}
           onChange={(e) => setAudioInputDeviceId(e.target.value)}
           className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
         >
-          <option value="">System Default</option>
+          <option value="">{t('settings.audio.systemDefault')}</option>
           {inputDevices.map((d) => (
             <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
           ))}
@@ -1030,20 +1039,20 @@ function AudioTab() {
             style={{ width: `${Math.max(micLevel * 100, 0)}%` }}
           />
         </div>
-        <p className="mt-1 text-[10px] text-vox-text-muted">Speak to test your microphone</p>
+        <p className="mt-1 text-[10px] text-vox-text-muted">{t('settings.audio.speakToTest')}</p>
       </div>
 
       {/* Output Device */}
       <div className="mb-5">
         <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-          Output Device
+          {t('settings.audio.outputDevice')}
         </label>
         <select
           value={audioOutputDeviceId}
           onChange={(e) => setAudioOutputDeviceId(e.target.value)}
           className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
         >
-          <option value="">System Default</option>
+          <option value="">{t('settings.audio.systemDefault')}</option>
           {outputDevices.map((d) => (
             <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
           ))}
@@ -1056,8 +1065,8 @@ function AudioTab() {
           <div className="flex items-center gap-2">
             <AudioLines size={16} className="text-vox-text-muted" />
             <div>
-              <p className="text-sm text-vox-text-primary">AI Noise Suppression</p>
-              <p className="text-[10px] text-vox-text-muted">ML-powered filter (RNNoise) removes keyboard, mouse, and background noise</p>
+              <p className="text-sm text-vox-text-primary">{t('settings.audio.noiseSuppression')}</p>
+              <p className="text-[10px] text-vox-text-muted">{t('settings.audio.noiseSuppressionDesc')}</p>
             </div>
           </div>
           <button
@@ -1083,14 +1092,14 @@ function AudioTab() {
         <div className="flex items-center gap-2 mb-1.5">
           <Radio size={16} className="text-vox-text-muted" />
           <label className="text-xs font-semibold uppercase tracking-wide text-vox-text-muted">
-            Voice Quality
+            {t('settings.audio.voiceQuality')}
           </label>
         </div>
         <div className="flex rounded-lg border border-vox-border overflow-hidden">
           {([
-            { id: 'low' as VoiceQuality, label: 'Low', desc: '16 kbps' },
-            { id: 'medium' as VoiceQuality, label: 'Medium', desc: '32 kbps' },
-            { id: 'high' as VoiceQuality, label: 'High', desc: '64 kbps' },
+            { id: 'low' as VoiceQuality, label: t('settings.audio.low'), desc: '16 kbps' },
+            { id: 'medium' as VoiceQuality, label: t('settings.audio.medium'), desc: '32 kbps' },
+            { id: 'high' as VoiceQuality, label: t('settings.audio.high'), desc: '64 kbps' },
           ]).map((q) => (
             <button
               key={q.id}
@@ -1108,14 +1117,14 @@ function AudioTab() {
           ))}
         </div>
         <p className="mt-1 text-[10px] text-vox-text-muted">
-          Higher quality uses more bandwidth. Takes effect on next voice join.
+          {t('settings.audio.voiceQualityNote')}
         </p>
       </div>
 
       {/* Voice Mode */}
       <div className="mb-5">
         <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-          Input Mode
+          {t('settings.audio.inputMode')}
         </label>
         <div className="flex rounded-lg border border-vox-border overflow-hidden">
           <button
@@ -1127,7 +1136,7 @@ function AudioTab() {
                 : 'bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary'
             }`}
           >
-            Voice Activity
+            {t('settings.audio.voiceActivity')}
           </button>
           <button
             type="button"
@@ -1138,7 +1147,7 @@ function AudioTab() {
                 : 'bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary'
             }`}
           >
-            Push to Talk
+            {t('settings.audio.pushToTalk')}
           </button>
         </div>
       </div>
@@ -1147,11 +1156,11 @@ function AudioTab() {
       {voiceMode === 'push_to_talk' && (
         <div className="mb-5">
           <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-            Push to Talk Key
+            {t('settings.audio.pushToTalkKey')}
           </label>
           <KeyBindingPicker value={pushToTalkKey} onChange={setPushToTalkKey} />
           <p className="mt-1 text-[10px] text-vox-text-muted">
-            Hold this key to transmit audio
+            {t('settings.audio.holdToTransmit')}
           </p>
         </div>
       )}
@@ -1159,10 +1168,10 @@ function AudioTab() {
       {/* Mic Sensitivity */}
       {voiceMode === 'voice_activity' && <div className="mb-2">
         <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-          Mic Sensitivity
+          {t('settings.audio.micSensitivity')}
         </label>
         <div className="flex items-center gap-3">
-          <span className="text-[10px] text-vox-text-muted">Sensitive</span>
+          <span className="text-[10px] text-vox-text-muted">{t('settings.audio.sensitive')}</span>
           <input
             type="range"
             min="0.002"
@@ -1172,25 +1181,25 @@ function AudioTab() {
             onChange={(e) => setNoiseGateThreshold(parseFloat(e.target.value))}
             className="flex-1 accent-vox-accent-primary"
           />
-          <span className="text-[10px] text-vox-text-muted">Aggressive</span>
+          <span className="text-[10px] text-vox-text-muted">{t('settings.audio.aggressive')}</span>
         </div>
         <p className="mt-1 text-[10px] text-vox-text-muted">
-          Filters background noise (keyboard, mouse). Move right to filter more.
+          {t('settings.audio.micSensitivityDesc')}
         </p>
       </div>}
 
       {/* Notifications */}
       <div className="border-t border-vox-border pt-5 mt-5">
         <h3 className="text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-3">
-          Notifications
+          {t('settings.audio.notifications')}
         </h3>
 
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <Volume2 size={16} className="text-vox-text-muted" />
             <div>
-              <p className="text-sm text-vox-text-primary">Notification Sounds</p>
-              <p className="text-[10px] text-vox-text-muted">Play sounds for voice join/leave and new messages</p>
+              <p className="text-sm text-vox-text-primary">{t('settings.audio.notificationSounds')}</p>
+              <p className="text-[10px] text-vox-text-muted">{t('settings.audio.notificationSoundsDesc')}</p>
             </div>
           </div>
           <button
@@ -1214,8 +1223,8 @@ function AudioTab() {
           <div className="flex items-center gap-2">
             <Bell size={16} className="text-vox-text-muted" />
             <div>
-              <p className="text-sm text-vox-text-primary">Desktop Notifications</p>
-              <p className="text-[10px] text-vox-text-muted">Show Windows notifications for messages and voice events</p>
+              <p className="text-sm text-vox-text-primary">{t('settings.audio.desktopNotifications')}</p>
+              <p className="text-[10px] text-vox-text-muted">{t('settings.audio.desktopNotificationsDesc')}</p>
             </div>
           </div>
           <button
@@ -1239,26 +1248,74 @@ function AudioTab() {
   );
 }
 
+// ─── Language Tab ──────────────────────────────────────────────────────────────
+
+function LanguageTab() {
+  const { t, i18n } = useTranslation();
+  const { language, setLanguage } = useSettingsStore();
+  const currentLang = language || i18n.language;
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-sm font-semibold text-vox-text-primary mb-1">{t('settings.language.selectLanguage')}</h3>
+        <p className="text-xs text-vox-text-muted mb-4">{t('settings.language.description')}</p>
+
+        <div className="grid grid-cols-1 gap-2">
+          {SUPPORTED_LANGUAGES.map((lang) => {
+            const isActive = currentLang === lang.code || currentLang.startsWith(lang.code + '-');
+            return (
+              <button
+                key={lang.code}
+                onClick={() => setLanguage(lang.code)}
+                className={`flex items-center gap-3 rounded-lg border-2 px-4 py-3 transition-colors text-left ${
+                  isActive
+                    ? 'border-vox-accent-primary bg-vox-accent-primary/10'
+                    : 'border-vox-border hover:border-vox-text-muted'
+                }`}
+              >
+                <div className="flex-1">
+                  <p className={`text-sm font-medium ${isActive ? 'text-vox-accent-primary' : 'text-vox-text-primary'}`}>
+                    {lang.nativeName}
+                  </p>
+                  <p className="text-xs text-vox-text-muted">{lang.name}</p>
+                </div>
+                {isActive && (
+                  <div className="h-5 w-5 rounded-full bg-vox-accent-primary flex items-center justify-center">
+                    <Check size={12} className="text-white" />
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Settings Modal ──────────────────────────────────────────────────────
 
 export function SettingsModal() {
+  const { t } = useTranslation();
   const { closeSettings } = useSettingsStore();
   const [activeTab, setActiveTab] = useState<SettingsTab>('account');
 
   const tabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
-    { id: 'account', label: 'My Account', icon: User },
-    { id: 'security', label: 'Security', icon: Shield },
-    { id: 'appearance', label: 'Appearance', icon: Palette },
-    { id: 'audio', label: 'Audio & Video', icon: Headphones },
+    { id: 'account', label: t('settings.tabs.account'), icon: User },
+    { id: 'security', label: t('settings.tabs.security'), icon: Shield },
+    { id: 'appearance', label: t('settings.tabs.appearance'), icon: Palette },
+    { id: 'audio', label: t('settings.tabs.audio'), icon: Headphones },
+    { id: 'language', label: t('settings.tabs.language'), icon: Languages },
   ];
 
   return (
-    <div id="vox-settings-modal" className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in">
+    <div id="vox-settings-modal" className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/60" onClick={closeSettings} />
       <div className="relative flex w-full max-w-4xl rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up" style={{ maxHeight: '85vh' }}>
         {/* Left sidebar nav */}
         <div className="w-48 shrink-0 border-r border-vox-border p-4">
-          <h2 className="mb-3 px-2 text-xs font-bold uppercase tracking-wide text-vox-text-muted">Settings</h2>
+          <h2 className="mb-3 px-2 text-xs font-bold uppercase tracking-wide text-vox-text-muted">{t('common.settings')}</h2>
           {tabs.map((tab) => (
             <button
               key={tab.id}
@@ -1284,6 +1341,7 @@ export function SettingsModal() {
             <button
               onClick={closeSettings}
               className="rounded-md p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+              aria-label={t('common.close')}
             >
               <X size={18} />
             </button>
@@ -1293,6 +1351,7 @@ export function SettingsModal() {
           {activeTab === 'security' && <SecurityTab />}
           {activeTab === 'appearance' && <AppearanceTab />}
           {activeTab === 'audio' && <AudioTab />}
+          {activeTab === 'language' && <LanguageTab />}
         </div>
       </div>
     </div>

@@ -1,19 +1,21 @@
 import { useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useFriendStore } from '../../stores/friendStore';
 import { FriendListItem } from './FriendListItem';
 import { AddFriendForm } from './AddFriendForm';
 import { Users } from 'lucide-react';
 import { clsx } from 'clsx';
 
-const TABS = [
-  { key: 'online' as const, label: 'Online' },
-  { key: 'all' as const, label: 'All' },
-  { key: 'pending' as const, label: 'Pending' },
-  { key: 'add' as const, label: 'Add Friend' },
-];
-
 export function FriendsView() {
+  const { t } = useTranslation();
   const { friends, pendingIncoming, pendingOutgoing, activeTab, setActiveTab, fetchFriends } = useFriendStore();
+
+  const TABS = [
+    { key: 'online' as const, label: t('friends.tabs.online') },
+    { key: 'all' as const, label: t('friends.tabs.all') },
+    { key: 'pending' as const, label: t('friends.tabs.pending') },
+    { key: 'add' as const, label: t('friends.tabs.addFriend') },
+  ];
 
   useEffect(() => {
     fetchFriends();
@@ -27,7 +29,7 @@ export function FriendsView() {
       <div className="flex h-12 items-center gap-4 border-b border-vox-border px-4 shadow-sm shrink-0">
         <div className="flex items-center gap-2 text-vox-text-primary">
           <Users size={16} />
-          <span className="text-sm font-semibold">Friends</span>
+          <span className="text-sm font-semibold">{t('friends.title')}</span>
         </div>
         <div className="h-5 w-px bg-vox-border" />
         <div className="flex items-center gap-1">
@@ -64,10 +66,10 @@ export function FriendsView() {
         {activeTab === 'online' && (
           <div className="p-3">
             <h4 className="mb-2 px-3 text-[11px] font-bold uppercase tracking-wide text-vox-text-muted">
-              Online — {onlineFriends.length}
+              {t('friends.onlineCount', { count: onlineFriends.length })}
             </h4>
             {onlineFriends.length === 0 ? (
-              <EmptyState message="No friends are online right now." />
+              <EmptyState message={t('friends.noOnline')} />
             ) : (
               onlineFriends.map((f) => (
                 <FriendListItem key={f.id} friendship={f} variant="accepted" />
@@ -79,10 +81,10 @@ export function FriendsView() {
         {activeTab === 'all' && (
           <div className="p-3">
             <h4 className="mb-2 px-3 text-[11px] font-bold uppercase tracking-wide text-vox-text-muted">
-              All Friends — {friends.length}
+              {t('friends.allCount', { count: friends.length })}
             </h4>
             {friends.length === 0 ? (
-              <EmptyState message="You don't have any friends yet. Try sending a friend request!" />
+              <EmptyState message={t('friends.noFriends')} />
             ) : (
               friends.map((f) => (
                 <FriendListItem key={f.id} friendship={f} variant="accepted" />
@@ -96,7 +98,7 @@ export function FriendsView() {
             {pendingIncoming.length > 0 && (
               <div>
                 <h4 className="mb-2 px-3 text-[11px] font-bold uppercase tracking-wide text-vox-text-muted">
-                  Incoming — {pendingIncoming.length}
+                  {t('friends.incomingCount', { count: pendingIncoming.length })}
                 </h4>
                 {pendingIncoming.map((f) => (
                   <FriendListItem key={f.id} friendship={f} variant="incoming" />
@@ -106,7 +108,7 @@ export function FriendsView() {
             {pendingOutgoing.length > 0 && (
               <div>
                 <h4 className="mb-2 px-3 text-[11px] font-bold uppercase tracking-wide text-vox-text-muted">
-                  Outgoing — {pendingOutgoing.length}
+                  {t('friends.outgoingCount', { count: pendingOutgoing.length })}
                 </h4>
                 {pendingOutgoing.map((f) => (
                   <FriendListItem key={f.id} friendship={f} variant="outgoing" />
@@ -114,7 +116,7 @@ export function FriendsView() {
               </div>
             )}
             {pendingIncoming.length === 0 && pendingOutgoing.length === 0 && (
-              <EmptyState message="No pending friend requests." />
+              <EmptyState message={t('friends.noPending')} />
             )}
           </div>
         )}

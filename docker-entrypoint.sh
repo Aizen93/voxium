@@ -1,6 +1,9 @@
 #!/bin/sh
 set -e
 
+# Node.js production memory tuning
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}"
+
 echo "[Voxium] Running database migrations..."
 
 # Retry migrations up to 10 times (DB may not be ready immediately)

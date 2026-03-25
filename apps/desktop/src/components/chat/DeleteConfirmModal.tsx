@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { toast } from '../../stores/toastStore';
 import { X } from 'lucide-react';
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export function DeleteConfirmModal({ message, channelId, conversationId, onClose }: Props) {
+  const { t } = useTranslation();
   const { requestDeleteMessage, requestDeleteDMMessage } = useChatStore();
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -34,7 +36,7 @@ export function DeleteConfirmModal({ message, channelId, conversationId, onClose
       }
       onClose();
     } catch {
-      toast.error('Failed to delete message');
+      toast.error(t('chat.failedToDelete'));
       setIsDeleting(false);
     }
   };
@@ -43,18 +45,20 @@ export function DeleteConfirmModal({ message, channelId, conversationId, onClose
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      role="dialog"
+      aria-modal="true"
     >
       <div className="w-full max-w-md rounded-2xl border border-vox-border bg-vox-bg-secondary p-6 shadow-2xl animate-slide-up">
         {/* Header */}
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-xl font-bold text-vox-text-primary">Delete Message</h2>
-          <button onClick={onClose} className="text-vox-text-muted hover:text-vox-text-primary transition-colors">
+          <h2 className="text-xl font-bold text-vox-text-primary">{t('chat.deleteMessage')}</h2>
+          <button onClick={onClose} className="text-vox-text-muted hover:text-vox-text-primary transition-colors" aria-label={t('common.close')}>
             <X size={20} />
           </button>
         </div>
 
         <p className="mb-4 text-sm text-vox-text-secondary">
-          Are you sure you want to delete this message? This action cannot be undone.
+          {t('chat.deleteConfirm')}
         </p>
 
         {/* Message preview */}
@@ -75,10 +79,10 @@ export function DeleteConfirmModal({ message, channelId, conversationId, onClose
         {/* Actions */}
         <div className="flex justify-end gap-3">
           <button onClick={onClose} className="btn-secondary" disabled={isDeleting}>
-            Cancel
+            {t('common.cancel')}
           </button>
           <button onClick={handleDelete} className="btn-danger" disabled={isDeleting}>
-            {isDeleting ? 'Deleting...' : 'Delete'}
+            {isDeleting ? t('chat.deleting') : t('common.delete')}
           </button>
         </div>
       </div>

@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getConnectionStatus, onConnectionStatusChange } from '../../services/socket';
 import { WifiOff, Loader2 } from 'lucide-react';
 
 export function ConnectionBanner() {
+  const { t } = useTranslation();
   const [status, setStatus] = useState(getConnectionStatus);
 
   useEffect(() => {
@@ -20,12 +22,12 @@ export function ConnectionBanner() {
       {status === 'connecting' ? (
         <>
           <Loader2 size={14} className="animate-spin" />
-          <span>Reconnecting to Voxium...</span>
+          <span>{t('connection.reconnecting')}</span>
         </>
       ) : (
         <>
           <WifiOff size={14} />
-          <span>Connection lost. Attempting to reconnect...</span>
+          <span>{t('connection.lost')}</span>
         </>
       )}
     </div>

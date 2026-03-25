@@ -23,7 +23,7 @@ messageRouter.use(authenticate, requireVerifiedEmail);
 messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId } = req.params;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, LIMITS.MESSAGES_PER_PAGE);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, LIMITS.MESSAGES_PER_PAGE);
     const before = req.query.before as string | undefined;
     const around = req.query.around as string | undefined;
 

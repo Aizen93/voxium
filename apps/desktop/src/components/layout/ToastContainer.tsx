@@ -41,6 +41,7 @@ export function ToastContainer() {
               <button
                 onClick={() => removeToast(t.id)}
                 className="shrink-0 text-vox-text-muted hover:text-vox-text-primary transition-colors"
+                aria-label="Dismiss"
               >
                 <X size={14} />
               </button>

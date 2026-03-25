@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export function CreateServerModal({ onClose }: Props) {
+  const { t } = useTranslation();
   const { createServer, setActiveServer, joinServer, uploadServerIcon } = useServerStore();
   const [mode, setMode] = useState<'create' | 'join'>('create');
   const [name, setName] = useState('');
@@ -29,14 +31,14 @@ export function CreateServerModal({ onClose }: Props) {
           await uploadServerIcon(server.id, iconFile);
         } catch {
           // Server was created but icon upload failed — not critical
-          toast.warning('Server created but icon upload failed');
+          toast.warning(t('server.create.iconUploadFailed'));
         }
       }
       await setActiveServer(server.id);
-      toast.success('Server created!');
+      toast.success(t('server.create.serverCreated'));
       onClose();
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to create server' : 'Failed to create server');
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('server.create.failedToCreate') : t('server.create.failedToCreate'));
     } finally {
       setLoading(false);
     }
@@ -53,24 +55,24 @@ export function CreateServerModal({ onClose }: Props) {
       if (urlMatch) code = urlMatch[1];
 
       await joinServer(code);
-      toast.success('Joined server!');
+      toast.success(t('server.create.joinedServer'));
       onClose();
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to join server' : 'Failed to join server');
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('server.create.failedToJoin') : t('server.create.failedToJoin'));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in" role="dialog" aria-modal="true">
       <div className="w-full max-w-md rounded-2xl border border-vox-border bg-vox-bg-secondary p-6 shadow-2xl animate-slide-up">
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
           <h2 className="text-xl font-bold text-vox-text-primary">
-            {mode === 'create' ? 'Create a Server' : 'Join a Server'}
+            {mode === 'create' ? t('server.create.createTitle') : t('server.create.joinTitle')}
           </h2>
-          <button onClick={onClose} className="text-vox-text-muted hover:text-vox-text-primary transition-colors">
+          <button onClick={onClose} className="text-vox-text-muted hover:text-vox-text-primary transition-colors" aria-label={t('common.close')}>
             <X size={20} />
           </button>
         </div>
@@ -85,7 +87,7 @@ export function CreateServerModal({ onClose }: Props) {
             }`}
             onClick={() => { setMode('create'); setError(''); }}
           >
-            Create New
+            {t('server.create.createNew')}
           </button>
           <button
             className={`flex-1 rounded-lg py-2 text-sm font-medium transition-colors ${
@@ -95,7 +97,7 @@ export function CreateServerModal({ onClose }: Props) {
             }`}
             onClick={() => { setMode('join'); setError(''); }}
           >
-            Join Existing
+            {t('server.create.joinExisting')}
           </button>
         </div>
 
@@ -118,40 +120,40 @@ export function CreateServerModal({ onClose }: Props) {
 
             <div>
               <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
-                Server Name
+                {t('server.create.serverName')}
               </label>
               <input
                 type="text"
                 className="input"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="My Awesome Server"
+                placeholder={t('server.create.serverNamePlaceholder')}
                 required
                 autoFocus
               />
             </div>
             <button type="submit" disabled={loading} className="btn-primary w-full">
-              {loading ? 'Creating...' : 'Create Server'}
+              {loading ? t('server.create.creating') : t('server.create.createServer')}
             </button>
           </form>
         ) : (
           <form onSubmit={handleJoin} className="space-y-4">
             <div>
               <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
-                Invite Code
+                {t('server.create.inviteCode')}
               </label>
               <input
                 type="text"
                 className="input"
                 value={inviteCode}
                 onChange={(e) => setInviteCode(e.target.value)}
-                placeholder="Enter an invite code or link"
+                placeholder={t('server.create.inviteCodePlaceholder')}
                 required
                 autoFocus
               />
             </div>
             <button type="submit" disabled={loading} className="btn-primary w-full">
-              {loading ? 'Joining...' : 'Join Server'}
+              {loading ? t('server.create.joining') : t('server.create.joinServer')}
             </button>
           </form>
         )}

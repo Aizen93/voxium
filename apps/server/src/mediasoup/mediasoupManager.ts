@@ -154,6 +154,9 @@ function getNextWorker(): Worker {
   return worker;
 }
 
+/** Tracks consecutive restart failures for exponential backoff. */
+let workerRestartAttempts = 0;
+
 async function createWorker(): Promise<Worker> {
   const worker = await mediasoup.createWorker({
     logLevel: getWorkerSettings().logLevel,
@@ -176,17 +179,25 @@ async function createWorker(): Promise<Worker> {
       }
     }
 
-    // Attempt to restart after a delay
+    // Attempt to restart with exponential backoff (50ms, 100ms, 200ms, ... 30s max)
+    workerRestartAttempts++;
+    const delay = Math.min(2000 * Math.pow(2, workerRestartAttempts - 1), 30000);
+    console.log(`[mediasoup] Scheduling worker restart in ${delay}ms (attempt ${workerRestartAttempts})`);
+
     setTimeout(async () => {
       try {
         console.log('[mediasoup] Restarting dead worker...');
         const newWorker = await createWorker();
         workers.push(newWorker);
+        workerRestartAttempts = 0; // Reset on success
         console.log(`[mediasoup] Replacement worker pid=${newWorker.pid} ready`);
       } catch (err) {
         console.error('[mediasoup] Failed to restart worker:', err);
+        if (workers.length === 0) {
+          console.error('[mediasoup] CRITICAL: All workers dead and restart failed. Voice will be unavailable.');
+        }
       }
-    }, 2000);
+    }, delay);
   });
 
   console.log(`[mediasoup] Worker pid=${worker.pid} created`);

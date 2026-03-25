@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from 'react';
+import i18n from '../../i18n';
 
 interface Props {
   children: ReactNode;
@@ -36,12 +37,12 @@ export class ErrorBoundary extends Component<Props, State> {
       if (this.props.inline) {
         return (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-            <p className="text-sm text-vox-text-secondary">This section encountered an error.</p>
+            <p className="text-sm text-vox-text-secondary">{i18n.t('errorBoundary.sectionError')}</p>
             <button
               onClick={this.handleRecover}
               className="rounded-md bg-vox-bg-hover px-3 py-1.5 text-xs font-medium text-vox-text-primary hover:bg-vox-bg-active transition-colors"
             >
-              Retry
+              {i18n.t('errorBoundary.retry')}
             </button>
           </div>
         );
@@ -57,9 +58,9 @@ export class ErrorBoundary extends Component<Props, State> {
                 />
               </svg>
             </div>
-            <h2 className="text-xl font-bold text-vox-text-primary">Something went wrong</h2>
+            <h2 className="text-xl font-bold text-vox-text-primary">{i18n.t('errorBoundary.title')}</h2>
             <p className="text-sm text-vox-text-secondary">
-              An unexpected error occurred. You can try to recover or reload the page.
+              {i18n.t('errorBoundary.unexpectedError')}
             </p>
             {this.state.error && (
               <pre className="w-full rounded-lg bg-vox-bg-secondary p-3 text-left text-xs text-vox-text-muted overflow-auto max-h-32">
@@ -71,13 +72,13 @@ export class ErrorBoundary extends Component<Props, State> {
                 onClick={this.handleRecover}
                 className="rounded-lg bg-vox-bg-secondary px-4 py-2 text-sm font-medium text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
               >
-                Try to Recover
+                {i18n.t('errorBoundary.tryToRecover')}
               </button>
               <button
                 onClick={this.handleReload}
                 className="rounded-lg bg-vox-accent-primary px-4 py-2 text-sm font-medium text-white hover:bg-vox-accent-hover transition-colors"
               >
-                Reload Page
+                {i18n.t('errorBoundary.reloadPage')}
               </button>
             </div>
           </div>

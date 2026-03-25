@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
@@ -16,6 +17,7 @@ interface Props {
 }
 
 export function MemberContextMenu({ member, position, onClose }: Props) {
+  const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
   const currentUser = useAuthStore((s) => s.user);
   const { members, activeServerId, roles, channels } = useServerStore();
@@ -111,7 +113,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'admin');
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to promote member' : 'Failed to promote member');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToPromote') : t('contextMenu.failedToPromote'));
     }
   }
 
@@ -120,7 +122,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'member');
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to demote member' : 'Failed to demote member');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToDemote') : t('contextMenu.failedToDemote'));
     }
   }
 
@@ -133,7 +135,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       await useServerStore.getState().kickMember(activeServerId!, member.userId);
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to kick member' : 'Failed to kick member');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToKick') : t('contextMenu.failedToKick'));
     }
   }
 
@@ -144,9 +146,9 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
         ? [...memberRoleIds].filter((id) => id !== roleId)
         : [...memberRoleIds, roleId];
       await useServerStore.getState().assignMemberRoles(activeServerId!, member.userId, newRoleIds);
-      toast.success('Roles updated');
+      toast.success(t('contextMenu.rolesUpdated'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to update roles' : 'Failed to update roles');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToUpdateRoles') : t('contextMenu.failedToUpdateRoles'));
     } finally {
       setSavingRoles(false);
     }
@@ -154,17 +156,17 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
 
   function handleServerMute() {
     serverMuteUser(member.userId, !targetVoiceUser?.serverMuted);
-    toast.success(targetVoiceUser?.serverMuted ? 'User unmuted' : 'User muted');
+    toast.success(targetVoiceUser?.serverMuted ? t('contextMenu.userUnmuted') : t('contextMenu.userMuted'));
   }
 
   function handleServerDeafen() {
     serverDeafenUser(member.userId, !targetVoiceUser?.serverDeafened);
-    toast.success(targetVoiceUser?.serverDeafened ? 'User undeafened' : 'User deafened');
+    toast.success(targetVoiceUser?.serverDeafened ? t('contextMenu.userUndeafened') : t('contextMenu.userDeafened'));
   }
 
   function handleMoveToChannel(targetChannelId: string) {
     forceMoveUser(member.userId, targetChannelId);
-    toast.success('User moved');
+    toast.success(t('contextMenu.userMoved'));
     setShowMoveMenu(false);
     onClose();
   }
@@ -176,10 +178,10 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       } else {
         await useServerStore.getState().setMemberNickname(activeServerId!, member.userId, nicknameInput.trim() || null);
       }
-      toast.success(nicknameInput.trim() ? 'Nickname set' : 'Nickname cleared');
+      toast.success(nicknameInput.trim() ? t('contextMenu.nicknameSet') : t('contextMenu.nicknameCleared'));
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to set nickname' : 'Failed to set nickname');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToSetNickname') : t('contextMenu.failedToSetNickname'));
     }
   }
 
@@ -190,11 +192,11 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       } else {
         await useServerStore.getState().setMemberNickname(activeServerId!, member.userId, null);
       }
-      toast.success('Nickname cleared');
+      toast.success(t('contextMenu.nicknameCleared'));
       setNicknameInput('');
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to clear nickname' : 'Failed to clear nickname');
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToClearNickname') : t('contextMenu.failedToClearNickname'));
     }
   }
 
@@ -217,7 +219,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
           >
             <div className="flex items-center gap-2">
               <Shield size={16} className="text-vox-accent-primary" />
-              Roles
+              {t('contextMenu.roles')}
             </div>
             <ChevronRight size={14} className={`text-vox-text-muted transition-transform ${showRoles ? 'rotate-180' : ''}`} />
           </button>
@@ -229,7 +231,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
         <>
           <div className="my-1 border-t border-vox-border" />
           <div className="px-2 py-1 text-[10px] font-semibold text-vox-text-muted uppercase tracking-wider">
-            Voice
+            {t('contextMenu.voice')}
           </div>
 
           {/* Server Mute */}
@@ -240,12 +242,12 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
             {targetVoiceUser?.serverMuted ? (
               <>
                 <Mic size={16} className="text-vox-accent-success" />
-                Unmute (Server)
+                {t('contextMenu.unmuteServer')}
               </>
             ) : (
               <>
                 <MicOff size={16} className="text-vox-accent-danger" />
-                Mute (Server)
+                {t('contextMenu.muteServer')}
               </>
             )}
           </button>
@@ -258,12 +260,12 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
             {targetVoiceUser?.serverDeafened ? (
               <>
                 <Headphones size={16} className="text-vox-accent-success" />
-                Undeafen (Server)
+                {t('contextMenu.undeafenServer')}
               </>
             ) : (
               <>
                 <HeadphoneOff size={16} className="text-vox-accent-danger" />
-                Deafen (Server)
+                {t('contextMenu.deafenServer')}
               </>
             )}
           </button>
@@ -282,7 +284,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
             >
               <div className="flex items-center gap-2">
                 <ArrowRightLeft size={16} className="text-vox-text-secondary" />
-                Move to Channel
+                {t('contextMenu.moveToChannel')}
               </div>
               <ChevronRight size={14} className={`text-vox-text-muted transition-transform ${showMoveMenu ? 'rotate-180' : ''}`} />
             </button>
@@ -299,7 +301,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
             className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
           >
             <Pencil size={16} className="text-vox-text-secondary" />
-            {isSelf ? 'Edit Nickname' : 'Set Nickname'}
+            {isSelf ? t('contextMenu.editNickname') : t('contextMenu.setNickname')}
           </button>
           {showNicknameInput && (
             <div className="px-2 pb-1">
@@ -308,7 +310,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
                 value={nicknameInput}
                 onChange={(e) => setNicknameInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleSetNickname(); }}
-                placeholder="Enter nickname..."
+                placeholder={t('contextMenu.nicknamePlaceholder')}
                 className="w-full rounded border border-vox-border bg-vox-bg-secondary px-2 py-1 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
                 autoFocus
               />
@@ -317,13 +319,13 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
                   onClick={handleSetNickname}
                   className="flex-1 rounded px-2 py-1 text-xs font-medium bg-vox-accent-primary text-white hover:bg-vox-accent-primary/80 transition-colors"
                 >
-                  Save
+                  {t('common.save')}
                 </button>
                 <button
                   onClick={handleClearNickname}
                   className="flex-1 rounded px-2 py-1 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
                 >
-                  Clear
+                  {t('contextMenu.clearNickname')}
                 </button>
               </div>
             </div>
@@ -339,7 +341,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
           <svg className="h-4 w-4 text-vox-accent-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
           </svg>
-          Promote to Admin
+          {t('contextMenu.promoteToAdmin')}
         </button>
       )}
 
@@ -351,7 +353,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
           <svg className="h-4 w-4 text-vox-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
-          Demote to Member
+          {t('contextMenu.demoteToMember')}
         </button>
       )}
 
@@ -365,7 +367,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M13 7a4 4 0 11-8 0 4 4 0 018 0zM9 14a6 6 0 00-6 6v1h12v-1a6 6 0 00-6-6zM21 12h-6" />
             </svg>
-            {confirmAction === 'kick' ? 'Click again to confirm' : 'Kick'}
+            {confirmAction === 'kick' ? t('contextMenu.confirmKick') : t('contextMenu.kick')}
           </button>
         </>
       )}
@@ -395,7 +397,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       {showRoles && (
         <>
           <div className="px-2 py-1 text-[10px] font-semibold text-vox-text-muted uppercase tracking-wider">
-            Assign Roles
+            {t('contextMenu.assignRoles')}
           </div>
           {assignableRoles.map((role) => (
             <button
@@ -426,14 +428,14 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
             </button>
           ))}
           {assignableRoles.length === 0 && (
-            <p className="px-2 py-1 text-xs text-vox-text-muted">No roles created</p>
+            <p className="px-2 py-1 text-xs text-vox-text-muted">{t('contextMenu.noRolesCreated')}</p>
           )}
         </>
       )}
       {showMoveMenu && (
         <>
           <div className="px-2 py-1 text-[10px] font-semibold text-vox-text-muted uppercase tracking-wider">
-            Move to Channel
+            {t('contextMenu.moveToChannel')}
           </div>
           {voiceChannels.map((ch) => (
             <button

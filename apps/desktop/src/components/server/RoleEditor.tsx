@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { Shield, Plus, Trash2, Check, X } from 'lucide-react';
@@ -20,14 +21,6 @@ interface RoleEditorProps {
 
 type PermissionCategory = PermissionInfo['category'];
 
-const CATEGORY_LABELS: Record<PermissionCategory, string> = {
-  general: 'General',
-  membership: 'Membership',
-  text: 'Text Channels',
-  voice: 'Voice Channels',
-  special: 'Special',
-};
-
 const CATEGORY_ORDER: PermissionCategory[] = ['general', 'membership', 'text', 'voice', 'special'];
 
 function getErrorMessage(err: unknown): string {
@@ -38,6 +31,7 @@ function getErrorMessage(err: unknown): string {
 }
 
 export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps) {
+  const { t } = useTranslation();
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
@@ -64,20 +58,20 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
     try {
       // Generate a unique name
       const existingNames = new Set(roles.map((r) => r.name));
-      let newName = 'New Role';
+      let newName = t('roles.newRole');
       let counter = 2;
       while (existingNames.has(newName)) {
-        newName = `New Role ${counter++}`;
+        newName = `${t('roles.newRole')} ${counter++}`;
       }
       const role = await useServerStore.getState().createRole(serverId, newName);
       setSelectedRoleId(role.id);
-      toast.success('Role created');
+      toast.success(t('roles.roleCreated'));
     } catch (err) {
       toast.error(getErrorMessage(err));
     } finally {
       setCreating(false);
     }
-  }, [serverId]);
+  }, [serverId, t]);
 
   const canCreateRole = roles.filter((r) => !r.isDefault).length < LIMITS.MAX_ROLES_PER_SERVER;
 
@@ -93,7 +87,7 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
             className="flex items-center justify-center gap-1.5 rounded-lg bg-vox-accent-primary px-3 py-2 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors disabled:opacity-50 mb-3"
           >
             <Plus size={14} />
-            {creating ? 'Creating...' : 'Create Role'}
+            {creating ? t('common.creating') : t('roles.createRole')}
           </button>
         )}
 
@@ -125,7 +119,7 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
 
         {!canCreateRole && canManageRoles && (
           <p className="text-[10px] text-vox-text-muted mt-2 px-1">
-            Max {LIMITS.MAX_ROLES_PER_SERVER} roles reached
+            {t('roles.maxRolesReached', { max: LIMITS.MAX_ROLES_PER_SERVER })}
           </p>
         )}
       </div>
@@ -142,7 +136,7 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-vox-text-muted">
             <Shield size={40} className="mb-3 opacity-40" />
-            <p className="text-sm">No roles to display</p>
+            <p className="text-sm">{t('roles.noRoles')}</p>
           </div>
         )}
       </div>
@@ -159,6 +153,16 @@ interface RoleDetailEditorProps {
 }
 
 function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorProps) {
+  const { t } = useTranslation();
+
+  const CATEGORY_LABELS: Record<PermissionCategory, string> = {
+    general: t('roles.categories.general'),
+    membership: t('roles.categories.membership'),
+    text: t('roles.categories.textChannels'),
+    voice: t('roles.categories.voiceChannels'),
+    special: t('roles.categories.special'),
+  };
+
   const [name, setName] = useState(role.name);
   const [color, setColor] = useState(role.color || '#99aab5');
   const [permissions, setPermissions] = useState(() => permissionsFromString(role.permissions));
@@ -203,7 +207,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
 
       if (Object.keys(fields).length > 0) {
         await useServerStore.getState().updateRole(serverId, role.id, fields);
-        toast.success('Role updated');
+        toast.success(t('roles.roleUpdated'));
       }
     } catch (err) {
       toast.error(getErrorMessage(err));
@@ -216,7 +220,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
     setDeleting(true);
     try {
       await useServerStore.getState().deleteRole(serverId, role.id);
-      toast.success('Role deleted');
+      toast.success(t('roles.roleDeleted'));
     } catch (err) {
       toast.error(getErrorMessage(err));
     } finally {
@@ -254,7 +258,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
         </h3>
         {role.isDefault && (
           <span className="rounded bg-vox-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-vox-text-muted">
-            Default
+            {t('roles.default')}
           </span>
         )}
       </div>
@@ -263,7 +267,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
       {!role.isDefault && (
         <div>
           <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-            Role Name
+            {t('roles.roleName')}
           </label>
           <input
             type="text"
@@ -279,7 +283,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
       {/* Color */}
       <div>
         <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-1.5">
-          Role Color
+          {t('roles.roleColor')}
         </label>
         <div className="flex items-center gap-3">
           <input
@@ -313,7 +317,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
       {/* Permissions */}
       <div>
         <label className="block text-xs font-semibold uppercase tracking-wide text-vox-text-muted mb-3">
-          Permissions
+          {t('roles.permissions')}
         </label>
 
         <div className="space-y-4">
@@ -359,16 +363,16 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">
                             <span className={`text-sm font-medium ${isAdmin ? 'text-vox-accent-danger' : 'text-vox-text-primary'}`}>
-                              {perm.name}
+                              {t(`permissions.${perm.key}.name`)}
                             </span>
                             {isAdmin && (
                               <span className="rounded bg-vox-accent-danger/20 px-1 py-0.5 text-[9px] font-bold uppercase text-vox-accent-danger">
-                                Dangerous
+                                {t('roles.dangerous')}
                               </span>
                             )}
                           </div>
                           <p className="text-xs text-vox-text-muted mt-0.5 leading-relaxed">
-                            {perm.description}
+                            {t(`permissions.${perm.key}.description`)}
                           </p>
                         </div>
                       </label>
@@ -384,14 +388,14 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
       {/* Save / Reset bar */}
       {canManageRoles && hasChanges && (
         <div className="sticky bottom-0 flex items-center justify-between rounded-lg border border-vox-border bg-vox-bg-floating px-4 py-3 shadow-lg">
-          <span className="text-xs text-vox-text-muted">You have unsaved changes</span>
+          <span className="text-xs text-vox-text-muted">{t('roles.unsavedChanges')}</span>
           <div className="flex items-center gap-2">
             <button
               onClick={handleReset}
               className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
             >
               <X size={14} />
-              Reset
+              {t('common.reset')}
             </button>
             <button
               onClick={handleSave}
@@ -399,7 +403,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
               className="flex items-center gap-1 rounded-lg bg-vox-accent-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors disabled:opacity-50"
             >
               <Check size={14} />
-              {saving ? 'Saving...' : 'Save Changes'}
+              {saving ? t('common.saving') : t('settings.profile.saveChanges')}
             </button>
           </div>
         </div>
@@ -409,7 +413,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
       {canManageRoles && !role.isDefault && (
         <div className="border-t border-vox-accent-danger/30 pt-4 mt-6">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-vox-accent-danger mb-2">
-            Danger Zone
+            {t('roles.dangerZone')}
           </h4>
           {!showDeleteConfirm ? (
             <button
@@ -417,25 +421,25 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
               className="flex items-center gap-1.5 rounded-lg border border-vox-accent-danger/50 px-3 py-2 text-xs font-medium text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
             >
               <Trash2 size={14} />
-              Delete Role
+              {t('roles.deleteRole')}
             </button>
           ) : (
             <div className="flex items-center gap-2 rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/5 p-3">
               <p className="flex-1 text-xs text-vox-text-secondary">
-                Delete <span className="font-semibold text-vox-text-primary">{role.name}</span>? This cannot be undone.
+                Delete <span className="font-semibold text-vox-text-primary">{role.name}</span>? {t('roles.deleteRoleConfirm')}
               </p>
               <button
                 onClick={handleDelete}
                 disabled={deleting}
                 className="rounded-lg bg-vox-accent-danger px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 hover:bg-vox-accent-danger/80 transition-colors"
               >
-                {deleting ? 'Deleting...' : 'Confirm'}
+                {deleting ? t('common.deleting') : t('common.confirm')}
               </button>
               <button
                 onClick={() => setShowDeleteConfirm(false)}
                 className="rounded-lg border border-vox-border px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
               >
-                Cancel
+                {t('common.cancel')}
               </button>
             </div>
           )}

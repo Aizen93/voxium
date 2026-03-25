@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
 import { X, Copy, Check } from 'lucide-react';
@@ -9,6 +10,7 @@ interface Props {
 }
 
 export function InviteModal({ serverId, onClose }: Props) {
+  const { t } = useTranslation();
   const { createInvite } = useServerStore();
   const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(true);
@@ -25,7 +27,7 @@ export function InviteModal({ serverId, onClose }: Props) {
         setLoading(false);
       })
       .catch((err: unknown) => {
-        setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to create invite' : 'Failed to create invite');
+        setError(axios.isAxiosError(err) ? err.response?.data?.error || t('server.invite.failedToCreate') : t('server.invite.failedToCreate'));
         setLoading(false);
       });
   }, [serverId, createInvite]);
@@ -49,12 +51,12 @@ export function InviteModal({ serverId, onClose }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in" role="dialog" aria-modal="true">
       <div className="w-full max-w-md rounded-2xl border border-vox-border bg-vox-bg-secondary p-6 shadow-2xl animate-slide-up">
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
-          <h2 className="text-xl font-bold text-vox-text-primary">Invite People</h2>
-          <button onClick={onClose} className="text-vox-text-muted hover:text-vox-text-primary transition-colors">
+          <h2 className="text-xl font-bold text-vox-text-primary">{t('server.invite.title')}</h2>
+          <button onClick={onClose} className="text-vox-text-muted hover:text-vox-text-primary transition-colors" aria-label={t('common.close')}>
             <X size={20} />
           </button>
         </div>
@@ -62,7 +64,7 @@ export function InviteModal({ serverId, onClose }: Props) {
         {loading && (
           <div className="flex items-center justify-center py-8">
             <div className="h-6 w-6 animate-spin rounded-full border-2 border-vox-accent-primary border-t-transparent" />
-            <span className="ml-3 text-sm text-vox-text-secondary">Generating invite link...</span>
+            <span className="ml-3 text-sm text-vox-text-secondary">{t('server.invite.generatingLink')}</span>
           </div>
         )}
 
@@ -76,7 +78,7 @@ export function InviteModal({ serverId, onClose }: Props) {
           <div className="space-y-4">
             <div>
               <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
-                Invite Link
+                {t('server.invite.inviteLink')}
               </label>
               <div className="flex gap-2">
                 <input
@@ -95,14 +97,14 @@ export function InviteModal({ serverId, onClose }: Props) {
                   }`}
                 >
                   {copied ? <Check size={16} /> : <Copy size={16} />}
-                  {copied ? 'Copied' : 'Copy'}
+                  {copied ? t('common.copied') : t('common.copy')}
                 </button>
               </div>
             </div>
 
             <div>
               <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
-                Invite Code
+                {t('server.invite.inviteCode')}
               </label>
               <p className="rounded-lg bg-vox-bg-hover px-3 py-2 text-sm font-mono text-vox-text-primary select-all">
                 {inviteCode}

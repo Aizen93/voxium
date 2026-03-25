@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { LifeBuoy, Send, RotateCcw, X } from 'lucide-react';
 import { useSupportStore } from '../../stores/supportStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -9,6 +10,7 @@ import { clsx } from 'clsx';
 import { LIMITS } from '@voxium/shared';
 
 export function SupportTicketView() {
+  const { t } = useTranslation();
   const { ticket, messages, isLoading, sendMessage, openTicket, setShowSupportView } = useSupportStore();
   const user = useAuthStore((s) => s.user);
   const [input, setInput] = useState('');
@@ -28,7 +30,7 @@ export function SupportTicketView() {
     const content = input.trim();
     if (!content || sending) return;
     if (content.length > LIMITS.SUPPORT_MESSAGE_MAX) {
-      toast.error(`Message too long (max ${LIMITS.SUPPORT_MESSAGE_MAX} characters)`);
+      toast.error(t('support.messageTooLong', { max: String(LIMITS.SUPPORT_MESSAGE_MAX) }));
       return;
     }
     setSending(true);
@@ -36,7 +38,7 @@ export function SupportTicketView() {
       await sendMessage(content);
       setInput('');
     } catch {
-      toast.error('Failed to send message');
+      toast.error(t('support.failedToSend'));
     } finally {
       setSending(false);
     }
@@ -53,13 +55,13 @@ export function SupportTicketView() {
     try {
       await openTicket();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message || 'Failed to reopen ticket' : 'Failed to reopen ticket');
+      toast.error(err instanceof Error ? err.message || t('support.failedToReopen') : t('support.failedToReopen'));
     }
   };
 
   const isClosed = ticket?.status === 'closed';
 
-  const statusLabel = ticket?.status === 'open' ? 'Open' : ticket?.status === 'claimed' ? 'In Progress' : 'Closed';
+  const statusLabel = ticket?.status === 'open' ? t('support.open') : ticket?.status === 'claimed' ? t('support.inProgress') : t('support.closed');
   const statusColor = ticket?.status === 'open' ? 'bg-yellow-500/20 text-yellow-400' : ticket?.status === 'claimed' ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-500/20 text-gray-400';
 
   return (
@@ -67,7 +69,7 @@ export function SupportTicketView() {
       {/* Header */}
       <div className="flex h-12 items-center gap-3 border-b border-vox-border px-4 shadow-sm">
         <LifeBuoy size={18} className="text-vox-accent-primary" />
-        <h2 className="text-sm font-semibold text-vox-text-primary">Support</h2>
+        <h2 className="text-sm font-semibold text-vox-text-primary">{t('support.title')}</h2>
         {ticket && (
           <span className={clsx('rounded px-2 py-0.5 text-[10px] font-semibold uppercase', statusColor)}>
             {statusLabel}
@@ -77,7 +79,8 @@ export function SupportTicketView() {
         <button
           onClick={() => setShowSupportView(false)}
           className="rounded p-1 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
-          title="Close"
+          title={t('common.close')}
+          aria-label={t('common.close')}
         >
           <X size={16} />
         </button>
@@ -94,7 +97,7 @@ export function SupportTicketView() {
         {!isLoading && messages.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
             <LifeBuoy size={40} className="text-vox-text-muted" />
-            <p className="text-sm text-vox-text-muted">No messages yet. Send a message to get help from our staff.</p>
+            <p className="text-sm text-vox-text-muted">{t('support.noMessages')}</p>
           </div>
         )}
 
@@ -150,7 +153,7 @@ export function SupportTicketView() {
               className="flex items-center gap-1.5 rounded-md bg-vox-accent-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-vox-accent-primary/90 transition-colors"
             >
               <RotateCcw size={14} />
-              Reopen Ticket
+              {t('support.reopenTicket')}
             </button>
           </div>
         ) : (
@@ -159,7 +162,7 @@ export function SupportTicketView() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Describe your issue..."
+              placeholder={t('support.placeholder')}
               rows={1}
               className="flex-1 resize-none rounded-md border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary placeholder:text-vox-text-muted focus:border-vox-accent-primary focus:outline-none"
             />
@@ -167,6 +170,7 @@ export function SupportTicketView() {
               onClick={handleSend}
               disabled={!input.trim() || sending}
               className="flex h-9 w-9 items-center justify-center rounded-md bg-vox-accent-primary text-white transition-colors hover:bg-vox-accent-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+              aria-label={t('support.sendMessage')}
             >
               <Send size={16} />
             </button>

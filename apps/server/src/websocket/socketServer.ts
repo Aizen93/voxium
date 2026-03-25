@@ -50,7 +50,7 @@ export function initSocketServer(httpServer: HttpServer) {
       credentials: true,
     },
     pingInterval: 25000,
-    pingTimeout: 20000,
+    pingTimeout: 10000,
   });
 
   // Attach Redis adapter for multi-node broadcast support

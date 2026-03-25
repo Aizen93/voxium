@@ -86,9 +86,11 @@
 
   html.landing-scroll,
   html.landing-scroll body,
-  html.landing-scroll #root {
-    overflow: auto;
-    height: auto;
+  html.landing-scroll #root,
+  html.landing-scroll #root > div,
+  html.landing-scroll #root > div > div {
+    overflow: visible !important;
+    height: auto !important;
     scroll-behavior: smooth;
   }
 

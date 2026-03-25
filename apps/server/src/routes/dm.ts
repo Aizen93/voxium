@@ -168,7 +168,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, LIMITS.MESSAGES_PER_PAGE);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, LIMITS.MESSAGES_PER_PAGE);
     const before = req.query.before as string | undefined;
     const around = req.query.around as string | undefined;
 

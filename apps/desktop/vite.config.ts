@@ -18,6 +18,7 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     target: 'esnext',
+    sourcemap: false,
   },
   // Prevent clearing the terminal so Tauri logs are visible
   clearScreen: false,

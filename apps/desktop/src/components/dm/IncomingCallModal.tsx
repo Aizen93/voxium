@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
@@ -10,6 +11,7 @@ import { Avatar } from '../common/Avatar';
 import { Phone, PhoneOff } from 'lucide-react';
 
 function IncomingCallContent({ incomingCall }: { incomingCall: { conversationId: string; from: { id: string; avatarUrl?: string | null; displayName: string } } }) {
+  const { t } = useTranslation();
   const acceptCall = useVoiceStore((s) => s.acceptCall);
   const declineCall = useVoiceStore((s) => s.declineCall);
 
@@ -37,12 +39,12 @@ function IncomingCallContent({ incomingCall }: { incomingCall: { conversationId:
       dmStore.setActiveConversation(conversationId);
     } catch (err) {
       console.error('Failed to accept call:', err);
-      toast.error('Failed to accept call');
+      toast.error(t('voice.failedToAccept'));
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" role="dialog" aria-modal="true">
       <div className="flex w-72 flex-col items-center gap-4 rounded-lg bg-vox-bg-secondary p-6 shadow-xl animate-fade-in">
         <Avatar
           avatarUrl={incomingCall.from.avatarUrl}
@@ -53,21 +55,23 @@ function IncomingCallContent({ incomingCall }: { incomingCall: { conversationId:
           <p className="text-sm font-semibold text-vox-text-primary">
             {incomingCall.from.displayName}
           </p>
-          <p className="text-xs text-vox-text-muted">Incoming voice call...</p>
+          <p className="text-xs text-vox-text-muted">{t('voice.incomingCall')}</p>
         </div>
 
         <div className="flex gap-4">
           <button
             onClick={declineCall}
             className="flex h-12 w-12 items-center justify-center rounded-full bg-vox-accent-danger text-white transition-colors hover:bg-vox-accent-danger/80"
-            title="Decline"
+            title={t('voice.decline')}
+            aria-label={t('voice.decline')}
           >
             <PhoneOff size={20} />
           </button>
           <button
             onClick={handleAccept}
             className="flex h-12 w-12 items-center justify-center rounded-full bg-vox-voice-connected text-white transition-colors hover:bg-vox-voice-connected/80"
-            title="Accept"
+            title={t('voice.accept')}
+            aria-label={t('voice.accept')}
           >
             <Phone size={20} />
           </button>

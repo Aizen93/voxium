@@ -24,6 +24,7 @@
     "@socket.io/redis-adapter": "^8.3.0",
     "@voxium/shared": "workspace:*",
     "bcryptjs": "^3.0.3",
+    "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.3.1",
@@ -42,6 +43,7 @@
     "socket.io": "^4.8.0"
   },
   "devDependencies": {
+    "@types/compression": "^1.8.1",
     "@types/cookie-parser": "^1.4.7",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",

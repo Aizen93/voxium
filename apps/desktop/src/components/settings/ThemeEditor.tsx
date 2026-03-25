@@ -181,6 +181,7 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
               onClick={handleClose}
               className="p-1 rounded-md transition-colors hover:opacity-80"
               style={{ color: 'var(--vox-text-muted)' }}
+              aria-label="Close"
             >
               <X size={18} />
             </button>
