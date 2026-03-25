@@ -38,6 +38,8 @@ const mockRedis = vi.hoisted(() => {
     sRem: vi.fn().mockResolvedValue(1),
     sCard: vi.fn().mockResolvedValue(0),
     sMembers: vi.fn().mockResolvedValue([]),
+    eval: vi.fn().mockResolvedValue(null),
+    expire: vi.fn().mockResolvedValue(1),
   };
 });
 
@@ -96,6 +98,8 @@ function resetRedis() {
   mockRedis.sRem.mockReset().mockResolvedValue(1);
   mockRedis.sCard.mockReset().mockResolvedValue(0);
   mockRedis.sMembers.mockReset().mockResolvedValue([]);
+  mockRedis.eval.mockReset().mockResolvedValue(null);
+  mockRedis.expire.mockReset().mockResolvedValue(1);
 }
 
 function createMockSocket(userId = 'user-1', socketId = 'socket-1') {
@@ -237,6 +241,8 @@ describe('dmVoiceHandler — dm:voice:join', () => {
   it('leaves server voice channel before joining DM call (mutual exclusion)', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    // Capacity check: no one in call yet
+    mockRedis.hGetAll.mockResolvedValueOnce({});
     // After addDMVoiceUser, 1 user in call
     mockRedis.hGetAll.mockResolvedValueOnce({
       'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
@@ -255,6 +261,8 @@ describe('dmVoiceHandler — dm:voice:join', () => {
   it('joins dm voice room and sets socket data', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    // Capacity check: no one in call yet
+    mockRedis.hGetAll.mockResolvedValueOnce({});
     // After addDMVoiceUser, first user in call
     mockRedis.hGetAll.mockResolvedValueOnce({
       'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
@@ -270,6 +278,8 @@ describe('dmVoiceHandler — dm:voice:join', () => {
   it('emits dm:voice:offer when first user joins (caller)', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    // Capacity check: no one in call yet
+    mockRedis.hGetAll.mockResolvedValueOnce({});
     // 1 user in call (the joiner)
     mockRedis.hGetAll.mockResolvedValueOnce({
       'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
@@ -294,6 +304,7 @@ describe('dmVoiceHandler — dm:voice:join', () => {
   it('uses initial mute/deaf state from client', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({});
     mockRedis.hGetAll.mockResolvedValueOnce({
       'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: true }),
     });
@@ -312,6 +323,7 @@ describe('dmVoiceHandler — dm:voice:join', () => {
   it('defaults mute/deaf to false when state not provided', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({});
     mockRedis.hGetAll.mockResolvedValueOnce({
       'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
     });
@@ -334,6 +346,10 @@ describe('dmVoiceHandler — dm:voice:join', () => {
 
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser2 as any);
+    // Capacity check: 1 user already in call (user-1)
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+    });
     // 2 users in call after join
     mockRedis.hGetAll.mockResolvedValueOnce({
       'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
@@ -361,7 +377,11 @@ describe('dmVoiceHandler — dm:voice:join', () => {
 
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser2 as any);
-    // 2 users in call
+    // Capacity check: 1 user already in call
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: false }),
+    });
+    // 2 users in call after join
     mockRedis.hGetAll.mockResolvedValueOnce({
       'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: false }),
       'user-2': JSON.stringify({ socketId: 'socket-2', selfMute: false, selfDeaf: false }),
@@ -640,26 +660,26 @@ describe('dmVoiceHandler — dm:voice:mute', () => {
 
   it('returns early when user state not found in Redis', async () => {
     socket.data.dmCallConversationId = 'conv-1';
-    mockRedis.hGet.mockResolvedValueOnce(null);
+    mockRedis.eval.mockResolvedValueOnce(null);
     const handler = handlers.get('dm:voice:mute')!;
     await handler(true);
     expect(io.to).not.toHaveBeenCalled();
   });
 
-  it('updates mute state in Redis and emits state_update', async () => {
+  it('updates mute state atomically via Lua and emits state_update', async () => {
     socket.data.dmCallConversationId = 'conv-1';
-    mockRedis.hGet.mockResolvedValueOnce(
-      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false })
+    // Lua script returns the updated JSON string
+    mockRedis.eval.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: false })
     );
 
     const handler = handlers.get('dm:voice:mute')!;
     await handler(true);
 
-    // Should update Redis
-    expect(mockRedis.hSet).toHaveBeenCalledWith(
-      'dm:voice:users:conv-1',
-      'user-1',
-      JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: false })
+    // Should call eval with Lua script
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      { keys: ['dm:voice:users:conv-1'], arguments: ['user-1', '1'] },
     );
 
     // Should emit state update to the dm room
@@ -674,17 +694,16 @@ describe('dmVoiceHandler — dm:voice:mute', () => {
 
   it('unmutes by setting selfMute to false', async () => {
     socket.data.dmCallConversationId = 'conv-1';
-    mockRedis.hGet.mockResolvedValueOnce(
-      JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: false })
+    mockRedis.eval.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false })
     );
 
     const handler = handlers.get('dm:voice:mute')!;
     await handler(false);
 
-    expect(mockRedis.hSet).toHaveBeenCalledWith(
-      'dm:voice:users:conv-1',
-      'user-1',
-      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false })
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      { keys: ['dm:voice:users:conv-1'], arguments: ['user-1', '0'] },
     );
 
     expect(io._emit).toHaveBeenCalledWith('dm:voice:state_update', {
@@ -697,8 +716,8 @@ describe('dmVoiceHandler — dm:voice:mute', () => {
 
   it('preserves selfDeaf state when toggling mute', async () => {
     socket.data.dmCallConversationId = 'conv-1';
-    mockRedis.hGet.mockResolvedValueOnce(
-      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: true })
+    mockRedis.eval.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: true })
     );
 
     const handler = handlers.get('dm:voice:mute')!;
@@ -759,25 +778,24 @@ describe('dmVoiceHandler — dm:voice:deaf', () => {
 
   it('returns early when user state not found in Redis', async () => {
     socket.data.dmCallConversationId = 'conv-1';
-    mockRedis.hGet.mockResolvedValueOnce(null);
+    mockRedis.eval.mockResolvedValueOnce(null);
     const handler = handlers.get('dm:voice:deaf')!;
     await handler(true);
     expect(io.to).not.toHaveBeenCalled();
   });
 
-  it('updates deaf state in Redis and emits state_update', async () => {
+  it('updates deaf state atomically via Lua and emits state_update', async () => {
     socket.data.dmCallConversationId = 'conv-1';
-    mockRedis.hGet.mockResolvedValueOnce(
-      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false })
+    mockRedis.eval.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: true })
     );
 
     const handler = handlers.get('dm:voice:deaf')!;
     await handler(true);
 
-    expect(mockRedis.hSet).toHaveBeenCalledWith(
-      'dm:voice:users:conv-1',
-      'user-1',
-      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: true })
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      { keys: ['dm:voice:users:conv-1'], arguments: ['user-1', '1'] },
     );
 
     expect(io.to).toHaveBeenCalledWith('dm:conv-1');
@@ -791,17 +809,16 @@ describe('dmVoiceHandler — dm:voice:deaf', () => {
 
   it('undeafens by setting selfDeaf to false', async () => {
     socket.data.dmCallConversationId = 'conv-1';
-    mockRedis.hGet.mockResolvedValueOnce(
-      JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: true })
+    mockRedis.eval.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: false })
     );
 
     const handler = handlers.get('dm:voice:deaf')!;
     await handler(false);
 
-    expect(mockRedis.hSet).toHaveBeenCalledWith(
-      'dm:voice:users:conv-1',
-      'user-1',
-      JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: false })
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      { keys: ['dm:voice:users:conv-1'], arguments: ['user-1', '0'] },
     );
 
     expect(io._emit).toHaveBeenCalledWith('dm:voice:state_update', {
@@ -814,8 +831,8 @@ describe('dmVoiceHandler — dm:voice:deaf', () => {
 
   it('preserves selfMute state when toggling deaf', async () => {
     socket.data.dmCallConversationId = 'conv-1';
-    mockRedis.hGet.mockResolvedValueOnce(
-      JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: false })
+    mockRedis.eval.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'socket-1', selfMute: true, selfDeaf: true })
     );
 
     const handler = handlers.get('dm:voice:deaf')!;

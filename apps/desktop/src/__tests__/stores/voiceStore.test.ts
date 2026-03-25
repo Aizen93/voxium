@@ -21,6 +21,7 @@ vi.mock('../../services/audioAnalyser', () => ({
   applyNoiseSuppression: vi.fn().mockImplementation((stream: MediaStream) => Promise.resolve(stream)),
   getSuppressedStream: vi.fn().mockReturnValue(null),
   stopNoiseSuppression: vi.fn(),
+  setSpeakingDetectionPaused: vi.fn(),
 }));
 
 vi.mock('../../services/sdpUtils', () => ({

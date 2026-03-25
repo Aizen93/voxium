@@ -1,7 +1,7 @@
 import { useRef, useState, useCallback, useLayoutEffect, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import axios from 'axios';
 import { createPortal } from 'react-dom';
+import { getTranslatedError } from '../../utils/serverErrors';
 import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -174,8 +174,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
       const status = await useFriendStore.getState().sendRequest(username);
       toast.success(status === 'accepted' ? t('friends.addFriend.nowFriends', { name: username }) : t('userProfile.friendRequestSent'));
     } catch (err) {
-      const msg = axios.isAxiosError(err) ? err.response?.data?.error || t('userProfile.failedToSendRequest') : t('userProfile.failedToSendRequest');
-      toast.error(msg);
+      toast.error(getTranslatedError(err, t, 'userProfile.failedToSendRequest'));
     }
   };
 

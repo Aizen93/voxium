@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
 import { CheckCircle, AlertCircle } from 'lucide-react';
+import { translateServerError } from '../utils/serverErrors';
 
 // Module-scope: survives React StrictMode unmount/remount cycles
 const processedTokens = new Set<string>();
@@ -34,7 +35,7 @@ export function VerifyEmailPage() {
         // Allow retry on transient/network errors (keep in set only for server rejections)
         if (!err.response) processedTokens.delete(token);
         setStatus('error');
-        setError(err.response?.data?.error || t('auth.verifyEmail.failed'));
+        setError(translateServerError(err.response?.data?.error, t, 'auth.verifyEmail.failed'));
       });
   }, [token]); // intentionally omit user/checkAuth — only re-run when token changes
 

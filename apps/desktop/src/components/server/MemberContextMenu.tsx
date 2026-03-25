@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
-import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
+import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
@@ -113,7 +113,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'admin');
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToPromote') : t('contextMenu.failedToPromote'));
+      toast.error(getTranslatedError(err, t, 'contextMenu.failedToPromote'));
     }
   }
 
@@ -122,7 +122,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'member');
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToDemote') : t('contextMenu.failedToDemote'));
+      toast.error(getTranslatedError(err, t, 'contextMenu.failedToDemote'));
     }
   }
 
@@ -135,7 +135,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       await useServerStore.getState().kickMember(activeServerId!, member.userId);
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToKick') : t('contextMenu.failedToKick'));
+      toast.error(getTranslatedError(err, t, 'contextMenu.failedToKick'));
     }
   }
 
@@ -148,7 +148,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       await useServerStore.getState().assignMemberRoles(activeServerId!, member.userId, newRoleIds);
       toast.success(t('contextMenu.rolesUpdated'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToUpdateRoles') : t('contextMenu.failedToUpdateRoles'));
+      toast.error(getTranslatedError(err, t, 'contextMenu.failedToUpdateRoles'));
     } finally {
       setSavingRoles(false);
     }
@@ -181,7 +181,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       toast.success(nicknameInput.trim() ? t('contextMenu.nicknameSet') : t('contextMenu.nicknameCleared'));
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToSetNickname') : t('contextMenu.failedToSetNickname'));
+      toast.error(getTranslatedError(err, t, 'contextMenu.failedToSetNickname'));
     }
   }
 
@@ -196,7 +196,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       setNicknameInput('');
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('contextMenu.failedToClearNickname') : t('contextMenu.failedToClearNickname'));
+      toast.error(getTranslatedError(err, t, 'contextMenu.failedToClearNickname'));
     }
   }
 

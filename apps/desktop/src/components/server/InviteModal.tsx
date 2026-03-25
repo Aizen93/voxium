@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
 import { X, Copy, Check } from 'lucide-react';
+import { getTranslatedError } from '../../utils/serverErrors';
 
 interface Props {
   serverId: string;
@@ -27,7 +27,7 @@ export function InviteModal({ serverId, onClose }: Props) {
         setLoading(false);
       })
       .catch((err: unknown) => {
-        setError(axios.isAxiosError(err) ? err.response?.data?.error || t('server.invite.failedToCreate') : t('server.invite.failedToCreate'));
+        setError(getTranslatedError(err, t, 'server.invite.failedToCreate'));
         setLoading(false);
       });
   }, [serverId, createInvite]);

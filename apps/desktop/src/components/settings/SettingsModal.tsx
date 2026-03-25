@@ -12,8 +12,8 @@ import { importTheme } from '../../services/themeEngine';
 import { ThemeEditor } from './ThemeEditor';
 import { ThemeBrowser } from './ThemeBrowser';
 import { api } from '../../services/api';
-import axios from 'axios';
 import { SUPPORTED_LANGUAGES } from '../../i18n';
+import { getTranslatedError } from '../../utils/serverErrors';
 
 interface DeviceInfo {
   deviceId: string;
@@ -125,7 +125,7 @@ function ChangePasswordForm() {
       setNewPassword('');
       setConfirmNewPassword('');
     } catch (err) {
-      setPasswordError(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.security.failedToChangePassword') : t('settings.security.failedToChangePassword'));
+      setPasswordError(getTranslatedError(err, t, 'settings.security.failedToChangePassword'));
     } finally {
       setChangingPassword(false);
     }
@@ -232,7 +232,7 @@ function ProfileTab() {
       await uploadAvatar(file);
       toast.success(t('settings.profile.avatarUpdated'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.profile.failedToUploadAvatar') : t('settings.profile.failedToUploadAvatar'));
+      toast.error(getTranslatedError(err, t, 'settings.profile.failedToUploadAvatar'));
     } finally {
       setUploading(false);
     }
@@ -247,7 +247,7 @@ function ProfileTab() {
       });
       toast.success(t('settings.profile.profileUpdated'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.profile.failedToUpdateProfile') : t('settings.profile.failedToUpdateProfile'));
+      toast.error(getTranslatedError(err, t, 'settings.profile.failedToUpdateProfile'));
     } finally {
       setSaving(false);
     }
@@ -357,7 +357,7 @@ function TwoFactorSection() {
       setSecret(data.secret);
       setStep('setup');
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.security.failedToSetup2FA') : t('settings.security.failedToSetup2FA'));
+      setError(getTranslatedError(err, t, 'settings.security.failedToSetup2FA'));
     } finally {
       setLoading(false);
     }
@@ -373,7 +373,7 @@ function TwoFactorSection() {
       setStep('backup');
       setCode('');
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.security.invalidCode') : t('settings.security.invalidCode'));
+      setError(getTranslatedError(err, t, 'settings.security.invalidCode'));
     } finally {
       setLoading(false);
     }
@@ -389,7 +389,7 @@ function TwoFactorSection() {
       setStep('idle');
       setCode('');
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.security.invalidCode') : t('settings.security.invalidCode'));
+      setError(getTranslatedError(err, t, 'settings.security.invalidCode'));
     } finally {
       setLoading(false);
     }
@@ -663,7 +663,7 @@ function AppearanceTab() {
       }
       toast.success(t('settings.appearance.themePublished'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.appearance.failedToPublish') : t('settings.appearance.failedToPublish'));
+      toast.error(getTranslatedError(err, t, 'settings.appearance.failedToPublish'));
     } finally {
       setPublishing(null);
     }
@@ -677,7 +677,7 @@ function AppearanceTab() {
       await api.post(`/themes/${ct.remoteId}/unpublish`);
       toast.success(t('settings.appearance.themeUnpublished'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('settings.appearance.failedToUnpublish') : t('settings.appearance.failedToUnpublish'));
+      toast.error(getTranslatedError(err, t, 'settings.appearance.failedToUnpublish'));
     } finally {
       setPublishing(null);
     }

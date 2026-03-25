@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../stores/authStore';
 import { Eye, EyeOff } from 'lucide-react';
 import { LIMITS } from '@voxium/shared';
-import axios from 'axios';
+import { getTranslatedError } from '../utils/serverErrors';
 
 export function ResetPasswordPage() {
   const { t } = useTranslation();
@@ -36,7 +36,7 @@ export function ResetPasswordPage() {
       await resetPassword(token!, password);
       setSuccess(true);
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('auth.resetPassword.failedToReset') : t('auth.resetPassword.failedToReset'));
+      setError(getTranslatedError(err, t, 'auth.resetPassword.failedToReset'));
     } finally {
       setIsLoading(false);
     }

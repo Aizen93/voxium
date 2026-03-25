@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import axios from 'axios';
 import { useFriendStore } from '../../stores/friendStore';
 import { toast } from '../../stores/toastStore';
 import { UserPlus } from 'lucide-react';
+import { getTranslatedError } from '../../utils/serverErrors';
 
 export function AddFriendForm() {
   const { t } = useTranslation();
@@ -22,8 +22,7 @@ export function AddFriendForm() {
       toast.success(status === 'accepted' ? t('friends.addFriend.nowFriends', { name: trimmed }) : t('friends.addFriend.requestSent', { name: trimmed }));
       setUsername('');
     } catch (err) {
-      const msg = axios.isAxiosError(err) ? err.response?.data?.error || t('friends.addFriend.failedToSend') : t('friends.addFriend.failedToSend');
-      toast.error(msg);
+      toast.error(getTranslatedError(err, t, 'friends.addFriend.failedToSend'));
     } finally {
       setIsLoading(false);
     }

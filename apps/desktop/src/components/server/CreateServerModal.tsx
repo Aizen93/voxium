@@ -1,10 +1,10 @@
 import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { ImageUploadButton } from '../common/ImageUploadButton';
 import { X } from 'lucide-react';
+import { getTranslatedError } from '../../utils/serverErrors';
 
 interface Props {
   onClose: () => void;
@@ -38,7 +38,7 @@ export function CreateServerModal({ onClose }: Props) {
       toast.success(t('server.create.serverCreated'));
       onClose();
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('server.create.failedToCreate') : t('server.create.failedToCreate'));
+      setError(getTranslatedError(err, t, 'server.create.failedToCreate'));
     } finally {
       setLoading(false);
     }
@@ -58,7 +58,7 @@ export function CreateServerModal({ onClose }: Props) {
       toast.success(t('server.create.joinedServer'));
       onClose();
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('server.create.failedToJoin') : t('server.create.failedToJoin'));
+      setError(getTranslatedError(err, t, 'server.create.failedToJoin'));
     } finally {
       setLoading(false);
     }

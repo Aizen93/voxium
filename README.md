@@ -14,7 +14,9 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 
 - **Zero personal data required** — No phone number, no ID verification, no tracking
 - **Fully open source** — Audit every line, self-host on your own infrastructure
-- **Production-ready voice** — mediasoup SFU for servers, direct P2P for DM calls, with AI noise suppression (RNNoise ML)
+- **Production-ready voice** — mediasoup SFU for servers, direct P2P for DM calls (private STUN), AI noise suppression (RNNoise ML)
+- **11 languages** — English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL)
+- **Theme engine** — 4 built-in themes, full custom theme editor with live preview, community marketplace
 - **Cross-platform** — Native desktop apps for Windows, macOS, and Linux via Tauri 2
 - **Modern stack** — React 19, TypeScript, Zustand, Tailwind CSS, real-time WebSockets
 
@@ -33,7 +35,21 @@ Discord-style role-based access control with 20 granular permission flags, per-c
 <td width="50%">
 
 ### Production-Ready Voice
-mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing, and voice quality selector. Voice moderation: server mute/deafen persists across reconnects via Redis, cross-channel force-move.
+mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing, and voice quality selector. DM calls use direct P2P WebRTC with Perfect Negotiation, routed through a private self-hosted STUN server (coturn) — no third-party relay.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### Theme Engine & Marketplace
+4 built-in themes (Dark, Light, Midnight, Tactical) plus a full theme editor where users create custom themes with their own branding — colors, patterns, and CSS overrides. Live preview before applying, and a community marketplace to publish, browse, and install themes created by other users.
+
+</td>
+<td width="50%">
+
+### 11 Languages
+Fully translated interface with first-class support for English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, and Arabic (with RTL layout). Language auto-detected from browser, switchable in settings. Every UI string is translated — not just labels but toasts, errors, modals, and voice indicators.
 
 </td>
 </tr>
@@ -41,7 +57,7 @@ mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNN
 <td width="50%">
 
 ### Privacy-First Architecture
-Zero third-party services — no Google STUN, no analytics, no CDNs. Self-hosted STUN via coturn, all media stays on your infrastructure. No phone number or ID required to sign up.
+Zero third-party services — no Google STUN, no analytics, no CDNs. Self-hosted STUN via coturn, all media stays on your infrastructure. STUN URL derived from your server hostname — no hardcoded external endpoints. No phone number or ID required to sign up.
 
 </td>
 <td width="50%">
@@ -67,7 +83,7 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 | | Direct Messages | 1-on-1 text with real-time delivery, typing indicators, reactions, persistent unread tracking, conversation deletion |
 | | Message Search | Full-text search across server channels and DM conversations with jump-to-message navigation |
 | **Voice** | Server Voice (SFU) | mediasoup Selective Forwarding Unit for scalable voice (25+ users per channel), speaking indicators, latency display |
-| | DM Voice Calls | 1-on-1 WebRTC P2P audio with incoming call modal, ringtone, speaking indicators, call history as system messages |
+| | DM Voice Calls | 1-on-1 WebRTC P2P audio with Perfect Negotiation, private STUN server (coturn), incoming call modal, ringtone, speaking indicators, call history as system messages |
 | | Screen Sharing | Share screen in voice channels with real-time video and system audio, inline/floating viewer modes |
 | | AI Noise Suppression | ML-powered RNNoise WASM filter removes keyboard, mouse, and background noise in real time via AudioWorklet |
 | | Opus Optimization | DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate |
@@ -93,9 +109,15 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 | | Authentication | JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation |
 | | Rate Limiting | Per-endpoint and per-socket rate limiting, admin-editable via Redis-backed registry |
 | | Input Sanitization | HTML stripping, validation, CORS protection |
+| **Themes** | Built-in Themes | 4 built-in themes — Dark, Light, Midnight, Tactical — switchable instantly in settings |
+| | Custom Theme Editor | Full visual editor with live preview: customize all colors, patterns, and CSS overrides to match your branding |
+| | Theme Marketplace | Publish your custom themes for the community; browse, preview, and install themes created by other users |
+| **Internationalization** | 11 Languages | English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL) |
+| | Auto-Detection | Language auto-detected from browser locale; switchable in settings; RTL layout for Arabic |
 | **Platform** | File Uploads | S3-compatible storage for avatars, server icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
 | | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
 | | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with Discord-inspired dark UI |
+| | Self-Hosted STUN | Private coturn STUN server for P2P WebRTC — STUN URL derived from your server hostname, zero reliance on Google or third-party STUN/TURN services |
 | | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |
 
 ---
@@ -553,12 +575,12 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 
 ## Testing
 
-Voxium has a comprehensive test suite with 635 unit and integration tests covering API routes, middleware, utilities, voice handlers, permission system, and security edge cases.
+Voxium has a comprehensive test suite with 940 unit and integration tests covering API routes, middleware, utilities, voice handlers, permission system, themes, DM voice, and security edge cases.
 
 ### Running Tests
 
 ```bash
-# Run all server tests (unit + integration, ~1.6s)
+# Run all tests (unit + integration, ~2s)
 pnpm test
 
 # Watch mode (re-runs on file changes)
@@ -589,6 +611,8 @@ pnpm test:e2e:headed         # Visible browser
 | **Upload Routes** | 19 | S3 redirect/proxy, Express 5 wildcards, path traversal prevention |
 | **Permission System** | 119 | Role CRUD, hierarchy enforcement, channel overrides, permission calculator, bitmask utilities |
 | **Voice Handler** | 45 | Transport ACK on all code paths, join validation, mute/deaf/speaking, server_mute/deafen/force_move + deafen-implies-mute |
+| **DM Voice Handler** | 81 | P2P call lifecycle, signal relay, atomic mute/deaf (Lua), call timeout, 1-on-1 capacity, decline auth, mutual exclusivity |
+| **Theme Routes** | 29 | CRUD, publish/unpublish marketplace, browse/search, install count, validation |
 | **Auth Service** | 22 | Registration, login, tokens, password reset, email normalization |
 | **TOTP Service** | 19 | Setup, enable, verify, disable, encrypt/decrypt roundtrip, backup codes |
 | **Pure Utilities** | 75 | Sanitization, error classes, mentions, reactions, rate limiting |

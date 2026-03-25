@@ -11,7 +11,7 @@ import {
   LIMITS,
 } from '@voxium/shared';
 import type { Role, PermissionInfo } from '@voxium/shared';
-import axios from 'axios';
+import { getTranslatedError } from '../../utils/serverErrors';
 
 interface RoleEditorProps {
   serverId: string;
@@ -22,13 +22,6 @@ interface RoleEditorProps {
 type PermissionCategory = PermissionInfo['category'];
 
 const CATEGORY_ORDER: PermissionCategory[] = ['general', 'membership', 'text', 'voice', 'special'];
-
-function getErrorMessage(err: unknown): string {
-  if (axios.isAxiosError(err)) {
-    return err.response?.data?.error || 'An error occurred';
-  }
-  return 'An error occurred';
-}
 
 export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps) {
   const { t } = useTranslation();
@@ -67,7 +60,7 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
       setSelectedRoleId(role.id);
       toast.success(t('roles.roleCreated'));
     } catch (err) {
-      toast.error(getErrorMessage(err));
+      toast.error(getTranslatedError(err, t));
     } finally {
       setCreating(false);
     }
@@ -210,7 +203,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
         toast.success(t('roles.roleUpdated'));
       }
     } catch (err) {
-      toast.error(getErrorMessage(err));
+      toast.error(getTranslatedError(err, t));
     } finally {
       setSaving(false);
     }
@@ -222,7 +215,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
       await useServerStore.getState().deleteRole(serverId, role.id);
       toast.success(t('roles.roleDeleted'));
     } catch (err) {
-      toast.error(getErrorMessage(err));
+      toast.error(getTranslatedError(err, t));
     } finally {
       setDeleting(false);
       setShowDeleteConfirm(false);

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { Device } from 'mediasoup-client';
 import type { Transport, Producer, Consumer, RtpCapabilities, IceParameters, IceCandidate, DtlsParameters, RtpParameters } from 'mediasoup-client/types';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression } from '../services/audioAnalyser';
+import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused } from '../services/audioAnalyser';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
 import { optimizeOpusSDP } from '../services/sdpUtils';
@@ -1224,6 +1224,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     set({ selfMute: newMute });
     persistVoicePrefs({ selfMute: newMute, selfDeaf: get().selfDeaf });
+
+    // Pause speaking detection processing when muted to save CPU
+    setSpeakingDetectionPaused(newMute);
   },
 
   toggleDeaf: () => {
@@ -1329,6 +1332,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const newAudios = new Map(remoteAudios);
     const audio = remoteAudios.get(userId);
     if (audio) {
+      // Stop tracks to release OS-level audio resources
+      if (audio.srcObject && typeof (audio.srcObject as MediaStream).getTracks === 'function') {
+        (audio.srcObject as MediaStream).getTracks().forEach((track) => track.stop());
+      }
       audio.pause();
       audio.srcObject = null;
       audio.remove();
@@ -1336,6 +1343,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
     const screenAudio = remoteAudios.get(`${userId}-screen`);
     if (screenAudio) {
+      if (screenAudio.srcObject && typeof (screenAudio.srcObject as MediaStream).getTracks === 'function') {
+        (screenAudio.srcObject as MediaStream).getTracks().forEach((track) => track.stop());
+      }
       screenAudio.pause();
       screenAudio.srcObject = null;
       screenAudio.remove();
@@ -1716,6 +1726,7 @@ useSettingsStore.subscribe((state, prevState) => {
               debugLog('[Voice SFU] Replaced audio track on producer after input device change');
             } catch (err) {
               console.error('[Voice SFU] Failed to replace track on producer:', err);
+              toast.error('Microphone issue detected — try rejoining voice');
             }
           }
         }
@@ -1931,10 +1942,16 @@ onSocketReconnect(async () => {
 
   // Restart audio pipelines BEFORE emitting voice:join
   if (localStream) {
-    setNoiseGateThreshold(settings.noiseGateThreshold);
-    setNoiseSuppression(settings.enableNoiseSuppression);
-    const suppressedStream = await applyNoiseSuppression(localStream);
-    startSpeakingDetection(suppressedStream, dmCallConversationId ? 'dm' : 'server');
+    try {
+      setNoiseGateThreshold(settings.noiseGateThreshold);
+      setNoiseSuppression(settings.enableNoiseSuppression);
+      const suppressedStream = await applyNoiseSuppression(localStream);
+      startSpeakingDetection(suppressedStream, dmCallConversationId ? 'dm' : 'server');
+    } catch (err) {
+      console.error('[Voice] Audio pipeline rebuild failed on reconnect:', err);
+      // Fallback: use raw stream for speaking detection
+      startSpeakingDetection(localStream, dmCallConversationId ? 'dm' : 'server');
+    }
 
     // Re-register producer pause/resume callback for silence detection (server voice only)
     if (activeChannelId) {

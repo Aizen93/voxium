@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import axios from 'axios';
 import { api } from '../services/api';
 import { connectSocket, disconnectSocket } from '../services/socket';
 import { getAccessToken, setTokens, clearTokens, isRemembered } from '../services/tokenStorage';
@@ -7,6 +6,8 @@ import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
 import { useVoiceStore } from './voiceStore';
 import { processImage } from '../utils/imageProcessing';
+import i18n from '../i18n';
+import { getTranslatedError } from '../utils/serverErrors';
 import type { User } from '@voxium/shared';
 
 interface AuthState {
@@ -69,7 +70,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ user, isAuthenticated: true, isSubmitting: false });
     } catch (err) {
       set({
-        error: axios.isAxiosError(err) ? err.response?.data?.error || 'Login failed' : 'Login failed',
+        error: getTranslatedError(err, i18n.t, 'auth.login.loginFailed'),
         isSubmitting: false,
       });
       throw err;
@@ -93,7 +94,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true });
     } catch (err) {
       set({
-        error: axios.isAxiosError(err) ? err.response?.data?.error || 'Invalid verification code' : 'Invalid verification code',
+        error: getTranslatedError(err, i18n.t, 'settings.security.invalidCode'),
         isSubmitting: false,
       });
       throw err;
@@ -120,7 +121,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ user, isAuthenticated: true, isSubmitting: false });
     } catch (err) {
       set({
-        error: axios.isAxiosError(err) ? err.response?.data?.error || 'Registration failed' : 'Registration failed',
+        error: getTranslatedError(err, i18n.t, 'auth.register.registrationFailed'),
         isSubmitting: false,
       });
       throw err;

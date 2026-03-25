@@ -10,8 +10,8 @@ import type { ServerMember, MemberRole, ResourceLimits } from '@voxium/shared';
 import { outranksRole } from '../../utils/roles';
 import { Permissions, permissionsFromString, hasPermission } from '@voxium/shared';
 import { RoleEditor } from './RoleEditor';
-import axios from 'axios';
 import { api } from '../../services/api';
+import { getTranslatedError } from '../../utils/serverErrors';
 
 interface Props {
   serverId: string;
@@ -144,7 +144,7 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
       await toggleInvitesLock(serverId, !server.invitesLocked);
       toast.success(server.invitesLocked ? t('serverSettings.general.invitesUnlocked') : t('serverSettings.general.invitesLockedSuccess'));
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('serverSettings.general.failedToToggleLock') : t('serverSettings.general.failedToToggleLock'));
+      toast.error(getTranslatedError(err, t, 'serverSettings.general.failedToToggleLock'));
     } finally {
       setTogglingLock(false);
     }
@@ -159,7 +159,7 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
           await uploadServerIcon(serverId, iconFile);
           setIconFile(null);
         } catch (err) {
-          toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('serverSettings.general.failedToUploadIcon') : t('serverSettings.general.failedToUploadIcon'));
+          toast.error(getTranslatedError(err, t, 'serverSettings.general.failedToUploadIcon'));
           setSaving(false);
           setUploading(false);
           return;
@@ -174,7 +174,7 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
       toast.success(t('serverSettings.general.serverUpdated'));
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('serverSettings.general.failedToUpdate') : t('serverSettings.general.failedToUpdate'));
+      toast.error(getTranslatedError(err, t, 'serverSettings.general.failedToUpdate'));
     } finally {
       setSaving(false);
     }
@@ -189,7 +189,7 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
       onClose();
       // No toast here — the server:deleted socket event shows one for all clients (including the owner)
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('serverSettings.general.failedToDelete') : t('serverSettings.general.failedToDelete'));
+      toast.error(getTranslatedError(err, t, 'serverSettings.general.failedToDelete'));
     } finally {
       setDeleting(false);
     }
@@ -357,7 +357,7 @@ function MembersTab({ serverId }: { serverId: string }) {
     try {
       await useServerStore.getState().updateMemberRole(serverId, memberId, newRole);
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('serverSettings.members.failedToUpdateRole') : t('serverSettings.members.failedToUpdateRole'));
+      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToUpdateRole'));
     }
   }
 
@@ -367,7 +367,7 @@ function MembersTab({ serverId }: { serverId: string }) {
       setConfirmAction(null);
       setExpandedMember(null);
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('serverSettings.members.failedToKick') : t('serverSettings.members.failedToKick'));
+      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToKick'));
     }
   }
 
@@ -377,7 +377,7 @@ function MembersTab({ serverId }: { serverId: string }) {
       setConfirmAction(null);
       setExpandedMember(null);
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('serverSettings.members.failedToTransfer') : t('serverSettings.members.failedToTransfer'));
+      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToTransfer'));
     }
   }
 
@@ -392,7 +392,7 @@ function MembersTab({ serverId }: { serverId: string }) {
         : [...currentRoleIds, roleId];
       await assignMemberRoles(serverId, memberId, newRoleIds);
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('serverSettings.members.failedToUpdateRoles') : t('serverSettings.members.failedToUpdateRoles'));
+      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToUpdateRoles'));
     } finally {
       setSavingRoles(false);
     }

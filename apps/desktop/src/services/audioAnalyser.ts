@@ -111,12 +111,24 @@ let threshold = 0.008;
 let speakingMode: 'server' | 'dm' = 'server';
 let speakingChangeCallback: ((speaking: boolean) => void) | null = null;
 
+/** When true, tick skips analyser processing (e.g. user is muted). */
+let detectionPaused = false;
+
 export function setNoiseGateThreshold(value: number) {
   threshold = value;
 }
 
 export function onSpeakingChange(cb: ((speaking: boolean) => void) | null) {
   speakingChangeCallback = cb;
+}
+
+/**
+ * Pause or resume the speaking detection analyser tick.
+ * When paused, the interval still fires but skips all processing — no
+ * getFloatTimeDomainData, no RMS calculation, no socket emissions.
+ */
+export function setSpeakingDetectionPaused(paused: boolean) {
+  detectionPaused = paused;
 }
 
 export function getAudioLevel(): number {
@@ -184,6 +196,7 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
   function tick() {
     const ctx = sdContext;
     if (!sdAnalyser || !sdGainNode || !ctx) return;
+    if (detectionPaused) return;
 
     sdAnalyser.getFloatTimeDomainData(dataArray);
 
@@ -256,4 +269,5 @@ export function stopSpeakingDetection() {
   sdDestination = null;
   currentLevel = 0;
   silenceStart = 0;
+  detectionPaused = false;
 }

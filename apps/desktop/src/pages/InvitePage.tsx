@@ -4,7 +4,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useServerStore } from '../stores/serverStore';
 import { api } from '../services/api';
 import { Users } from 'lucide-react';
-import axios from 'axios';
+import { getTranslatedError } from '../utils/serverErrors';
 
 interface InvitePreview {
   code: string;
@@ -34,7 +34,7 @@ export function InvitePage() {
         setLoading(false);
       })
       .catch((err: unknown) => {
-        setError(axios.isAxiosError(err) ? err.response?.data?.error || 'This invite is invalid or has expired' : 'This invite is invalid or has expired');
+        setError(getTranslatedError(err, t, 'invite.invalidOrExpired'));
         setLoading(false);
       });
   }, [code]);
@@ -50,7 +50,7 @@ export function InvitePage() {
       }
       navigate('/', { replace: true });
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to join server' : 'Failed to join server');
+      setError(getTranslatedError(err, t, 'invite.failedToJoin'));
       setJoining(false);
     }
   };

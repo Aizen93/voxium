@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import axios from 'axios';
 import { X, Flag } from 'lucide-react';
 import { api } from '../../services/api';
 import { toast } from '../../stores/toastStore';
 import { LIMITS } from '@voxium/shared';
+import { getTranslatedError } from '../../utils/serverErrors';
 
 interface Props {
   type: 'message' | 'user';
@@ -45,7 +45,7 @@ export function ReportModal({ type, reportedUserId, messageId, onClose }: Props)
       toast.success(t('chat.report.submitted'));
       onClose();
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('chat.report.failedToSubmit') : t('chat.report.failedToSubmit'));
+      toast.error(getTranslatedError(err, t, 'chat.report.failedToSubmit'));
     } finally {
       setSubmitting(false);
     }

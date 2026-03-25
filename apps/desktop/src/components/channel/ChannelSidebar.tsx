@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
-import axios from 'axios';
 import { useServerStore } from '../../stores/serverStore';
+import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -477,7 +477,7 @@ export function ChannelSidebar() {
       setNewChannelName('');
       setShowCreateChannel(false);
     } catch (err) {
-      toast.error(axios.isAxiosError(err) ? err.response?.data?.error || t('channel.failedToCreateChannel') : t('channel.failedToCreateChannel'));
+      toast.error(getTranslatedError(err, t, 'channel.failedToCreateChannel'));
     }
   };
 

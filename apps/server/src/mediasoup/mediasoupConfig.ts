@@ -42,7 +42,7 @@ export function getWebRtcTransportOptions() {
 export function getWorkerSettings() {
   return {
     rtcMinPort: parseInt(process.env.MEDIASOUP_MIN_PORT || '10000', 10),
-    rtcMaxPort: parseInt(process.env.MEDIASOUP_MAX_PORT || '10500', 10),
+    rtcMaxPort: parseInt(process.env.MEDIASOUP_MAX_PORT || '59999', 10),
     logLevel: 'warn' as WorkerLogLevel,
   };
 }

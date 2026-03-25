@@ -101,7 +101,7 @@ describe('mediasoup/mediasoupConfig — lazy getters', () => {
 
     const settings = mod.getWorkerSettings();
     expect(settings.rtcMinPort).toBe(10000);
-    expect(settings.rtcMaxPort).toBe(10500);
+    expect(settings.rtcMaxPort).toBe(59999);
     expect(settings.logLevel).toBe('warn');
   });
 

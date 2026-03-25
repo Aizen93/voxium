@@ -445,7 +445,23 @@ export function handleVoiceEvents(
 
           consumerPromises.push(createConsumerForUser(io, channelId, otherUserId, otherMedia, producer, userId));
         }
-        await Promise.allSettled(consumerPromises);
+        const results = await Promise.allSettled(consumerPromises);
+
+        // Retry once for transient failures (consumer creation can fail due to timing)
+        const retryTargets = [...channelUsers.entries()].filter(([uid]) => uid !== userId);
+        const retryPromises: Promise<void>[] = [];
+        results.forEach((result, i) => {
+          if (result.status === 'rejected' && retryTargets[i]) {
+            const [otherUserId, otherMedia] = retryTargets[i];
+            if (otherMedia.recvTransport && otherMedia.rtpCapabilities && !otherMedia.recvTransport.closed) {
+              console.warn(`[Voice] Retrying consumer creation for ${otherUserId}`);
+              retryPromises.push(createConsumerForUser(io, channelId, otherUserId, otherMedia, producer, userId));
+            }
+          }
+        });
+        if (retryPromises.length > 0) {
+          await Promise.allSettled(retryPromises);
+        }
       }
     } catch (err) {
       console.error(`[Voice] produce failed for ${userId}:`, err);
@@ -759,11 +775,9 @@ export function handleVoiceEvents(
       return;
     }
     const targetSocketId = targetMedia.socketId;
-    const targetSocket = io.sockets.sockets.get(targetSocketId);
-    if (!targetSocket) return;
 
-    // Emit force_moved to the target so their client auto-rejoins the new channel
-    targetSocket.emit('voice:force_moved', { channelId: sourceChannelId, userId: targetId, targetChannelId });
+    // Use io.to() instead of local socket lookup — works cross-node with Redis adapter
+    io.to(targetSocketId).emit('voice:force_moved', { channelId: sourceChannelId, userId: targetId, targetChannelId });
 
     // The actual channel switch is handled client-side:
     // the target client receives voice:force_moved, calls leaveChannel() then joinChannel(targetChannelId)

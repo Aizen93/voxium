@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../stores/authStore';
-import axios from 'axios';
+import { getTranslatedError } from '../utils/serverErrors';
 
 export function ForgotPasswordPage() {
   const { t } = useTranslation();
@@ -20,7 +20,7 @@ export function ForgotPasswordPage() {
       await forgotPassword(email);
       setSuccess(true);
     } catch (err) {
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('common.somethingWentWrong') : t('common.somethingWentWrong'));
+      setError(getTranslatedError(err, t));
     } finally {
       setIsLoading(false);
     }

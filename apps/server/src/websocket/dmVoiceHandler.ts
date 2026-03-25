@@ -84,6 +84,9 @@ async function getDMVoiceUsers(conversationId: string): Promise<Map<string, DMVo
   return map;
 }
 
+/** TTL safety net for DM voice Redis keys (10 minutes). Prevents orphaned keys if cleanup fails. */
+const DM_VOICE_KEY_TTL_SEC = 600;
+
 async function addDMVoiceUser(
   conversationId: string,
   userId: string,
@@ -92,9 +95,11 @@ async function addDMVoiceUser(
   const redis = getRedis();
   await redis.multi()
     .hSet(`dm:voice:users:${conversationId}`, userId, JSON.stringify(state))
-    .set(`dm:voice:call:${userId}`, conversationId)
+    .set(`dm:voice:call:${userId}`, conversationId, { EX: DM_VOICE_KEY_TTL_SEC })
     .sAdd('dm:voice:active', conversationId)
     .exec();
+  // Set TTL on hash key (cannot set in multi with hSet; use separate EXPIRE)
+  await redis.expire(`dm:voice:users:${conversationId}`, DM_VOICE_KEY_TTL_SEC);
 }
 
 async function removeDMVoiceUser(conversationId: string, userId: string): Promise<void> {
@@ -213,6 +218,20 @@ export function handleDMVoiceEvents(
     // Leave any existing DM call
     await leaveCurrentDMVoiceChannel(io, socket, userId);
 
+    // DM calls are 1-on-1 — reject if call already has 2 participants
+    let existingUsers: Map<string, DMVoiceUserState>;
+    try {
+      existingUsers = await getDMVoiceUsers(conversationId);
+    } catch (err) {
+      console.error(`[DMVoice] Redis error checking call capacity:`, err);
+      socket.emit('voice:error', { message: 'Voice service temporarily unavailable.' });
+      return;
+    }
+    if (existingUsers.size >= 2) {
+      socket.emit('voice:error', { message: 'This call is already full.' });
+      return;
+    }
+
     // Join the DM voice room
     socket.join(`dm:voice:${conversationId}`);
     socket.data.dmCallConversationId = conversationId;
@@ -220,11 +239,19 @@ export function handleDMVoiceEvents(
     const initialMute = state?.selfMute ?? false;
     const initialDeaf = state?.selfDeaf ?? false;
 
-    await addDMVoiceUser(conversationId, userId, {
-      socketId: socket.id,
-      selfMute: initialMute,
-      selfDeaf: initialDeaf,
-    });
+    try {
+      await addDMVoiceUser(conversationId, userId, {
+        socketId: socket.id,
+        selfMute: initialMute,
+        selfDeaf: initialDeaf,
+      });
+    } catch (err) {
+      console.error(`[DMVoice] Redis error adding user to call:`, err);
+      socket.leave(`dm:voice:${conversationId}`);
+      socket.data.dmCallConversationId = undefined;
+      socket.emit('voice:error', { message: 'Voice service temporarily unavailable.' });
+      return;
+    }
 
     // Fetch user info
     const user = await prisma.user.findUnique({
@@ -250,18 +277,22 @@ export function handleDMVoiceEvents(
       dmCallTimeouts.set(conversationId, setTimeout(async () => {
         dmCallTimeouts.delete(conversationId);
         // Check Redis — call may have been answered on another node
-        const currentUsers = await getDMVoiceUsers(conversationId);
-        if (currentUsers.size <= 1) {
-          console.log(`[DMVoice] Call timeout for conversation ${conversationId}`);
-          // Clean up all remaining users
-          for (const [uid] of currentUsers) {
-            await removeDMVoiceUser(conversationId, uid);
-            const sockets = await io.in(`user:${uid}`).fetchSockets();
-            for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
+        try {
+          const currentUsers = await getDMVoiceUsers(conversationId);
+          if (currentUsers.size <= 1) {
+            console.log(`[DMVoice] Call timeout for conversation ${conversationId}`);
+            // Clean up all remaining users
+            for (const [uid] of currentUsers) {
+              await removeDMVoiceUser(conversationId, uid);
+              const sockets = await io.in(`user:${uid}`).fetchSockets();
+              for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
+            }
+            io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId });
+            io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
+            createSystemMessage(io, conversationId, userId, 'Voice call ended');
           }
-          io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId });
-          io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
-          createSystemMessage(io, conversationId, userId, 'Voice call ended');
+        } catch (err) {
+          console.error(`[DMVoice] Redis error during call timeout cleanup:`, err);
         }
       }, DM_CALL_TIMEOUT_MS));
     } else {
@@ -334,18 +365,25 @@ export function handleDMVoiceEvents(
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 
+    // Atomic read-modify-write via Lua to prevent race conditions
     const redis = getRedis();
-    const dataStr = await redis.hGet(`dm:voice:users:${conversationId}`, userId);
-    if (!dataStr) return;
+    const updatedStr = await redis.eval(
+      `local d = redis.call('hget', KEYS[1], ARGV[1])
+       if not d then return nil end
+       local t = cjson.decode(d)
+       t.selfMute = ARGV[2] == '1'
+       local s = cjson.encode(t)
+       redis.call('hset', KEYS[1], ARGV[1], s)
+       return s`,
+      { keys: [`dm:voice:users:${conversationId}`], arguments: [userId, muted ? '1' : '0'] },
+    ) as string | null;
+    if (!updatedStr) return;
 
-    const data: DMVoiceUserState = JSON.parse(dataStr);
-    data.selfMute = muted;
-    await redis.hSet(`dm:voice:users:${conversationId}`, userId, JSON.stringify(data));
-
+    const data: DMVoiceUserState = JSON.parse(updatedStr);
     io.to(`dm:${conversationId}`).emit('dm:voice:state_update', {
       conversationId,
       userId,
-      selfMute: muted,
+      selfMute: data.selfMute,
       selfDeaf: data.selfDeaf,
     });
   });
@@ -356,19 +394,26 @@ export function handleDMVoiceEvents(
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 
+    // Atomic read-modify-write via Lua to prevent race conditions
     const redis = getRedis();
-    const dataStr = await redis.hGet(`dm:voice:users:${conversationId}`, userId);
-    if (!dataStr) return;
+    const updatedStr = await redis.eval(
+      `local d = redis.call('hget', KEYS[1], ARGV[1])
+       if not d then return nil end
+       local t = cjson.decode(d)
+       t.selfDeaf = ARGV[2] == '1'
+       local s = cjson.encode(t)
+       redis.call('hset', KEYS[1], ARGV[1], s)
+       return s`,
+      { keys: [`dm:voice:users:${conversationId}`], arguments: [userId, deafened ? '1' : '0'] },
+    ) as string | null;
+    if (!updatedStr) return;
 
-    const data: DMVoiceUserState = JSON.parse(dataStr);
-    data.selfDeaf = deafened;
-    await redis.hSet(`dm:voice:users:${conversationId}`, userId, JSON.stringify(data));
-
+    const data: DMVoiceUserState = JSON.parse(updatedStr);
     io.to(`dm:${conversationId}`).emit('dm:voice:state_update', {
       conversationId,
       userId,
       selfMute: data.selfMute,
-      selfDeaf: deafened,
+      selfDeaf: data.selfDeaf,
     });
   });
 

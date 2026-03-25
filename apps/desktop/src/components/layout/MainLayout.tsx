@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { translateServerError } from '../../utils/serverErrors';
+import i18n from '../../i18n';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore } from '../../stores/voiceStore';
@@ -573,7 +575,7 @@ export function MainLayout() {
         const vs = useVoiceStore.getState();
         if (vs.activeChannelId) vs.leaveChannel();
         if (vs.dmCallConversationId) vs.leaveDMCall();
-        toast.error(data.message);
+        toast.error(translateServerError(data.message, i18n.t, 'common.somethingWentWrong'));
       },
     };
 

@@ -71,6 +71,8 @@ export async function getOrCreateRouter(channelId: string): Promise<Router> {
  * Release a Router when the last user leaves a voice channel.
  */
 export function releaseRouter(channelId: string): void {
+  // Cancel any in-flight router creation for this channel
+  pendingRouters.delete(channelId);
   const router = channelRouters.get(channelId);
   if (router && !router.closed) {
     router.close();
