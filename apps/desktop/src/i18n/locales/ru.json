@@ -766,7 +766,12 @@
       "mobileApp": "Мобильное приложение",
       "planned": "Планируется",
       "basic": "Базовый",
-      "viaJitsi": "Через Jitsi"
+      "viaJitsi": "Через Jitsi",
+      "customThemes": "Пользовательские темы",
+      "rolePermissions": "Права ролей + переопределения каналов",
+      "ts3Addons": "Аддоны TS3",
+      "jsonThemes": "JSON-темы",
+      "powerLevels": "Уровни доступа"
     },
     "showcase": {
       "title": "Сделано",

@@ -102,7 +102,7 @@ export function MessageList() {
         <Virtuoso
           ref={virtuosoRef}
           data={messages}
-          className="h-full px-4"
+          className="h-full px-4 !overflow-x-hidden"
           followOutput={atBottom ? 'smooth' : false}
           startReached={handleStartReached}
           atBottomStateChange={handleAtBottomChange}

@@ -766,7 +766,12 @@
       "mobileApp": "تطبيق الهاتف",
       "planned": "مخطط",
       "basic": "أساسي",
-      "viaJitsi": "عبر Jitsi"
+      "viaJitsi": "عبر Jitsi",
+      "customThemes": "سمات مخصصة",
+      "rolePermissions": "أذونات الأدوار + تجاوزات القنوات",
+      "ts3Addons": "إضافات TS3",
+      "jsonThemes": "سمات JSON",
+      "powerLevels": "مستويات الصلاحيات"
     },
     "showcase": {
       "title": "صُمّم",

@@ -766,7 +766,12 @@
       "mobileApp": "モバイルアプリ",
       "planned": "計画中",
       "basic": "基本",
-      "viaJitsi": "Jitsi 経由"
+      "viaJitsi": "Jitsi 経由",
+      "customThemes": "カスタムテーマ",
+      "rolePermissions": "ロール権限 + チャンネル上書き",
+      "ts3Addons": "TS3アドオン",
+      "jsonThemes": "JSONテーマ",
+      "powerLevels": "パワーレベル"
     },
     "showcase": {
       "title": "あなただけの",

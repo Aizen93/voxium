@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
-**Version:** 1.6.0
-**Date:** 2026-03-19
+**Version:** 1.7.0
+**Date:** 2026-03-26
 
 ## Project Structure
 
@@ -43,7 +43,7 @@ Voxium/
 - Tauri 2 desktop wrapper with native notifications (avatar support: WinRT circular icon on Windows, blob URL icon in browser), auto-update with signed builds via `tauri-plugin-updater`
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
 - **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members; admin UI for global + per-server management; read-only limits tab in server settings
-- Custom frameless title bar with system tray (close-to-tray), splash screen window, infrastructure server management with interactive 3D globe visualization in admin geography dashboard
+- Custom frameless title bar with system tray (close-to-tray with graceful fallback on Linux — quit cleanly if tray unavailable), splash screen window, infrastructure server management with interactive 3D globe visualization in admin geography dashboard
 - **Community themes** — create, publish, browse, install/uninstall themes with live preview editor, JSON import/export, marketplace with search/sort/tag filtering, admin moderation (remove)
 - **Internationalization (i18n)** — 11 languages (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar) with RTL support for Arabic, browser language detection, localStorage persistence, language settings tab
 
@@ -74,6 +74,17 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **v1.7.0 — Linux Desktop Fix + Landing Page + UX Polish** (2026-03-26)
+  - **Linux Tauri fix (CORS):** Removed unnecessary `withCredentials: true` from Axios — auth uses Bearer tokens, not cookies. The strict CORS mode it triggered broke on Linux webkit2gtk where the Tauri custom protocol origin (`http://tauri.localhost`) may not be echoed correctly. Server CORS middleware now echoes the first allowed origin on null-origin requests instead of `*` (which is forbidden with `credentials: true`).
+  - **Linux Tauri fix (system tray):** `TrayIconBuilder::build()` error now handled gracefully (`.is_ok()` instead of `?`). On Linux GNOME/Wayland without `libappindicator`, the app no longer crashes on startup. Close behavior adapts: tray available → hide to tray; no tray → quit cleanly.
+  - **Landing page comparison table:** Added "Custom Themes" row (Voxium ✓, Discord ✗, TeamSpeak "TS3 Addons", Matrix "JSON Themes") and "Role Permissions + Channel Overrides" row (Voxium ✓, Discord ✓, TeamSpeak ✓, Matrix "Power Levels"). All values fact-checked against free tiers.
+  - **Landing page footer:** Contributing link now points to GitHub CONTRIBUTING.md. Status link commented out (placeholder for future Uptime Kuma deployment).
+  - **Message area horizontal scroll fix:** Added `!overflow-x-hidden` to Virtuoso scroller (overrides inline `overflow: auto`) and `min-w-0` to ChatArea/DMChatArea root flex containers. Prevents useless horizontal scrollbar in both server and DM message lists.
+  - **Server error translations:** New `utils/serverErrors.ts` maps 130+ server error messages to i18n keys. All error-displaying components updated to use `getTranslatedError()`.
+  - **Production env template:** `.env.production.example` now documents all three Tauri CORS origins (Windows/macOS/Linux).
+  - Translation keys added across all 11 locales for new comparison rows.
+  - Version bump: 1.6.0 → 1.7.0 across all packages, Tauri config, and Cargo files.
 
 - **Internationalization (i18n)** (2026-03-23) -- 11-language support (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar) with RTL for Arabic; language selector in settings; i18next with browser detection and localStorage persistence.
 

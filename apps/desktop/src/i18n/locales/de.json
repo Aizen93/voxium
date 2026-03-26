@@ -766,7 +766,12 @@
       "mobileApp": "Mobile App",
       "planned": "Geplant",
       "basic": "Einfach",
-      "viaJitsi": "Via Jitsi"
+      "viaJitsi": "Via Jitsi",
+      "customThemes": "Benutzerdefinierte Themes",
+      "rolePermissions": "Rollenberechtigungen + Kanalüberschreibungen",
+      "ts3Addons": "TS3-Addons",
+      "jsonThemes": "JSON-Themes",
+      "powerLevels": "Berechtigungsstufen"
     },
     "showcase": {
       "title": "Ganz",

@@ -773,7 +773,12 @@
       "mobileApp": "Mobile App",
       "planned": "Planned",
       "basic": "Basic",
-      "viaJitsi": "Via Jitsi"
+      "viaJitsi": "Via Jitsi",
+      "customThemes": "Custom Themes",
+      "rolePermissions": "Role Permissions + Channel Overrides",
+      "ts3Addons": "TS3 Addons",
+      "jsonThemes": "JSON Themes",
+      "powerLevels": "Power Levels"
     },
     "showcase": {
       "title": "Made",

@@ -6,7 +6,11 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
 
 export const api = axios.create({
   baseURL: API_BASE,
-  withCredentials: true,
+  // Note: withCredentials is intentionally NOT set. Auth uses Bearer tokens
+  // via the Authorization header (not cookies). Setting withCredentials: true
+  // triggers strict CORS (origin must be exact, not "*") which breaks on
+  // Linux webkit2gtk where the Tauri custom protocol origin may not be echoed
+  // correctly by the server.
 });
 
 // Attach auth token to every request
