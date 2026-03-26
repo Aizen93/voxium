@@ -71,7 +71,7 @@ jobs:
           fetch-depth: 0
 
       - name: Gitleaks (secrets detection)
-        uses: gitleaks/gitleaks-action@ff98106d4c7b40b7eb5303a239c8a7386bc95e4c # v2.3.9
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
