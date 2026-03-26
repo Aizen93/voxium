@@ -1,0 +1,9 @@
+# Require owner approval for any changes to CI/CD, security config, or deployment files
+/.github/                    @Aizen93
+/.github/workflows/          @Aizen93
+.gitleaks.toml               @Aizen93
+docker-compose*.yml          @Aizen93
+Dockerfile                   @Aizen93
+docker-entrypoint.sh         @Aizen93
+.env.production.example      @Aizen93
+apps/desktop/src-tauri/tauri.conf.json @Aizen93
