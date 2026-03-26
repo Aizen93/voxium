@@ -44,7 +44,25 @@ export const LIMITS = {
   MAX_ATTACHMENT_SIZE: 8 * 1024 * 1024, // 8 MB (default for non-video files)
   MAX_VIDEO_ATTACHMENT_SIZE: 12 * 1024 * 1024, // 12 MB (for video files)
   ATTACHMENT_RETENTION_DAYS: 3,
+  MAX_ROLES_PER_SERVER: 25,
+  ROLE_NAME_MIN: 1,
+  ROLE_NAME_MAX: 100,
+  NICKNAME_MAX: 32,
+  THEME_NAME_MIN: 2,
+  THEME_NAME_MAX: 50,
+  THEME_DESCRIPTION_MAX: 500,
+  THEME_MAX_TAGS: 5,
+  THEME_TAG_MAX_LENGTH: 20,
+  THEME_MAX_PER_USER: 10,
+  THEMES_PER_PAGE: 20,
+  THEME_SVG_MAX_SIZE: 10_000, // 10KB max for custom SVG patterns
 } as const;
+
+export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
+export type ThemePatternType = (typeof THEME_PATTERN_TYPES)[number];
+
+export const THEME_PATTERN_AREAS = ['sidebar', 'channel', 'chat'] as const;
+export type ThemePatternArea = (typeof THEME_PATTERN_AREAS)[number];
 
 export const ALLOWED_ATTACHMENT_TYPES = [
   'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -129,6 +147,10 @@ export const WS_EVENTS = {
   MEMBER_ROLE_UPDATED: 'member:role_updated',
   MEMBER_KICKED: 'member:kicked',
   SERVER_DELETED: 'server:deleted',
+  VOICE_SERVER_MUTE: 'voice:server_mute',
+  VOICE_SERVER_DEAFEN: 'voice:server_deafen',
+  VOICE_FORCE_MOVE: 'voice:force_move',
+  VOICE_FORCE_MOVED: 'voice:force_moved',
   VOICE_SCREEN_SHARE_START: 'voice:screen_share:start',
   VOICE_SCREEN_SHARE_STOP: 'voice:screen_share:stop',
   VOICE_SCREEN_SHARE_STATE: 'voice:screen_share:state',
@@ -146,4 +168,42 @@ export const WS_EVENTS = {
   ADMIN_SUBSCRIBE_SUPPORT: 'admin:subscribe_support',
   ADMIN_UNSUBSCRIBE_SUPPORT: 'admin:unsubscribe_support',
   FORCE_LOGOUT: 'force:logout',
+  // Roles & Permissions
+  ROLE_CREATED: 'role:created',
+  ROLE_UPDATED: 'role:updated',
+  ROLE_DELETED: 'role:deleted',
+  ROLE_REORDERED: 'role:reordered',
+  MEMBER_ROLES_UPDATED: 'member:roles_updated',
+  CHANNEL_PERMISSIONS_UPDATED: 'channel:permissions_updated',
+  MEMBER_NICKNAME_UPDATED: 'member:nickname_updated',
+  // Community Themes
+  THEME_PUBLISHED: 'theme:published',
+  THEME_UPDATED: 'theme:updated',
+  THEME_REMOVED: 'theme:removed',
 } as const;
+
+export const THEME_COLOR_KEYS = [
+  'bg-primary', 'bg-secondary', 'bg-tertiary', 'bg-hover', 'bg-active', 'bg-floating',
+  'sidebar', 'channel', 'chat',
+  'text-primary', 'text-secondary', 'text-muted', 'text-link',
+  'accent-primary', 'accent-hover', 'accent-success', 'accent-warning', 'accent-danger', 'accent-info',
+  'border',
+  'voice-connected', 'voice-speaking', 'voice-muted',
+  'scrollbar-thumb', 'scrollbar-thumb-hover',
+  'selection-bg', 'selection-text',
+] as const;
+
+export type ThemeColorKey = (typeof THEME_COLOR_KEYS)[number];
+
+export const THEME_COLOR_GROUPS: Record<string, readonly ThemeColorKey[]> = {
+  'Backgrounds': ['bg-primary', 'bg-secondary', 'bg-tertiary', 'bg-hover', 'bg-active', 'bg-floating'],
+  'Layout': ['sidebar', 'channel', 'chat'],
+  'Text': ['text-primary', 'text-secondary', 'text-muted', 'text-link'],
+  'Accents': ['accent-primary', 'accent-hover', 'accent-success', 'accent-warning', 'accent-danger', 'accent-info'],
+  'Borders': ['border'],
+  'Voice': ['voice-connected', 'voice-speaking', 'voice-muted'],
+  'Scrollbar': ['scrollbar-thumb', 'scrollbar-thumb-hover'],
+  'Selection': ['selection-bg', 'selection-text'],
+} as const;
+
+export const BUILT_IN_THEME_IDS = ['dark', 'light', 'midnight', 'tactical'] as const;

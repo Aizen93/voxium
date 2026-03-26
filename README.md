@@ -14,9 +14,60 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 
 - **Zero personal data required** — No phone number, no ID verification, no tracking
 - **Fully open source** — Audit every line, self-host on your own infrastructure
-- **Production-ready voice** — mediasoup SFU for servers, direct P2P for DM calls, with AI noise suppression (RNNoise ML)
+- **Production-ready voice** — mediasoup SFU for servers, direct P2P for DM calls (private STUN), AI noise suppression (RNNoise ML)
+- **11 languages** — English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL)
+- **Theme engine** — 4 built-in themes, full custom theme editor with live preview, community marketplace
 - **Cross-platform** — Native desktop apps for Windows, macOS, and Linux via Tauri 2
 - **Modern stack** — React 19, TypeScript, Zustand, Tailwind CSS, real-time WebSockets
+
+---
+
+## Key Highlights
+
+<table>
+<tr>
+<td width="50%">
+
+### Advanced Permission System
+Discord-style role-based access control with 20 granular permission flags, per-channel overrides (allow/deny/inherit), role hierarchy enforcement, and a permission calculator that resolves @everyone → role permissions → channel overrides. Admins manage roles, assign them to members, and configure channel-specific restrictions — all through the UI.
+
+</td>
+<td width="50%">
+
+### Production-Ready Voice
+mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing, and voice quality selector. DM calls use direct P2P WebRTC with Perfect Negotiation, routed through a private self-hosted STUN server (coturn) — no third-party relay.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### Theme Engine & Marketplace
+4 built-in themes (Dark, Light, Midnight, Tactical) plus a full theme editor where users create custom themes with their own branding — colors, patterns, and CSS overrides. Live preview before applying, and a community marketplace to publish, browse, and install themes created by other users.
+
+</td>
+<td width="50%">
+
+### 11 Languages
+Fully translated interface with first-class support for English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, and Arabic (with RTL layout). Language auto-detected from browser, switchable in settings. Every UI string is translated — not just labels but toasts, errors, modals, and voice indicators.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### Privacy-First Architecture
+Zero third-party services — no Google STUN, no analytics, no CDNs. Self-hosted STUN via coturn, all media stays on your infrastructure. STUN URL derived from your server hostname — no hardcoded external endpoints. No phone number or ID required to sign up.
+
+</td>
+<td width="50%">
+
+### Full-Stack Security
+JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte limit, timing-safe auth flows, IDOR prevention, runtime socket payload validation, rate limiting on every endpoint, email verification gate, and comprehensive input sanitization.
+
+</td>
+</tr>
+</table>
 
 ---
 
@@ -32,15 +83,21 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 | | Direct Messages | 1-on-1 text with real-time delivery, typing indicators, reactions, persistent unread tracking, conversation deletion |
 | | Message Search | Full-text search across server channels and DM conversations with jump-to-message navigation |
 | **Voice** | Server Voice (SFU) | mediasoup Selective Forwarding Unit for scalable voice (25+ users per channel), speaking indicators, latency display |
-| | DM Voice Calls | 1-on-1 WebRTC P2P audio with incoming call modal, ringtone, speaking indicators, call history as system messages |
+| | DM Voice Calls | 1-on-1 WebRTC P2P audio with Perfect Negotiation, private STUN server (coturn), incoming call modal, ringtone, speaking indicators, call history as system messages |
 | | Screen Sharing | Share screen in voice channels with real-time video and system audio, inline/floating viewer modes |
 | | AI Noise Suppression | ML-powered RNNoise WASM filter removes keyboard, mouse, and background noise in real time via AudioWorklet |
 | | Opus Optimization | DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate |
 | | Push-to-Talk | Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode |
 | | Audio Settings | Input/output device selection, live mic level meter, noise suppression toggle, persisted preferences |
-| | Mute/Deaf Controls | Always-visible controls that persist across channel switches, server switches, and app restarts |
+| | Mute/Deaf Controls | Self mute/deaf persisted across sessions; server force-mute/deafen by moderators (persists via Redis, cannot be bypassed) |
+| | Voice Moderation | Server mute/deafen (persists across reconnect via Redis), cross-channel force-move, role hierarchy enforcement |
+| **Permissions** | Custom Roles | Create unlimited custom roles with names, colors, and granular permissions; role hierarchy enforcement prevents privilege escalation |
+| | 20 Permission Flags | VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, and 12 more |
+| | Channel Overrides | Per-channel permission overrides with allow/deny/inherit tri-state per role — restrict #announcements to read-only, hide #staff channels |
+| | Permission Calculator | Discord-style resolution: @everyone base → OR all role permissions → channel overrides; ADMINISTRATOR bypasses everything |
+| | Voice Moderation | Server mute/deafen (persists across reconnect via Redis), cross-channel force-move, role hierarchy enforcement |
+| | Per-Server Nicknames | Members can set server-specific display names; admins can manage others' nicknames |
 | **Social** | Friend System | Send, accept, decline, and remove friend requests with real-time notifications |
-| | Roles & Permissions | Owner/Admin/Member hierarchy; role changes, member kicks, ownership transfer |
 | | User Profiles | Avatars with online/offline status, display names, bios with real-time sync across all clients |
 | | Presence | Real-time online/offline status for all server members and DM participants |
 | **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/server/ban management, storage management (avatars/icons/attachments with top uploaders and orphan cleanup), live metrics, audit log, moderation queue |
@@ -52,9 +109,15 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 | | Authentication | JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation |
 | | Rate Limiting | Per-endpoint and per-socket rate limiting, admin-editable via Redis-backed registry |
 | | Input Sanitization | HTML stripping, validation, CORS protection |
+| **Themes** | Built-in Themes | 4 built-in themes — Dark, Light, Midnight, Tactical — switchable instantly in settings |
+| | Custom Theme Editor | Full visual editor with live preview: customize all colors, patterns, and CSS overrides to match your branding |
+| | Theme Marketplace | Publish your custom themes for the community; browse, preview, and install themes created by other users |
+| **Internationalization** | 11 Languages | English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL) |
+| | Auto-Detection | Language auto-detected from browser locale; switchable in settings; RTL layout for Arabic |
 | **Platform** | File Uploads | S3-compatible storage for avatars, server icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
 | | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
 | | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with Discord-inspired dark UI |
+| | Self-Hosted STUN | Private coturn STUN server for P2P WebRTC — STUN URL derived from your server hostname, zero reliance on Google or third-party STUN/TURN services |
 | | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |
 
 ---
@@ -63,10 +126,11 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 
 | Layer | Technologies |
 |-------|-------------|
-| Backend | Node.js, Express, Socket.IO, Prisma, PostgreSQL, Redis |
-| Frontend | React 19, TypeScript, Vite, Zustand, Tailwind CSS |
+| Backend | Node.js, Express 5, Socket.IO, Prisma 7, PostgreSQL, Redis 5 |
+| Frontend | React 19, TypeScript, Vite 7, Zustand, Tailwind CSS 4 |
 | Desktop | Tauri 2 (Rust) |
 | Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM, Web Audio API |
+| Testing | Vitest, Supertest, Playwright (E2E) |
 | Infrastructure | S3-compatible storage, Nodemailer (SMTP) |
 
 ---
@@ -509,6 +573,63 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 
 ---
 
+## Testing
+
+Voxium has a comprehensive test suite with 940 unit and integration tests covering API routes, middleware, utilities, voice handlers, permission system, themes, DM voice, and security edge cases.
+
+### Running Tests
+
+```bash
+# Run all tests (unit + integration, ~2s)
+pnpm test
+
+# Watch mode (re-runs on file changes)
+pnpm test:watch
+
+# Run with coverage report
+pnpm --filter @voxium/server test:coverage
+
+# Run E2E tests (requires backend + frontend + Redis running)
+pnpm test:e2e               # Headless
+pnpm test:e2e:ui             # Interactive UI mode
+pnpm test:e2e:headed         # Visible browser
+```
+
+### Test Coverage
+
+| Category | Tests | What's Covered |
+|----------|-------|----------------|
+| **Lazy Init Regression** | 44 | Prisma, S3, email, Redis, mediasoup, CORS — catches module-scope env var bugs |
+| **Auth Routes** | 25 | Register, login, refresh, me, change-password, forgot-password, TOTP flow |
+| **Auth Middleware** | 16 | JWT validation, HS256 algorithm pinning, token purpose rejection, email verification gate |
+| **Error Handler** | 16 | Error-to-HTTP mapping, all error classes, production mode |
+| **Server Routes** | 31 | CRUD, membership, permissions, feature flags, socket events |
+| **Channel Routes** | 24 | CRUD, resource limits, categories, socket events |
+| **Message Routes** | 26 | CRUD, IDOR prevention, sanitization, pagination, admin delete |
+| **Invite Routes** | 16 | Create, join (single-use), preview, expiry, member limits |
+| **DM Routes** | 18 | Conversations, messages, cascade delete, authorization |
+| **Upload Routes** | 19 | S3 redirect/proxy, Express 5 wildcards, path traversal prevention |
+| **Permission System** | 119 | Role CRUD, hierarchy enforcement, channel overrides, permission calculator, bitmask utilities |
+| **Voice Handler** | 45 | Transport ACK on all code paths, join validation, mute/deaf/speaking, server_mute/deafen/force_move + deafen-implies-mute |
+| **DM Voice Handler** | 81 | P2P call lifecycle, signal relay, atomic mute/deaf (Lua), call timeout, 1-on-1 capacity, decline auth, mutual exclusivity |
+| **Theme Routes** | 29 | CRUD, publish/unpublish marketplace, browse/search, install count, validation |
+| **Auth Service** | 22 | Registration, login, tokens, password reset, email normalization |
+| **TOTP Service** | 19 | Setup, enable, verify, disable, encrypt/decrypt roundtrip, backup codes |
+| **Pure Utilities** | 75 | Sanitization, error classes, mentions, reactions, rate limiting |
+| **Server Limits** | 10 | 3-tier resolution (server > global > hardcoded), fallthrough |
+| **Feature Flags** | 6 | Defaults, overrides, unknown flags |
+| **Attachment Cleanup** | 7 | 4 AM scheduling, timer lifecycle |
+
+### Test Architecture
+
+- **Framework:** [Vitest](https://vitest.dev/) — fast, TypeScript-native, ESM-compatible
+- **HTTP Testing:** [Supertest](https://github.com/ladjs/supertest) for Express route testing without starting a server
+- **Mocking:** Prisma, Redis, S3, Socket.IO, and rate limiters are mocked for isolation
+- **E2E:** [Playwright](https://playwright.dev/) with Chromium against the real dev stack
+- **Test location:** `apps/server/src/__tests__/` (excluded from production `tsc` and `eslint`)
+
+---
+
 ## Scripts Reference
 
 | Script | Description |
@@ -523,9 +644,14 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 | `pnpm build:desktop` | Build frontend for production |
 | `pnpm typecheck` | Run TypeScript type checking across all packages |
 | `pnpm lint` | Run ESLint across all packages |
+| `pnpm test` | Run all server unit + integration tests |
+| `pnpm test:watch` | Run tests in watch mode |
+| `pnpm test:e2e` | Run Playwright E2E tests |
 | `pnpm db:migrate` | Run Prisma migrations |
 | `pnpm db:seed` | Seed database with demo data |
 | `pnpm db:studio` | Open Prisma Studio |
+| `npx tsx scripts/test-permissions.ts` | Run permission system integration test (73 assertions, 11 phases) |
+| `npx tsx scripts/load-test-voice.ts` | Voice channel load test with real WebRTC media |
 
 ---
 

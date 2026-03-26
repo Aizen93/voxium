@@ -9,6 +9,8 @@ import { handleVoiceEvents, getVoiceStateForServer, getScreenShareState } from '
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
+import { Permissions } from '@voxium/shared';
+import { hasChannelPermission } from '../utils/permissionCalculator';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -48,7 +50,7 @@ export function initSocketServer(httpServer: HttpServer) {
       credentials: true,
     },
     pingInterval: 25000,
-    pingTimeout: 20000,
+    pingTimeout: 10000,
   });
 
   // Attach Redis adapter for multi-node broadcast support
@@ -133,6 +135,9 @@ export function initSocketServer(httpServer: HttpServer) {
           },
         });
         if (!channel || channel.server.members.length === 0) return;
+        // Check VIEW_CHANNEL permission
+        const canView = await hasChannelPermission(userId, channelId, channel.serverId, Permissions.VIEW_CHANNEL);
+        if (!canView) return;
         socket.join(`channel:${channelId}`);
         console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
       } catch (err) {
@@ -149,10 +154,20 @@ export function initSocketServer(httpServer: HttpServer) {
     });
 
     // ─── Typing indicators ──────────────────────────────────────────
-    socket.on('typing:start', (channelId: string) => {
+    socket.on('typing:start', async (channelId: string) => {
       if (!socketRateLimit(socket, 'typing', 30)) return;
       if (typeof channelId !== 'string' || !channelId) return;
       if (!socket.rooms.has(`channel:${channelId}`)) return;
+      // Check SEND_MESSAGES — user shouldn't appear to type in channels they can't send to
+      try {
+        const ch = await prisma.channel.findUnique({ where: { id: channelId }, select: { serverId: true } });
+        if (!ch) return;
+        const canSend = await hasChannelPermission(userId, channelId, ch.serverId, Permissions.SEND_MESSAGES);
+        if (!canSend) return;
+      } catch (err) {
+        console.warn('[Socket] typing:start permission check failed:', err instanceof Error ? err.message : err);
+        return;
+      }
       socket.to(`channel:${channelId}`).emit('typing:start', {
         channelId,
         userId,
@@ -262,15 +277,24 @@ export function initSocketServer(httpServer: HttpServer) {
         // Only broadcast offline and update DB if the user has no remaining
         // sockets on any node (1:many presence model).
         if (result?.fullyOffline) {
-          const membershipList = await prisma.serverMember.findMany({
-            where: { userId },
-            select: { serverId: true },
-          });
+          const [membershipList, dmConversations] = await Promise.all([
+            prisma.serverMember.findMany({
+              where: { userId },
+              select: { serverId: true },
+            }),
+            prisma.conversation.findMany({
+              where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
+              select: { id: true },
+            }),
+          ]);
 
           await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
 
           for (const m of membershipList) {
             socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
+          }
+          for (const c of dmConversations) {
+            socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'offline' });
           }
         }
       } catch (err) {
@@ -295,7 +319,7 @@ export function initSocketServer(httpServer: HttpServer) {
           where: { userId_ip: { userId, ip: connectIp } },
           update: { lastSeenAt: new Date() },
           create: { userId, ip: connectIp },
-        }).catch(() => {}); // Non-critical
+        }).catch((err) => console.warn('[WS] IP record upsert failed:', err));
       }
 
       // Join rooms for all servers the user is a member of
@@ -307,30 +331,51 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.join(`server:${m.serverId}`);
       }
 
-      // Auto-join all text channel rooms so message:new events reach all members
-      const textChannels = await prisma.channel.findMany({
+      // Auto-join text channel rooms the user can view
+      const allTextChannels = await prisma.channel.findMany({
         where: { serverId: { in: memberships.map((m) => m.serverId) }, type: 'text' },
         select: { id: true, serverId: true },
       });
+      // Group channels by server for efficient batch filtering
+      const channelsByServer = new Map<string, typeof allTextChannels>();
+      for (const ch of allTextChannels) {
+        const list = channelsByServer.get(ch.serverId) || [];
+        list.push(ch);
+        channelsByServer.set(ch.serverId, list);
+      }
+      const { filterVisibleChannels } = await import('../utils/permissionCalculator');
+      const textChannels: typeof allTextChannels = [];
+      for (const [serverId, channels] of channelsByServer) {
+        const visible = await filterVisibleChannels(userId, serverId, channels);
+        textChannels.push(...visible);
+      }
       for (const ch of textChannels) {
         socket.join(`channel:${ch.id}`);
       }
 
-      // Compute unread counts across all text channels in a single query
+      // Compute unread counts across all text channels in a single query.
+      // Uses LATERAL JOIN with LIMIT 100 to cap per-channel scanning — the frontend
+      // shows "99+" anyway, so exact counts beyond 100 are unnecessary. This prevents
+      // full table scans on channels with thousands of unread messages.
       if (textChannels.length > 0) {
         const textChannelIds = textChannels.map((ch) => ch.id);
         const unreads = await prisma.$queryRawUnsafe<
-          Array<{ channel_id: string; server_id: string; cnt: bigint }>
+          Array<{ channel_id: string; server_id: string; cnt: number }>
         >(
-          `SELECT c.id AS channel_id, c.server_id, COUNT(m.id) AS cnt
+          `SELECT c.id AS channel_id, c.server_id, cnt.val AS cnt
            FROM channels c
            LEFT JOIN channel_reads cr ON cr.channel_id = c.id AND cr.user_id = $1
-           INNER JOIN messages m ON m.channel_id = c.id
-             AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
-             AND m.author_id != $1
+           CROSS JOIN LATERAL (
+             SELECT COUNT(*)::int AS val FROM (
+               SELECT 1 FROM messages m
+               WHERE m.channel_id = c.id
+                 AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
+                 AND m.author_id != $1
+               LIMIT 100
+             ) sub
+           ) cnt
            WHERE c.id = ANY($2::text[])
-           GROUP BY c.id, c.server_id
-           HAVING COUNT(m.id) > 0`,
+             AND cnt.val > 0`,
           userId,
           textChannelIds
         );
@@ -340,7 +385,7 @@ export function initSocketServer(httpServer: HttpServer) {
             unreads: unreads.map((r) => ({
               channelId: r.channel_id,
               serverId: r.server_id,
-              count: Number(r.cnt),
+              count: r.cnt,
             })),
           });
         }
@@ -355,20 +400,25 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.join(`dm:${conv.id}`);
       }
 
-      // Compute DM unread counts
+      // Compute DM unread counts — same LATERAL + LIMIT 100 optimization as channels
       if (conversations.length > 0) {
         const convIds = conversations.map((c) => c.id);
         const dmUnreads = await prisma.$queryRawUnsafe<
-          Array<{ conversation_id: string; cnt: bigint }>
+          Array<{ conversation_id: string; cnt: number }>
         >(
-          `SELECT m.conversation_id, COUNT(m.id) AS cnt
-           FROM messages m
-           LEFT JOIN conversation_reads cr ON cr.conversation_id = m.conversation_id AND cr.user_id = $1
-           WHERE m.conversation_id = ANY($2::text[])
-             AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
-             AND m.author_id != $1
-           GROUP BY m.conversation_id
-           HAVING COUNT(m.id) > 0`,
+          `SELECT conv.id AS conversation_id, cnt.val AS cnt
+           FROM unnest($2::text[]) AS conv(id)
+           LEFT JOIN conversation_reads cr ON cr.conversation_id = conv.id AND cr.user_id = $1
+           CROSS JOIN LATERAL (
+             SELECT COUNT(*)::int AS val FROM (
+               SELECT 1 FROM messages m
+               WHERE m.conversation_id = conv.id
+                 AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
+                 AND m.author_id != $1
+               LIMIT 100
+             ) sub
+           ) cnt
+           WHERE cnt.val > 0`,
           userId,
           convIds
         );
@@ -377,7 +427,7 @@ export function initSocketServer(httpServer: HttpServer) {
           socket.emit('dm:unread:init', {
             unreads: dmUnreads.map((r) => ({
               conversationId: r.conversation_id,
-              count: Number(r.cnt),
+              count: r.cnt,
             })),
           });
         }
@@ -444,10 +494,28 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
       }
 
+      // Broadcast online status to all DM conversation rooms
+      try {
+        const dmConversations = await prisma.conversation.findMany({
+          where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
+          select: { id: true },
+        });
+        for (const c of dmConversations) {
+          socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
+        }
+      } catch (dmPresErr) {
+        console.error(`[WS] Error broadcasting DM presence for ${userId}:`, dmPresErr);
+      }
+
       // Send existing voice channel users for all servers (reads from Redis for cross-node visibility)
+      // Only send for channels the user has VIEW_CHANNEL permission for
       for (const m of memberships) {
         const voiceState = await getVoiceStateForServer(m.serverId);
         for (const { channelId, userIds, userStates } of voiceState) {
+          // Check VIEW_CHANNEL before revealing voice channel occupants
+          const canView = await hasChannelPermission(userId, channelId, m.serverId, Permissions.VIEW_CHANNEL);
+          if (!canView) continue;
+
           const userInfos = await prisma.user.findMany({
             where: { id: { in: userIds } },
             select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -458,6 +526,8 @@ export function initSocketServer(httpServer: HttpServer) {
               ...u,
               selfMute: state?.selfMute ?? false,
               selfDeaf: state?.selfDeaf ?? false,
+              serverMuted: state?.serverMuted ?? false,
+              serverDeafened: state?.serverDeafened ?? false,
               speaking: false,
             };
           });

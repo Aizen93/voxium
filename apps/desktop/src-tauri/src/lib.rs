@@ -1,5 +1,4 @@
 use std::io::Read;
-use tauri::Manager;
 
 /// Strict regex matching the server's VALID_S3_KEY_RE: (avatars|server-icons)/[word-dash]+.webp
 /// Prevents path traversal, null bytes, and unexpected characters in the key.
@@ -151,10 +150,82 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![notify_with_avatar])
         .setup(|app| {
+            use tauri::Manager;
+
+            // System tray with "Show" and "Quit" menu
+            // On Linux (GNOME/Wayland), tray creation can fail if libappindicator
+            // or a StatusNotifierItem D-Bus service is not available. We must handle
+            // this gracefully so the app still works without a system tray.
+            use tauri::menu::{Menu, MenuItem};
+            use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+            let show_item = MenuItem::with_id(app, "show", "Show Voxium", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            let has_tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("Voxium")
+                .menu(&menu)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // Double-click or left-click on tray icon → show window
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)
+                .is_ok();
+
+            if !has_tray {
+                eprintln!("[Voxium] System tray unavailable — close will quit the app instead of minimizing to tray");
+            }
+
+            // Set window icon and close behavior
             if let Some(window) = app.get_webview_window("main") {
                 let icon = tauri::include_image!("icons/icon.png");
-                let _ = window.set_icon(icon);
+                let _ = window.set_icon(icon.clone());
+
+                // If tray is available: close → hide to tray
+                // If no tray (Linux GNOME/Wayland): close → quit the app
+                let win = window.clone();
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        if has_tray {
+                            api.prevent_close();
+                            let _ = win.hide();
+                        } else {
+                            app_handle.exit(0);
+                        }
+                    }
+                });
             }
+
             Ok(())
         })
         .run(tauri::generate_context!())

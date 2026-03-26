@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+import axios from 'axios';
 import { api } from '../../services/api';
 import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
@@ -17,6 +19,7 @@ interface SearchModalProps {
 }
 
 export function SearchModal({ onClose, serverId, channels, conversationId, participantName }: SearchModalProps) {
+  const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -83,8 +86,8 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
       }
       setHasMore(data.hasMore);
       setHasSearched(true);
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       console.error('Search failed:', err);
     } finally {
       setIsSearching(false);
@@ -148,8 +151,8 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
 
   const formatTime = (dateStr: string) => {
     const date = new Date(dateStr);
-    if (isToday(date)) return `Today at ${format(date, 'h:mm a')}`;
-    if (isYesterday(date)) return `Yesterday at ${format(date, 'h:mm a')}`;
+    if (isToday(date)) return `${t('chat.search.today')} at ${format(date, 'h:mm a')}`;
+    if (isYesterday(date)) return `${t('chat.search.yesterday')} at ${format(date, 'h:mm a')}`;
     return format(date, 'MM/dd/yyyy h:mm a');
   };
 
@@ -163,7 +166,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
 
       {/* Modal */}
-      <div className="relative z-10 flex h-fit max-h-[70vh] w-full max-w-2xl flex-col rounded-lg bg-vox-bg-primary shadow-2xl border border-vox-border">
+      <div className="relative z-10 flex h-fit max-h-[70vh] w-full max-w-2xl flex-col rounded-lg bg-vox-bg-primary shadow-2xl border border-vox-border" role="dialog" aria-modal="true">
         {/* Search Header */}
         <div className="flex items-center gap-2 border-b border-vox-border px-4 py-3">
           <Search size={18} className="shrink-0 text-vox-text-muted" />
@@ -172,11 +175,11 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={serverId ? 'Search messages in this server...' : `Search messages with ${participantName || 'this user'}...`}
+            placeholder={serverId ? t('chat.search.searchInServer') : t('chat.search.searchWith', { name: participantName || 'this user' })}
             className="flex-1 bg-transparent text-sm text-vox-text-primary outline-none placeholder:text-vox-text-muted"
           />
           {query && (
-            <button onClick={() => setQuery('')} className="text-vox-text-muted hover:text-vox-text-primary">
+            <button onClick={() => setQuery('')} className="text-vox-text-muted hover:text-vox-text-primary" aria-label={t('common.clear')}>
               <X size={16} />
             </button>
           )}
@@ -194,7 +197,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
               onChange={(e) => setChannelFilter(e.target.value)}
               className="bg-vox-bg-secondary text-xs text-vox-text-secondary rounded px-2 py-1 outline-none border border-vox-border"
             >
-              <option value="">All channels</option>
+              <option value="">{t('chat.search.allChannels')}</option>
               {textChannels.map((ch) => (
                 <option key={ch.id} value={ch.id}>{ch.name}</option>
               ))}
@@ -217,14 +220,14 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
           {!isSearching && hasSearched && results.length === 0 && (
             <div className="flex flex-col items-center justify-center py-8 text-vox-text-muted">
               <Search size={32} className="mb-2 opacity-40" />
-              <p className="text-sm">No results found</p>
+              <p className="text-sm">{t('chat.search.noResults')}</p>
             </div>
           )}
 
           {!hasSearched && !isSearching && (
             <div className="flex flex-col items-center justify-center py-8 text-vox-text-muted">
               <Search size={32} className="mb-2 opacity-40" />
-              <p className="text-sm">Type to search messages</p>
+              <p className="text-sm">{t('chat.search.typeToSearch')}</p>
             </div>
           )}
 

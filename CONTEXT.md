@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
-**Version:** 1.4.0
-**Date:** 2026-03-13
+**Version:** 1.7.0
+**Date:** 2026-03-26
 
 ## Project Structure
 
@@ -17,7 +17,7 @@ Voxium/
 │   └── admin/            # Standalone admin dashboard (React + Vite, port 8082)
 ├── packages/
 │   └── shared/           # TypeScript types, validators, constants
-├── docker-compose.yml    # PostgreSQL + Redis
+├── docker-compose.yml    # Redis + coturn STUN server
 └── CLAUDE.md             # Conventions and commands
 ```
 
@@ -26,6 +26,9 @@ Voxium/
 - Real-time text messaging with editing, deletion, reactions, replies, search, @mentions with server-side autocomplete search + styled mention badges + mention highlight + distinct notification sound
 - **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls with global call status panel (visible from any view), push-to-talk, noise suppression, screen sharing, silence detection (producer pause/resume), voice quality selector (low/medium/high bitrate), adaptive bandwidth caps
 - Server/channel/category management with drag-and-drop reordering
+- **Advanced permission system** — Discord-style bitmask roles with 20 permission flags (VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, etc.), role hierarchy enforcement (actors cannot modify roles at or above their position), channel-level permission overrides (allow/deny/inherit tri-state per role), @everyone default role per server with restricted defaults (no ATTACH_FILES, CREATE_INVITES, CHANGE_NICKNAME), permission calculator resolves @everyone base → OR all role permissions → channel overrides (ADMINISTRATOR bypasses everything), VIEW_CHANNEL enforcement on channel list filtering, message access, and socket auto-join, role CRUD + member role assignment + channel override management UI
+- **Voice moderation** — server mute/deafen with Redis persistence (`voice:server_muted:{serverId}:{userId}`), re-applied on voice:join, cannot be self-bypassed, deafen implies mute (both server-side and client-side), cross-channel force-move, role hierarchy enforcement on moderation actions
+- **Per-server nicknames** — `ServerMember.nickname` nullable field, CHANGE_NICKNAME permission for self-nickname, MANAGE_NICKNAMES for managing others, displayed in MemberSidebar, voice panel, and message author names (falls back to displayName)
 - JWT auth with refresh tokens, password reset, Remember Me
 - S3 file uploads (avatars, server icons, message attachments) with presigned URLs; attachments proxied through server (S3 URL never exposed to client); `?inline` proxy for avatars/server-icons (used by notifications); 3-day retention with daily 4 AM cleanup job + email report; expired attachments show placeholder in chat
 - Direct messages with typing indicators, reactions, unread tracking
@@ -33,20 +36,23 @@ Voxium/
 - Unread indicators (channel + server level, persistent via DB)
 - Two-tier admin dashboard (admin + superadmin roles) with user/server/ban management, storage tools (avatars/server-icons/attachments with top uploaders, file browser, orphan cleanup), live metrics, audit log, moderation queue (reports), support ticket management, rate limit controls, feature flags
 - Admin user deletion with server ownership transfer
-- Comprehensive security hardening: JWT algorithm pinning (`HS256`), token purpose validation, IDOR prevention on message routes, admin role hierarchy enforcement, email enumeration prevention, email verification gate, TOTP replay protection (Redis), bcrypt 72-byte input limit, Tauri CSP, socket payload runtime type validation, presigned URL content-type enforcement, trust proxy conditional, GitHub Actions injection prevention
+- Comprehensive security hardening: JWT algorithm pinning (`HS256`), token purpose validation, IDOR prevention on message routes, admin role hierarchy enforcement, email enumeration prevention (generic registration errors + timing-safe password reset), email verification gate, TOTP replay protection (Redis), bcrypt 72-byte input limit, Tauri CSP, socket payload runtime type validation, presigned URL content-type enforcement, trust proxy conditional, GitHub Actions injection prevention
 - Rate limiting (per-endpoint + socket-level, admin-editable via Redis-backed registry) and input sanitization
 - Feature flags (registration, invites, server creation, voice, DM voice, support) — Redis-backed, toggleable from admin dashboard without redeploying
 - Per-server invite lock (owners/admins can lock/unlock invites independently of global flag)
 - Tauri 2 desktop wrapper with native notifications (avatar support: WinRT circular icon on Windows, blob URL icon in browser), auto-update with signed builds via `tauri-plugin-updater`
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
 - **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members; admin UI for global + per-server management; read-only limits tab in server settings
+- Custom frameless title bar with system tray (close-to-tray with graceful fallback on Linux — quit cleanly if tray unavailable), splash screen window, infrastructure server management with interactive 3D globe visualization in admin geography dashboard
+- **Community themes** — create, publish, browse, install/uninstall themes with live preview editor, JSON import/export, marketplace with search/sort/tag filtering, admin moderation (remove)
+- **Internationalization (i18n)** — 11 languages (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar) with RTL support for Arabic, browser language detection, localStorage persistence, language settings tab
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Node.js, Express, TypeScript, Prisma, PostgreSQL, Redis, Socket.IO |
-| Frontend | React 19, Vite 6, Zustand, Tailwind CSS, Tauri 2 |
+| Backend | Node.js, Express 5, TypeScript, Prisma 7, PostgreSQL, Redis, Socket.IO |
+| Frontend | React 19, Vite 7, Zustand, Tailwind CSS 4, Tauri 2 |
 | Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM noise suppression |
 | Storage | S3-compatible (presigned URL upload, proxy streaming for attachments) |
 | Admin | React 19, Vite, Zustand (standalone app, port 8082) |
@@ -68,6 +74,41 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **v1.7.0 — Linux Desktop Fix + Landing Page + UX Polish** (2026-03-26)
+  - **Linux Tauri fix (CORS):** Removed unnecessary `withCredentials: true` from Axios — auth uses Bearer tokens, not cookies. The strict CORS mode it triggered broke on Linux webkit2gtk where the Tauri custom protocol origin (`http://tauri.localhost`) may not be echoed correctly. Server CORS middleware now echoes the first allowed origin on null-origin requests instead of `*` (which is forbidden with `credentials: true`).
+  - **Linux Tauri fix (system tray):** `TrayIconBuilder::build()` error now handled gracefully (`.is_ok()` instead of `?`). On Linux GNOME/Wayland without `libappindicator`, the app no longer crashes on startup. Close behavior adapts: tray available → hide to tray; no tray → quit cleanly.
+  - **Landing page comparison table:** Added "Custom Themes" row (Voxium ✓, Discord ✗, TeamSpeak "TS3 Addons", Matrix "JSON Themes") and "Role Permissions + Channel Overrides" row (Voxium ✓, Discord ✓, TeamSpeak ✓, Matrix "Power Levels"). All values fact-checked against free tiers.
+  - **Landing page footer:** Contributing link now points to GitHub CONTRIBUTING.md. Status link commented out (placeholder for future Uptime Kuma deployment).
+  - **Message area horizontal scroll fix:** Added `!overflow-x-hidden` to Virtuoso scroller (overrides inline `overflow: auto`) and `min-w-0` to ChatArea/DMChatArea root flex containers. Prevents useless horizontal scrollbar in both server and DM message lists.
+  - **Server error translations:** New `utils/serverErrors.ts` maps 130+ server error messages to i18n keys. All error-displaying components updated to use `getTranslatedError()`.
+  - **Production env template:** `.env.production.example` now documents all three Tauri CORS origins (Windows/macOS/Linux).
+  - Translation keys added across all 11 locales for new comparison rows.
+  - Version bump: 1.6.0 → 1.7.0 across all packages, Tauri config, and Cargo files.
+
+- **Internationalization (i18n)** (2026-03-23) -- 11-language support (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar) with RTL for Arabic; language selector in settings; i18next with browser detection and localStorage persistence.
+
+- **Community Themes Review** (2026-03-21) -- Review found: patterns dropped on install (BUG), patterns not restored after preview (BUG), version not bumped for pattern-only changes, search missing debounce, empty catch blocks; see CONTEXT_CHANGELOG.md for full findings.
+
+- **Community Themes** (2026-03-21) -- Theme creation, marketplace browsing, JSON import/export, live preview editor, install/uninstall tracking; backend CRUD + admin moderation + 49 tests.
+
+- **Desktop UX + Admin Globe + Permission Enforcement** (2026-03-21) — Custom frameless title bar, system tray (close-to-tray), splash screen; admin infra server CRUD with cobe v2 globe; permission checks on voice produce/SPEAK, attachment proxy/VIEW_CHANNEL, force-move/CONNECT; input validation hardening on auth and infra routes.
+
+- **Advanced Permission System** (2026-03-19) — Discord-style bitmask roles with 20 permission flags (VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, etc.), role hierarchy enforcement, channel-level permission overrides (allow/deny/inherit tri-state), @everyone default role with restricted defaults, permission calculator (base → roles → channel overrides), VIEW_CHANNEL enforcement on channel list/messages/socket auto-join, voice moderation (server mute/deafen with Redis persistence, cross-channel force-move), per-server nicknames (CHANGE_NICKNAME/MANAGE_NICKNAMES), full CRUD API with role management UI in server settings + channel permission editor + member context menu for voice moderation. 119 permission system tests + 16 additional voice handler tests. Integration test script: `scripts/test-permissions.ts` (73 assertions, 11 phases).
+
+- **Security: Timing Side-Channel Fix** (2026-03-17) — `requestPasswordReset` now performs crypto work (token generation + hashing) regardless of whether the email exists in the DB. Prevents attackers from measuring response time differences to enumerate registered email addresses.
+
+- **Self-Hosted STUN + Desktop Test Suite** (2026-03-17) — Added coturn STUN-only server to docker-compose for cross-internet DM P2P calls (stateless NAT discovery, no media relay, privacy-first). STUN host auto-derived from `VITE_WS_URL`. Set up Vitest + jsdom for desktop app with 53 unit tests covering audio pipeline, voice store (pttActive lifecycle, DM user CRUD, peer cleanup), PTT logic (guard conditions, DM event routing, speaking indicator formula, STUN URL derivation, generation counter).
+
+- **Audio Pipeline Refactor + PTT for DM Calls + Privacy** (2026-03-16) — Separated noise suppression (Jitsi/Matrix RNNoise pattern: clean `source → AudioWorklet → destination` pipeline) from speaking detection into isolated pipelines. Extended push-to-talk to DM calls with PTT speaking indicator override (`pttActive` state). Removed Google STUN servers (privacy-first). Live noise suppression toggle mid-call with generation counter to prevent race conditions. All empty catch blocks replaced with proper error logging.
+
+- **Unit Test Suite** (2026-03-14) -- 635 unit and integration tests (582 server + 53 desktop) covering utils, middleware, routes, services, websocket, mediasoup config, and permission system. Vitest with process isolation (`pool: 'forks'`). CI pipeline updated to run tests.
+
+- **Dependency Upgrades** (2026-03-14) -- Prisma 6->7 (adapter pattern via `@prisma/adapter-pg`, `prisma.config.ts`, generated client at `src/generated/prisma/client`), Express 4->5, Redis 4->5 (`sIsMember` returns number, `multi().exec()` type changes), Tailwind 3->4 (CSS-first `@theme` config, `@tailwindcss/vite` plugin, removed `tailwind.config.js`/`postcss.config.js`), Vite 6->7 with `@vitejs/plugin-react` 5, bcryptjs 2->3 (ships own types), dotenv 16->17, rate-limiter-flexible 5->9, lucide-react 0.469->0.577; removed nanoid (replaced with `crypto.randomBytes`), zod (unused), `@types/bcryptjs` (bundled), autoprefixer+postcss (built into Tailwind 4). Updated Dockerfile + docker-entrypoint.sh + CI workflows for Prisma 7.
+
+- **Voice System Hardening + ESLint Zero Warnings** (2026-03-14) -- Transport connect ACK, auto-rejoin on DTLS failure (max 3 attempts), RNNoise gain gate bypass, consumer resume retry, live input device switching, voice cleanup on logout, toast notifications for voice errors. ESLint 153 warnings eliminated across all packages. Unread counter improvements: dedup mark-as-read calls, debounced while-viewing mark, tab-focus re-mark, lateral-join capped unread queries, rate-limited mark-read endpoints.
+
+- **Unread Counter Bug Fixes** (2026-03-13) — Fixed phantom unread badges caused by failed fire-and-forget mark-as-read calls (added single retry), stale serverId in debounced timer closures after server switch, missing mark-as-read on reconnect, and no re-mark on tab focus regain.
 
 - **Email Verification + Case-Insensitive Login** (2026-03-13) — New users must verify email before accessing the platform. Backend gate via `requireVerifiedEmail` middleware on all non-auth routes (including attachment proxy) + Socket.IO auth rejection. Frontend shows `EmailVerificationPendingPage` for unverified users with resend cooldown (reads `Retry-After` from 429, capped at 300s). `VerifyEmailPage` uses `processedTokenRef` guard (tracks last-processed token string, not boolean) to prevent StrictMode double-POST while allowing navigation to different tokens. Auth service queries use Prisma `select` to limit fetched fields (defense-in-depth against sensitive column exposure). Verification tokens: 256-bit entropy, SHA-256 hashed in DB, 24h expiry, format-validated (64 hex chars, normalized to lowercase). Reset-password tokens also normalized. Email addresses normalized to lowercase on registration, login, and password reset. `authStore.updateProfile` merges partial response to preserve `emailVerified`. Email sender uses Nodemailer structured `{ name, address }` to prevent header injection. Migration includes preflight duplicate-email check before case normalization. Dedicated rate limiters for verify-email (IP-based) and resend-verification (userId-based). Existing users backfilled as verified via migration. E2E: 9 verification tests + global teardown for PrismaClient cleanup + `registerViaUI` auto-verifies via DB (by email, no JWT parsing) + `registerViaUIUnverified` for pending-page tests.
 

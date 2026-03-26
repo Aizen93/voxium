@@ -2,7 +2,16 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
+import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
+
+// Untyped socket interface for admin-specific events not in the shared event maps
+interface AdminSocket {
+  emit(ev: string, ...args: unknown[]): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on(ev: string, fn: (...args: any[]) => void): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  off(ev: string, fn: (...args: any[]) => void): void;
+}
 
 // Module-level refs for metrics subscription cleanup
 let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
@@ -122,6 +131,9 @@ interface AdminState {
     isCustom: boolean;
   }>;
 
+  // Infrastructure Servers
+  infraServers: InfraServer[];
+
   // SFU
   sfuStats: (SfuStats & SfuMediaCounts) | null;
 
@@ -217,6 +229,12 @@ interface AdminState {
   deleteStorageFile: (key: string) => Promise<void>;
   cleanupOrphans: () => Promise<{ found: number; deleted: number }>;
 
+  // Infrastructure Servers
+  fetchInfraServers: () => Promise<void>;
+  createInfraServer: (data: Omit<InfraServer, 'id' | 'createdAt'>) => Promise<void>;
+  updateInfraServer: (id: string, data: Partial<Omit<InfraServer, 'id' | 'createdAt'>>) => Promise<void>;
+  deleteInfraServer: (id: string) => Promise<void>;
+
   // Export
   exportUsers: () => Promise<AdminUser[]>;
   exportServers: () => Promise<AdminServer[]>;
@@ -274,6 +292,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   supportTicketsFilter: 'all',
   activeTicket: null,
   activeTicketMessages: [],
+  infraServers: [],
   sfuStats: null,
   globalLimits: null,
   serverLimits: null,
@@ -577,9 +596,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   subscribeReports: () => {
     const socket = getSocket();
     if (!socket) return;
+    const adminSocket = socket as unknown as AdminSocket;
 
     // Clean up any existing subscription to prevent listener accumulation
-    if (reportsHandler) socket.off('report:new' as any, reportsHandler);
+    if (reportsHandler) adminSocket.off('report:new', reportsHandler);
     if (reportsReconnectUnsub) { reportsReconnectUnsub(); reportsReconnectUnsub = null; }
 
     reportsHandler = () => {
@@ -587,15 +607,16 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       get().fetchStats();
     };
 
-    socket.emit('admin:subscribe_reports' as any);
-    socket.on('report:new' as any, reportsHandler);
+    adminSocket.emit('admin:subscribe_reports');
+    adminSocket.on('report:new', reportsHandler);
 
     reportsReconnectUnsub = onSocketReconnect(() => {
       const s = getSocket();
       if (s && reportsHandler) {
-        s.emit('admin:subscribe_reports' as any);
-        s.off('report:new' as any, reportsHandler);
-        s.on('report:new' as any, reportsHandler);
+        const as = s as unknown as AdminSocket;
+        as.emit('admin:subscribe_reports');
+        as.off('report:new', reportsHandler);
+        as.on('report:new', reportsHandler);
       }
     });
   },
@@ -603,8 +624,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   unsubscribeReports: () => {
     const socket = getSocket();
     if (socket) {
-      socket.emit('admin:unsubscribe_reports' as any);
-      if (reportsHandler) socket.off('report:new' as any, reportsHandler);
+      const adminSocket = socket as unknown as AdminSocket;
+      adminSocket.emit('admin:unsubscribe_reports');
+      if (reportsHandler) adminSocket.off('report:new', reportsHandler);
     }
     reportsHandler = null;
     if (reportsReconnectUnsub) {
@@ -700,11 +722,12 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   subscribeSupport: () => {
     const socket = getSocket();
     if (!socket) return;
+    const adminSocket = socket as unknown as AdminSocket;
 
     // Clean up any existing subscription to prevent listener accumulation
-    if (supportTicketHandler) socket.off('support:ticket:new' as any, supportTicketHandler);
-    if (supportMessageHandler) socket.off('support:message:new' as any, supportMessageHandler);
-    if (supportStatusHandler) socket.off('support:status_change' as any, supportStatusHandler);
+    if (supportTicketHandler) adminSocket.off('support:ticket:new', supportTicketHandler);
+    if (supportMessageHandler) adminSocket.off('support:message:new', supportMessageHandler);
+    if (supportStatusHandler) adminSocket.off('support:status_change', supportStatusHandler);
     if (supportReconnectUnsub) { supportReconnectUnsub(); supportReconnectUnsub = null; }
 
     supportTicketHandler = () => {
@@ -731,26 +754,27 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       get().fetchSupportTickets();
     };
 
-    socket.emit('admin:subscribe_support' as any);
-    socket.on('support:ticket:new' as any, supportTicketHandler);
-    socket.on('support:message:new' as any, supportMessageHandler);
-    socket.on('support:status_change' as any, supportStatusHandler);
+    adminSocket.emit('admin:subscribe_support');
+    adminSocket.on('support:ticket:new', supportTicketHandler);
+    adminSocket.on('support:message:new', supportMessageHandler);
+    adminSocket.on('support:status_change', supportStatusHandler);
 
     supportReconnectUnsub = onSocketReconnect(() => {
       const s = getSocket();
       if (s) {
-        s.emit('admin:subscribe_support' as any);
+        const as = s as unknown as AdminSocket;
+        as.emit('admin:subscribe_support');
         if (supportTicketHandler) {
-          s.off('support:ticket:new' as any, supportTicketHandler);
-          s.on('support:ticket:new' as any, supportTicketHandler);
+          as.off('support:ticket:new', supportTicketHandler);
+          as.on('support:ticket:new', supportTicketHandler);
         }
         if (supportMessageHandler) {
-          s.off('support:message:new' as any, supportMessageHandler);
-          s.on('support:message:new' as any, supportMessageHandler);
+          as.off('support:message:new', supportMessageHandler);
+          as.on('support:message:new', supportMessageHandler);
         }
         if (supportStatusHandler) {
-          s.off('support:status_change' as any, supportStatusHandler);
-          s.on('support:status_change' as any, supportStatusHandler);
+          as.off('support:status_change', supportStatusHandler);
+          as.on('support:status_change', supportStatusHandler);
         }
       }
     });
@@ -759,10 +783,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   unsubscribeSupport: () => {
     const socket = getSocket();
     if (socket) {
-      socket.emit('admin:unsubscribe_support' as any);
-      if (supportTicketHandler) socket.off('support:ticket:new' as any, supportTicketHandler);
-      if (supportMessageHandler) socket.off('support:message:new' as any, supportMessageHandler);
-      if (supportStatusHandler) socket.off('support:status_change' as any, supportStatusHandler);
+      const adminSocket = socket as unknown as AdminSocket;
+      adminSocket.emit('admin:unsubscribe_support');
+      if (supportTicketHandler) adminSocket.off('support:ticket:new', supportTicketHandler);
+      if (supportMessageHandler) adminSocket.off('support:message:new', supportMessageHandler);
+      if (supportStatusHandler) adminSocket.off('support:status_change', supportStatusHandler);
     }
     supportTicketHandler = null;
     supportMessageHandler = null;
@@ -895,6 +920,30 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const { data } = await api.post('/admin/storage/cleanup-orphans');
     await Promise.all([get().fetchStorageStats(), get().fetchStorageFiles()]);
     return data.data;
+  },
+
+  fetchInfraServers: async () => {
+    try {
+      const { data } = await api.get('/admin/infra-servers');
+      set({ infraServers: data.data });
+    } catch (err) {
+      console.error('[Admin] Failed to fetch infrastructure servers:', err);
+    }
+  },
+
+  createInfraServer: async (serverData) => {
+    await api.post('/admin/infra-servers', serverData);
+    await get().fetchInfraServers();
+  },
+
+  updateInfraServer: async (id, serverData) => {
+    await api.patch(`/admin/infra-servers/${id}`, serverData);
+    await get().fetchInfraServers();
+  },
+
+  deleteInfraServer: async (id) => {
+    await api.delete(`/admin/infra-servers/${id}`);
+    set((s) => ({ infraServers: s.infraServers.filter((srv) => srv.id !== id) }));
   },
 
   exportUsers: async () => {

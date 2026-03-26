@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, useMemo, memo, type KeyboardEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { toast } from '../../stores/toastStore';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
@@ -16,6 +17,7 @@ import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
 import { ReportModal } from './ReportModal';
 import { useAuthStore } from '../../stores/authStore';
+import { useServerStore } from '../../stores/serverStore';
 
 interface Props {
   message: Message;
@@ -27,14 +29,15 @@ interface Props {
   conversationId?: string;
 }
 
-function formatMessageTime(dateStr: string) {
+function formatMessageTime(dateStr: string, t: (key: string, opts?: Record<string, string>) => string) {
   const date = new Date(dateStr);
-  if (isToday(date)) return `Today at ${format(date, 'h:mm a')}`;
-  if (isYesterday(date)) return `Yesterday at ${format(date, 'h:mm a')}`;
+  if (isToday(date)) return t('messageItem.todayAt', { time: format(date, 'h:mm a') });
+  if (isYesterday(date)) return t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') });
   return format(date, 'MM/dd/yyyy h:mm a');
 }
 
-export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId }: Props) {
+export const MessageItem = memo(function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId }: Props) {
+  const { t } = useTranslation();
   const { editMessage, editDMMessage } = useChatStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -82,7 +85,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
       setIsEditing(false);
       setEditContent('');
     } catch {
-      toast.error('Failed to edit message');
+      toast.error(t('chat.failedToEdit'));
     } finally {
       setIsSaving(false);
     }
@@ -107,7 +110,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
         await useChatStore.getState().toggleReaction(channelId, message.id, emoji);
       }
     } catch {
-      toast.error('Failed to toggle reaction');
+      toast.error(t('messageItem.failedToToggleReaction'));
     }
   };
 
@@ -128,7 +131,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
         rows={1}
       />
       <p className="mt-1 text-[11px] text-vox-text-muted">
-        escape to cancel · enter to save
+        {t('messageItem.editHint')}
       </p>
     </div>
   );
@@ -136,6 +139,20 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
   const isSystemMessage = message.type === 'system';
   const currentUserId = useAuthStore((s) => s.user?.id);
   const isMentioned = !!(message.mentions && currentUserId && message.mentions.some((m) => m.id === currentUserId));
+
+  // Look up member for nickname and role color (only applies in server context)
+  const members = useServerStore((s) => s.members);
+  const authorMember = useMemo(
+    () => channelId ? members.find((m) => m.userId === message.author.id) ?? null : null,
+    [members, channelId, message.author.id],
+  );
+  const authorDisplayName = authorMember?.nickname || message.author.displayName;
+  const authorRoleColor = useMemo(
+    () => authorMember?.roles?.length
+      ? [...authorMember.roles].sort((a, b) => b.position - a.position)[0]?.color ?? null
+      : null,
+    [authorMember],
+  );
 
   const handleReply = () => {
     useChatStore.getState().setReplyingTo(message);
@@ -171,7 +188,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
       return (
         <div className="ml-13 mb-0.5 flex items-center gap-1.5 text-xs text-vox-text-muted italic border-l-2 border-vox-text-muted/40 pl-2">
           <Reply size={12} className="shrink-0 rotate-180" />
-          <span>Original message was deleted</span>
+          <span>{t('messageItem.originalDeleted')}</span>
         </div>
       );
     }
@@ -200,7 +217,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
               <button
                 onClick={handleReply}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
-                title="Reply"
+                title={t('messageItem.reply')}
+                aria-label={t('messageItem.reply')}
               >
                 <Reply size={14} />
               </button>
@@ -209,7 +227,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
               ref={reactionBtnRef}
               onClick={() => setShowReactionPicker(!showReactionPicker)}
               className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
-              title="Add reaction"
+              title={t('messageItem.addReaction')}
+              aria-label={t('messageItem.addReaction')}
             >
               <SmilePlus size={14} />
             </button>
@@ -224,7 +243,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
               <button
                 onClick={handleStartEdit}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
-                title="Edit message"
+                title={t('messageItem.editMessage')}
+                aria-label={t('messageItem.editMessage')}
               >
                 <Pencil size={14} />
               </button>
@@ -233,7 +253,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
               <button
                 onClick={() => setShowDeleteModal(true)}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
-                title="Delete message"
+                title={t('messageItem.deleteMessage')}
+                aria-label={t('messageItem.deleteMessage')}
               >
                 <Trash2 size={14} />
               </button>
@@ -242,7 +263,8 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
               <button
                 onClick={() => setShowReportModal(true)}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-accent-warning hover:bg-vox-accent-warning/10 transition-colors"
-                title="Report"
+                title={t('messageItem.report')}
+                aria-label={t('messageItem.report')}
               >
                 <Flag size={14} />
               </button>
@@ -261,20 +283,23 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
                   <UserHoverTarget userId={message.author.id} className="inline">
-                    <span className={clsx(
-                      'text-sm font-semibold cursor-pointer hover:underline',
-                      isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary'
-                    )}>
-                      {message.author.displayName}
+                    <span
+                      className={clsx(
+                        'text-sm font-semibold cursor-pointer hover:underline',
+                        !authorRoleColor && (isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary')
+                      )}
+                      style={authorRoleColor ? { color: authorRoleColor } : undefined}
+                    >
+                      {authorDisplayName}
                     </span>
                   </UserHoverTarget>
                   {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}
                   {message.author.isSupporter && <SupporterBadge tier={message.author.supporterTier} />}
                   <span className="text-xs text-vox-text-muted">
-                    {formatMessageTime(message.createdAt)}
+                    {formatMessageTime(message.createdAt, t)}
                   </span>
                   {message.editedAt && !isEditing && (
-                    <span className="text-[10px] text-vox-text-muted">(edited)</span>
+                    <span className="text-[10px] text-vox-text-muted">{t('messageItem.edited')}</span>
                   )}
                 </div>
 
@@ -315,7 +340,7 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
                     <div className="text-sm text-vox-text-primary break-words">
                       <MessageContent content={message.content} mentions={message.mentions} />
                       {message.editedAt && (
-                        <span className="text-[10px] text-vox-text-muted">(edited)</span>
+                        <span className="text-[10px] text-vox-text-muted">{t('messageItem.edited')}</span>
                       )}
                     </div>
                   )}
@@ -353,4 +378,4 @@ export function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelet
       )}
     </>
   );
-}
+});

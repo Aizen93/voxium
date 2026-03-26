@@ -47,6 +47,7 @@ export const useFriendStore = create<FriendState>((set, get) => ({
       });
     } catch (err) {
       console.error('Failed to fetch friends:', err);
+      toast.error('Failed to load friends');
     }
   },
 

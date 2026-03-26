@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useDMStore } from '../../stores/dmStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { useSupportStore } from '../../stores/supportStore';
@@ -11,6 +12,7 @@ import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
 
 export function DMList() {
+  const { t } = useTranslation();
   const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, participantStatuses, deleteConversation } = useDMStore();
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const pendingIncoming = useFriendStore((s) => s.pendingIncoming);
@@ -50,8 +52,8 @@ export function DMList() {
       await useSupportStore.getState().openTicket();
       useFriendStore.getState().setShowFriendsView(false);
       useDMStore.getState().clearActiveConversation();
-    } catch (err: any) {
-      toast.error(err?.message || 'Failed to open support ticket');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message || t('dm.failedToOpenTicket') : t('dm.failedToOpenTicket'));
     }
   };
 
@@ -60,7 +62,7 @@ export function DMList() {
       {/* Header */}
       <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
         <MessageSquare size={16} className="text-vox-text-muted" />
-        <h2 className="text-sm font-semibold text-vox-text-primary">Direct Messages</h2>
+        <h2 className="text-sm font-semibold text-vox-text-primary">{t('dm.title')}</h2>
       </div>
 
       {/* Friends button */}
@@ -75,7 +77,7 @@ export function DMList() {
           )}
         >
           <Users size={16} />
-          <span className="flex-1 text-sm font-medium">Friends</span>
+          <span className="flex-1 text-sm font-medium">{t('dm.friends')}</span>
           {pendingIncoming.length > 0 && (
             <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-vox-accent-danger px-1 text-[10px] font-bold text-white">
               {pendingIncoming.length}
@@ -91,14 +93,14 @@ export function DMList() {
           className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary transition-colors"
         >
           <LifeBuoy size={16} />
-          <span className="flex-1 text-sm font-medium">Contact Support</span>
+          <span className="flex-1 text-sm font-medium">{t('dm.contactSupport')}</span>
         </button>
       </div>
 
       {/* Separator + title */}
       <div className="px-4 pt-3">
         <div className="border-t border-vox-border" />
-        <h3 className="mt-3 text-[10px] font-bold uppercase tracking-wide text-vox-text-muted">Private Messages</h3>
+        <h3 className="mt-3 text-[10px] font-bold uppercase tracking-wide text-vox-text-muted">{t('dm.title')}</h3>
       </div>
 
       {/* Conversation list */}
@@ -113,7 +115,7 @@ export function DMList() {
           <div className="flex flex-col items-center gap-2 py-8 px-2 text-center">
             <MessageSquare size={24} className="text-vox-text-muted" />
             <p className="text-xs text-vox-text-muted">
-              No conversations yet. Click a member in any server to start one.
+              {t('dm.noConversations')}
             </p>
           </div>
         )}
@@ -153,8 +155,8 @@ export function DMList() {
                     {conv.participant.displayName}
                   </span>
                   {(conv.participant.role === 'admin' || conv.participant.role === 'superadmin') && <StaffBadge />}
-                  {conv.participant.isSupporter && <SupporterBadge tier={conv.participant.supporterTier} />}
                 </div>
+                {conv.participant.isSupporter && <SupporterBadge tier={conv.participant.supporterTier} />}
                 {conv.lastMessage && (
                   <p className="truncate text-[11px] text-vox-text-muted">
                     {conv.lastMessage.content}
@@ -172,7 +174,8 @@ export function DMList() {
                   deleteConversation(conv.id);
                 }}
                 className="opacity-0 group-hover:opacity-100 shrink-0 rounded p-0.5 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-active transition-all"
-                title="Delete conversation"
+                title={t('common.delete')}
+                aria-label={t('common.delete')}
               >
                 <X size={14} />
               </button>
@@ -190,23 +193,23 @@ export function DMList() {
           <div className="w-full max-w-sm rounded-lg bg-vox-bg-secondary p-5 shadow-xl border border-vox-border">
             <div className="flex items-center gap-2 mb-3">
               <LifeBuoy size={18} className="text-vox-accent-primary" />
-              <h3 className="text-sm font-semibold text-vox-text-primary">Contact Support</h3>
+              <h3 className="text-sm font-semibold text-vox-text-primary">{t('dm.contactSupport')}</h3>
             </div>
             <p className="text-sm text-vox-text-secondary mb-4">
-              This will open a support ticket where you can chat with our staff. Would you like to continue?
+              {t('dm.confirmSupport')}
             </p>
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setShowSupportConfirm(false)}
                 className="px-3 py-1.5 text-sm rounded-md bg-vox-bg-hover text-vox-text-secondary hover:text-vox-text-primary transition-colors"
               >
-                Cancel
+                {t('common.cancel')}
               </button>
               <button
                 onClick={handleConfirmSupport}
                 className="px-3 py-1.5 text-sm rounded-md bg-vox-accent-primary text-white hover:bg-vox-accent-primary/90 transition-colors"
               >
-                Open Ticket
+                {t('common.confirm')}
               </button>
             </div>
           </div>

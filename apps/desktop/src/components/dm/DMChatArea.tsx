@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useDMStore } from '../../stores/dmStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore } from '../../stores/voiceStore';
@@ -22,6 +23,7 @@ const STATUS_COLORS: Record<UserStatus, string> = {
 };
 
 export function DMChatArea() {
+  const { t } = useTranslation();
   const { activeConversationId, conversations } = useDMStore();
   const participantStatuses = useDMStore((s) => s.participantStatuses);
   const fetchDMMessages = useChatStore((s) => s.fetchDMMessages);
@@ -54,6 +56,10 @@ export function DMChatArea() {
         socket.emit('dm:join', conversationId);
       }
       fetchDMMessages(conversationId);
+      // Ensure unread is cleared and server is notified — covers reconnect scenarios
+      // where dm:unread:init may restore stale counts from a previously failed markConversationRead
+      useDMStore.getState().clearDMUnread(conversationId);
+      useDMStore.getState().markConversationRead(conversationId);
     },
     [fetchDMMessages]
   );
@@ -73,7 +79,7 @@ export function DMChatArea() {
       if (data.data?.status) {
         useDMStore.getState().updateParticipantStatus(participantId, data.data.status);
       }
-    }).catch(() => {});
+    }).catch((err) => { console.warn('[DMChatArea] Failed to fetch participant status:', err); });
   }, [participantId]);
 
   // Re-join on reconnect
@@ -129,13 +135,13 @@ export function DMChatArea() {
   if (!conversation) {
     return (
       <div className="flex h-full flex-col items-center justify-center bg-vox-chat">
-        <p className="text-vox-text-muted">Select a conversation</p>
+        <p className="text-vox-text-muted">{t('dm.selectConversation')}</p>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col bg-vox-chat">
+    <div className="flex h-full min-w-0 flex-col bg-vox-chat">
       {/* DM Header */}
       <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
         <UserHoverTarget userId={conversation.participant.id} className="shrink-0 cursor-pointer">
@@ -159,7 +165,8 @@ export function DMChatArea() {
         <button
           onClick={() => setShowSearch(true)}
           className="rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
-          title="Search Messages (Ctrl+K)"
+          title={t('dm.searchMessages')}
+          aria-label={t('dm.searchMessages')}
         >
           <Search size={18} />
         </button>
@@ -167,7 +174,8 @@ export function DMChatArea() {
           <button
             onClick={handleEndCall}
             className="rounded-md p-1.5 text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
-            title="End Call"
+            title={t('dm.endCall')}
+            aria-label={t('dm.endCall')}
           >
             <PhoneOff size={18} />
           </button>
@@ -175,7 +183,8 @@ export function DMChatArea() {
           <button
             onClick={handleStartCall}
             className="rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
-            title="Start Voice Call"
+            title={t('dm.startCall')}
+            aria-label={t('dm.startCall')}
           >
             <Phone size={18} />
           </button>

@@ -1,9 +1,12 @@
 node_modules/
 dist/
 build/
+**/src/generated/
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.production.example
+.mcp.json
 *.log
 .DS_Store
 Thumbs.db

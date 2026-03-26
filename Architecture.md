@@ -26,57 +26,33 @@ Voxium is a real-time communication platform enabling users to create communitie
 - **Real-time first:** All interactions are immediately reflected across connected clients
 - **Low latency:** Voice and messaging prioritize sub-100ms delivery
 - **Horizontal scalability:** Stateless services behind load balancers
-- **Cross-platform:** Single codebase serves Windows, macOS, Linux (and future mobile)
+- **Cross-platform:** Single codebase serves Windows, macOS, Linux, and web browsers (future: mobile)
+- **Privacy-first:** No third-party services — all traffic stays on user's own infrastructure
 - **Security:** JWT auth, input validation, rate limiting, CORS protection
 
 ---
 
 ## High-Level Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                           CLIENTS                                    │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────────────┐  │
-│  │ Windows  │  │  macOS   │  │  Linux   │  │ Web (future)       │  │
-│  │ (Tauri)  │  │ (Tauri)  │  │ (Tauri)  │  │ (same React app)  │  │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬───────────┘  │
-│       │              │              │                  │              │
-│       └──────────────┴──────────────┴──────────────────┘              │
-│                              │                                        │
-│               ┌──────────────┴──────────────┐                        │
-│               │    HTTPS + WebSocket        │                        │
-│               │    (REST API + Socket.IO)   │                        │
-│               └──────────────┬──────────────┘                        │
-└──────────────────────────────┼───────────────────────────────────────┘
-                               │
-┌──────────────────────────────┼───────────────────────────────────────┐
-│                         BACKEND                                       │
-│               ┌──────────────┴──────────────┐                        │
-│               │      Load Balancer          │                        │
-│               │   (nginx / Cloudflare)      │                        │
-│               └──────┬───────────┬──────────┘                        │
-│                      │           │                                    │
-│            ┌─────────┴──┐  ┌────┴──────────┐                        │
-│            │  API Node  │  │  API Node     │  ← Horizontally        │
-│            │  (Express) │  │  (Express)    │    scalable             │
-│            │  Socket.IO │  │  Socket.IO    │                        │
-│            └─────┬──────┘  └────┬──────────┘                        │
-│                  │              │                                     │
-│           ┌──────┴──────────────┴───────┐                            │
-│           │     Redis (Pub/Sub +        │                            │
-│           │     Presence + Cache)       │                            │
-│           └──────┬──────────────────────┘                            │
-│                  │                                                    │
-│           ┌──────┴──────────────────────┐                            │
-│           │     PostgreSQL              │                            │
-│           │     (Primary data store)    │                            │
-│           └─────────────────────────────┘                            │
-│                                                                       │
-│           ┌─────────────────────────────┐                            │
-│           │     SFU Media Server        │  ← mediasoup (active)     │
-│           │     (Voice/Video routing)   │                            │
-│           └─────────────────────────────┘                            │
-└───────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph Clients
+        Win["Windows<br/>(Tauri)"]
+        Mac["macOS<br/>(Tauri)"]
+        Lin["Linux<br/>(Tauri)"]
+        Web["Web Browser<br/>(same React app)"]
+    end
+
+    Win & Mac & Lin & Web -->|"HTTPS + WebSocket<br/>(REST API + Socket.IO)"| LB
+
+    subgraph Backend
+        LB["Load Balancer<br/>(nginx / Cloudflare)"]
+        LB --> Node1["API Node<br/>(Express + Socket.IO)"]
+        LB --> Node2["API Node<br/>(Express + Socket.IO)"]
+        Node1 & Node2 --> Redis[("Redis<br/>Pub/Sub + Presence + Cache")]
+        Redis --> PG[("PostgreSQL<br/>Primary data store")]
+        SFU["SFU Media Server<br/>(mediasoup)<br/>Voice/Video routing"]
+    end
 ```
 
 ---
@@ -88,15 +64,16 @@ Voxium is a real-time communication platform enabling users to create communitie
 |-------|-----------|---------|
 | Runtime | Node.js | 20+ |
 | Language | TypeScript | 5.6+ |
-| HTTP Framework | Express.js | 4.x |
+| HTTP Framework | Express.js | 5.x |
 | WebSocket | Socket.IO | 4.8 |
-| ORM | Prisma | 6.x |
+| ORM | Prisma | 7.x (driver adapter pattern) |
 | Database | PostgreSQL | 16 |
-| Cache / Pub/Sub | Redis | 7 |
+| DB Driver | @prisma/adapter-pg | 7.x |
+| Cache / Pub/Sub | Redis (node-redis) | 5.x |
 | Voice (SFU) | mediasoup | 3.x |
 | Auth | JWT (jsonwebtoken) | 9.x |
-| Validation | Zod + custom validators | — |
-| Password Hashing | bcryptjs | — |
+| Rate Limiting | rate-limiter-flexible | 9.x |
+| Password Hashing | bcryptjs | 3.x |
 | File Storage | S3-compatible (OVH) | — |
 | S3 Presigning | @aws-sdk/s3-request-presigner | — |
 | Email | Nodemailer | 8.x |
@@ -106,9 +83,9 @@ Voxium is a real-time communication platform enabling users to create communitie
 |-------|-----------|---------|
 | Framework | React | 19 |
 | Language | TypeScript | 5.6+ |
-| Build Tool | Vite | 6.x |
+| Build Tool | Vite | 7.x |
 | Desktop Shell | Tauri | 2.x |
-| Styling | Tailwind CSS | 3.4 |
+| Styling | Tailwind CSS | 4.x (CSS-first `@theme` config) |
 | State | Zustand | 5.x |
 | Routing | React Router | 7.x |
 | HTTP Client | Axios | 1.x |
@@ -121,7 +98,7 @@ Voxium is a real-time communication platform enabling users to create communitie
 |-----------|-----------|
 | Containers | Docker + Docker Compose |
 | Orchestration (future) | Kubernetes |
-| CI/CD (future) | GitHub Actions |
+| CI/CD | GitHub Actions (lint, typecheck, build, release, Docker) |
 | Monitoring (future) | Prometheus + Grafana |
 
 ---
@@ -152,6 +129,8 @@ apps/server/
 │   │   ├── search.ts       # Full-text message search (server channels + DM conversations)
 │   │   ├── reports.ts      # User-facing report submission
 │   │   ├── support.ts      # User-facing support ticket routes
+│   │   ├── roles.ts        # Role CRUD, member role assignment, channel permission overrides
+│   │   ├── themes.ts       # Community theme marketplace (CRUD, publish/unpublish, install/uninstall, admin moderation)
 │   │   ├── admin.ts        # Admin API (users, servers, bans, storage, reports, support, rate limits, feature flags, audit log, export)
 │   │   └── stats.ts        # Public stats endpoint
 │   ├── services/
@@ -167,7 +146,7 @@ apps/server/
 │   │   ├── dmVoiceHandler.ts # DM call signaling + system messages
 │   │   └── adminMetrics.ts  # Live metrics emitter for admin dashboard
 │   └── utils/
-│       ├── prisma.ts            # Prisma client singleton
+│       ├── prisma.ts            # Prisma client singleton (v7 adapter pattern via @prisma/adapter-pg)
 │       ├── redis.ts             # Redis client + presence helpers
 │       ├── errors.ts            # Custom error classes
 │       ├── sanitize.ts          # HTML stripping + text sanitization utility
@@ -183,28 +162,20 @@ apps/server/
 
 ### Request Flow
 
-```
-Client Request
-    │
-    ▼
-Express Middleware Pipeline
-    │
-    ├── helmet()          → Security headers
-    ├── cors()            → CORS validation
-    ├── morgan()          → Request logging
-    ├── express.json()    → Body parsing
-    ├── cookieParser()    → Cookie parsing
-    │
-    ▼
-Route Handler
-    │
-    ├── rateLimiter()     → Per-endpoint rate limiting (Redis + memory fallback)
-    ├── authenticate()    → JWT verification (protected routes)
-    ├── sanitizeText()    → HTML tag stripping on user input (messages, names, bios)
-    ├── Business Logic    → Database queries via Prisma
-    │
-    ▼
-Response / Error Handler
+```mermaid
+graph TD
+    A["Client Request"] --> B["Express Middleware Pipeline"]
+    B --> B1["helmet() — Security headers"]
+    B1 --> B2["cors() — CORS validation"]
+    B2 --> B3["morgan() — Request logging"]
+    B3 --> B4["express.json() — Body parsing"]
+    B4 --> B5["cookieParser() — Cookie parsing"]
+    B5 --> C["Route Handler"]
+    C --> C1["rateLimiter() — Per-endpoint rate limiting<br/>(Redis + memory fallback)"]
+    C1 --> C2["authenticate() — JWT verification<br/>(protected routes)"]
+    C2 --> C3["sanitizeText() — HTML tag stripping<br/>on user input"]
+    C3 --> C4["Business Logic — Database queries<br/>via Prisma"]
+    C4 --> D["Response / Error Handler"]
 ```
 
 ### Error Handling
@@ -301,13 +272,18 @@ apps/desktop/
 │   │   ├── tokenStorage.ts      # Dual-storage token abstraction (localStorage/sessionStorage)
 │   │   └── notifications.ts     # 3-tier notifications: WinRT toast (avatar) → Tauri plugin → Web API (blob URL avatar)
 │   ├── utils/
-│   │   └── imageProcessing.ts   # Client-side image resize + WebP via Canvas API
+│   │   ├── imageProcessing.ts   # Client-side image resize + WebP via Canvas API
+│   │   └── serverErrors.ts    # Server error message → i18n key mapping for translated error display
+│   ├── i18n/
+│   │   ├── index.ts           # i18next setup (browser detection, localStorage persistence)
+│   │   └── locales/           # 11 language JSON files (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar)
 │   └── styles/
-│       └── globals.css       # Tailwind + custom utilities
+│       ├── globals.css        # Tailwind + custom utilities
+│       └── themes.css         # Built-in theme definitions (dark, light, midnight, tactical)
 ├── src-tauri/                # Tauri Rust backend
 │   ├── src/
 │   │   ├── main.rs           # Desktop entry point
-│   │   └── lib.rs            # Tauri setup + notify_with_avatar command (WinRT toast with circular avatar)
+│   │   └── lib.rs            # Tauri setup + notify_with_avatar command (WinRT toast with circular avatar) + graceful tray (Linux)
 │   ├── Cargo.toml
 │   └── tauri.conf.json       # Tauri configuration
 ```
@@ -315,42 +291,42 @@ apps/desktop/
 ### UI Layout
 
 ```
-┌─────┬──────────┬─────────────────────────────┬──────────┐
-│     │          │  # channel-name              │          │
-│  S  │ Channels │─────────────────────────────│ Members  │
-│  e  │          │                              │          │
-│  r  │ # general│  [Avatar] Username    12:30  │ ─ Owner  │
-│  v  │ # random │  Message content here...    │   Alice  │
-│  e  │          │                              │          │
-│  r  │ 🔊 Voice │  [Avatar] Username    12:31  │ ─ Admins │
-│  s  │   General│  Another message...         │   Bob    │
-│     │   Gaming │                              │          │
-│  +  │          │                              │ ─ Members│
-│     │          │                              │   Charlie│
-│     │──────────│                              │          │
-│     │ User ⚙  │  [Message input box]         │          │
-└─────┴──────────┴─────────────────────────────┴──────────┘
-│72px │  240px   │        flex-1               │  240px   │
++-------+------------+-------------------------------+----------+
+|       |            |  # channel-name               |          |
+|  S    | Channels   |-------------------------------|  Members |
+|  e    |            |                               |          |
+|  r    | # general  |  [Avatar] Username    12:30   | - Owner  |
+|  v    | # random   |  Message content here...      |   Alice  |
+|  e    |            |                               |          |
+|  r    | Voice      |  [Avatar] Username    12:31   | - Admins |
+|  s    |   General  |  Another message...           |   Bob    |
+|       |   Gaming   |                               |          |
+|  +    |            |                               | - Members|
+|       |            |                               |   Charlie|
+|       |------------|                               |          |
+|       | User  [G]  |  [Message input box]          |          |
++-------+------------+-------------------------------+----------+
+| 72px  |   240px    |         flex-1                |  240px   |
 ```
 
 **DM View** (when no server is active):
 
 ```
-┌─────┬──────────┬─────────────────────────────┐
-│     │          │  @ Username        📞  🔊   │
-│  S  │ DMs      │─────────────────────────────│
-│  e  │          │                              │
-│  r  │ 🟢 Alice │  [Avatar] Alice      12:30  │
-│  v  │  Last msg│  Hey, how are you?          │
-│  e  │          │                              │
-│  r  │ ⚫ Bob   │  [📞 Voice call ended]      │
-│  s  │  Hi!     │                              │
-│     │          │  [Avatar] You        12:31  │
-│  +  │ 🟢 Char  │  I'm good, thanks!          │
-│     │          │                              │
-│     │          │  [Message input box]         │
-└─────┴──────────┴─────────────────────────────┘
-│72px │  240px   │        flex-1               │
++-------+------------+-------------------------------+
+|       |            |  @ Username        [P]  [V]   |
+|  S    | DMs        |-------------------------------|
+|  e    |            |                               |
+|  r    | * Alice    |  [Avatar] Alice      12:30    |
+|  v    |  Last msg  |  Hey, how are you?            |
+|  e    |            |                               |
+|  r    | o Bob      |  [Voice call ended]           |
+|  s    |  Hi!       |                               |
+|       |            |  [Avatar] You        12:31    |
+|  +    | * Char     |  I'm good, thanks!            |
+|       |            |                               |
+|       |            |  [Message input box]          |
++-------+------------+-------------------------------+
+| 72px  |   240px    |         flex-1                |
 ```
 
 ### State Management (Zustand)
@@ -362,7 +338,7 @@ Eight independent stores, each managing a domain:
 | `authStore` | User session, login/register/logout, token management, avatar upload (presigned URL + client-side processing), profile editing, forgot/reset/change password |
 | `serverStore` | Server list, active server, channels, members, server icon upload, member profile sync, persistent unread tracking (via `ChannelRead` DB table + `unread:init` socket event) |
 | `chatStore` | Messages for active channel/conversation, typing indicators, pagination, author profile sync, reply-to-message state (shared by server channels and DMs) |
-| `voiceStore` | Server voice channel connection, DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`), mute/deaf, peer management (WebRTC). Server and DM voice are mutually exclusive. |
+| `voiceStore` | Server voice channel connection, DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`), mute/deaf, `pttActive` (PTT override), peer management (WebRTC), noise suppression pipeline lifecycle. Server and DM voice are mutually exclusive. |
 | `dmStore` | DM conversation list, active conversation, participant online/offline status, DM unread counts (persisted via `ConversationRead` + `dm:unread:init`), conversation deletion. Owns `clearMessages()` calls for DM view transitions. |
 | `friendStore` | Friends list (accepted/pending incoming/pending outgoing), friend request CRUD, real-time friend event handlers, friendship status lookups, `showFriendsView` toggle |
 | `settingsStore` | Audio devices, noise gate, notification prefs, PTT key (persisted to localStorage) |
@@ -370,11 +346,16 @@ Eight independent stores, each managing a domain:
 
 ### Data Flow
 
-```
-User Action → Zustand Store → API Call (Axios) → Backend Response → Store Update → React Re-render
-                    │                                                    ▲
-                    │          WebSocket Event ──────────────────────────┘
-                    └──────── Socket.IO Emit
+```mermaid
+graph LR
+    A["User Action"] --> B["Zustand Store"]
+    B --> C["API Call<br/>(Axios)"]
+    C --> D["Backend Response"]
+    D --> E["Store Update"]
+    E --> F["React Re-render"]
+    B --> G["Socket.IO Emit"]
+    G --> H["WebSocket Event"]
+    H --> E
 ```
 
 ---
@@ -383,90 +364,184 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 
 ### Entity-Relationship Diagram
 
-```
-┌──────────┐    ┌────────────────┐    ┌──────────┐
-│   User   │───<│ ServerMember   │>───│  Server  │
-│          │    │                │    │          │
-│ id       │    │ userId (PK,FK)│    │ id       │
-│ username │    │ serverId(PK,FK)│    │ name     │
-│ email    │    │ role           │    │ ownerId  │
-│ password │    │ joinedAt       │    │ iconUrl  │
-│ display  │    └────────────────┘    └────┬─────┘
-│ avatarUrl│                               │
-│ bio      │    ┌────────────────┐         │
-│ status   │    │    Channel     │─────────┘
-│ tokenVer │
-│ resetTkn │
-│ emlVerif │
-│ emlVfyTkn│
-└────┬─────┘    │                │
-     │          │ id             │
-     │          │ name           │
-     │          │ type           │
-     │          │ serverId (FK)  │
-     │          │ position       │
-     │          └────────┬───────┘
-     │                   │
-     │    ┌──────────────┴───────┐
-     └───>│      Message         │
-          │                      │
-          │ id                   │
-          │ content              │
-          │ type (user/system)   │
-          │ channelId (FK, null) │
-          │ conversationId (null)│
-          │ authorId  (FK)       │
-          │ replyToId (FK, null) │──┐ self-relation
-          │ editedAt             │<─┘ (onDelete: SetNull)
-          │ createdAt            │
-          └──────────┬───────────┘
-                     │
-          ┌──────────┴───────────┐
-          │  MessageReaction     │
-          │                      │
-          │ id                   │
-          │ messageId (FK)       │
-          │ userId    (FK)       │
-          │ emoji                │
-          │ createdAt            │
-          │                      │
-          │ @@unique(messageId,  │
-          │   userId, emoji)     │
-          └──────────────────────┘
+```mermaid
+erDiagram
+    User {
+        string id PK
+        string username UK
+        string email UK
+        string password
+        string displayName
+        string avatarUrl
+        string bio
+        string status
+        int tokenVersion
+        string resetToken UK
+        boolean emailVerified
+        string emailVerificationToken UK
+        string totpSecret
+        boolean totpEnabled
+        string totpBackupCodes
+    }
 
-┌──────────────────┐    ┌──────────────────────┐
-│     Invite       │    │    ChannelRead        │
-│                  │    │                      │
-│ code (PK)        │    │ userId (PK,FK)       │
-│ serverId (FK)    │    │ channelId (PK,FK)    │
-│ createdBy (FK)   │    │ lastReadAt           │
-│ expiresAt        │    └──────────────────────┘
-└──────────────────┘
+    Server {
+        string id PK
+        string name
+        string ownerId FK
+        string iconUrl
+        boolean invitesLocked
+    }
 
-┌──────────────────────┐    ┌──────────────────────┐
-│   Conversation       │    │  ConversationRead    │
-│                      │    │                      │
-│ id                   │    │ userId (PK,FK)       │
-│ user1Id (FK)         │    │ conversationId(PK,FK)│
-│ user2Id (FK)         │    │ lastReadAt           │
-│ updatedAt            │    └──────────────────────┘
-│                      │
-│ @@unique(user1Id,    │    user1Id < user2Id invariant
-│   user2Id)           │    for deduplication
-└──────────────────────┘
+    ServerMember {
+        string userId PK
+        string serverId PK
+        string role
+        string nickname
+        datetime joinedAt
+    }
 
-┌──────────────────────┐    ┌──────────────────────┐
-│   GlobalConfig       │    │   ServerLimits        │
-│   (singleton)        │    │   (per-server)        │
-│                      │    │                       │
-│ id = "global" (PK)   │    │ serverId (PK,FK)      │
-│ maxChannelsPerServer │    │ maxChannelsPerServer?  │
-│ maxVoiceUsersPerCh.  │    │ maxVoiceUsersPerCh.?  │
-│ maxCategoriesPerSrv  │    │ maxCategoriesPerSrv?  │
-│ maxMembersPerServer  │    │ maxMembersPerServer?   │
-│ updatedAt            │    │ updatedAt              │
-└──────────────────────┘    └──────────────────────┘
-  Defaults: 20/12/12/0       Nullable = use global
+    Channel {
+        string id PK
+        string name
+        string type
+        string serverId FK
+        string categoryId FK
+        int position
+    }
+
+    Category {
+        string id PK
+        string name
+        string serverId FK
+        int position
+    }
+
+    Message {
+        string id PK
+        string content
+        string type
+        string channelId FK
+        string conversationId FK
+        string authorId FK
+        string replyToId FK
+        datetime editedAt
+        datetime createdAt
+    }
+
+    MessageReaction {
+        string id PK
+        string messageId FK
+        string userId FK
+        string emoji
+        datetime createdAt
+    }
+
+    Invite {
+        string code PK
+        string serverId FK
+        string createdBy FK
+        datetime expiresAt
+    }
+
+    ChannelRead {
+        string userId PK
+        string channelId PK
+        datetime lastReadAt
+    }
+
+    Conversation {
+        string id PK
+        string user1Id FK
+        string user2Id FK
+        datetime updatedAt
+    }
+
+    ConversationRead {
+        string userId PK
+        string conversationId PK
+        datetime lastReadAt
+    }
+
+    GlobalConfig {
+        string id PK
+        int maxChannelsPerServer
+        int maxVoiceUsersPerChannel
+        int maxCategoriesPerServer
+        int maxMembersPerServer
+        datetime updatedAt
+    }
+
+    ServerLimits {
+        string serverId PK
+        int maxChannelsPerServer
+        int maxVoiceUsersPerChannel
+        int maxCategoriesPerServer
+        int maxMembersPerServer
+        datetime updatedAt
+    }
+
+    Role {
+        string id PK
+        string serverId FK
+        string name
+        string color
+        int position
+        string permissions
+        boolean isDefault
+    }
+
+    MemberRole {
+        string memberId FK
+        string roleId FK
+    }
+
+    ChannelPermissionOverride {
+        string id PK
+        string channelId FK
+        string roleId FK
+        string allow
+        string deny
+    }
+
+    CommunityTheme {
+        string id PK
+        string name
+        string description
+        string tags
+        json colors
+        json patterns
+        int version
+        string status
+        int installCount
+        string authorId FK
+    }
+
+    User ||--o{ ServerMember : "has many"
+    Server ||--o{ ServerMember : "has many"
+    Server ||--o{ Channel : "has many"
+    Server ||--o{ Category : "has many"
+    Category ||--o{ Channel : "has many"
+    Channel ||--o{ Message : "has many"
+    Conversation ||--o{ Message : "has many"
+    User ||--o{ Message : "authors"
+    Message ||--o{ MessageReaction : "has many"
+    Message ||--o| Message : "replyTo"
+    User ||--o{ MessageReaction : "has many"
+    Server ||--o{ Invite : "has many"
+    User ||--o{ Invite : "creates"
+    User ||--o{ ChannelRead : "has many"
+    Channel ||--o{ ChannelRead : "has many"
+    User ||--o{ Conversation : "user1"
+    User ||--o{ Conversation : "user2"
+    User ||--o{ ConversationRead : "has many"
+    Conversation ||--o{ ConversationRead : "has many"
+    Server ||--o| ServerLimits : "has one"
+    Server ||--o{ Role : "has many"
+    Role ||--o{ MemberRole : "has many"
+    ServerMember ||--o{ MemberRole : "has many"
+    Channel ||--o{ ChannelPermissionOverride : "has many"
+    Role ||--o{ ChannelPermissionOverride : "has many"
+    User ||--o{ CommunityTheme : "authors"
 ```
 
 ### Key Indexes
@@ -484,6 +559,12 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 - `conversations(user1Id, user2Id)` UNIQUE — Conversation dedup
 - `conversation_reads(userId, conversationId)` COMPOSITE PK — DM read positions
 - `invites(code)` PK — Invite lookup
+- `roles(serverId, position)` — Role hierarchy ordering
+- `roles(serverId, name)` UNIQUE — Role name uniqueness per server
+- `channel_permission_overrides(channelId, roleId)` UNIQUE — One override per role per channel
+- `community_themes(status, installCount)` — Marketplace sort by popularity
+- `community_themes(status, createdAt)` — Marketplace sort by newest
+- `community_themes(authorId)` — User's own themes
 
 ### Scaling Considerations
 
@@ -498,46 +579,56 @@ User Action → Zustand Store → API Call (Axios) → Backend Response → Stor
 
 ### Socket.IO Architecture
 
-```
-Client                          Server
-  │                               │
-  │── connect (with JWT) ────────>│
-  │                               │── verify JWT
-  │                               │── setUserOnline(Redis)
-  │                               │── join server:{id} rooms
-  │                               │── join channel:{id} rooms (all text channels)
-  │                               │── compute unread counts (SQL)
-  │<── unread:init ──────────────<│── emit unreads (if any)
-  │                               │── broadcast presence:update
-  │<── connected ─────────────────│
-  │                               │
-  │── channel:join ──────────────>│── socket.join(room) (for newly created channels)
-  │── typing:start ──────────────>│── broadcast to channel room
-  │── typing:stop ───────────────>│── broadcast to channel room
-  │                               │
-  │<── message:new ──────────────<│  (after HTTP POST creates message,
-  │<── presence:update ──────────<│   server broadcasts via Socket.IO)
-  │                               │
-  │── voice:join ────────────────>│── track voice state
-  │                               │── broadcast voice:user_joined
-  │── voice:signal ──────────────>│── relay to target peer
-  │<── voice:signal ─────────────<│── (from another peer)
-  │                               │
-  │                               │
-  │── dm:join ──────────────────>│── verify membership (DB)
-  │                               │── socket.join(dm:{id})
-  │── dm:typing:start ──────────>│── broadcast to dm room
-  │                               │
-  │<── dm:message:new ──────────<│  (after HTTP POST)
-  │<── dm:unread:init ──────────<│  (on connect, persistent DM unreads)
-  │                               │
-  │── dm:voice:join ────────────>│── verify participant, track state
-  │                               │── broadcast dm:voice:offer/joined
-  │── dm:voice:signal ──────────>│── relay to other participant
-  │                               │
-  │── disconnect ────────────────>│── setUserOffline(Redis)
-  │                               │── broadcast presence:update
-  │                               │── cleanup DM voice state
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+
+    Client->>Server: connect (with JWT)
+    Server->>Server: verify JWT
+    Server->>Server: setUserOnline(Redis)
+    Server->>Server: join server:{id} rooms
+    Server->>Server: join channel:{id} rooms (all text channels)
+    Server->>Server: compute unread counts (SQL)
+    Server-->>Client: unread:init (if any)
+    Server->>Server: broadcast presence:update
+    Server-->>Client: connected
+
+    Client->>Server: channel:join (for newly created channels)
+    Client->>Server: typing:start
+    Server-->>Client: broadcast to channel room
+    Client->>Server: typing:stop
+    Server-->>Client: broadcast to channel room
+
+    Note over Client,Server: After HTTP POST creates message
+    Server-->>Client: message:new
+    Server-->>Client: presence:update
+
+    Client->>Server: voice:join
+    Server->>Server: track voice state
+    Server-->>Client: voice:user_joined (broadcast)
+    Client->>Server: voice:signal
+    Server-->>Client: voice:signal (from another peer)
+
+    Client->>Server: dm:join (verify membership via DB)
+    Server->>Server: socket.join(dm:{id})
+    Client->>Server: dm:typing:start
+    Server-->>Client: broadcast to dm room
+
+    Note over Client,Server: After HTTP POST
+    Server-->>Client: dm:message:new
+    Server-->>Client: dm:unread:init (on connect)
+
+    Client->>Server: dm:voice:join
+    Server->>Server: verify participant, track state
+    Server-->>Client: dm:voice:offer / dm:voice:joined
+    Client->>Server: dm:voice:signal
+    Server-->>Client: relay to other participant
+
+    Client->>Server: disconnect
+    Server->>Server: setUserOffline(Redis)
+    Server-->>Client: broadcast presence:update
+    Server->>Server: cleanup DM voice state
 ```
 
 ### Room Strategy
@@ -600,19 +691,17 @@ Client                          Server
 
 ### Current Implementation — mediasoup SFU
 
-```
-┌────────┐  ┌────────┐  ┌────────┐
-│ User A │  │ User B │  │ User C │
-└───┬────┘  └───┬────┘  └───┬────┘
-    │           │           │
-    │     ┌─────┴─────┐    │
-    └────>│ mediasoup  │<───┘
-          │   SFU      │
-          │            │
-          │ Selective  │
-          │ Forwarding │
-          │ Unit       │
-          └────────────┘
+```mermaid
+graph TD
+    UserA["User A"] --> SFU
+    UserB["User B"] --> SFU
+    UserC["User C"] --> SFU
+
+    SFU["mediasoup SFU<br/>Selective Forwarding Unit"]
+
+    SFU --> UserA
+    SFU --> UserB
+    SFU --> UserC
 ```
 
 - Each client sends one upstream (Producer) to the SFU
@@ -668,21 +757,15 @@ Screen sharing allows one user per voice channel to share their screen with all 
 
 ### DM Voice Calls (V0.5 - 1-on-1)
 
-```
-┌────────┐         ┌────────┐
-│ User A │<──P2P──>│ User B │
-└───┬────┘         └───┬────┘
-    │                   │
-    └───────┬───────────┘
-            │
-       ┌────┴─────┐
-       │  Server   │
-       │ (Signal + │
-       │  State)   │
-       └──────────┘
+```mermaid
+graph TD
+    UserA["User A"] <-->|"P2P WebRTC<br/>(audio stream)"| UserB["User B"]
+    UserA -->|"signaling"| Srv["Server<br/>(Signal + State)"]
+    UserB -->|"signaling"| Srv
 ```
 
-- Same WebRTC mesh approach as server voice (1-on-1 only)
+- WebRTC P2P (1-on-1 only) with self-hosted STUN for NAT traversal
+- **Self-hosted STUN server** — coturn in STUN-only mode (`--stun-only --no-auth`) runs alongside the Voxium backend via docker-compose. STUN is stateless UDP (~100 bytes each way) that tells each peer its public IP:port — no media flows through it. Privacy-first: no third-party STUN/TURN servers. Frontend derives STUN URL from `VITE_WS_URL` hostname + port 3478.
 - **Perfect Negotiation pattern** — resolves offer glare (both peers sending offers simultaneously) via polite/impolite roles based on userId comparison
 - **Mutually exclusive** with server voice — joining one leaves the other (cross-cleanup on both server and client)
 - In-memory state: `dmVoiceUsers` Map (conversationId → Map of userId → socketId) + `userDMCall` reverse lookup
@@ -690,85 +773,137 @@ Screen sharing allows one user per voice channel to share their screen with all 
 - Call offer broadcasts to `dm:{conversationId}` room; incoming call shown via `IncomingCallModal` with looping ringtone (stops on accept/decline/cancel)
 - DM call UI has two layers: `DMCallPanel` renders inline in `DMChatArea` (full avatars + controls when viewing the conversation), and `DMVoicePanel` is a compact global panel rendered in both `ChannelSidebar` (after `VoicePanel`) and `DMList` so the user always sees their DM call status from any view
 
+### Audio Processing Pipeline
+
+Two cleanly separated pipelines (follows Jitsi/Matrix pattern):
+
+```mermaid
+graph LR
+    subgraph "1. Noise Suppression (applyNoiseSuppression)"
+        mic["mic"] --> rnnoise["RNNoise WASM<br/>AudioWorklet"] --> dest1["destination<br/>(suppressed stream)"]
+    end
+
+    subgraph "2. Speaking Detection (startSpeakingDetection)"
+        stream["suppressed stream"] --> analyser["AnalyserNode"] --> gain["GainNode"] --> dest2["destination<br/>(SFU only)"]
+    end
+```
+
+1. **Noise Suppression** (clean, isolated — `applyNoiseSuppression()`):
+   Uses `@timephy/rnnoise-wasm` (fork of `@jitsi/rnnoise-wasm`) with the Jitsi `NoiseSuppressorWorklet` (circular buffer, LCM-based sizing, 480-sample frame handling). Nothing else in the audio path. Returns a clean suppressed stream used by both SFU producers and DM P2P peers.
+
+2. **Speaking Detection** (read-only side-chain — `startSpeakingDetection()`):
+   Taps into the already-suppressed stream. The gain gate only matters for SFU producer pause/resume (saves bandwidth). DM mode bypasses the gain gate — DM uses the suppressed stream directly.
+
+- **Live toggle:** Noise suppression can be enabled/disabled mid-call. A generation counter prevents race conditions on rapid toggles.
+- **Push-to-talk:** Works in both server voice and DM calls. PTT overrides mute — pressing the key temporarily enables the mic regardless of mute state. `pttActive` store state drives the speaking indicator so the green ring shows during PTT even when muted.
+- **Browser noiseSuppression inversion:** When RNNoise is enabled, the browser's built-in `noiseSuppression` getUserMedia constraint is disabled to avoid double-processing.
+
 ---
 
 ## Authentication & Security
 
 ### JWT Token Flow
 
-```
-Register/Login
-    │
-    ▼
-Server generates:
-├── Access Token  (15min expiry, signed with JWT_SECRET)
-└── Refresh Token (7 day expiry, signed with JWT_REFRESH_SECRET)
-    │                Both embed tokenVersion from User model
-    ▼
-Client stores in localStorage
-    │
-    ▼
-Every API request:
-├── Authorization: Bearer <access_token>
-│
-├── If 401 → Try refresh:
-│   POST /auth/refresh { refreshToken }
-│   ├── Check tokenVersion matches DB → reject if mismatched (revoked)
-│   ├── Success → New tokens, retry request
-│   └── Failure → Redirect to login
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    participant DB as Database
+
+    Client->>Server: Register / Login
+    Server->>Server: Generate Access Token (15min, JWT_SECRET)
+    Server->>Server: Generate Refresh Token (7d, JWT_REFRESH_SECRET)
+    Note over Server: Both embed tokenVersion from User model
+    Server-->>Client: { accessToken, refreshToken }
+    Client->>Client: Store in localStorage
+
+    Client->>Server: API request (Authorization: Bearer access_token)
+    Server-->>Client: 200 OK / Response
+
+    Client->>Server: API request (expired token)
+    Server-->>Client: 401 Unauthorized
+
+    Client->>Server: POST /auth/refresh { refreshToken }
+    Server->>DB: Check tokenVersion matches
+    alt Token version matches
+        Server-->>Client: New { accessToken, refreshToken }
+        Client->>Server: Retry original request
+    else Token revoked
+        Server-->>Client: 401 — Redirect to login
+    end
 ```
 
 ### Password Reset Flow
 
-```
-Forgot Password (unauthenticated):
-  POST /auth/forgot-password { email }
-    → Find user (silent return if not found — prevents enumeration)
-    → Generate crypto.randomBytes(32), store SHA-256 hash + 1hr expiry in DB
-    → Send raw token via email (Nodemailer → MailHog locally / OVH SMTP in prod)
-    → Always returns same success message
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    participant DB as Database
+    participant Email as Email (SMTP)
 
-  POST /auth/reset-password { token, password }
-    → SHA-256 hash incoming token → findUnique by resetToken (@@unique)
-    → Check expiry, clear expired tokens
-    → Hash new password, clear reset fields, increment tokenVersion
+    Note over Client,Email: Forgot Password (unauthenticated)
+    Client->>Server: POST /auth/forgot-password { email }
+    Server->>DB: Find user (silent return if not found)
+    Server->>Server: Generate crypto.randomBytes(32)
+    Server->>DB: Store SHA-256 hash + 1hr expiry
+    Server->>Email: Send raw token via email
+    Server-->>Client: Same success message (always)
 
-Change Password (authenticated):
-  POST /auth/change-password { currentPassword, newPassword }
-    → Verify current password via bcrypt
-    → Hash new password, increment tokenVersion
-    → Return fresh tokens (current session survives)
+    Note over Client,Email: Reset Password
+    Client->>Server: POST /auth/reset-password { token, password }
+    Server->>Server: SHA-256 hash incoming token
+    Server->>DB: findUnique by resetToken (@@unique)
+    Server->>Server: Check expiry, clear expired tokens
+    Server->>DB: Hash new password, clear reset fields, increment tokenVersion
+    Server-->>Client: Success
+
+    Note over Client,Email: Change Password (authenticated)
+    Client->>Server: POST /auth/change-password { currentPassword, newPassword }
+    Server->>Server: Verify current password via bcrypt
+    Server->>DB: Hash new password, increment tokenVersion
+    Server-->>Client: Fresh tokens (current session survives)
 ```
 
 ### Email Verification Flow
 
-```
-Registration:
-  POST /auth/register { username, email, password }
-    → Normalize email (lowercase + trim)
-    → Create user with emailVerified=false
-    → Generate crypto.randomBytes(32), store SHA-256 hash + 24hr expiry in DB
-    → Send raw token via email (fire-and-forget)
-    → Return auth tokens (user authenticated but unverified)
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    participant DB as Database
+    participant Email as Email (SMTP)
 
-  POST /auth/verify-email { token }
-    → Normalize to lowercase (defensive — base64url safe)
-    → Validate format (64 hex chars) — reject before DB query
-    → SHA-256 hash incoming token → findUnique by emailVerificationToken (@@unique, select: id + expiresAt only)
-    → Check expiry, clear expired tokens
-    → Set emailVerified=true, clear token fields
-    → Frontend processedTokenRef guard prevents StrictMode double-POST (tracks token string, allows different tokens)
+    Note over Client,Email: Registration
+    Client->>Server: POST /auth/register { username, email, password }
+    Server->>Server: Normalize email (lowercase + trim)
+    Server->>DB: Create user with emailVerified=false
+    Server->>Server: Generate crypto.randomBytes(32)
+    Server->>DB: Store SHA-256 hash + 24hr expiry
+    Server->>Email: Send raw token (fire-and-forget)
+    Server-->>Client: Auth tokens (authenticated but unverified)
 
-  POST /auth/resend-verification (authenticated)
-    → Check if already verified (reject if so)
-    → Generate new token, replace in DB
-    → Send verification email
+    Note over Client,Email: Verify Email
+    Client->>Server: POST /auth/verify-email { token }
+    Server->>Server: Normalize to lowercase
+    Server->>Server: Validate format (64 hex chars)
+    Server->>Server: SHA-256 hash incoming token
+    Server->>DB: findUnique by emailVerificationToken
+    Server->>Server: Check expiry, clear expired tokens
+    Server->>DB: Set emailVerified=true, clear token fields
+    Server-->>Client: Success
 
-Enforcement:
-  → requireVerifiedEmail middleware on all REST routes except auth self-management (includes attachment proxy)
-  → Socket.IO auth middleware rejects unverified users
-  → Frontend gates unverified users to EmailVerificationPendingPage (resend reads Retry-After, capped 300s)
-  → Migration: preflight duplicate-email check → backfill existing users as emailVerified=true → normalize emails to lowercase
+    Note over Client,Email: Resend Verification (authenticated)
+    Client->>Server: POST /auth/resend-verification
+    Server->>Server: Check if already verified (reject if so)
+    Server->>DB: Generate new token, replace in DB
+    Server->>Email: Send verification email
+    Server-->>Client: Success
+
+    Note over Client,Server: Enforcement
+    Note right of Server: requireVerifiedEmail middleware on all REST routes except auth self-management
+    Note right of Server: Socket.IO auth rejects unverified users
+    Note right of Client: Frontend gates to EmailVerificationPendingPage
 ```
 
 ### Security Measures
@@ -782,7 +917,7 @@ Enforcement:
 | Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
 | Email Verification | SHA-256 hashed tokens, 24hr expiry, single-use, format validation (64 hex chars, lowercase normalized), `requireVerifiedEmail` on all functional routes + attachment proxy + Socket.IO, StrictMode double-POST guard, migration preflight duplicate check |
 | Registration | Generic "Username or email already in use" error prevents email enumeration; email normalized to lowercase; Nodemailer structured address prevents header injection |
-| CORS | Explicit origin whitelist |
+| CORS | Explicit origin whitelist (must include Tauri origins: `https://tauri.localhost` Win, `tauri://localhost` macOS, `http://tauri.localhost` Linux). No `withCredentials` on client (Bearer tokens, not cookies) — avoids strict CORS mode that breaks on custom protocol origins. Server CORS echoes first allowed origin on null-origin requests instead of `*` |
 | Input | Server-side validation on all endpoints + runtime type validation on all Socket.IO payloads |
 | SQL Injection | Prisma parameterized queries |
 | IDOR | Message edit/delete verify channelId match + server membership; cross-channel manipulation blocked |
@@ -962,31 +1097,29 @@ Message attachments follow a 3-day retention lifecycle:
 
 3-tier notification system with avatar support (`services/notifications.ts`):
 
-```
-notify(title, body, avatarKey)
-  │
-  ├─ [1] Tauri: invoke('notify_with_avatar') ── Rust command ──┐
-  │       │                                                     │
-  │       │  Windows: WinRT Toast with circular avatar          │
-  │       │  ├─ Download avatar via ureq (HTTP GET ?inline)     │
-  │       │  ├─ Validate: key regex + magic bytes + 1MB limit   │
-  │       │  ├─ Cache to %TEMP%/voxium_avatars/ (symlink check) │
-  │       │  └─ Toast::icon(path, IconCrop::Circular)           │
-  │       │                                                     │
-  │       │  Other OS: returns Err → falls through              │
-  │       │                                                     │
-  ├─ [2] Tauri: sendNotification({title, body}) ── text-only    │
-  │       (plugin fallback, no avatar support)                   │
-  │                                                              │
-  └─ [3] Browser: new Notification(title, {icon: blobUrl})      │
-          ├─ fetch(API_BASE/uploads/{key}?inline)                │
-          ├─ Create blob URL (URL.createObjectURL)               │
-          ├─ Cache: Map<key, blobUrl>, max 100, LRU eviction     │
-          └─ Dedup: concurrent fetches for same key share promise│
+```mermaid
+graph TD
+    Start["notify(title, body, avatarKey)"] --> T1{"[1] Tauri:<br/>invoke notify_with_avatar"}
+
+    T1 -->|"Windows"| WinRT["WinRT Toast with circular avatar"]
+    WinRT --> DL["Download avatar via ureq (HTTP GET ?inline)"]
+    DL --> Validate["Validate: key regex +<br/>magic bytes + 1MB limit"]
+    Validate --> Cache["Cache to %TEMP%/voxium_avatars/<br/>(symlink check)"]
+    Cache --> Toast["Toast::icon(path, IconCrop::Circular)"]
+
+    T1 -->|"Other OS / Error"| T2{"[2] Tauri:<br/>sendNotification<br/>(text-only)"}
+
+    T2 -->|"Success"| Done["Notification shown"]
+    T2 -->|"Fallback"| T3{"[3] Browser:<br/>new Notification"}
+    T3 --> Fetch["fetch(API_BASE/uploads/key?inline)"]
+    Fetch --> Blob["Create blob URL<br/>(URL.createObjectURL)"]
+    Blob --> BlobCache["Cache: Map of key to blobUrl<br/>max 100, LRU eviction"]
+    BlobCache --> Done
 ```
 
 **Security:**
 - All Tauri-specific code gated behind `TAURI_AVAILABLE` (`'__TAURI_INTERNALS__' in window`)
+- **System tray:** graceful creation — if `TrayIconBuilder::build()` fails (Linux GNOME/Wayland without `libappindicator`), app continues without tray. Close behavior adapts: tray available → hide to tray; no tray → `app.exit(0)` (quit cleanly)
 - Avatar key validated against `VALID_AVATAR_KEY_RE` on both frontend (JS regex) and backend (Rust regex)
 - Rust: null byte rejection, control char rejection, 128-char key limit, image magic byte validation (PNG/JPEG/WebP/GIF), symlink detection on cached files
 - Server: `?inline` proxy forces `Content-Type: image/webp`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`
@@ -1006,6 +1139,64 @@ Nodemailer transporter (`utils/email.ts`) with configurable SMTP:
 - **Password reset emails** — HTML + plaintext with reset link, 1hr expiry
 - **Cleanup report emails** — HTML + plaintext summary table sent to `CLEANUP_REPORT_EMAIL` after each daily attachment cleanup run
 
+### Community Themes
+
+User-created themes with a marketplace for sharing. Themes customize all `--vox-*` CSS custom properties and optional SVG background patterns.
+
+**Data Model** (`CommunityTheme`):
+- `colors` (JSON) — key-value map of `--vox-*` CSS variable overrides (validated against `THEME_COLOR_KEYS` from shared)
+- `patterns` (JSON, optional) — per-area SVG background patterns for sidebar, channel, chat (type: `none` | `svg`, sanitized via `sanitizeSvg()`)
+- `status`: `draft` → `published` → `removed` (admin moderation)
+- `installCount` — atomic increment/decrement on install/uninstall
+- Composite unique: `[authorId, name]`; indexed on `[status, installCount]` and `[status, createdAt]`
+
+**API Routes** (`/api/v1/themes`):
+| Route | Purpose |
+|-------|---------|
+| `GET /` | Browse published themes (paginated, sort by newest/popular/name, search by name, filter by tag) |
+| `GET /mine` | List current user's themes (all statuses) |
+| `GET /:themeId` | Get single theme (published or own) |
+| `POST /` | Create theme (draft) — validates name, description, tags, colors, patterns |
+| `PATCH /:themeId` | Update own theme |
+| `DELETE /:themeId` | Delete own theme |
+| `POST /:themeId/publish` | Publish draft theme to marketplace |
+| `POST /:themeId/unpublish` | Revert to draft |
+| `POST /:themeId/install` | Install theme (increments installCount) |
+| `POST /:themeId/uninstall` | Uninstall theme (decrements installCount) |
+| `POST /:themeId/remove` | Admin: remove from marketplace |
+
+**Frontend Engine** (`services/themeEngine.ts`):
+- `applyCustomThemeColors()` — sets `data-theme="custom"` + injects `--vox-*` inline styles on `<html>`
+- `applyCustomPatterns()` — injects a `<style id="vox-custom-patterns">` tag with per-area SVG background rules
+- `clearCustomThemeColors()` — removes custom properties, restores built-in theme
+- Built-in themes (`styles/themes.css`): dark (default), light, midnight, tactical — applied via `[data-theme]` CSS selectors
+
+**Frontend UI** (`components/settings/ThemeEditor.tsx`, `ThemeBrowser.tsx`):
+- **ThemeEditor** — live preview with color pickers for all `--vox-*` variables, pattern config per area, JSON import/export
+- **ThemeBrowser** — marketplace grid with search, tag filter, sort, install/uninstall tracking
+- Settings modal appearance tab: built-in theme selector + custom theme management
+
+**Rate limiting:** `rateLimitThemeManage` (write operations), `rateLimitThemeBrowse` (read operations)
+
+### Internationalization (i18n)
+
+11 languages with RTL support, fully client-side via `i18next` + `react-i18next`.
+
+**Supported Languages:**
+`en`, `fr`, `es`, `pt`, `de`, `ru`, `uk`, `ko`, `zh`, `ja`, `ar` (RTL)
+
+**Architecture:**
+- Static JSON bundles per language in `i18n/locales/*.json` (~800+ keys each)
+- `i18next-browser-languagedetector` for auto-detection (order: `localStorage` → `navigator`)
+- Language persisted in `localStorage` key `voxium_language`
+- RTL handled via `document.documentElement.dir = 'rtl'` on language change (Arabic)
+- Server error messages mapped to i18n keys via `utils/serverErrors.ts` (130+ mappings) — `getTranslatedError()` translates API error responses for display
+
+**Key design decisions:**
+- All translations are client-side (no server-side i18n) — backend returns English error strings, frontend maps them to localized keys
+- Fallback: `en` for any missing key in other languages
+- Direction attribute removed (not set to `ltr`) for LTR languages to avoid Tailwind 4 logical property issues
+
 ---
 
 ## Scalability Strategy
@@ -1017,32 +1208,16 @@ Nodemailer transporter (`utils/email.ts`) with configurable SMTP:
 - Simple deployment
 
 ### Phase 2: Multi-Node (10K users)
-```
-                    ┌─────────────┐
-                    │   nginx     │
-                    │ (LB + SSL) │
-                    └──────┬──────┘
-                           │
-              ┌────────────┼────────────┐
-              │            │            │
-         ┌────┴────┐  ┌───┴─────┐  ┌──┴──────┐
-         │ Node 1  │  │ Node 2  │  │ Node 3  │
-         │ API+WS  │  │ API+WS  │  │ API+WS  │
-         └────┬────┘  └───┬─────┘  └──┬──────┘
-              │            │           │
-              └────────────┼───────────┘
-                           │
-              ┌────────────┼────────────┐
-              │            │            │
-         ┌────┴────┐  ┌───┴─────┐     │
-         │ Redis   │  │ Redis   │     │
-         │ Primary │  │ Replica │     │
-         └─────────┘  └─────────┘     │
-                                       │
-                              ┌────────┴────────┐
-                              │   PostgreSQL    │
-                              │ Primary+Replica │
-                              └─────────────────┘
+
+```mermaid
+graph TD
+    LB["nginx<br/>(LB + SSL)"] --> N1["Node 1<br/>API + WS"]
+    LB --> N2["Node 2<br/>API + WS"]
+    LB --> N3["Node 3<br/>API + WS"]
+
+    N1 & N2 & N3 --> RP[("Redis Primary")]
+    N1 & N2 & N3 --> RR[("Redis Replica")]
+    N1 & N2 & N3 --> PG[("PostgreSQL<br/>Primary + Replica")]
 ```
 
 Key changes:
@@ -1053,18 +1228,13 @@ Key changes:
 
 ### Phase 3: Microservices (100K+ users)
 
-```
-┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
-│   API    │  │ Message  │  │  Voice   │  │ Presence │
-│ Gateway  │  │ Service  │  │ Service  │  │ Service  │
-└──────────┘  └──────────┘  └──────────┘  └──────────┘
-     │              │              │              │
-     └──────────────┴──────────────┴──────────────┘
-                         │
-                    ┌────┴────┐
-                    │  NATS / │
-                    │  Kafka  │
-                    └─────────┘
+```mermaid
+graph TD
+    GW["API Gateway"] --> MS["Message Service"]
+    GW --> VS["Voice Service"]
+    GW --> PS["Presence Service"]
+
+    MS & VS & PS --> Broker["NATS / Kafka<br/>(Message Broker)"]
 ```
 
 - Break into domain microservices
@@ -1152,7 +1322,7 @@ packages/shared/     → Types, validators, constants (shared)
 packages/ui/         → UI components (future, shared)
 apps/desktop/        → Tauri + React (desktop)
 apps/mobile/         → React Native (future)
-apps/web/            → React SPA (future, same code as desktop minus Tauri)
+apps/web/            → React SPA (ships today, same code as desktop minus Tauri)
 ```
 
 Zustand stores and service layer (API + Socket) are framework-agnostic and can be reused across all platforms.

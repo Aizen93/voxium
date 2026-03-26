@@ -66,6 +66,10 @@ async function main() {
   // Create HTTP server
   const server = http.createServer(app);
 
+  // Production HTTP timeouts — prevent hanging connections from accumulating
+  server.keepAliveTimeout = 65000;   // Must exceed reverse proxy keep-alive (nginx default: 60s)
+  server.headersTimeout = 66000;     // Must be > keepAliveTimeout
+
   // Initialize WebSocket server
   const io = initSocketServer(server);
   console.log('[WS] Socket.IO server initialized');
@@ -77,23 +81,39 @@ async function main() {
   startAttachmentCleanup();
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n[Node ${NODE_ID}] Voxium server running on http://0.0.0.0:${PORT}\n`);
+    console.log(`\n[Node ${NODE_ID()}] Voxium server running on http://0.0.0.0:${PORT}\n`);
+    // Signal readiness probe after full initialization (migrations, Redis, mediasoup)
+    import('./app').then(({ markServerReady }) => markServerReady());
   });
 
   // Graceful shutdown
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log('\nShutting down...');
     stopAdminMetricsEmitter();
     stopAttachmentCleanup();
+    // Gracefully disconnect all Socket.IO clients before closing HTTP server
+    io.disconnectSockets(true);
     server.close();
     // Clean up presence so users don't appear online after shutdown
-    await clearPresenceState(prisma).catch(() => {});
+    await clearPresenceState(prisma).catch((err) => console.warn('[Shutdown] Presence cleanup failed:', err));
     await prisma.$disconnect();
     process.exit(0);
   };
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  // Catch unhandled errors to prevent silent crashes
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Process] Unhandled Rejection at:', promise, 'reason:', reason);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[Process] Uncaught Exception:', err);
+    shutdown();
+  });
 }
 
 main().catch((err) => {

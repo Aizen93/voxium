@@ -15,6 +15,9 @@ authRouter.post('/register', rateLimitRegister, async (req: Request, res: Respon
       return;
     }
     const { username, email, password, displayName } = req.body;
+    if (!username || typeof username !== 'string') { res.status(400).json({ success: false, error: 'Username is required' }); return; }
+    if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
+    if (!password || typeof password !== 'string') { res.status(400).json({ success: false, error: 'Password is required' }); return; }
     const result = await registerUser(username, email, password, displayName);
 
     res.status(201).json({
@@ -29,6 +32,8 @@ authRouter.post('/register', rateLimitRegister, async (req: Request, res: Respon
 authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email, password, rememberMe, trustedDeviceToken } = req.body;
+    if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
+    if (!password || typeof password !== 'string') { res.status(400).json({ success: false, error: 'Password is required' }); return; }
     const result = await loginUser(email, password, rememberMe ?? true, req.ip || req.socket.remoteAddress, trustedDeviceToken);
 
     res.json({
@@ -43,6 +48,10 @@ authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, ne
 authRouter.post('/refresh', rateLimitRefresh, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { refreshToken } = req.body;
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      res.status(400).json({ success: false, error: 'Refresh token is required' });
+      return;
+    }
     const tokens = await refreshTokens(refreshToken);
 
     res.json({

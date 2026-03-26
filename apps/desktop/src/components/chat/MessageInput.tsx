@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ChangeEvent, type DragEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
@@ -41,6 +42,7 @@ function getFileIcon(mimeType: string) {
 }
 
 export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
+  const { t } = useTranslation();
   const { sendMessage, sendDMMessage, replyingTo, clearReplyingTo } = useChatStore();
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
@@ -160,7 +162,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
     const remaining = LIMITS.MAX_ATTACHMENTS_PER_MESSAGE - pendingFiles.length;
     if (remaining <= 0) {
-      toast.error(`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments per message`);
+      toast.error(t('chat.maxAttachments', { max: LIMITS.MAX_ATTACHMENTS_PER_MESSAGE }));
       return;
     }
 
@@ -168,12 +170,12 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     for (let i = 0; i < Math.min(files.length, remaining); i++) {
       const file = files[i];
       if (!ALLOWED_ATTACHMENT_TYPES.includes(file.type as typeof ALLOWED_ATTACHMENT_TYPES[number])) {
-        toast.error(`${file.name}: file type not allowed`);
+        toast.error(t('chat.fileTypeNotAllowed', { name: file.name }));
         continue;
       }
       const maxSize = getMaxAttachmentSize(file.type);
       if (file.size > maxSize) {
-        toast.error(`${file.name} is too large (max ${maxSize / 1024 / 1024}MB)`);
+        toast.error(t('chat.fileTooLarge', { name: file.name, max: maxSize / 1024 / 1024 }));
         continue;
       }
       const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
@@ -215,7 +217,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     const hasUploading = pendingFiles.some((pf) => pf.status === 'uploading');
 
     if (hasUploading) {
-      toast.warning('Please wait for uploads to finish');
+      toast.warning(t('chat.waitForUploads'));
       return;
     }
 
@@ -237,6 +239,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         await sendMessage(channelId, trimmed, attachments.length ? attachments : undefined);
       }
       setContent('');
+      // Reset textarea height to single row
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
       // Clean up previews
       for (const pf of pendingFiles) {
         if (pf.previewUrl) URL.revokeObjectURL(pf.previewUrl);
@@ -244,7 +250,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       setPendingFiles([]);
       isTypingRef.current = false;
     } catch {
-      toast.error('Failed to send message');
+      toast.error(t('chat.failedToSend'));
     } finally {
       setIsSending(false);
     }
@@ -326,7 +332,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-vox-accent-primary bg-vox-accent-primary/10 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-2 text-vox-accent-primary">
             <Upload size={32} />
-            <span className="text-sm font-medium">Drop files to upload</span>
+            <span className="text-sm font-medium">{t('messageInput.dropToUpload')}</span>
           </div>
         </div>
       )}
@@ -334,7 +340,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       {replyingTo && (
         <div className="flex items-center justify-between rounded-t-xl border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2">
           <div className="min-w-0 flex-1 text-xs text-vox-text-secondary">
-            <span className="text-vox-text-muted">Replying to </span>
+            <span className="text-vox-text-muted">{t('messageInput.replyingTo')} </span>
             <span className="font-semibold text-vox-text-primary">{replyingTo.author.displayName}</span>
             <span className="ml-2 truncate text-vox-text-muted">
               {replyingTo.content.length > 80 ? replyingTo.content.slice(0, 80) + '...' : replyingTo.content}
@@ -343,7 +349,8 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           <button
             onClick={clearReplyingTo}
             className="ml-2 shrink-0 rounded p-0.5 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
-            title="Cancel reply"
+            title={t('messageInput.cancelReply')}
+            aria-label={t('messageInput.cancelReply')}
           >
             <X size={16} />
           </button>
@@ -372,7 +379,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
                 <div className="min-w-0 max-w-[120px]">
                   <p className="truncate text-xs text-vox-text-primary">{pf.fileName}</p>
                   <p className="text-[10px] text-vox-text-muted">
-                    {pf.status === 'uploading' ? 'Uploading...' : pf.status === 'error' ? 'Failed' : formatFileSize(pf.fileSize)}
+                    {pf.status === 'uploading' ? t('messageInput.uploading') : pf.status === 'error' ? t('messageInput.uploadFailed') : formatFileSize(pf.fileSize)}
                   </p>
                 </div>
                 {pf.status === 'uploading' && (
@@ -383,6 +390,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
                 <button
                   onClick={() => removePendingFile(pf.id)}
                   className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-vox-bg-tertiary text-vox-text-muted hover:text-vox-text-primary"
+                  aria-label={t('messageInput.removeAttachment')}
                 >
                   <X size={10} />
                 </button>
@@ -409,7 +417,8 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         <button
           onClick={() => fileInputRef.current?.click()}
           className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
-          title="Attach file"
+          title={t('messageInput.attachFile')}
+          aria-label={t('messageInput.attachFile')}
         >
           <PlusCircle size={20} />
         </button>
@@ -456,6 +465,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           ref={emojiBtnRef}
           onClick={() => setShowEmojiPicker(!showEmojiPicker)}
           className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
+          aria-label={t('messageInput.emojiPicker')}
         >
           <Smile size={20} />
         </button>
@@ -475,6 +485,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
             onClick={handleSend}
             disabled={isSending}
             className="mb-0.5 text-vox-accent-primary hover:text-vox-accent-hover transition-colors disabled:opacity-50"
+            aria-label={t('messageInput.sendMessage')}
           >
             <Send size={20} />
           </button>

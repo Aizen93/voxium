@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import axios from 'axios';
 import { Megaphone, Plus, Send, Trash2, X } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAdminStore } from '../stores/adminStore';
@@ -96,8 +97,8 @@ export function AdminAnnouncements() {
       toast.success(publishImmediately ? 'Announcement created and published' : 'Announcement draft created');
       setShowCreate(false);
       resetForm();
-    } catch (err: any) {
-      const msg = err?.response?.data?.error || err?.response?.data?.message || 'Failed to create announcement';
+    } catch (err: unknown) {
+      const msg = (axios.isAxiosError(err) && (err.response?.data?.error || err.response?.data?.message)) || 'Failed to create announcement';
       toast.error(msg);
     } finally {
       setCreating(false);

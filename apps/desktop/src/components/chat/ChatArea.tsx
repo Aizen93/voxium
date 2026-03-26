@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
 import { getSocket, onConnectionStatusChange } from '../../services/socket';
@@ -8,6 +9,7 @@ import { SearchModal } from '../search/SearchModal';
 import { Hash, Search } from 'lucide-react';
 
 export function ChatArea() {
+  const { t } = useTranslation();
   const { channels, activeChannelId, activeServerId } = useServerStore();
   const [showSearch, setShowSearch] = useState(false);
   const { fetchMessages, clearMessages } = useChatStore();
@@ -27,6 +29,10 @@ export function ChatArea() {
       }
       clearMessages();
       fetchMessages(channelId);
+      // Ensure unread is cleared and server is notified — covers reconnect scenarios
+      // where unread:init may restore stale counts from a previously failed markChannelRead
+      useServerStore.getState().clearUnread(channelId);
+      useServerStore.getState().markChannelRead(channelId);
     },
     [clearMessages, fetchMessages]
   );
@@ -61,7 +67,7 @@ export function ChatArea() {
       const channelId = prevChannelRef.current;
       if (!channelId) return;
 
-      console.log(`[Chat] Socket (re)connected (id=${socket.id}) — re-joining channel: ${channelId}`);
+      if (import.meta.env.DEV) console.log(`[Chat] Socket (re)connected (id=${socket.id}) — re-joining channel: ${channelId}`);
       joinAndFetch(channelId);
     }
 
@@ -74,7 +80,7 @@ export function ChatArea() {
         // Already connected — mark as handled, ensure room is joined
         handledSocketId = socket.id;
         if (prevChannelRef.current) {
-          console.log('[Chat] Socket already connected on mount — ensuring channel:join');
+          if (import.meta.env.DEV) console.log('[Chat] Socket already connected on mount — ensuring channel:join');
           socket.emit('channel:join', prevChannelRef.current);
         }
       }
@@ -112,13 +118,13 @@ export function ChatArea() {
   if (!activeChannel || activeChannel.type !== 'text') {
     return (
       <div className="flex h-full flex-col items-center justify-center bg-vox-chat">
-        <p className="text-vox-text-muted">Select a text channel to start chatting</p>
+        <p className="text-vox-text-muted">{t('chat.selectChannel')}</p>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col bg-vox-chat">
+    <div className="flex h-full min-w-0 flex-col bg-vox-chat">
       {/* Channel Header */}
       <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
         <Hash size={18} className="text-vox-text-muted" />
@@ -126,7 +132,8 @@ export function ChatArea() {
         <button
           onClick={() => setShowSearch(true)}
           className="rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
-          title="Search Messages (Ctrl+K)"
+          title={t('chat.searchMessages')}
+          aria-label={t('chat.searchMessages')}
         >
           <Search size={18} />
         </button>

@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { FileText, Download, Image, Film, Music, Clock, Loader2 } from 'lucide-react';
 import { ImageLightbox } from './ImageLightbox';
 import { toast } from '../../stores/toastStore';
 import { api } from '../../services/api';
 import type { Attachment } from '@voxium/shared';
-
-const API_URL = import.meta.env.VITE_API_URL;
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -31,6 +30,7 @@ interface Props {
 }
 
 export function AttachmentDisplay({ attachment }: Props) {
+  const { t } = useTranslation();
   const [imgError, setImgError] = useState(false);
   const [showLightbox, setShowLightbox] = useState(false);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
@@ -72,7 +72,7 @@ export function AttachmentDisplay({ attachment }: Props) {
       <div className="mt-1 inline-flex items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-xs text-vox-text-muted">
         <FileIcon size={16} className="shrink-0" />
         <span>{attachment.fileName}</span>
-        <span className="flex items-center gap-1 text-vox-text-muted/60"><Clock size={12} />Expired</span>
+        <span className="flex items-center gap-1 text-vox-text-muted/60"><Clock size={12} />{t('attachment.expired')}</span>
       </div>
     );
   }
@@ -87,9 +87,9 @@ export function AttachmentDisplay({ attachment }: Props) {
       a.download = attachment.fileName;
       a.click();
       URL.revokeObjectURL(url);
-      toast.success(`Downloaded "${attachment.fileName}"`);
+      toast.success(t('attachment.downloaded'));
     } catch {
-      toast.error('Failed to download file');
+      toast.error(t('attachment.failedToDownload'));
     }
   };
 
@@ -98,7 +98,7 @@ export function AttachmentDisplay({ attachment }: Props) {
     return (
       <div className="mt-1 inline-flex items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-xs text-vox-text-muted">
         <Loader2 size={16} className="animate-spin shrink-0" />
-        <span>Loading {isImage ? 'image' : isVideo ? 'video' : 'audio'}...</span>
+        <span>{isImage ? t('attachment.loadingImage') : isVideo ? t('attachment.loadingVideo') : t('attachment.loadingAudio')}</span>
       </div>
     );
   }
@@ -130,7 +130,7 @@ export function AttachmentDisplay({ attachment }: Props) {
     return (
       <div className="mt-1 flex items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-xs text-vox-text-muted">
         <Image size={16} />
-        <span>{attachment.fileName} - File expired</span>
+        <span>{attachment.fileName} - {t('attachment.fileExpired')}</span>
       </div>
     );
   }

@@ -6,7 +6,7 @@ import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export function DMCallPanel() {
-  const { dmCallUsers, selfMute, selfDeaf, toggleMute, toggleDeaf, leaveDMCall } = useVoiceStore();
+  const { dmCallUsers, selfMute, selfDeaf, pttActive, toggleMute, toggleDeaf, leaveDMCall } = useVoiceStore();
   const { user } = useAuthStore();
   const localAudioLevel = useLocalAudioLevel();
 
@@ -19,7 +19,7 @@ export function DMCallPanel() {
         {dmCallUsers.map((voiceUser) => {
           const isLocal = voiceUser.id === user?.id;
           const isSpeaking = isLocal
-            ? (localAudioLevel > 0.05 && !selfMute)
+            ? (localAudioLevel > 0.05 && (!selfMute || pttActive))
             : voiceUser.speaking;
 
           return (
@@ -63,6 +63,7 @@ export function DMCallPanel() {
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
           )}
           title={selfMute ? 'Unmute' : 'Mute'}
+          aria-label={selfMute ? 'Unmute' : 'Mute'}
         >
           {selfMute ? <MicOff size={20} /> : <Mic size={20} />}
         </button>
@@ -76,6 +77,7 @@ export function DMCallPanel() {
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
           )}
           title={selfDeaf ? 'Undeafen' : 'Deafen'}
+          aria-label={selfDeaf ? 'Undeafen' : 'Deafen'}
         >
           {selfDeaf ? <HeadphoneOff size={20} /> : <Headphones size={20} />}
         </button>
@@ -84,6 +86,7 @@ export function DMCallPanel() {
           onClick={leaveDMCall}
           className="rounded-full bg-vox-accent-danger p-3 text-white hover:bg-vox-accent-danger/80 transition-colors"
           title="Leave Call"
+          aria-label="Leave call"
         >
           <PhoneOff size={20} />
         </button>

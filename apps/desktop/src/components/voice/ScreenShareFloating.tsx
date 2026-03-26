@@ -129,6 +129,7 @@ export function ScreenShareFloating() {
             onClick={handleFullscreen}
             className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary transition-colors"
             title="Fullscreen"
+            aria-label="Fullscreen"
           >
             <Maximize size={12} />
           </button>
@@ -136,6 +137,7 @@ export function ScreenShareFloating() {
             onClick={() => setViewMode('inline')}
             className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary transition-colors"
             title="Dock to inline"
+            aria-label="Dock to inline"
           >
             <Minimize2 size={12} />
           </button>
@@ -144,6 +146,7 @@ export function ScreenShareFloating() {
               onClick={stopScreenShare}
               className="rounded p-1 text-vox-accent-danger hover:bg-vox-accent-danger/20 transition-colors"
               title="Stop sharing"
+              aria-label="Stop sharing"
             >
               <MonitorOff size={12} />
             </button>

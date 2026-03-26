@@ -25,7 +25,7 @@ searchRouter.get('/servers/:serverId/messages', async (req: Request<{ serverId: 
     const channelId = req.query.channelId as string | undefined;
     const authorId = req.query.authorId as string | undefined;
     const before = req.query.before as string | undefined;
-    const limit = Math.min(parseInt(req.query.limit as string) || LIMITS.SEARCH_RESULTS_PER_PAGE, LIMITS.SEARCH_RESULTS_PER_PAGE);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || LIMITS.SEARCH_RESULTS_PER_PAGE, LIMITS.SEARCH_RESULTS_PER_PAGE);
 
     const queryErr = validateSearchQuery(q);
     if (queryErr) throw new BadRequestError(queryErr);
@@ -110,7 +110,7 @@ searchRouter.get('/dm/:conversationId/messages', async (req: Request<{ conversat
     const userId = req.user!.userId;
     const q = sanitizeText((req.query.q as string) ?? '');
     const before = req.query.before as string | undefined;
-    const limit = Math.min(parseInt(req.query.limit as string) || LIMITS.SEARCH_RESULTS_PER_PAGE, LIMITS.SEARCH_RESULTS_PER_PAGE);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || LIMITS.SEARCH_RESULTS_PER_PAGE, LIMITS.SEARCH_RESULTS_PER_PAGE);
 
     const queryErr = validateSearchQuery(q);
     if (queryErr) throw new BadRequestError(queryErr);

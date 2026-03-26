@@ -9,6 +9,8 @@ import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerR
 import { RECV_TRANSPORT_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { getRedis, NODE_ID } from '../utils/redis';
+import { hasChannelPermission, hasServerPermission, getHighestRolePosition } from '../utils/permissionCalculator';
+import { Permissions } from '@voxium/shared';
 
 /** Runtime type guard — returns false if value is not a non-empty string */
 function isString(v: unknown): v is string {
@@ -25,6 +27,8 @@ interface UserMediaState {
   socketId: string;
   selfMute: boolean;
   selfDeaf: boolean;
+  serverMuted: boolean;
+  serverDeafened: boolean;
   sendTransport: WebRtcTransport | null;
   recvTransport: WebRtcTransport | null;
   producers: Map<string, Producer>;   // producerId → Producer
@@ -48,14 +52,14 @@ const screenSharers = new Map<string, string>();
 // voice:screen:{channelId}         — String: userId (screen sharer)
 // voice:active                     — Set of channelIds with active voice users
 
-function mirrorVoiceJoin(channelId: string, serverId: string, userId: string, selfMute: boolean, selfDeaf: boolean): void {
+function mirrorVoiceJoin(channelId: string, serverId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false): void {
   getRedis().multi()
-    .hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, nodeId: NODE_ID }))
+    .hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID() }))
     .set(`voice:channel:server:${channelId}`, serverId)
-    .set(`voice:channel:node:${channelId}`, NODE_ID)
+    .set(`voice:channel:node:${channelId}`, NODE_ID())
     .set(`voice:user:${userId}`, channelId)
     .sAdd('voice:active', channelId)
-    .exec().catch(() => {});
+    .exec().catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
 
 function mirrorVoiceLeave(channelId: string, userId: string, channelEmpty: boolean): void {
@@ -71,19 +75,48 @@ function mirrorVoiceLeave(channelId: string, userId: string, channelEmpty: boole
       .sRem('voice:active', channelId)
       .del(`voice:screen:${channelId}`);
   }
-  pipeline.exec().catch(() => {});
+  pipeline.exec().catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
 
-function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean): void {
-  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, nodeId: NODE_ID })).catch(() => {});
+function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false): void {
+  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID() })).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+}
+
+// ─── Persistent server-mute/deafen (survives reconnect) ─────────────────────
+
+async function setServerMutePersist(serverId: string, userId: string, muted: boolean): Promise<void> {
+  const redis = getRedis();
+  if (muted) {
+    await redis.set(`voice:server_muted:${serverId}:${userId}`, '1').catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+  } else {
+    await redis.del(`voice:server_muted:${serverId}:${userId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+  }
+}
+
+async function setServerDeafenPersist(serverId: string, userId: string, deafened: boolean): Promise<void> {
+  const redis = getRedis();
+  if (deafened) {
+    await redis.set(`voice:server_deafened:${serverId}:${userId}`, '1').catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+  } else {
+    await redis.del(`voice:server_deafened:${serverId}:${userId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+  }
+}
+
+async function getPersistedServerMuteDeaf(serverId: string, userId: string): Promise<{ serverMuted: boolean; serverDeafened: boolean }> {
+  const redis = getRedis();
+  const [muted, deafened] = await Promise.all([
+    redis.get(`voice:server_muted:${serverId}:${userId}`),
+    redis.get(`voice:server_deafened:${serverId}:${userId}`),
+  ]);
+  return { serverMuted: muted === '1', serverDeafened: deafened === '1' };
 }
 
 function mirrorScreenShare(channelId: string, userId: string | null): void {
   const redis = getRedis();
   if (userId) {
-    redis.set(`voice:screen:${channelId}`, userId).catch(() => {});
+    redis.set(`voice:screen:${channelId}`, userId).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   } else {
-    redis.del(`voice:screen:${channelId}`).catch(() => {});
+    redis.del(`voice:screen:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   }
 }
 
@@ -122,6 +155,13 @@ export function handleVoiceEvents(
     if (!membership) {
       console.log(`[Voice] User ${userId} not a member of server`);
       socket.emit('voice:error', { message: 'You are not a member of this server.' });
+      return;
+    }
+
+    // Check CONNECT permission for this voice channel
+    const canConnect = await hasChannelPermission(userId, channelId, channel.serverId, Permissions.CONNECT);
+    if (!canConnect) {
+      socket.emit('voice:error', { message: 'You do not have permission to join this voice channel.' });
       return;
     }
 
@@ -192,6 +232,8 @@ export function handleVoiceEvents(
       socketId: socket.id,
       selfMute: initialMute,
       selfDeaf: initialDeaf,
+      serverMuted: false,
+      serverDeafened: false,
       sendTransport,
       recvTransport,
       producers: new Map(),
@@ -201,8 +243,21 @@ export function handleVoiceEvents(
 
     voiceChannelUsers.get(channelId)!.set(userId, userMedia);
 
+    // Re-apply persisted server-mute/deafen (survives disconnect+rejoin)
+    const persisted = await getPersistedServerMuteDeaf(channel.serverId, userId);
+    if (persisted.serverMuted) {
+      userMedia.serverMuted = true;
+      userMedia.selfMute = true; // deafen-implies-mute
+    }
+    if (persisted.serverDeafened) {
+      userMedia.serverDeafened = true;
+      userMedia.serverMuted = true; // deafen-implies-mute
+      userMedia.selfMute = true;
+      userMedia.selfDeaf = true;
+    }
+
     // Mirror to Redis for cross-node visibility
-    mirrorVoiceJoin(channelId, channel.serverId, userId, initialMute, initialDeaf);
+    mirrorVoiceJoin(channelId, channel.serverId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened);
 
     // Fetch user info
     const user = await prisma.user.findUnique({
@@ -227,6 +282,8 @@ export function handleVoiceEvents(
             ...u,
             selfMute: uState?.selfMute ?? false,
             selfDeaf: uState?.selfDeaf ?? false,
+            serverMuted: uState?.serverMuted ?? false,
+            serverDeafened: uState?.serverDeafened ?? false,
             speaking: false,
           };
         });
@@ -241,11 +298,23 @@ export function handleVoiceEvents(
       }
 
       // Broadcast to the ENTIRE SERVER so all members can see who's in voice
-      const voiceUser = { ...user, selfMute: initialMute, selfDeaf: initialDeaf, speaking: false };
+      const voiceUser = { ...user, selfMute: userMedia.selfMute, selfDeaf: userMedia.selfDeaf, serverMuted: userMedia.serverMuted, serverDeafened: userMedia.serverDeafened, speaking: false };
       io.to(`server:${channel.serverId}`).emit('voice:user_joined', {
         channelId,
         user: voiceUser,
       });
+
+      // If server-muted/deafened (persisted), notify the joining user so their UI updates
+      if (userMedia.serverMuted || userMedia.serverDeafened) {
+        socket.emit('voice:state_update', {
+          channelId,
+          userId,
+          selfMute: userMedia.selfMute,
+          selfDeaf: userMedia.selfDeaf,
+          serverMuted: userMedia.serverMuted,
+          serverDeafened: userMedia.serverDeafened,
+        });
+      }
 
       // Send transport parameters to the joining client
       socket.emit('voice:transport_created', {
@@ -274,14 +343,26 @@ export function handleVoiceEvents(
   });
 
   // ── voice:transport:connect ───────────────────────────────────────────
-  socket.on('voice:transport:connect', async (data: { transportId: string; dtlsParameters: unknown }) => {
-    if (!socketRateLimit(socket, 'voice:transport:connect', 30)) return;
-    if (!data || typeof data !== 'object' || !isString(data.transportId) || !data.dtlsParameters || typeof data.dtlsParameters !== 'object') return;
+  socket.on('voice:transport:connect', async (data: { transportId: string; dtlsParameters: unknown }, ackCallback) => {
+    if (!socketRateLimit(socket, 'voice:transport:connect', 30)) {
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Rate limited' });
+      return;
+    }
+    if (!data || typeof data !== 'object' || !isString(data.transportId) || !data.dtlsParameters || typeof data.dtlsParameters !== 'object') {
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Invalid parameters' });
+      return;
+    }
     const channelId = socket.data.voiceChannelId as string;
-    if (!channelId) return;
+    if (!channelId) {
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Not in a voice channel' });
+      return;
+    }
 
     const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
-    if (!userMedia) return;
+    if (!userMedia) {
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Voice state not found' });
+      return;
+    }
 
     const transport =
       userMedia.sendTransport?.id === data.transportId ? userMedia.sendTransport :
@@ -290,13 +371,16 @@ export function handleVoiceEvents(
 
     if (!transport) {
       console.warn(`[Voice] Transport ${data.transportId} not found for user ${userId}`);
+      if (typeof ackCallback === 'function') ackCallback({ error: 'Transport not found' });
       return;
     }
 
     try {
       await transport.connect({ dtlsParameters: data.dtlsParameters as DtlsParameters });
+      if (typeof ackCallback === 'function') ackCallback({});
     } catch (err) {
       console.error(`[Voice] transport.connect failed for ${userId}:`, err);
+      if (typeof ackCallback === 'function') ackCallback({ error: 'DTLS connect failed' });
     }
   });
 
@@ -313,6 +397,15 @@ export function handleVoiceEvents(
     const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
     if (!userMedia?.sendTransport) return;
 
+    // Check SPEAK permission for audio producers (screen-share audio/video are separate)
+    if (data.kind === 'audio' && (!data.appData || data.appData.type !== 'screen-audio')) {
+      const serverId = channelServerMap.get(channelId);
+      if (serverId) {
+        const canSpeak = await hasChannelPermission(userId, channelId, serverId, Permissions.SPEAK);
+        if (!canSpeak) return;
+      }
+    }
+
     // Cap at 4 producers per user (1 mic audio + 1 screen video + 1 screen audio + 1 spare)
     if (userMedia.producers.size >= 4) {
       console.warn(`[Voice] User ${userId} exceeded max producers`);
@@ -328,8 +421,8 @@ export function handleVoiceEvents(
 
       userMedia.producers.set(producer.id, producer);
 
-      // If muted at join, pause the audio producer immediately
-      if (data.kind === 'audio' && userMedia.selfMute) {
+      // If muted (self or server) at join, pause the audio producer immediately
+      if (data.kind === 'audio' && (userMedia.selfMute || userMedia.serverMuted)) {
         producer.pause();
       }
 
@@ -352,7 +445,23 @@ export function handleVoiceEvents(
 
           consumerPromises.push(createConsumerForUser(io, channelId, otherUserId, otherMedia, producer, userId));
         }
-        await Promise.allSettled(consumerPromises);
+        const results = await Promise.allSettled(consumerPromises);
+
+        // Retry once for transient failures (consumer creation can fail due to timing)
+        const retryTargets = [...channelUsers.entries()].filter(([uid]) => uid !== userId);
+        const retryPromises: Promise<void>[] = [];
+        results.forEach((result, i) => {
+          if (result.status === 'rejected' && retryTargets[i]) {
+            const [otherUserId, otherMedia] = retryTargets[i];
+            if (otherMedia.recvTransport && otherMedia.rtpCapabilities && !otherMedia.recvTransport.closed) {
+              console.warn(`[Voice] Retrying consumer creation for ${otherUserId}`);
+              retryPromises.push(createConsumerForUser(io, channelId, otherUserId, otherMedia, producer, userId));
+            }
+          }
+        });
+        if (retryPromises.length > 0) {
+          await Promise.allSettled(retryPromises);
+        }
       }
     } catch (err) {
       console.error(`[Voice] produce failed for ${userId}:`, err);
@@ -406,6 +515,36 @@ export function handleVoiceEvents(
     }
   });
 
+  /** Helper: emit full voice:state_update for a user */
+  function emitStateUpdate(channelId: string, uid: string, media: UserMediaState) {
+    const serverId = channelServerMap.get(channelId);
+    if (serverId) {
+      io.to(`server:${serverId}`).emit('voice:state_update', {
+        channelId,
+        userId: uid,
+        selfMute: media.selfMute,
+        selfDeaf: media.selfDeaf,
+        serverMuted: media.serverMuted,
+        serverDeafened: media.serverDeafened,
+      });
+    }
+  }
+
+  /** Helper: pause all audio producers for a user */
+  function pauseUserAudio(media: UserMediaState) {
+    for (const producer of media.producers.values()) {
+      if (producer.kind === 'audio') producer.pause();
+    }
+  }
+
+  /** Helper: resume audio producers (only if neither selfMute nor serverMuted) */
+  function resumeUserAudioIfAllowed(media: UserMediaState) {
+    if (media.selfMute || media.serverMuted) return;
+    for (const producer of media.producers.values()) {
+      if (producer.kind === 'audio') producer.resume();
+    }
+  }
+
   // ── voice:mute ────────────────────────────────────────────────────────
   socket.on('voice:mute', (muted: boolean) => {
     if (!socketRateLimit(socket, 'voice:mute', 30)) return;
@@ -413,30 +552,22 @@ export function handleVoiceEvents(
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
-    const channelUsers = voiceChannelUsers.get(channelId);
-    const userMedia = channelUsers?.get(userId);
-    if (userMedia) {
-      userMedia.selfMute = muted;
+    const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
+    if (!userMedia) return;
 
-      // Pause/resume the audio Producer on the server to save bandwidth
-      for (const producer of userMedia.producers.values()) {
-        if (producer.kind === 'audio') {
-          if (muted) { producer.pause(); } else { producer.resume(); }
-        }
-      }
+    // If server-muted, user cannot unmute themselves
+    if (!muted && userMedia.serverMuted) return;
 
-      mirrorVoiceStateUpdate(channelId, userId, muted, userMedia.selfDeaf);
+    userMedia.selfMute = muted;
+
+    if (muted) {
+      pauseUserAudio(userMedia);
+    } else {
+      resumeUserAudioIfAllowed(userMedia);
     }
 
-    const serverId = channelServerMap.get(channelId);
-    if (serverId) {
-      io.to(`server:${serverId}`).emit('voice:state_update', {
-        channelId,
-        userId,
-        selfMute: muted,
-        selfDeaf: userMedia?.selfDeaf ?? false,
-      });
-    }
+    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened);
+    emitStateUpdate(channelId, userId, userMedia);
   });
 
   // ── voice:deaf ────────────────────────────────────────────────────────
@@ -446,22 +577,22 @@ export function handleVoiceEvents(
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
-    const channelUsers = voiceChannelUsers.get(channelId);
-    const userMedia = channelUsers?.get(userId);
-    if (userMedia) {
-      userMedia.selfDeaf = deafened;
-      mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, deafened);
+    const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
+    if (!userMedia) return;
+
+    // If server-deafened, user cannot undeafen themselves
+    if (!deafened && userMedia.serverDeafened) return;
+
+    userMedia.selfDeaf = deafened;
+
+    // Deafen implies mute — if deafening, also mute
+    if (deafened && !userMedia.selfMute) {
+      userMedia.selfMute = true;
+      pauseUserAudio(userMedia);
     }
 
-    const serverId = channelServerMap.get(channelId);
-    if (serverId) {
-      io.to(`server:${serverId}`).emit('voice:state_update', {
-        channelId,
-        userId,
-        selfMute: userMedia?.selfMute ?? false,
-        selfDeaf: deafened,
-      });
-    }
+    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened);
+    emitStateUpdate(channelId, userId, userMedia);
   });
 
   // ── voice:speaking ────────────────────────────────────────────────────
@@ -471,10 +602,9 @@ export function handleVoiceEvents(
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
-    // Pause/resume mic audio producer server-side to stop forwarding RTP during silence.
-    // Only target mic audio (appData.type === 'audio'), not screen-share audio.
+    // Only control producers if not self-muted AND not server-muted
     const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
-    if (userMedia && !userMedia.selfMute) {
+    if (userMedia && !userMedia.selfMute && !userMedia.serverMuted) {
       for (const producer of userMedia.producers.values()) {
         if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
           if (speaking) { producer.resume(); } else { producer.pause(); }
@@ -482,20 +612,181 @@ export function handleVoiceEvents(
       }
     }
 
+    // Don't broadcast speaking indicator if server-muted (prevents UI deception by modified clients)
+    if (userMedia?.serverMuted) return;
+
     const serverId = channelServerMap.get(channelId);
     if (serverId) {
-      io.to(`server:${serverId}`).emit('voice:speaking', {
-        channelId,
-        userId,
-        speaking,
-      });
+      io.to(`server:${serverId}`).emit('voice:speaking', { channelId, userId, speaking });
     }
+  });
+
+  // ── voice:server_mute (force-mute another user) ────────────────────────
+  socket.on('voice:server_mute', async (data: unknown) => {
+    if (!socketRateLimit(socket, 'voice:server_mute', 20)) return;
+    if (!data || typeof data !== 'object') return;
+    const { userId: targetId, muted } = data as { userId: string; muted: boolean };
+    if (typeof targetId !== 'string' || typeof muted !== 'boolean') return;
+
+    const channelId = socket.data.voiceChannelId as string;
+    if (!channelId) return;
+    const serverId = channelServerMap.get(channelId);
+    if (!serverId) return;
+
+    // Permission check: MUTE_MEMBERS
+    const canMute = await hasChannelPermission(userId, channelId, serverId, Permissions.MUTE_MEMBERS);
+    if (!canMute) {
+      socket.emit('voice:error', { message: 'You do not have permission to mute members.' });
+      return;
+    }
+
+    // Hierarchy check: can't mute users with equal/higher role
+    const actorHighest = await getHighestRolePosition(userId, serverId);
+    const targetHighest = await getHighestRolePosition(targetId, serverId);
+    if (actorHighest !== Infinity && targetHighest >= actorHighest) {
+      socket.emit('voice:error', { message: 'Cannot mute a member with an equal or higher role.' });
+      return;
+    }
+
+    const targetMedia = voiceChannelUsers.get(channelId)?.get(targetId);
+    if (!targetMedia) return;
+
+    targetMedia.serverMuted = muted;
+    setServerMutePersist(serverId, targetId, muted);
+
+    if (muted) {
+      pauseUserAudio(targetMedia);
+    } else {
+      resumeUserAudioIfAllowed(targetMedia);
+    }
+
+    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened);
+    emitStateUpdate(channelId, targetId, targetMedia);
+  });
+
+  // ── voice:server_deafen (force-deafen another user) ────────────────────
+  socket.on('voice:server_deafen', async (data: unknown) => {
+    if (!socketRateLimit(socket, 'voice:server_deafen', 20)) return;
+    if (!data || typeof data !== 'object') return;
+    const { userId: targetId, deafened } = data as { userId: string; deafened: boolean };
+    if (typeof targetId !== 'string' || typeof deafened !== 'boolean') return;
+
+    const channelId = socket.data.voiceChannelId as string;
+    if (!channelId) return;
+    const serverId = channelServerMap.get(channelId);
+    if (!serverId) return;
+
+    // Permission check: DEAFEN_MEMBERS
+    const canDeafen = await hasChannelPermission(userId, channelId, serverId, Permissions.DEAFEN_MEMBERS);
+    if (!canDeafen) {
+      socket.emit('voice:error', { message: 'You do not have permission to deafen members.' });
+      return;
+    }
+
+    const actorHighest = await getHighestRolePosition(userId, serverId);
+    const targetHighest = await getHighestRolePosition(targetId, serverId);
+    if (actorHighest !== Infinity && targetHighest >= actorHighest) {
+      socket.emit('voice:error', { message: 'Cannot deafen a member with an equal or higher role.' });
+      return;
+    }
+
+    const targetMedia = voiceChannelUsers.get(channelId)?.get(targetId);
+    if (!targetMedia) return;
+
+    targetMedia.serverDeafened = deafened;
+    setServerDeafenPersist(serverId, targetId, deafened);
+
+    // Deafen implies mute — if deafening, also server-mute
+    if (deafened && !targetMedia.serverMuted) {
+      targetMedia.serverMuted = true;
+      setServerMutePersist(serverId, targetId, true);
+      pauseUserAudio(targetMedia);
+    }
+
+    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened);
+    emitStateUpdate(channelId, targetId, targetMedia);
+  });
+
+  // ── voice:force_move (move another user to a different voice channel) ──
+  // Supports cross-channel: actor does NOT need to be in the same channel as target.
+  socket.on('voice:force_move', async (data: unknown) => {
+    if (!socketRateLimit(socket, 'voice:force_move', 10)) return;
+    if (!data || typeof data !== 'object') return;
+    const { userId: targetId, targetChannelId } = data as { userId: string; targetChannelId: string };
+    if (typeof targetId !== 'string' || typeof targetChannelId !== 'string') return;
+
+    // Find which channel the target is in (search all voice channels)
+    let sourceChannelId: string | null = null;
+    let targetMedia: UserMediaState | undefined;
+    for (const [chId, users] of voiceChannelUsers) {
+      const media = users.get(targetId);
+      if (media) {
+        sourceChannelId = chId;
+        targetMedia = media;
+        break;
+      }
+    }
+    if (!sourceChannelId || !targetMedia) {
+      socket.emit('voice:error', { message: 'User is not in a voice channel.' });
+      return;
+    }
+
+    const serverId = channelServerMap.get(sourceChannelId);
+    if (!serverId) return;
+
+    // Permission check: MOVE_MEMBERS (check against server-level permission)
+    const canMove = await hasServerPermission(userId, serverId, Permissions.MOVE_MEMBERS);
+    if (!canMove) {
+      socket.emit('voice:error', { message: 'You do not have permission to move members.' });
+      return;
+    }
+
+    const actorHighest = await getHighestRolePosition(userId, serverId);
+    const targetHighest = await getHighestRolePosition(targetId, serverId);
+    if (actorHighest !== Infinity && targetHighest >= actorHighest) {
+      socket.emit('voice:error', { message: 'Cannot move a member with an equal or higher role.' });
+      return;
+    }
+
+    // Validate target channel exists, is voice, is in the same server
+    const targetChannel = await prisma.channel.findUnique({
+      where: { id: targetChannelId },
+      select: { serverId: true, type: true },
+    });
+    if (!targetChannel || targetChannel.type !== 'voice' || targetChannel.serverId !== serverId) {
+      socket.emit('voice:error', { message: 'Invalid target voice channel.' });
+      return;
+    }
+
+    // Check that the target user has CONNECT permission on the destination channel.
+    // Without this check, force_move could be abused to place users in channels they
+    // are not allowed to join (effectively a voice-kick disguised as a move).
+    const targetCanConnect = await hasChannelPermission(targetId, targetChannelId, serverId, Permissions.CONNECT);
+    if (!targetCanConnect) {
+      socket.emit('voice:error', { message: 'Target user does not have permission to join that channel.' });
+      return;
+    }
+
+    // Check capacity of target channel
+    const targetChanUsers = voiceChannelUsers.get(targetChannelId);
+    const limits = await getEffectiveLimits(serverId);
+    if (targetChanUsers && targetChanUsers.size >= limits.maxVoiceUsersPerChannel) {
+      socket.emit('voice:error', { message: 'Target voice channel is full.' });
+      return;
+    }
+    const targetSocketId = targetMedia.socketId;
+
+    // Use io.to() instead of local socket lookup — works cross-node with Redis adapter
+    io.to(targetSocketId).emit('voice:force_moved', { channelId: sourceChannelId, userId: targetId, targetChannelId });
+
+    // The actual channel switch is handled client-side:
+    // the target client receives voice:force_moved, calls leaveChannel() then joinChannel(targetChannelId)
   });
 
   // ── voice:signal (kept as no-op for backward compat) ──────────────────
   // No-op: kept for backward compat (SFU replaced P2P). Rate-limited to prevent spam.
   socket.on('voice:signal', () => {
-    socketRateLimit(socket, 'voice:signal', 10);
+    if (!socketRateLimit(socket, 'voice:signal', 10)) return;
   });
 
   // ── Screen sharing ────────────────────────────────────────────────────
@@ -708,7 +999,7 @@ export function cleanupServerVoice(
         }
 
         // Clean up Redis mirror for this user
-        getRedis().del(`voice:user:${uid}`).catch(() => {});
+        getRedis().del(`voice:user:${uid}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
       }
       voiceChannelUsers.delete(channelId);
     }
@@ -716,11 +1007,11 @@ export function cleanupServerVoice(
     channelServerMap.delete(channelId);
     // Clean up Redis mirror for the entire channel
     const redis = getRedis();
-    redis.del(`voice:channel:users:${channelId}`).catch(() => {});
-    redis.del(`voice:channel:server:${channelId}`).catch(() => {});
-    redis.del(`voice:channel:node:${channelId}`).catch(() => {});
-    redis.sRem('voice:active', channelId).catch(() => {});
-    redis.del(`voice:screen:${channelId}`).catch(() => {});
+    redis.del(`voice:channel:users:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+    redis.del(`voice:channel:server:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+    redis.del(`voice:channel:node:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+    redis.sRem('voice:active', channelId).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+    redis.del(`voice:screen:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   }
 
   // Release mediasoup Routers for these channels
@@ -828,7 +1119,7 @@ export function getVoiceDiagnostics(): {
 }
 
 /** Returns all channelIds that belong to a given server and have active voice users (cross-node via Redis) */
-export async function getVoiceStateForServer(serverId: string): Promise<{ channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean }> }[]> {
+export async function getVoiceStateForServer(serverId: string): Promise<{ channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }> }[]> {
   const redis = getRedis();
   const activeChannels = await redis.sMembers('voice:active');
   if (activeChannels.length === 0) return [];
@@ -841,7 +1132,7 @@ export async function getVoiceStateForServer(serverId: string): Promise<{ channe
   const serverIdsRaw = await serverPipeline.exec();
 
   // Filter to channels belonging to this server, then fetch user data
-  const matchingChannels = activeChannels.filter((_, i) => serverIdsRaw[i] === serverId);
+  const matchingChannels = activeChannels.filter((_, i) => String(serverIdsRaw[i]) === serverId);
   if (matchingChannels.length === 0) return [];
 
   const usersPipeline = redis.multi();
@@ -850,17 +1141,17 @@ export async function getVoiceStateForServer(serverId: string): Promise<{ channe
   }
   const usersResultsRaw = await usersPipeline.exec();
 
-  const result: { channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean }> }[] = [];
+  const result: { channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }> }[] = [];
   for (let i = 0; i < matchingChannels.length; i++) {
     const usersData = usersResultsRaw[i] as unknown as Record<string, string>;
     if (!usersData || typeof usersData !== 'object') continue;
     const userIds = Object.keys(usersData);
     if (userIds.length === 0) continue;
 
-    const userStates = new Map<string, { selfMute: boolean; selfDeaf: boolean }>();
+    const userStates = new Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }>();
     for (const [uid, json] of Object.entries(usersData)) {
-      const { selfMute, selfDeaf } = JSON.parse(json);
-      userStates.set(uid, { selfMute, selfDeaf });
+      const { selfMute, selfDeaf, serverMuted, serverDeafened } = JSON.parse(json);
+      userStates.set(uid, { selfMute, selfDeaf, serverMuted: serverMuted ?? false, serverDeafened: serverDeafened ?? false });
     }
     result.push({ channelId: matchingChannels[i], userIds, userStates });
   }

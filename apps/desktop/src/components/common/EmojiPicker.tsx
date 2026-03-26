@@ -1,6 +1,6 @@
 import { useEffect, useRef, useLayoutEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import EmojiPickerReact, { Theme, type EmojiClickData } from 'emoji-picker-react';
+import EmojiPickerReact, { Theme, EmojiStyle, type EmojiClickData } from 'emoji-picker-react';
 
 const PICKER_WIDTH = 350;
 const PICKER_HEIGHT = 400;
@@ -89,6 +89,7 @@ export function EmojiPicker({ onEmojiSelect, onClose, anchorRef }: Props) {
     >
       <EmojiPickerReact
         theme={Theme.DARK}
+        emojiStyle={EmojiStyle.NATIVE}
         width={PICKER_WIDTH}
         height={PICKER_HEIGHT}
         lazyLoadEmojis

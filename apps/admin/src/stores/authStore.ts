@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import axios from 'axios';
 import { api } from '../services/api';
 import { connectSocket, disconnectSocket } from '../services/socket';
 import { getAccessToken, setTokens, clearTokens } from '../services/tokenStorage';
@@ -51,9 +52,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       setTokens(accessToken, refreshToken, true);
       connectSocket(accessToken);
       set({ user, isAuthenticated: true, isSubmitting: false });
-    } catch (err: any) {
+    } catch (err: unknown) {
       set({
-        error: err.response?.data?.error || 'Login failed',
+        error: (axios.isAxiosError(err) && err.response?.data?.error) || 'Login failed',
         isSubmitting: false,
       });
       throw err;
@@ -79,9 +80,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
       connectSocket(accessToken);
       set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null });
-    } catch (err: any) {
+    } catch (err: unknown) {
       set({
-        error: err.response?.data?.error || 'Invalid verification code',
+        error: (axios.isAxiosError(err) && err.response?.data?.error) || 'Invalid verification code',
         isSubmitting: false,
       });
       throw err;

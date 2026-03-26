@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
+import { useTranslation, Trans } from 'react-i18next';
 import { useAuthStore } from '../stores/authStore';
 import { Mail, RotateCw, LogOut } from 'lucide-react';
+import axios from 'axios';
 
 export function EmailVerificationPendingPage() {
+  const { t } = useTranslation();
   const { user, logout, resendVerification } = useAuthStore();
   const [isSending, setIsSending] = useState(false);
   const [cooldown, setCooldown] = useState(0);
@@ -37,14 +40,14 @@ export function EmailVerificationPendingPage() {
     setMessage(null);
     try {
       await resendVerification();
-      setMessage('Verification email sent! Check your inbox.');
+      setMessage(t('auth.emailPending.sent'));
       startCooldown(60);
-    } catch (err: any) {
-      const retryAfter = Math.min(parseInt(err.response?.headers?.['retry-after'], 10) || 0, 300);
+    } catch (err) {
+      const retryAfter = axios.isAxiosError(err) ? Math.min(parseInt(err.response?.headers?.['retry-after'], 10) || 0, 300) : 0;
       if (retryAfter > 0) {
         startCooldown(retryAfter);
       }
-      setError(err.response?.data?.error || 'Failed to send verification email.');
+      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('auth.emailPending.failedToSend') : t('auth.emailPending.failedToSend'));
     } finally {
       setIsSending(false);
     }
@@ -58,11 +61,11 @@ export function EmailVerificationPendingPage() {
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-vox-accent-primary/10">
               <Mail size={32} className="text-vox-accent-primary" />
             </div>
-            <h1 className="mt-4 text-2xl font-bold text-vox-text-primary">Verify your email</h1>
+            <h1 className="mt-4 text-2xl font-bold text-vox-text-primary">{t('auth.emailPending.title')}</h1>
             <p className="mt-2 text-center text-sm text-vox-text-secondary">
-              We sent a verification link to{' '}
-              <span className="font-medium text-vox-text-primary">{user?.email}</span>.
-              Check your inbox and click the link to activate your account.
+              <Trans i18nKey="auth.emailPending.description" values={{ email: user?.email }}>
+                We sent a verification link to <span className="font-medium text-vox-text-primary">{'{{email}}'}</span>. Check your inbox and click the link to activate your account.
+              </Trans>
             </p>
           </div>
 
@@ -86,10 +89,10 @@ export function EmailVerificationPendingPage() {
             >
               <RotateCw size={16} className={isSending ? 'animate-spin' : ''} />
               {cooldown > 0
-                ? `Resend in ${cooldown}s`
+                ? t('auth.emailPending.resendIn', { seconds: cooldown })
                 : isSending
-                  ? 'Sending...'
-                  : 'Resend verification email'}
+                  ? t('auth.emailPending.sending')
+                  : t('auth.emailPending.resend')}
             </button>
 
             <button
@@ -97,12 +100,12 @@ export function EmailVerificationPendingPage() {
               className="flex w-full items-center justify-center gap-2 rounded-lg border border-vox-border py-2.5 text-sm text-vox-text-secondary hover:bg-vox-bg-tertiary hover:text-vox-text-primary transition-colors"
             >
               <LogOut size={16} />
-              Log out
+              {t('common.logout')}
             </button>
           </div>
 
           <p className="mt-6 text-center text-xs text-vox-text-muted">
-            Didn't receive the email? Check your spam folder or try resending.
+            {t('auth.emailPending.checkSpam')}
           </p>
         </div>
       </div>

@@ -3,12 +3,13 @@ import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitMessageSend, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, type Message } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
 import { extractMentionIds, resolveMentionsForServer, batchResolveMentions, attachMentions } from '../utils/mentions';
+import { hasChannelPermission } from '../utils/permissionCalculator';
 
 const attachmentSelect = {
   select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
@@ -22,7 +23,7 @@ messageRouter.use(authenticate, requireVerifiedEmail);
 messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId } = req.params;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, LIMITS.MESSAGES_PER_PAGE);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, LIMITS.MESSAGES_PER_PAGE);
     const before = req.query.before as string | undefined;
     const around = req.query.around as string | undefined;
 
@@ -36,6 +37,10 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
       where: { userId_serverId: { userId: req.user!.userId, serverId: channel.serverId } },
     });
     if (!membership) throw new ForbiddenError('Not a member of this server');
+
+    // Check VIEW_CHANNEL permission
+    const canView = await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.VIEW_CHANNEL);
+    if (!canView) throw new ForbiddenError('You do not have permission to view this channel');
 
     const messageInclude = {
       author: {
@@ -186,8 +191,19 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
     });
     if (!membership) throw new ForbiddenError('Not a member of this server');
 
+    // Check channel-level SEND_MESSAGES permission
+    const canSend = await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.SEND_MESSAGES);
+    if (!canSend) throw new ForbiddenError('You do not have permission to send messages in this channel');
+
+    // Check ATTACH_FILES permission if attachments are present
+    if (attachments?.length) {
+      const canAttach = await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.ATTACH_FILES);
+      if (!canAttach) throw new ForbiddenError('You do not have permission to attach files in this channel');
+    }
+
     // Validate optional replyToId
     const replyToId = req.body.replyToId as string | undefined;
+    if (replyToId !== undefined && typeof replyToId !== 'string') throw new BadRequestError('replyToId must be a string');
     if (replyToId) {
       const parent = await prisma.message.findUnique({ where: { id: replyToId }, select: { channelId: true } });
       if (!parent || parent.channelId !== channelId) throw new BadRequestError('Invalid replyToId');
@@ -321,6 +337,10 @@ messageRouter.put('/:messageId/reactions/:emoji', rateLimitGeneral, async (req: 
     });
     if (!membership) throw new ForbiddenError('Not a member of this server');
 
+    // Check ADD_REACTIONS permission
+    const canReact = await hasChannelPermission(userId, channelId, message.channel.serverId, Permissions.ADD_REACTIONS);
+    if (!canReact) throw new ForbiddenError('You do not have permission to add reactions in this channel');
+
     const existing = await prisma.messageReaction.findUnique({
       where: { messageId_userId_emoji: { messageId, userId, emoji } },
     });
@@ -371,22 +391,23 @@ messageRouter.delete('/:messageId', rateLimitGeneral, async (req: Request<{ chan
     if (!message || !message.channel) throw new NotFoundError('Message');
     if (message.channelId !== channelId) throw new NotFoundError('Message');
 
+    // Verify server membership (even for own messages — kicked users shouldn't delete retroactively)
     const membership = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId: message.channel.serverId } },
+      where: { userId_serverId: { userId: req.user!.userId, serverId: message.channel!.serverId } },
     });
+    if (!membership) throw new ForbiddenError('Not a member of this server');
 
     const isAuthor = message.authorId === req.user!.userId;
-    const isAdmin = membership && ['owner', 'admin'].includes(membership.role);
-
-    if (!isAuthor && !isAdmin) {
-      throw new ForbiddenError('You can only delete your own messages');
+    if (!isAuthor) {
+      const canManageMessages = await hasChannelPermission(req.user!.userId, message.channelId!, message.channel!.serverId, Permissions.MANAGE_MESSAGES);
+      if (!canManageMessages) throw new ForbiddenError('You can only delete your own messages');
     }
 
     await prisma.message.delete({ where: { id: messageId } });
 
     // Fire-and-forget S3 cleanup
     if (message.attachments.length > 0) {
-      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch(() => {});
+      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete attachments on message delete:', err));
     }
 
     getIO().to(`channel:${message.channelId!}`).emit('message:delete', {

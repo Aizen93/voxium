@@ -39,6 +39,8 @@ export function ImageLightbox({ src, alt, fileName, onClose }: Props) {
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80"
       onClick={onClose}
+      role="dialog"
+      aria-modal="true"
     >
       {/* Top-right controls */}
       <div className="absolute top-4 right-4 flex items-center gap-2 z-10">
@@ -46,6 +48,7 @@ export function ImageLightbox({ src, alt, fileName, onClose }: Props) {
           onClick={(e) => { e.stopPropagation(); handleDownload(); }}
           className="rounded-full bg-vox-bg-tertiary/80 p-2 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-tertiary transition-colors"
           title="Download"
+          aria-label="Download"
         >
           <Download size={20} />
         </button>
@@ -53,6 +56,7 @@ export function ImageLightbox({ src, alt, fileName, onClose }: Props) {
           onClick={onClose}
           className="rounded-full bg-vox-bg-tertiary/80 p-2 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-tertiary transition-colors"
           title="Close"
+          aria-label="Close"
         >
           <X size={20} />
         </button>

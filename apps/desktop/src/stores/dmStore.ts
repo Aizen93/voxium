@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { useChatStore } from './chatStore';
+import { toast } from './toastStore';
 import type { Conversation, DMUnreadCount, UserStatus } from '@voxium/shared';
 
 interface DMState {
@@ -26,6 +27,10 @@ interface DMState {
   updateParticipantStatus: (userId: string, status: UserStatus) => void;
 }
 
+// Dedup: prevent redundant mark-as-read API calls (same pattern as serverStore)
+let _lastMarkedConv = '';
+let _lastMarkedConvAt = 0;
+
 export const useDMStore = create<DMState>((set, get) => ({
   conversations: [],
   activeConversationId: null,
@@ -37,15 +42,35 @@ export const useDMStore = create<DMState>((set, get) => ({
     set({ isLoading: true });
     try {
       const { data } = await api.get('/dm');
-      set({ conversations: data.data, isLoading: false });
+      const conversations = data.data;
+
+      // Initialize participant statuses from the conversation data
+      const statuses: Record<string, import('@voxium/shared').UserStatus> = {};
+      for (const conv of conversations) {
+        if (conv.participant?.status) {
+          statuses[conv.participant.id] = conv.participant.status;
+        }
+      }
+
+      set((state) => ({
+        conversations,
+        participantStatuses: { ...state.participantStatuses, ...statuses },
+        isLoading: false,
+      }));
     } catch (err) {
       console.error('Failed to fetch conversations:', err);
+      toast.error('Failed to load conversations');
       set({ isLoading: false });
     }
   },
 
   setActiveConversation: (conversationId: string) => {
-    if (get().activeConversationId !== conversationId) {
+    const prevConvId = get().activeConversationId;
+    // Mark the previous conversation as read (captures messages received while viewing)
+    if (prevConvId && prevConvId !== conversationId) {
+      get().markConversationRead(prevConvId);
+    }
+    if (prevConvId !== conversationId) {
       useChatStore.getState().clearMessages();
     }
     set({ activeConversationId: conversationId });
@@ -54,7 +79,10 @@ export const useDMStore = create<DMState>((set, get) => ({
   },
 
   clearActiveConversation: () => {
-    if (get().activeConversationId) {
+    const prevConvId = get().activeConversationId;
+    if (prevConvId) {
+      // Mark as read before leaving (captures messages received while viewing)
+      get().markConversationRead(prevConvId);
       useChatStore.getState().clearMessages();
     }
     set({ activeConversationId: null });
@@ -111,7 +139,8 @@ export const useDMStore = create<DMState>((set, get) => ({
 
   clearDMUnread: (conversationId: string) => {
     set((state) => {
-      const { [conversationId]: _, ...rest } = state.dmUnreadCounts;
+      const rest = { ...state.dmUnreadCounts };
+      delete rest[conversationId];
       return { dmUnreadCounts: rest };
     });
   },
@@ -125,7 +154,16 @@ export const useDMStore = create<DMState>((set, get) => ({
   },
 
   markConversationRead: (conversationId: string) => {
-    api.post(`/dm/${conversationId}/read`).catch(() => {});
+    // Dedup: skip if same conversation was marked within the last 2s
+    const now = Date.now();
+    if (conversationId === _lastMarkedConv && now - _lastMarkedConvAt < 2000) return;
+    _lastMarkedConv = conversationId;
+    _lastMarkedConvAt = now;
+    // Retry once on failure to prevent stale lastReadAt causing phantom unreads on reconnect
+    const url = `/dm/${conversationId}/read`;
+    api.post(url).catch(() => {
+      setTimeout(() => api.post(url).catch((err) => { console.warn('[DM] Mark-read retry failed:', err); }), 2000);
+    });
   },
 
   deleteConversation: async (conversationId: string) => {
@@ -140,7 +178,8 @@ export const useDMStore = create<DMState>((set, get) => ({
 
   handleConversationDeleted: (conversationId: string) => {
     set((state) => {
-      const { [conversationId]: _, ...restUnreads } = state.dmUnreadCounts;
+      const restUnreads = { ...state.dmUnreadCounts };
+      delete restUnreads[conversationId];
       return {
         conversations: state.conversations.filter((c) => c.id !== conversationId),
         activeConversationId: state.activeConversationId === conversationId ? null : state.activeConversationId,

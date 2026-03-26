@@ -4,7 +4,10 @@ import { connectSocket, disconnectSocket } from '../services/socket';
 import { getAccessToken, setTokens, clearTokens, isRemembered } from '../services/tokenStorage';
 import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
+import { useVoiceStore } from './voiceStore';
 import { processImage } from '../utils/imageProcessing';
+import i18n from '../i18n';
+import { getTranslatedError } from '../utils/serverErrors';
 import type { User } from '@voxium/shared';
 
 interface AuthState {
@@ -65,9 +68,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         connectSocket(accessToken);
       }
       set({ user, isAuthenticated: true, isSubmitting: false });
-    } catch (err: any) {
+    } catch (err) {
       set({
-        error: err.response?.data?.error || 'Login failed',
+        error: getTranslatedError(err, i18n.t, 'auth.login.loginFailed'),
         isSubmitting: false,
       });
       throw err;
@@ -89,9 +92,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         connectSocket(accessToken);
       }
       set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true });
-    } catch (err: any) {
+    } catch (err) {
       set({
-        error: err.response?.data?.error || 'Invalid verification code',
+        error: getTranslatedError(err, i18n.t, 'settings.security.invalidCode'),
         isSubmitting: false,
       });
       throw err;
@@ -116,9 +119,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
 
       set({ user, isAuthenticated: true, isSubmitting: false });
-    } catch (err: any) {
+    } catch (err) {
       set({
-        error: err.response?.data?.error || 'Registration failed',
+        error: getTranslatedError(err, i18n.t, 'auth.register.registrationFailed'),
         isSubmitting: false,
       });
       throw err;
@@ -126,6 +129,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: () => {
+    // Clean up voice state before disconnecting socket (stops mic, audio pipeline)
+    const vs = useVoiceStore.getState();
+    if (vs.activeChannelId) vs.leaveChannel();
+    if (vs.dmCallConversationId) vs.leaveDMCall();
+
     clearTokens();
     disconnectSocket();
     set({ user: null, isAuthenticated: false });

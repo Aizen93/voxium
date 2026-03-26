@@ -1,5 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import type { Components } from 'react-markdown';
 import { MENTION_RE } from '@voxium/shared';
 import type { MessageAuthor } from '@voxium/shared';
@@ -82,7 +83,7 @@ export function MessageContent({ content, mentions }: Props) {
   if (!hasMentions) {
     return (
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkBreaks]}
         allowedElements={allowedElements}
         unwrapDisallowed
         components={components}
@@ -135,7 +136,7 @@ export function MessageContent({ content, mentions }: Props) {
         return (
           <ReactMarkdown
             key={i}
-            remarkPlugins={[remarkGfm]}
+            remarkPlugins={[remarkGfm, remarkBreaks]}
             allowedElements={allowedElements}
             unwrapDisallowed
             components={components}

@@ -42,7 +42,11 @@ export async function initNotifications(): Promise<void> {
 
   // Browser mode — use Web Notification API
   if ('Notification' in window && Notification.permission === 'default') {
-    await Notification.requestPermission();
+    try {
+      await Notification.requestPermission();
+    } catch (err) {
+      console.warn('[Notifications] Permission request failed:', err);
+    }
   }
 }
 
@@ -135,13 +139,17 @@ export async function notify(
 
   // 3. Web Notification API (browser mode)
   if ('Notification' in window && Notification.permission === 'granted') {
-    const webOptions: NotificationOptions = { body, silent: true };
-    if (safeAvatarKey) {
-      const blobUrl = await resolveAvatarBlobUrl(safeAvatarKey);
-      if (blobUrl) {
-        webOptions.icon = blobUrl;
+    try {
+      const webOptions: NotificationOptions = { body, silent: true };
+      if (safeAvatarKey) {
+        const blobUrl = await resolveAvatarBlobUrl(safeAvatarKey);
+        if (blobUrl) {
+          webOptions.icon = blobUrl;
+        }
       }
+      new Notification(title, webOptions);
+    } catch {
+      // Web Notification API failed — non-critical, silently ignore
     }
-    new Notification(title, webOptions);
   }
 }
