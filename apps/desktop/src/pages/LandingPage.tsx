@@ -1112,6 +1112,8 @@ function ComparisonTable() {
     { feature: t('landing.comparison.screenSharing'),     voxium: true,                discord: true,           teamspeak: false,          matrix: t('landing.comparison.viaJitsi') },
     { feature: t('landing.comparison.messageReactions'),  voxium: true,                discord: true,           teamspeak: false,          matrix: true },
     { feature: t('landing.comparison.fileSharing'),       voxium: true,                discord: true,           teamspeak: true,           matrix: true },
+    { feature: t('landing.comparison.customThemes'),       voxium: true,                discord: false,          teamspeak: t('landing.comparison.ts3Addons'), matrix: t('landing.comparison.jsonThemes') },
+    { feature: t('landing.comparison.rolePermissions'),   voxium: true,                discord: true,           teamspeak: true,           matrix: t('landing.comparison.powerLevels') },
     { feature: t('landing.comparison.noAdsTracking'),     voxium: true,                discord: false,          teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.desktopApp'),        voxium: true,                discord: true,           teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.lightweightClient'), voxium: 'Tauri (~10MB)',      discord: 'Electron',     teamspeak: 'Native',       matrix: 'Electron' },
@@ -1471,7 +1473,9 @@ function Footer() {
             <ul className="space-y-2">
               <li><a href="#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.download')}</a></li>
               <li><a href="https://github.com/Aizen93/voxium/releases" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.changelog')}</a></li>
-              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.status')}</a></li>
+              {/* Status page: uncomment once Uptime Kuma is deployed
+              <li><a href="https://status.voxium.app" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.status')}</a></li>
+              */}
             </ul>
           </div>
 
@@ -1490,7 +1494,7 @@ function Footer() {
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.community')}</h4>
             <ul className="space-y-2">
               <li><a href="https://github.com/Aizen93/voxium" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">GitHub</a></li>
-              <li><a href="#" onClick={(e) => e.preventDefault()} className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.contributing')}</a></li>
+              <li><a href="https://github.com/Aizen93/voxium?tab=contributing-ov-file" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.contributing')}</a></li>
             </ul>
           </div>
         </div>

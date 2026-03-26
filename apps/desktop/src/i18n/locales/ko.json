@@ -766,7 +766,12 @@
       "mobileApp": "모바일 앱",
       "planned": "계획됨",
       "basic": "기본",
-      "viaJitsi": "Jitsi 경유"
+      "viaJitsi": "Jitsi 경유",
+      "customThemes": "사용자 정의 테마",
+      "rolePermissions": "역할 권한 + 채널 재정의",
+      "ts3Addons": "TS3 애드온",
+      "jsonThemes": "JSON 테마",
+      "powerLevels": "권한 레벨"
     },
     "showcase": {
       "title": "나만의",

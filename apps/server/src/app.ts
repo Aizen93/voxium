@@ -81,7 +81,11 @@ app.use(cors({
   origin: (origin, callback) => {
     const origins = getAllowedOrigins();
     if (!origin || origins.includes(origin)) {
-      callback(null, origin || true);
+      // Echo the exact origin back (required when credentials: true).
+      // For same-origin/non-browser requests (origin === undefined), reflect
+      // the first allowed origin instead of `true` (which becomes "*" and is
+      // forbidden with credentials).
+      callback(null, origin || origins[0]);
     } else {
       callback(null, false);
     }

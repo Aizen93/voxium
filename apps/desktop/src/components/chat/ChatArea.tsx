@@ -124,7 +124,7 @@ export function ChatArea() {
   }
 
   return (
-    <div className="flex h-full flex-col bg-vox-chat">
+    <div className="flex h-full min-w-0 flex-col bg-vox-chat">
       {/* Channel Header */}
       <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
         <Hash size={18} className="text-vox-text-muted" />

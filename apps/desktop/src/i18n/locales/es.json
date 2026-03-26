@@ -766,7 +766,12 @@
       "mobileApp": "Aplicacion movil",
       "planned": "Planeado",
       "basic": "Basico",
-      "viaJitsi": "Via Jitsi"
+      "viaJitsi": "Via Jitsi",
+      "customThemes": "Temas personalizados",
+      "rolePermissions": "Permisos por rol + por canal",
+      "ts3Addons": "Addons TS3",
+      "jsonThemes": "Temas JSON",
+      "powerLevels": "Niveles de poder"
     },
     "showcase": {
       "title": "Hecho",

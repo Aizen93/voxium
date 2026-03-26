@@ -766,7 +766,12 @@
       "mobileApp": "Aplicativo movel",
       "planned": "Planejado",
       "basic": "Basico",
-      "viaJitsi": "Via Jitsi"
+      "viaJitsi": "Via Jitsi",
+      "customThemes": "Temas personalizados",
+      "rolePermissions": "Permissões por cargo + por canal",
+      "ts3Addons": "Addons TS3",
+      "jsonThemes": "Temas JSON",
+      "powerLevels": "Níveis de poder"
     },
     "showcase": {
       "title": "Feito",

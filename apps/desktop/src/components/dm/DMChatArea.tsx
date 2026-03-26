@@ -141,7 +141,7 @@ export function DMChatArea() {
   }
 
   return (
-    <div className="flex h-full flex-col bg-vox-chat">
+    <div className="flex h-full min-w-0 flex-col bg-vox-chat">
       {/* DM Header */}
       <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
         <UserHoverTarget userId={conversation.participant.id} className="shrink-0 cursor-pointer">

@@ -766,7 +766,12 @@
       "mobileApp": "Application mobile",
       "planned": "Prévu",
       "basic": "Basique",
-      "viaJitsi": "Via Jitsi"
+      "viaJitsi": "Via Jitsi",
+      "customThemes": "Thèmes personnalisés",
+      "rolePermissions": "Permissions par rôle + par salon",
+      "ts3Addons": "Addons TS3",
+      "jsonThemes": "Thèmes JSON",
+      "powerLevels": "Niveaux de pouvoir"
     },
     "showcase": {
       "title": "Fait",

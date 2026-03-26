@@ -766,7 +766,12 @@
       "mobileApp": "移动应用",
       "planned": "计划中",
       "basic": "基础",
-      "viaJitsi": "通过 Jitsi"
+      "viaJitsi": "通过 Jitsi",
+      "customThemes": "自定义主题",
+      "rolePermissions": "角色权限 + 频道覆盖",
+      "ts3Addons": "TS3插件",
+      "jsonThemes": "JSON主题",
+      "powerLevels": "权限等级"
     },
     "showcase": {
       "title": "随心",
