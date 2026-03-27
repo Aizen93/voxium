@@ -3,16 +3,17 @@ import { Search, Ban, Trash2, Heart, Sparkles, Crown } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
+import { AdminDeleteUserModal } from './AdminDeleteUserModal';
 import { toast } from '../stores/toastStore';
 
 interface ConfirmAction {
-  type: 'ban' | 'delete';
+  type: 'ban' | 'delete' | 'deleteWithTransfer';
   userId: string;
   username: string;
 }
 
 export function AdminUserList({ onSelectUser }: { onSelectUser: (userId: string) => void }) {
-  const { users, usersTotal, usersPage, usersSearch, usersFilter, usersSort, loading, fetchUsers, setUsersSearch, setUsersFilter, setUsersSort, banUser, deleteUser } = useAdminStore();
+  const { users, usersTotal, usersPage, usersSearch, usersFilter, usersSort, loading, fetchUsers, setUsersSearch, setUsersFilter, setUsersSort, banUser, deleteUser, fetchUserOwnedServers } = useAdminStore();
   const [searchInput, setSearchInput] = useState(usersSearch);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
 
@@ -75,7 +76,18 @@ export function AdminUserList({ onSelectUser }: { onSelectUser: (userId: string)
         )}
         {user.role !== 'superadmin' && (
           <button
-            onClick={() => setConfirmAction({ type: 'delete', userId: user.id, username: user.username })}
+            onClick={async () => {
+              try {
+                const owned = await fetchUserOwnedServers(user.id);
+                setConfirmAction({
+                  type: owned.length > 0 ? 'deleteWithTransfer' : 'delete',
+                  userId: user.id,
+                  username: user.username,
+                });
+              } catch {
+                setConfirmAction({ type: 'delete', userId: user.id, username: user.username });
+              }
+            }}
             className="p-1 rounded text-vox-text-muted hover:text-vox-accent-danger"
             title="Delete user"
           >
@@ -153,7 +165,7 @@ export function AdminUserList({ onSelectUser }: { onSelectUser: (userId: string)
       )}
 
       {/* Confirm Modal */}
-      {confirmAction && (
+      {confirmAction && confirmAction.type !== 'deleteWithTransfer' && (
         <AdminConfirmModal
           title={confirmAction.type === 'ban' ? 'Ban User' : 'Delete User'}
           message={`Are you sure you want to ${confirmAction.type} "${confirmAction.username}"? ${confirmAction.type === 'delete' ? 'This action cannot be undone.' : 'They will be disconnected immediately.'}`}
@@ -167,6 +179,19 @@ export function AdminUserList({ onSelectUser }: { onSelectUser: (userId: string)
               toast.error(`Failed to ${confirmAction.type} user`);
             }
             setConfirmAction(null);
+          }}
+          onCancel={() => setConfirmAction(null)}
+        />
+      )}
+
+      {/* Delete with Transfer Modal */}
+      {confirmAction && confirmAction.type === 'deleteWithTransfer' && (
+        <AdminDeleteUserModal
+          userId={confirmAction.userId}
+          username={confirmAction.username}
+          onSuccess={() => {
+            setConfirmAction(null);
+            fetchUsers(usersPage);
           }}
           onCancel={() => setConfirmAction(null)}
         />
