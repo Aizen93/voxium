@@ -89,7 +89,7 @@ export function EmojiPicker({ onEmojiSelect, onClose, anchorRef }: Props) {
     >
       <EmojiPickerReact
         theme={Theme.DARK}
-        emojiStyle={EmojiStyle.NATIVE}
+        emojiStyle={EmojiStyle.TWITTER}
         width={PICKER_WIDTH}
         height={PICKER_HEIGHT}
         lazyLoadEmojis
