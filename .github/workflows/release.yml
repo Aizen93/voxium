@@ -47,7 +47,7 @@ jobs:
           version: 10
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174353f47 # stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache pnpm store
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
@@ -75,7 +75,7 @@ jobs:
         run: pnpm build:shared
 
       - name: Build and release Tauri app
-        uses: tauri-apps/tauri-action@dc5c873e4c25b4ae62275e14e89a0b29ca5cae2a # v0
+        uses: tauri-apps/tauri-action@1ddc7b49b13c3038297360482fcb3e058764d7c9 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
