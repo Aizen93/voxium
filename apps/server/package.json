@@ -34,7 +34,7 @@
     "jsonwebtoken": "^9.0.2",
     "mediasoup": "^3.19.18",
     "morgan": "^1.10.0",
-    "nodemailer": "^8.0.3",
+    "nodemailer": "^8.0.4",
     "otpauth": "^9.5.0",
     "prisma": "^7.5.0",
     "qrcode": "^1.5.4",
