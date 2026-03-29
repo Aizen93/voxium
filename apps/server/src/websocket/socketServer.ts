@@ -331,6 +331,68 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.join(`server:${m.serverId}`);
       }
 
+      // Send all custom emojis for user's servers
+      const memberServerIds = memberships.map((m) => m.serverId);
+      if (memberServerIds.length > 0) {
+        const customEmojis = await prisma.customEmoji.findMany({
+          where: { serverId: { in: memberServerIds } },
+          orderBy: [{ serverId: 'asc' }, { name: 'asc' }],
+        });
+        if (customEmojis.length > 0) {
+          socket.emit('emoji:init', {
+            emojis: customEmojis.map((e) => ({
+              id: e.id,
+              serverId: e.serverId,
+              name: e.name,
+              s3Key: e.s3Key,
+              animated: e.animated,
+              creatorId: e.creatorId,
+              createdAt: e.createdAt.toISOString(),
+            })),
+          });
+        }
+      }
+
+      // Send sticker packs (server + personal)
+      {
+        const [serverStickerPacks, personalStickerPacks] = await Promise.all([
+          memberServerIds.length > 0
+            ? prisma.stickerPack.findMany({
+                where: { serverId: { in: memberServerIds } },
+                include: { stickers: { orderBy: { name: 'asc' } } },
+                orderBy: { createdAt: 'asc' },
+              })
+            : Promise.resolve([]),
+          prisma.stickerPack.findMany({
+            where: { userId },
+            include: { stickers: { orderBy: { name: 'asc' } } },
+            orderBy: { createdAt: 'asc' },
+          }),
+        ]);
+
+        if (serverStickerPacks.length > 0 || personalStickerPacks.length > 0) {
+          const serialize = (p: typeof serverStickerPacks[number]) => ({
+            id: p.id,
+            name: p.name,
+            description: p.description,
+            serverId: p.serverId,
+            userId: p.userId,
+            createdAt: p.createdAt.toISOString(),
+            stickers: p.stickers.map((s) => ({
+              id: s.id,
+              packId: s.packId,
+              name: s.name,
+              s3Key: s.s3Key,
+              createdAt: s.createdAt.toISOString(),
+            })),
+          });
+          socket.emit('sticker:init', {
+            serverPacks: serverStickerPacks.map(serialize),
+            personalPacks: personalStickerPacks.map(serialize),
+          });
+        }
+      }
+
       // Auto-join text channel rooms the user can view
       const allTextChannels = await prisma.channel.findMany({
         where: { serverId: { in: memberships.map((m) => m.serverId) }, type: 'text' },

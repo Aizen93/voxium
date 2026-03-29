@@ -1182,31 +1182,43 @@ adminRouter.get('/top-servers', async (req: Request, res: Response, next: NextFu
 
 // ─── Storage Management ──────────────────────────────────────────────────────
 
-function classifyKey(key: string): 'avatar' | 'server-icon' | 'attachment' {
+function classifyKey(key: string): import('@voxium/shared').StorageFileType {
   if (key.startsWith('server-icons/')) return 'server-icon';
   if (key.startsWith('attachments/')) return 'attachment';
+  if (key.startsWith('emojis/')) return 'emoji';
+  if (key.startsWith('stickers/')) return 'sticker';
+  if (key.startsWith('gifs/')) return 'gif';
   return 'avatar';
 }
 
 adminRouter.get('/storage/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys] = await Promise.all([
+    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys, emojiKeys, stickerKeys, gifKeys] = await Promise.all([
       listAllS3Objects(),
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
       prisma.messageAttachment.findMany({ where: { expired: false }, select: { s3Key: true } }),
+      prisma.customEmoji.findMany({ select: { s3Key: true } }),
+      prisma.sticker.findMany({ select: { s3Key: true } }),
+      prisma.gifUpload.findMany({ select: { s3Key: true } }),
     ]);
 
     const referencedKeys = new Set<string>();
     for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
     for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
     for (const a of attachmentKeys) referencedKeys.add(a.s3Key);
+    for (const e of emojiKeys) referencedKeys.add(e.s3Key);
+    for (const s of stickerKeys) referencedKeys.add(s.s3Key);
+    for (const g of gifKeys) referencedKeys.add(g.s3Key);
 
     const stats: StorageStats = {
       totalFiles: 0, totalSize: 0,
       avatarCount: 0, avatarSize: 0,
       serverIconCount: 0, serverIconSize: 0,
       attachmentCount: 0, attachmentSize: 0,
+      emojiCount: 0, emojiSize: 0,
+      stickerCount: 0, stickerSize: 0,
+      gifCount: 0, gifSize: 0,
       orphanCount: 0, orphanSize: 0,
     };
 
@@ -1215,15 +1227,13 @@ adminRouter.get('/storage/stats', async (_req: Request, res: Response, next: Nex
       stats.totalSize += obj.size;
 
       const type = classifyKey(obj.key);
-      if (type === 'avatar') {
-        stats.avatarCount++;
-        stats.avatarSize += obj.size;
-      } else if (type === 'server-icon') {
-        stats.serverIconCount++;
-        stats.serverIconSize += obj.size;
-      } else {
-        stats.attachmentCount++;
-        stats.attachmentSize += obj.size;
+      switch (type) {
+        case 'avatar': stats.avatarCount++; stats.avatarSize += obj.size; break;
+        case 'server-icon': stats.serverIconCount++; stats.serverIconSize += obj.size; break;
+        case 'attachment': stats.attachmentCount++; stats.attachmentSize += obj.size; break;
+        case 'emoji': stats.emojiCount++; stats.emojiSize += obj.size; break;
+        case 'sticker': stats.stickerCount++; stats.stickerSize += obj.size; break;
+        case 'gif': stats.gifCount++; stats.gifSize += obj.size; break;
       }
 
       if (!referencedKeys.has(obj.key)) {
@@ -1421,31 +1431,33 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
     const filter = (req.query.filter as string) || 'all';
 
-    const prefix = filter === 'avatars' ? 'avatars/'
-      : filter === 'server-icons' ? 'server-icons/'
-      : filter === 'attachments' ? 'attachments/'
-      : undefined;
+    const prefixMap: Record<string, string> = {
+      avatars: 'avatars/', 'server-icons': 'server-icons/', attachments: 'attachments/',
+      emojis: 'emojis/', stickers: 'stickers/', gifs: 'gifs/',
+    };
+    const prefix = prefixMap[filter] ?? undefined;
     const objects = await listAllS3Objects(prefix);
 
-    const [usersWithAvatar, serversWithIcon, attachmentRecords] = await Promise.all([
+    const [usersWithAvatar, serversWithIcon, attachmentRecords, emojiRecords, stickerRecords, gifRecords] = await Promise.all([
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { id: true, username: true, avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { id: true, name: true, iconUrl: true } }),
       prisma.messageAttachment.findMany({ select: { s3Key: true, fileName: true, messageId: true, expired: true } }),
+      prisma.customEmoji.findMany({ select: { s3Key: true, name: true, serverId: true, server: { select: { name: true } } } }),
+      prisma.sticker.findMany({ select: { s3Key: true, name: true, pack: { select: { name: true, serverId: true } } } }),
+      prisma.gifUpload.findMany({ select: { s3Key: true, fileName: true, uploaderId: true, uploader: { select: { username: true } } } }),
     ]);
 
-    const keyToUser = new Map<string, { id: string; name: string }>();
-    for (const u of usersWithAvatar) if (u.avatarUrl) keyToUser.set(u.avatarUrl, { id: u.id, name: u.username });
-    const keyToServer = new Map<string, { id: string; name: string }>();
-    for (const s of serversWithIcon) if (s.iconUrl) keyToServer.set(s.iconUrl, { id: s.id, name: s.name });
-    const keyToAttachment = new Map<string, { id: string; name: string; expired: boolean }>();
-    for (const a of attachmentRecords) keyToAttachment.set(a.s3Key, { id: a.messageId, name: a.fileName, expired: a.expired });
+    const keyToLinked = new Map<string, { id: string; name: string; expired?: boolean }>();
+    for (const u of usersWithAvatar) if (u.avatarUrl) keyToLinked.set(u.avatarUrl, { id: u.id, name: u.username });
+    for (const s of serversWithIcon) if (s.iconUrl) keyToLinked.set(s.iconUrl, { id: s.id, name: s.name });
+    for (const a of attachmentRecords) keyToLinked.set(a.s3Key, { id: a.messageId, name: a.fileName, expired: a.expired });
+    for (const e of emojiRecords) keyToLinked.set(e.s3Key, { id: e.serverId, name: `:${e.name}: (${e.server.name})` });
+    for (const s of stickerRecords) keyToLinked.set(s.s3Key, { id: s.pack.serverId || 'personal', name: `${s.name} (${s.pack.name})` });
+    for (const g of gifRecords) keyToLinked.set(g.s3Key, { id: g.uploaderId, name: `${g.fileName} (${g.uploader.username})` });
 
     let files: StorageFile[] = objects.map((obj) => {
       const type = classifyKey(obj.key);
-      const userRef = keyToUser.get(obj.key);
-      const serverRef = keyToServer.get(obj.key);
-      const attachRef = keyToAttachment.get(obj.key);
-      const linked = userRef ?? serverRef ?? (attachRef ? { id: attachRef.id, name: attachRef.name } : null);
+      const linked = keyToLinked.get(obj.key);
 
       return {
         key: obj.key,
@@ -1455,7 +1467,7 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
         linkedEntity: linked?.name ?? null,
         linkedEntityId: linked?.id ?? null,
         isOrphan: !linked,
-        isExpired: attachRef?.expired ?? false,
+        isExpired: linked?.expired ?? false,
       };
     });
 
@@ -1487,13 +1499,19 @@ adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, n
       throw new BadRequestError('Invalid file key');
     }
 
-    // Nullify or expire DB reference
+    // Nullify, expire, or delete DB reference
     if (key.startsWith('avatars/')) {
       await prisma.user.updateMany({ where: { avatarUrl: key }, data: { avatarUrl: null } });
     } else if (key.startsWith('server-icons/')) {
       await prisma.server.updateMany({ where: { iconUrl: key }, data: { iconUrl: null } });
     } else if (key.startsWith('attachments/')) {
       await prisma.messageAttachment.updateMany({ where: { s3Key: key }, data: { expired: true } });
+    } else if (key.startsWith('emojis/')) {
+      await prisma.customEmoji.deleteMany({ where: { s3Key: key } });
+    } else if (key.startsWith('stickers/')) {
+      await prisma.sticker.deleteMany({ where: { s3Key: key } });
+    } else if (key.startsWith('gifs/')) {
+      await prisma.gifUpload.deleteMany({ where: { s3Key: key } });
     }
 
     await deleteFromS3(key);
@@ -2025,17 +2043,23 @@ adminRouter.delete('/announcements/:id', async (req: Request<{ id: string }>, re
 
 adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys] = await Promise.all([
+    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys, emojiKeys, stickerKeys, gifKeys] = await Promise.all([
       listAllS3Objects(),
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
       prisma.messageAttachment.findMany({ where: { expired: false }, select: { s3Key: true } }),
+      prisma.customEmoji.findMany({ select: { s3Key: true } }),
+      prisma.sticker.findMany({ select: { s3Key: true } }),
+      prisma.gifUpload.findMany({ select: { s3Key: true } }),
     ]);
 
     const referencedKeys = new Set<string>();
     for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
     for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
     for (const a of attachmentKeys) referencedKeys.add(a.s3Key);
+    for (const e of emojiKeys) referencedKeys.add(e.s3Key);
+    for (const s of stickerKeys) referencedKeys.add(s.s3Key);
+    for (const g of gifKeys) referencedKeys.add(g.s3Key);
 
     const orphans = objects.filter((obj) => !referencedKeys.has(obj.key));
     let deleted = 0;

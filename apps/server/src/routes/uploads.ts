@@ -216,7 +216,9 @@ uploadRouter.get(
         const s3Response = await getS3Object(key);
         if (!s3Response.Body) throw new NotFoundError('Asset');
         // Force image Content-Type regardless of what S3 returns (defense-in-depth against stored XSS)
-        res.set('Content-Type', 'image/webp');
+        const ext = key.split('.').pop()?.toLowerCase();
+        const contentType = ext === 'gif' ? 'image/gif' : ext === 'png' ? 'image/png' : 'image/webp';
+        res.set('Content-Type', contentType);
         if (s3Response.ContentLength) res.set('Content-Length', String(s3Response.ContentLength));
         res.set('Cache-Control', 'public, max-age=86400, immutable');
         res.set('Content-Disposition', 'inline');

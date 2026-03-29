@@ -146,12 +146,25 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
 messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId } = req.params;
-    const content = sanitizeText(req.body.content ?? '');
+    const messageType = req.body.type === 'sticker' ? 'sticker' : 'user';
 
-    // Validate attachments
-    const attachments = req.body.attachments as Array<{
+    // Sticker messages: content is the sticker ID, no attachments
+    let content: string;
+    if (messageType === 'sticker') {
+      if (typeof req.body.content !== 'string' || !req.body.content.trim()) {
+        throw new BadRequestError('Sticker ID is required');
+      }
+      content = req.body.content.trim();
+      const sticker = await prisma.sticker.findUnique({ where: { id: content } });
+      if (!sticker) throw new BadRequestError('Sticker not found');
+    } else {
+      content = sanitizeText(req.body.content ?? '');
+    }
+
+    // Validate attachments (not for sticker messages)
+    const attachments = messageType !== 'sticker' ? req.body.attachments as Array<{
       s3Key: string; fileName: string; fileSize: number; mimeType: string;
-    }> | undefined;
+    }> | undefined : undefined;
 
     if (attachments) {
       if (!Array.isArray(attachments)) throw new BadRequestError('attachments must be an array');
@@ -171,11 +184,11 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       }
     }
 
-    // Allow empty content if attachments are present
-    if (!attachments?.length) {
+    // Allow empty content if attachments are present (not for stickers — already validated)
+    if (messageType !== 'sticker' && !attachments?.length) {
       const contentErr = validateMessageContent(content);
       if (contentErr) throw new BadRequestError(contentErr);
-    } else if (content.length > LIMITS.MESSAGE_MAX) {
+    } else if (messageType !== 'sticker' && content.length > LIMITS.MESSAGE_MAX) {
       throw new BadRequestError(`Message must be at most ${LIMITS.MESSAGE_MAX} characters`);
     }
 
@@ -213,6 +226,7 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       const msg = await tx.message.create({
         data: {
           content,
+          type: messageType,
           channelId,
           authorId: req.user!.userId,
           ...(replyToId && { replyToId }),

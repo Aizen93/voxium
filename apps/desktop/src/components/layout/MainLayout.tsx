@@ -32,12 +32,15 @@ import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
 import { useAnnouncementStore } from '../../stores/announcementStore';
+import { useEmojiStore } from '../../stores/emojiStore';
+import { useStickerStore } from '../../stores/stickerStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
   MemberRole, Role, Announcement, SupportMessageData, SupportTicketStatus,
   ReactionGroup,
+  CustomEmoji, StickerPackData, StickerData,
 } from '@voxium/shared';
 
 export function MainLayout() {
@@ -571,6 +574,38 @@ export function MainLayout() {
       supportStatusChange: (data: { ticketId: string; status: SupportTicketStatus; claimedById?: string; claimedByUsername?: string }) => {
         useSupportStore.getState().updateStatus(data.status, data.claimedById, data.claimedByUsername);
       },
+      // Custom Emojis
+      emojiInit: (data: { emojis: CustomEmoji[] }) => {
+        useEmojiStore.getState().initEmojis(data.emojis);
+      },
+      emojiCreated: (data: { serverId: string; emoji: CustomEmoji }) => {
+        useEmojiStore.getState().addEmoji(data.serverId, data.emoji);
+      },
+      emojiDeleted: (data: { serverId: string; emojiId: string }) => {
+        useEmojiStore.getState().removeEmoji(data.serverId, data.emojiId);
+      },
+      // Stickers
+      stickerInit: (data: { serverPacks: StickerPackData[]; personalPacks: StickerPackData[] }) => {
+        useStickerStore.getState().initStickers(data.serverPacks, data.personalPacks);
+      },
+      stickerPackCreated: (data: { pack: StickerPackData }) => {
+        if (data.pack.serverId) {
+          useStickerStore.getState().addServerPack(data.pack);
+        }
+      },
+      stickerPackDeleted: (data: { packId: string; serverId?: string }) => {
+        if (data.serverId) {
+          useStickerStore.getState().removeServerPack(data.packId);
+        } else {
+          useStickerStore.getState().removePersonalPack(data.packId);
+        }
+      },
+      stickerAdded: (data: { packId: string; sticker: StickerData }) => {
+        useStickerStore.getState().addSticker(data.packId, data.sticker);
+      },
+      stickerRemoved: (data: { packId: string; stickerId: string }) => {
+        useStickerStore.getState().removeSticker(data.packId, data.stickerId);
+      },
       voiceError: (data: { message: string }) => {
         const vs = useVoiceStore.getState();
         if (vs.activeChannelId) vs.leaveChannel();
@@ -645,6 +680,15 @@ export function MainLayout() {
       ['announcement:new', handlers.announcementNew],
       ['support:message:new', handlers.supportMessageNew],
       ['support:status_change', handlers.supportStatusChange],
+      // Custom Emojis & Stickers
+      ['emoji:init', handlers.emojiInit],
+      ['emoji:created', handlers.emojiCreated],
+      ['emoji:deleted', handlers.emojiDeleted],
+      ['sticker:init', handlers.stickerInit],
+      ['sticker:pack_created', handlers.stickerPackCreated],
+      ['sticker:pack_deleted', handlers.stickerPackDeleted],
+      ['sticker:added', handlers.stickerAdded],
+      ['sticker:removed', handlers.stickerRemoved],
     ];
 
     /**

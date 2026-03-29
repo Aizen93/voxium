@@ -1,12 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
+import { useEmojiStore } from '../../stores/emojiStore';
+import { useStickerStore } from '../../stores/stickerStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
 import { ImageUploadButton } from '../common/ImageUploadButton';
-import { X, Lock, Unlock } from 'lucide-react';
-import type { ServerMember, MemberRole, ResourceLimits } from '@voxium/shared';
+import { X, Lock, Unlock, Trash2, Upload } from 'lucide-react';
+import type { ServerMember, MemberRole, ResourceLimits, CustomEmoji, StickerPackData } from '@voxium/shared';
+import { LIMITS, ALLOWED_EMOJI_TYPES } from '@voxium/shared';
 import { outranksRole } from '../../utils/roles';
 import { Permissions, permissionsFromString, hasPermission } from '@voxium/shared';
 import { RoleEditor } from './RoleEditor';
@@ -18,7 +21,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Tab = 'general' | 'members' | 'roles' | 'limits';
+type Tab = 'general' | 'members' | 'roles' | 'limits' | 'emojis' | 'stickers';
 
 export function ServerSettingsModal({ serverId, onClose }: Props) {
   const { t } = useTranslation();
@@ -35,6 +38,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   }, [serverId, fetchEffectivePermissions]);
 
   const canManageRoles = isOwner || (effectivePerms !== null && hasPermission(permissionsFromString(effectivePerms), Permissions.MANAGE_ROLES));
+  const canManageEmojis = isOwner || (effectivePerms !== null && hasPermission(permissionsFromString(effectivePerms), Permissions.MANAGE_EMOJIS));
 
   if (!server) return null;
 
@@ -98,6 +102,30 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
           >
             {t('serverSettings.tabs.limits')}
           </button>
+          {canManageEmojis && (
+            <button
+              onClick={() => setActiveTab('emojis')}
+              className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                activeTab === 'emojis'
+                  ? 'text-vox-text-primary border-vox-accent-primary'
+                  : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+              }`}
+            >
+              Emojis
+            </button>
+          )}
+          {canManageEmojis && (
+            <button
+              onClick={() => setActiveTab('stickers')}
+              className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                activeTab === 'stickers'
+                  ? 'text-vox-text-primary border-vox-accent-primary'
+                  : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+              }`}
+            >
+              Stickers
+            </button>
+          )}
         </div>
 
         {/* Content */}
@@ -108,6 +136,10 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
             <MembersTab serverId={serverId} />
           ) : activeTab === 'roles' ? (
             <RoleEditor serverId={serverId} roles={roles} canManageRoles={canManageRoles} />
+          ) : activeTab === 'emojis' ? (
+            <EmojiManagementTab serverId={serverId} />
+          ) : activeTab === 'stickers' ? (
+            <StickerManagementTab serverId={serverId} />
           ) : (
             <LimitsTab serverId={serverId} />
           )}
@@ -763,3 +795,311 @@ function RoleBadge({ role }: { role: MemberRole }) {
   return null;
 }
 
+// ─── Emoji Management Tab ──────────────────────────────────────────────────
+
+function EmojiManagementTab({ serverId }: { serverId: string }) {
+  const emojisByServer = useEmojiStore((s) => s.emojisByServer);
+  const emojis = emojisByServer.get(serverId) ?? [];
+  const getUrl = useEmojiStore((s) => s.getEmojiImageUrl);
+  const [uploading, setUploading] = useState(false);
+  const [newName, setNewName] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const handleUpload = async (file: File) => {
+    if (!ALLOWED_EMOJI_TYPES.includes(file.type as typeof ALLOWED_EMOJI_TYPES[number])) {
+      toast.error('Only PNG, WebP, and GIF files are allowed');
+      return;
+    }
+    if (file.size > LIMITS.MAX_EMOJI_FILE_SIZE) {
+      toast.error(`Max file size is ${LIMITS.MAX_EMOJI_FILE_SIZE / 1024}KB`);
+      return;
+    }
+    if (!newName.trim()) {
+      toast.error('Please enter an emoji name first');
+      return;
+    }
+
+    setUploading(true);
+    try {
+      // 1. Get presigned URL
+      const { data: presignData } = await api.post(`/uploads/presign/emoji/${serverId}`, {
+        fileName: file.name,
+        fileSize: file.size,
+        mimeType: file.type,
+      });
+      const { uploadUrl, key } = presignData.data;
+
+      // 2. Upload to S3
+      await fetch(uploadUrl, {
+        method: 'PUT',
+        body: file,
+        headers: { 'Content-Type': file.type },
+      });
+
+      // 3. Create emoji record
+      await api.post(`/servers/${serverId}/emojis`, {
+        name: newName.trim(),
+        s3Key: key,
+        animated: file.type === 'image/gif',
+      });
+
+      setNewName('');
+      toast.success('Emoji created');
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Failed to create emoji';
+      toast.error(msg);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDelete = async (emoji: CustomEmoji) => {
+    if (!confirm(`Delete :${emoji.name}:?`)) return;
+    try {
+      await api.delete(`/servers/${serverId}/emojis/${emoji.id}`);
+      toast.success('Emoji deleted');
+    } catch {
+      toast.error('Failed to delete emoji');
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-base font-semibold text-vox-text-primary">
+          Custom Emojis ({emojis.length} / {LIMITS.MAX_CUSTOM_EMOJIS_PER_SERVER})
+        </h3>
+      </div>
+
+      {/* Upload form */}
+      <div className="flex items-center gap-2 mb-4 p-3 rounded-lg bg-vox-bg-secondary border border-vox-border">
+        <input
+          type="text"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
+          placeholder="emoji_name"
+          className="flex-1 px-3 py-1.5 rounded bg-vox-bg-tertiary text-vox-text-primary text-sm border border-vox-border focus:outline-none focus:border-vox-accent-primary"
+          maxLength={32}
+        />
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".png,.webp,.gif"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) handleUpload(file);
+            e.target.value = '';
+          }}
+        />
+        <button
+          onClick={() => fileRef.current?.click()}
+          disabled={uploading || !newName.trim()}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-vox-accent-primary text-white text-sm font-medium hover:bg-vox-accent-hover disabled:opacity-50 transition-colors"
+        >
+          <Upload size={14} />
+          {uploading ? 'Uploading...' : 'Upload'}
+        </button>
+      </div>
+
+      {/* Emoji grid */}
+      <div className="grid grid-cols-1 gap-1">
+        {emojis.map((emoji) => (
+          <div key={emoji.id} className="flex items-center gap-3 px-3 py-2 rounded hover:bg-vox-bg-hover group">
+            <img src={getUrl(emoji)} alt={emoji.name} className="w-8 h-8 object-contain" />
+            <span className="text-sm text-vox-text-primary flex-1">:{emoji.name}:</span>
+            <button
+              onClick={() => handleDelete(emoji)}
+              className="opacity-0 group-hover:opacity-100 text-vox-accent-danger hover:text-red-400 transition-all"
+              title="Delete emoji"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+        {emojis.length === 0 && (
+          <div className="text-center text-vox-text-muted text-sm py-8">No custom emojis yet</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Sticker Management Tab ────────────────────────────────────────────────
+
+function StickerManagementTab({ serverId }: { serverId: string }) {
+  const allServerPacks = useStickerStore((s) => s.serverPacks);
+  const packs = useMemo(() => allServerPacks.filter((p) => p.serverId === serverId), [allServerPacks, serverId]);
+  const getUrl = useStickerStore((s) => s.getStickerImageUrl);
+  const [newPackName, setNewPackName] = useState('');
+  const [creating, setCreating] = useState(false);
+
+  const handleCreatePack = async () => {
+    if (!newPackName.trim()) return;
+    setCreating(true);
+    try {
+      await api.post(`/servers/${serverId}/sticker-packs`, { name: newPackName.trim() });
+      setNewPackName('');
+      toast.success('Sticker pack created');
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Failed to create pack';
+      toast.error(msg);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDeletePack = async (packId: string) => {
+    if (!confirm('Delete this sticker pack and all its stickers?')) return;
+    try {
+      await api.delete(`/servers/${serverId}/sticker-packs/${packId}`);
+      toast.success('Sticker pack deleted');
+    } catch {
+      toast.error('Failed to delete pack');
+    }
+  };
+
+  const handleAddSticker = async (pack: StickerPackData, file: File, name: string) => {
+    try {
+      const { data: presignData } = await api.post(`/uploads/presign/sticker/${pack.id}`, {
+        fileName: file.name,
+        fileSize: file.size,
+        mimeType: file.type,
+      });
+      const { uploadUrl, key } = presignData.data;
+      await fetch(uploadUrl, { method: 'PUT', body: file, headers: { 'Content-Type': file.type } });
+      await api.post(`/servers/${serverId}/sticker-packs/${pack.id}/stickers`, { name, s3Key: key });
+      toast.success('Sticker added');
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Failed to add sticker';
+      toast.error(msg);
+    }
+  };
+
+  const handleDeleteSticker = async (packId: string, stickerId: string) => {
+    try {
+      await api.delete(`/servers/${serverId}/sticker-packs/${packId}/stickers/${stickerId}`);
+      toast.success('Sticker removed');
+    } catch {
+      toast.error('Failed to remove sticker');
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-base font-semibold text-vox-text-primary">
+          Sticker Packs ({packs.length} / {LIMITS.MAX_STICKER_PACKS_PER_SERVER})
+        </h3>
+      </div>
+
+      {/* Create pack */}
+      <div className="flex items-center gap-2 mb-4 p-3 rounded-lg bg-vox-bg-secondary border border-vox-border">
+        <input
+          type="text"
+          value={newPackName}
+          onChange={(e) => setNewPackName(e.target.value)}
+          placeholder="New pack name..."
+          className="flex-1 px-3 py-1.5 rounded bg-vox-bg-tertiary text-vox-text-primary text-sm border border-vox-border focus:outline-none focus:border-vox-accent-primary"
+          maxLength={50}
+        />
+        <button
+          onClick={handleCreatePack}
+          disabled={creating || !newPackName.trim()}
+          className="px-3 py-1.5 rounded bg-vox-accent-primary text-white text-sm font-medium hover:bg-vox-accent-hover disabled:opacity-50 transition-colors"
+        >
+          Create Pack
+        </button>
+      </div>
+
+      {/* Pack list */}
+      {packs.map((pack) => (
+        <StickerPackCard
+          key={pack.id}
+          pack={pack}
+          getUrl={getUrl}
+          onAddSticker={handleAddSticker}
+          onDeleteSticker={handleDeleteSticker}
+          onDeletePack={handleDeletePack}
+        />
+      ))}
+      {packs.length === 0 && (
+        <div className="text-center text-vox-text-muted text-sm py-8">No sticker packs yet</div>
+      )}
+    </div>
+  );
+}
+
+function StickerPackCard({ pack, getUrl, onAddSticker, onDeleteSticker, onDeletePack }: {
+  pack: StickerPackData;
+  getUrl: (s: import('@voxium/shared').StickerData) => string;
+  onAddSticker: (pack: StickerPackData, file: File, name: string) => Promise<void>;
+  onDeleteSticker: (packId: string, stickerId: string) => void;
+  onDeletePack: (packId: string) => void;
+}) {
+  const [stickerName, setStickerName] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <div className="mb-4 rounded-lg border border-vox-border bg-vox-bg-secondary p-3">
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-sm font-semibold text-vox-text-primary">{pack.name}</h4>
+        <button onClick={() => onDeletePack(pack.id)} className="text-vox-accent-danger hover:text-red-400" title="Delete pack">
+          <Trash2 size={14} />
+        </button>
+      </div>
+
+      {/* Add sticker */}
+      <div className="flex items-center gap-2 mb-2">
+        <input
+          type="text"
+          value={stickerName}
+          onChange={(e) => setStickerName(e.target.value)}
+          placeholder="Sticker name"
+          className="flex-1 px-2 py-1 rounded bg-vox-bg-tertiary text-vox-text-primary text-xs border border-vox-border focus:outline-none"
+          maxLength={32}
+        />
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".png,.webp,.gif"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file && stickerName.trim()) {
+              onAddSticker(pack, file, stickerName.trim());
+              setStickerName('');
+            }
+            e.target.value = '';
+          }}
+        />
+        <button
+          onClick={() => fileRef.current?.click()}
+          disabled={!stickerName.trim()}
+          className="px-2 py-1 rounded bg-vox-accent-primary text-white text-xs hover:bg-vox-accent-hover disabled:opacity-50"
+        >
+          Add
+        </button>
+      </div>
+
+      {/* Sticker grid */}
+      <div className="grid grid-cols-5 gap-1">
+        {pack.stickers.map((s) => (
+          <div key={s.id} className="relative group aspect-square rounded bg-vox-bg-tertiary p-1 flex items-center justify-center">
+            <img src={getUrl(s)} alt={s.name} className="w-full h-full object-contain" />
+            <button
+              onClick={() => onDeleteSticker(pack.id, s.id)}
+              className="absolute top-0 right-0 opacity-0 group-hover:opacity-100 bg-vox-accent-danger text-white rounded-full p-0.5"
+              title="Remove"
+            >
+              <X size={10} />
+            </button>
+          </div>
+        ))}
+      </div>
+      {pack.stickers.length === 0 && (
+        <div className="text-center text-vox-text-muted text-xs py-4">No stickers in this pack</div>
+      )}
+    </div>
+  );
+}

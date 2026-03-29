@@ -13,6 +13,7 @@ import { Pencil, Trash2, SmilePlus, Reply, Flag } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
+import { useStickerStore } from '../../stores/stickerStore';
 import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
 import { ReportModal } from './ReportModal';
@@ -235,6 +236,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
             {showReactionPicker && (
               <EmojiPicker
                 anchorRef={reactionBtnRef}
+                mode="emoji-only"
                 onEmojiSelect={handleReactionSelect}
                 onClose={() => setShowReactionPicker(false)}
               />
@@ -305,6 +307,8 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
 
                 {isEditing ? (
                   <div className="mt-1">{editArea}</div>
+                ) : message.type === 'sticker' ? (
+                  <StickerMessage stickerId={message.content} />
                 ) : (
                   <>
                     {message.content && (
@@ -334,7 +338,9 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 </span>
               </div>
 
-              {isEditing ? editArea : (
+              {isEditing ? editArea : message.type === 'sticker' ? (
+                <StickerMessage stickerId={message.content} />
+              ) : (
                 <div className="min-w-0 flex-1">
                   {message.content && (
                     <div className="text-sm text-vox-text-primary break-words">
@@ -379,3 +385,35 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
     </>
   );
 });
+
+function StickerMessage({ stickerId }: { stickerId: string }) {
+  // Find sticker directly from packs to avoid creating new array reference on every render
+  const sticker = useStickerStore((s) => {
+    for (const pack of s.serverPacks) {
+      const found = pack.stickers.find((st) => st.id === stickerId);
+      if (found) return found;
+    }
+    for (const pack of s.personalPacks) {
+      const found = pack.stickers.find((st) => st.id === stickerId);
+      if (found) return found;
+    }
+    return null;
+  });
+  const getUrl = useStickerStore((s) => s.getStickerImageUrl);
+
+  if (!sticker) {
+    return <div className="text-sm text-vox-text-muted italic py-1">Sticker not found</div>;
+  }
+
+  return (
+    <div className="py-1">
+      <img
+        src={getUrl(sticker)}
+        alt={sticker.name}
+        title={sticker.name}
+        className="w-40 h-40 object-contain"
+        loading="lazy"
+      />
+    </div>
+  );
+}

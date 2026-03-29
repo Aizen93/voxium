@@ -30,8 +30,8 @@ function getBucket(): string {
   return process.env.S3_ASSETS_BUCKET!;
 }
 
-/** Regex matching valid S3 asset keys (e.g. avatars/userId-timestamp.webp) */
-export const VALID_S3_KEY_RE = /^(avatars|server-icons)\/[\w-]+\.webp$/;
+/** Regex matching valid S3 asset keys (e.g. avatars/userId-timestamp.webp, emojis/srv-xxx/id.png, gifs/usr-xxx/id.gif) */
+export const VALID_S3_KEY_RE = /^((avatars|server-icons)\/[\w-]+\.webp|(emojis\/srv-[\w-]+|stickers\/pack-[\w-]+|gifs\/usr-[\w-]+)\/[\w-]+\.(webp|png|gif))$/;
 
 /** Regex matching valid attachment keys (e.g. attachments/ch-abc123/clxyz-report.pdf) */
 export const VALID_ATTACHMENT_KEY_RE = /^attachments\/(ch|dm)-[\w-]+\/[\w]+-[\w][\w.-]*$/;

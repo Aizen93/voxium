@@ -23,7 +23,7 @@ Voxium/
 
 ## Key Features Implemented
 
-- Real-time text messaging with editing, deletion, reactions, replies, search, @mentions with server-side autocomplete search + styled mention badges + mention highlight + distinct notification sound
+- Real-time text messaging with editing, deletion, reactions, replies, search, @mentions with server-side autocomplete search + styled mention badges + mention highlight + distinct notification sound, custom emojis per server, sticker packs (server + personal), GIF search (Tenor, opt-in via feature flag)
 - **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls with global call status panel (visible from any view), push-to-talk, noise suppression, screen sharing, silence detection (producer pause/resume), voice quality selector (low/medium/high bitrate), adaptive bandwidth caps
 - Server/channel/category management with drag-and-drop reordering
 - **Advanced permission system** — Discord-style bitmask roles with 20 permission flags (VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, etc.), role hierarchy enforcement (actors cannot modify roles at or above their position), channel-level permission overrides (allow/deny/inherit tri-state per role), @everyone default role per server with restricted defaults (no ATTACH_FILES, CREATE_INVITES, CHANGE_NICKNAME), permission calculator resolves @everyone base → OR all role permissions → channel overrides (ADMINISTRATOR bypasses everything), VIEW_CHANNEL enforcement on channel list filtering, message access, and socket auto-join, role CRUD + member role assignment + channel override management UI
@@ -74,6 +74,8 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **Custom Emojis, Stickers, and GIF Search** (2026-03-28) -- Server-scoped custom emojis (<:name:id> format in messages), sticker packs (server + personal) with sticker-type messages, Tenor GIF search proxy (opt-in via `gif_tenor` feature flag, disabled by default), MANAGE_EMOJIS permission flag, EmojiPicker with tabbed UI (emoji/custom/stickers/GIF), inline custom emoji rendering in messages and reactions. Review: fixed broken tests (missing JWT_SECRET env var), added lazy emoji resolution for cross-server DMs.
 
 - **v1.7.0 — Linux Desktop Fix + Landing Page + UX Polish** (2026-03-26)
   - **Linux Tauri fix (CORS):** Removed unnecessary `withCredentials: true` from Axios — auth uses Bearer tokens, not cookies. The strict CORS mode it triggered broke on Linux webkit2gtk where the Tauri custom protocol origin (`http://tauri.localhost`) may not be echoed correctly. Server CORS middleware now echoes the first allowed origin on null-origin requests instead of `*` (which is forbidden with `credentials: true`).

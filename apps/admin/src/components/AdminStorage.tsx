@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { HardDrive, Image, Server, AlertTriangle, Trash2, RefreshCw, Users, Crown, Paperclip } from 'lucide-react';
+import { HardDrive, Image, Server, AlertTriangle, Trash2, RefreshCw, Users, Crown, Paperclip, Smile, Star, Film } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminStatCard } from './AdminStatCard';
 import { AdminTable } from './AdminTable';
@@ -15,13 +15,16 @@ function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
-type FilterTab = 'all' | 'avatars' | 'server-icons' | 'attachments' | 'orphaned';
+type FilterTab = 'all' | 'avatars' | 'server-icons' | 'attachments' | 'emojis' | 'stickers' | 'gifs' | 'orphaned';
 
 const FILTER_TABS: Array<{ id: FilterTab; label: string }> = [
   { id: 'all', label: 'All' },
   { id: 'avatars', label: 'Avatars' },
   { id: 'server-icons', label: 'Server Icons' },
   { id: 'attachments', label: 'Attachments' },
+  { id: 'emojis', label: 'Emojis' },
+  { id: 'stickers', label: 'Stickers' },
+  { id: 'gifs', label: 'GIFs' },
   { id: 'orphaned', label: 'Orphaned' },
 ];
 
@@ -31,7 +34,7 @@ export function AdminStorage() {
     fetchStorageStats, fetchStorageFiles, setStorageFilter, deleteStorageFile, cleanupOrphans, fetchTopUploaders,
   } = useAdminStore();
 
-  const [deleteTarget, setDeleteTarget] = useState<{ key: string; linkedEntity: string | null; type: 'avatar' | 'server-icon' | 'attachment' } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ key: string; linkedEntity: string | null; type: import('@voxium/shared').StorageFileType } | null>(null);
   const [showCleanup, setShowCleanup] = useState(false);
 
   const loadInitial = useCallback(() => {
@@ -163,7 +166,7 @@ export function AdminStorage() {
       </div>
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <AdminStatCard
           label="Total Storage"
           value={storageStats ? formatBytes(storageStats.totalSize) : '—'}
@@ -186,6 +189,24 @@ export function AdminStorage() {
           value={storageStats ? formatBytes(storageStats.attachmentSize) : '—'}
           icon={Paperclip}
           color="text-emerald-400"
+        />
+        <AdminStatCard
+          label={`Emojis (${storageStats?.emojiCount ?? 0})`}
+          value={storageStats ? formatBytes(storageStats.emojiSize) : '—'}
+          icon={Smile}
+          color="text-orange-400"
+        />
+        <AdminStatCard
+          label={`Stickers (${storageStats?.stickerCount ?? 0})`}
+          value={storageStats ? formatBytes(storageStats.stickerSize) : '—'}
+          icon={Star}
+          color="text-pink-400"
+        />
+        <AdminStatCard
+          label={`GIFs (${storageStats?.gifCount ?? 0})`}
+          value={storageStats ? formatBytes(storageStats.gifSize) : '—'}
+          icon={Film}
+          color="text-cyan-400"
         />
         <AdminStatCard
           label={`Orphaned (${storageStats?.orphanCount ?? 0})`}
@@ -231,6 +252,12 @@ export function AdminStorage() {
           message={`Delete "${deleteTarget.key}"?${
             deleteTarget.type === 'attachment'
               ? ' This attachment will show as expired in the chat.'
+              : deleteTarget.type === 'emoji'
+              ? ' This custom emoji image will be removed.'
+              : deleteTarget.type === 'sticker'
+              ? ' This sticker image will be removed.'
+              : deleteTarget.type === 'gif'
+              ? ' This GIF will be removed from the library.'
               : deleteTarget.linkedEntity
               ? ` This file is currently linked to "${deleteTarget.linkedEntity}" — their avatar/icon will be removed.`
               : ' This is an orphaned file.'

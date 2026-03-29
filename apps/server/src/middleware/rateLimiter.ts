@@ -41,6 +41,9 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   general:        { keyPrefix: 'rl:general',   points: 100, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'General' },
   themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
   themeBrowse:    { keyPrefix: 'rl:themebr',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Browse' },
+  emojiManage:    { keyPrefix: 'rl:emoji',     points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Emoji Manage' },
+  stickerManage:  { keyPrefix: 'rl:sticker',   points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Sticker Manage' },
+  gifSearch:      { keyPrefix: 'rl:gifsrch',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'GIF Search' },
 };
 
 // Overrides loaded from Redis on init, updated via admin API
@@ -217,6 +220,9 @@ export const rateLimitRoleManage = createMiddleware('roleManage', byUserId);
 export const rateLimitGeneral = createMiddleware('general', byIp);
 export const rateLimitThemeManage = createMiddleware('themeManage', byUserId);
 export const rateLimitThemeBrowse = createMiddleware('themeBrowse', byUserId);
+export const rateLimitEmojiManage = createMiddleware('emojiManage', byUserId);
+export const rateLimitStickerManage = createMiddleware('stickerManage', byUserId);
+export const rateLimitGifSearch = createMiddleware('gifSearch', byUserId);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────
 

@@ -1,9 +1,11 @@
+import { useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import type { Components } from 'react-markdown';
-import { MENTION_RE } from '@voxium/shared';
+import { MENTION_RE, CUSTOM_EMOJI_RE } from '@voxium/shared';
 import type { MessageAuthor } from '@voxium/shared';
+import { useEmojiStore } from '../../stores/emojiStore';
 
 interface Props {
   content: string;
@@ -76,11 +78,59 @@ function buildMentionMap(mentions?: MessageAuthor[]): Map<string, MessageAuthor>
   return map;
 }
 
+type Segment =
+  | { type: 'text'; value: string }
+  | { type: 'mention'; userId: string }
+  | { type: 'custom_emoji'; name: string; id: string };
+
+/** Parse content into text, mention, and custom emoji segments */
+function parseSegments(content: string): Segment[] {
+  // Combined regex: mentions OR custom emojis
+  const combined = new RegExp(
+    `(${MENTION_RE.source})|(${CUSTOM_EMOJI_RE.source})`,
+    'g',
+  );
+  const segments: Segment[] = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = combined.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: 'text', value: content.slice(lastIndex, match.index) });
+    }
+    if (match[1]) {
+      // Mention: @[userId]
+      segments.push({ type: 'mention', userId: match[2] });
+    } else if (match[3]) {
+      // Custom emoji: <:name:id>
+      segments.push({ type: 'custom_emoji', name: match[4], id: match[5] });
+    }
+    lastIndex = combined.lastIndex;
+  }
+  if (lastIndex < content.length) {
+    segments.push({ type: 'text', value: content.slice(lastIndex) });
+  }
+  return segments;
+}
+
+/** Check if content is ONLY custom emojis (for large display) */
+function isEmojiOnly(segments: Segment[]): boolean {
+  const nonEmpty = segments.filter(
+    (s) => s.type !== 'text' || s.value.trim().length > 0,
+  );
+  return (
+    nonEmpty.length > 0 &&
+    nonEmpty.length <= 3 &&
+    nonEmpty.every((s) => s.type === 'custom_emoji')
+  );
+}
+
 export function MessageContent({ content, mentions }: Props) {
   const mentionMap = buildMentionMap(mentions);
-  const hasMentions = mentionMap.size > 0 && new RegExp(MENTION_RE.source, MENTION_RE.flags).test(content);
 
-  if (!hasMentions) {
+  // Fast path: skip regex parsing entirely for plain text messages (vast majority)
+  const mightHaveSpecial = content.includes('@[') || content.includes('<:');
+  if (!mightHaveSpecial) {
     return (
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
@@ -93,24 +143,24 @@ export function MessageContent({ content, mentions }: Props) {
     );
   }
 
-  // When mentions are present, first do mention replacement then render markdown
-  // for the text segments. We split content by mentions and render text parts
-  // through markdown individually.
-  const re = new RegExp(MENTION_RE.source, MENTION_RE.flags);
-  const segments: Array<{ type: 'text'; value: string } | { type: 'mention'; userId: string }> = [];
-  let lastIndex = 0;
-  let match;
+  const segments = parseSegments(content);
+  const hasSpecial = segments.some((s) => s.type !== 'text');
 
-  while ((match = re.exec(content)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ type: 'text', value: content.slice(lastIndex, match.index) });
-    }
-    segments.push({ type: 'mention', userId: match[1] });
-    lastIndex = re.lastIndex;
+  if (!hasSpecial) {
+    return (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        allowedElements={allowedElements}
+        unwrapDisallowed
+        components={components}
+      >
+        {content}
+      </ReactMarkdown>
+    );
   }
-  if (lastIndex < content.length) {
-    segments.push({ type: 'text', value: content.slice(lastIndex) });
-  }
+
+  const emojiOnly = isEmojiOnly(segments);
+  const emojiSize = emojiOnly ? 'w-10 h-10' : 'w-5 h-5';
 
   return (
     <span>
@@ -133,6 +183,9 @@ export function MessageContent({ content, mentions }: Props) {
             </span>
           );
         }
+        if (seg.type === 'custom_emoji') {
+          return <CustomEmojiInline key={i} name={seg.name} id={seg.id} className={emojiSize} />;
+        }
         return (
           <ReactMarkdown
             key={i}
@@ -146,6 +199,34 @@ export function MessageContent({ content, mentions }: Props) {
         );
       })}
     </span>
+  );
+}
+
+function CustomEmojiInline({ name, id, className }: { name: string; id: string; className: string }) {
+  const emoji = useEmojiStore((s) => s.emojis.get(id));
+  const getUrl = useEmojiStore((s) => s.getEmojiImageUrl);
+  const resolveEmoji = useEmojiStore((s) => s.resolveEmoji);
+
+  // Trigger resolution for unknown emojis (e.g. cross-server usage in DMs)
+  useEffect(() => {
+    if (!emoji) {
+      resolveEmoji(id);
+    }
+  }, [emoji, id, resolveEmoji]);
+
+  if (!emoji) {
+    // Emoji not in cache yet — show fallback text while resolving
+    return <span className="text-vox-text-muted" title={`Custom emoji: ${name}`}>:{name}:</span>;
+  }
+
+  return (
+    <img
+      src={getUrl(emoji)}
+      alt={`:${name}:`}
+      title={`:${name}:`}
+      className={`${className} inline-block align-middle object-contain`}
+      loading="lazy"
+    />
   );
 }
 

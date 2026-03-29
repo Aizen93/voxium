@@ -77,4 +77,30 @@ describe('sanitizeText', () => {
   it('handles whitespace-only string', () => {
     expect(sanitizeText('   ')).toBe('');
   });
+
+  it('preserves custom emoji tokens <:name:id>', () => {
+    const content = 'Check this <:pepe_laugh:clxyz123abc> out!';
+    expect(sanitizeText(content)).toBe('Check this <:pepe_laugh:clxyz123abc> out!');
+  });
+
+  it('preserves multiple custom emoji tokens', () => {
+    const content = '<:emoji1:abcdefghij> and <:emoji2:klmnopqrst>';
+    expect(sanitizeText(content)).toBe('<:emoji1:abcdefghij> and <:emoji2:klmnopqrst>');
+  });
+
+  it('strips HTML tags but preserves custom emojis in the same string', () => {
+    const content = '<b>bold</b> <:pepe:abcdef1234> <script>xss</script>';
+    expect(sanitizeText(content)).toBe('bold <:pepe:abcdef1234> xss');
+  });
+
+  it('does not preserve malformed custom emoji tokens', () => {
+    // Missing colon or wrong format — should be stripped as HTML
+    expect(sanitizeText('<:short:ab>')).toBe(''); // id too short (< 10 chars)
+    expect(sanitizeText('<notEmoji>')).toBe('');
+  });
+
+  it('preserves custom emojis alongside mentions', () => {
+    const content = '@[user123] sent <:wave:abcdefghij>';
+    expect(sanitizeText(content)).toBe('@[user123] sent <:wave:abcdefghij>');
+  });
 });

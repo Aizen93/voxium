@@ -62,6 +62,12 @@ const { mockPrisma } = vi.hoisted(() => {
       announcement: {
         findMany: vi.fn().mockResolvedValue([]),
       },
+      customEmoji: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      stickerPack: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
       conversationRead: {
         createMany: vi.fn(),
       },

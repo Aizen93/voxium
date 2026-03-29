@@ -17,6 +17,7 @@ const DEFAULTS: Record<string, FeatureFlagDef> = {
   dm_voice:        { name: 'dm_voice',        label: 'DM Voice Calls',      description: 'Allow users to start direct message voice calls',  enabled: true },
   support:         { name: 'support',         label: 'Support Tickets',     description: 'Allow users to open support tickets',              enabled: true },
   community_funding: { name: 'community_funding', label: 'Community Funding', description: 'Show the community funding section on the landing page', enabled: false },
+  gif_giphy:         { name: 'gif_giphy',         label: 'Giphy GIF Search',  description: 'Enable GIF search via Giphy API (requires GIPHY_API_KEY env var)',  enabled: false },
 };
 
 const REDIS_KEY = 'feature:flags';

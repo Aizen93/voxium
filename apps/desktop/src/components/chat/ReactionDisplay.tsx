@@ -1,10 +1,12 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Plus } from 'lucide-react';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
+import { useEmojiStore } from '../../stores/emojiStore';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
 import type { ReactionGroup } from '@voxium/shared';
+import { CUSTOM_EMOJI_RE } from '@voxium/shared';
 
 interface Props {
   reactions: ReactionGroup[];
@@ -51,7 +53,7 @@ export function ReactionDisplay({ reactions, messageId, channelId, conversationI
                 : 'border-vox-border bg-vox-bg-secondary text-vox-text-secondary hover:bg-vox-bg-hover'
             }`}
           >
-            <span>{r.emoji}</span>
+            <ReactionEmoji emoji={r.emoji} />
             <span>{r.count}</span>
           </button>
         );
@@ -68,10 +70,41 @@ export function ReactionDisplay({ reactions, messageId, channelId, conversationI
       {showPicker && (
         <EmojiPicker
           anchorRef={addBtnRef}
+          mode="emoji-only"
           onEmojiSelect={handlePickerSelect}
           onClose={() => setShowPicker(false)}
         />
       )}
     </div>
+  );
+}
+
+function ReactionEmoji({ emoji }: { emoji: string }) {
+  // Use non-global version of CUSTOM_EMOJI_RE for single match
+  const match = new RegExp(CUSTOM_EMOJI_RE.source).exec(emoji);
+  if (!match) return <span>{emoji}</span>;
+
+  const [name, id] = [match[1], match[2]];
+  const emojiData = useEmojiStore((s) => s.emojis.get(id));
+  const getUrl = useEmojiStore((s) => s.getEmojiImageUrl);
+  const resolveEmoji = useEmojiStore((s) => s.resolveEmoji);
+
+  // Trigger resolution for unknown emojis (e.g. cross-server usage in DMs)
+  useEffect(() => {
+    if (!emojiData) {
+      resolveEmoji(id);
+    }
+  }, [emojiData, id, resolveEmoji]);
+
+  if (!emojiData) return <span title={`:${name}:`}>:{name}:</span>;
+
+  return (
+    <img
+      src={getUrl(emojiData)}
+      alt={`:${name}:`}
+      title={`:${name}:`}
+      className="w-4 h-4 inline-block object-contain"
+      loading="lazy"
+    />
   );
 }

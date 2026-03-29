@@ -206,15 +206,18 @@ const DOWNLOAD_URLS = {
 
 function Navbar() {
   const { t, i18n } = useTranslation();
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 bg-vox-bg-primary/80 backdrop-blur-md border-b border-vox-border">
-      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
         <a href="#hero" className="flex items-center gap-2.5">
           <img src="/logo.svg" alt="Voxium" className="h-9 w-9 rounded-lg" />
           <span className="text-xl font-bold text-vox-text-primary">Voxium</span>
         </a>
-        <div className="flex items-center gap-3">
+
+        {/* Desktop nav */}
+        <div className="hidden sm:flex items-center gap-3">
           <select
             value={i18n.language}
             onChange={(e) => { i18n.changeLanguage(e.target.value); localStorage.setItem('voxium_language', e.target.value); }}
@@ -233,7 +236,47 @@ function Navbar() {
             {t('landing.nav.getStarted')} <ArrowRight className="ml-1 h-4 w-4" />
           </Link>
         </div>
+
+        {/* Mobile hamburger */}
+        <button
+          onClick={() => setMobileOpen(!mobileOpen)}
+          className="sm:hidden p-2 text-vox-text-secondary hover:text-vox-text-primary transition-colors"
+          aria-label="Toggle menu"
+        >
+          {mobileOpen ? (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="4" y1="4" x2="16" y2="16" /><line x1="16" y1="4" x2="4" y2="16" />
+            </svg>
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="3" y1="5" x2="17" y2="5" /><line x1="3" y1="10" x2="17" y2="10" /><line x1="3" y1="15" x2="17" y2="15" />
+            </svg>
+          )}
+        </button>
       </div>
+
+      {/* Mobile dropdown */}
+      {mobileOpen && (
+        <div className="sm:hidden border-t border-vox-border bg-vox-bg-primary/95 backdrop-blur-md px-4 py-3 flex flex-col gap-3">
+          <select
+            value={i18n.language}
+            onChange={(e) => { i18n.changeLanguage(e.target.value); localStorage.setItem('voxium_language', e.target.value); }}
+            className="bg-transparent border border-vox-border rounded-md px-2 py-1.5 text-sm text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary cursor-pointer"
+          >
+            {SUPPORTED_LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code} className="bg-vox-bg-primary text-vox-text-primary">
+                {lang.nativeName}
+              </option>
+            ))}
+          </select>
+          <Link to="/login" className="btn-ghost text-sm text-center" onClick={() => setMobileOpen(false)}>
+            {t('landing.nav.signIn')}
+          </Link>
+          <Link to="/register" className="btn-primary text-sm text-center" onClick={() => setMobileOpen(false)}>
+            {t('landing.nav.getStarted')} <ArrowRight className="ml-1 h-4 w-4 inline" />
+          </Link>
+        </div>
+      )}
     </nav>
   );
 }

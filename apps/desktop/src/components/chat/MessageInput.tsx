@@ -472,9 +472,29 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         {showEmojiPicker && (
           <EmojiPicker
             anchorRef={emojiBtnRef}
+            mode="full"
             onEmojiSelect={(emoji) => {
               setContent((prev) => prev + emoji);
               setShowEmojiPicker(false);
+            }}
+            onStickerSelect={async (stickerId) => {
+              setShowEmojiPicker(false);
+              try {
+                if (conversationId) {
+                  await useChatStore.getState().sendDMMessage(conversationId, stickerId, undefined, 'sticker');
+                } else if (channelId) {
+                  await useChatStore.getState().sendMessage(channelId, stickerId, undefined, 'sticker');
+                }
+              } catch (err) {
+                console.error('[MessageInput] Failed to send sticker:', err instanceof Error ? err.message : err);
+                toast.error('Failed to send sticker');
+              }
+            }}
+            onGifSelect={(gif) => {
+              setShowEmojiPicker(false);
+              // GiphyGif has .url (external), GifUploadData has .s3Key (self-hosted)
+              const gifUrl = 'url' in gif ? gif.url : `${import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1'}/uploads/${gif.s3Key}?inline`;
+              setContent((prev) => prev + (prev ? ' ' : '') + gifUrl);
             }}
             onClose={() => setShowEmojiPicker(false)}
           />

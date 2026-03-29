@@ -45,7 +45,29 @@ export function validateMessageContent(content: string): string | null {
 export function validateEmoji(emoji: string): string | null {
   if (!emoji || emoji.trim().length === 0) return 'Emoji cannot be empty';
   if (emoji.length > LIMITS.MAX_EMOJI_LENGTH) return 'Emoji is too long';
+  // Allow custom emoji format <:name:id>
+  if (/^<:[a-zA-Z0-9_]{1,32}:[a-zA-Z0-9]{10,30}>$/.test(emoji)) return null;
   if (/^[\x20-\x7E]+$/.test(emoji)) return 'Invalid emoji';
+  return null;
+}
+
+export function validateEmojiName(name: string): string | null {
+  if (!name || name.length === 0) return 'Emoji name cannot be empty';
+  if (name.length > LIMITS.MAX_EMOJI_NAME_LENGTH) return `Emoji name must be at most ${LIMITS.MAX_EMOJI_NAME_LENGTH} characters`;
+  if (!/^[a-zA-Z0-9_]+$/.test(name)) return 'Emoji name can only contain letters, numbers, and underscores';
+  return null;
+}
+
+export function validateStickerPackName(name: string): string | null {
+  if (!name || name.trim().length === 0) return 'Pack name cannot be empty';
+  if (name.length > LIMITS.MAX_STICKER_PACK_NAME_LENGTH) return `Pack name must be at most ${LIMITS.MAX_STICKER_PACK_NAME_LENGTH} characters`;
+  return null;
+}
+
+export function validateStickerName(name: string): string | null {
+  if (!name || name.trim().length === 0) return 'Sticker name cannot be empty';
+  if (name.length > LIMITS.MAX_STICKER_NAME_LENGTH) return `Sticker name must be at most ${LIMITS.MAX_STICKER_NAME_LENGTH} characters`;
+  if (!/^[a-zA-Z0-9_ -]+$/.test(name)) return 'Sticker name can only contain letters, numbers, underscores, hyphens, and spaces';
   return null;
 }
 

@@ -25,13 +25,13 @@ interface ChatState {
   clearReplyingTo: () => void;
   fetchMessages: (channelId: string, before?: string) => Promise<void>;
   fetchMessagesAround: (channelId: string, messageId: string) => Promise<void>;
-  sendMessage: (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => Promise<void>;
+  sendMessage: (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[], type?: string) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   toggleReaction: (channelId: string, messageId: string, emoji: string) => Promise<void>;
   fetchDMMessages: (conversationId: string, before?: string) => Promise<void>;
   fetchDMMessagesAround: (conversationId: string, messageId: string) => Promise<void>;
-  sendDMMessage: (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => Promise<void>;
+  sendDMMessage: (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[], type?: string) => Promise<void>;
   editDMMessage: (conversationId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteDMMessage: (conversationId: string, messageId: string) => Promise<void>;
   toggleDMReaction: (conversationId: string, messageId: string, emoji: string) => Promise<void>;
@@ -148,10 +148,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => {
+  sendMessage: async (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[], type?: string) => {
     try {
       const replyingTo = get().replyingTo;
       const body: Record<string, unknown> = { content };
+      if (type) body.type = type;
       if (replyingTo) body.replyToId = replyingTo.id;
       if (attachments?.length) body.attachments = attachments;
 
@@ -276,10 +277,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendDMMessage: async (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => {
+  sendDMMessage: async (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[], type?: string) => {
     try {
       const replyingTo = get().replyingTo;
       const body: Record<string, unknown> = { content };
+      if (type) body.type = type;
       if (replyingTo) body.replyToId = replyingTo.id;
       if (attachments?.length) body.attachments = attachments;
 

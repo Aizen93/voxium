@@ -344,6 +344,16 @@ export interface ServerToClientEvents {
   'theme:published': (theme: CommunityTheme) => void;
   'theme:updated': (theme: CommunityTheme) => void;
   'theme:removed': (data: { themeId: string }) => void;
+  // Custom Emojis
+  'emoji:init': (data: { emojis: CustomEmoji[] }) => void;
+  'emoji:created': (data: { serverId: string; emoji: CustomEmoji }) => void;
+  'emoji:deleted': (data: { serverId: string; emojiId: string }) => void;
+  // Stickers
+  'sticker:init': (data: { serverPacks: StickerPackData[]; personalPacks: StickerPackData[] }) => void;
+  'sticker:pack_created': (data: { pack: StickerPackData }) => void;
+  'sticker:pack_deleted': (data: { packId: string; serverId?: string }) => void;
+  'sticker:added': (data: { packId: string; sticker: StickerData }) => void;
+  'sticker:removed': (data: { packId: string; stickerId: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -606,13 +616,21 @@ export interface StorageStats {
   serverIconSize: number;
   attachmentCount: number;
   attachmentSize: number;
+  emojiCount: number;
+  emojiSize: number;
+  stickerCount: number;
+  stickerSize: number;
+  gifCount: number;
+  gifSize: number;
   orphanCount: number;
   orphanSize: number;
 }
 
+export type StorageFileType = 'avatar' | 'server-icon' | 'attachment' | 'emoji' | 'sticker' | 'gif';
+
 export interface StorageFile {
   key: string;
-  type: 'avatar' | 'server-icon' | 'attachment';
+  type: StorageFileType;
   size: number;
   lastModified: string | null;
   linkedEntity: string | null;
@@ -725,6 +743,59 @@ export interface CommunityTheme extends CommunityThemeData {
   installCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+// ─── Custom Emojis ──────────────────────────────────────────────────────────
+
+export interface CustomEmoji {
+  id: string;
+  serverId: string;
+  name: string;
+  s3Key: string;
+  animated: boolean;
+  creatorId: string;
+  createdAt: string;
+}
+
+// ─── Stickers ───────────────────────────────────────────────────────────────
+
+export interface StickerData {
+  id: string;
+  packId: string;
+  name: string;
+  s3Key: string;
+  createdAt: string;
+}
+
+export interface StickerPackData {
+  id: string;
+  name: string;
+  description: string;
+  serverId: string | null;
+  userId: string | null;
+  stickers: StickerData[];
+  createdAt: string;
+}
+
+// ─── GIFs ───────────────────────────────────────────────────────────────────
+
+export interface GiphyGif {
+  id: string;
+  title: string;
+  url: string;
+  previewUrl: string;
+  width: number;
+  height: number;
+}
+
+export interface GifUploadData {
+  id: string;
+  s3Key: string;
+  fileName: string;
+  fileSize: number;
+  tags: string[];
+  uploaderId: string;
+  createdAt: string;
 }
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────

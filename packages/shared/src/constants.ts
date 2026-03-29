@@ -23,7 +23,7 @@ export const LIMITS = {
   MAX_CHANNELS_PER_SERVER: 20,
   MAX_VOICE_USERS_PER_CHANNEL: 12,
   MAX_REACTIONS_PER_MESSAGE: 20,
-  MAX_EMOJI_LENGTH: 32,
+  MAX_EMOJI_LENGTH: 64,
   CATEGORY_NAME_MIN: 1,
   CATEGORY_NAME_MAX: 100,
   MAX_CATEGORIES_PER_SERVER: 12,
@@ -56,6 +56,21 @@ export const LIMITS = {
   THEME_MAX_PER_USER: 10,
   THEMES_PER_PAGE: 20,
   THEME_SVG_MAX_SIZE: 10_000, // 10KB max for custom SVG patterns
+  MAX_CUSTOM_EMOJIS_PER_SERVER: 50,
+  MAX_STICKER_PACKS_PER_SERVER: 5,
+  MAX_STICKERS_PER_PACK: 30,
+  MAX_PERSONAL_STICKER_PACKS: 3,
+  MAX_EMOJI_FILE_SIZE: 256 * 1024,      // 256 KB
+  MAX_STICKER_FILE_SIZE: 512 * 1024,    // 512 KB
+  MAX_EMOJI_NAME_LENGTH: 32,
+  MAX_STICKER_NAME_LENGTH: 32,
+  MAX_STICKER_PACK_NAME_LENGTH: 50,
+  MAX_STICKER_PACK_DESCRIPTION_LENGTH: 200,
+  GIPHY_RESULTS_PER_PAGE: 20,
+  MAX_GIF_FILE_SIZE: 8 * 1024 * 1024,     // 8 MB
+  MAX_GIF_TAGS: 5,
+  MAX_GIF_TAG_LENGTH: 30,
+  MAX_GIFS_PER_USER: 50,
 } as const;
 
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
@@ -80,6 +95,12 @@ export const INVITE_CODE_LENGTH = 8;
 
 /** Regex to match @[userId] mention tokens in message content */
 export const MENTION_RE = /@\[([^\]]{1,30})\]/g;
+
+/** Regex to match custom emoji tokens <:name:id> in message content */
+export const CUSTOM_EMOJI_RE = /<:([a-zA-Z0-9_]{1,32}):([a-zA-Z0-9]{10,30})>/g;
+
+/** Allowed MIME types for custom emoji and sticker uploads */
+export const ALLOWED_EMOJI_TYPES = ['image/png', 'image/webp', 'image/gif'] as const;
 
 export const WS_EVENTS = {
   MESSAGE_NEW: 'message:new',
@@ -180,6 +201,16 @@ export const WS_EVENTS = {
   THEME_PUBLISHED: 'theme:published',
   THEME_UPDATED: 'theme:updated',
   THEME_REMOVED: 'theme:removed',
+  // Custom Emojis
+  EMOJI_INIT: 'emoji:init',
+  EMOJI_CREATED: 'emoji:created',
+  EMOJI_DELETED: 'emoji:deleted',
+  // Stickers
+  STICKER_INIT: 'sticker:init',
+  STICKER_PACK_CREATED: 'sticker:pack_created',
+  STICKER_PACK_DELETED: 'sticker:pack_deleted',
+  STICKER_ADDED: 'sticker:added',
+  STICKER_REMOVED: 'sticker:removed',
 } as const;
 
 export const THEME_COLOR_KEYS = [
