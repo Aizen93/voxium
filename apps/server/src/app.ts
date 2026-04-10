@@ -25,6 +25,7 @@ import { themeRouter } from './routes/themes';
 import { serverEmojiRouter, emojiResolveRouter, registerEmojiPresignRoute } from './routes/emojis';
 import { serverStickerRouter, personalStickerRouter, registerStickerPresignRoute } from './routes/stickers';
 import { gifRouter, registerGifPresignRoute } from './routes/gifs';
+import { collabRouter } from './routes/collab';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 
@@ -225,6 +226,7 @@ api.use('/emojis', emojiResolveRouter);
 api.use('/servers/:serverId/sticker-packs', serverStickerRouter);
 api.use('/stickers', personalStickerRouter);
 api.use('/gifs', gifRouter);
+api.use('/channels/:channelId/document', collabRouter);
 
 // Register presign routes on the upload router
 registerEmojiPresignRoute(uploadRouter);

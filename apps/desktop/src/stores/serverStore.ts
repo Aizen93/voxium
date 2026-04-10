@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
-import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride } from '@voxium/shared';
+import type { Server, Channel, Category, ChannelType, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride } from '@voxium/shared';
 
 interface ServerState {
   servers: Server[];
@@ -20,7 +20,7 @@ interface ServerState {
   setActiveServer: (serverId: string) => Promise<void>;
   setActiveChannel: (channelId: string) => void;
   createServer: (name: string) => Promise<Server>;
-  createChannel: (serverId: string, name: string, type: 'text' | 'voice', categoryId?: string) => Promise<Channel>;
+  createChannel: (serverId: string, name: string, type: ChannelType, categoryId?: string) => Promise<Channel>;
   deleteChannel: (serverId: string, channelId: string) => Promise<void>;
   createInvite: (serverId: string) => Promise<string>;
   joinServer: (inviteCode: string) => Promise<void>;
@@ -170,7 +170,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     return server;
   },
 
-  createChannel: async (serverId: string, name: string, type: 'text' | 'voice', categoryId?: string) => {
+  createChannel: async (serverId: string, name: string, type: ChannelType, categoryId?: string) => {
     const { data } = await api.post(`/servers/${serverId}/channels`, { name, type, categoryId });
     return data.data;
   },

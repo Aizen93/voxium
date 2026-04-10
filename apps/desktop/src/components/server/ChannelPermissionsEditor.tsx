@@ -9,13 +9,13 @@ import {
   permissionsToString,
   hasPermission,
 } from '@voxium/shared';
-import type { ChannelPermissionOverride, PermissionInfo } from '@voxium/shared';
+import type { ChannelPermissionOverride, PermissionInfo, ChannelType } from '@voxium/shared';
 
 interface ChannelPermissionsEditorProps {
   serverId: string;
   channelId: string;
   channelName: string;
-  channelType: 'text' | 'voice';
+  channelType: ChannelType;
   onClose: () => void;
 }
 

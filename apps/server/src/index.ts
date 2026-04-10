@@ -35,6 +35,7 @@ import { initRedis, clearPresenceState, NODE_ID } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
 import { initMediasoup } from './mediasoup/mediasoupManager';
+import { shutdownCollab } from './websocket/collabHandler';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -94,6 +95,8 @@ async function main() {
     console.log('\nShutting down...');
     stopAdminMetricsEmitter();
     stopAttachmentCleanup();
+    // Persist all dirty collaborative documents before disconnecting clients
+    await shutdownCollab().catch((err) => console.warn('[Shutdown] Collab cleanup failed:', err));
     // Gracefully disconnect all Socket.IO clients before closing HTTP server
     io.disconnectSockets(true);
     server.close();

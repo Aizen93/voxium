@@ -75,6 +75,8 @@ Voxium/
 
 ## Recent Changes
 
+- **Canvas & Code Collaborative Channels Review** (2026-03-29) -- Code review of the collaborative channels feature (canvas via tldraw, code via Monaco+Yjs). Fixed 14 issues: missing `shutdownCollab()` on server shutdown (data loss), canvas double-encoding on `collab:join`, race condition in `getOrCreateDoc`, `btoa` stack overflow on large Yjs updates, non-exception-safe `isRemoteUpdate` flag, missing canvas snapshot cleanup on reset, tldraw store listener leak, missing collab cleanup on server delete/kick, wrong rate limiter usage, dead code removal, and test mock fixes.
+
 - **Custom Emojis, Stickers, and GIF Search** (2026-03-28) -- Server-scoped custom emojis (<:name:id> format in messages), sticker packs (server + personal) with sticker-type messages, Tenor GIF search proxy (opt-in via `gif_tenor` feature flag, disabled by default), MANAGE_EMOJIS permission flag, EmojiPicker with tabbed UI (emoji/custom/stickers/GIF), inline custom emoji rendering in messages and reactions. Review: fixed broken tests (missing JWT_SECRET env var), added lazy emoji resolution for cross-server DMs.
 
 - **v1.7.0 — Linux Desktop Fix + Landing Page + UX Polish** (2026-03-26)

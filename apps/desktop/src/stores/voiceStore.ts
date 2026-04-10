@@ -175,6 +175,8 @@ interface VoiceState {
 let latencyInterval: ReturnType<typeof setInterval> | null = null;
 let pongHandler: ((timestamp: number) => void) | null = null;
 let transportRejoinAttempts = 0;
+/** Guard against concurrent joinChannel calls (e.g., React StrictMode double-mount) */
+let joiningChannelId: string | null = null;
 
 // Track ICE restart timers per DM peer
 const iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -593,6 +595,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const socket = getSocket();
     if (!socket) return;
 
+    // Already in this channel or join in progress — skip to prevent transport race
+    if (get().activeChannelId === channelId) return;
+    if (joiningChannelId === channelId) return;
+    joiningChannelId = channelId;
+
     // Leave DM call if active (cross-cleanup)
     if (get().dmCallConversationId) {
       get().leaveDMCall();
@@ -641,6 +648,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     const effectiveMute = stream ? selfMute : true;
     const serverMute = isPTT ? true : effectiveMute;
+    // Bail if a different join superseded us during async work
+    if (joiningChannelId !== channelId) return;
+    joiningChannelId = null;
+
     set({ activeChannelId: channelId, activeVoiceServerId: serverId ?? null, localStream: stream, selfMute: effectiveMute });
 
     // Emit voice:join — server will respond with voice:transport_created
@@ -650,6 +661,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   leaveChannel: () => {
+    joiningChannelId = null;
     const socket = getSocket();
     const { localStream, activeChannelId, localUserId } = get();
 

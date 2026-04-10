@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateChannelName, WS_EVENTS, Permissions, type Channel } from '@voxium/shared';
+import { validateChannelName, WS_EVENTS, Permissions, VALID_CHANNEL_TYPES, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
@@ -113,8 +113,8 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
     const nameErr = validateChannelName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
-    if (!['text', 'voice'].includes(type)) {
-      throw new BadRequestError('Channel type must be "text" or "voice"');
+    if (!(VALID_CHANNEL_TYPES as readonly string[]).includes(type)) {
+      throw new BadRequestError(`Channel type must be one of: ${VALID_CHANNEL_TYPES.join(', ')}`);
     }
 
     // Validate categoryId if provided
@@ -162,6 +162,16 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
           skipDuplicates: true,
         });
       }
+    }
+
+    // Create a ChannelDocument for collaborative channels (canvas/code)
+    if (type === 'canvas' || type === 'code') {
+      await prisma.channelDocument.create({
+        data: {
+          channelId: channel.id,
+          language: type === 'code' ? (req.body.language || 'typescript') : null,
+        },
+      });
     }
 
     res.status(201).json({ success: true, data: channel });

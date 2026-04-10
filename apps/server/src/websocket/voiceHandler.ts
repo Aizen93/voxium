@@ -143,8 +143,9 @@ export function handleVoiceEvents(
       select: { serverId: true, type: true },
     });
 
-    if (!channel || channel.type !== 'voice') {
-      console.log(`[Voice] Channel ${channelId} not found or not voice type`);
+    const VOICE_CAPABLE_TYPES = ['voice', 'canvas', 'code'];
+    if (!channel || !VOICE_CAPABLE_TYPES.includes(channel.type)) {
+      console.log(`[Voice] Channel ${channelId} not found or not voice-capable type`);
       socket.emit('voice:error', { message: 'Voice channel not found.' });
       return;
     }
@@ -753,7 +754,8 @@ export function handleVoiceEvents(
       where: { id: targetChannelId },
       select: { serverId: true, type: true },
     });
-    if (!targetChannel || targetChannel.type !== 'voice' || targetChannel.serverId !== serverId) {
+    const VOICE_CAPABLE_TYPES = ['voice', 'canvas', 'code'];
+    if (!targetChannel || !VOICE_CAPABLE_TYPES.includes(targetChannel.type) || targetChannel.serverId !== serverId) {
       socket.emit('voice:error', { message: 'Invalid target voice channel.' });
       return;
     }

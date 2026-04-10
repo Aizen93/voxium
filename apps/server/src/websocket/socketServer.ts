@@ -7,6 +7,7 @@ import { setUserOnline, setUserOffline, getRedisPubSub } from '../utils/redis';
 import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, getVoiceStateForServer, getScreenShareState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
+import { handleCollabEvents } from './collabHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { Permissions } from '@voxium/shared';
@@ -227,6 +228,9 @@ export function initSocketServer(httpServer: HttpServer) {
 
     // ─── DM Voice events ─────────────────────────────────────────────
     handleDMVoiceEvents(io, socket);
+
+    // ─── Collaboration events (Canvas/Code channels) ─────────────────
+    handleCollabEvents(io, socket);
 
     // ─── Admin metrics subscription ──────────────────────────────────
     socket.on('admin:subscribe_metrics', () => {

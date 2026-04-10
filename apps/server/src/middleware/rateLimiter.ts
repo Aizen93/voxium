@@ -44,6 +44,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   emojiManage:    { keyPrefix: 'rl:emoji',     points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Emoji Manage' },
   stickerManage:  { keyPrefix: 'rl:sticker',   points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Sticker Manage' },
   gifSearch:      { keyPrefix: 'rl:gifsrch',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'GIF Search' },
+  collabDoc:      { keyPrefix: 'rl:collab',    points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Collab Document' },
 };
 
 // Overrides loaded from Redis on init, updated via admin API
@@ -223,6 +224,7 @@ export const rateLimitThemeBrowse = createMiddleware('themeBrowse', byUserId);
 export const rateLimitEmojiManage = createMiddleware('emojiManage', byUserId);
 export const rateLimitStickerManage = createMiddleware('stickerManage', byUserId);
 export const rateLimitGifSearch = createMiddleware('gifSearch', byUserId);
+export const rateLimitCollabDoc = createMiddleware('collabDoc', byUserId);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────
 

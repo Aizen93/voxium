@@ -6,11 +6,13 @@ import { getSocket, onConnectionStatusChange } from '../../services/socket';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { SearchModal } from '../search/SearchModal';
-import { Hash, Search } from 'lucide-react';
+import { Hash, Search, Users } from 'lucide-react';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 export function ChatArea() {
   const { t } = useTranslation();
   const { channels, activeChannelId, activeServerId } = useServerStore();
+  const { showMemberSidebar, toggleMemberSidebar } = useSettingsStore();
   const [showSearch, setShowSearch] = useState(false);
   const { fetchMessages, clearMessages } = useChatStore();
   const prevChannelRef = useRef<string | null>(null);
@@ -136,6 +138,14 @@ export function ChatArea() {
           aria-label={t('chat.searchMessages')}
         >
           <Search size={18} />
+        </button>
+        <button
+          onClick={toggleMemberSidebar}
+          className={`rounded-md p-1.5 transition-colors ${showMemberSidebar ? 'text-vox-text-primary bg-vox-bg-hover' : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary'}`}
+          title="Toggle member list"
+          aria-label="Toggle member list"
+        >
+          <Users size={18} />
         </button>
       </div>
 

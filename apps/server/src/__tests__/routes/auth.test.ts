@@ -141,6 +141,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitEmojiManage: passthroughMiddleware,
   rateLimitStickerManage: passthroughMiddleware,
   rateLimitGifSearch: passthroughMiddleware,
+  rateLimitCollabDoc: passthroughMiddleware,
   socketRateLimit: vi.fn().mockReturnValue(true),
 }));
 

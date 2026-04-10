@@ -233,8 +233,22 @@ model Channel {
   messages Message[]
   reads    ChannelRead[]
   permissionOverrides ChannelPermissionOverride[]
+  document ChannelDocument?
 
   @@map("channels")
+}
+
+// ─── Channel Documents (Collaborative Canvas/Code) ──────────────────────────
+
+model ChannelDocument {
+  channelId String   @id @map("channel_id")
+  snapshot  Bytes?                          // Yjs encoded state (Y.encodeStateAsUpdate)
+  language  String?                         // For code channels: "typescript", "java", etc.
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@map("channel_documents")
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────

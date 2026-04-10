@@ -89,7 +89,7 @@ export interface Category {
 
 // ─── Channel ─────────────────────────────────────────────────────────────────
 
-export type ChannelType = 'text' | 'voice';
+export type ChannelType = 'text' | 'voice' | 'canvas' | 'code';
 
 export interface Channel {
   id: string;
@@ -105,6 +105,23 @@ export interface CreateChannelRequest {
   name: string;
   type: ChannelType;
   categoryId?: string;
+}
+
+// ─── Collaboration (Canvas/Code Channels) ───────────────────────────────────
+
+export type CodeLanguage = 'typescript' | 'javascript' | 'java' | 'rust' | 'python' | 'go' | 'cpp' | 'csharp' | 'html' | 'css' | 'sql' | 'plaintext';
+
+export interface ChannelDocument {
+  channelId: string;
+  language: string | null;
+  updatedAt: string;
+}
+
+export interface CollabUser {
+  userId: string;
+  username: string;
+  displayName: string;
+  color: string;
 }
 
 // ─── Message ─────────────────────────────────────────────────────────────────
@@ -354,6 +371,10 @@ export interface ServerToClientEvents {
   'sticker:pack_deleted': (data: { packId: string; serverId?: string }) => void;
   'sticker:added': (data: { packId: string; sticker: StickerData }) => void;
   'sticker:removed': (data: { packId: string; stickerId: string }) => void;
+  // Collaboration (Canvas/Code Channels)
+  'collab:sync': (data: { channelId: string; update: string }) => void;
+  'collab:awareness': (data: { channelId: string; states: string }) => void;
+  'collab:language_changed': (data: { channelId: string; language: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -396,6 +417,11 @@ export interface ClientToServerEvents {
   'admin:unsubscribe_reports': () => void;
   'admin:subscribe_support': () => void;
   'admin:unsubscribe_support': () => void;
+  // Collaboration (Canvas/Code Channels)
+  'collab:join': (channelId: string) => void;
+  'collab:leave': (channelId: string) => void;
+  'collab:update': (data: { channelId: string; update: string }) => void;
+  'collab:awareness': (data: { channelId: string; states: string }) => void;
 }
 
 // ─── API Response ────────────────────────────────────────────────────────────

@@ -29,6 +29,9 @@ import { useSupportStore } from '../../stores/supportStore';
 import { SearchModal } from '../search/SearchModal';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
+import { CanvasChannel } from '../channel/CanvasChannel';
+import { CodeChannel } from '../channel/CodeChannel';
+import { useCollabStore } from '../../stores/collabStore';
 import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
 import { useAnnouncementStore } from '../../stores/announcementStore';
@@ -44,13 +47,14 @@ import type {
 } from '@voxium/shared';
 
 export function MainLayout() {
-  const { fetchServers, activeServerId, channels } = useServerStore();
+  const { fetchServers, activeServerId, activeChannelId, channels } = useServerStore();
   const { user } = useAuthStore();
   const activeConversationId = useDMStore((s) => s.activeConversationId);
   const conversations = useDMStore((s) => s.conversations);
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const showSupportView = useSupportStore((s) => s.showSupportView);
   const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
+  const showMemberSidebar = useSettingsStore((s) => s.showMemberSidebar);
   const screenSharingUserId = useVoiceStore((s) => s.screenSharingUserId);
   const screenShareViewMode = useVoiceStore((s) => s.screenShareViewMode);
   const voiceActiveChannelId = useVoiceStore((s) => s.activeChannelId);
@@ -508,6 +512,14 @@ export function MainLayout() {
             voiceState.leaveChannel();
           }
         }
+        // Leave collab if in a canvas/code channel on this server
+        const collabState = useCollabStore.getState();
+        if (collabState.activeCollabChannelId) {
+          const collabChannel = serverState.channels.find((c) => c.id === collabState.activeCollabChannelId);
+          if (collabChannel?.serverId === serverId) {
+            collabState.leaveCollab();
+          }
+        }
         serverState.handleMemberKicked(serverId);
         toast.warning('You were kicked from the server');
       },
@@ -550,6 +562,15 @@ export function MainLayout() {
               newChannelUsers.delete(chId);
             }
             useVoiceStore.setState({ channelUsers: newChannelUsers });
+          }
+
+          // Clean up collab state if in a canvas/code channel on this server
+          const collabState = useCollabStore.getState();
+          if (collabState.activeCollabChannelId) {
+            const collabChannel = serverState.channels.find((c) => c.id === collabState.activeCollabChannelId);
+            if (collabChannel?.serverId === serverId) {
+              collabState.leaveCollab();
+            }
           }
 
           // Clear messages since the active channel is being removed
@@ -805,19 +826,26 @@ export function MainLayout() {
         {activeServerId ? <ChannelSidebar /> : <DMList />}
         <ErrorBoundary inline>
         <div className="flex flex-1 flex-col overflow-hidden">
-          {activeServerId ? (
-            screenSharingUserId && voiceActiveChannelId ? (
-              screenShareViewMode === 'inline' ? (
+          {activeServerId ? (() => {
+            const activeChannel = channels.find((c) => c.id === activeChannelId);
+            if (activeChannel?.type === 'canvas') {
+              return <CanvasChannel channelId={activeChannel.id} serverId={activeServerId} />;
+            }
+            if (activeChannel?.type === 'code') {
+              return <CodeChannel channelId={activeChannel.id} serverId={activeServerId} />;
+            }
+            if (screenSharingUserId && voiceActiveChannelId) {
+              return screenShareViewMode === 'inline' ? (
                 <ScreenShareViewer />
               ) : (
                 <>
                   <ChatArea />
                   <ScreenShareFloating />
                 </>
-              )
-            ) : (
-              <ChatArea />
-            )
+              );
+            }
+            return <ChatArea />;
+          })(
           ) : showFriendsView ? (
             <FriendsView />
           ) : showSupportView ? (
@@ -829,7 +857,7 @@ export function MainLayout() {
           )}
         </div>
         </ErrorBoundary>
-        {activeServerId && <ErrorBoundary inline><MemberSidebar /></ErrorBoundary>}
+        {activeServerId && showMemberSidebar && <ErrorBoundary inline><MemberSidebar /></ErrorBoundary>}
         {isSettingsOpen && <SettingsModal />}
         <IncomingCallModal />
         {showGlobalSearch && (() => {

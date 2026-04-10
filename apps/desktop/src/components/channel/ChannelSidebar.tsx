@@ -6,7 +6,8 @@ import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings } from 'lucide-react';
+import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings, Paintbrush, Code2 } from 'lucide-react';
+import type { ChannelType } from '@voxium/shared';
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
 import { ChannelPermissionsEditor } from '../server/ChannelPermissionsEditor';
@@ -101,6 +102,17 @@ function SortableChannelItem({
   };
 
   const isText = channel.type === 'text';
+  // Canvas/code channels navigate like text (click to select), not like voice (click to join)
+  const isNavigable = channel.type !== 'voice';
+
+  const channelIcon = (() => {
+    switch (channel.type) {
+      case 'canvas': return <Paintbrush size={16} className="shrink-0 opacity-60" />;
+      case 'code': return <Code2 size={16} className="shrink-0 opacity-60" />;
+      case 'voice': return <Volume2 size={16} className="shrink-0 opacity-60" />;
+      default: return <Hash size={16} className="shrink-0 opacity-60" />;
+    }
+  })();
 
   return (
     <div ref={setNodeRef} style={style}>
@@ -108,7 +120,7 @@ function SortableChannelItem({
         onContextMenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, channel); } }}
         className={clsx(
           'group flex w-full items-center gap-1 rounded-md px-1 py-1.5 text-sm transition-colors',
-          isText
+          isNavigable
             ? isActive
               ? 'bg-vox-bg-active text-vox-text-primary font-medium'
               : unread > 0
@@ -130,13 +142,10 @@ function SortableChannelItem({
           </button>
         )}
         <button
-          onClick={() => isText ? onSelectText(channel.id) : onJoinVoice(channel.id)}
+          onClick={() => isNavigable ? onSelectText(channel.id) : onJoinVoice(channel.id)}
           className="flex min-w-0 flex-1 items-center gap-1.5"
         >
-          {isText
-            ? <Hash size={16} className="shrink-0 opacity-60" />
-            : <Volume2 size={16} className="shrink-0 opacity-60" />
-          }
+          {channelIcon}
           <span className="truncate">{channel.name}</span>
         </button>
         {isText && unread > 0 && (
@@ -310,13 +319,19 @@ function SortableCategoryHeader({
 
 // ─── Channel Drag Overlay (ghost while dragging) ────────────────────────────
 
+function getChannelIcon(type: string) {
+  switch (type) {
+    case 'canvas': return <Paintbrush size={16} className="shrink-0 opacity-60" />;
+    case 'code': return <Code2 size={16} className="shrink-0 opacity-60" />;
+    case 'voice': return <Volume2 size={16} className="shrink-0 opacity-60" />;
+    default: return <Hash size={16} className="shrink-0 opacity-60" />;
+  }
+}
+
 function ChannelOverlay({ channel }: { channel: Channel }) {
   return (
     <div className="flex items-center gap-1.5 rounded-md bg-vox-bg-active px-2 py-1.5 text-sm text-vox-text-primary font-medium shadow-lg border border-vox-border w-52">
-      {channel.type === 'text'
-        ? <Hash size={16} className="shrink-0 opacity-60" />
-        : <Volume2 size={16} className="shrink-0 opacity-60" />
-      }
+      {getChannelIcon(channel.type)}
       <span className="truncate">{channel.name}</span>
     </div>
   );
@@ -344,14 +359,14 @@ export function ChannelSidebar() {
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [createChannelCategoryId, setCreateChannelCategoryId] = useState<string | null>(null);
   const [newChannelName, setNewChannelName] = useState('');
-  const [newChannelType, setNewChannelType] = useState<'text' | 'voice'>('text');
+  const [newChannelType, setNewChannelType] = useState<ChannelType>('text');
   const [showCreateCategory, setShowCreateCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
   const [channelContextMenu, setChannelContextMenu] = useState<{ channel: Channel; position: { x: number; y: number } } | null>(null);
   const [voiceUserCtx, setVoiceUserCtx] = useState<{ userId: string; position: { x: number; y: number } } | null>(null);
-  const [permissionsEditorChannel, setPermissionsEditorChannel] = useState<{ id: string; name: string; type: 'text' | 'voice' } | null>(null);
+  const [permissionsEditorChannel, setPermissionsEditorChannel] = useState<{ id: string; name: string; type: ChannelType } | null>(null);
   const [editingNickname, setEditingNickname] = useState(false);
   const [nicknameInput, setNicknameInput] = useState('');
   const ctxRef = useRef<HTMLDivElement>(null);
@@ -462,7 +477,11 @@ export function ChannelSidebar() {
   const handleSelectTextChannel = (channelId: string) => {
     setActiveChannel(channelId);
     clearMessages();
-    fetchMessages(channelId);
+    // Only fetch messages for text channels — canvas/code channels don't have messages
+    const channel = channels.find((c) => c.id === channelId);
+    if (!channel || channel.type === 'text') {
+      fetchMessages(channelId);
+    }
   };
 
   const handleJoinVoice = (channelId: string) => {
@@ -513,7 +532,7 @@ export function ChannelSidebar() {
     }
   };
 
-  const openCreateChannel = (categoryId: string | null, type: 'text' | 'voice') => {
+  const openCreateChannel = (categoryId: string | null, type: ChannelType) => {
     setCreateChannelCategoryId(categoryId);
     setNewChannelType(type);
     setShowCreateChannel(true);
@@ -774,7 +793,7 @@ export function ChannelSidebar() {
               onKeyDown={(e) => e.key === 'Enter' && handleCreateChannel()}
               autoFocus
             />
-            <div className="flex gap-2 mb-2">
+            <div className="flex gap-2 mb-1">
               <button
                 onClick={() => setNewChannelType('text')}
                 className={clsx('flex-1 py-1 text-xs rounded', newChannelType === 'text' ? 'btn-primary' : 'btn-ghost')}
@@ -786,6 +805,20 @@ export function ChannelSidebar() {
                 className={clsx('flex-1 py-1 text-xs rounded', newChannelType === 'voice' ? 'btn-primary' : 'btn-ghost')}
               >
                 {t('channel.voiceType')}
+              </button>
+            </div>
+            <div className="flex gap-2 mb-2">
+              <button
+                onClick={() => setNewChannelType('canvas')}
+                className={clsx('flex-1 py-1 text-xs rounded', newChannelType === 'canvas' ? 'btn-primary' : 'btn-ghost')}
+              >
+                Canvas
+              </button>
+              <button
+                onClick={() => setNewChannelType('code')}
+                className={clsx('flex-1 py-1 text-xs rounded', newChannelType === 'code' ? 'btn-primary' : 'btn-ghost')}
+              >
+                Code
               </button>
             </div>
             <div className="flex gap-2">
@@ -929,7 +962,7 @@ export function ChannelSidebar() {
         >
           <button
             onClick={() => {
-              setPermissionsEditorChannel({ id: channelContextMenu.channel.id, name: channelContextMenu.channel.name, type: channelContextMenu.channel.type as 'text' | 'voice' });
+              setPermissionsEditorChannel({ id: channelContextMenu.channel.id, name: channelContextMenu.channel.name, type: channelContextMenu.channel.type as ChannelType });
               setChannelContextMenu(null);
             }}
             className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"

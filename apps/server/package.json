@@ -40,7 +40,8 @@
     "qrcode": "^1.5.4",
     "rate-limiter-flexible": "^10.0.1",
     "redis": "^5.11.0",
-    "socket.io": "^4.8.0"
+    "socket.io": "^4.8.0",
+    "yjs": "^13.6.30"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",

@@ -35,7 +35,9 @@ export async function applyNoiseSuppression(micStream: MediaStream): Promise<Med
   if (!noiseSuppEnabled) return micStream;
 
   try {
-    nsContext = new AudioContext();
+    // RNNoise is trained on 48kHz audio — force this sample rate
+    // to avoid silent/distorted output on systems defaulting to 44100Hz
+    nsContext = new AudioContext({ sampleRate: 48000 });
 
     if (nsContext.state === 'suspended') {
       await nsContext.resume();

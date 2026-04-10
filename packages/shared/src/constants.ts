@@ -71,6 +71,8 @@ export const LIMITS = {
   MAX_GIF_TAGS: 5,
   MAX_GIF_TAG_LENGTH: 30,
   MAX_GIFS_PER_USER: 50,
+  MAX_COLLAB_UPDATE_SIZE: 512 * 1024,         // 512 KB per Yjs update
+  MAX_COLLAB_SNAPSHOT_SIZE: 10 * 1024 * 1024,  // 10 MB max snapshot
 } as const;
 
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
@@ -211,6 +213,13 @@ export const WS_EVENTS = {
   STICKER_PACK_DELETED: 'sticker:pack_deleted',
   STICKER_ADDED: 'sticker:added',
   STICKER_REMOVED: 'sticker:removed',
+  // Collaboration (Canvas/Code Channels)
+  COLLAB_JOIN: 'collab:join',
+  COLLAB_LEAVE: 'collab:leave',
+  COLLAB_UPDATE: 'collab:update',
+  COLLAB_SYNC: 'collab:sync',
+  COLLAB_AWARENESS: 'collab:awareness',
+  COLLAB_LANGUAGE_CHANGED: 'collab:language_changed',
 } as const;
 
 export const THEME_COLOR_KEYS = [
@@ -238,3 +247,10 @@ export const THEME_COLOR_GROUPS: Record<string, readonly ThemeColorKey[]> = {
 } as const;
 
 export const BUILT_IN_THEME_IDS = ['dark', 'light', 'midnight', 'tactical'] as const;
+
+export const CODE_LANGUAGES = [
+  'typescript', 'javascript', 'java', 'rust', 'python',
+  'go', 'cpp', 'csharp', 'html', 'css', 'sql', 'plaintext',
+] as const;
+
+export const VALID_CHANNEL_TYPES = ['text', 'voice', 'canvas', 'code'] as const;

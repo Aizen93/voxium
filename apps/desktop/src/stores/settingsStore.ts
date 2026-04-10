@@ -49,6 +49,7 @@ interface PersistedSettings {
   enableNoiseSuppression: boolean;
   enableNotificationSounds: boolean;
   enableDesktopNotifications: boolean;
+  showMemberSidebar: boolean;
 }
 
 interface SettingsState extends PersistedSettings {
@@ -66,6 +67,7 @@ interface SettingsState extends PersistedSettings {
   setEnableNoiseSuppression: (enabled: boolean) => void;
   setEnableNotificationSounds: (enabled: boolean) => void;
   setEnableDesktopNotifications: (enabled: boolean) => void;
+  toggleMemberSidebar: () => void;
   // Custom theme management
   installCustomTheme: (remoteId: string, data: CommunityThemeData) => string;
   uninstallCustomTheme: (localId: string) => void;
@@ -128,6 +130,7 @@ function loadPersistedSettings(): PersistedSettings {
         enableNoiseSuppression: parsed.enableNoiseSuppression !== false,
         enableNotificationSounds: parsed.enableNotificationSounds !== false,
         enableDesktopNotifications: parsed.enableDesktopNotifications !== false,
+        showMemberSidebar: parsed.showMemberSidebar !== false,
       };
     }
   } catch {
@@ -146,6 +149,7 @@ function loadPersistedSettings(): PersistedSettings {
     enableNoiseSuppression: true,
     enableNotificationSounds: true,
     enableDesktopNotifications: true,
+    showMemberSidebar: true,
   };
 }
 
@@ -164,6 +168,7 @@ function persistSettings(state: PersistedSettings) {
       enableNoiseSuppression: state.enableNoiseSuppression,
       enableNotificationSounds: state.enableNotificationSounds,
       enableDesktopNotifications: state.enableDesktopNotifications,
+      showMemberSidebar: state.showMemberSidebar,
     }));
   } catch {
     // ignore storage errors
@@ -265,6 +270,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setEnableDesktopNotifications: (enabled: boolean) => {
     set({ enableDesktopNotifications: enabled });
+    persistSettings(get());
+  },
+
+  toggleMemberSidebar: () => {
+    set((state) => ({ showMemberSidebar: !state.showMemberSidebar }));
     persistSettings(get());
   },
 
