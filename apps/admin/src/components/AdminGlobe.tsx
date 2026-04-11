@@ -48,18 +48,16 @@ const COUNTRY_CENTROIDS: Record<string, [number, number]> = {
   GF: [4, -53], NC: [-22.3, 166.5], PF: [-17.7, -149.4],
 };
 
-/** Render a country flag as native emoji (no third-party CDN — privacy-first) */
+/** Render a country flag using bundled SVG sprites (flag-icons).
+ *  Emoji regional indicators don't render as flags on Windows. */
 function CountryFlag({ code, size = 20 }: { code: string; size?: number }) {
-  // Convert country code to regional indicator emoji: "US" → 🇺🇸
-  const flag = code
-    .toUpperCase()
-    .split('')
-    .map((c) => String.fromCodePoint(0x1f1e6 + c.charCodeAt(0) - 65))
-    .join('');
   return (
-    <span role="img" aria-label={`${code} flag`} style={{ fontSize: size }} className="leading-none">
-      {flag}
-    </span>
+    <span
+      className={`fi fi-${code.toLowerCase()}`}
+      role="img"
+      aria-label={`${code} flag`}
+      style={{ fontSize: size, lineHeight: 1 }}
+    />
   );
 }
 
@@ -224,31 +222,18 @@ export function AdminGlobe({ geoStats, infraServers, fullPage }: AdminGlobeProps
 
     const dpr = Math.min(window.devicePixelRatio, 2);
 
-    const globe = createGlobe(canvas, {
-      devicePixelRatio: dpr,
-      width: globeSize * dpr,
-      height: globeSize * dpr,
-      phi: phiRef.current,
-      theta: thetaRef.current,
-      dark: 1,
-      diffuse: 1.4,
-      mapSamples: 24000,
-      mapBrightness: 8,
-      baseColor: [0.18, 0.18, 0.32],
-      markerColor: [0.36, 0.36, 0.97],
-      glowColor: [0.2, 0.18, 0.4],
-      markers,
-      markerElevation: 0,
-      arcs,
-      arcColor: [0.36, 0.36, 0.97],
-      arcWidth: 0.3,
-      arcHeight: 0.15,
-      scale: 1,
-    });
-
-    // Animation loop — update globe + project infra server overlays each frame
+    // Defer globe creation to the next frame so the canvas is fully
+    // composited. cobe (via regl) does an immediate drawArrays on
+    // construction; if the canvas isn't laid out yet the WebGL driver
+    // warns about unbound attribute buffers. Also guards against the
+    // React StrictMode double-mount cycle where the first effect is
+    // torn down before the canvas is ready.
+    let globe: ReturnType<typeof createGlobe> | null = null;
     let animFrame: number;
+    let destroyed = false;
+
     const animate = () => {
+      if (destroyed || !globe) return;
       globe.update({
         phi: phiRef.current,
         theta: thetaRef.current,
@@ -288,11 +273,40 @@ export function AdminGlobe({ geoStats, infraServers, fullPage }: AdminGlobeProps
 
       animFrame = requestAnimationFrame(animate);
     };
-    animFrame = requestAnimationFrame(animate);
+
+    const initFrame = requestAnimationFrame(() => {
+      if (destroyed) return;
+      globe = createGlobe(canvas, {
+        devicePixelRatio: dpr,
+        width: globeSize * dpr,
+        height: globeSize * dpr,
+        phi: phiRef.current,
+        theta: thetaRef.current,
+        dark: 1,
+        diffuse: 1.4,
+        mapSamples: 24000,
+        mapBrightness: 8,
+        baseColor: [0.18, 0.18, 0.32],
+        markerColor: [0.36, 0.36, 0.97],
+        glowColor: [0.2, 0.18, 0.4],
+        markers,
+        markerElevation: 0,
+        arcs,
+        arcColor: [0.36, 0.36, 0.97],
+        arcWidth: 0.3,
+        arcHeight: 0.15,
+        scale: 1,
+      });
+      animFrame = requestAnimationFrame(animate);
+    });
 
     return () => {
-      cancelAnimationFrame(animFrame);
-      globe.destroy();
+      destroyed = true;
+      cancelAnimationFrame(initFrame);
+      if (globe) {
+        cancelAnimationFrame(animFrame);
+        globe.destroy();
+      }
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('wheel', onWheel);
       window.removeEventListener('pointerup', onPointerUp);

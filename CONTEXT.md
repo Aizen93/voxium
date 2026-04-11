@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
-**Version:** 1.7.0
-**Date:** 2026-03-26
+**Version:** 1.7.3
+**Date:** 2026-04-10
 
 ## Project Structure
 
@@ -74,6 +74,8 @@ Voxium/
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **RNNoise Suppression Production Fix** (2026-04-10) -- Fixed WASM noise suppression silencing audio in production builds via CSP `wasm-unsafe-eval`, Vite ES worker format, and `processorerror` fallback detection.
 
 - **v1.7.0 — Linux Desktop Fix + Landing Page + UX Polish** (2026-03-26)
   - **Linux Tauri fix (CORS):** Removed unnecessary `withCredentials: true` from Axios — auth uses Bearer tokens, not cookies. The strict CORS mode it triggered broke on Linux webkit2gtk where the Tauri custom protocol origin (`http://tauri.localhost`) may not be echoed correctly. Server CORS middleware now echoes the first allowed origin on null-origin requests instead of `*` (which is forbidden with `credentials: true`).

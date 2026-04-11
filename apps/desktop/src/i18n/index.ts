@@ -67,6 +67,11 @@ i18n
       ar: { translation: ar },
     },
     fallbackLng: 'en',
+    // Strip region subtags so detected "fr-FR" becomes "fr", matching our
+    // resource keys and SUPPORTED_LANGUAGES codes. Without this, i18n.language
+    // holds the full BCP-47 tag (e.g. "fr-FR") which breaks <select> value
+    // matching, RTL detection for "ar-*" variants, etc.
+    load: 'languageOnly',
     interpolation: {
       escapeValue: false,
     },

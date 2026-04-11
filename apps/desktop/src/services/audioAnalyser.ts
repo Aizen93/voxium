@@ -27,6 +27,11 @@ export function setNoiseSuppression(enabled: boolean) {
  *
  * This follows the Jitsi/Matrix pattern: a dedicated AudioContext with
  * source → NoiseSuppressorWorklet → destination. Nothing else in the path.
+ *
+ * The worklet compiles RNNoise WASM synchronously in its constructor. If
+ * WASM compilation fails (e.g. CSP blocks it), the constructor throws in
+ * the AudioWorklet thread — invisible to the main thread. We detect this
+ * via the `processorerror` event and fall back to the raw mic stream.
  */
 export async function applyNoiseSuppression(micStream: MediaStream): Promise<MediaStream> {
   // Clean up any previous suppression context
@@ -44,6 +49,28 @@ export async function applyNoiseSuppression(micStream: MediaStream): Promise<Med
     await nsContext.audioWorklet.addModule(NoiseSuppressorWorkletUrl);
     nsWorklet = new AudioWorkletNode(nsContext, NoiseSuppressorWorklet_Name);
 
+    // Detect worklet-thread failures (WASM compile error, CSP block, etc.).
+    // These throw inside AudioWorkletGlobalScope and don't propagate to the
+    // main thread — the node just outputs silence. processorerror lets us
+    // catch this and fall back to the raw mic stream.
+    const processorReady = new Promise<void>((resolve, reject) => {
+      const errorTimeout = setTimeout(() => resolve(), 2000);
+      nsWorklet!.onprocessorerror = (event) => {
+        clearTimeout(errorTimeout);
+        reject(new Error(`AudioWorklet processor error: ${event.type}`));
+      };
+      // The processor is initialized synchronously during AudioWorkletNode
+      // construction. If we reach this point without processorerror firing,
+      // the worklet is healthy. Use a microtask to let any pending error
+      // event fire first.
+      queueMicrotask(() => {
+        clearTimeout(errorTimeout);
+        resolve();
+      });
+    });
+
+    await processorReady;
+
     nsSource = nsContext.createMediaStreamSource(micStream);
     nsDestination = nsContext.createMediaStreamDestination();
 
@@ -54,7 +81,7 @@ export async function applyNoiseSuppression(micStream: MediaStream): Promise<Med
     if (import.meta.env.DEV) console.log('[NoiseSuppression] RNNoise pipeline active');
     return nsDestination.stream;
   } catch (err) {
-    console.warn('[NoiseSuppression] Failed to load RNNoise worklet, using raw mic:', err);
+    console.warn('[NoiseSuppression] Failed to initialize RNNoise worklet, using raw mic:', err);
     stopNoiseSuppression();
     return micStream;
   }

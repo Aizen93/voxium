@@ -70,6 +70,15 @@ class MockAudioContext {
 }
 vi.stubGlobal('AudioContext', MockAudioContext);
 
+// Mock AudioWorkletNode — supports processorerror listener and triggering
+// it to simulate worklet-thread WASM init failure.
+class MockAudioWorkletNode {
+  onprocessorerror: ((e: Event) => void) | null = null;
+  connect = vi.fn();
+  disconnect = vi.fn();
+}
+vi.stubGlobal('AudioWorkletNode', MockAudioWorkletNode);
+
 import {
   setNoiseSuppression,
   setNoiseGateThreshold,
@@ -138,12 +147,68 @@ describe('audioAnalyser', () => {
       expect(result).toBe(mockStream);
     });
 
-    it('should fall back to original stream when worklet fails to load', async () => {
+    it('should fall back to original stream when addModule rejects', async () => {
       setNoiseSuppression(true);
       const mockStream = { getAudioTracks: () => [] } as unknown as MediaStream;
-      // AudioWorklet.addModule is mocked to reject
+      // AudioWorklet.addModule is mocked to reject by default
       const result = await applyNoiseSuppression(mockStream);
       expect(result).toBe(mockStream);
+    });
+
+    it('should return suppressed stream when worklet initializes successfully', async () => {
+      setNoiseSuppression(true);
+      mockAudioContext.audioWorklet.addModule.mockResolvedValueOnce(undefined);
+      const mockStream = { getAudioTracks: () => [] } as unknown as MediaStream;
+
+      const result = await applyNoiseSuppression(mockStream);
+
+      // Should return the destination stream (not the original mic stream)
+      expect(result).toBe(mockDestinationStream);
+      expect(mockSourceNode.connect).toHaveBeenCalled();
+    });
+
+    it('should fall back to original stream when processorerror fires (WASM init failure)', async () => {
+      setNoiseSuppression(true);
+      mockAudioContext.audioWorklet.addModule.mockResolvedValueOnce(undefined);
+      const mockStream = { getAudioTracks: () => [] } as unknown as MediaStream;
+
+      // Intercept AudioWorkletNode construction to fire processorerror synchronously
+      // before the queueMicrotask resolve can run
+      const OrigMock = MockAudioWorkletNode;
+      class FailingWorkletNode extends OrigMock {
+        constructor() {
+          super();
+          // Simulate the worklet-thread constructor throwing (WASM compile error)
+          // by firing processorerror during the same microtask window
+          queueMicrotask(() => {
+            if (this.onprocessorerror) {
+              this.onprocessorerror(new Event('processorerror'));
+            }
+          });
+        }
+      }
+      vi.stubGlobal('AudioWorkletNode', FailingWorkletNode);
+
+      const result = await applyNoiseSuppression(mockStream);
+
+      // Should fall back to the original mic stream
+      expect(result).toBe(mockStream);
+
+      // Restore original mock
+      vi.stubGlobal('AudioWorkletNode', OrigMock);
+    });
+
+    it('should clean up previous suppression context on re-apply', async () => {
+      setNoiseSuppression(true);
+      mockAudioContext.audioWorklet.addModule.mockResolvedValueOnce(undefined);
+      const mockStream1 = { getAudioTracks: () => [] } as unknown as MediaStream;
+      await applyNoiseSuppression(mockStream1);
+
+      // Re-apply — should call close() on old context
+      mockAudioContext.audioWorklet.addModule.mockRejectedValueOnce(new Error('fail'));
+      const mockStream2 = { getAudioTracks: () => [] } as unknown as MediaStream;
+      await applyNoiseSuppression(mockStream2);
+      expect(mockAudioContext.close).toHaveBeenCalled();
     });
   });
 

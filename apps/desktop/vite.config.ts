@@ -15,6 +15,9 @@ export default defineConfig({
     strictPort: true,
     host: true,
   },
+  worker: {
+    format: 'es',
+  },
   build: {
     outDir: 'dist',
     target: 'esnext',
