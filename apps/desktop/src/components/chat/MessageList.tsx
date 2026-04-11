@@ -135,17 +135,18 @@ export function MessageList() {
                   <p className="text-sm text-vox-text-secondary">This is the beginning of the conversation.</p>
                 </div>
               ) : null,
-            Footer: () =>
-              typingText ? (
-                <div className="flex items-center gap-2 px-4 py-1">
+            Footer: () => (
+              <div className="pb-2">
+                <div className={`flex items-center gap-2 px-4 py-1 ${typingText ? 'visible' : 'invisible'}`}>
                   <div className="flex gap-0.5">
                     <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
                     <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
                     <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
                   </div>
-                  <span className="text-xs text-vox-text-muted">{typingText}</span>
+                  <span className="text-xs text-vox-text-muted">{typingText ?? '\u00A0'}</span>
                 </div>
-              ) : null,
+              </div>
+            ),
           }}
         />
       )}
