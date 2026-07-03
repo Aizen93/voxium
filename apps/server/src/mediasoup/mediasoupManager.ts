@@ -58,12 +58,20 @@ export async function getOrCreateRouter(channelId: string): Promise<Router> {
     const router = await worker.createRouter({ mediaCodecs });
     channelRouters.set(channelId, router);
     routerWorkerMap.set(channelId, worker);
-    pendingRouters.delete(channelId);
     console.log(`[mediasoup] Created Router for channel ${channelId} on worker pid=${worker.pid}`);
     return router;
   })();
 
   pendingRouters.set(channelId, promise);
+  // Always clear the pending entry once settled — on success AND failure. A rejected
+  // createRouter() (e.g. transient worker death) must not stay cached, or every future
+  // join to this channel would receive the same stale rejection until process restart.
+  // The identity check avoids clobbering a newer creation that already replaced this one.
+  promise
+    .finally(() => {
+      if (pendingRouters.get(channelId) === promise) pendingRouters.delete(channelId);
+    })
+    .catch(() => { /* rejection is surfaced to awaiting callers; nothing to do here */ });
   return promise;
 }
 

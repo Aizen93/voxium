@@ -35,6 +35,8 @@ import { initRedis, clearPresenceState, NODE_ID } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
 import { initMediasoup } from './mediasoup/mediasoupManager';
+import { clearVoiceState } from './websocket/voiceHandler';
+import { clearDMVoiceState } from './websocket/dmVoiceHandler';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -50,6 +52,13 @@ async function main() {
   // Reset stale presence from previous runs (crash, hot reload, etc.)
   await clearPresenceState(prisma);
   console.log('[Presence] Stale presence cleared');
+
+  // Reset stale voice state from previous runs. mediasoup objects are node-local, so
+  // any voice/DM-call metadata left in Redis after a crash/redeploy is stale and would
+  // otherwise show ghost users stuck in voice and skew stats.
+  await clearVoiceState().catch((err) => console.warn('[Voice] Stale voice cleanup failed:', err));
+  await clearDMVoiceState().catch((err) => console.warn('[DMVoice] Stale DM-call cleanup failed:', err));
+  console.log('[Voice] Stale voice state cleared');
 
   // Load rate limit overrides from Redis
   await loadRateLimitOverrides();
