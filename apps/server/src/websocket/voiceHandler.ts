@@ -43,6 +43,14 @@ const channelServerMap = new Map<string, string>();
 // channelId → userId (one screen sharer per channel)
 const screenSharers = new Map<string, string>();
 
+/** Locate the voice channel a user currently occupies in the in-memory state. */
+function findUserVoiceChannel(userId: string): string | undefined {
+  for (const [channelId, users] of voiceChannelUsers) {
+    if (users.has(userId)) return channelId;
+  }
+  return undefined;
+}
+
 // ─── Redis metadata mirror ──────────────────────────────────────────────────
 // Redis keys:
 // voice:channel:users:{channelId}  — Hash: userId → JSON({ selfMute, selfDeaf, nodeId })
@@ -120,6 +128,37 @@ function mirrorScreenShare(channelId: string, userId: string | null): void {
   }
 }
 
+/**
+ * Clear the server-voice Redis mirror on startup. mediasoup objects are node-local,
+ * so on a fresh boot any voice metadata in Redis is stale (a crash/redeploy left it
+ * behind with users who are no longer connected). Without this, ghost occupants stay
+ * visible to every connecting client and skew stats forever.
+ *
+ * Persistent moderation keys (voice:server_muted:*, voice:server_deafened:*) are
+ * intentionally preserved — they must survive reconnects.
+ *
+ * NOTE (multi-node): this clears ALL mirror state, which is correct for a single-node
+ * deployment. A multi-node setup must instead scope cleanup to this node's NODE_ID
+ * (via voice:channel:node) plus a heartbeat/TTL so a crashed peer's state is reaped.
+ */
+export async function clearVoiceState(): Promise<void> {
+  const redis = getRedis();
+  // SCAN every voice:* key directly (rather than deriving from voice:active) so orphaned
+  // reverse-lookup keys not reachable from the active set are also reaped. Persistent
+  // moderation keys (voice:server_muted:*, voice:server_deafened:*) MUST survive.
+  const keys: string[] = [];
+  for await (const batch of redis.scanIterator({ MATCH: 'voice:*', COUNT: 200 })) {
+    for (const k of batch) {
+      if (k.startsWith('voice:server_muted:') || k.startsWith('voice:server_deafened:')) continue;
+      keys.push(k);
+    }
+  }
+  if (keys.length > 0) {
+    await redis.del(keys);
+    console.log(`[Voice] Cleared ${keys.length} stale voice mirror key(s)`);
+  }
+}
+
 // ─── Handler Registration ───────────────────────────────────────────────────
 
 export function handleVoiceEvents(
@@ -173,10 +212,12 @@ export function handleVoiceEvents(
       return;
     }
 
-    // Leave any current DM voice call first (cross-cleanup)
-    await leaveCurrentDMVoiceChannel(io, socket, userId);
+    // Leave any current DM voice call first (cross-cleanup). Force: this socket is
+    // (re)joining voice, so evict any prior session for this user regardless of which
+    // socket owns it — otherwise a reconnected socket would orphan the old transports.
+    await leaveCurrentDMVoiceChannel(io, socket, userId, { force: true });
     // Leave any current voice channel first
-    leaveCurrentVoiceChannel(io, socket, userId);
+    leaveCurrentVoiceChannel(io, socket, userId, { force: true });
 
     // Join the voice channel room and set voiceChannelId early so that
     // concurrent voice:leave / disconnecting can clean up properly
@@ -241,7 +282,16 @@ export function handleVoiceEvents(
       rtpCapabilities: null,
     };
 
-    voiceChannelUsers.get(channelId)!.set(userId, userMedia);
+    // Defensive: the channel Map was created before the awaits above; re-ensure it exists
+    // in case a concurrent leave/disconnect drained it mid-join, so this never throws or
+    // silently drops the user (belt-and-suspenders alongside the force-evict socket clear).
+    let channelUsersMap = voiceChannelUsers.get(channelId);
+    if (!channelUsersMap) {
+      channelUsersMap = new Map();
+      voiceChannelUsers.set(channelId, channelUsersMap);
+      channelServerMap.set(channelId, channel.serverId);
+    }
+    channelUsersMap.set(userId, userMedia);
 
     // Re-apply persisted server-mute/deafen (survives disconnect+rejoin)
     const persisted = await getPersistedServerMuteDeaf(channel.serverId, userId);
@@ -899,10 +949,46 @@ async function createConsumerForUser(
 export function leaveCurrentVoiceChannel(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   socket: Socket<ClientToServerEvents, ServerToClientEvents>,
-  userId: string
+  userId: string,
+  opts?: { force?: boolean }
 ) {
-  const channelId = socket.data.voiceChannelId as string;
+  const force = opts?.force ?? false;
+
+  // Resolve the channel this user occupies. Prefer this socket's own record;
+  // when forcing (a fresh socket taking over the session after a reconnect),
+  // fall back to a userId lookup since the new socket hasn't set voiceChannelId yet.
+  let channelId = socket.data.voiceChannelId as string | undefined;
+  if (!channelId && force) channelId = findUserVoiceChannel(userId);
   if (!channelId) return;
+
+  const channelUsersForOwnership = voiceChannelUsers.get(channelId);
+  const ownerMedia = channelUsersForOwnership?.get(userId);
+
+  // Socket-ownership guard: a non-forced leave (disconnect / explicit leave) must
+  // NOT tear down a session a newer socket has taken over. Without this, when the
+  // old socket times out (~10-35s after a network blip) it would kill the freshly
+  // re-joined session and leak its transports. A stale socket only clears its own
+  // room membership and leaves the live session intact.
+  if (!force && ownerMedia && ownerMedia.socketId !== socket.id) {
+    socket.leave(`voice:${channelId}`);
+    if (socket.data.voiceChannelId === channelId) socket.data.voiceChannelId = undefined;
+    return;
+  }
+
+  // When force-evicting a session owned by a DIFFERENT socket (a reconnect where this
+  // socket takes over), synchronously neutralise the OLD socket's voice state so its
+  // delayed disconnect becomes a no-op. This eviction runs before any await in voice:join,
+  // so clearing it now closes the window where the old socket's ping-timeout disconnect
+  // could otherwise tear down the channel map out from under the in-progress rejoin
+  // (crash on the map write + orphaned transports + duplicate voice:user_left). The old
+  // socket is local on a single node, so io.sockets.sockets.get is intentional here.
+  if (force && ownerMedia && ownerMedia.socketId !== socket.id) {
+    const oldSocket = io.sockets.sockets.get(ownerMedia.socketId);
+    if (oldSocket) {
+      oldSocket.leave(`voice:${channelId}`);
+      oldSocket.data.voiceChannelId = undefined;
+    }
+  }
 
   console.log(`[Voice] Removing user ${userId} from channel ${channelId}`);
 

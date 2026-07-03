@@ -250,8 +250,6 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
 
     // Broadcast to all users subscribed to this channel
     const room = `channel:${channelId}`;
-    const socketsInRoom = await getIO().in(room).fetchSockets();
-    console.log(`[MSG] Broadcasting message:new to ${room} — ${socketsInRoom.length} socket(s) in room: [${socketsInRoom.map(s => s.data.userId).join(', ')}]`);
     // Prisma returns Date objects; Socket.IO serializes them to ISO strings over the wire
     // Attach channel/server names for desktop notification context + mentions
     const payload = { ...message, reactions: [], mentions, channelName: channel.name, serverName: channel.server.name, serverId: channel.serverId };

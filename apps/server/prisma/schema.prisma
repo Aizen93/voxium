@@ -140,6 +140,7 @@ model ServerMember {
   memberRoles MemberRole[]
 
   @@id([userId, serverId])
+  @@index([serverId])
   @@map("server_members")
 }
 
@@ -208,6 +209,7 @@ model Category {
   server   Server    @relation(fields: [serverId], references: [id], onDelete: Cascade)
   channels Channel[]
 
+  @@index([serverId])
   @@map("categories")
 }
 
@@ -229,6 +231,8 @@ model Channel {
   reads    ChannelRead[]
   permissionOverrides ChannelPermissionOverride[]
 
+  @@index([serverId])
+  @@index([categoryId])
   @@map("channels")
 }
 
@@ -256,6 +260,9 @@ model Message {
 
   @@index([channelId, createdAt])
   @@index([conversationId, createdAt])
+  @@index([replyToId])
+  @@index([authorId])
+  @@index([createdAt])
   @@map("messages")
 }
 
@@ -293,6 +300,7 @@ model MessageReaction {
 
   @@unique([messageId, userId, emoji])
   @@index([messageId])
+  @@index([userId])
   @@map("message_reactions")
 }
 
@@ -307,6 +315,7 @@ model ChannelRead {
   channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
 
   @@id([userId, channelId])
+  @@index([channelId])
   @@map("channel_reads")
 }
 
@@ -325,6 +334,7 @@ model Conversation {
   reads    ConversationRead[]
 
   @@unique([user1Id, user2Id])
+  @@index([user2Id])
   @@map("conversations")
 }
 
@@ -337,6 +347,7 @@ model ConversationRead {
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@id([userId, conversationId])
+  @@index([conversationId])
   @@map("conversation_reads")
 }
 
@@ -370,6 +381,8 @@ model Invite {
   server  Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
   creator User   @relation(fields: [createdBy], references: [id], onDelete: Cascade)
 
+  @@index([serverId])
+  @@index([createdBy])
   @@map("invites")
 }
 
@@ -442,6 +455,7 @@ model Announcement {
 
   @@index([publishedAt])
   @@index([expiresAt])
+  @@index([createdById])
   @@map("announcements")
 }
 
@@ -471,6 +485,9 @@ model Report {
 
   @@index([status])
   @@index([createdAt])
+  @@index([reporterId])
+  @@index([reportedUserId])
+  @@index([messageId])
   @@map("reports")
 }
 
@@ -533,5 +550,6 @@ model SupportMessage {
   author User          @relation("SupportMessageAuthor", fields: [authorId], references: [id], onDelete: Cascade)
 
   @@index([ticketId, createdAt])
+  @@index([authorId])
   @@map("support_messages")
 }

@@ -42,24 +42,27 @@ vi.mock('../../utils/prisma', () => ({
 }));
 
 // Mock Redis
-vi.mock('../../utils/redis', () => ({
-  getRedis: vi.fn().mockReturnValue({
-    multi: vi.fn().mockReturnValue({
-      hSet: vi.fn().mockReturnThis(),
-      set: vi.fn().mockReturnThis(),
-      sAdd: vi.fn().mockReturnThis(),
-      hDel: vi.fn().mockReturnThis(),
-      del: vi.fn().mockReturnThis(),
-      sRem: vi.fn().mockReturnThis(),
-      exec: vi.fn().mockResolvedValue([]),
-    }),
-    hSet: vi.fn().mockResolvedValue(1),
-    set: vi.fn().mockResolvedValue('OK'),
-    del: vi.fn().mockResolvedValue(1),
-    sCard: vi.fn().mockResolvedValue(0),
-    sMembers: vi.fn().mockResolvedValue([]),
-    get: vi.fn().mockResolvedValue(null),
+const mockVoiceRedis = vi.hoisted(() => ({
+  multi: vi.fn().mockReturnValue({
+    hSet: vi.fn().mockReturnThis(),
+    set: vi.fn().mockReturnThis(),
+    sAdd: vi.fn().mockReturnThis(),
+    hDel: vi.fn().mockReturnThis(),
+    del: vi.fn().mockReturnThis(),
+    sRem: vi.fn().mockReturnThis(),
+    exec: vi.fn().mockResolvedValue([]),
   }),
+  hSet: vi.fn().mockResolvedValue(1),
+  set: vi.fn().mockResolvedValue('OK'),
+  del: vi.fn().mockResolvedValue(1),
+  sCard: vi.fn().mockResolvedValue(0),
+  sMembers: vi.fn().mockResolvedValue([]),
+  get: vi.fn().mockResolvedValue(null),
+  // eslint-disable-next-line require-yield
+  scanIterator: vi.fn().mockImplementation(async function* () { /* default: no keys */ }),
+}));
+vi.mock('../../utils/redis', () => ({
+  getRedis: vi.fn().mockReturnValue(mockVoiceRedis),
   NODE_ID: vi.fn().mockReturnValue('test-node-1'),
 }));
 
@@ -110,7 +113,7 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
-import { handleVoiceEvents, leaveCurrentVoiceChannel } from '../../websocket/voiceHandler';
+import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState } from '../../websocket/voiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -436,6 +439,109 @@ describe('voiceHandler — leaveCurrentVoiceChannel', () => {
     leaveCurrentVoiceChannel(io as any, socket as any, 'user-1');
     expect(socket.leave).not.toHaveBeenCalled();
     expect(io.to).not.toHaveBeenCalled();
+  });
+});
+
+describe('voiceHandler — reconnect ownership (CRIT-1)', () => {
+  // Uses distinct userIds/channels per test so the module-global voice map can't
+  // cross-contaminate (findUserVoiceChannel searches by userId across all channels).
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.channel.findUnique).mockResolvedValue({ serverId: 's1', type: 'voice' } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({ userId: 'x', serverId: 's1' } as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'x', username: 'u', displayName: 'U', avatarUrl: null } as any);
+    vi.mocked(prisma.user.findMany).mockResolvedValue([] as any);
+  });
+
+  it('stale socket disconnect does NOT tear down a session a newer socket took over', async () => {
+    // Original socket joins the channel.
+    const c1 = createMockSocket('user-A', 'socket-A1');
+    const io1 = createMockIO();
+    handleVoiceEvents(io1 as any, c1.socket as any);
+    await c1.handlers.get('voice:join')!('ch-A');
+
+    // Reconnect: a new socket for the same user (re)joins, force-evicting the old session.
+    const c2 = createMockSocket('user-A', 'socket-A2');
+    const io2 = createMockIO();
+    handleVoiceEvents(io2 as any, c2.socket as any);
+    await c2.handlers.get('voice:join')!('ch-A');
+
+    io1._emit.mockClear();
+
+    // The old socket finally times out. Its stale disconnect must NOT remove user-A,
+    // whose live session is now owned by socket-A2.
+    await c1.handlers.get('disconnecting')!();
+    expect(io1._emit).not.toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-A', userId: 'user-A' });
+  });
+
+  it('owning socket disconnect DOES tear down the session', async () => {
+    const c1 = createMockSocket('user-B', 'socket-B1');
+    const io1 = createMockIO();
+    handleVoiceEvents(io1 as any, c1.socket as any);
+    await c1.handlers.get('voice:join')!('ch-B');
+
+    io1._emit.mockClear();
+    await c1.handlers.get('disconnecting')!();
+    expect(io1._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-B', userId: 'user-B' });
+  });
+
+  it('force-evict clears the old socket so its delayed disconnect is a no-op (no crash/leak)', async () => {
+    // One shared io, as on a real node — both sockets live in io.sockets.sockets.
+    const io = createMockIO();
+    const c1 = createMockSocket('user-C', 'socket-C1');
+    const c2 = createMockSocket('user-C', 'socket-C2');
+    io.sockets.sockets.set('socket-C1', c1.socket);
+    io.sockets.sockets.set('socket-C2', c2.socket);
+    handleVoiceEvents(io as any, c1.socket as any);
+    handleVoiceEvents(io as any, c2.socket as any);
+
+    await c1.handlers.get('voice:join')!('ch-C');
+    expect(c1.socket.data.voiceChannelId).toBe('ch-C');
+
+    // Reconnect: the new socket (re)joins and force-evicts the old session.
+    await c2.handlers.get('voice:join')!('ch-C');
+    // The old socket's voice state must be cleared so its ping-timeout disconnect no-ops.
+    expect(c1.socket.data.voiceChannelId).toBeUndefined();
+
+    io._emit.mockClear();
+    // The old socket finally disconnects — must NOT tear down the live session.
+    await expect((async () => c1.handlers.get('disconnecting')!())()).resolves.not.toThrow();
+    expect(io._emit).not.toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-C', userId: 'user-C' });
+  });
+});
+
+describe('voiceHandler — clearVoiceState (boot cleanup)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockVoiceRedis.del.mockResolvedValue(1);
+    // eslint-disable-next-line require-yield
+    mockVoiceRedis.scanIterator.mockImplementation(async function* () { /* no keys */ });
+  });
+
+  it('reaps stale voice:* mirror keys but PRESERVES persistent moderation keys', async () => {
+    mockVoiceRedis.scanIterator.mockImplementation(async function* () {
+      yield ['voice:active', 'voice:channel:users:ch-1', 'voice:user:u-1'];
+      // Persistent moderation keys must survive a boot cleanup:
+      yield ['voice:server_muted:s-1:u-1', 'voice:server_deafened:s-1:u-2', 'voice:screen:ch-1'];
+    });
+
+    await clearVoiceState();
+
+    expect(mockVoiceRedis.del).toHaveBeenCalledWith([
+      'voice:active',
+      'voice:channel:users:ch-1',
+      'voice:user:u-1',
+      'voice:screen:ch-1',
+    ]);
+    // The persistent keys are NOT in the delete set.
+    const deleted = mockVoiceRedis.del.mock.calls[0][0] as string[];
+    expect(deleted).not.toContain('voice:server_muted:s-1:u-1');
+    expect(deleted).not.toContain('voice:server_deafened:s-1:u-2');
+  });
+
+  it('is a no-op when there are no voice keys', async () => {
+    await clearVoiceState();
+    expect(mockVoiceRedis.del).not.toHaveBeenCalled();
   });
 });
 
