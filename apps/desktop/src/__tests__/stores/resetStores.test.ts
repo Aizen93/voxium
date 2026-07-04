@@ -84,6 +84,7 @@ import { useFriendStore } from '../../stores/friendStore';
 import { useSupportStore } from '../../stores/supportStore';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useVoiceStore } from '../../stores/voiceStore';
 import type { Server, ServerMember, Conversation, Friendship, Message } from '@voxium/shared';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -216,5 +217,24 @@ describe('resetAccountStores (HIGH-14b)', () => {
     expect((useSettingsStore.getState() as { audioInputDeviceId: string }).audioInputDeviceId).toBe('mic-42');
     // Account stores were still wiped in the same call
     expect(useServerStore.getState().servers).toEqual([]);
+  });
+
+  it('preserves device-scoped localStorage-backed fields inside account stores', () => {
+    // These live inside otherwise account-scoped stores but are persisted
+    // device preferences: reverting them to the module-load snapshot would
+    // make the next persist call write STALE values back to localStorage
+    // (dropped mute prefs, resurrected dismissed announcements).
+    useVoiceStore.setState({ selfMute: true, selfDeaf: true });
+    useAnnouncementStore.setState({ dismissedIds: ['ann-1', 'ann-2'] } as never);
+    populateAccountStores();
+
+    resetAccountStores();
+
+    expect(useVoiceStore.getState().selfMute).toBe(true);
+    expect(useVoiceStore.getState().selfDeaf).toBe(true);
+    expect(useAnnouncementStore.getState().dismissedIds).toEqual(['ann-1', 'ann-2']);
+    // While the account-scoped fields of the same stores were wiped
+    expect(useVoiceStore.getState().channelUsers.size).toBe(0);
+    expect(useAnnouncementStore.getState().announcements).toEqual([]);
   });
 });

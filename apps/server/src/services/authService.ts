@@ -13,11 +13,20 @@ import { sanitizeText } from '../utils/sanitize';
 // Timing-equalization hash for login attempts against unknown emails (same
 // convention as requestPasswordReset): skipping bcrypt when the user doesn't
 // exist makes the response measurably faster, enumerating registered emails.
-// Lazily generated once with the same cost factor as real password hashes.
+// Generated EAGERLY at module load with the same cost factor as real password
+// hashes — lazy init would make the first unknown-email login pay hash+compare
+// (2× a real login's cost), itself a one-request timing signal.
 let timingEqualizerHash: string | null = null;
+const timingEqualizerReady = bcrypt.hash(crypto.randomBytes(16).toString('hex'), 12)
+  .then((hash) => { timingEqualizerHash = hash; })
+  .catch((err) => console.warn('[Auth] Timing-equalizer hash init failed (will retry lazily):', err));
+
 async function getTimingEqualizerHash(): Promise<string> {
   if (!timingEqualizerHash) {
-    timingEqualizerHash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), 12);
+    await timingEqualizerReady;
+    if (!timingEqualizerHash) {
+      timingEqualizerHash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), 12);
+    }
   }
   return timingEqualizerHash;
 }

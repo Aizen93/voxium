@@ -35,7 +35,19 @@ const initialStates = ACCOUNT_STORES.map((store) => store.getState());
 
 /** Reset every account-scoped store to its initial state. Called on logout. */
 export function resetAccountStores(): void {
+  // Device-scoped, localStorage-backed fields living inside otherwise
+  // account-scoped stores must SURVIVE the reset. The snapshot holds their
+  // module-load values; reverting to those would make the next persist call
+  // (toggleMute/dismissAnnouncement) write STALE prefs back to localStorage —
+  // dropping mute/deafen prefs and resurrecting dismissed announcements after
+  // a client-side logout→login.
+  const { selfMute, selfDeaf } = useVoiceStore.getState();
+  const { dismissedIds } = useAnnouncementStore.getState();
+
   ACCOUNT_STORES.forEach((store, i) => {
     (store.setState as (state: unknown, replace: true) => void)(initialStates[i], true);
   });
+
+  useVoiceStore.setState({ selfMute, selfDeaf });
+  useAnnouncementStore.setState({ dismissedIds });
 }
