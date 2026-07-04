@@ -35,9 +35,10 @@ import { initRedis, clearPresenceState, NODE_ID, startNodeHeartbeat, stopNodeHea
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
 import { initMediasoup } from './mediasoup/mediasoupManager';
-import { clearVoiceState } from './websocket/voiceHandler';
+import { clearVoiceState, dispatchVoiceEvent } from './websocket/voiceHandler';
 import { clearDMVoiceState } from './websocket/dmVoiceHandler';
 import { initVoiceCluster, stopVoiceCluster } from './websocket/voiceCluster';
+import { initVoiceRelay } from './websocket/voiceRelay';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -92,6 +93,12 @@ async function main() {
   // Cross-node voice coordination: server-deletion fan-out + dead-node reaper
   await initVoiceCluster(io);
   console.log('[VoiceCluster] Initialized');
+
+  // Channel-affinity voice signaling relay (HIGH-15): a channel's mediasoup
+  // Router lives on ONE node; peers relay their participants' voice events here
+  // and this node dispatches them against shims.
+  await initVoiceRelay(io, (shim, event, args, ack) => dispatchVoiceEvent(io, shim, event, args, ack));
+  console.log('[VoiceRelay] Initialized');
 
   // Start admin metrics emitter
   startAdminMetricsEmitter(io);
