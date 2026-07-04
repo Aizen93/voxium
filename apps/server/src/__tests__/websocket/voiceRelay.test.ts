@@ -6,6 +6,7 @@ const { mockRedis, mockPublish, mockSubscribe, mockIsNodeAlive, mockReapMirror }
   mockRedis: {
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue('OK'),
+    eval: vi.fn().mockResolvedValue(1),
   },
   mockPublish: vi.fn().mockResolvedValue(1),
   mockSubscribe: vi.fn().mockResolvedValue(undefined),
@@ -51,6 +52,7 @@ function reset() {
   _resetVoiceRelayForTests();
   mockRedis.get.mockResolvedValue(null);
   mockRedis.set.mockResolvedValue('OK');
+  mockRedis.eval.mockResolvedValue(1);
   mockIsNodeAlive.mockResolvedValue(false);
   mockPublish.mockResolvedValue(1);
 }
@@ -73,15 +75,33 @@ describe('voiceRelay — resolveOrClaimChannelOwner', () => {
     expect(mockRedis.set).not.toHaveBeenCalled();
   });
 
-  it('takes over from a DEAD owner: reaps the stale mirror and claims', async () => {
+  it('takes over from a DEAD owner ATOMICALLY (Lua CAS) and reaps the stale mirror', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockRedis.get.mockResolvedValueOnce('node-B');
     mockIsNodeAlive.mockResolvedValueOnce(false);
+    mockRedis.eval.mockResolvedValueOnce(1); // CAS won
 
     expect(await resolveOrClaimChannelOwner('ch-1')).toBe('node-A');
-    expect(mockReapMirror).toHaveBeenCalledWith('ch-1');
-    expect(mockRedis.set).toHaveBeenCalledWith('voice:channel:node:ch-1', 'node-A', { EX: 90 });
+    // Compare-and-swap: only claim if the key still records the dead node
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.stringContaining("redis.call('get', KEYS[1]) == ARGV[1]"),
+      { keys: ['voice:channel:node:ch-1'], arguments: ['node-B', 'node-A', '90'] },
+    );
+    // Reap preserves the node key we just claimed
+    expect(mockReapMirror).toHaveBeenCalledWith('ch-1', { preserveNodeKey: true });
+    // No plain (non-atomic) SET on the takeover path
+    expect(mockRedis.set).not.toHaveBeenCalled();
     warnSpy.mockRestore();
+  });
+
+  it('yields to a concurrent takeover when the CAS loses (no split-brain double claim)', async () => {
+    mockRedis.get.mockResolvedValueOnce('node-B');   // observed dead owner
+    mockIsNodeAlive.mockResolvedValueOnce(false);
+    mockRedis.eval.mockResolvedValueOnce(0);         // CAS lost — peer took over first
+    mockRedis.get.mockResolvedValueOnce('node-C');   // re-read: the winner
+
+    expect(await resolveOrClaimChannelOwner('ch-1')).toBe('node-C');
+    expect(mockReapMirror).not.toHaveBeenCalled();   // the winner's mirror is untouched
   });
 
   it('claims an unowned channel atomically (SET NX)', async () => {
@@ -224,6 +244,33 @@ describe('voiceRelay — handleRelayMessage (owner side)', () => {
       'voice:relay:node-B',
       JSON.stringify({ kind: 'rep', id: 'node-B:42', response: { producerId: 'p-7' } }),
     );
+  });
+
+  it('drops the shim after a cross-node force_move by a session-less moderator (no leak)', async () => {
+    const { dispatcher } = await initWithDispatcher();
+    // Moderator relays force_move; their shim never gets a voiceChannelId
+    await handleRelayMessage(req({ event: 'voice:force_move', args: [{ userId: 't-1', targetChannelId: 'ch-2' }] }));
+    const shimBefore = dispatcher.mock.calls[0][0];
+
+    // A later relayed event creates a FRESH shim — the old one was dropped
+    await handleRelayMessage(req({ event: 'voice:force_move', args: [{ userId: 't-1', targetChannelId: 'ch-3' }] }));
+    const shimAfter = dispatcher.mock.calls[1][0];
+    expect(shimAfter).not.toBe(shimBefore);
+  });
+
+  it('keeps the shim after force_move when the moderator DOES have a session on this node', async () => {
+    const { dispatcher } = await initWithDispatcher();
+    // Simulate a join that established a session on this node (dispatcher sets data)
+    dispatcher.mockImplementationOnce(async (shim) => {
+      (shim as { data: { voiceChannelId?: string } }).data.voiceChannelId = 'ch-1';
+    });
+    await handleRelayMessage(req({ event: 'voice:join', args: ['ch-1', null] }));
+    const shimBefore = dispatcher.mock.calls[0][0];
+
+    await handleRelayMessage(req({ event: 'voice:force_move', args: [{ userId: 't-1', targetChannelId: 'ch-2' }] }));
+    await handleRelayMessage(req({ event: 'voice:mute', args: [true] }));
+    const shimAfter = dispatcher.mock.calls[2][0];
+    expect(shimAfter).toBe(shimBefore);
   });
 
   it('drops the shim after a completed leave/disconnect (fresh shim on rejoin)', async () => {

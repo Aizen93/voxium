@@ -102,6 +102,7 @@ const mockVoiceRedis = vi.hoisted(() => ({
   sMembers: vi.fn().mockResolvedValue([]),
   get: vi.fn().mockResolvedValue(null),
   exists: vi.fn().mockResolvedValue(0),
+  eval: vi.fn().mockResolvedValue(1),
   // eslint-disable-next-line require-yield
   scanIterator: vi.fn().mockImplementation(async function* () { /* default: no keys */ }),
 }));
@@ -182,7 +183,7 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
-import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants } from '../../websocket/voiceHandler';
+import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent } from '../../websocket/voiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -645,6 +646,22 @@ describe('voiceHandler — clearVoiceState (boot cleanup, multi-node aware)', ()
     await clearVoiceState();
 
     expect(mockVoiceRedis.del).toHaveBeenCalledWith('voice:user:u-orphan');
+  });
+
+  it('preserves a voice:user key referencing a LIVE peer\'s channel created during our boot (TOCTOU guard)', async () => {
+    mockVoiceRedis.scanIterator.mockImplementation(async function* (opts: { MATCH?: string }) {
+      if (opts?.MATCH === 'voice:user:*') yield ['voice:user:u-fresh'];
+    });
+    mockVoiceRedis.get.mockImplementation((key: string) => {
+      if (key === 'voice:user:u-fresh') return Promise.resolve('ch-fresh'); // not in our activeSet snapshot
+      if (key === 'voice:channel:node:ch-fresh') return Promise.resolve('peer-node');
+      return Promise.resolve(null);
+    });
+    vi.mocked(redisIsNodeAlive).mockImplementation(async (nodeId: string) => nodeId === 'peer-node');
+
+    await clearVoiceState();
+
+    expect(mockVoiceRedis.del).not.toHaveBeenCalledWith('voice:user:u-fresh');
   });
 
   it('is a no-op when there is nothing stale', async () => {
@@ -1367,10 +1384,38 @@ describe('voiceHandler — multi-node routing (HIGH-15)', () => {
     });
     expect(mockRelay.relayVoiceEvent).toHaveBeenCalledWith(
       'peer-node', 'voice:join', socket, ['ch-mn-2', { selfMute: true, selfDeaf: false }],
+      expect.any(Function), // internal relay ACK — guards against a dead owner
     );
     // No local channel/membership lookups — the OWNER validates and joins
     expect(prisma.channel.findUnique).not.toHaveBeenCalled();
     expect(socket.join).not.toHaveBeenCalledWith('voice:ch-mn-2');
+  });
+
+  it('a failed/timed-out relayed join surfaces voice:error and clears the session (no silent hang)', async () => {
+    mockRelay.resolveOrClaimChannelOwner.mockResolvedValue('peer-node');
+    const { socket, handlers } = createMockSocket('mn-2b', 'sock-mn-2b');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-mn-2b');
+
+    const joinAck = mockRelay.relayVoiceEvent.mock.calls[0][4] as (r: unknown) => void;
+    mockRelay.getRemoteSession.mockReturnValue({ userId: 'mn-2b', channelId: 'ch-mn-2b', ownerNodeId: 'peer-node' });
+    joinAck({ error: 'Voice node timeout' });
+
+    expect(mockRelay.clearRemoteSession).toHaveBeenCalledWith('sock-mn-2b');
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', { message: 'Voice server unavailable. Please try again later.' });
+  });
+
+  it('a successful relayed join ACK leaves the session intact', async () => {
+    mockRelay.resolveOrClaimChannelOwner.mockResolvedValue('peer-node');
+    const { socket, handlers } = createMockSocket('mn-2c', 'sock-mn-2c');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-mn-2c');
+
+    const joinAck = mockRelay.relayVoiceEvent.mock.calls[0][4] as (r: unknown) => void;
+    joinAck({ ok: true });
+
+    expect(mockRelay.clearRemoteSession).not.toHaveBeenCalled();
+    expect(socket.emit).not.toHaveBeenCalledWith('voice:error', expect.anything());
   });
 
   it('session-routed events relay to the owner when the session is remote', async () => {
@@ -1461,6 +1506,43 @@ describe('voiceHandler — multi-node routing (HIGH-15)', () => {
 
     expect(mockRelay.relayVoiceEvent).toHaveBeenCalledWith('old-owner', 'voice:leave', socket, []);
     expect(mockRelay.clearRemoteSession).toHaveBeenCalledWith('sock-mn-9');
+  });
+});
+
+describe('voiceHandler — dispatchVoiceEvent (owner side, HIGH-15)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+  });
+
+  it('auto-acks internal-ACK events (voice:join) on completion so the home node can detect dead owners', async () => {
+    const io = createMockIO();
+    const shim = {
+      id: 'shim-da-1', data: { userId: 'da-1' },
+      emit: vi.fn(), join: vi.fn(), leave: vi.fn(),
+    };
+    const ack = vi.fn();
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:join', ['ch-da-1', null], ack);
+
+    expect(ack).toHaveBeenCalledWith({ ok: true });
+    expect(shim.data).toMatchObject({ voiceChannelId: 'ch-da-1' }); // shim.data persisted the join
+    // Clean up the session
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:leave', []);
+  });
+
+  it('passes client-facing ACKs INTO the handler (produce acks itself, never double-acks)', async () => {
+    const io = createMockIO();
+    const shim = {
+      id: 'shim-da-2', data: { userId: 'da-2' },
+      emit: vi.fn(), join: vi.fn(), leave: vi.fn(),
+    };
+    const ack = vi.fn();
+    // No session on this node → the produce handler acks its own error
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:produce', [{ kind: 'audio', rtpParameters: {} }], ack);
+
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(ack).toHaveBeenCalledWith({ error: 'Not in a voice channel' });
   });
 });
 
