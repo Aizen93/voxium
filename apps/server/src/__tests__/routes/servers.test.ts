@@ -627,6 +627,23 @@ describe('Server Routes', () => {
     });
   });
 
+  // ── POST /api/v1/servers/:serverId/join — removed (HIGH-6) ──────────────
+
+  describe('POST /api/v1/servers/:serverId/join (removed route)', () => {
+    it('returns 404 — joining MUST go through POST /invites/:code/join', async () => {
+      // The direct join-by-id route bypassed invite validity, invitesLocked,
+      // and maxMembers. It was removed; only the invite flow may add members.
+      const token = makeToken();
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/join')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+      // Defense-in-depth: no membership row was created
+      expect(prismaMock.serverMember.create).not.toHaveBeenCalled();
+    });
+  });
+
   // ── POST /api/v1/servers/:serverId/leave ────────────────────────────────
 
   describe('POST /api/v1/servers/:serverId/leave', () => {

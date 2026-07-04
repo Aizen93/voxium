@@ -66,9 +66,24 @@ const ICE_SERVERS: RTCIceServer[] = [
 const ICE_RESTART_DELAY_MS = 3000;
 const MAX_TRANSPORT_REJOIN_ATTEMPTS = 3;
 
+// Screen-share video target bitrate. High enough for readable 1080p desktop
+// content; the server raises the viewer-side recv cap while a video consumer
+// is active (SCREEN_SHARE_RECV_MAX_BITRATE).
+const SCREEN_SHARE_MAX_BITRATE = 2_500_000;
+
 interface PeerConnection {
   pc: RTCPeerConnection;
   makingOffer: boolean;
+}
+
+/**
+ * True only for the MICROPHONE producer. Every mute/deafen/PTT path must use
+ * this filter — pausing by `kind === 'audio'` alone also pauses screen-share
+ * system audio, which must keep flowing for muted/PTT sharers.
+ */
+export function isMicProducer(producer: Producer): boolean {
+  return producer.kind === 'audio'
+    && (producer.appData as Record<string, unknown>)?.type === 'audio';
 }
 
 // ─── State Interface ─────────────────────────────────────────────────────────
@@ -97,7 +112,9 @@ interface VoiceState {
   msSendTransport: Transport | null;
   msRecvTransport: Transport | null;
   msProducers: Map<string, Producer>;
-  msConsumers: Map<string, { consumer: Consumer; producerUserId: string }>;
+  // appType is the server-derived producer type ('audio' | 'screen-audio' | 'screen-video')
+  // — used to route cleanup precisely when a producer closes
+  msConsumers: Map<string, { consumer: Consumer; producerUserId: string; appType: string }>;
 
   // ─── Screen Share State ──────────────────────────────────────────
   screenStream: MediaStream | null;
@@ -748,13 +765,31 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
       sendTransport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
         const s = getSocket();
-        if (s) {
-          s.emit('voice:produce', { kind, rtpParameters, appData }, (response: { producerId: string }) => {
-            callback({ id: response.producerId });
-          });
-        } else {
+        if (!s) {
           errback(new Error('Socket not available'));
+          return;
         }
+        // The server ACKs every voice:produce path (success or error). The timeout
+        // is a second line of defense — without it, a lost ACK would hang produce()
+        // forever and wedge the whole send transport.
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          console.error('[Voice SFU] voice:produce ACK timed out');
+          errback(new Error('voice:produce ACK timeout'));
+        }, 10000);
+        s.emit('voice:produce', { kind, rtpParameters, appData }, (response: { producerId?: string; error?: string }) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          if (!response?.producerId) {
+            console.error('[Voice SFU] voice:produce rejected:', response?.error);
+            errback(new Error(response?.error || 'Producer creation failed'));
+          } else {
+            callback({ id: response.producerId });
+          }
+        });
       });
 
       // 3. Create recv transport
@@ -810,6 +845,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             if (currentChannelId && transportRejoinAttempts < MAX_TRANSPORT_REJOIN_ATTEMPTS) {
               transportRejoinAttempts++;
               toast.error(`Voice connection lost — reconnecting (attempt ${transportRejoinAttempts}/${MAX_TRANSPORT_REJOIN_ATTEMPTS})...`);
+              // Screen share cannot survive the rejoin — release the capture stream
+              // and clear state so the share button doesn't stay stuck "on"
+              const { screenStream: staleScreenStream } = get();
+              if (staleScreenStream) {
+                staleScreenStream.getTracks().forEach((t) => t.stop());
+              }
+              set({ screenStream: null, isScreenSharing: false, screenSharingUserId: null });
               get().cleanupSFU();
               const s = getSocket();
               if (s) {
@@ -891,17 +933,40 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         rtpParameters: data.rtpParameters as RtpParameters,
       });
 
+      // Route by the server-derived appData.type, NOT by kind: screen audio
+      // arrives as kind 'audio' — treating it as mic audio would clobber the
+      // sharer's mic <audio> element and survive deafen incorrectly.
+      const appType = (data.appData?.type as string)
+        ?? (data.kind === 'video' ? 'screen-video' : 'audio');
+
       const newConsumers = new Map(get().msConsumers);
-      newConsumers.set(consumer.id, { consumer, producerUserId: data.producerUserId });
+      newConsumers.set(consumer.id, { consumer, producerUserId: data.producerUserId, appType });
       set({ msConsumers: newConsumers });
 
       const outputDeviceId = useSettingsStore.getState().audioOutputDeviceId;
 
-      if (data.kind === 'audio') {
-        // Create audio element for this consumer
+      if (appType === 'screen-video') {
+        // Screen share video track
+        const stream = new MediaStream([consumer.track]);
+        set({ remoteScreenStream: stream });
+
+        consumer.track.onended = () => {
+          set({ remoteScreenStream: null, screenSharingUserId: null });
+        };
+      } else {
+        // Mic audio or screen audio — separate element keys so they never collide
+        const audioKey = appType === 'screen-audio'
+          ? `${data.producerUserId}-screen`
+          : data.producerUserId;
         const container = getAudioContainer();
+        const oldAudio = get().remoteAudios.get(audioKey);
+        if (oldAudio) {
+          oldAudio.pause();
+          oldAudio.srcObject = null;
+          oldAudio.remove();
+        }
         const audio = document.createElement('audio');
-        audio.id = `vox-sfu-audio-${data.producerUserId}`;
+        audio.id = `vox-sfu-audio-${audioKey}`;
         audio.autoplay = true;
         audio.muted = selfDeaf;
         audio.srcObject = new MediaStream([consumer.track]);
@@ -909,43 +974,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         applyOutputDevice(audio, outputDeviceId);
 
         const newAudios = new Map(get().remoteAudios);
-        newAudios.set(data.producerUserId, audio);
+        newAudios.set(audioKey, audio);
         set({ remoteAudios: newAudios });
 
         audio.play().catch((err) =>
-          console.warn('[Voice SFU] Audio autoplay blocked for', data.producerUserId, err)
+          console.warn('[Voice SFU] Audio autoplay blocked for', audioKey, err)
         );
-      } else if (data.kind === 'video') {
-        // Video consumer = screen share
-        const appType = data.appData?.type;
-        if (appType === 'screen-audio') {
-          // Screen share audio track
-          const container = getAudioContainer();
-          const screenAudioKey = `${data.producerUserId}-screen`;
-          const audio = document.createElement('audio');
-          audio.id = `vox-sfu-audio-${screenAudioKey}`;
-          audio.autoplay = true;
-          audio.muted = selfDeaf;
-          audio.srcObject = new MediaStream([consumer.track]);
-          container.appendChild(audio);
-          applyOutputDevice(audio, outputDeviceId);
-
-          const newAudios = new Map(get().remoteAudios);
-          newAudios.set(screenAudioKey, audio);
-          set({ remoteAudios: newAudios });
-
-          audio.play().catch((err) =>
-            console.warn('[Voice SFU] Screen audio autoplay blocked:', err)
-          );
-        } else {
-          // Screen share video track
-          const stream = new MediaStream([consumer.track]);
-          set({ remoteScreenStream: stream });
-
-          consumer.track.onended = () => {
-            set({ remoteScreenStream: null, screenSharingUserId: null });
-          };
-        }
       }
 
       // Resume the consumer on the server
@@ -974,7 +1008,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   handleProducerClosed: (data) => {
-    const { msConsumers, remoteAudios } = get();
+    const { msConsumers } = get();
     const entry = msConsumers.get(data.consumerId);
     if (!entry) return;
 
@@ -984,34 +1018,28 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     newConsumers.delete(data.consumerId);
     set({ msConsumers: newConsumers });
 
-    // Clean up audio element
-    const audio = remoteAudios.get(data.producerUserId);
-    if (audio) {
-      audio.pause();
-      audio.srcObject = null;
-      audio.remove();
-      const newAudios = new Map(remoteAudios);
-      newAudios.delete(data.producerUserId);
-      set({ remoteAudios: newAudios });
+    // Clean up ONLY the resource this specific consumer fed. Screen producers
+    // close on every share-stop — indiscriminately removing everything keyed by
+    // producerUserId would delete the sharer's MIC element and mute them for
+    // the rest of the call.
+    if (entry.appType === 'screen-video') {
+      set({ remoteScreenStream: null });
+    } else {
+      const audioKey = entry.appType === 'screen-audio'
+        ? `${data.producerUserId}-screen`
+        : data.producerUserId;
+      const audio = get().remoteAudios.get(audioKey);
+      if (audio) {
+        audio.pause();
+        audio.srcObject = null;
+        audio.remove();
+        const newAudios = new Map(get().remoteAudios);
+        newAudios.delete(audioKey);
+        set({ remoteAudios: newAudios });
+      }
     }
 
-    // Clean up screen audio if any
-    const screenAudio = remoteAudios.get(`${data.producerUserId}-screen`);
-    if (screenAudio) {
-      screenAudio.pause();
-      screenAudio.srcObject = null;
-      screenAudio.remove();
-      const newAudios = new Map(get().remoteAudios);
-      newAudios.delete(`${data.producerUserId}-screen`);
-      set({ remoteAudios: newAudios });
-    }
-
-    // Clear screen share state if this producer was the screen sharer
-    if (get().screenSharingUserId === data.producerUserId) {
-      set({ remoteScreenStream: null, screenSharingUserId: null });
-    }
-
-    debugLog('[Voice SFU] Producer closed, consumer removed:', data.consumerId);
+    debugLog('[Voice SFU] Producer closed, consumer removed:', data.consumerId, entry.appType);
   },
 
   cleanupSFU: () => {
@@ -1109,6 +1137,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => {
     const { localUserId } = get();
 
+    // Capture the previous entry BEFORE updating the map — the un-deafen path
+    // below must distinguish a lifted server-deafen from a plain self-deafen.
+    const prevSelf = userId === localUserId
+      ? (get().channelUsers.get(channelId) || []).find((u) => u.id === userId)
+      : undefined;
+
     set((state) => {
       const newMap = new Map(state.channelUsers);
       const existing = newMap.get(channelId) || [];
@@ -1121,17 +1155,27 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // If WE were server-muted/deafened, update local state + mute audio
     if (userId === localUserId) {
       if (serverMuted && !get().selfMute) {
-        // Force our local mute state on — pause producers
+        // Force our local mute state on — pause the mic producer
         for (const producer of get().msProducers.values()) {
-          if (producer.kind === 'audio') producer.pause();
+          if (isMicProducer(producer)) producer.pause();
         }
         set({ selfMute: true });
       }
       if (serverDeafened && !get().selfDeaf) {
-        // Force our local deaf state on — mute all remote audio
-        const remoteAudios = document.querySelectorAll<HTMLAudioElement>('audio[data-voice-remote]');
-        remoteAudios.forEach((a) => { a.muted = true; });
+        // Force our local deaf state on — mute all remote audio elements.
+        // Iterate the store's remoteAudios map (same as toggleDeaf); the old
+        // `audio[data-voice-remote]` selector matched nothing, so server-deafen
+        // was never enforced client-side.
+        get().remoteAudios.forEach((audio) => { audio.muted = true; });
         set({ selfDeaf: true });
+      }
+      if (!serverDeafened && prevSelf?.serverDeafened && get().selfDeaf) {
+        // The moderator lifted our server-deafen — restore hearing. The forced
+        // deafen muted every remote element and set selfDeaf, and toggleDeaf is
+        // blocked while serverDeafened, so without this symmetric release the
+        // user would stay silenced after being un-deafened.
+        get().remoteAudios.forEach((audio) => { audio.muted = false; });
+        set({ selfDeaf: false });
       }
     }
   },
@@ -1205,10 +1249,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
     }
 
-    // Pause/resume mediasoup audio producer (server voice)
+    // Pause/resume the mediasoup MIC producer (server voice) — screen-share
+    // system audio is independent of mute
     if (activeChannelId) {
       for (const producer of msProducers.values()) {
-        if (producer.kind === 'audio') {
+        if (isMicProducer(producer)) {
           if (newMute) { producer.pause(); } else { producer.resume(); }
         }
       }
@@ -1251,10 +1296,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // Deafen implies mute — if deafening and not already muted, also mute
     const { selfMute, msProducers, localStream } = get();
     if (newDeaf && !selfMute) {
-      // Pause audio producers
+      // Pause the mic producer (screen audio unaffected)
       if (get().activeChannelId) {
         for (const producer of msProducers.values()) {
-          if (producer.kind === 'audio') producer.pause();
+          if (isMicProducer(producer)) producer.pause();
         }
       }
       if (localStream) {
@@ -1404,43 +1449,75 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
     }
 
+    let stream: MediaStream | null = null;
+    const createdProducers: Producer[] = [];
+    let claimedSlot = false;
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 30 } },
         audio: true,
       });
 
-      // Produce video track via SFU
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack && msDevice.canProduce('video')) {
-        const videoProducer = await msSendTransport.produce({
-          track: videoTrack,
-          appData: { type: 'screen-video' },
+      // Claim the sharer slot BEFORE producing — the server authorizes
+      // screen-video/screen-audio producers only for the active sharer.
+      const startResponse = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+        const timeout = setTimeout(
+          () => resolve({ ok: false, error: 'Server did not respond' }),
+          5000,
+        );
+        socket.emit('voice:screen_share:start', (response: { ok: boolean; error?: string }) => {
+          clearTimeout(timeout);
+          resolve(response ?? { ok: false, error: 'No response from server' });
         });
+      });
+      if (!startResponse.ok) {
+        throw new Error(startResponse.error || 'Screen share rejected by server');
+      }
+      claimedSlot = true;
 
+      // Bail if we left voice while awaiting the slot claim
+      if (!get().activeChannelId) {
+        throw new Error('Left voice channel during screen share setup');
+      }
+
+      const videoTrack = stream.getVideoTracks()[0];
+      if (!videoTrack || !msDevice.canProduce('video')) {
+        throw new Error('Cannot produce screen video');
+      }
+
+      // 'detail' prioritizes resolution/sharpness over frame rate — right for
+      // desktop content. Without encodings the producer gets a default bitrate
+      // far too low for 1080p, leaving viewers in permanent blur.
+      videoTrack.contentHint = 'detail';
+      const videoProducer = await msSendTransport.produce({
+        track: videoTrack,
+        encodings: [{ maxBitrate: SCREEN_SHARE_MAX_BITRATE }],
+        codecOptions: { videoGoogleStartBitrate: 1000 },
+        appData: { type: 'screen-video' },
+      });
+      createdProducers.push(videoProducer);
+      {
         const newProducers = new Map(get().msProducers);
         newProducers.set(videoProducer.id, videoProducer);
         set({ msProducers: newProducers });
-
-        videoTrack.onended = () => {
-          get().stopScreenShare();
-        };
       }
+      videoTrack.onended = () => {
+        get().stopScreenShare();
+      };
 
-      // Produce audio track if available (system audio from getDisplayMedia)
+      // Produce system audio if available (never mute/silence-paused — it is
+      // independent of the mic; muted and PTT sharers still transmit game audio)
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack) {
         const audioProducer = await msSendTransport.produce({
           track: audioTrack,
           appData: { type: 'screen-audio' },
         });
-
+        createdProducers.push(audioProducer);
         const newProducers = new Map(get().msProducers);
         newProducers.set(audioProducer.id, audioProducer);
         set({ msProducers: newProducers });
       }
-
-      socket.emit('voice:screen_share:start');
 
       set({
         screenStream: stream,
@@ -1448,8 +1525,25 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       });
     } catch (err) {
       console.warn('[Voice] Screen share cancelled or failed:', err);
-      // Ensure state is clean even if getDisplayMedia was cancelled or produce failed mid-way
+      // Roll back everything: close half-created producers on BOTH sides,
+      // release the capture stream (clears the OS capture indicator), and
+      // free the sharer slot on the server.
+      const s = getSocket();
+      const producers = new Map(get().msProducers);
+      for (const producer of createdProducers) {
+        if (s) s.emit('voice:producer:close', { producerId: producer.id });
+        if (!producer.closed) producer.close();
+        producers.delete(producer.id);
+      }
+      set({ msProducers: producers });
+      stream?.getTracks().forEach((track) => track.stop());
+      if (claimedSlot && s) s.emit('voice:screen_share:stop');
       set({ screenStream: null, isScreenSharing: false });
+      // A getDisplayMedia permission cancel is a deliberate user action — no toast
+      const isUserCancel = err instanceof DOMException && err.name === 'NotAllowedError';
+      if (!isUserCancel) {
+        toast.error('Screen share failed — please try again');
+      }
     }
   },
 
@@ -1457,11 +1551,15 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const socket = getSocket();
     const { screenStream, msProducers } = get();
 
-    // Close screen-related producers
+    // Close screen producers on BOTH sides. The server-side close
+    // (voice:producer:close) frees the producer immediately and notifies every
+    // viewer via producer_closed — without it, stopped-share producers leaked
+    // until leaving voice and the second share of a session hung the client.
     const newProducers = new Map(msProducers);
     for (const [id, producer] of msProducers.entries()) {
       const appType = (producer.appData as Record<string, unknown>)?.type;
       if (appType === 'screen-video' || appType === 'screen-audio') {
+        if (socket) socket.emit('voice:producer:close', { producerId: id });
         if (!producer.closed) producer.close();
         newProducers.delete(id);
       }
@@ -1861,10 +1959,10 @@ useSettingsStore.subscribe((state, prevState) => {
       if (activeChannelId) socket.emit('voice:mute', true);
       else socket.emit('dm:voice:mute', true);
     }
-    // Pause SFU audio producer
+    // Pause the SFU mic producer (screen audio unaffected)
     if (activeChannelId) {
       for (const producer of msProducers.values()) {
-        if (producer.kind === 'audio') producer.pause();
+        if (isMicProducer(producer)) producer.pause();
       }
     }
   } else {
@@ -1874,10 +1972,10 @@ useSettingsStore.subscribe((state, prevState) => {
         if (activeChannelId) socket.emit('voice:mute', false);
         else socket.emit('dm:voice:mute', false);
       }
-      // Resume SFU audio producer
+      // Resume the SFU mic producer
       if (activeChannelId) {
         for (const producer of msProducers.values()) {
-          if (producer.kind === 'audio') producer.resume();
+          if (isMicProducer(producer)) producer.resume();
         }
       }
     }

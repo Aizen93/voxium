@@ -17,6 +17,7 @@ import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitRoleManage } from '../middleware/rateLimiter';
 import { hasServerPermission, getHighestRolePosition, getEffectivePermissions } from '../utils/permissionCalculator';
+import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 
 export const roleRouter = Router({ mergeParams: true });
 
@@ -274,6 +275,14 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
       role: updated as unknown as Role,
     });
 
+    // Permission changes can grant/revoke VIEW_CHANNEL — re-sync live socket
+    // room membership so real-time events match the new visibility. Fire-and-
+    // forget: the util catches its own errors, and the response must not wait
+    // on a per-online-member permission sweep.
+    if (updateData.permissions !== undefined) {
+      void syncChannelVisibilityRooms(serverId);
+    }
+
     res.json({ success: true, data: updated });
   } catch (err) {
     next(err);
@@ -301,6 +310,9 @@ roleRouter.delete('/:roleId', rateLimitRoleManage, async (req: Request<{ serverI
     await prisma.role.delete({ where: { id: roleId } });
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_DELETED, { serverId, roleId });
+
+    // Deleting a role (and its cascade-deleted overrides) can change visibility
+    void syncChannelVisibilityRooms(serverId);
 
     res.json({ success: true, message: 'Role deleted' });
   } catch (err) {
@@ -411,6 +423,9 @@ roleRouter.patch(
         role: legacyRole,
       });
 
+      // The member's role set changed — re-sync their sockets' channel rooms
+      void syncChannelVisibilityRooms(serverId, { userId: memberId });
+
       res.json({ success: true, message: 'Roles updated' });
     } catch (err) {
       next(err);
@@ -519,6 +534,9 @@ roleRouter.put(
         overrides: allOverrides as unknown as ChannelPermissionOverride[],
       });
 
+      // Override may have granted/revoked VIEW_CHANNEL for this channel
+      void syncChannelVisibilityRooms(serverId, { channelId });
+
       res.json({ success: true, data: allOverrides });
     } catch (err) {
       next(err);
@@ -562,6 +580,9 @@ roleRouter.delete(
         channelId,
         overrides: allOverrides as unknown as ChannelPermissionOverride[],
       });
+
+      // Removing an override may restore/revoke VIEW_CHANNEL for this channel
+      void syncChannelVisibilityRooms(serverId, { channelId });
 
       res.json({ success: true, message: 'Override removed' });
     } catch (err) {

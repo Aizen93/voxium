@@ -75,6 +75,12 @@ vi.mock('../../middleware/auth', () => ({
   requireVerifiedEmail: (_req: any, _res: any, next: () => void) => next(),
 }));
 
+// Channel visibility room re-sync (called after permission-affecting mutations)
+const mockSyncVisibilityRooms = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/channelVisibilityRooms', () => ({
+  syncChannelVisibilityRooms: (...args: any[]) => mockSyncVisibilityRooms(...args),
+}));
+
 // Rate limiters
 vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
@@ -315,6 +321,8 @@ describe('Role Routes', () => {
         WS_EVENTS.ROLE_UPDATED,
         expect.objectContaining({ serverId: 'srv1' }),
       );
+      // Name/color changes don't affect visibility — no room re-sync
+      expect(mockSyncVisibilityRooms).not.toHaveBeenCalled();
     });
 
     it('updates role permissions', async () => {
@@ -345,6 +353,8 @@ describe('Role Routes', () => {
         .send({ permissions: permissionsToString(newPerms) });
 
       expect(res.status).toBe(200);
+      // Permission changes can grant/revoke VIEW_CHANNEL — rooms must re-sync
+      expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1');
     });
 
     it('returns 403 for role at or above actor position', async () => {
@@ -520,6 +530,8 @@ describe('Role Routes', () => {
         WS_EVENTS.ROLE_DELETED,
         { serverId: 'srv1', roleId: 'role1' },
       );
+      // Deleting a role (and its cascade-deleted overrides) can change visibility
+      expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1');
     });
 
     it('returns 403 when trying to delete @everyone', async () => {
@@ -737,6 +749,8 @@ describe('Role Routes', () => {
           roleIds: ['r2', 'r3'],
         }),
       );
+      // The member's role set changed — their sockets' channel rooms re-sync
+      expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { userId: 'member1' });
     });
 
     it('returns 403 without MANAGE_ROLES permission', async () => {
@@ -981,6 +995,8 @@ describe('Role Routes', () => {
           channelId: 'ch1',
         }),
       );
+      // Override may grant/revoke VIEW_CHANNEL — this channel's room re-syncs
+      expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { channelId: 'ch1' });
     });
 
     it('removes override when both allow and deny are 0', async () => {
@@ -1215,6 +1231,8 @@ describe('Role Routes', () => {
           channelId: 'ch1',
         }),
       );
+      // Removing an override can restore/revoke VIEW_CHANNEL — room re-sync
+      expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { channelId: 'ch1' });
     });
 
     it('returns 403 without MANAGE_ROLES permission', async () => {

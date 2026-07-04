@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
-const { mockEmit, mockTo, mockIn, mockFetchSockets, mockPrisma } = vi.hoisted(() => {
+const { mockEmit, mockTo, mockIn, mockFetchSockets, mockPrisma, mockFilterVisibleChannels } = vi.hoisted(() => {
   const mockEmit = vi.fn();
   const mockTo = vi.fn();
   const mockFetchSockets = vi.fn();
@@ -13,6 +13,7 @@ const { mockEmit, mockTo, mockIn, mockFetchSockets, mockPrisma } = vi.hoisted(()
     mockTo,
     mockIn,
     mockFetchSockets,
+    mockFilterVisibleChannels: vi.fn(),
     mockPrisma: {
       channel: {
         findMany: vi.fn(),
@@ -37,6 +38,13 @@ vi.mock('../../utils/prisma', () => ({
   prisma: mockPrisma,
 }));
 
+// Visibility filtering logic itself is covered by permissionCalculator tests —
+// here it defaults to pass-through and is overridden per-test to verify that
+// join paths respect the filter result.
+vi.mock('../../utils/permissionCalculator', () => ({
+  filterVisibleChannels: mockFilterVisibleChannels,
+}));
+
 // ─── Import after mocks ─────────────────────────────────────────────────────
 
 import {
@@ -54,6 +62,10 @@ function resetMockChains() {
   mockFetchSockets.mockResolvedValue([]);
   mockPrisma.channel.findMany.mockResolvedValue([]);
   mockPrisma.user.findUnique.mockResolvedValue(null);
+  // Default: every channel is visible (pass-through)
+  mockFilterVisibleChannels.mockImplementation(
+    async (_userId: string, _serverId: string, channels: { id: string }[]) => channels,
+  );
 }
 
 function createMockSocket(id = 'socket-1') {
@@ -83,7 +95,7 @@ describe('memberBroadcast — joinServerRoom', () => {
     expect(socket.join).toHaveBeenCalledWith('server:server-1');
   });
 
-  it('joins user socket to all text channel rooms', async () => {
+  it('joins user socket to all visible channel rooms', async () => {
     const socket = createMockSocket();
     mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([
@@ -95,7 +107,7 @@ describe('memberBroadcast — joinServerRoom', () => {
     await joinServerRoom('user-1', 'server-1');
 
     expect(mockPrisma.channel.findMany).toHaveBeenCalledWith({
-      where: { serverId: 'server-1', type: 'text' },
+      where: { serverId: 'server-1' },
       select: { id: true },
     });
     expect(socket.join).toHaveBeenCalledWith('server:server-1');
@@ -103,6 +115,27 @@ describe('memberBroadcast — joinServerRoom', () => {
     expect(socket.join).toHaveBeenCalledWith('channel:ch-2');
     expect(socket.join).toHaveBeenCalledWith('channel:ch-3');
     expect(socket.join).toHaveBeenCalledTimes(4); // server + 3 channels
+  });
+
+  it('does NOT join rooms of channels the user cannot view', async () => {
+    const socket = createMockSocket();
+    mockFetchSockets.mockResolvedValueOnce([socket]);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([
+      { id: 'ch-public' },
+      { id: 'ch-private' },
+    ]);
+    // Visibility filter denies the private channel
+    mockFilterVisibleChannels.mockResolvedValueOnce([{ id: 'ch-public' }]);
+
+    await joinServerRoom('user-1', 'server-1');
+
+    expect(mockFilterVisibleChannels).toHaveBeenCalledWith(
+      'user-1',
+      'server-1',
+      [{ id: 'ch-public' }, { id: 'ch-private' }],
+    );
+    expect(socket.join).toHaveBeenCalledWith('channel:ch-public');
+    expect(socket.join).not.toHaveBeenCalledWith('channel:ch-private');
   });
 
   it('joins ALL connected sockets of that user (multi-device)', async () => {
@@ -139,19 +172,19 @@ describe('memberBroadcast — joinServerRoom', () => {
     expect(mockEmit).not.toHaveBeenCalled();
   });
 
-  it('queries only text channels (not voice)', async () => {
+  it('queries ALL channels (text and voice — voice presence rooms need joining too)', async () => {
     mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await joinServerRoom('user-1', 'server-1');
 
     expect(mockPrisma.channel.findMany).toHaveBeenCalledWith({
-      where: { serverId: 'server-1', type: 'text' },
+      where: { serverId: 'server-1' },
       select: { id: true },
     });
   });
 
-  it('handles server with no text channels', async () => {
+  it('handles server with no channels', async () => {
     const socket = createMockSocket();
     mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
@@ -170,7 +203,7 @@ describe('memberBroadcast — broadcastMemberJoined', () => {
     resetMockChains();
   });
 
-  it('joins the user socket to server room and text channel rooms', async () => {
+  it('joins the user socket to server room and visible channel rooms', async () => {
     const socket = createMockSocket();
     mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }]);
@@ -431,7 +464,7 @@ describe('memberBroadcast — broadcastMemberLeft', () => {
     expect(socket.leave).toHaveBeenCalledWith('server:server-1');
   });
 
-  it('removes the user socket from all text channel rooms', async () => {
+  it('removes the user socket from all channel rooms', async () => {
     const socket = createMockSocket();
     mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([
@@ -488,19 +521,20 @@ describe('memberBroadcast — broadcastMemberLeft', () => {
     });
   });
 
-  it('queries only text channels for room removal', async () => {
+  it('queries ALL channels for room removal (no visibility filter — a departed member must receive nothing)', async () => {
     mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await broadcastMemberLeft('user-1', 'server-1');
 
     expect(mockPrisma.channel.findMany).toHaveBeenCalledWith({
-      where: { serverId: 'server-1', type: 'text' },
+      where: { serverId: 'server-1' },
       select: { id: true },
     });
+    expect(mockFilterVisibleChannels).not.toHaveBeenCalled();
   });
 
-  it('handles server with no text channels — only leaves server room', async () => {
+  it('handles server with no channels — only leaves server room', async () => {
     const socket = createMockSocket();
     mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
@@ -567,7 +601,7 @@ describe('memberBroadcast — edge cases', () => {
     resetMockChains();
   });
 
-  it('broadcastMemberJoined handles many text channels', async () => {
+  it('broadcastMemberJoined handles many channels', async () => {
     const socket = createMockSocket();
     mockFetchSockets.mockResolvedValueOnce([socket]);
 
