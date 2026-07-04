@@ -31,12 +31,13 @@ import { initSocketServer } from './websocket/socketServer';
 import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
 import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
 import { prisma } from './utils/prisma';
-import { initRedis, clearPresenceState, NODE_ID } from './utils/redis';
+import { initRedis, clearPresenceState, NODE_ID, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
 import { initMediasoup } from './mediasoup/mediasoupManager';
 import { clearVoiceState } from './websocket/voiceHandler';
 import { clearDMVoiceState } from './websocket/dmVoiceHandler';
+import { initVoiceCluster, stopVoiceCluster } from './websocket/voiceCluster';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -49,16 +50,10 @@ async function main() {
   await initRedis();
   console.log('[Redis] Connected');
 
-  // Reset stale presence from previous runs (crash, hot reload, etc.)
-  await clearPresenceState(prisma);
-  console.log('[Presence] Stale presence cleared');
-
-  // Reset stale voice state from previous runs. mediasoup objects are node-local, so
-  // any voice/DM-call metadata left in Redis after a crash/redeploy is stale and would
-  // otherwise show ghost users stuck in voice and skew stats.
-  await clearVoiceState().catch((err) => console.warn('[Voice] Stale voice cleanup failed:', err));
-  await clearDMVoiceState().catch((err) => console.warn('[DMVoice] Stale DM-call cleanup failed:', err));
-  console.log('[Voice] Stale voice state cleared');
+  // Announce this node's liveness IMMEDIATELY so peer reapers stop treating our
+  // state as dead. Production runs multiple horizontally-scaled instances.
+  await startNodeHeartbeat();
+  console.log(`[Node ${NODE_ID()}] Heartbeat started`);
 
   // Load rate limit overrides from Redis
   await loadRateLimitOverrides();
@@ -79,9 +74,24 @@ async function main() {
   server.keepAliveTimeout = 65000;   // Must exceed reverse proxy keep-alive (nginx default: 60s)
   server.headersTimeout = 66000;     // Must be > keepAliveTimeout
 
-  // Initialize WebSocket server
+  // Initialize WebSocket server (before the stale-state cleanups: they need the
+  // Redis adapter to emit cross-node and to check cluster-wide socket existence;
+  // no client can connect until server.listen() below)
   const io = initSocketServer(server);
   console.log('[WS] Socket.IO server initialized');
+
+  // Reset stale state from previous runs (crash, hot reload, redeploy). All three
+  // are multi-node aware: with live peer nodes they reap only cluster-wide-dead
+  // state; the full wipes run only when this is the sole node.
+  await clearPresenceState(prisma, io);
+  console.log('[Presence] Stale presence cleared');
+  await clearVoiceState(io).catch((err) => console.warn('[Voice] Stale voice cleanup failed:', err));
+  await clearDMVoiceState(io).catch((err) => console.warn('[DMVoice] Stale DM-call cleanup failed:', err));
+  console.log('[Voice] Stale voice state cleared');
+
+  // Cross-node voice coordination: server-deletion fan-out + dead-node reaper
+  await initVoiceCluster(io);
+  console.log('[VoiceCluster] Initialized');
 
   // Start admin metrics emitter
   startAdminMetricsEmitter(io);
@@ -103,11 +113,17 @@ async function main() {
     console.log('\nShutting down...');
     stopAdminMetricsEmitter();
     stopAttachmentCleanup();
+    stopVoiceCluster();
+    // Drop our liveness key FIRST so peer reapers promptly clean up any voice
+    // state this node owned, instead of waiting out the heartbeat TTL.
+    await stopNodeHeartbeat().catch((err) => console.warn('[Shutdown] Heartbeat cleanup failed:', err));
     // Gracefully disconnect all Socket.IO clients before closing HTTP server
     io.disconnectSockets(true);
     server.close();
-    // Clean up presence so users don't appear online after shutdown
-    await clearPresenceState(prisma).catch((err) => console.warn('[Shutdown] Presence cleanup failed:', err));
+    // Clean up presence so users don't appear online after shutdown.
+    // Multi-node aware: with live peers this only reaps OUR dead sockets —
+    // wiping everything would mark the peers' users offline.
+    await clearPresenceState(prisma, io).catch((err) => console.warn('[Shutdown] Presence cleanup failed:', err));
     await prisma.$disconnect();
     process.exit(0);
   };

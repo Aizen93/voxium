@@ -8,7 +8,7 @@ import { isFeatureEnabled } from '../utils/featureFlags';
 import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerRouters, getRouter } from '../mediasoup/mediasoupManager';
 import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { getRedis, NODE_ID } from '../utils/redis';
+import { getRedis, NODE_ID, isNodeAlive } from '../utils/redis';
 import { hasChannelPermission, hasServerPermission, getHighestRolePosition } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
 
@@ -129,33 +129,89 @@ function mirrorScreenShare(channelId: string, userId: string | null): void {
 }
 
 /**
- * Clear the server-voice Redis mirror on startup. mediasoup objects are node-local,
- * so on a fresh boot any voice metadata in Redis is stale (a crash/redeploy left it
- * behind with users who are no longer connected). Without this, ghost occupants stay
- * visible to every connecting client and skew stats forever.
- *
- * Persistent moderation keys (voice:server_muted:*, voice:server_deafened:*) are
- * intentionally preserved — they must survive reconnects.
- *
- * NOTE (multi-node): this clears ALL mirror state, which is correct for a single-node
- * deployment. A multi-node setup must instead scope cleanup to this node's NODE_ID
- * (via voice:channel:node) plus a heartbeat/TTL so a crashed peer's state is reaped.
+ * Delete one channel's entire Redis mirror (users hash, server/node mapping,
+ * screen-share flag, active-set membership, and the participants' reverse-lookup
+ * keys). Returns the userIds that were mirrored so callers can emit
+ * voice:user_left for each ghost. Used by boot cleanup and the dead-node reaper.
  */
-export async function clearVoiceState(): Promise<void> {
+export async function reapVoiceChannelMirror(channelId: string): Promise<string[]> {
   const redis = getRedis();
-  // SCAN every voice:* key directly (rather than deriving from voice:active) so orphaned
-  // reverse-lookup keys not reachable from the active set are also reaped. Persistent
-  // moderation keys (voice:server_muted:*, voice:server_deafened:*) MUST survive.
-  const keys: string[] = [];
-  for await (const batch of redis.scanIterator({ MATCH: 'voice:*', COUNT: 200 })) {
-    for (const k of batch) {
-      if (k.startsWith('voice:server_muted:') || k.startsWith('voice:server_deafened:')) continue;
-      keys.push(k);
+  const users = await redis.hGetAll(`voice:channel:users:${channelId}`);
+  const userIds = Object.keys(users ?? {});
+  const pipeline = redis.multi()
+    .del(`voice:channel:users:${channelId}`)
+    .del(`voice:channel:server:${channelId}`)
+    .del(`voice:channel:node:${channelId}`)
+    .del(`voice:screen:${channelId}`)
+    .sRem('voice:active', channelId);
+  for (const uid of userIds) {
+    pipeline.del(`voice:user:${uid}`);
+  }
+  await pipeline.exec();
+  return userIds;
+}
+
+/**
+ * Clear stale server-voice Redis mirror state on startup. mediasoup objects are
+ * node-local, so after a crash/redeploy THIS node's mirrored channels are ghosts.
+ *
+ * Multi-node aware (production runs several instances): only channels owned by
+ * this NODE_ID, or by a node with no live heartbeat, are reaped — a live peer's
+ * mirror is NEVER touched (the old wipe-all erased the peer's live voice state
+ * on every deploy). Persistent moderation keys (voice:server_muted:*,
+ * voice:server_deafened:*) always survive.
+ *
+ * Pass `io` to broadcast voice:user_left for reaped ghosts so clients connected
+ * to peer nodes clear them immediately instead of at their next reconnect.
+ */
+export async function clearVoiceState(
+  io?: Pick<SocketServer<ClientToServerEvents, ServerToClientEvents>, 'to'>,
+): Promise<void> {
+  const redis = getRedis();
+  let reapedChannels = 0;
+  let reapedUsers = 0;
+
+  // 1. Reap active channels owned by this node or by dead nodes.
+  const active = await redis.sMembers('voice:active');
+  for (const channelId of active) {
+    const owner = await redis.get(`voice:channel:node:${channelId}`);
+    const ownedByUs = owner === NODE_ID();
+    const ownerDead = !owner || !(await isNodeAlive(owner));
+    if (!ownedByUs && !ownerDead) continue; // live peer's channel — hands off
+    const userIds = await reapVoiceChannelMirror(channelId);
+    reapedChannels++;
+    reapedUsers += userIds.length;
+    if (io) {
+      for (const uid of userIds) {
+        io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId: uid });
+      }
     }
   }
-  if (keys.length > 0) {
-    await redis.del(keys);
-    console.log(`[Voice] Cleared ${keys.length} stale voice mirror key(s)`);
+
+  // 2. Reap orphaned per-channel keys not reachable from the (updated) active set.
+  const activeSet = new Set(await redis.sMembers('voice:active'));
+  for await (const batch of redis.scanIterator({ MATCH: 'voice:channel:node:*', COUNT: 200 })) {
+    for (const key of batch) {
+      const channelId = key.slice('voice:channel:node:'.length);
+      if (activeSet.has(channelId)) continue;
+      const owner = await redis.get(key);
+      if (owner && owner !== NODE_ID() && await isNodeAlive(owner)) continue;
+      await reapVoiceChannelMirror(channelId);
+    }
+  }
+
+  // 3. Reap orphaned reverse-lookup keys pointing at channels that no longer exist.
+  for await (const batch of redis.scanIterator({ MATCH: 'voice:user:*', COUNT: 200 })) {
+    for (const key of batch) {
+      const channelId = await redis.get(key);
+      if (!channelId || !activeSet.has(channelId)) {
+        await redis.del(key);
+      }
+    }
+  }
+
+  if (reapedChannels > 0) {
+    console.log(`[Voice] Reaped ${reapedChannels} stale voice channel mirror(s) (${reapedUsers} ghost user(s))`);
   }
 }
 
@@ -978,9 +1034,9 @@ export function handleVoiceEvents(
 }
 
 // ─── Consumer creation helper ───────────────────────────────────────────────
-// NOTE (multi-node): Uses io.sockets.sockets.get() intentionally — mediasoup
-// Consumers/Transports are node-local objects.  With ip_hash sticky sessions,
-// all voice users for a given channel are on the same node as the Router.
+// NOTE (multi-node): mediasoup Consumers/Transports are node-local C++ handles
+// and are always operated on the Router-owning node. Client-facing emits use
+// io.to(socketId) so they reach the participant's socket on ANY node.
 
 /** Restore the default recv bitrate cap once no open video consumers remain. */
 function restoreRecvBitrateIfNoVideo(media: UserMediaState): void {
@@ -1037,28 +1093,24 @@ async function createConsumerForUser(
       if (consumer.kind === 'video') {
         restoreRecvBitrateIfNoVideo(consumerMedia);
       }
-      // Notify the consumer's client that this producer is gone
-      const consumerSocket = io.sockets.sockets.get(consumerMedia.socketId);
-      if (consumerSocket) {
-        consumerSocket.emit('voice:producer_closed', {
-          consumerId: consumer.id,
-          producerUserId,
-        });
-      }
+      // Notify the consumer's client that this producer is gone. io.to() works
+      // cross-node via the Redis adapter — the consumer's SOCKET may live on a
+      // different node than this Router (multi-node signaling relay).
+      io.to(consumerMedia.socketId).emit('voice:producer_closed', {
+        consumerId: consumer.id,
+        producerUserId,
+      });
     });
 
-    // Send Consumer info to the client
-    const consumerSocket = io.sockets.sockets.get(consumerMedia.socketId);
-    if (consumerSocket) {
-      consumerSocket.emit('voice:new_consumer', {
-        id: consumer.id,
-        producerId: producer.id,
-        kind: consumer.kind,
-        rtpParameters: consumer.rtpParameters,
-        producerUserId,
-        appData: producer.appData as Record<string, unknown>,
-      });
-    }
+    // Send Consumer info to the client — io.to() reaches the socket on any node
+    io.to(consumerMedia.socketId).emit('voice:new_consumer', {
+      id: consumer.id,
+      producerId: producer.id,
+      kind: consumer.kind,
+      rtpParameters: consumer.rtpParameters,
+      producerUserId,
+      appData: producer.appData as Record<string, unknown>,
+    });
   } catch (err) {
     console.error(`[Voice] Failed to create Consumer for ${consumerUserId}:`, err);
   }

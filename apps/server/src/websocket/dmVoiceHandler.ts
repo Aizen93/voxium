@@ -4,7 +4,7 @@ import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
-import { getRedis } from '../utils/redis';
+import { getRedis, anyOtherNodeAlive, socketExistsInCluster, type ClusterSocketLookup } from '../utils/redis';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -127,15 +127,60 @@ async function updateDMVoiceUserSocket(
 }
 
 /**
- * Clear all DM-voice Redis state on startup. DM calls are P2P signaling brokered via
- * these keys; on a fresh boot every socket is gone, so any lingering call state is
- * stale. Mirrors clearVoiceState() for server voice.
+ * Clear stale DM-voice Redis state on startup.
+ *
+ * Multi-node aware: DM-call state is fully Redis-based and calls keep working
+ * across nodes, so when other nodes are alive a full wipe would destroy the
+ * state of LIVE calls between users on peer nodes (mute/leave/signal handlers
+ * validate against these keys). In that case only entries whose registered
+ * socket no longer exists ANYWHERE in the cluster (crash ghosts) are reaped.
+ * The full wipe runs only when this is the sole node — every socket is dead.
  */
-export async function clearDMVoiceState(): Promise<void> {
+export async function clearDMVoiceState(
+  io?: ClusterSocketLookup & { to: (room: string) => { emit: (event: 'dm:voice:left', data: { conversationId: string; userId: string }) => void } },
+): Promise<void> {
   const redis = getRedis();
-  // SCAN every dm:voice:* key directly rather than deriving from the active set, so an
-  // orphaned dm:voice:call:{userId} (not reachable from dm:voice:active) is still reaped.
-  // No DM-voice keys are persistent, so clearing all of them on boot is correct.
+
+  if (io && await anyOtherNodeAlive()) {
+    let reaped = 0;
+    const activeConvs = await redis.sMembers('dm:voice:active');
+    for (const conversationId of activeConvs) {
+      const users = await redis.hGetAll(`dm:voice:users:${conversationId}`);
+      for (const [userId, json] of Object.entries(users)) {
+        let socketId: string | undefined;
+        try {
+          socketId = (JSON.parse(json) as DMVoiceUserState).socketId;
+        } catch {
+          socketId = undefined; // malformed entry — treat as ghost
+        }
+        try {
+          if (socketId && await socketExistsInCluster(io, socketId)) continue;
+        } catch (err) {
+          console.warn('[DMVoice] Cluster socket lookup failed, skipping reap for', userId, err);
+          continue;
+        }
+        await removeDMVoiceUser(conversationId, userId);
+        io.to(`dm:voice:${conversationId}`).emit('dm:voice:left', { conversationId, userId });
+        reaped++;
+      }
+    }
+    // Orphaned reverse-lookup keys pointing at conversations with no user entry
+    for await (const batch of redis.scanIterator({ MATCH: 'dm:voice:call:*', COUNT: 200 })) {
+      for (const key of batch) {
+        const userId = key.slice('dm:voice:call:'.length);
+        const conversationId = await redis.get(key);
+        if (!conversationId) continue;
+        const stillInCall = await redis.hExists(`dm:voice:users:${conversationId}`, userId);
+        if (!stillInCall) await redis.del(key);
+      }
+    }
+    if (reaped > 0) {
+      console.log(`[DMVoice] Reaped ${reaped} stale DM-call participant(s) (scoped, peers alive)`);
+    }
+    return;
+  }
+
+  // Sole node: every socket is gone, all DM-voice state is stale — full wipe.
   const keys: string[] = [];
   for await (const batch of redis.scanIterator({ MATCH: 'dm:voice:*', COUNT: 200 })) {
     for (const k of batch) keys.push(k);

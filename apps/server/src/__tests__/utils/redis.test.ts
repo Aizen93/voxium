@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock the redis module to avoid real Redis connections
 vi.mock('redis', () => ({
@@ -22,7 +22,10 @@ vi.mock('redis', () => ({
     del: vi.fn().mockResolvedValue(1),
     set: vi.fn().mockResolvedValue('OK'),
     get: vi.fn().mockResolvedValue(null),
+    exists: vi.fn().mockResolvedValue(0),
     ping: vi.fn().mockResolvedValue('PONG'),
+    // eslint-disable-next-line require-yield
+    scanIterator: vi.fn().mockImplementation(async function* () { /* default: no keys */ }),
   }),
 }));
 
@@ -158,5 +161,153 @@ describe('utils/redis — isUserOnline returns boolean', () => {
     const result = await mod.isUserOnline('user-nonexistent');
     expect(typeof result).toBe('boolean');
     expect(result).toBe(false);
+  });
+});
+
+// ─── Node heartbeat & cluster liveness (multi-node) ──────────────────────────
+
+describe('utils/redis — node heartbeat & cluster liveness', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.NODE_ID = 'hb-node-1';
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    delete process.env.NODE_ID;
+  });
+
+  it('startNodeHeartbeat sets the liveness key with a TTL and refreshes it on an interval', async () => {
+    vi.useFakeTimers();
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    vi.mocked(client.set).mockClear();
+
+    await mod.startNodeHeartbeat();
+    expect(client.set).toHaveBeenCalledWith('node:alive:hb-node-1', expect.any(String), { EX: 30 });
+
+    vi.mocked(client.set).mockClear();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.set).toHaveBeenCalledWith('node:alive:hb-node-1', expect.any(String), { EX: 30 });
+
+    await mod.stopNodeHeartbeat();
+  });
+
+  it('stopNodeHeartbeat deletes the liveness key so peers reap promptly on graceful shutdown', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+
+    await mod.startNodeHeartbeat();
+    vi.mocked(client.del).mockClear();
+    await mod.stopNodeHeartbeat();
+
+    expect(client.del).toHaveBeenCalledWith('node:alive:hb-node-1');
+  });
+
+  it('isNodeAlive reflects heartbeat key existence', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+
+    vi.mocked(client.exists).mockResolvedValueOnce(1);
+    expect(await mod.isNodeAlive('peer-a')).toBe(true);
+    vi.mocked(client.exists).mockResolvedValueOnce(0);
+    expect(await mod.isNodeAlive('peer-b')).toBe(false);
+  });
+
+  it('anyOtherNodeAlive ignores this node\'s own heartbeat key', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+
+    vi.mocked(client.scanIterator).mockImplementation(async function* () {
+      yield ['node:alive:hb-node-1']; // only ourselves
+    });
+    expect(await mod.anyOtherNodeAlive()).toBe(false);
+
+    vi.mocked(client.scanIterator).mockImplementation(async function* () {
+      yield ['node:alive:hb-node-1', 'node:alive:peer-x'];
+    });
+    expect(await mod.anyOtherNodeAlive()).toBe(true);
+
+    // Restore the shared mock's default for subsequent tests
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+  });
+});
+
+// ─── clearPresenceState (multi-node aware) ───────────────────────────────────
+
+describe('utils/redis — clearPresenceState (multi-node aware)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.NODE_ID = 'hb-node-1';
+  });
+
+  afterEach(() => {
+    delete process.env.NODE_ID;
+  });
+
+  function makeDb() {
+    return { user: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) } };
+  }
+
+  it('performs the full wipe when this is the sole node', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    vi.mocked(client.sMembers).mockResolvedValueOnce(['u-1']);
+    vi.mocked(client.del).mockClear();
+
+    const db = makeDb();
+    await mod.clearPresenceState(db);
+
+    expect(client.del).toHaveBeenCalledWith(['user:sockets:u-1']);
+    expect(client.del).toHaveBeenCalledWith(['online_users', 'socket:users']);
+    expect(db.user.updateMany).toHaveBeenCalledWith({ where: { status: 'online' }, data: { status: 'offline' } });
+  });
+
+  it('with live peers: reaps only cluster-dead sockets and never wipes global presence keys', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+
+    // A peer node is alive
+    vi.mocked(client.scanIterator).mockImplementation(async function* () {
+      yield ['node:alive:hb-node-1', 'node:alive:peer-x'];
+    });
+    // Two registered sockets: one dead cluster-wide, one alive on the peer
+    vi.mocked(client.hGetAll).mockResolvedValueOnce({ 's-dead': 'u-dead', 's-live': 'u-live' });
+    // setUserOffline internals for the dead socket
+    vi.mocked(client.hGet).mockResolvedValue('u-dead');
+    vi.mocked(client.sCard).mockResolvedValue(0);
+    vi.mocked(client.del).mockClear();
+
+    const io = {
+      in: vi.fn((room: string) => ({
+        fetchSockets: vi.fn().mockResolvedValue(room === 's-live' ? [{}] : []),
+      })),
+    };
+
+    const db = makeDb();
+    await mod.clearPresenceState(db, io);
+
+    // Dead socket reaped, its user marked offline in DB (scoped, not global)
+    expect(client.hDel).toHaveBeenCalledWith('socket:users', 's-dead');
+    expect(db.user.updateMany).toHaveBeenCalledWith({
+      where: { status: 'online', id: { in: ['u-dead'] } },
+      data: { status: 'offline' },
+    });
+    // Live peer socket untouched; NO global wipe
+    expect(client.hDel).not.toHaveBeenCalledWith('socket:users', 's-live');
+    expect(client.del).not.toHaveBeenCalledWith(['online_users', 'socket:users']);
+
+    // Restore the shared mock's default for subsequent tests
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGet).mockResolvedValue(null);
+    vi.mocked(client.hGetAll).mockResolvedValue({});
   });
 });

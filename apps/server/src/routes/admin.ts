@@ -6,7 +6,8 @@ import { rateLimitAdmin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
-import { cleanupServerVoice, getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
+import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
+import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
 import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
 import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
@@ -524,8 +525,9 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           await broadcastMemberLeft(targetId, action.serverId);
 
         } else {
-          // action === 'delete' — clean up and delete the server
-          cleanupServerVoice(io, action.serverId);
+          // action === 'delete' — clean up and delete the server (voice cleanup
+          // fans out to every node; mediasoup objects are node-local)
+          await broadcastServerVoiceCleanup(io, action.serverId);
           io.to(`server:${action.serverId}`).emit('server:deleted', { serverId: action.serverId });
           await clearServerRoom(action.serverId);
           await prisma.server.delete({ where: { id: action.serverId } });
@@ -782,8 +784,8 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
 
     const io = getIO();
 
-    // Clean up voice state
-    cleanupServerVoice(io, server.id);
+    // Clean up voice state on every node (mediasoup objects are node-local)
+    await broadcastServerVoiceCleanup(io, server.id);
 
     // Notify members
     io.to(`server:${server.id}`).emit('server:deleted', { serverId: server.id });

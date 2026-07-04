@@ -13,7 +13,8 @@ import { rateLimitMemberManage, rateLimitSearch } from '../middleware/rateLimite
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
-import { leaveCurrentVoiceChannel, cleanupServerVoice } from '../websocket/voiceHandler';
+import { leaveCurrentVoiceChannel } from '../websocket/voiceHandler';
+import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
 
@@ -406,8 +407,9 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
 
     const io = getIO();
 
-    // 1. Silently eject all users from voice channels (no voice:user_left events — clients handle via server:deleted)
-    cleanupServerVoice(io, serverId);
+    // 1. Silently eject all users from voice channels (no voice:user_left events — clients handle via server:deleted).
+    //    Broadcast: mediasoup objects are node-local, every node must reap its own.
+    await broadcastServerVoiceCleanup(io, serverId);
 
     // 2. Notify all members before removing them from rooms
     io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_DELETED, { serverId });
