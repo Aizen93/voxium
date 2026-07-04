@@ -64,7 +64,40 @@ vi.mock('../../stores/settingsStore', async () => {
   };
 });
 
-import { useVoiceStore } from '../../stores/voiceStore';
+import { useVoiceStore, isMicProducer } from '../../stores/voiceStore';
+import { getSocket } from '../../services/socket';
+import type { Producer, Consumer } from 'mediasoup-client/types';
+
+// ─── Fakes ───────────────────────────────────────────────────────────────────
+
+function fakeProducer(appType: string, kind: 'audio' | 'video' = appType === 'screen-video' ? 'video' : 'audio') {
+  return {
+    id: `producer-${appType}-${Math.random().toString(36).slice(2, 8)}`,
+    kind,
+    appData: { type: appType },
+    closed: false,
+    paused: false,
+    pause: vi.fn(),
+    resume: vi.fn(),
+    close: vi.fn(),
+  };
+}
+
+function fakeConsumer() {
+  return {
+    id: `consumer-${Math.random().toString(36).slice(2, 8)}`,
+    close: vi.fn(),
+  };
+}
+
+function fakeAudioElement() {
+  return {
+    muted: false,
+    pause: vi.fn(),
+    srcObject: {} as unknown,
+    remove: vi.fn(),
+  };
+}
 
 describe('voiceStore', () => {
   beforeEach(() => {
@@ -252,6 +285,215 @@ describe('voiceStore', () => {
       expect(useVoiceStore.getState().selfDeaf).toBe(false);
       useVoiceStore.getState().toggleDeaf();
       expect(useVoiceStore.getState().selfDeaf).toBe(true);
+    });
+  });
+
+  // ─── P1: screen share + mute filtering (HIGH-1) ──────────────────────────
+
+  describe('isMicProducer', () => {
+    it('matches only the mic producer, never screen audio/video', () => {
+      expect(isMicProducer(fakeProducer('audio') as unknown as Producer)).toBe(true);
+      expect(isMicProducer(fakeProducer('screen-audio') as unknown as Producer)).toBe(false);
+      expect(isMicProducer(fakeProducer('screen-video') as unknown as Producer)).toBe(false);
+    });
+  });
+
+  describe('toggleMute — screen audio keeps flowing (HIGH-1)', () => {
+    it('pauses only the mic producer, not screen-share audio', () => {
+      const mic = fakeProducer('audio');
+      const screenAudio = fakeProducer('screen-audio');
+      useVoiceStore.setState({
+        activeChannelId: 'ch-1',
+        msProducers: new Map([[mic.id, mic], [screenAudio.id, screenAudio]]) as unknown as Map<string, Producer>,
+      });
+
+      useVoiceStore.getState().toggleMute(); // mute
+
+      expect(mic.pause).toHaveBeenCalled();
+      expect(screenAudio.pause).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('handleProducerClosed — precise per-consumer cleanup (HIGH-1)', () => {
+    it('closing the screen-audio consumer removes ONLY the -screen element, never the mic element', () => {
+      const consumer = fakeConsumer();
+      const micAudio = fakeAudioElement();
+      const screenAudio = fakeAudioElement();
+      useVoiceStore.setState({
+        msConsumers: new Map([
+          [consumer.id, { consumer: consumer as unknown as Consumer, producerUserId: 'user-2', appType: 'screen-audio' }],
+        ]),
+        remoteAudios: new Map([
+          ['user-2', micAudio as unknown as HTMLAudioElement],
+          ['user-2-screen', screenAudio as unknown as HTMLAudioElement],
+        ]),
+      });
+
+      useVoiceStore.getState().handleProducerClosed({ consumerId: consumer.id, producerUserId: 'user-2' });
+
+      expect(screenAudio.remove).toHaveBeenCalled();
+      expect(micAudio.remove).not.toHaveBeenCalled();
+      expect(useVoiceStore.getState().remoteAudios.has('user-2')).toBe(true);
+      expect(useVoiceStore.getState().remoteAudios.has('user-2-screen')).toBe(false);
+    });
+
+    it('closing the screen-video consumer clears the remote stream but leaves audio elements', () => {
+      const consumer = fakeConsumer();
+      const micAudio = fakeAudioElement();
+      useVoiceStore.setState({
+        msConsumers: new Map([
+          [consumer.id, { consumer: consumer as unknown as Consumer, producerUserId: 'user-2', appType: 'screen-video' }],
+        ]),
+        remoteAudios: new Map([['user-2', micAudio as unknown as HTMLAudioElement]]),
+        remoteScreenStream: {} as MediaStream,
+      });
+
+      useVoiceStore.getState().handleProducerClosed({ consumerId: consumer.id, producerUserId: 'user-2' });
+
+      expect(useVoiceStore.getState().remoteScreenStream).toBeNull();
+      expect(micAudio.remove).not.toHaveBeenCalled();
+    });
+
+    it('closing the mic consumer removes only the mic element', () => {
+      const consumer = fakeConsumer();
+      const micAudio = fakeAudioElement();
+      const screenAudio = fakeAudioElement();
+      useVoiceStore.setState({
+        msConsumers: new Map([
+          [consumer.id, { consumer: consumer as unknown as Consumer, producerUserId: 'user-2', appType: 'audio' }],
+        ]),
+        remoteAudios: new Map([
+          ['user-2', micAudio as unknown as HTMLAudioElement],
+          ['user-2-screen', screenAudio as unknown as HTMLAudioElement],
+        ]),
+      });
+
+      useVoiceStore.getState().handleProducerClosed({ consumerId: consumer.id, producerUserId: 'user-2' });
+
+      expect(micAudio.remove).toHaveBeenCalled();
+      expect(screenAudio.remove).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op for an unknown consumerId', () => {
+      expect(() =>
+        useVoiceStore.getState().handleProducerClosed({ consumerId: 'nope', producerUserId: 'user-2' }),
+      ).not.toThrow();
+    });
+  });
+
+  describe('stopScreenShare — closes producers on both sides (HIGH-1)', () => {
+    it('emits voice:producer:close per screen producer and voice:screen_share:stop, leaving the mic alone', () => {
+      const socket = vi.mocked(getSocket)()!;
+      vi.mocked(socket.emit).mockClear();
+
+      const mic = fakeProducer('audio');
+      const screenVideo = fakeProducer('screen-video');
+      const screenAudio = fakeProducer('screen-audio');
+      useVoiceStore.setState({
+        activeChannelId: 'ch-1',
+        isScreenSharing: true,
+        screenStream: { getTracks: () => [] } as unknown as MediaStream,
+        msProducers: new Map([
+          [mic.id, mic],
+          [screenVideo.id, screenVideo],
+          [screenAudio.id, screenAudio],
+        ]) as unknown as Map<string, Producer>,
+      });
+
+      useVoiceStore.getState().stopScreenShare();
+
+      expect(socket.emit).toHaveBeenCalledWith('voice:producer:close', { producerId: screenVideo.id });
+      expect(socket.emit).toHaveBeenCalledWith('voice:producer:close', { producerId: screenAudio.id });
+      expect(socket.emit).not.toHaveBeenCalledWith('voice:producer:close', { producerId: mic.id });
+      expect(socket.emit).toHaveBeenCalledWith('voice:screen_share:stop');
+
+      expect(screenVideo.close).toHaveBeenCalled();
+      expect(screenAudio.close).toHaveBeenCalled();
+      expect(mic.close).not.toHaveBeenCalled();
+
+      const state = useVoiceStore.getState();
+      expect(state.isScreenSharing).toBe(false);
+      expect(state.screenStream).toBeNull();
+      expect(state.msProducers.size).toBe(1); // mic only
+    });
+  });
+
+  describe('updateUserState — server-deafen enforcement (HIGH-12)', () => {
+    it('mutes every remote audio element when the local user is server-deafened', () => {
+      const micAudio = fakeAudioElement();
+      const screenAudio = fakeAudioElement();
+      useVoiceStore.setState({
+        localUserId: 'me',
+        selfDeaf: false,
+        channelUsers: new Map([['ch-1', [
+          { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false },
+        ]]]),
+        remoteAudios: new Map([
+          ['user-2', micAudio as unknown as HTMLAudioElement],
+          ['user-2-screen', screenAudio as unknown as HTMLAudioElement],
+        ]),
+      });
+
+      useVoiceStore.getState().updateUserState('ch-1', 'me', false, false, false, true);
+
+      expect(micAudio.muted).toBe(true);
+      expect(screenAudio.muted).toBe(true);
+      expect(useVoiceStore.getState().selfDeaf).toBe(true);
+    });
+
+    it('restores hearing when the server-deafen is lifted (un-deafen)', () => {
+      const micAudio = fakeAudioElement();
+      micAudio.muted = true;
+      useVoiceStore.setState({
+        localUserId: 'me',
+        selfDeaf: true, // forced on by the earlier server-deafen
+        channelUsers: new Map([['ch-1', [
+          { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null, selfMute: true, selfDeaf: true, serverMuted: true, serverDeafened: true, speaking: false },
+        ]]]),
+        remoteAudios: new Map([['user-2', micAudio as unknown as HTMLAudioElement]]),
+      });
+
+      // Moderator un-deafens us
+      useVoiceStore.getState().updateUserState('ch-1', 'me', true, false, true, false);
+
+      expect(micAudio.muted).toBe(false);
+      expect(useVoiceStore.getState().selfDeaf).toBe(false);
+    });
+
+    it('does NOT force-undeafen a self-deafened user on unrelated state updates', () => {
+      const micAudio = fakeAudioElement();
+      micAudio.muted = true;
+      useVoiceStore.setState({
+        localUserId: 'me',
+        selfDeaf: true, // user's own choice — was never server-deafened
+        channelUsers: new Map([['ch-1', [
+          { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null, selfMute: true, selfDeaf: true, serverMuted: false, serverDeafened: false, speaking: false },
+        ]]]),
+        remoteAudios: new Map([['user-2', micAudio as unknown as HTMLAudioElement]]),
+      });
+
+      // e.g. a moderator server-mutes us — serverDeafened stays false
+      useVoiceStore.getState().updateUserState('ch-1', 'me', true, true, true, false);
+
+      expect(micAudio.muted).toBe(true);
+      expect(useVoiceStore.getState().selfDeaf).toBe(true);
+    });
+
+    it('pauses only the mic producer when server-muted', () => {
+      const mic = fakeProducer('audio');
+      const screenAudio = fakeProducer('screen-audio');
+      useVoiceStore.setState({
+        localUserId: 'me',
+        selfMute: false,
+        channelUsers: new Map([['ch-1', []]]),
+        msProducers: new Map([[mic.id, mic], [screenAudio.id, screenAudio]]) as unknown as Map<string, Producer>,
+      });
+
+      useVoiceStore.getState().updateUserState('ch-1', 'me', false, false, true, false);
+
+      expect(mic.pause).toHaveBeenCalled();
+      expect(screenAudio.pause).not.toHaveBeenCalled();
+      expect(useVoiceStore.getState().selfMute).toBe(true);
     });
   });
 });

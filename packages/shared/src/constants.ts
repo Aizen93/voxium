@@ -106,6 +106,7 @@ export const WS_EVENTS = {
   VOICE_PRODUCE: 'voice:produce',
   VOICE_NEW_CONSUMER: 'voice:new_consumer',
   VOICE_CONSUMER_RESUME: 'voice:consumer:resume',
+  VOICE_PRODUCER_CLOSE: 'voice:producer:close',
   VOICE_PRODUCER_CLOSED: 'voice:producer_closed',
   VOICE_RTP_CAPABILITIES: 'voice:rtp_capabilities',
   TYPING_START: 'typing:start',

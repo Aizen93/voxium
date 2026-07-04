@@ -2128,6 +2128,23 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
 
     const sanitizedResolution = resolution ? sanitizeText(resolution) : 'Resolved';
 
+    // Pre-validate the optional ban action BEFORE mutating anything, applying the
+    // same self/hierarchy rules as the canonical POST /users/:userId/ban route.
+    // Throwing here (rather than silently skipping) means a disallowed ban leaves
+    // the report untouched and gives the admin explicit feedback.
+    let banTarget: { id: string; role: string } | null = null;
+    if (action === 'ban') {
+      if (report.reportedUserId === req.user!.userId) throw new ForbiddenError('Cannot ban yourself');
+      banTarget = await prisma.user.findUnique({
+        where: { id: report.reportedUserId },
+        select: { id: true, role: true },
+      });
+      if (banTarget) {
+        if (banTarget.role === 'superadmin') throw new ForbiddenError('Cannot ban a super admin');
+        if (banTarget.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can ban other admins');
+      }
+    }
+
     await prisma.report.update({
       where: { id },
       data: {
@@ -2152,31 +2169,33 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       }
     }
 
-    // Optional action: ban the reported user
-    if (action === 'ban') {
-      const target = await prisma.user.findUnique({
-        where: { id: report.reportedUserId },
-        select: { id: true, role: true },
+    // Optional action: ban the reported user (validated above)
+    if (banTarget) {
+      await prisma.user.update({
+        where: { id: banTarget.id },
+        data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
       });
-      if (target && target.role !== 'superadmin') {
-        await prisma.user.update({
-          where: { id: report.reportedUserId },
-          data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
-        });
 
-        // Force logout the banned user via per-user room
-        const io = getIO();
-        io.in(`user:${report.reportedUserId}`).emit('force:logout', { reason: 'Your account has been banned.' });
-        io.in(`user:${report.reportedUserId}`).disconnectSockets(true);
-
-        logAuditEvent({
-          actorId: req.user!.userId,
-          action: 'user.ban',
-          targetType: 'user',
-          targetId: report.reportedUserId,
-          metadata: { reason: `Report resolved: ${sanitizedResolution}` },
-        });
+      // Remove the banned user from all server member lists/rooms — same as the
+      // canonical ban route. Without this the banned user lingers in member lists.
+      const memberships = await prisma.serverMember.findMany({
+        where: { userId: banTarget.id },
+        select: { serverId: true },
+      });
+      for (const { serverId } of memberships) {
+        await broadcastMemberLeft(banTarget.id, serverId);
       }
+
+      // Force logout then disconnect active sockets (works across all nodes)
+      await forceLogoutUser(banTarget.id, 'Your account has been banned');
+
+      logAuditEvent({
+        actorId: req.user!.userId,
+        action: 'user.ban',
+        targetType: 'user',
+        targetId: banTarget.id,
+        metadata: { reason: `Report resolved: ${sanitizedResolution}` },
+      });
     }
 
     logAuditEvent({

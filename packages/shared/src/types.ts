@@ -358,8 +358,9 @@ export interface ClientToServerEvents {
   'voice:transport:connect': (data: { transportId: string; dtlsParameters: unknown }, callback: (response: { error?: string }) => void) => void;
   'voice:produce': (
     data: { kind: 'audio' | 'video'; rtpParameters: unknown; appData?: Record<string, unknown> },
-    callback: (response: { producerId: string }) => void,
+    callback: (response: { producerId?: string; error?: string }) => void,
   ) => void;
+  'voice:producer:close': (data: { producerId: string }) => void;
   'voice:consumer:resume': (data: { consumerId: string }) => void;
   'voice:rtp_capabilities': (data: { rtpCapabilities: unknown }) => void;
   'ping:latency': (timestamp: number) => void;
@@ -378,7 +379,7 @@ export interface ClientToServerEvents {
   'voice:server_mute': (data: { userId: string; muted: boolean }) => void;
   'voice:server_deafen': (data: { userId: string; deafened: boolean }) => void;
   'voice:force_move': (data: { userId: string; targetChannelId: string }) => void;
-  'voice:screen_share:start': () => void;
+  'voice:screen_share:start': (callback?: (response: { ok: boolean; error?: string }) => void) => void;
   'voice:screen_share:stop': () => void;
   'admin:subscribe_metrics': () => void;
   'admin:unsubscribe_metrics': () => void;

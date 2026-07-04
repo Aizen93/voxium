@@ -6,7 +6,7 @@ import { leaveCurrentDMVoiceChannel } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerRouters, getRouter } from '../mediasoup/mediasoupManager';
-import { RECV_TRANSPORT_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
+import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { getRedis, NODE_ID } from '../utils/redis';
 import { hasChannelPermission, hasServerPermission, getHighestRolePosition } from '../utils/permissionCalculator';
@@ -220,8 +220,12 @@ export function handleVoiceEvents(
     leaveCurrentVoiceChannel(io, socket, userId, { force: true });
 
     // Join the voice channel room and set voiceChannelId early so that
-    // concurrent voice:leave / disconnecting can clean up properly
+    // concurrent voice:leave / disconnecting can clean up properly.
+    // Also join the channel's visibility room: voice presence events broadcast to
+    // `channel:{id}` (VIEW_CHANNEL-scoped), and a participant must always receive
+    // its own channel's events even if their VIEW permission is unusual.
     socket.join(`voice:${channelId}`);
+    socket.join(`channel:${channelId}`);
     socket.data.voiceChannelId = channelId;
     channelServerMap.set(channelId, channel.serverId);
 
@@ -347,9 +351,12 @@ export function handleVoiceEvents(
         socket.emit('voice:screen_share:state', { channelId, sharingUserId: currentSharer });
       }
 
-      // Broadcast to the ENTIRE SERVER so all members can see who's in voice
+      // Broadcast to the channel's visibility room — every member whose socket
+      // can VIEW this channel is subscribed to it (see socketServer connect +
+      // syncChannelVisibilityRooms). Broadcasting server-wide leaked private
+      // voice channel occupancy to members without VIEW_CHANNEL (HIGH-8).
       const voiceUser = { ...user, selfMute: userMedia.selfMute, selfDeaf: userMedia.selfDeaf, serverMuted: userMedia.serverMuted, serverDeafened: userMedia.serverDeafened, speaking: false };
-      io.to(`server:${channel.serverId}`).emit('voice:user_joined', {
+      io.to(`channel:${channelId}`).emit('voice:user_joined', {
         channelId,
         user: voiceUser,
       });
@@ -439,40 +446,72 @@ export function handleVoiceEvents(
     data: { kind: 'audio' | 'video'; rtpParameters: unknown; appData?: Record<string, unknown> },
     callback,
   ) => {
-    if (!socketRateLimit(socket, 'voice:produce', 20)) return;
-    if (!data || typeof data !== 'object' || (data.kind !== 'audio' && data.kind !== 'video') || !data.rtpParameters || typeof data.rtpParameters !== 'object') return;
+    // Every exit path MUST ack — the client's produce() awaits this callback.
+    // A silent return would hang the client's send transport forever.
+    let acked = false;
+    const ack = (response: { producerId?: string; error?: string }) => {
+      if (acked) return;
+      acked = true;
+      if (typeof callback === 'function') callback(response);
+    };
+
+    if (!socketRateLimit(socket, 'voice:produce', 20)) { ack({ error: 'Rate limited' }); return; }
+    if (!data || typeof data !== 'object' || (data.kind !== 'audio' && data.kind !== 'video') || !data.rtpParameters || typeof data.rtpParameters !== 'object') {
+      ack({ error: 'Invalid parameters' });
+      return;
+    }
     const channelId = socket.data.voiceChannelId as string;
-    if (!channelId) return;
+    if (!channelId) { ack({ error: 'Not in a voice channel' }); return; }
 
     const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
-    if (!userMedia?.sendTransport) return;
+    if (!userMedia?.sendTransport) { ack({ error: 'Voice session not found' }); return; }
 
-    // Check SPEAK permission for audio producers (screen-share audio/video are separate)
-    if (data.kind === 'audio' && (!data.appData || data.appData.type !== 'screen-audio')) {
+    // Derive the producer type SERVER-SIDE. appData is client-controlled — trusting
+    // its `type` would let a SPEAK-denied member transmit mic audio by labelling it
+    // 'screen-audio' (which is exempt from both the SPEAK check and silence pausing).
+    // Screen types are only granted to the channel's active screen sharer.
+    const isSharer = screenSharers.get(channelId) === userId;
+    let producerType: 'audio' | 'screen-audio' | 'screen-video';
+    if (data.kind === 'video') {
+      if (!isSharer) { ack({ error: 'Not the active screen sharer' }); return; }
+      producerType = 'screen-video';
+    } else {
+      producerType = isSharer && data.appData?.type === 'screen-audio' ? 'screen-audio' : 'audio';
+    }
+
+    if (producerType === 'audio') {
       const serverId = channelServerMap.get(channelId);
       if (serverId) {
         const canSpeak = await hasChannelPermission(userId, channelId, serverId, Permissions.SPEAK);
-        if (!canSpeak) return;
+        if (!canSpeak) { ack({ error: 'You do not have permission to speak in this channel' }); return; }
       }
     }
 
-    // Cap at 4 producers per user (1 mic audio + 1 screen video + 1 screen audio + 1 spare)
-    if (userMedia.producers.size >= 4) {
-      console.warn(`[Voice] User ${userId} exceeded max producers`);
-      return;
+    // One producer per type — a re-produce replaces the stale one (self-healing after
+    // client-side restarts). This also caps producers at 3 per user (mic, screen
+    // video, screen audio), replacing the old size>=4 cap that silently dropped the
+    // second screen share of a session.
+    for (const [existingId, existing] of userMedia.producers) {
+      if ((existing.appData as Record<string, unknown>)?.type === producerType) {
+        existing.close();
+        userMedia.producers.delete(existingId);
+      }
     }
 
     try {
       const producer = await userMedia.sendTransport.produce({
         kind: data.kind,
         rtpParameters: data.rtpParameters as RtpParameters,
-        appData: { ...data.appData, userId },
+        // Server-derived appData only — never persist client-controlled fields
+        appData: { type: producerType, userId },
       });
 
       userMedia.producers.set(producer.id, producer);
 
-      // If muted (self or server) at join, pause the audio producer immediately
-      if (data.kind === 'audio' && (userMedia.selfMute || userMedia.serverMuted)) {
+      // If muted (self or server) at join, pause the MIC producer immediately.
+      // Screen audio is intentionally exempt — mute means "mute my microphone",
+      // system audio keeps flowing for muted/PTT sharers.
+      if (producerType === 'audio' && (userMedia.selfMute || userMedia.serverMuted)) {
         producer.pause();
       }
 
@@ -481,9 +520,7 @@ export function handleVoiceEvents(
       });
 
       // ACK the client with the server-side producerId
-      if (typeof callback === 'function') {
-        callback({ producerId: producer.id });
-      }
+      ack({ producerId: producer.id });
 
       // Create Consumers for all other users in the channel (in parallel)
       const channelUsers = voiceChannelUsers.get(channelId);
@@ -515,7 +552,30 @@ export function handleVoiceEvents(
       }
     } catch (err) {
       console.error(`[Voice] produce failed for ${userId}:`, err);
+      ack({ error: 'Failed to create producer' });
     }
+  });
+
+  // ── voice:producer:close ──────────────────────────────────────────────
+  // Client closes a specific producer (screen-share stop, error rollback).
+  // Closing fires 'producerclose' on every remote Consumer, which notifies
+  // each viewer via voice:producer_closed. Without this event, stopped-share
+  // producers leaked server-side until the user left the channel.
+  socket.on('voice:producer:close', (data: { producerId: string }) => {
+    if (!socketRateLimit(socket, 'voice:producer:close', 30)) return;
+    if (!data || typeof data !== 'object' || !isString(data.producerId)) return;
+    const channelId = socket.data.voiceChannelId as string;
+    if (!channelId) return;
+
+    const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
+    // Ownership guard: only the socket that owns the live session may close producers
+    if (!userMedia || userMedia.socketId !== socket.id) return;
+
+    const producer = userMedia.producers.get(data.producerId);
+    if (!producer) return;
+
+    producer.close();
+    userMedia.producers.delete(data.producerId);
   });
 
   // ── voice:rtp_capabilities ────────────────────────────────────────────
@@ -557,6 +617,10 @@ export function handleVoiceEvents(
 
     const consumer = userMedia.consumers.get(data.consumerId);
     if (consumer) {
+      // Server-deafen enforcement: a deafened user's audio consumers stay paused
+      // server-side so a modified client cannot keep listening. Video (screen
+      // share) is deliberately not blocked — deafen only silences audio.
+      if (userMedia.serverDeafened && consumer.kind === 'audio') return;
       try {
         await consumer.resume();
       } catch (err) {
@@ -565,33 +629,38 @@ export function handleVoiceEvents(
     }
   });
 
-  /** Helper: emit full voice:state_update for a user */
+  /** Helper: emit full voice:state_update for a user.
+   *  Broadcast to the channel's visibility room (VIEW_CHANNEL-scoped), not the
+   *  whole server — private voice channels must not leak state to non-viewers. */
   function emitStateUpdate(channelId: string, uid: string, media: UserMediaState) {
-    const serverId = channelServerMap.get(channelId);
-    if (serverId) {
-      io.to(`server:${serverId}`).emit('voice:state_update', {
-        channelId,
-        userId: uid,
-        selfMute: media.selfMute,
-        selfDeaf: media.selfDeaf,
-        serverMuted: media.serverMuted,
-        serverDeafened: media.serverDeafened,
-      });
-    }
+    io.to(`channel:${channelId}`).emit('voice:state_update', {
+      channelId,
+      userId: uid,
+      selfMute: media.selfMute,
+      selfDeaf: media.selfDeaf,
+      serverMuted: media.serverMuted,
+      serverDeafened: media.serverDeafened,
+    });
   }
 
-  /** Helper: pause all audio producers for a user */
+  /** Helper: pause the MIC producer for a user.
+   *  Filters by appData.type — mute means "mute my microphone"; screen-share
+   *  system audio must keep flowing for muted/PTT sharers. */
   function pauseUserAudio(media: UserMediaState) {
     for (const producer of media.producers.values()) {
-      if (producer.kind === 'audio') producer.pause();
+      if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+        producer.pause();
+      }
     }
   }
 
-  /** Helper: resume audio producers (only if neither selfMute nor serverMuted) */
+  /** Helper: resume the MIC producer (only if neither selfMute nor serverMuted) */
   function resumeUserAudioIfAllowed(media: UserMediaState) {
     if (media.selfMute || media.serverMuted) return;
     for (const producer of media.producers.values()) {
-      if (producer.kind === 'audio') producer.resume();
+      if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+        producer.resume();
+      }
     }
   }
 
@@ -665,10 +734,8 @@ export function handleVoiceEvents(
     // Don't broadcast speaking indicator if server-muted (prevents UI deception by modified clients)
     if (userMedia?.serverMuted) return;
 
-    const serverId = channelServerMap.get(channelId);
-    if (serverId) {
-      io.to(`server:${serverId}`).emit('voice:speaking', { channelId, userId, speaking });
-    }
+    // Channel visibility room — private voice channels must not leak activity server-wide
+    io.to(`channel:${channelId}`).emit('voice:speaking', { channelId, userId, speaking });
   });
 
   // ── voice:server_mute (force-mute another user) ────────────────────────
@@ -745,6 +812,15 @@ export function handleVoiceEvents(
 
     targetMedia.serverDeafened = deafened;
     setServerDeafenPersist(serverId, targetId, deafened);
+
+    // Enforce server-side: pause/resume the target's AUDIO consumers so a modified
+    // client cannot keep listening while server-deafened. Video (screen share)
+    // stays — deafen only silences audio. voice:consumer:resume is also guarded.
+    for (const consumer of targetMedia.consumers.values()) {
+      if (consumer.kind !== 'audio') continue;
+      const op = deafened ? consumer.pause() : consumer.resume();
+      op.catch((err) => console.warn(`[Voice] Failed to ${deafened ? 'pause' : 'resume'} consumer on server-deafen:`, err));
+    }
 
     // Deafen implies mute — if deafening, also server-mute
     if (deafened && !targetMedia.serverMuted) {
@@ -840,20 +916,29 @@ export function handleVoiceEvents(
   });
 
   // ── Screen sharing ────────────────────────────────────────────────────
-  socket.on('voice:screen_share:start', () => {
-    if (!socketRateLimit(socket, 'voice:screen_share', 10)) return;
+  // The client claims the sharer slot BEFORE producing (the server derives
+  // screen producer authorization from the active sharer), so start must ACK —
+  // the client needs to know whether it may proceed.
+  socket.on('voice:screen_share:start', (callback?: (response: { ok: boolean; error?: string }) => void) => {
+    const ack = (response: { ok: boolean; error?: string }) => {
+      if (typeof callback === 'function') callback(response);
+    };
+    if (!socketRateLimit(socket, 'voice:screen_share', 10)) { ack({ ok: false, error: 'Rate limited' }); return; }
     const channelId = socket.data.voiceChannelId as string;
-    if (!channelId) return;
+    if (!channelId) { ack({ ok: false, error: 'Not in a voice channel' }); return; }
 
-    // Only one sharer per channel
-    if (screenSharers.has(channelId)) return;
+    // Only one sharer per channel (re-claim by the same user is idempotent —
+    // covers a retry after a failed produce that never reached stop)
+    const currentSharer = screenSharers.get(channelId);
+    if (currentSharer && currentSharer !== userId) {
+      ack({ ok: false, error: 'Someone else is already sharing in this channel' });
+      return;
+    }
 
     screenSharers.set(channelId, userId);
     mirrorScreenShare(channelId, userId);
-    const serverId = channelServerMap.get(channelId);
-    if (serverId) {
-      io.to(`server:${serverId}`).emit('voice:screen_share:start', { channelId, userId });
-    }
+    io.to(`channel:${channelId}`).emit('voice:screen_share:start', { channelId, userId });
+    ack({ ok: true });
   });
 
   socket.on('voice:screen_share:stop', () => {
@@ -866,10 +951,24 @@ export function handleVoiceEvents(
 
     screenSharers.delete(channelId);
     mirrorScreenShare(channelId, null);
-    const serverId = channelServerMap.get(channelId);
-    if (serverId) {
-      io.to(`server:${serverId}`).emit('voice:screen_share:stop', { channelId, userId });
+
+    // Close this user's screen producers server-side (defense in depth — the
+    // client also sends voice:producer:close per producer). Closing notifies
+    // every viewer's Consumer via 'producerclose'. Without this, stopped-share
+    // producers leaked until the user left voice, and the SECOND share of a
+    // session hit the producer cap and hung the client (the core HIGH-1 bug).
+    const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
+    if (userMedia) {
+      for (const [producerId, producer] of userMedia.producers) {
+        const producerType = (producer.appData as Record<string, unknown>)?.type;
+        if (producerType === 'screen-video' || producerType === 'screen-audio') {
+          producer.close();
+          userMedia.producers.delete(producerId);
+        }
+      }
     }
+
+    io.to(`channel:${channelId}`).emit('voice:screen_share:stop', { channelId, userId });
   });
 
   // ── Disconnect cleanup ────────────────────────────────────────────────
@@ -882,6 +981,16 @@ export function handleVoiceEvents(
 // NOTE (multi-node): Uses io.sockets.sockets.get() intentionally — mediasoup
 // Consumers/Transports are node-local objects.  With ip_hash sticky sessions,
 // all voice users for a given channel are on the same node as the Router.
+
+/** Restore the default recv bitrate cap once no open video consumers remain. */
+function restoreRecvBitrateIfNoVideo(media: UserMediaState): void {
+  if (!media.recvTransport || media.recvTransport.closed) return;
+  for (const c of media.consumers.values()) {
+    if (c.kind === 'video' && !c.closed) return;
+  }
+  media.recvTransport.setMaxOutgoingBitrate(RECV_TRANSPORT_MAX_BITRATE)
+    .catch((err) => console.warn('[Voice] Failed to restore recv bitrate cap:', err));
+}
 
 async function createConsumerForUser(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
@@ -911,12 +1020,23 @@ async function createConsumerForUser(
 
     consumerMedia.consumers.set(consumer.id, consumer);
 
+    // Screen-share video needs far more downstream bandwidth than the audio-era
+    // 1.5 Mbps cap allows. Raise this viewer's recv cap while a video consumer
+    // exists; restored when the last one closes.
+    if (consumer.kind === 'video') {
+      consumerMedia.recvTransport.setMaxOutgoingBitrate(SCREEN_SHARE_RECV_MAX_BITRATE)
+        .catch((err) => console.warn(`[Voice] Failed to raise recv bitrate cap for ${consumerUserId}:`, err));
+    }
+
     consumer.on('transportclose', () => {
       consumerMedia.consumers.delete(consumer.id);
     });
 
     consumer.on('producerclose', () => {
       consumerMedia.consumers.delete(consumer.id);
+      if (consumer.kind === 'video') {
+        restoreRecvBitrateIfNoVideo(consumerMedia);
+      }
       // Notify the consumer's client that this producer is gone
       const consumerSocket = io.sockets.sockets.get(consumerMedia.socketId);
       if (consumerSocket) {
@@ -992,15 +1112,15 @@ export function leaveCurrentVoiceChannel(
 
   console.log(`[Voice] Removing user ${userId} from channel ${channelId}`);
 
+  // Captured before the empty-channel cleanup deletes the mapping — needed for
+  // the VIEW re-check below.
   const serverId = channelServerMap.get(channelId);
 
   // Clean up screen share if this user was sharing
   if (screenSharers.get(channelId) === userId) {
     screenSharers.delete(channelId);
     mirrorScreenShare(channelId, null);
-    if (serverId) {
-      io.to(`server:${serverId}`).emit('voice:screen_share:stop', { channelId, userId });
-    }
+    io.to(`channel:${channelId}`).emit('voice:screen_share:stop', { channelId, userId });
   }
 
   // Close mediasoup resources for this user
@@ -1043,10 +1163,22 @@ export function leaveCurrentVoiceChannel(
   socket.leave(`voice:${channelId}`);
   socket.data.voiceChannelId = undefined;
 
-  // Broadcast to the entire server so everyone sees the user leave
+  // voice:join force-joins the participant's socket to the channel's visibility
+  // room (so it always receives its own channel's events, even with unusual
+  // permissions). Members who can VIEW keep that subscription after leaving —
+  // normal room semantics — but a CONNECT-without-VIEW participant must not
+  // keep receiving presence events. Fire-and-forget: a failed check just leaves
+  // the socket subscribed until disconnect, same as before this guard existed.
   if (serverId) {
-    io.to(`server:${serverId}`).emit('voice:user_left', { channelId, userId });
+    hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL)
+      .then((canView) => {
+        if (!canView) socket.leave(`channel:${channelId}`);
+      })
+      .catch((err) => console.warn(`[Voice] VIEW re-check on leave failed for ${userId}:`, err));
   }
+
+  // Broadcast to the channel's visibility room (VIEW_CHANNEL-scoped)
+  io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId });
 }
 
 /**

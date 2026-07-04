@@ -23,6 +23,12 @@ export const mediaCodecs: RouterRtpCodecCapability[] = [
 // Caps each consumer connection to prevent bandwidth abuse.
 export const RECV_TRANSPORT_MAX_BITRATE = 1_500_000;
 
+// Raised recv-transport cap while a screen-share video consumer is active.
+// The 1.5 Mbps audio-era cap starves 1080p desktop content into permanent blur;
+// screen video needs headroom on top of the channel's audio streams. Restored
+// to RECV_TRANSPORT_MAX_BITRATE when the last video consumer closes.
+export const SCREEN_SHARE_RECV_MAX_BITRATE = 4_000_000;
+
 // Lazy getters — env vars not available at module scope (ES import hoisting)
 export function getWebRtcTransportOptions() {
   const listenIp = process.env.MEDIASOUP_LISTEN_IP || '0.0.0.0';

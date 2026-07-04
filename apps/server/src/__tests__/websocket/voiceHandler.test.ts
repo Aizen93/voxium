@@ -2,7 +2,49 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
-const { mockRouter, mockSendTransport, mockRecvTransport } = vi.hoisted(() => {
+const { mockRouter, mockSendTransport, mockRecvTransport, createFakeProducer, createFakeConsumer } = vi.hoisted(() => {
+  let producerSeq = 0;
+  let consumerSeq = 0;
+  // producerId → kind, so fake consumers inherit the right kind
+  const producerKinds = new Map<string, string>();
+
+  /** Fake mediasoup Producer — kind/appData flow through like the real thing */
+  const createFakeProducer = (kind: string, appData: Record<string, unknown>) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const producer: any = {
+      id: `producer-${++producerSeq}`,
+      kind,
+      appData,
+      paused: false,
+      closed: false,
+      on: vi.fn(),
+    };
+    producer.pause = vi.fn(() => { producer.paused = true; });
+    producer.resume = vi.fn(() => { producer.paused = false; });
+    producer.close = vi.fn(() => { producer.closed = true; });
+    producerKinds.set(producer.id, kind);
+    return producer;
+  };
+
+  /** Fake mediasoup Consumer — kind mirrors the source producer's kind */
+  const createFakeConsumer = (producerId: string, kind?: string) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const consumer: any = {
+      id: `consumer-${++consumerSeq}`,
+      producerId,
+      kind: kind ?? producerKinds.get(producerId) ?? 'audio',
+      rtpParameters: {},
+      appData: {},
+      paused: true,
+      closed: false,
+      pause: vi.fn().mockResolvedValue(undefined),
+      resume: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+    };
+    consumer.close = vi.fn(() => { consumer.closed = true; });
+    return consumer;
+  };
+
   const mockRouter = {
     rtpCapabilities: { codecs: [], headerExtensions: [] },
     canConsume: vi.fn().mockReturnValue(true),
@@ -29,7 +71,7 @@ const { mockRouter, mockSendTransport, mockRecvTransport } = vi.hoisted(() => {
     connect: vi.fn().mockResolvedValue(undefined),
     setMaxOutgoingBitrate: vi.fn().mockResolvedValue(undefined),
   };
-  return { mockRouter, mockSendTransport, mockRecvTransport };
+  return { mockRouter, mockSendTransport, mockRecvTransport, createFakeProducer, createFakeConsumer };
 });
 
 // Mock Prisma
@@ -80,14 +122,24 @@ vi.mock('../../utils/featureFlags', () => ({
 vi.mock('../../utils/permissionCalculator', () => ({
   hasChannelPermission: vi.fn().mockResolvedValue(true),
   hasServerPermission: vi.fn().mockResolvedValue(true),
+  getHighestRolePosition: vi.fn().mockResolvedValue(Infinity),
   Permissions: { CONNECT: 1n << 14n },
 }));
 
-// Mock mediasoup manager
+// Mock mediasoup manager — transports can produce/consume with fake objects
 vi.mock('../../mediasoup/mediasoupManager', () => ({
   getOrCreateRouter: vi.fn().mockResolvedValue(mockRouter),
   createWebRtcTransport: vi.fn().mockImplementation(() =>
-    Promise.resolve({ ...mockRecvTransport, id: `transport-${Math.random()}`, close: vi.fn(), setMaxOutgoingBitrate: vi.fn().mockResolvedValue(undefined) }),
+    Promise.resolve({
+      ...mockRecvTransport,
+      id: `transport-${Math.random()}`,
+      close: vi.fn(),
+      setMaxOutgoingBitrate: vi.fn().mockResolvedValue(undefined),
+      produce: vi.fn().mockImplementation(({ kind, appData }: { kind: string; appData: Record<string, unknown> }) =>
+        Promise.resolve(createFakeProducer(kind, appData))),
+      consume: vi.fn().mockImplementation(({ producerId }: { producerId: string }) =>
+        Promise.resolve(createFakeConsumer(producerId))),
+    }),
   ),
   releaseRouter: vi.fn(),
   releaseServerRouters: vi.fn(),
@@ -96,6 +148,7 @@ vi.mock('../../mediasoup/mediasoupManager', () => ({
 
 vi.mock('../../mediasoup/mediasoupConfig', () => ({
   RECV_TRANSPORT_MAX_BITRATE: 1500000,
+  SCREEN_SHARE_RECV_MAX_BITRATE: 4000000,
 }));
 
 // Mock DM voice handler
@@ -546,7 +599,7 @@ describe('voiceHandler — clearVoiceState (boot cleanup)', () => {
 });
 
 describe('voiceHandler — handler registration', () => {
-  it('registers all 16 expected event handlers', () => {
+  it('registers all 17 expected event handlers', () => {
     const { socket, handlers } = createMockSocket();
     const io = createMockIO();
     handleVoiceEvents(io as any, socket as any);
@@ -556,6 +609,7 @@ describe('voiceHandler — handler registration', () => {
       'voice:leave',
       'voice:transport:connect',
       'voice:produce',
+      'voice:producer:close',
       'voice:rtp_capabilities',
       'voice:consumer:resume',
       'voice:mute',
@@ -570,8 +624,8 @@ describe('voiceHandler — handler registration', () => {
       'disconnecting',
     ];
 
-    expect(expectedEvents.length).toBe(16);
-    expect(handlers.size).toBe(16);
+    expect(expectedEvents.length).toBe(17);
+    expect(handlers.size).toBe(17);
 
     for (const event of expectedEvents) {
       expect(handlers.has(event)).toBe(true);
@@ -768,5 +822,488 @@ describe('voiceHandler — server-muted blocks self-unmute (voice:mute)', () => 
     // Trying to unmute
     handler(false);
     expect(io.to).not.toHaveBeenCalled();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P1 regression tests — screen share protocol (HIGH-1), SPEAK bypass (HIGH-4),
+// private-channel broadcasts (HIGH-8), server-deafen enforcement (HIGH-12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { hasChannelPermission } from '../../utils/permissionCalculator';
+import { createWebRtcTransport } from '../../mediasoup/mediasoupManager';
+
+/** All transports created since the last vi.clearAllMocks(), in creation order:
+ *  [A.send, A.recv, B.send, B.recv, ...] per join. */
+async function getCreatedTransports() {
+  return Promise.all(vi.mocked(createWebRtcTransport).mock.results.map((r) => r.value));
+}
+
+function mockJoinablePrisma() {
+  vi.mocked(prisma.channel.findUnique).mockResolvedValue({ serverId: 's1', type: 'voice' } as any);
+  vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({ userId: 'x', serverId: 's1' } as any);
+  vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'x', username: 'u', displayName: 'U', avatarUrl: null } as any);
+  vi.mocked(prisma.user.findMany).mockResolvedValue([] as any);
+}
+
+describe('voiceHandler — voice:produce ACK contract (HIGH-1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+  });
+
+  it('acks an error when rate limited (never silent)', async () => {
+    const { socket, handlers } = createMockSocket('prod-rl', 'sock-prod-rl');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    vi.mocked(socketRateLimit).mockReturnValueOnce(false);
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, ack);
+    expect(ack).toHaveBeenCalledWith({ error: 'Rate limited' });
+  });
+
+  it('acks an error on invalid parameters', async () => {
+    const { socket, handlers } = createMockSocket('prod-inv', 'sock-prod-inv');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'weird', rtpParameters: {} }, ack);
+    expect(ack).toHaveBeenCalledWith({ error: 'Invalid parameters' });
+  });
+
+  it('acks an error when not in a voice channel', async () => {
+    const { socket, handlers } = createMockSocket('prod-noch', 'sock-prod-noch');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, ack);
+    expect(ack).toHaveBeenCalledWith({ error: 'Not in a voice channel' });
+  });
+
+  it('acks the producerId on a successful mic produce', async () => {
+    const { socket, handlers } = createMockSocket('prod-ok', 'sock-prod-ok');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-prod-ok');
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, ack);
+    expect(ack).toHaveBeenCalledWith({ producerId: expect.stringMatching(/^producer-/) });
+  });
+
+  it('acks an error (does NOT hang) when video is produced without an active screen share', async () => {
+    const { socket, handlers } = createMockSocket('prod-vid', 'sock-prod-vid');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-prod-vid');
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'video', rtpParameters: {} }, ack);
+    expect(ack).toHaveBeenCalledWith({ error: 'Not the active screen sharer' });
+  });
+
+  it('replaces an existing producer of the same type instead of leaking it', async () => {
+    const { socket, handlers } = createMockSocket('prod-dup', 'sock-prod-dup');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-prod-dup');
+
+    const ack1 = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, ack1);
+    const ack2 = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, ack2);
+
+    expect(ack2).toHaveBeenCalledWith({ producerId: expect.stringMatching(/^producer-/) });
+    // The first mic producer was closed when the second replaced it
+    const [sendTransport] = await getCreatedTransports();
+    const firstProducer = await sendTransport.produce.mock.results[0].value;
+    expect(firstProducer.close).toHaveBeenCalled();
+  });
+
+  it('pauses the mic producer at produce time when self-muted, but NOT screen audio', async () => {
+    const { socket, handlers } = createMockSocket('prod-mute', 'sock-prod-mute');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-prod-mute', { selfMute: true, selfDeaf: false });
+
+    // Mic while muted → paused immediately
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    const [sendTransport] = await getCreatedTransports();
+    const micProducer = await sendTransport.produce.mock.results[0].value;
+    expect(micProducer.pause).toHaveBeenCalled();
+
+    // Claim the sharer slot, then produce screen audio → NOT paused despite mute
+    handlers.get('voice:screen_share:start')!(vi.fn());
+    await handlers.get('voice:produce')!(
+      { kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } },
+      vi.fn(),
+    );
+    const screenAudioProducer = await sendTransport.produce.mock.results[1].value;
+    expect(screenAudioProducer.appData).toEqual({ type: 'screen-audio', userId: 'prod-mute' });
+    expect(screenAudioProducer.pause).not.toHaveBeenCalled();
+  });
+});
+
+describe('voiceHandler — SPEAK bypass via client appData (HIGH-4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+  });
+
+  it('treats claimed screen-audio from a NON-sharer as mic audio and enforces SPEAK', async () => {
+    const { socket, handlers } = createMockSocket('bypass-1', 'sock-bypass-1');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-bypass-1'); // CONNECT check consumes one allow
+
+    // Deny SPEAK for the produce
+    vi.mocked(hasChannelPermission).mockResolvedValueOnce(false);
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!(
+      { kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } },
+      ack,
+    );
+    expect(ack).toHaveBeenCalledWith({ error: 'You do not have permission to speak in this channel' });
+  });
+
+  it('stores server-derived appData — a non-sharer mic claim is forced to type "audio"', async () => {
+    const { socket, handlers } = createMockSocket('bypass-2', 'sock-bypass-2');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-bypass-2');
+
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!(
+      { kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio', evil: 'field' } },
+      ack,
+    );
+    expect(ack).toHaveBeenCalledWith({ producerId: expect.any(String) });
+    const [sendTransport] = await getCreatedTransports();
+    // Forced to 'audio' (silence-pausing + mute apply), client fields dropped
+    expect(sendTransport.produce).toHaveBeenCalledWith(
+      expect.objectContaining({ appData: { type: 'audio', userId: 'bypass-2' } }),
+    );
+  });
+
+  it('allows screen audio WITHOUT a SPEAK check for the active sharer', async () => {
+    const { socket, handlers } = createMockSocket('bypass-3', 'sock-bypass-3');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-bypass-3');
+    handlers.get('voice:screen_share:start')!(vi.fn());
+
+    // From here on, ANY permission check would fail — screen audio must not need one
+    vi.mocked(hasChannelPermission).mockResolvedValue(false);
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!(
+      { kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } },
+      ack,
+    );
+    expect(ack).toHaveBeenCalledWith({ producerId: expect.any(String) });
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+  });
+});
+
+describe('voiceHandler — screen share slot protocol (HIGH-1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+  });
+
+  it('start acks ok:true and broadcasts to the channel visibility room', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('ss-1', 'sock-ss-1');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-ss-1');
+
+    const ack = vi.fn();
+    handlers.get('voice:screen_share:start')!(ack);
+    expect(ack).toHaveBeenCalledWith({ ok: true });
+    expect(io.to).toHaveBeenCalledWith('channel:ch-ss-1');
+    expect(io._emit).toHaveBeenCalledWith('voice:screen_share:start', { channelId: 'ch-ss-1', userId: 'ss-1' });
+  });
+
+  it('start acks ok:false when someone else is already sharing', async () => {
+    const io = createMockIO();
+    const a = createMockSocket('ss-2a', 'sock-ss-2a');
+    const b = createMockSocket('ss-2b', 'sock-ss-2b');
+    handleVoiceEvents(io as any, a.socket as any);
+    handleVoiceEvents(io as any, b.socket as any);
+    a.socket.data.voiceChannelId = 'ch-ss-2';
+    b.socket.data.voiceChannelId = 'ch-ss-2';
+
+    a.handlers.get('voice:screen_share:start')!(vi.fn());
+    const ackB = vi.fn();
+    b.handlers.get('voice:screen_share:start')!(ackB);
+    expect(ackB).toHaveBeenCalledWith({ ok: false, error: 'Someone else is already sharing in this channel' });
+  });
+
+  it('re-claim by the same user is idempotent (retry after failed produce)', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('ss-3', 'sock-ss-3');
+    handleVoiceEvents(io as any, socket as any);
+    socket.data.voiceChannelId = 'ch-ss-3';
+
+    handlers.get('voice:screen_share:start')!(vi.fn());
+    const ack2 = vi.fn();
+    handlers.get('voice:screen_share:start')!(ack2);
+    expect(ack2).toHaveBeenCalledWith({ ok: true });
+  });
+
+  it('start acks ok:false when not in a voice channel', () => {
+    const { socket, handlers } = createMockSocket('ss-4', 'sock-ss-4');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    const ack = vi.fn();
+    handlers.get('voice:screen_share:start')!(ack);
+    expect(ack).toHaveBeenCalledWith({ ok: false, error: 'Not in a voice channel' });
+  });
+
+  it('stop closes the sharer\'s screen producers server-side but leaves the mic producer', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('ss-5', 'sock-ss-5');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-ss-5');
+
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    handlers.get('voice:screen_share:start')!(vi.fn());
+    await handlers.get('voice:produce')!({ kind: 'video', rtpParameters: {} }, vi.fn());
+    await handlers.get('voice:produce')!(
+      { kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } }, vi.fn(),
+    );
+
+    const [sendTransport] = await getCreatedTransports();
+    const mic = await sendTransport.produce.mock.results[0].value;
+    const screenVideo = await sendTransport.produce.mock.results[1].value;
+    const screenAudio = await sendTransport.produce.mock.results[2].value;
+
+    handlers.get('voice:screen_share:stop')!();
+
+    expect(screenVideo.close).toHaveBeenCalled();
+    expect(screenAudio.close).toHaveBeenCalled();
+    expect(mic.close).not.toHaveBeenCalled();
+    expect(io._emit).toHaveBeenCalledWith('voice:screen_share:stop', { channelId: 'ch-ss-5', userId: 'ss-5' });
+  });
+
+  it('the SECOND screen share of a session works (share → stop → share)', async () => {
+    const { socket, handlers } = createMockSocket('ss-6', 'sock-ss-6');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-ss-6');
+
+    // First share: mic + screen video + screen audio (3 producers)
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    handlers.get('voice:screen_share:start')!(vi.fn());
+    await handlers.get('voice:produce')!({ kind: 'video', rtpParameters: {} }, vi.fn());
+    await handlers.get('voice:produce')!(
+      { kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } }, vi.fn(),
+    );
+    handlers.get('voice:screen_share:stop')!();
+
+    // Second share: previously hit the producer cap and never acked → client hang
+    const startAck = vi.fn();
+    handlers.get('voice:screen_share:start')!(startAck);
+    expect(startAck).toHaveBeenCalledWith({ ok: true });
+
+    const videoAck = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'video', rtpParameters: {} }, videoAck);
+    expect(videoAck).toHaveBeenCalledWith({ producerId: expect.any(String) });
+
+    const audioAck = vi.fn();
+    await handlers.get('voice:produce')!(
+      { kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } }, audioAck,
+    );
+    expect(audioAck).toHaveBeenCalledWith({ producerId: expect.any(String) });
+  });
+
+  it('voice:producer:close closes only the named producer', async () => {
+    const { socket, handlers } = createMockSocket('ss-7', 'sock-ss-7');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-ss-7');
+
+    const micAck = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, micAck);
+    handlers.get('voice:screen_share:start')!(vi.fn());
+    const vidAck = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'video', rtpParameters: {} }, vidAck);
+
+    const videoProducerId = vidAck.mock.calls[0][0].producerId;
+    handlers.get('voice:producer:close')!({ producerId: videoProducerId });
+
+    const [sendTransport] = await getCreatedTransports();
+    const mic = await sendTransport.produce.mock.results[0].value;
+    const video = await sendTransport.produce.mock.results[1].value;
+    expect(video.close).toHaveBeenCalled();
+    expect(mic.close).not.toHaveBeenCalled();
+  });
+
+  it('voice:producer:close ignores producers not owned by this user session', async () => {
+    const { socket, handlers } = createMockSocket('ss-8', 'sock-ss-8');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-ss-8');
+    // Unknown producer id — must be a silent no-op, no crash
+    expect(() => handlers.get('voice:producer:close')!({ producerId: 'not-mine' })).not.toThrow();
+  });
+});
+
+describe('voiceHandler — private channel broadcasts (HIGH-8)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+  });
+
+  it('voice:user_joined broadcasts to the channel room, NOT the server room', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('h8-1', 'sock-h8-1');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-h8-1');
+
+    expect(io.to).toHaveBeenCalledWith('channel:ch-h8-1');
+    expect(io.to).not.toHaveBeenCalledWith('server:s1');
+    expect(io._emit).toHaveBeenCalledWith('voice:user_joined', expect.objectContaining({ channelId: 'ch-h8-1' }));
+  });
+
+  it('the joining socket enters the channel visibility room', async () => {
+    const { socket, handlers } = createMockSocket('h8-2', 'sock-h8-2');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-h8-2');
+    expect(socket.join).toHaveBeenCalledWith('voice:ch-h8-2');
+    expect(socket.join).toHaveBeenCalledWith('channel:ch-h8-2');
+  });
+
+  it('voice:speaking broadcasts to the channel room, NOT the server room', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('h8-3', 'sock-h8-3');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-h8-3');
+    io.to.mockClear();
+    io._emit.mockClear();
+
+    handlers.get('voice:speaking')!(true);
+    expect(io.to).toHaveBeenCalledWith('channel:ch-h8-3');
+    expect(io.to).not.toHaveBeenCalledWith('server:s1');
+    expect(io._emit).toHaveBeenCalledWith('voice:speaking', { channelId: 'ch-h8-3', userId: 'h8-3', speaking: true });
+  });
+
+  it('voice:user_left broadcasts to the channel room on leave', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('h8-4', 'sock-h8-4');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-h8-4');
+    io.to.mockClear();
+    io._emit.mockClear();
+
+    handlers.get('voice:leave')!();
+    expect(io.to).toHaveBeenCalledWith('channel:ch-h8-4');
+    expect(io.to).not.toHaveBeenCalledWith('server:s1');
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-h8-4', userId: 'h8-4' });
+  });
+
+  it('a CONNECT-without-VIEW participant is removed from the visibility room on leave', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('h8-5', 'sock-h8-5');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-h8-5'); // CONNECT allowed (default mock)
+
+    // The post-leave VIEW re-check denies — socket must leave the channel room
+    vi.mocked(hasChannelPermission).mockResolvedValueOnce(false);
+    handlers.get('voice:leave')!();
+    await new Promise((r) => setTimeout(r, 0)); // flush the fire-and-forget check
+
+    expect(socket.leave).toHaveBeenCalledWith('channel:ch-h8-5');
+  });
+
+  it('a VIEW-permitted member KEEPS the visibility room subscription after leaving voice', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('h8-6', 'sock-h8-6');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-h8-6');
+
+    handlers.get('voice:leave')!(); // VIEW re-check passes (default mock: true)
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(socket.leave).toHaveBeenCalledWith('voice:ch-h8-6');
+    expect(socket.leave).not.toHaveBeenCalledWith('channel:ch-h8-6');
+  });
+});
+
+describe('voiceHandler — server-deafen enforcement (HIGH-12)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+  });
+
+  async function setupTwoUsersWithConsumer() {
+    const io = createMockIO();
+    const a = createMockSocket('h12-A', 'sock-h12-A');
+    const b = createMockSocket('h12-B', 'sock-h12-B');
+    io.sockets.sockets.set('sock-h12-A', a.socket);
+    io.sockets.sockets.set('sock-h12-B', b.socket);
+    handleVoiceEvents(io as any, a.socket as any);
+    handleVoiceEvents(io as any, b.socket as any);
+
+    await a.handlers.get('voice:join')!('ch-h12');
+    await b.handlers.get('voice:join')!('ch-h12');
+    await b.handlers.get('voice:rtp_capabilities')!({ rtpCapabilities: { codecs: [] } });
+    // A produces mic → server creates an audio consumer for B
+    await a.handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+
+    const newConsumerCall = b.socket.emit.mock.calls.find((c: unknown[]) => c[0] === 'voice:new_consumer');
+    expect(newConsumerCall).toBeTruthy();
+    const consumerId = (newConsumerCall![1] as { id: string }).id;
+
+    const transports = await getCreatedTransports();
+    const bRecv = transports[3]; // A.send, A.recv, B.send, B.recv
+    const consumer = await bRecv.consume.mock.results[0].value;
+
+    return { io, a, b, consumerId, consumer };
+  }
+
+  it('pauses the target\'s audio consumers server-side and blocks their resume while deafened', async () => {
+    const { a, b, consumerId, consumer } = await setupTwoUsersWithConsumer();
+
+    // A (moderator) server-deafens B
+    await a.handlers.get('voice:server_deafen')!({ userId: 'h12-B', deafened: true });
+    expect(consumer.pause).toHaveBeenCalled();
+
+    // A modified client trying to resume its consumer is blocked server-side
+    consumer.resume.mockClear();
+    await b.handlers.get('voice:consumer:resume')!({ consumerId });
+    expect(consumer.resume).not.toHaveBeenCalled();
+  });
+
+  it('resumes the target\'s audio consumers on un-deafen', async () => {
+    const { a, consumer } = await setupTwoUsersWithConsumer();
+
+    await a.handlers.get('voice:server_deafen')!({ userId: 'h12-B', deafened: true });
+    consumer.resume.mockClear();
+    await a.handlers.get('voice:server_deafen')!({ userId: 'h12-B', deafened: false });
+    expect(consumer.resume).toHaveBeenCalled();
+  });
+
+  it('normal consumer:resume works when not deafened', async () => {
+    const { b, consumerId, consumer } = await setupTwoUsersWithConsumer();
+    consumer.resume.mockClear();
+    await b.handlers.get('voice:consumer:resume')!({ consumerId });
+    expect(consumer.resume).toHaveBeenCalled();
+  });
+});
+
+describe('voiceHandler — screen-share recv bitrate lift (HIGH-1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+  });
+
+  it('raises the viewer\'s recv-transport cap when a video consumer is created', async () => {
+    const io = createMockIO();
+    const a = createMockSocket('br-A', 'sock-br-A');
+    const b = createMockSocket('br-B', 'sock-br-B');
+    io.sockets.sockets.set('sock-br-A', a.socket);
+    io.sockets.sockets.set('sock-br-B', b.socket);
+    handleVoiceEvents(io as any, a.socket as any);
+    handleVoiceEvents(io as any, b.socket as any);
+
+    await a.handlers.get('voice:join')!('ch-br');
+    await b.handlers.get('voice:join')!('ch-br');
+    await b.handlers.get('voice:rtp_capabilities')!({ rtpCapabilities: { codecs: [] } });
+
+    // A shares screen (video producer) → B consumes video → cap lifted
+    a.handlers.get('voice:screen_share:start')!(vi.fn());
+    await a.handlers.get('voice:produce')!({ kind: 'video', rtpParameters: {} }, vi.fn());
+
+    const transports = await getCreatedTransports();
+    const bRecv = transports[3];
+    expect(bRecv.setMaxOutgoingBitrate).toHaveBeenCalledWith(4000000);
   });
 });

@@ -331,27 +331,31 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.join(`server:${m.serverId}`);
       }
 
-      // Auto-join text channel rooms the user can view
-      const allTextChannels = await prisma.channel.findMany({
-        where: { serverId: { in: memberships.map((m) => m.serverId) }, type: 'text' },
-        select: { id: true, serverId: true },
+      // Auto-join channel rooms the user can view. Includes VOICE channels:
+      // `channel:{id}` is the visibility boundary for real-time events, and voice
+      // presence (voice:user_joined/state/speaking/screen share) broadcasts there
+      // instead of server-wide so private voice channels don't leak occupancy.
+      const allChannels = await prisma.channel.findMany({
+        where: { serverId: { in: memberships.map((m) => m.serverId) } },
+        select: { id: true, serverId: true, type: true },
       });
       // Group channels by server for efficient batch filtering
-      const channelsByServer = new Map<string, typeof allTextChannels>();
-      for (const ch of allTextChannels) {
+      const channelsByServer = new Map<string, typeof allChannels>();
+      for (const ch of allChannels) {
         const list = channelsByServer.get(ch.serverId) || [];
         list.push(ch);
         channelsByServer.set(ch.serverId, list);
       }
       const { filterVisibleChannels } = await import('../utils/permissionCalculator');
-      const textChannels: typeof allTextChannels = [];
+      const visibleChannels: typeof allChannels = [];
       for (const [serverId, channels] of channelsByServer) {
         const visible = await filterVisibleChannels(userId, serverId, channels);
-        textChannels.push(...visible);
+        visibleChannels.push(...visible);
       }
-      for (const ch of textChannels) {
+      for (const ch of visibleChannels) {
         socket.join(`channel:${ch.id}`);
       }
+      const textChannels = visibleChannels.filter((ch) => ch.type === 'text');
 
       // Compute unread counts across all text channels in a single query.
       // Uses LATERAL JOIN with LIMIT 100 to cap per-channel scanning — the frontend

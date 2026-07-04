@@ -6,7 +6,7 @@ import { validateServerName, validateNickname, LIMITS, WS_EVENTS, DEFAULT_EVERYO
 import type { MemberRole, Server } from '@voxium/shared';
 import type { Socket } from 'socket.io';
 import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
-import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
+import { broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitSearch } from '../middleware/rateLimiter';
@@ -268,48 +268,10 @@ serverRouter.get('/:serverId/members/search', rateLimitSearch, async (req: Reque
   }
 });
 
-// Join a server (via invite code - simplified)
-serverRouter.post('/:serverId/join', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
-  try {
-    const { serverId } = req.params;
-
-    const server = await prisma.server.findUnique({ where: { id: serverId } });
-    if (!server) throw new NotFoundError('Server');
-
-    const existing = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-    if (existing) throw new BadRequestError('Already a member of this server');
-
-    await prisma.serverMember.create({
-      data: { userId: req.user!.userId, serverId },
-    });
-
-    // Notify all members and add the joiner's socket(s) to the server room
-    await broadcastMemberJoined(req.user!.userId, serverId);
-
-    // Seed ChannelRead for all text channels so existing history doesn't show as unread
-    const textChannels = await prisma.channel.findMany({
-      where: { serverId, type: 'text' },
-      select: { id: true },
-    });
-    if (textChannels.length > 0) {
-      const now = new Date();
-      await prisma.channelRead.createMany({
-        data: textChannels.map((ch) => ({
-          userId: req.user!.userId,
-          channelId: ch.id,
-          lastReadAt: now,
-        })),
-        skipDuplicates: true,
-      });
-    }
-
-    res.json({ success: true, data: server });
-  } catch (err) {
-    next(err);
-  }
-});
+// NOTE: There is intentionally no direct POST /:serverId/join route. Joining a
+// server MUST go through POST /invites/:code/join, which enforces invite
+// validity, invitesLocked, and maxMembers. A direct join-by-id route would
+// bypass all three (HIGH-6 in the stabilization audit).
 
 // Leave a server
 serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
