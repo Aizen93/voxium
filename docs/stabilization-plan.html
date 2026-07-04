@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voxium Stabilization &amp; Encryption Plan</title>
+<style>
+  :root {
+    --bg: #f6f6fb;
+    --surface: #ffffff;
+    --surface-2: #f0f0f7;
+    --surface-3: #e9e9f3;
+    --border: #e3e3ef;
+    --border-strong: #d3d3e4;
+    --text: #191a26;
+    --text-dim: #565873;
+    --text-faint: #83859e;
+    --accent: #5b4fd6;
+    --accent-soft: #ece9ff;
+    --crit: #d92b45;
+    --high: #d9761a;
+    --med: #b58a05;
+    --low: #2f7fc4;
+    --ok: #12946a;
+    --crit-soft: #fde7ea;
+    --high-soft: #fcefe1;
+    --med-soft: #faf3d9;
+    --low-soft: #e6f0fa;
+    --ok-soft: #dcf4ea;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, Roboto, "Helvetica Neue", sans-serif;
+    --shadow: 0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c0d14;
+      --surface: #14151f;
+      --surface-2: #1a1c28;
+      --surface-3: #222533;
+      --border: #262a3a;
+      --border-strong: #333750;
+      --text: #e7e8f0;
+      --text-dim: #9a9db4;
+      --text-faint: #6c6f87;
+      --accent: #9182ff;
+      --accent-soft: #201d3a;
+      --crit: #ff5d6c;
+      --high: #ff9d42;
+      --med: #f0c64b;
+      --low: #5aa9e6;
+      --ok: #3ddc97;
+      --crit-soft: #2a1519;
+      --high-soft: #2a1e12;
+      --med-soft: #29230f;
+      --low-soft: #10202e;
+      --ok-soft: #0f2820;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f6fb; --surface: #ffffff; --surface-2: #f0f0f7; --surface-3: #e9e9f3;
+    --border: #e3e3ef; --border-strong: #d3d3e4; --text: #191a26; --text-dim: #565873;
+    --text-faint: #83859e; --accent: #5b4fd6; --accent-soft: #ece9ff;
+    --crit: #d92b45; --high: #d9761a; --med: #b58a05; --low: #2f7fc4; --ok: #12946a;
+    --crit-soft: #fde7ea; --high-soft: #fcefe1; --med-soft: #faf3d9; --low-soft: #e6f0fa; --ok-soft: #dcf4ea;
+    --shadow: 0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.05);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c0d14; --surface: #14151f; --surface-2: #1a1c28; --surface-3: #222533;
+    --border: #262a3a; --border-strong: #333750; --text: #e7e8f0; --text-dim: #9a9db4;
+    --text-faint: #6c6f87; --accent: #9182ff; --accent-soft: #201d3a;
+    --crit: #ff5d6c; --high: #ff9d42; --med: #f0c64b; --low: #5aa9e6; --ok: #3ddc97;
+    --crit-soft: #2a1519; --high-soft: #2a1e12; --med-soft: #29230f; --low-soft: #10202e; --ok-soft: #0f2820;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    font-size: 15.5px;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px 120px; }
+
+  /* ── Header ── */
+  header.masthead {
+    padding: 64px 0 40px; border-bottom: 1px solid var(--border);
+  }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--accent); font-weight: 600;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .eyebrow::before {
+    content: ""; width: 26px; height: 2px; background: var(--accent); display: inline-block;
+  }
+  h1 {
+    font-size: clamp(30px, 5vw, 46px); line-height: 1.08; margin: 18px 0 0;
+    letter-spacing: -0.02em; font-weight: 800; text-wrap: balance; max-width: 20ch;
+  }
+  .dek {
+    margin: 18px 0 0; font-size: 18px; color: var(--text-dim); max-width: 62ch; text-wrap: pretty;
+  }
+  .meta-row {
+    margin-top: 26px; display: flex; flex-wrap: wrap; gap: 10px 22px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--text-faint);
+  }
+  .meta-row b { color: var(--text-dim); font-weight: 600; }
+
+  /* ── Verdict banner ── */
+  .verdict {
+    margin-top: 32px; background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); border-radius: 12px; padding: 20px 22px;
+    box-shadow: var(--shadow);
+  }
+  .verdict p { margin: 0; color: var(--text-dim); }
+  .verdict strong { color: var(--text); }
+
+  /* ── Section scaffolding ── */
+  section { padding-top: 56px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+  .sec-num {
+    font-family: var(--mono); font-size: 13px; color: var(--accent); font-weight: 600;
+    letter-spacing: .05em;
+  }
+  h2 {
+    font-size: 25px; letter-spacing: -0.01em; margin: 0; font-weight: 750;
+  }
+  .sec-sub { color: var(--text-dim); margin: 4px 0 26px; max-width: 68ch; }
+
+  /* ── Severity tiles ── */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin: 8px 0 4px; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; position: relative; overflow: hidden;
+  }
+  .tile::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; }
+  .tile.c::before { background: var(--crit);} .tile.h::before { background: var(--high);}
+  .tile.m::before { background: var(--med);} .tile.l::before { background: var(--low);}
+  .tile .n { font-family: var(--mono); font-size: 30px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .tile.c .n { color: var(--crit);} .tile.h .n { color: var(--high);} .tile.m .n { color: var(--med);} .tile.l .n { color: var(--low);}
+  .tile .lbl { font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-faint); margin-top: 8px; }
+  .tile .desc { font-size: 12.5px; color: var(--text-dim); margin-top: 6px; line-height: 1.45; }
+
+  /* ── Findings ── */
+  .finding {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px 18px 22px; margin-bottom: 14px; position: relative;
+    box-shadow: var(--shadow);
+  }
+  .finding::before { content:""; position:absolute; left:0; top:14px; bottom:14px; width:3px; border-radius: 3px; }
+  .finding.c::before { background: var(--crit);} .finding.h::before { background: var(--high);}
+  .finding.m::before { background: var(--med);} .finding.l::before { background: var(--low);}
+  .f-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .chip {
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
+    text-transform: uppercase; padding: 3px 8px; border-radius: 5px; white-space: nowrap;
+  }
+  .chip.c { color: var(--crit); background: var(--crit-soft); }
+  .chip.h { color: var(--high); background: var(--high-soft); }
+  .chip.m { color: var(--med); background: var(--med-soft); }
+  .chip.l { color: var(--low); background: var(--low-soft); }
+  .chip.cat { color: var(--text-dim); background: var(--surface-3); letter-spacing: .06em; }
+  .chip.confirmed { color: var(--ok); background: var(--ok-soft); }
+  .f-id { font-family: var(--mono); font-size: 12px; color: var(--text-faint); font-weight: 600; }
+  .f-title { font-weight: 700; font-size: 16px; margin: 0; flex: 1 1 260px; }
+  .f-body { color: var(--text-dim); margin: 4px 0 0; font-size: 14.5px; }
+  .f-body + .f-body { margin-top: 8px; }
+  .f-body .k { color: var(--text); font-weight: 600; }
+  code, .path {
+    font-family: var(--mono); font-size: 12.5px; background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; color: var(--text);
+    word-break: break-word;
+  }
+  .fix { margin-top: 10px; font-size: 13.5px; color: var(--text-dim); padding-top: 10px; border-top: 1px dashed var(--border); }
+  .fix b { color: var(--ok); font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+
+  /* ── Phase blocks ── */
+  .phase {
+    border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+    margin-bottom: 18px; background: var(--surface);
+  }
+  .phase-head {
+    display: flex; align-items: center; gap: 14px; padding: 16px 20px;
+    background: var(--surface-2); border-bottom: 1px solid var(--border);
+  }
+  .phase-tag {
+    font-family: var(--mono); font-weight: 700; font-size: 13px; letter-spacing: .05em;
+    padding: 4px 10px; border-radius: 6px; color: #fff; white-space: nowrap;
+  }
+  .phase-tag.p0 { background: var(--crit); }
+  .phase-tag.p1 { background: var(--high); }
+  .phase-tag.p2 { background: var(--low); }
+  .phase-tag.p3 { background: var(--accent); }
+  .phase-title { font-weight: 700; font-size: 16px; flex: 1; }
+  .phase-eta { font-family: var(--mono); font-size: 12px; color: var(--text-faint); }
+  .phase-body { padding: 16px 20px 18px; }
+  .phase-body > p.goal { margin: 0 0 12px; color: var(--text-dim); }
+  ul.items { margin: 0; padding: 0; list-style: none; }
+  ul.items li {
+    padding: 8px 0 8px 26px; position: relative; border-top: 1px solid var(--border);
+    font-size: 14.5px; color: var(--text-dim);
+  }
+  ul.items li:first-child { border-top: none; }
+  ul.items li::before {
+    content: ""; position: absolute; left: 4px; top: 15px; width: 7px; height: 7px;
+    border-radius: 2px; background: var(--accent); opacity: .7;
+  }
+  ul.items li b { color: var(--text); font-weight: 650; }
+  ul.items li .ref { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+
+  /* ── Generic prose ── */
+  p.prose { color: var(--text-dim); max-width: 70ch; }
+  .callout {
+    background: var(--accent-soft); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 18px; margin: 16px 0; font-size: 14px; color: var(--text-dim);
+  }
+  .callout b { color: var(--text); }
+
+  /* ── Table ── */
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 620px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); font-weight: 600; background: var(--surface-2); }
+  td { color: var(--text-dim); }
+  td:first-child { font-family: var(--mono); font-size: 12px; color: var(--text); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+
+  /* ── Screen share flow ── */
+  .flow { display: grid; gap: 10px; margin: 18px 0; }
+  .flow-step {
+    display: grid; grid-template-columns: 30px 1fr; gap: 14px; align-items: start;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+  }
+  .flow-step .dot {
+    font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--crit);
+    background: var(--crit-soft); border-radius: 6px; width: 30px; height: 30px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .flow-step h4 { margin: 0 0 3px; font-size: 15px; }
+  .flow-step p { margin: 0; font-size: 13.5px; color: var(--text-dim); }
+
+  /* ── Tradeoffs ── */
+  .trade { display: grid; grid-template-columns: 1fr; gap: 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .trade-row { display: grid; grid-template-columns: 200px 1fr; gap: 0; border-top: 1px solid var(--border); }
+  .trade-row:first-child { border-top: none; }
+  .trade-row .t-k { padding: 12px 16px; font-weight: 650; background: var(--surface-2); font-size: 14px; border-right: 1px solid var(--border); }
+  .trade-row .t-v { padding: 12px 16px; color: var(--text-dim); font-size: 14px; }
+
+  .decision {
+    background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px;
+    padding: 18px 20px; margin-bottom: 14px;
+  }
+  .decision .q { font-weight: 700; font-size: 16px; margin: 0 0 6px; }
+  .decision .q::before { content: "?"; font-family: var(--mono); color: var(--accent); font-weight: 800; margin-right: 8px; }
+  .decision p { margin: 0; color: var(--text-dim); font-size: 14px; }
+  .decision .rec { margin-top: 8px; font-size: 13.5px; }
+  .decision .rec b { color: var(--ok); font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+
+  hr.rule { border: none; border-top: 1px solid var(--border); margin: 0; }
+  .foot { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-faint); font-size: 13px; font-family: var(--mono); }
+
+  @media (max-width: 640px) {
+    .trade-row { grid-template-columns: 1fr; }
+    .trade-row .t-k { border-right: none; border-bottom: 1px solid var(--border); }
+    .wrap { padding: 0 16px 80px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="masthead">
+    <div class="eyebrow">Production Stabilization Audit</div>
+    <h1>Voxium: Stabilize, Secure, Fix Screen Share</h1>
+    <p class="dek">A five-front code audit of the live v1.7.3 platform, consolidated into a prioritized fix plan — plus a root-cause diagnosis of the screen-share bug and a phased design for end-to-end DM encryption.</p>
+    <div class="meta-row">
+      <span><b>Scope</b> server · websocket/voice · desktop · schema/perf · admin</span>
+      <span><b>Baseline</b> 887 + 56 tests green · typecheck clean</span>
+      <span><b>Method</b> 5 parallel agents · critical claims verified in source</span>
+    </div>
+    <div class="verdict" style="border-left-color: var(--ok);">
+      <p><strong style="color: var(--ok);">Update — P0 shipped.</strong> The two criticals (voice-reconnect kick, missing indexes), the DM 10-minute call timeout, ghost-voice-on-crash, the channel-bricking router bug, and the message-send hot-path regression are <strong>fixed, tested, and committed</strong> on <code>fix/p0-stabilization</code>. A two-round adversarial multi-agent review caught two regressions the fixes themselves introduced — both fixed. 899 server + 56 desktop tests pass; typecheck &amp; lint clean. Detail below is the original audit.</p>
+    </div>
+    <div class="verdict" style="border-left-color: var(--ok);">
+      <p><strong style="color: var(--ok);">Update — P1 shipped.</strong> Commit <code>ee09962</code>, pushed on <code>fix/p0-stabilization</code>, PR to <code>develop</code> open. The full screen-share protocol fix (HIGH-1: producer-close event, ACK-all-paths, slot-claim-before-produce, mute filters, consumer routing, video quality + recv-cap lift) and every High security/authz gap: SPEAK bypass (HIGH-4), direct-join route removed (HIGH-6), report-ban hierarchy (HIGH-7), private-channel visibility rooms with live resync (HIGH-8), server-deafen enforcement (HIGH-12). Two-agent review; findings fixed. 945 server + 67 desktop tests green.</p>
+    </div>
+    <div class="verdict" style="border-left-color: var(--crit);">
+      <p><strong style="color: var(--crit);">Update — production is MULTI-NODE (Decision D1 answered).</strong> Prod runs <strong>2 horizontally-scaled instances today and will grow</strong>. That converts HIGH-15 from "conditional" to the <strong>top open defect</strong>: nginx <code>ip_hash</code> pins by client IP, not by channel, so two users in the same voice channel can land on different nodes with no media path between them — voice appears randomly broken depending on who connects where. It also makes the P0 boot cleanup (<code>clearVoiceState()</code>) wrong for this topology: it wipes <em>all</em> <code>voice:*</code> mirror keys on any node's restart, including the peer node's live state. Both are pulled into a new phase <strong>P2-MN</strong> below, ahead of the original P2.</p>
+    </div>
+    <div class="verdict">
+      <p><strong>The tests pass, but the platform is unstable at the seams the tests don't cover.</strong> Every defect below lives in runtime behavior — reconnect handling, multi-user races, Redis lifecycle, socket authorization, and query cost at scale — which unit tests with mocked Prisma/Redis/Socket.IO structurally cannot catch. Two defects are actively degrading production today: voice drops users ~10–35s after any network blip, and screen share breaks after the first use per session. Neither shows up red in CI.</p>
+    </div>
+  </header>
+
+  <!-- ══ 1. SUMMARY ══ -->
+  <section id="summary">
+    <div class="sec-head"><span class="sec-num">01</span><h2>What the audit found</h2></div>
+    <p class="sec-sub">~70 distinct defects across the five surfaces. Counts below are post-deduplication (several were independently reported by more than one agent, which raises confidence). Severity reflects production impact, not code ugliness.</p>
+    <div class="tiles">
+      <div class="tile c"><div class="n">2</div><div class="lbl">Critical</div><div class="desc">Actively breaking prod: voice reconnect kills the session; missing indexes make deletes O(N²).</div></div>
+      <div class="tile h"><div class="n">15</div><div class="lbl">High</div><div class="desc">Broken features, auth gaps, and scale cliffs — screen share, DM-call timeout, private-channel leak.</div></div>
+      <div class="tile m"><div class="n">~30</div><div class="lbl">Medium</div><div class="desc">Races, 500s on common gestures, redundant queries, UX state-machine bugs.</div></div>
+      <div class="tile l"><div class="n">~25</div><div class="lbl">Low</div><div class="desc">Cascade indexes, unbounded lists, log hygiene, cosmetic state leaks.</div></div>
+    </div>
+    <div class="callout"><b>Cross-confirmed by multiple agents</b> (highest confidence): the screen-share producer leak + no-ACK hang, the DM-voice 10-minute TTL, the server-voice Redis mirror with no TTL, the private-channel real-time leak, and the debug <code>fetchSockets()</code> on the message-send hot path.</div>
+  </section>
+
+  <!-- ══ 2. CRITICAL ══ -->
+  <section id="critical">
+    <div class="sec-head"><span class="sec-num">02</span><h2>Critical — fix before anything else</h2></div>
+    <p class="sec-sub">Both are verified in source. Together they explain the two most-felt symptoms: "voice randomly disconnects" and "the server hangs when we delete things."</p>
+
+    <div class="finding c">
+      <div class="f-top">
+        <span class="chip c">Critical</span><span class="chip cat">race · resource leak</span><span class="chip confirmed">verified in source</span>
+        <span class="f-id">CRIT-1</span>
+      </div>
+      <p class="f-title">Voice/DM cleanup is keyed by userId with no socket-ownership check — the client's own reconnect flow kills its session</p>
+      <p class="f-body"><span class="k">Where:</span> <span class="path">voiceHandler.ts:899</span> <code>leaveCurrentVoiceChannel</code> tears down <code>channelUsers.get(userId)</code> using <code>socket.data.voiceChannelId</code>, never comparing the departing socket to the session owner. Same shape in <span class="path">dmVoiceHandler.ts:127</span>.</p>
+      <p class="f-body"><span class="k">Failure:</span> a network blip makes Socket.IO reconnect with a <em>new</em> socket; the client auto re-emits <code>voice:join</code>, which overwrites the per-user media entry (<span class="path">voiceHandler.ts:244</span>). When the old socket's ping finally times out (~10–35s later), its <code>disconnecting</code> handler finds the <em>new</em> session under that userId and closes its transports/producers — kicking the user out of voice and leaking two UDP ports each time. For DM calls it force-ends the call and re-rings the peer.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Store <code>socketId</code> on the media/call state; both leave paths must no-op unless <code>state.socketId === socket.id</code>. Add regression tests for reconnect-rejoin and stale-socket-disconnect.</div>
+    </div>
+
+    <div class="finding c">
+      <div class="f-top">
+        <span class="chip c">Critical</span><span class="chip cat">schema · performance</span><span class="chip confirmed">verified in source</span>
+        <span class="f-id">CRIT-2</span>
+      </div>
+      <p class="f-title">Missing indexes turn routine deletes into full-table scans and every socket connect into a sequential scan</p>
+      <p class="f-body"><span class="k">Where:</span> <span class="path">schema.prisma</span> — no index on <code>messages.reply_to_id</code>, <code>messages.author_id</code>, a plain <code>messages.created_at</code>, <code>server_members.server_id</code> (PK is <code>[userId, serverId]</code>), or <code>conversations.user2_id</code>.</p>
+      <p class="f-body"><span class="k">Failure:</span> <code>reply_to_id</code>'s <code>ON DELETE SET NULL</code> runs <code>UPDATE … WHERE reply_to_id=$1</code> per deleted row; with no index, deleting a channel of 50k messages scans the messages table 50k times (O(N²) — can lock the DB for minutes to hours). <code>conversations.user2_id</code> is scanned twice on <em>every</em> socket connect; <code>messages.created_at</code> is full-scanned <em>every 5 seconds</em> by the admin live-metrics emitter.</p>
+      <div class="fix"><b>Fix</b> &nbsp;One additive migration (indexes only, no data change) covering the five above plus the low-severity cascade indexes in §5. Zero application-code risk.</div>
+    </div>
+  </section>
+
+  <!-- ══ 3. HIGH ══ -->
+  <section id="high">
+    <div class="sec-head"><span class="sec-num">03</span><h2>High — broken features, auth gaps, scale cliffs</h2></div>
+    <p class="sec-sub">Fifteen findings. Grouped by theme. Screen share (HIGH-1) has its own deep-dive in §4.</p>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">voice · feature broken</span><span class="f-id">HIGH-1</span></div>
+      <p class="f-title">Screen share breaks after first use, has no sound for muted/PTT sharers, and is starved to blur → see §4</p>
+      <p class="f-body">Three compounding root causes plus eight adjacent defects. Detailed separately because it needs a coordinated server+client change and is one of your two named priorities.</p>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">reliability</span><span class="chip confirmed">verified</span><span class="f-id">HIGH-2</span></div>
+      <p class="f-title">DM calls silently break after exactly 10 minutes</p>
+      <p class="f-body"><span class="path">dmVoiceHandler.ts:88</span> sets a 600s TTL on the call-state Redis keys once at join and never refreshes it. Past 10 min: signaling/renegotiation stops, mute/deaf no-op, and hang-up never emits <code>dm:voice:ended</code> or writes the "call ended" message. The <code>dm:voice:active</code> set entry never expires, permanently inflating call stats.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Refresh TTLs on activity (mute/deaf/signal) or a heartbeat; give <code>dm:voice:active</code> membership a reconciliation path. Independently found by the perf audit too.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">reliability · crash-recovery</span><span class="f-id">HIGH-3</span></div>
+      <p class="f-title">Server-voice Redis mirror has no TTL and no boot cleanup — crashes leave ghost users stuck in voice forever</p>
+      <p class="f-body"><code>voice:active</code>, <code>voice:channel:users:*</code>, <code>voice:user:*</code>, <code>voice:screen:*</code> are written without expiry; startup only clears presence keys. A <code>kill -9</code> or redeploy with users in voice leaves phantom occupants that every future connecting client sees, and permanently skewed admin stats.</p>
+      <div class="fix"><b>Fix</b> &nbsp;TTL the mirror keys and clear this node's voice keys (by <code>NODE_ID</code>) on boot, mirroring the existing presence-cleanup path.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">security · authz bypass</span><span class="chip confirmed">verified</span><span class="f-id">HIGH-4</span></div>
+      <p class="f-title">SPEAK permission bypass via client-controlled appData</p>
+      <p class="f-body"><span class="path">voiceHandler.ts:401</span> skips the SPEAK check when <code>data.appData.type === 'screen-audio'</code>, but <code>appData</code> is attacker-controlled. A member denied SPEAK can transmit their microphone by tagging the producer <code>screen-audio</code> — which also exempts it from silence-detection pausing, so it forwards continuously.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Derive the "is screen audio" fact server-side from an active screen-share for that user, not from client appData.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">reliability · error handling</span><span class="f-id">HIGH-5</span></div>
+      <p class="f-title">A transient worker error bricks a voice channel until process restart</p>
+      <p class="f-body"><span class="path">mediasoupManager.ts:49</span> caches the router-creation promise but only deletes it on success. If <code>createRouter()</code> rejects once, the rejected promise stays cached and every future join to that channel gets the same stale rejection.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Wrap the <code>pendingRouters</code> bookkeeping in <code>try/finally</code> so failures clear the cache.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">security · business-logic</span><span class="f-id">HIGH-6</span></div>
+      <p class="f-title">Direct server-join route bypasses invites, invite-lock, and member limits</p>
+      <p class="f-body"><span class="path">servers.ts:271</span> <code>POST /servers/:id/join</code> lets any verified user join any server by ID — no invite, no <code>invitesLocked</code> check, no <code>maxMembers</code> enforcement. The client never calls it, so it's pure live attack surface: a locked or capacity-capped server can still be joined at will by anyone who learns its ID.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Remove the route (client uses <code>/invites/:code/join</code>) or gate it behind the same invite/lock/limit checks.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">security · role hierarchy</span><span class="f-id">HIGH-7</span></div>
+      <p class="f-title">An admin can ban a peer admin via report resolution</p>
+      <p class="f-body"><span class="path">admin.ts:2156</span> the report-resolution ban only blocks banning <em>superadmins</em>, missing the "admins can't ban peer admins" rule the dedicated ban route enforces. Also skips <code>broadcastMemberLeft</code>, so the banned admin lingers in member lists/rooms.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Reuse the canonical ban helper/guard on both paths instead of a bespoke check.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">security · confidentiality</span><span class="chip confirmed">cross-confirmed</span><span class="f-id">HIGH-8</span></div>
+      <p class="f-title">Private (VIEW_CHANNEL-denied) channels leak content and voice presence over WebSocket</p>
+      <p class="f-body">REST reads enforce <code>VIEW_CHANNEL</code>, but every member's socket is joined to <em>all</em> text channel rooms and <code>message:new</code> is broadcast room-wide with no per-recipient filter (<span class="path">messages.ts:251</span>). Voice events (<code>voice:user_joined</code>, <code>speaking</code>, <code>screen_share:start</code>) leak the same way (<span class="path">voiceHandler.ts:302</span>). A member denied view still receives full message content and occupancy live — only client-side code hides it.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Filter recipients by <code>VIEW_CHANNEL</code> at emit time (per-channel sub-rooms scoped to permitted members, refreshed on override change), for both text and voice broadcasts.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">performance</span><span class="chip confirmed">cross-confirmed</span><span class="f-id">HIGH-9</span></div>
+      <p class="f-title">A leftover debug <code>fetchSockets()</code> + console.log runs on every message send</p>
+      <p class="f-body"><span class="path">messages.ts:253</span> awaits a cross-node room fetch (serializing every socket in the channel over the Redis adapter) purely to log recipient user IDs. In a 500-member channel at 10 msg/s that's 5,000 socket serializations/s plus log spam that leaks who's subscribed to each channel.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Delete it. Pure regression, zero behavior change.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">performance · multi-node</span><span class="f-id">HIGH-10</span></div>
+      <p class="f-title">Per-user events fetch every socket on every node (7 call sites)</p>
+      <p class="f-body">Friend requests, DM-conversation creation, and member kicks use <code>io.fetchSockets()</code> (all sockets, all nodes) to target one user, when a per-user room <code>user:{id}</code> already exists (<span class="path">friends.ts</span>, <span class="path">dm.ts:141</span>, <span class="path">servers.ts:553</span>). With 10k sockets, every friend action round-trips ~10k serialized handshakes through the adapter.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Replace with <code>io.to('user:'+id).emit(...)</code> — the pattern already used correctly in admin code.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">performance · scale cliff</span><span class="f-id">HIGH-11</span></div>
+      <p class="f-title">Socket connect is an N+1 avalanche → a deploy becomes a self-inflicted DB stampede</p>
+      <p class="f-body"><span class="path">socketServer.ts:346,512</span> per connection runs ~4 channel-visibility queries per server, then per membership a Redis scan over <em>every</em> globally-active voice channel plus a 5-query permission check per visible voice channel. A user in 20 servers ≈ 80 DB queries + thousands of Redis ops. A deploy that reconnects 5k clients fires ~400k queries in seconds — taking down Postgres exactly during recovery.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Batch visibility into one query per connect; scope the voice-state read to the user's servers; memoize per-request server/membership lookups.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">voice · moderation broken</span><span class="f-id">HIGH-12</span></div>
+      <p class="f-title">Server-deafen is not enforced on the client — the dead-code selector matches nothing</p>
+      <p class="f-body"><span class="path">voiceStore.ts:1130</span> mutes <code>audio[data-voice-remote]</code>, an attribute no element ever gets, and the server doesn't pause the target's consumers either. A moderator "deafens" a user, their UI locks to deafened, yet they keep hearing the whole channel indefinitely.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Iterate <code>get().remoteAudios</code> (as <code>toggleDeaf</code> does) and/or pause the target's consumers server-side.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">voice · lifecycle</span><span class="f-id">HIGH-13</span></div>
+      <p class="f-title">Voice never re-joins after a reconnect in any logout→login session</p>
+      <p class="f-body"><span class="path">socket.ts:235</span> <code>disconnectSocket()</code> empties the reconnect-callback array on logout, and the only subscriber registers once at module import (<span class="path">voiceStore.ts:1888</span>). After a logout+login without restarting the app, any network drop reconnects the socket but never re-emits <code>voice:join</code> — UI shows "Connected", audio is dead.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Re-register the reconnect handler on login, or don't tear down module-level subscriptions on logout.</div>
+    </div>
+
+    <div class="finding h">
+      <div class="f-top"><span class="chip h">High</span><span class="chip cat">correctness · privacy</span><span class="f-id">HIGH-14</span></div>
+      <p class="f-title">Server messages inject into open DMs, and logout leaks the previous account's data</p>
+      <p class="f-body">Two frontend state-isolation bugs: (a) server chat handlers only check <code>channelId === activeChannelId</code>, which survives switching to DM view, so a message posted in your last-viewed channel appends into the DM you're reading and falsely marks the channel read (<span class="path">MainLayout.tsx:126</span>). (b) <code>logout()</code> resets none of the stores (<span class="path">authStore.ts:131</span>) — on a shared machine the next user sees the prior user's servers, DM list, and even their support-ticket transcript until refetches land.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Add an "in server view" guard to server chat handlers; add a full store-reset to logout.</div>
+    </div>
+
+    <div class="finding c">
+      <div class="f-top"><span class="chip c">Critical</span><span class="chip cat">multi-node · CONFIRMED in prod</span><span class="f-id">HIGH-15</span></div>
+      <p class="f-title">Multi-node voice is silently dead — users on different nodes can't hear each other</p>
+      <p class="f-body"><span class="path">voiceHandler.ts:197</span> nginx <code>ip_hash</code> pins by client IP, not channel, so two users in one channel on different nodes each get their own local mediasoup router with no media path between them. Cross-node server mute/deafen/force-move also no-op (target lookups are node-local). <b>Production runs 2 nodes today (D1 answered)</b> — this is live user impact and is now the top open defect, scheduled as phase P2-MN.</p>
+      <div class="fix"><b>Fix</b> &nbsp;Channel-affinity routing (all users of a channel reach the Router-owning node, discoverable via <code>voice:channel:node</code> in Redis) or cross-node router piping (<code>router.pipeToRouter</code> equivalents over the network). Affinity is the pragmatic first step; piping is the scale-out end-state.</div>
+    </div>
+  </section>
+
+  <!-- ══ 4. SCREEN SHARE ══ -->
+  <section id="screenshare">
+    <div class="sec-head"><span class="sec-num">04</span><h2>Screen share — root cause</h2></div>
+    <p class="sec-sub">The TODO marked this "fixed," but it regressed because the fix was verified only on the first share of a session — which always works. The failure is deterministic on the second share. Three independent faults compound.</p>
+
+    <div class="flow">
+      <div class="flow-step">
+        <div class="dot">1</div>
+        <div>
+          <h4>Producer slot leak → second share hangs the client (the core bug)</h4>
+          <p>There is no <code>voice:producer:close</code> event anywhere in the protocol (confirmed in <span class="path">types.ts</span>). Stopping a share closes producers <em>client-side only</em>; the server keeps them until the user leaves the channel. Mic (1) + screen video (2) + screen audio (3) → stop → share again: video is producer 4, and screen audio hits the <code>producers.size &gt;= 4</code> cap (<span class="path">voiceHandler.ts:410</span>). The cap path <code>return</code>s <b>without calling the ACK callback</b>, and the client's <code>produce()</code> awaits that ACK with no timeout — so it hangs forever, wedging the whole send transport. Viewers see nothing; the OS capture indicator stays on.</p>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="dot">2</div>
+        <div>
+          <h4>Screen system-audio is muted for any muted or push-to-talk sharer</h4>
+          <p>Every mute path — produce-time pause, <code>pauseUserAudio</code>, <code>voice:mute/deaf/server_mute</code>, and all client toggles + the PTT hook — pauses <em>every</em> audio-kind producer with no <code>appData.type</code> filter. PTT users are permanently server-muted, so their stream carries game audio only while holding the key. "Screen share has no sound."</p>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="dot">3</div>
+        <div>
+          <h4>Video is starved to blur</h4>
+          <p>A hard 1.5 Mbps cap on every recv transport (shared across all consumers), a 600 kbps bandwidth seed, and a video producer created with no <code>encodings</code>/<code>maxBitrate</code>, no <code>contentHint</code>, and VP8-only. 1080p+ desktop content is permanently unreadable, with a multi-second blurry warm-up per viewer.</p>
+        </div>
+      </div>
+    </div>
+
+    <p class="prose"><b>Adjacent defects</b> that must be handled in the same change: the screen-audio consumer arrives as <code>kind:'audio'</code> and is misrouted as mic audio on viewers (survives deafen; orphans the mic <code>&lt;audio&gt;</code> element); stale <code>isScreenSharing</code> after transport auto-rejoin; capture stream + half-created producer leaked on the error path with no user feedback; and — critically — once #1 is fixed by closing screen producers on stop, <span class="path">voiceStore.ts:976</span> will start deleting the sharer's <em>mic</em> element on every stop unless fixed together.</p>
+
+    <div class="callout"><b>Fix shape:</b> add a <code>voice:producer:close</code> event (client → server, closes the specific producer + notifies consumers); ACK every <code>voice:produce</code> failure path and add a client-side timeout; filter all pause/resume by <code>appData.type</code> so screen audio is never silence/mute-paused; route the screen-audio consumer by <code>appData</code>, not <code>kind</code>; and give the video producer real <code>encodings</code> + <code>contentHint:'detail'</code> and lift the recv cap for screen video. This is a coordinated server+client change with its own test pass (share → stop → share×3, muted sharer, PTT sharer, deafened viewer, late joiner).</div>
+  </section>
+
+  <!-- ══ 5. MEDIUM / LOW ══ -->
+  <section id="mediumlow">
+    <div class="sec-head"><span class="sec-num">05</span><h2>Medium &amp; low — the long tail</h2></div>
+    <p class="sec-sub">~55 findings. The medium ones cause visible glitches and occasional 500s; the low ones are hygiene and pre-scale hardening. Representative selection below; the full list drives the backlog in §6.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Severity</th><th>Defect</th><th>Symptom</th></tr></thead>
+        <tbody>
+          <tr><td>MED-1</td><td>Medium</td><td>Reaction toggle is check-then-act, no transaction</td><td>Double-clicking a reaction intermittently 500s and desyncs</td></tr>
+          <tr><td>MED-2</td><td>Medium</td><td>bcrypt truncates &gt;72 bytes; validator counts chars not bytes</td><td>Two long CJK/emoji passwords sharing a 72-byte prefix authenticate identically</td></tr>
+          <tr><td>MED-3</td><td>Medium</td><td>Login skips bcrypt when email unknown (timing)</td><td>Response-time delta enumerates registered emails — violates project's own convention</td></tr>
+          <tr><td>MED-4</td><td>Medium</td><td>Username uniqueness case-sensitive at signup, insensitive at lookup</td><td>Register "Alice" vs "alice" → friend requests route to impersonator</td></tr>
+          <tr><td>MED-5</td><td>Medium</td><td>Edit/delete/react limited by IP + double-charged (global + route)</td><td>Users behind one NAT share a halved 429 budget</td></tr>
+          <tr><td>MED-6</td><td>Medium</td><td>Ghost voice user resurrected on disconnect-mid-join</td><td>Phantom occupant visible to everyone, never cleaned</td></tr>
+          <tr><td>MED-7</td><td>Medium</td><td>mediasoup worker death leaves users stuck, no notification</td><td>Silent dead channel until each user manually rejoins</td></tr>
+          <tr><td>MED-8</td><td>Medium</td><td>Speaking indicator sticks ON when you mute mid-sentence</td><td>Green ring + mic-off icon shown together to everyone</td></tr>
+          <tr><td>MED-9</td><td>Medium</td><td>Concurrent <code>joinChannel</code> leaks a live mic stream</td><td>OS recording indicator stays on after leaving voice</td></tr>
+          <tr><td>MED-10</td><td>Medium</td><td>Attachment PUT never checks <code>res.ok</code></td><td>Failed S3 upload sent as a permanently broken attachment</td></tr>
+          <tr><td>MED-11</td><td>Medium</td><td>Rapid server-switch clobbers state (no post-await staleness check)</td><td>Sidebar shows server B, renders server A's channels/members</td></tr>
+          <tr><td>MED-12</td><td>Medium</td><td>Admin queries: cartesian top-servers, unbounded top-uploaders IN-list, whole-table exports</td><td>One dashboard load can pin Postgres for minutes / error out</td></tr>
+          <tr><td>MED-13</td><td>Medium</td><td>Non-atomic admin ban/delete-user flows (N+1, no transaction)</td><td>Half-migrated state if it fails midway; slow under many IPs/servers</td></tr>
+          <tr><td>MED-14</td><td>Medium</td><td>Message search uses ILIKE <code>%q%</code>, no trigram/FTS index</td><td>Search scans every message in a big server</td></tr>
+          <tr><td>MED-15</td><td>Medium</td><td>Channel creation seeds ChannelRead per member, unbounded</td><td>Creating a channel in a 10k-member server is multi-second, lock-heavy</td></tr>
+          <tr><td>LOW-*</td><td>Low ×~25</td><td>Cascade indexes; unbounded <code>GET /dm</code> &amp; admin lists; admin-store fetchers with no catch; notification raw <code>@[id]</code> markup; presence DB write amplification; ICE candidate queue; whole-store re-renders; force-move client-only; PTT rate-limit dead-mic; and more</td><td>Pre-scale hygiene; isolated cosmetic/log/perf issues</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><b>Schema safety note (LOW but worth a decision):</b> <code>User → Server(owner)</code> is <code>onDelete: Cascade</code>, so any <code>user.delete()</code> silently deletes every community that user owns (with the O(N²) trigger cost of CRIT-2). The admin route guards this, but the <em>default</em> path is destructive. Switching to <code>Restrict</code> + explicit transfer/delete makes it fail-safe.</div>
+  </section>
+
+  <!-- ══ 6. PLAN ══ -->
+  <section id="plan">
+    <div class="sec-head"><span class="sec-num">06</span><h2>Stabilization plan — sequenced</h2></div>
+    <p class="sec-sub">Four phases, each independently shippable. Every change ships with tests per the project's mandatory-test convention, and I verify behavior end-to-end (not just green CI) before moving on. Order is by production impact and blast radius, not by area.</p>
+
+    <div class="phase">
+      <div class="phase-head"><span class="phase-tag p0" style="background: var(--ok);">P0 ✓ SHIPPED</span><span class="phase-title">Stop the bleeding</span><span class="phase-eta">committed on fix/p0-stabilization</span></div>
+      <div class="phase-body">
+        <p class="goal">Fixes users feel immediately, plus changes with no behavioral downside.</p>
+        <ul class="items">
+          <li><b>CRIT-1</b> socket-ownership guard on both voice + DM leave paths <span class="ref">voice reconnect drops</span></li>
+          <li><b>CRIT-2</b> additive index migration (5 hot indexes + cascade indexes) <span class="ref">O(N²) deletes, per-connect scans</span></li>
+          <li><b>HIGH-2 / HIGH-3</b> DM-voice TTL refresh + server-voice mirror TTL &amp; boot cleanup <span class="ref">10-min call death, ghost voice</span></li>
+          <li><b>HIGH-9</b> delete the debug <code>fetchSockets()</code> on message send <span class="ref">hot-path regression</span></li>
+          <li><b>HIGH-5</b> <code>try/finally</code> the router-creation cache <span class="ref">channel bricking</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="phase-tag p1" style="background: var(--ok);">P1 ✓ SHIPPED</span><span class="phase-title">Screen share + security &amp; authz gaps</span><span class="phase-eta">commit ee09962 · PR to develop open</span></div>
+      <div class="phase-body">
+        <p class="goal">The full screen-share fix and every High-severity security/authorization defect. All six landed with 56 new tests (945 server + 67 desktop green).</p>
+        <ul class="items">
+          <li><b>HIGH-1</b> screen share: producer-close event, ACK-all-paths, appData-filtered mute, consumer routing, video quality <span class="ref">§4</span></li>
+          <li><b>HIGH-4</b> SPEAK bypass — derive screen-audio server-side <span class="ref">mic-through-screen-audio</span></li>
+          <li><b>HIGH-6</b> remove/guard the direct server-join route <span class="ref">invite/limit bypass</span></li>
+          <li><b>HIGH-7</b> unify the admin-ban hierarchy check on the report path <span class="ref">admin-bans-admin</span></li>
+          <li><b>HIGH-8</b> VIEW_CHANNEL filtering on text + voice socket broadcasts <span class="ref">private-channel leak</span></li>
+          <li><b>HIGH-12</b> enforce server-deafen on the client / server consumers <span class="ref">moderation no-op</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="phase-tag p0">P2-MN</span><span class="phase-title">Multi-node correctness — prod runs 2 nodes today</span><span class="phase-eta">NEW · elevated by Decision D1</span></div>
+      <div class="phase-body">
+        <p class="goal">Production is horizontally scaled (2 instances, growing). Voice between users on different nodes is broken right now, and any node restart wipes the peer node's voice mirror. This phase makes the voice path node-aware; it goes before the original P2.</p>
+        <ul class="items">
+          <li><b>HIGH-15</b> channel-affinity voice routing: all participants of a channel must reach the node that owns its Router (<code>voice:channel:node</code> in Redis is already written). Decide affinity mechanism — voice-scoped redirect/proxy to the owning node, or cross-node RTP piping — then implement. <span class="ref">cross-node voice dead</span></li>
+          <li><b>Boot cleanup scoping</b> — <code>clearVoiceState()</code> (shipped in P0, explicitly single-node per its own comment) deletes ALL <code>voice:*</code> mirror keys on startup. Scope to this node's channels via <code>voice:channel:node == NODE_ID</code>, and add TTL/heartbeat reaping so a <em>crashed</em> peer's state is still collected. <span class="ref">deploy wipes peer state</span></li>
+          <li><b>Cross-node moderation</b> — server mute/deafen/force-move resolve targets in node-local maps; a moderator on node A silently no-ops against a target on node B. Route through the channel-owning node (falls out of affinity) or relay via Redis pub/sub. <span class="ref">HIGH-15 corollary</span></li>
+          <li><b>Server-deletion voice cleanup broadcast</b> — <code>cleanupServerVoice()</code> only cleans the local node; deleting a server must fan out so every node reaps its own routers/transports. <span class="ref">documented in code</span></li>
+          <li><b>Screen-share slot authority</b> — <code>screenSharers</code> map is node-local (Redis mirror exists); verify the P1 slot-claim + produce authorization holds once affinity lands, and read authority from Redis if signaling can cross nodes. <span class="ref">P1 interaction</span></li>
+          <li><b>Validation</b> — extend <code>scripts/test-multi-node.ts</code> with server-voice scenarios (join/hear/mute/screen-share across nodes) + a 2-node run of the voice load test. <span class="ref">12 existing scenarios don't cover server voice media</span></li>
+          <li><b>Interim mitigation (optional, quick)</b> — until affinity lands, route WebSocket upgrades to a single node (HTTP stays balanced) so all voice users share one node; removes the user-facing breakage at the cost of voice headroom. <span class="ref">stopgap</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="phase-tag p2">P2</span><span class="phase-title">Correctness, races &amp; the frontend state machine</span><span class="phase-eta">the visible glitches</span></div>
+      <div class="phase-body">
+        <p class="goal">The medium defects that produce 500s, desyncs, and phantom UI — plus the two remaining high frontend/scale items.</p>
+        <ul class="items">
+          <li><b>HIGH-13 / HIGH-14</b> voice reconnect-callback lifecycle; server-view guard; logout store reset <span class="ref">dead audio, cross-account leak</span></li>
+          <li><b>HIGH-11</b> flatten the socket-connect N+1 <span class="ref">deploy stampede</span></li>
+          <li><b>HIGH-10</b> per-user room targeting (7 sites) <span class="ref">all-node fetch</span></li>
+          <li><b>MED-1…MED-11</b> reaction race, bcrypt bytes, login timing, username case, rate-limit keys, mic-stream races, speaking-indicator, attachment <code>res.ok</code>, server-switch staleness</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="phase-tag p3">P3</span><span class="phase-title">Scale hardening &amp; hygiene</span><span class="phase-eta">before the next growth step</span></div>
+      <div class="phase-body">
+        <p class="goal">Cost-at-scale and the low-severity long tail. Batchable; lower urgency.</p>
+        <ul class="items">
+          <li>Admin query rewrites (top-servers, top-uploaders, exports, ban/delete atomicity) <span class="ref">MED-12/13</span></li>
+          <li>Message-search trigram/FTS index; message-send query dedup; ChannelRead seeding strategy <span class="ref">MED-14/15</span></li>
+          <li>Dependency updates: nodemailer + admin-app axios/react-router/ws/form-data <span class="ref">see note</span></li>
+          <li>Cascade-delete safety (owner <code>Restrict</code> + transfer); unbounded-list <code>take</code>s; admin-store catch blocks; notification mention rendering; the ~25 LOW items</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout"><b>On the dependency audit:</b> <code>pnpm audit</code> shows 27 high advisories, but most (hono, lodash, effect, path-to-regexp) are transitive dev-tooling under Prisma — not in the runtime path. The genuinely actionable ones are direct deps: <code>nodemailer</code> (server) and <code>axios</code>/<code>react-router</code>/<code>ws</code>/<code>form-data</code> (admin app). These go in P3 unless you want them pulled forward.</div>
+  </section>
+
+  <!-- ══ 7. ENCRYPTION ══ -->
+  <section id="encryption">
+    <div class="sec-head"><span class="sec-num">07</span><h2>Encryption — securing user data</h2></div>
+    <p class="sec-sub">"Encryption" splits into two very different layers. The roadmap and Architecture.md already commit to the honest framing: server channels stay protected <em>by</em> the server (TLS + at-rest), DMs get optional protection <em>from</em> the server (E2E). I'd build it in that order.</p>
+
+    <div class="phase">
+      <div class="phase-head"><span class="phase-tag p0" style="background:var(--ok)">A</span><span class="phase-title">Baseline data-at-rest &amp; in-transit — no UX change</span></div>
+      <div class="phase-body">
+        <p class="goal">Verifiable "the data is secured" without touching the product surface. Mostly infra + a few code checks.</p>
+        <ul class="items">
+          <li>Confirm TLS everywhere (nginx already documented); enforce HTTPS/WSS, HSTS <span class="ref">in transit</span></li>
+          <li>Postgres at-rest: encrypted volume / managed-PG encryption; verify backups are encrypted <span class="ref">disk-level</span></li>
+          <li>S3 server-side encryption (SSE) on the assets bucket <span class="ref">attachments/avatars</span></li>
+          <li>Audit that no sensitive material is logged (ties to HIGH-9's user-id logging); confirm TOTP secrets' AES-256-GCM (already done) and extend the pattern to any other secret columns</li>
+          <li>Encrypt DM/attachment content columns at the application layer if you want defense-in-depth before full E2E <span class="ref">optional</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="phase-tag p1" style="background:var(--ok)">B</span><span class="phase-title">End-to-end encrypted DMs — MVP (opt-in, text)</span></div>
+      <div class="phase-body">
+        <p class="goal">The privacy differentiator. Server stores ciphertext + public keys only; it cannot read message bodies.</p>
+        <ul class="items">
+          <li>New <code>UserDevice</code> model: identity public key (X25519), signed prekey, one-time prekeys, registrationId — <b>private keys never leave the device</b> (Tauri secure storage / OS keychain)</li>
+          <li>Adopt a vetted library (Signal Protocol / Double Ratchet, e.g. libsignal) rather than hand-rolling crypto — client-side only, no third-party service, consistent with the privacy stance</li>
+          <li>Server endpoints serve prekey <em>bundles</em>; message ciphertext stored as an opaque blob with only sender/recipient/timestamp metadata</li>
+          <li>Opt-in per conversation with a key-verification step (safety numbers / QR); "E2E Encrypted" badge</li>
+          <li>Graceful degradation: recipient without keys (old client) → fall back with an explicit warning, never silently plaintext</li>
+          <li>Single device first; multi-device fanout in Phase C</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="phase-tag p2" style="background:var(--ok)">C</span><span class="phase-title">E2E completeness</span></div>
+      <div class="phase-body">
+        <p class="goal">Everything a DM can contain, plus multi-device.</p>
+        <ul class="items">
+          <li>Client-side encrypted attachments: AES-256-GCM before S3 upload, file key wrapped in the E2E message; proxy/cleanup work unchanged on ciphertext</li>
+          <li>Multi-device: per-recipient-device session fanout; encrypted key backup so a new device can be provisioned</li>
+          <li>Client-side search over the locally-decrypted cache (server search can't see ciphertext)</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="prose" style="margin-top:22px"><b>The honest trade-offs</b> — E2E is not free, and each of these is a product decision, not just an engineering one:</p>
+    <div class="trade">
+      <div class="trade-row"><div class="t-k">Server-side search</div><div class="t-v">Breaks for E2E conversations — the server can't index ciphertext. Either exclude E2E DMs from server search or move to client-side search over the local cache.</div></div>
+      <div class="trade-row"><div class="t-k">Notifications</div><div class="t-v">Push/desktop can't show message content server-side — only "New message"; the body is resolved on-device after decrypt.</div></div>
+      <div class="trade-row"><div class="t-k">Moderation / reports</div><div class="t-v">You can't server-inspect E2E DM content (this aligns with the privacy stance). Reporting an E2E DM must attach client-side plaintext chosen by the reporter.</div></div>
+      <div class="trade-row"><div class="t-k">History &amp; device loss</div><div class="t-v">A new device can't read old messages without encrypted key backup; losing all keys means losing message history — by design.</div></div>
+      <div class="trade-row"><div class="t-k">Scope</div><div class="t-v">DMs only. Server channels (many recipients, moderation, search) stay server-side encrypted — E2E group channels are a much larger, separate effort.</div></div>
+    </div>
+  </section>
+
+  <!-- ══ 8. DECISIONS ══ -->
+  <section id="decisions">
+    <div class="sec-head"><span class="sec-num">08</span><h2>What I need from you before building</h2></div>
+    <p class="sec-sub">Four forks materially change the plan. I'll ask these as quick questions alongside this document; here they are in context.</p>
+
+    <div class="decision" style="border-left: 3px solid var(--ok);">
+      <p class="q">Is production single-node or multi-node right now?</p>
+      <p><b>ANSWERED (2026-07-04): multi-node — 2 horizontally-scaled instances, growing with sign-ups.</b> HIGH-15 is therefore live user impact (cross-node voice dead), and the P0 boot cleanup needs NODE_ID scoping. Both pulled into the new phase <b>P2-MN</b>, which now runs before the original P2.</p>
+    </div>
+
+    <div class="decision" style="border-left: 3px solid var(--ok);">
+      <p class="q">Approve the phased order — P0 → P1 → P2 → P3?</p>
+      <p><b>SETTLED by execution:</b> P0 and P1 both shipped in that order. Remaining order is now P2-MN → P2 → P3 (multi-node correctness first, per D1).</p>
+    </div>
+
+    <div class="decision">
+      <p class="q">Encryption: start with baseline (A) or go straight to E2E DMs (B)?</p>
+      <p>Baseline (A) is mostly infra and makes a truthful "data is encrypted at rest and in transit" claim quickly. E2E DMs (B) is the marketable differentiator but is a multi-week client-crypto effort with the trade-offs above.</p>
+      <p class="rec"><b>Recommendation</b> A during stabilization (cheap, no UX risk), then B as a dedicated project once the platform is stable.</p>
+    </div>
+
+    <div class="decision" style="border-left: 3px solid var(--ok);">
+      <p class="q">Branch &amp; delivery — how do you want changes landed?</p>
+      <p><b>SETTLED by execution:</b> P0+P1 were committed to <code>fix/p0-stabilization</code>, pushed, and a PR to <code>develop</code> is open. Future phases: one branch + PR into <code>develop</code> per phase.</p>
+    </div>
+  </section>
+
+  <div class="foot">Voxium v1.7.3 · stabilization audit · 5 surfaces · ~70 findings · P0 + P1 shipped (PR to develop open) · prod confirmed multi-node (2 nodes) — next: P2-MN (cross-node voice) → P2 → P3.</div>
+</div>
+</body>
+</html>
