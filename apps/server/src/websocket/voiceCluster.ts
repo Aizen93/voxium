@@ -1,7 +1,8 @@
 import type { Server as SocketServer } from 'socket.io';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { getRedis, getRedisPubSub, getRedisConfigSub, NODE_ID, isNodeAlive } from '../utils/redis';
-import { cleanupServerVoice, reapVoiceChannelMirror, reapOrphanedRemoteParticipants } from './voiceHandler';
+import { reapDeadOwnerChannelMirror } from '../utils/voiceMirror';
+import { cleanupServerVoice, reapOrphanedRemoteParticipants } from './voiceHandler';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -89,7 +90,10 @@ export async function reapDeadNodeVoiceState(io: IO): Promise<void> {
     const owner = await redis.get(`voice:channel:node:${channelId}`);
     if (owner === NODE_ID()) continue;               // our own live channel
     if (owner && await isNodeAlive(owner)) continue; // healthy peer's channel
-    const userIds = await reapVoiceChannelMirror(channelId);
+    // Guarded reap (CAS on the recorded owner): if a peer took the channel
+    // over between our liveness check and now, its fresh mirror is untouched.
+    const userIds = await reapDeadOwnerChannelMirror(channelId, owner);
+    if (userIds === null) continue; // ownership changed under us — hands off
     for (const userId of userIds) {
       io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId });
     }

@@ -9,7 +9,7 @@ import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerR
 import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { getRedis, NODE_ID, isNodeAlive, socketExistsInCluster } from '../utils/redis';
-import { reapVoiceChannelMirror } from '../utils/voiceMirror';
+import { reapVoiceChannelMirror, reapDeadOwnerChannelMirror } from '../utils/voiceMirror';
 import {
   getRemoteSession, setRemoteSession, clearRemoteSession,
   relayVoiceEvent, resolveOrClaimChannelOwner, dropShim,
@@ -162,9 +162,14 @@ export async function clearVoiceState(
   for (const channelId of active) {
     const owner = await redis.get(`voice:channel:node:${channelId}`);
     const ownedByUs = owner === NODE_ID();
-    const ownerDead = !owner || !(await isNodeAlive(owner));
-    if (!ownedByUs && !ownerDead) continue; // live peer's channel — hands off
-    const userIds = await reapVoiceChannelMirror(channelId);
+    if (!ownedByUs && owner && await isNodeAlive(owner)) continue; // live peer's channel — hands off
+    // Own channels reap unconditionally (our heartbeat is already up, so no
+    // peer can be taking them over); dead-owner channels use the CAS-guarded
+    // reap so a concurrent takeover by a peer is never wiped.
+    const userIds = ownedByUs
+      ? await reapVoiceChannelMirror(channelId)
+      : await reapDeadOwnerChannelMirror(channelId, owner);
+    if (userIds === null) continue; // ownership changed under us — hands off
     reapedChannels++;
     reapedUsers += userIds.length;
     if (io) {
@@ -182,14 +187,22 @@ export async function clearVoiceState(
       if (activeSet.has(channelId)) continue;
       const owner = await redis.get(key);
       if (owner && owner !== NODE_ID() && await isNodeAlive(owner)) continue;
-      await reapVoiceChannelMirror(channelId);
+      await reapDeadOwnerChannelMirror(channelId, owner === NODE_ID() ? null : owner);
     }
   }
 
-  // 3. Reap orphaned reverse-lookup keys pointing at channels that no longer exist.
+  // 3. Reap orphaned reverse-lookup keys pointing at channels that no longer
+  // exist. Peer nodes keep serving joins throughout our boot, so a key that
+  // references a channel missing from our activeSet snapshot may belong to a
+  // LIVE peer channel created moments ago — re-check the channel's owner
+  // liveness before deleting.
   for await (const batch of redis.scanIterator({ MATCH: 'voice:user:*', COUNT: 200 })) {
     for (const key of batch) {
       const channelId = await redis.get(key);
+      if (channelId && !activeSet.has(channelId)) {
+        const owner = await redis.get(`voice:channel:node:${channelId}`);
+        if (owner && owner !== NODE_ID() && await isNodeAlive(owner)) continue; // live peer's fresh channel
+      }
       if (!channelId || !activeSet.has(channelId)) {
         await redis.del(key);
       }
@@ -1108,7 +1121,15 @@ export function handleVoiceEvents(
     leaveCurrentVoiceChannel(io, socket, userId, { force: true });
     await leaveCurrentDMVoiceChannel(io, socket, userId, { force: true });
     setRemoteSession(socket.id, { userId, channelId, ownerNodeId });
-    void relayVoiceEvent(ownerNodeId, 'voice:join', socket, [channelId, state ?? null]);
+    // Internal relay ACK (dispatch auto-acks non-client-ACK events): if the
+    // owner dies mid-join or errors, the client gets voice:error instead of a
+    // silent forever-hang, and the stale session record is cleared.
+    void relayVoiceEvent(ownerNodeId, 'voice:join', socket, [channelId, state ?? null], (response) => {
+      const r = response as { ok?: boolean; error?: string } | undefined;
+      if (r?.ok) return;
+      if (getRemoteSession(socket.id)?.channelId === channelId) clearRemoteSession(socket.id);
+      socket.emit('voice:error', { message: 'Voice server unavailable. Please try again later.' });
+    });
   });
 
   // ── Session-routed events ───────────────────────────────────────────────
@@ -1193,14 +1214,23 @@ export async function dispatchVoiceEvent(
   const handler = table[event];
   if (!handler) return;
   try {
-    if (ack) {
+    if (ack && ACK_VOICE_EVENTS.has(event)) {
+      // Client-facing ACK — the handler invokes it itself (produce, etc.)
       await handler(...args, ack);
     } else {
+      // Internal relay ACK (e.g. voice:join): auto-ack success on completion;
+      // a throw is acked with an error shape by handleRelayMessage's catch.
       await handler(...args);
+      ack?.({ ok: true });
     }
   } finally {
-    // A completed leave/disconnect ends this remote participant
-    if (event === 'voice:leave' || event === 'disconnecting') {
+    // A completed leave/disconnect ends this remote participant. Same for a
+    // cross-node force_move by a moderator with NO session on this node —
+    // nothing will ever relay a leave for them here, so the table would leak.
+    if (
+      event === 'voice:leave' || event === 'disconnecting'
+      || (event === 'voice:force_move' && !shim.data.voiceChannelId)
+    ) {
       shimHandlerTables.delete(shim.id);
     }
   }

@@ -127,16 +127,31 @@ export async function resolveOrClaimChannelOwner(channelId: string): Promise<str
   if (existing === NODE_ID()) return existing;
   if (existing) {
     if (await isNodeAlive(existing)) return existing;
-    // Dead owner — reap its stale mirror and take over.
-    console.warn(`[VoiceRelay] Taking over channel ${channelId} from dead node ${existing}`);
-    await reapVoiceChannelMirror(channelId);
-    await redis.set(key, NODE_ID(), { EX: OWNERSHIP_CLAIM_TTL_S });
-    return NODE_ID();
+    // Dead owner — take over ATOMICALLY: CAS the key to ourselves only if it
+    // still records the dead node. Two nodes racing this takeover would
+    // otherwise both claim and create split-brain Routers for the channel.
+    const takeover = await redis.eval(
+      `if redis.call('get', KEYS[1]) == ARGV[1] then
+         redis.call('set', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
+         return 1
+       end
+       return 0`,
+      { keys: [key], arguments: [existing, NODE_ID(), String(OWNERSHIP_CLAIM_TTL_S)] },
+    ) as number;
+    if (takeover === 1) {
+      console.warn(`[VoiceRelay] Took over channel ${channelId} from dead node ${existing}`);
+      // Reap the dead node's stale mirror — preserving the node key we just claimed
+      await reapVoiceChannelMirror(channelId, { preserveNodeKey: true });
+      return NODE_ID();
+    }
+    // Lost the takeover race — use whatever the winner recorded.
+    return (await redis.get(key)) ?? NODE_ID();
   }
 
-  // Unowned — atomic claim; the TTL covers the window until the first
-  // successful join persists the key via mirrorVoiceJoin (or the join fails
-  // validation and the claim just expires).
+  // Unowned — atomic claim. NOTE: the claim happens before the join handler
+  // validates membership/permission, so a rejected join leaves a short-lived
+  // ownership tombstone; the TTL expires it and legitimate joins overwrite it
+  // via mirrorVoiceJoin. Placement quirk, not a correctness issue.
   const claimed = await redis.set(key, NODE_ID(), { NX: true, EX: OWNERSHIP_CLAIM_TTL_S });
   if (claimed === 'OK') return NODE_ID();
   // Lost the race — someone else claimed between GET and SET NX.
@@ -254,8 +269,14 @@ export async function handleRelayMessage(raw: string): Promise<void> {
     ack?.(ackFailureResponse(event, 'Voice node error'));
   }
 
-  // A completed leave/disconnect ends the remote participant — drop the shim
-  if (event === 'voice:leave' || event === 'disconnecting') {
+  // A completed leave/disconnect ends the remote participant — drop the shim.
+  // Also drop after a cross-node force_move by a moderator with NO session on
+  // this node (shim.data.voiceChannelId never set): nothing will ever relay a
+  // leave/disconnect for them here, so the shim would leak until restart.
+  if (
+    event === 'voice:leave' || event === 'disconnecting'
+    || (event === 'voice:force_move' && !shim.data.voiceChannelId)
+  ) {
     dropShim(socketId);
   }
 }

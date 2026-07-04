@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
-const { mockRedis, mockPublish, mockSubscribe, mockIsNodeAlive, mockCleanupServerVoice, mockReapChannelMirror } = vi.hoisted(() => ({
+const { mockRedis, mockPublish, mockSubscribe, mockIsNodeAlive, mockCleanupServerVoice, mockGuardedReap } = vi.hoisted(() => ({
   mockRedis: {
     sMembers: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),
@@ -11,7 +11,7 @@ const { mockRedis, mockPublish, mockSubscribe, mockIsNodeAlive, mockCleanupServe
   mockSubscribe: vi.fn().mockResolvedValue(undefined),
   mockIsNodeAlive: vi.fn().mockResolvedValue(false),
   mockCleanupServerVoice: vi.fn(),
-  mockReapChannelMirror: vi.fn().mockResolvedValue([]),
+  mockGuardedReap: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock('../../utils/redis', () => ({
@@ -22,9 +22,13 @@ vi.mock('../../utils/redis', () => ({
   isNodeAlive: mockIsNodeAlive,
 }));
 
+vi.mock('../../utils/voiceMirror', () => ({
+  reapVoiceChannelMirror: vi.fn().mockResolvedValue([]),
+  reapDeadOwnerChannelMirror: mockGuardedReap,
+}));
+
 vi.mock('../../websocket/voiceHandler', () => ({
   cleanupServerVoice: mockCleanupServerVoice,
-  reapVoiceChannelMirror: mockReapChannelMirror,
   reapOrphanedRemoteParticipants: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -116,24 +120,37 @@ describe('voiceCluster — reapDeadNodeVoiceState', () => {
     mockRedis.sMembers.mockResolvedValue([]);
     mockRedis.get.mockResolvedValue(null);
     mockIsNodeAlive.mockResolvedValue(false);
-    mockReapChannelMirror.mockResolvedValue([]);
+    mockGuardedReap.mockResolvedValue([]);
   });
 
-  it('reaps channels owned by dead nodes and emits voice:user_left for each ghost', async () => {
+  it('reaps channels owned by dead nodes (CAS-guarded) and emits voice:user_left for each ghost', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockRedis.sMembers.mockResolvedValue(['ch-dead']);
     mockRedis.get.mockResolvedValue('gone-node');
     mockIsNodeAlive.mockResolvedValue(false);
-    mockReapChannelMirror.mockResolvedValue(['u-1', 'u-2']);
+    mockGuardedReap.mockResolvedValue(['u-1', 'u-2']);
 
     const io = createMockIO();
     await reapDeadNodeVoiceState(io as never);
 
-    expect(mockReapChannelMirror).toHaveBeenCalledWith('ch-dead');
+    // The reap is guarded by the OBSERVED owner — never a blind delete
+    expect(mockGuardedReap).toHaveBeenCalledWith('ch-dead', 'gone-node');
     expect(io.to).toHaveBeenCalledWith('channel:ch-dead');
     expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-dead', userId: 'u-1' });
     expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-dead', userId: 'u-2' });
     warnSpy.mockRestore();
+  });
+
+  it('backs off when a peer took the channel over mid-reap (guarded reap returns null)', async () => {
+    mockRedis.sMembers.mockResolvedValue(['ch-contested']);
+    mockRedis.get.mockResolvedValue('gone-node');
+    mockIsNodeAlive.mockResolvedValue(false);
+    mockGuardedReap.mockResolvedValue(null); // ownership changed under us
+
+    const io = createMockIO();
+    await reapDeadNodeVoiceState(io as never);
+
+    expect(io._emit).not.toHaveBeenCalled(); // nothing reaped, nothing announced
   });
 
   it('never touches its OWN channels or a live peer\'s channels', async () => {
@@ -148,6 +165,6 @@ describe('voiceCluster — reapDeadNodeVoiceState', () => {
     const io = createMockIO();
     await reapDeadNodeVoiceState(io as never);
 
-    expect(mockReapChannelMirror).not.toHaveBeenCalled();
+    expect(mockGuardedReap).not.toHaveBeenCalled();
   });
 });
