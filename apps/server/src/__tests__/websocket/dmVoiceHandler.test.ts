@@ -31,6 +31,7 @@ const mockRedis = vi.hoisted(() => {
     hGetAll: vi.fn().mockResolvedValue({}),
     hLen: vi.fn().mockResolvedValue(0),
     hDel: vi.fn().mockResolvedValue(1),
+    hExists: vi.fn().mockResolvedValue(0),
     set: vi.fn().mockResolvedValue('OK'),
     get: vi.fn().mockResolvedValue(null),
     del: vi.fn().mockResolvedValue(1),
@@ -45,9 +46,16 @@ const mockRedis = vi.hoisted(() => {
   };
 });
 
+const { mockAnyOtherNodeAlive, mockSocketExists } = vi.hoisted(() => ({
+  mockAnyOtherNodeAlive: vi.fn().mockResolvedValue(false),
+  mockSocketExists: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock('../../utils/redis', () => ({
   getRedis: vi.fn().mockReturnValue(mockRedis),
   NODE_ID: vi.fn().mockReturnValue('test-node-1'),
+  anyOtherNodeAlive: mockAnyOtherNodeAlive,
+  socketExistsInCluster: mockSocketExists,
 }));
 
 // Mock rate limiter — always allow by default
@@ -89,6 +97,7 @@ function resetRedis() {
 
   // Reset individual commands
   mockRedis.hSet.mockReset().mockResolvedValue(1);
+  mockRedis.hExists.mockReset().mockResolvedValue(0);
   mockRedis.hGet.mockReset().mockResolvedValue(null);
   mockRedis.hGetAll.mockReset().mockResolvedValue({});
   mockRedis.hLen.mockReset().mockResolvedValue(0);
@@ -647,6 +656,74 @@ describe('dmVoiceHandler — clearDMVoiceState (boot cleanup)', () => {
   it('is a no-op when there are no dm:voice keys', async () => {
     await clearDMVoiceState();
     expect(mockRedis.del).not.toHaveBeenCalled();
+  });
+});
+
+// ─── clearDMVoiceState multi-node scoped reap ────────────────────────────────
+
+describe('dmVoiceHandler — clearDMVoiceState (multi-node scoped reap)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+    mockAnyOtherNodeAlive.mockResolvedValue(false);
+    mockSocketExists.mockResolvedValue(false);
+  });
+
+  it('with live peers: reaps ONLY participants whose socket is gone cluster-wide', async () => {
+    mockAnyOtherNodeAlive.mockResolvedValue(true);
+    mockRedis.sMembers.mockResolvedValue(['conv-9']);
+    mockRedis.hGetAll.mockImplementation((key: string) =>
+      Promise.resolve(key === 'dm:voice:users:conv-9' ? {
+        'u-dead': JSON.stringify({ socketId: 's-dead', selfMute: false, selfDeaf: false }),
+        'u-live': JSON.stringify({ socketId: 's-live', selfMute: false, selfDeaf: false }),
+      } : {}));
+    mockSocketExists.mockImplementation(async (_io: unknown, socketId: string) => socketId === 's-live');
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    // The crash ghost is removed atomically (Lua eval) and announced to the call room
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ arguments: ['u-dead', 'conv-9'] }),
+    );
+    expect(io.to).toHaveBeenCalledWith('dm:voice:conv-9');
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-9', userId: 'u-dead' });
+    // The live cross-node participant is untouched
+    expect(mockRedis.eval).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ arguments: ['u-live', 'conv-9'] }),
+    );
+    // And crucially: NO full wipe of dm:voice:* keys
+    expect(mockRedis.del).not.toHaveBeenCalledWith(expect.arrayContaining([expect.any(String)]));
+  });
+
+  it('with live peers: reaps orphaned dm:voice:call keys whose user is no longer in the call hash', async () => {
+    mockAnyOtherNodeAlive.mockResolvedValue(true);
+    mockRedis.sMembers.mockResolvedValue([]);
+    mockRedis.scanIterator.mockImplementation(async function* (opts: { MATCH?: string }) {
+      if (opts?.MATCH === 'dm:voice:call:*') yield ['dm:voice:call:u-orphan'];
+    });
+    mockRedis.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'dm:voice:call:u-orphan' ? 'conv-x' : null));
+    mockRedis.hExists.mockResolvedValue(0);
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    expect(mockRedis.del).toHaveBeenCalledWith('dm:voice:call:u-orphan');
+  });
+
+  it('falls back to the full wipe when this is the sole node, even with io provided', async () => {
+    mockAnyOtherNodeAlive.mockResolvedValue(false);
+    mockRedis.scanIterator.mockImplementation(async function* () {
+      yield ['dm:voice:active', 'dm:voice:users:conv-1'];
+    });
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    expect(mockRedis.del).toHaveBeenCalledWith(['dm:voice:active', 'dm:voice:users:conv-1']);
   });
 });
 

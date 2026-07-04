@@ -95,17 +95,20 @@ const mockVoiceRedis = vi.hoisted(() => ({
     exec: vi.fn().mockResolvedValue([]),
   }),
   hSet: vi.fn().mockResolvedValue(1),
+  hGetAll: vi.fn().mockResolvedValue({}),
   set: vi.fn().mockResolvedValue('OK'),
   del: vi.fn().mockResolvedValue(1),
   sCard: vi.fn().mockResolvedValue(0),
   sMembers: vi.fn().mockResolvedValue([]),
   get: vi.fn().mockResolvedValue(null),
+  exists: vi.fn().mockResolvedValue(0),
   // eslint-disable-next-line require-yield
   scanIterator: vi.fn().mockImplementation(async function* () { /* default: no keys */ }),
 }));
 vi.mock('../../utils/redis', () => ({
   getRedis: vi.fn().mockReturnValue(mockVoiceRedis),
   NODE_ID: vi.fn().mockReturnValue('test-node-1'),
+  isNodeAlive: vi.fn().mockResolvedValue(false),
 }));
 
 // Mock rate limiter — always allow
@@ -563,38 +566,79 @@ describe('voiceHandler — reconnect ownership (CRIT-1)', () => {
   });
 });
 
-describe('voiceHandler — clearVoiceState (boot cleanup)', () => {
+describe('voiceHandler — clearVoiceState (boot cleanup, multi-node aware)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockVoiceRedis.del.mockResolvedValue(1);
+    mockVoiceRedis.sMembers.mockResolvedValue([]);
+    mockVoiceRedis.get.mockResolvedValue(null);
+    mockVoiceRedis.hGetAll.mockResolvedValue({});
+    vi.mocked(redisIsNodeAlive).mockResolvedValue(false);
     // eslint-disable-next-line require-yield
     mockVoiceRedis.scanIterator.mockImplementation(async function* () { /* no keys */ });
   });
 
-  it('reaps stale voice:* mirror keys but PRESERVES persistent moderation keys', async () => {
-    mockVoiceRedis.scanIterator.mockImplementation(async function* () {
-      yield ['voice:active', 'voice:channel:users:ch-1', 'voice:user:u-1'];
-      // Persistent moderation keys must survive a boot cleanup:
-      yield ['voice:server_muted:s-1:u-1', 'voice:server_deafened:s-1:u-2', 'voice:screen:ch-1'];
+  it('reaps OWN channels but never touches a live peer node\'s mirror or persistent moderation keys', async () => {
+    mockVoiceRedis.sMembers.mockResolvedValue(['ch-own', 'ch-peer']);
+    mockVoiceRedis.get.mockImplementation((key: string) => {
+      if (key === 'voice:channel:node:ch-own') return Promise.resolve('test-node-1');
+      if (key === 'voice:channel:node:ch-peer') return Promise.resolve('peer-node');
+      return Promise.resolve(null);
     });
+    vi.mocked(redisIsNodeAlive).mockImplementation(async (nodeId: string) => nodeId === 'peer-node');
+    mockVoiceRedis.hGetAll.mockImplementation((key: string) =>
+      Promise.resolve(key === 'voice:channel:users:ch-own' ? { 'u-1': '{}' } : {}));
 
     await clearVoiceState();
 
-    expect(mockVoiceRedis.del).toHaveBeenCalledWith([
-      'voice:active',
-      'voice:channel:users:ch-1',
-      'voice:user:u-1',
-      'voice:screen:ch-1',
-    ]);
-    // The persistent keys are NOT in the delete set.
-    const deleted = mockVoiceRedis.del.mock.calls[0][0] as string[];
-    expect(deleted).not.toContain('voice:server_muted:s-1:u-1');
-    expect(deleted).not.toContain('voice:server_deafened:s-1:u-2');
+    const chain = mockVoiceRedis.multi();
+    // Own channel reaped, including the participant's reverse-lookup key
+    expect(chain.del).toHaveBeenCalledWith('voice:channel:users:ch-own');
+    expect(chain.del).toHaveBeenCalledWith('voice:screen:ch-own');
+    expect(chain.del).toHaveBeenCalledWith('voice:user:u-1');
+    expect(chain.sRem).toHaveBeenCalledWith('voice:active', 'ch-own');
+    // Live peer's channel untouched
+    expect(chain.del).not.toHaveBeenCalledWith('voice:channel:users:ch-peer');
+    expect(chain.sRem).not.toHaveBeenCalledWith('voice:active', 'ch-peer');
+    // Persistent moderation keys never deleted
+    const allDeleted = [...chain.del.mock.calls, ...mockVoiceRedis.del.mock.calls].flat();
+    expect(allDeleted.some((k) => String(k).includes('voice:server_muted') || String(k).includes('voice:server_deafened'))).toBe(false);
   });
 
-  it('is a no-op when there are no voice keys', async () => {
+  it('reaps channels owned by DEAD nodes and emits voice:user_left for each ghost', async () => {
+    mockVoiceRedis.sMembers.mockResolvedValue(['ch-dead']);
+    mockVoiceRedis.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'voice:channel:node:ch-dead' ? 'gone-node' : null));
+    vi.mocked(redisIsNodeAlive).mockResolvedValue(false);
+    mockVoiceRedis.hGetAll.mockImplementation((key: string) =>
+      Promise.resolve(key === 'voice:channel:users:ch-dead' ? { 'u-9': '{}' } : {}));
+
+    const io = createMockIO();
+    await clearVoiceState(io as any);
+
+    const chain = mockVoiceRedis.multi();
+    expect(chain.del).toHaveBeenCalledWith('voice:channel:users:ch-dead');
+    expect(io.to).toHaveBeenCalledWith('channel:ch-dead');
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-dead', userId: 'u-9' });
+  });
+
+  it('reaps orphaned voice:user keys pointing at channels no longer active', async () => {
+    mockVoiceRedis.scanIterator.mockImplementation(async function* (opts: { MATCH?: string }) {
+      if (opts?.MATCH === 'voice:user:*') yield ['voice:user:u-orphan'];
+    });
+    mockVoiceRedis.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'voice:user:u-orphan' ? 'ch-gone' : null));
+
+    await clearVoiceState();
+
+    expect(mockVoiceRedis.del).toHaveBeenCalledWith('voice:user:u-orphan');
+  });
+
+  it('is a no-op when there is nothing stale', async () => {
     await clearVoiceState();
     expect(mockVoiceRedis.del).not.toHaveBeenCalled();
+    const chain = mockVoiceRedis.multi();
+    expect(chain.exec).not.toHaveBeenCalled();
   });
 });
 
@@ -832,6 +876,7 @@ describe('voiceHandler — server-muted blocks self-unmute (voice:mute)', () => 
 
 import { hasChannelPermission } from '../../utils/permissionCalculator';
 import { createWebRtcTransport } from '../../mediasoup/mediasoupManager';
+import { isNodeAlive as redisIsNodeAlive } from '../../utils/redis';
 
 /** All transports created since the last vi.clearAllMocks(), in creation order:
  *  [A.send, A.recv, B.send, B.recv, ...] per join. */
@@ -1234,10 +1279,12 @@ describe('voiceHandler — server-deafen enforcement (HIGH-12)', () => {
     await a.handlers.get('voice:join')!('ch-h12');
     await b.handlers.get('voice:join')!('ch-h12');
     await b.handlers.get('voice:rtp_capabilities')!({ rtpCapabilities: { codecs: [] } });
-    // A produces mic → server creates an audio consumer for B
+    // A produces mic → server creates an audio consumer for B, announced via
+    // io.to(B's socketId) (cross-node-safe emit)
     await a.handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
 
-    const newConsumerCall = b.socket.emit.mock.calls.find((c: unknown[]) => c[0] === 'voice:new_consumer');
+    expect(io.to).toHaveBeenCalledWith('sock-h12-B');
+    const newConsumerCall = io._emit.mock.calls.find((c: unknown[]) => c[0] === 'voice:new_consumer');
     expect(newConsumerCall).toBeTruthy();
     const consumerId = (newConsumerCall![1] as { id: string }).id;
 
