@@ -272,5 +272,104 @@ export async function filterVisibleChannels<T extends { id: string }>(
   });
 }
 
+/**
+ * Multi-server variant of filterVisibleChannels for the socket-connect hot
+ * path. The old per-server loop cost ~4 queries PER SERVER on every connect —
+ * a deploy reconnecting thousands of clients turned into a self-inflicted DB
+ * stampede. This runs exactly 4 batched queries regardless of how many
+ * servers/channels are involved.
+ *
+ * CALLER CONTRACT: the user must be a member of every server referenced by
+ * `channels` (the connect flow derives them from the user's own memberships) —
+ * membership is NOT re-verified here.
+ */
+export async function filterVisibleChannelsMulti<T extends { id: string; serverId: string }>(
+  userId: string,
+  channels: T[],
+): Promise<T[]> {
+  if (channels.length === 0) return [];
+  const serverIds = [...new Set(channels.map((c) => c.serverId))];
+
+  const [servers, everyoneRoles, memberRoles, allOverrides] = await Promise.all([
+    prisma.server.findMany({
+      where: { id: { in: serverIds } },
+      select: { id: true, ownerId: true },
+    }),
+    prisma.role.findMany({
+      where: { serverId: { in: serverIds }, isDefault: true },
+      select: { id: true, serverId: true, permissions: true },
+    }),
+    prisma.memberRole.findMany({
+      where: { userId, serverId: { in: serverIds } },
+      include: { role: { select: { permissions: true } } },
+    }),
+    prisma.channelPermissionOverride.findMany({
+      where: { channelId: { in: channels.map((c) => c.id) } },
+    }),
+  ]);
+
+  const ownerByServer = new Map(servers.map((s) => [s.id, s.ownerId]));
+  const everyoneByServer = new Map(everyoneRoles.map((r) => [r.serverId, r]));
+  const rolesByServer = new Map<string, typeof memberRoles>();
+  for (const mr of memberRoles) {
+    const list = rolesByServer.get(mr.serverId) || [];
+    list.push(mr);
+    rolesByServer.set(mr.serverId, list);
+  }
+  const overridesByChannel = new Map<string, typeof allOverrides>();
+  for (const o of allOverrides) {
+    const list = overridesByChannel.get(o.channelId) || [];
+    list.push(o);
+    overridesByChannel.set(o.channelId, list);
+  }
+
+  // Base permissions computed once per server (same math as filterVisibleChannels)
+  const baseByServer = new Map<string, bigint>();
+  const userRoleIdsByServer = new Map<string, Set<string>>();
+  for (const serverId of serverIds) {
+    const serverRoles = rolesByServer.get(serverId) || [];
+    userRoleIdsByServer.set(serverId, new Set(serverRoles.map((mr) => mr.roleId)));
+    if (!ownerByServer.has(serverId)) {
+      baseByServer.set(serverId, 0n); // server deleted mid-connect
+      continue;
+    }
+    if (ownerByServer.get(serverId) === userId) {
+      baseByServer.set(serverId, ALL_PERMISSIONS);
+      continue;
+    }
+    const everyoneRole = everyoneByServer.get(serverId);
+    const everyonePerms = everyoneRole
+      ? permissionsFromString(everyoneRole.permissions)
+      : DEFAULT_EVERYONE_PERMISSIONS;
+    const rolePerms = serverRoles.map((mr) => permissionsFromString(mr.role.permissions));
+    baseByServer.set(serverId, computeBasePermissions(everyonePerms, rolePerms));
+  }
+
+  return channels.filter((channel) => {
+    if (ownerByServer.get(channel.serverId) === userId) return true;
+    const base = baseByServer.get(channel.serverId) ?? 0n;
+    if (base === ALL_PERMISSIONS) return true; // ADMINISTRATOR sees everything
+
+    const everyoneRole = everyoneByServer.get(channel.serverId);
+    const userRoleIds = userRoleIdsByServer.get(channel.serverId) ?? new Set<string>();
+    const overrides = overridesByChannel.get(channel.id) || [];
+
+    let everyoneOverride: { allow: bigint; deny: bigint } | null = null;
+    const roleOverrides: { allow: bigint; deny: bigint }[] = [];
+    for (const o of overrides) {
+      const allow = permissionsFromString(o.allow);
+      const deny = permissionsFromString(o.deny);
+      if (everyoneRole && o.roleId === everyoneRole.id) {
+        everyoneOverride = { allow, deny };
+      } else if (userRoleIds.has(o.roleId)) {
+        roleOverrides.push({ allow, deny });
+      }
+    }
+
+    const perms = computeChannelPermissions(base, everyoneOverride, roleOverrides);
+    return hasFlag(perms, Permissions.VIEW_CHANNEL);
+  });
+}
+
 // Re-export Permissions for convenient use in route guards
 export { Permissions, hasFlag as hasPermission };

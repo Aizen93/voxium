@@ -19,7 +19,13 @@ export function validateEmail(email: string): string | null {
 
 export function validatePassword(password: string): string | null {
   if (password.length < LIMITS.PASSWORD_MIN) return `Password must be at least ${LIMITS.PASSWORD_MIN} characters`;
-  if (password.length > LIMITS.PASSWORD_MAX) return `Password must be at most ${LIMITS.PASSWORD_MAX} characters`;
+  // bcrypt silently truncates at 72 BYTES, not characters. Multi-byte input
+  // (CJK, emoji) can pass a character-count check while exceeding 72 bytes —
+  // then two different passwords sharing a 72-byte prefix authenticate
+  // identically. TextEncoder is available in both Node 18+ and browsers.
+  if (new TextEncoder().encode(password).length > LIMITS.PASSWORD_MAX) {
+    return `Password must be at most ${LIMITS.PASSWORD_MAX} bytes (special characters and emoji count as multiple bytes)`;
+  }
   return null;
 }
 

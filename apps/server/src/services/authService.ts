@@ -10,6 +10,18 @@ import { validateEmail, validatePassword, validateUsername } from '@voxium/share
 import { sendPasswordResetEmail, sendVerificationEmail } from '../utils/email';
 import { sanitizeText } from '../utils/sanitize';
 
+// Timing-equalization hash for login attempts against unknown emails (same
+// convention as requestPasswordReset): skipping bcrypt when the user doesn't
+// exist makes the response measurably faster, enumerating registered emails.
+// Lazily generated once with the same cost factor as real password hashes.
+let timingEqualizerHash: string | null = null;
+async function getTimingEqualizerHash(): Promise<string> {
+  if (!timingEqualizerHash) {
+    timingEqualizerHash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), 12);
+  }
+  return timingEqualizerHash;
+}
+
 export async function registerUser(username: string, email: string, password: string, displayName?: string) {
   email = email.toLowerCase().trim();
 
@@ -22,8 +34,16 @@ export async function registerUser(username: string, email: string, password: st
   const passwordErr = validatePassword(password);
   if (passwordErr) throw new BadRequestError(passwordErr);
 
+  // Username check is case-INSENSITIVE: lookups elsewhere (friend requests,
+  // member search) match insensitively, so allowing "Alice" alongside "alice"
+  // at signup would route the other account's requests to an impersonator.
   const existing = await prisma.user.findFirst({
-    where: { OR: [{ username }, { email }] },
+    where: {
+      OR: [
+        { username: { equals: username, mode: 'insensitive' } },
+        { email },
+      ],
+    },
   });
 
   if (existing) {
@@ -108,7 +128,12 @@ export async function loginUser(email: string, password: string, rememberMe = tr
     },
   });
 
-  if (!user) throw new UnauthorizedError('Invalid credentials');
+  if (!user) {
+    // Burn the same bcrypt cost as a real comparison so an unknown email is
+    // indistinguishable from a wrong password by response time
+    await bcrypt.compare(password, await getTimingEqualizerHash());
+    throw new UnauthorizedError('Invalid credentials');
+  }
 
   const validPassword = await bcrypt.compare(password, user.password);
   if (!validPassword) throw new UnauthorizedError('Invalid credentials');

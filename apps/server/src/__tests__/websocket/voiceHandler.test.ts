@@ -183,7 +183,7 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
-import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent } from '../../websocket/voiceHandler';
+import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath } from '../../websocket/voiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -1628,5 +1628,91 @@ describe('voiceHandler — screen-share recv bitrate lift (HIGH-1)', () => {
     const transports = await getCreatedTransports();
     const bRecv = transports[3];
     expect(bRecv.setMaxOutgoingBitrate).toHaveBeenCalledWith(4000000);
+  });
+});
+
+describe('voiceHandler — ghost guard on leave during persisted-mute read (MED-6)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+  });
+
+  it('a user disconnecting DURING the voice:join Redis read is not broadcast as joined', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('med6-u', 'sock-med6');
+    handleVoiceEvents(io as any, socket as any);
+
+    // Park the join on the persisted server-mute/deafen Redis read: capture the
+    // resolvers so the leave can run in the gap before they resolve.
+    const resolvers: Array<(v: string | null) => void> = [];
+    mockVoiceRedis.get.mockImplementation((key: string) => {
+      if (key.startsWith('voice:server_muted') || key.startsWith('voice:server_deafened')) {
+        return new Promise<string | null>((resolve) => { resolvers.push(resolve); });
+      }
+      return Promise.resolve(null);
+    });
+
+    const joinPromise = handlers.get('voice:join')!('ch-med6');
+    await new Promise((r) => setTimeout(r, 0)); // flush microtasks up to the parked read
+    expect(resolvers.length).toBe(2); // sanity: join is parked on the mute+deafen gets
+
+    // The user leaves while the join is still awaiting Redis
+    handlers.get('voice:leave')!();
+
+    io._emit.mockClear();
+    const chain = mockVoiceRedis.multi();
+    chain.hSet.mockClear();
+
+    for (const resolve of resolvers) resolve(null);
+    await joinPromise;
+
+    // The aborted join must not broadcast the ghost or mirror it to Redis
+    expect(io._emit).not.toHaveBeenCalledWith('voice:user_joined', expect.anything());
+    expect(chain.hSet).not.toHaveBeenCalled();
+
+    mockVoiceRedis.get.mockResolvedValue(null);
+  });
+});
+
+describe('voiceHandler — worker death eviction (MED-7)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+  });
+
+  it('evicts participants, tells each socket to rejoin, and broadcasts voice:user_left', async () => {
+    const io = createMockIO();
+    (io as any).in = vi.fn().mockReturnValue({ socketsJoin: vi.fn(), socketsLeave: vi.fn() });
+    const { socket, handlers } = createMockSocket('med7-u', 'sock-med7');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-med7');
+
+    io.to.mockClear();
+    io._emit.mockClear();
+
+    handleWorkerDeath(io as any, ['ch-med7']);
+
+    // The participant's socket is told to rejoin...
+    expect(io.to).toHaveBeenCalledWith('sock-med7');
+    expect(io._emit).toHaveBeenCalledWith('voice:error', { message: expect.stringContaining('rejoin') });
+    // ...and the channel sees them leave
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-med7', userId: 'med7-u' });
+  });
+
+  it('a second handleWorkerDeath for the same channel is a no-op', async () => {
+    const io = createMockIO();
+    (io as any).in = vi.fn().mockReturnValue({ socketsJoin: vi.fn(), socketsLeave: vi.fn() });
+    const { socket, handlers } = createMockSocket('med7-v', 'sock-med7-v');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-med7-b');
+
+    handleWorkerDeath(io as any, ['ch-med7-b']);
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-med7-b', userId: 'med7-v' });
+
+    io._emit.mockClear();
+    handleWorkerDeath(io as any, ['ch-med7-b']);
+    expect(io._emit).not.toHaveBeenCalledWith('voice:user_left', expect.anything());
   });
 });

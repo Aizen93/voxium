@@ -193,6 +193,11 @@ let latencyInterval: ReturnType<typeof setInterval> | null = null;
 let pongHandler: ((timestamp: number) => void) | null = null;
 let transportRejoinAttempts = 0;
 
+// Incremented on every join/leave (server voice AND DM calls). Guards the async
+// mic acquisition inside joins: a join superseded mid-getUserMedia must stop the
+// stream it acquired instead of leaking it (OS mic indicator stuck on forever).
+let voiceSessionGeneration = 0;
+
 // Track ICE restart timers per DM peer
 const iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -619,6 +624,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       get().leaveChannel();
     }
 
+    const generation = ++voiceSessionGeneration;
     transportRejoinAttempts = 0; // Reset retry counter on explicit join
 
     const settings = useSettingsStore.getState();
@@ -626,6 +632,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     setNoiseSuppression(settings.enableNoiseSuppression);
 
     const stream = await acquireAudioStream();
+
+    // Superseded while acquiring the mic (rapid channel switch / leave) —
+    // release the just-acquired stream or the OS records forever
+    if (generation !== voiceSessionGeneration) {
+      stream?.getTracks().forEach((track) => track.stop());
+      return;
+    }
 
     const { selfMute, selfDeaf } = get();
     const isPTT = settings.voiceMode === 'push_to_talk';
@@ -667,6 +680,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   leaveChannel: () => {
+    voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
     const socket = getSocket();
     const { localStream, activeChannelId, localUserId } = get();
 
@@ -1306,6 +1320,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
       }
       set({ selfMute: true });
+      // Same as toggleMute: stop speaking detection so the indicator can't stick
+      setSpeakingDetectionPaused(true);
     }
 
     if (socket) {
@@ -1614,11 +1630,19 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       get().leaveDMCall();
     }
 
+    const generation = ++voiceSessionGeneration;
+
     const settings = useSettingsStore.getState();
     setNoiseGateThreshold(settings.noiseGateThreshold);
     setNoiseSuppression(settings.enableNoiseSuppression);
 
     const stream = await acquireAudioStream();
+
+    // Superseded while acquiring the mic — release it (see joinChannel)
+    if (generation !== voiceSessionGeneration) {
+      stream?.getTracks().forEach((track) => track.stop());
+      return;
+    }
 
     const { selfMute, selfDeaf } = get();
     const isPTT = settings.voiceMode === 'push_to_talk';
@@ -1654,6 +1678,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   leaveDMCall: () => {
+    voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
     const socket = getSocket();
     const { localStream, dmCallConversationId } = get();
 

@@ -101,6 +101,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
 vi.mock('../../websocket/voiceHandler', () => ({
   handleVoiceEvents: vi.fn(),
   getVoiceStateForServer: vi.fn().mockResolvedValue([]),
+  getVoiceStateForServers: vi.fn().mockResolvedValue([]),
   getScreenShareState: vi.fn().mockResolvedValue(null),
 }));
 
@@ -201,12 +202,10 @@ describe('socketServer — DM presence broadcast on connect', () => {
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
 
-    // The connection handler queries conversations twice:
-    // 1. To auto-join DM rooms
-    // 2. To broadcast DM presence
+    // The connection handler queries conversations ONCE — the same result is
+    // used for auto-joining DM rooms AND the DM presence broadcast
     mockPrisma.conversation.findMany
-      .mockResolvedValueOnce([{ id: 'conv-1' }, { id: 'conv-2' }]) // auto-join rooms
-      .mockResolvedValueOnce([{ id: 'conv-1' }, { id: 'conv-2' }]); // DM presence broadcast
+      .mockResolvedValueOnce([{ id: 'conv-1' }, { id: 'conv-2' }]);
 
     await connectionHandler(socket);
 
@@ -231,10 +230,8 @@ describe('socketServer — DM presence broadcast on connect', () => {
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
 
-    // No conversations
-    mockPrisma.conversation.findMany
-      .mockResolvedValueOnce([]) // auto-join rooms
-      .mockResolvedValueOnce([]); // DM presence broadcast
+    // No conversations (single query serves rooms + presence)
+    mockPrisma.conversation.findMany.mockResolvedValueOnce([]);
 
     await connectionHandler(socket);
 
@@ -254,10 +251,10 @@ describe('socketServer — DM presence broadcast on connect', () => {
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
 
-    // First call for auto-join succeeds, second call for DM presence throws
+    // The single conversations query fails — the outer connection-setup
+    // try/catch must absorb it without crashing the handler
     mockPrisma.conversation.findMany
-      .mockResolvedValueOnce([]) // auto-join rooms
-      .mockRejectedValueOnce(new Error('DB connection lost')); // DM presence broadcast
+      .mockRejectedValueOnce(new Error('DB connection lost'));
 
     // Should not throw — the error is caught internally via try/catch
     await expect(connectionHandler(socket)).resolves.not.toThrow();
@@ -305,10 +302,8 @@ describe('socketServer — DM presence broadcast on disconnect', () => {
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
 
-    // Set up for connection phase
-    mockPrisma.conversation.findMany
-      .mockResolvedValueOnce([]) // auto-join rooms
-      .mockResolvedValueOnce([]); // online DM presence
+    // Set up for connection phase (single conversations query)
+    mockPrisma.conversation.findMany.mockResolvedValueOnce([]);
 
     await connectionHandler(socket);
 
@@ -350,9 +345,7 @@ describe('socketServer — DM presence broadcast on disconnect', () => {
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
 
-    mockPrisma.conversation.findMany
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
+    mockPrisma.conversation.findMany.mockResolvedValueOnce([]);
 
     await connectionHandler(socket);
 
@@ -378,9 +371,7 @@ describe('socketServer — DM presence broadcast on disconnect', () => {
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
 
-    mockPrisma.conversation.findMany
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
+    mockPrisma.conversation.findMany.mockResolvedValueOnce([]);
 
     await connectionHandler(socket);
 
@@ -404,9 +395,7 @@ describe('socketServer — DM presence broadcast on disconnect', () => {
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
 
-    mockPrisma.conversation.findMany
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
+    mockPrisma.conversation.findMany.mockResolvedValueOnce([]);
 
     await connectionHandler(socket);
 
@@ -428,9 +417,7 @@ describe('socketServer — DM presence broadcast on disconnect', () => {
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
 
-    mockPrisma.conversation.findMany
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
+    mockPrisma.conversation.findMany.mockResolvedValueOnce([]);
 
     await connectionHandler(socket);
 

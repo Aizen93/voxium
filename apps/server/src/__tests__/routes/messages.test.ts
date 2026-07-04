@@ -60,6 +60,7 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
     create: vi.fn(),
     delete: vi.fn(),
+    deleteMany: vi.fn(),
     findMany: vi.fn(),
     groupBy: vi.fn(),
   },
@@ -93,6 +94,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return {
     rateLimitGeneral: passthrough,
+    rateLimitInteract: passthrough,
     rateLimitMessageSend: passthrough,
   };
 });
@@ -604,6 +606,98 @@ describe('Message Routes', () => {
         .send({ content: 'Edited' });
 
       expect(res.status).toBe(403);
+    });
+  });
+
+  // ── PUT /api/v1/channels/:channelId/messages/:messageId/reactions/:emoji ──
+
+  describe('PUT /api/v1/channels/:channelId/messages/:messageId/reactions/:emoji', () => {
+    const EMOJI = '👍';
+    const reactionUrl = `/api/v1/channels/ch-1/messages/msg-1/reactions/${encodeURIComponent(EMOJI)}`;
+
+    function mockReactableMessage() {
+      prismaMock.message.findUnique.mockResolvedValue({
+        id: 'msg-1',
+        channelId: 'ch-1',
+        channel: { serverId: 'srv-1' },
+      });
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        serverId: 'srv-1',
+        role: 'member',
+      });
+    }
+
+    it('adds a reaction and responds with action "add"', async () => {
+      const token = makeToken();
+      mockReactableMessage();
+      prismaMock.messageReaction.findUnique.mockResolvedValue(null);
+      prismaMock.messageReaction.groupBy.mockResolvedValue([]);
+      prismaMock.messageReaction.create.mockResolvedValue({});
+      prismaMock.messageReaction.findMany.mockResolvedValue([{ emoji: EMOJI, userId: 'user-1' }]);
+
+      const res = await request(app)
+        .put(reactionUrl)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.action).toBe('add');
+    });
+
+    it('race idempotency: responds 200 with action "add" when create rejects with P2002 (concurrent duplicate)', async () => {
+      const token = makeToken();
+      mockReactableMessage();
+      prismaMock.messageReaction.findUnique.mockResolvedValue(null);
+      prismaMock.messageReaction.groupBy.mockResolvedValue([]);
+      // The losing half of a double-click race: unique constraint violation
+      prismaMock.messageReaction.create.mockRejectedValue({ code: 'P2002' });
+      prismaMock.messageReaction.findMany.mockResolvedValue([{ emoji: EMOJI, userId: 'user-1' }]);
+
+      const res = await request(app)
+        .put(reactionUrl)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.action).toBe('add');
+    });
+
+    it('non-P2002 create errors still fail the request', async () => {
+      const token = makeToken();
+      mockReactableMessage();
+      prismaMock.messageReaction.findUnique.mockResolvedValue(null);
+      prismaMock.messageReaction.groupBy.mockResolvedValue([]);
+      prismaMock.messageReaction.create.mockRejectedValue(new Error('connection lost'));
+
+      const res = await request(app)
+        .put(reactionUrl)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(500);
+    });
+
+    it('removes an existing reaction via deleteMany (idempotent) and responds with action "remove"', async () => {
+      const token = makeToken();
+      mockReactableMessage();
+      prismaMock.messageReaction.findUnique.mockResolvedValue({
+        messageId: 'msg-1',
+        userId: 'user-1',
+        emoji: EMOJI,
+      });
+      prismaMock.messageReaction.deleteMany.mockResolvedValue({ count: 1 });
+      prismaMock.messageReaction.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .put(reactionUrl)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.action).toBe('remove');
+      // deleteMany (not delete) — a concurrent remove that already deleted the
+      // row must not 500 with P2025
+      expect(prismaMock.messageReaction.deleteMany).toHaveBeenCalledWith({
+        where: { messageId: 'msg-1', userId: 'user-1', emoji: EMOJI },
+      });
     });
   });
 

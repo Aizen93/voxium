@@ -26,6 +26,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   return {
     rateLimitMessageSend: passthrough,
     rateLimitGeneral: passthrough,
+    rateLimitInteract: passthrough,
     rateLimitMarkRead: passthrough,
     socketRateLimit: vi.fn().mockReturnValue(true),
   };
@@ -36,7 +37,11 @@ vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn().mockReturnValue({
     to: mockTo,
     fetchSockets: mockFetchSockets,
-    in: vi.fn().mockReturnValue({ fetchSockets: vi.fn().mockResolvedValue([]) }),
+    in: vi.fn().mockReturnValue({
+      fetchSockets: vi.fn().mockResolvedValue([]),
+      socketsJoin: vi.fn(),
+      socketsLeave: vi.fn(),
+    }),
   }),
 }));
 
@@ -106,6 +111,7 @@ vi.mock('../../utils/prisma', () => ({
       findMany: vi.fn(),
       create: vi.fn(),
       delete: vi.fn(),
+      deleteMany: vi.fn(),
       groupBy: vi.fn(),
     },
     messageAttachment: {
@@ -153,6 +159,7 @@ function resetPrismaMocks() {
   vi.mocked(prisma.messageReaction.findMany).mockReset();
   vi.mocked(prisma.messageReaction.create).mockReset();
   vi.mocked(prisma.messageReaction.delete).mockReset();
+  vi.mocked(prisma.messageReaction.deleteMany).mockReset();
   vi.mocked(prisma.messageReaction.groupBy).mockReset();
   vi.mocked(prisma.messageAttachment.findMany).mockReset();
   vi.mocked(prisma.messageAttachment.createMany).mockReset();
@@ -495,6 +502,94 @@ describe('DM routes — POST /:conversationId/messages', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/replyToId must be a string/);
+  });
+});
+
+describe('DM routes — PUT /:conversationId/messages/:messageId/reactions/:emoji', () => {
+  const EMOJI = '👍';
+  const reactionUrl = `/api/v1/dm/conv-1/messages/msg-1/reactions/${encodeURIComponent(EMOJI)}`;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetPrismaMocks();
+  });
+
+  it('adds a reaction and responds with action "add"', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1' } as any);
+    vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
+    vi.mocked(prisma.messageReaction.create).mockResolvedValueOnce({} as any);
+    vi.mocked(prisma.messageReaction.findMany).mockResolvedValueOnce([{ emoji: EMOJI, userId: 'user-1' }] as any);
+
+    const app = createApp();
+    const res = await request(app).put(reactionUrl);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.action).toBe('add');
+    expect(mockTo).toHaveBeenCalledWith('dm:conv-1');
+    expect(mockEmit).toHaveBeenCalledWith('dm:message:reaction_update', expect.objectContaining({ action: 'add' }));
+  });
+
+  it('race idempotency: responds 200 with action "add" when create rejects with P2002 (concurrent duplicate)', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1' } as any);
+    vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
+    // The losing half of a double-click race: unique constraint violation
+    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce({ code: 'P2002' });
+    vi.mocked(prisma.messageReaction.findMany).mockResolvedValueOnce([{ emoji: EMOJI, userId: 'user-1' }] as any);
+
+    const app = createApp();
+    const res = await request(app).put(reactionUrl);
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.action).toBe('add');
+  });
+
+  it('non-P2002 create errors still fail the request', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1' } as any);
+    vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
+    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce(new Error('connection lost'));
+
+    const app = createApp();
+    const res = await request(app).put(reactionUrl);
+
+    expect(res.status).toBe(500);
+  });
+
+  it('removes an existing reaction via deleteMany (idempotent) and responds with action "remove"', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1' } as any);
+    vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce({
+      messageId: 'msg-1', userId: 'user-1', emoji: EMOJI,
+    } as any);
+    vi.mocked(prisma.messageReaction.deleteMany).mockResolvedValueOnce({ count: 1 } as any);
+    vi.mocked(prisma.messageReaction.findMany).mockResolvedValueOnce([] as any);
+
+    const app = createApp();
+    const res = await request(app).put(reactionUrl);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.action).toBe('remove');
+    // deleteMany (not delete) — a concurrent remove that already deleted the
+    // row must not 500 with P2025
+    expect(prisma.messageReaction.deleteMany).toHaveBeenCalledWith({
+      where: { messageId: 'msg-1', userId: 'user-1', emoji: EMOJI },
+    });
+  });
+
+  it('returns 404 when the message belongs to a different conversation', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-other' } as any);
+
+    const app = createApp();
+    const res = await request(app).put(reactionUrl);
+
+    expect(res.status).toBe(404);
   });
 });
 

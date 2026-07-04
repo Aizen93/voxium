@@ -418,6 +418,41 @@ describe('voiceStore', () => {
     });
   });
 
+  describe('joinChannel — generation guard (MED-9)', () => {
+    it('a join superseded by leaveChannel mid-mic-acquisition never emits voice:join', async () => {
+      const socket = vi.mocked(getSocket)()!;
+      vi.mocked(socket.emit).mockClear();
+
+      // Start joining, then leave synchronously while the (async) mic
+      // acquisition is still in flight — the stale join must be abandoned.
+      const joinPromise = useVoiceStore.getState().joinChannel('ch-race');
+      useVoiceStore.getState().leaveChannel();
+      await joinPromise;
+
+      const joinEmits = vi.mocked(socket.emit).mock.calls.filter((c) => c[0] === 'voice:join');
+      expect(joinEmits).toHaveLength(0);
+      expect(useVoiceStore.getState().activeChannelId).toBeNull();
+    });
+
+    it('control: an unimpeded join emits voice:join for the channel', async () => {
+      const socket = vi.mocked(getSocket)()!;
+      vi.mocked(socket.emit).mockClear();
+
+      // navigator.mediaDevices is undefined in jsdom → listen-only join
+      await useVoiceStore.getState().joinChannel('ch-ok');
+
+      expect(socket.emit).toHaveBeenCalledWith(
+        'voice:join',
+        'ch-ok',
+        expect.objectContaining({ selfMute: expect.any(Boolean), selfDeaf: expect.any(Boolean) }),
+      );
+      expect(useVoiceStore.getState().activeChannelId).toBe('ch-ok');
+
+      // Clean up latency interval / voice state for subsequent tests
+      useVoiceStore.getState().leaveChannel();
+    });
+  });
+
   describe('updateUserState — server-deafen enforcement (HIGH-12)', () => {
     it('mutes every remote audio element when the local user is server-deafened', () => {
       const micAudio = fakeAudioElement();

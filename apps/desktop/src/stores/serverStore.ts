@@ -122,6 +122,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set({ activeServerId: serverId, isLoading: true });
     try {
       const { data } = await api.get(`/servers/${serverId}`);
+
+      // Staleness guard: the user may have switched to ANOTHER server (or to the
+      // DM view) while this request was in flight. Applying the response anyway
+      // would render server A's channels under server B's header.
+      if (get().activeServerId !== serverId) return;
+
       const channels = data.data.channels || [];
       const categories = data.data.categories || [];
       const roles = data.data.roles || [];
@@ -145,8 +151,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
       get().fetchMembers(serverId);
     } catch (err) {
       console.error('Failed to fetch server:', err);
-      toast.error('Failed to load server');
-      set({ isLoading: false });
+      // Only surface the failure if this server is still the one being viewed
+      if (get().activeServerId === serverId) {
+        toast.error('Failed to load server');
+        set({ isLoading: false });
+      }
     }
   },
 
@@ -302,10 +311,15 @@ export const useServerStore = create<ServerState>((set, get) => ({
   fetchMembers: async (serverId: string) => {
     try {
       const { data } = await api.get(`/servers/${serverId}/members`);
+      // Staleness guard — a slow response for the previous server must not
+      // overwrite the member list of the server now being viewed
+      if (get().activeServerId !== serverId) return;
       set({ members: data.data });
     } catch (err) {
       console.error('Failed to fetch members:', err);
-      toast.error('Failed to load members');
+      if (get().activeServerId === serverId) {
+        toast.error('Failed to load members');
+      }
     }
   },
 
@@ -530,6 +544,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
   fetchRoles: async (serverId: string) => {
     try {
       const { data } = await api.get(`/servers/${serverId}/roles`);
+      // Staleness guard — don't overwrite the currently-viewed server's roles
+      if (get().activeServerId !== serverId) return;
       set({ roles: data.data });
     } catch (err) {
       console.error('Failed to fetch roles:', err);

@@ -232,6 +232,11 @@ export function disconnectSocket() {
   hasConnectedOnce = false;
   explicitlyDisconnected = true;
   readyCallbacks.length = 0;
-  reconnectCallbacks.length = 0;
+  // Reconnect callbacks are NOT cleared: they are registered once at module
+  // import (e.g. voiceStore's re-join handler) and must survive logout→login.
+  // Clearing them here meant any network drop in a post-relogin session
+  // reconnected the socket but never re-emitted voice:join — UI said
+  // "Connected" with dead audio. Scoped consumers unsubscribe via the
+  // function returned by onSocketReconnect().
   setStatus('disconnected');
 }
