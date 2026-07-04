@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
 import { setUserOnline, setUserOffline, getRedisPubSub } from '../utils/redis';
 import { prisma } from '../utils/prisma';
-import { handleVoiceEvents, getVoiceStateForServer, getScreenShareState } from './voiceHandler';
+import { handleVoiceEvents, getVoiceStateForServers, getScreenShareState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
@@ -335,23 +335,15 @@ export function initSocketServer(httpServer: HttpServer) {
       // `channel:{id}` is the visibility boundary for real-time events, and voice
       // presence (voice:user_joined/state/speaking/screen share) broadcasts there
       // instead of server-wide so private voice channels don't leak occupancy.
+      // Visibility for ALL servers is computed in 4 batched queries (the old
+      // per-server loop made a deploy that reconnects thousands of clients a
+      // self-inflicted DB stampede).
       const allChannels = await prisma.channel.findMany({
         where: { serverId: { in: memberships.map((m) => m.serverId) } },
         select: { id: true, serverId: true, type: true },
       });
-      // Group channels by server for efficient batch filtering
-      const channelsByServer = new Map<string, typeof allChannels>();
-      for (const ch of allChannels) {
-        const list = channelsByServer.get(ch.serverId) || [];
-        list.push(ch);
-        channelsByServer.set(ch.serverId, list);
-      }
-      const { filterVisibleChannels } = await import('../utils/permissionCalculator');
-      const visibleChannels: typeof allChannels = [];
-      for (const [serverId, channels] of channelsByServer) {
-        const visible = await filterVisibleChannels(userId, serverId, channels);
-        visibleChannels.push(...visible);
-      }
+      const { filterVisibleChannelsMulti } = await import('../utils/permissionCalculator');
+      const visibleChannels = await filterVisibleChannelsMulti(userId, allChannels);
       for (const ch of visibleChannels) {
         socket.join(`channel:${ch.id}`);
       }
@@ -498,43 +490,49 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
       }
 
-      // Broadcast online status to all DM conversation rooms
+      // Broadcast online status to all DM conversation rooms (reuses the
+      // conversation list fetched above — this was a duplicate query)
       try {
-        const dmConversations = await prisma.conversation.findMany({
-          where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
-          select: { id: true },
-        });
-        for (const c of dmConversations) {
+        for (const c of conversations) {
           socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
         }
       } catch (dmPresErr) {
         console.error(`[WS] Error broadcasting DM presence for ${userId}:`, dmPresErr);
       }
 
-      // Send existing voice channel users for all servers (reads from Redis for cross-node visibility)
-      // Only send for channels the user has VIEW_CHANNEL permission for
-      for (const m of memberships) {
-        const voiceState = await getVoiceStateForServer(m.serverId);
-        for (const { channelId, userIds, userStates } of voiceState) {
-          // Check VIEW_CHANNEL before revealing voice channel occupants
-          const canView = await hasChannelPermission(userId, channelId, m.serverId, Permissions.VIEW_CHANNEL);
-          if (!canView) continue;
+      // Send existing voice channel users for all servers (reads from Redis for
+      // cross-node visibility). One batched Redis read for ALL memberships; the
+      // VIEW_CHANNEL decision reuses the bulk visibility result computed above
+      // (the old loop did a per-membership Redis scan over every globally-active
+      // channel plus a multi-query permission check per voice channel).
+      const visibleChannelIds = new Set(visibleChannels.map((ch) => ch.id));
+      const voiceStates = (await getVoiceStateForServers(memberships.map((m) => m.serverId)))
+        .filter(({ channelId }) => visibleChannelIds.has(channelId));
 
-          const userInfos = await prisma.user.findMany({
-            where: { id: { in: userIds } },
-            select: { id: true, username: true, displayName: true, avatarUrl: true },
-          });
-          const voiceUsers = userInfos.map((u) => {
-            const state = userStates.get(u.id);
-            return {
-              ...u,
-              selfMute: state?.selfMute ?? false,
-              selfDeaf: state?.selfDeaf ?? false,
-              serverMuted: state?.serverMuted ?? false,
-              serverDeafened: state?.serverDeafened ?? false,
-              speaking: false,
-            };
-          });
+      if (voiceStates.length > 0) {
+        // Single user-info query across all visible voice channels
+        const allVoiceUserIds = [...new Set(voiceStates.flatMap((v) => v.userIds))];
+        const userInfos = await prisma.user.findMany({
+          where: { id: { in: allVoiceUserIds } },
+          select: { id: true, username: true, displayName: true, avatarUrl: true },
+        });
+        const userInfoById = new Map(userInfos.map((u) => [u.id, u]));
+
+        for (const { channelId, userIds, userStates } of voiceStates) {
+          const voiceUsers = userIds
+            .map((uid) => userInfoById.get(uid))
+            .filter((u): u is NonNullable<typeof u> => !!u)
+            .map((u) => {
+              const state = userStates.get(u.id);
+              return {
+                ...u,
+                selfMute: state?.selfMute ?? false,
+                selfDeaf: state?.selfDeaf ?? false,
+                serverMuted: state?.serverMuted ?? false,
+                serverDeafened: state?.serverDeafened ?? false,
+                speaking: false,
+              };
+            });
           socket.emit('voice:channel_users', { channelId, users: voiceUsers });
 
           // Send screen share state if someone is sharing in this channel

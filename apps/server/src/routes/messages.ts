@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
-import { rateLimitMessageSend, rateLimitGeneral } from '../middleware/rateLimiter';
+import { rateLimitMessageSend, rateLimitInteract } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
 import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, type Message } from '@voxium/shared';
@@ -262,7 +262,7 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
 });
 
 // Edit a message
-messageRouter.patch('/:messageId', rateLimitGeneral, async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
+messageRouter.patch('/:messageId', rateLimitInteract, async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId, messageId } = req.params;
     const content = sanitizeText(req.body.content ?? '');
@@ -315,7 +315,7 @@ messageRouter.patch('/:messageId', rateLimitGeneral, async (req: Request<{ chann
 });
 
 // Toggle reaction on a message
-messageRouter.put('/:messageId/reactions/:emoji', rateLimitGeneral, async (req: Request<{ channelId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
+messageRouter.put('/:messageId/reactions/:emoji', rateLimitInteract, async (req: Request<{ channelId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId, messageId } = req.params;
     const emoji = decodeURIComponent(req.params.emoji);
@@ -343,9 +343,12 @@ messageRouter.put('/:messageId/reactions/:emoji', rateLimitGeneral, async (req: 
       where: { messageId_userId_emoji: { messageId, userId, emoji } },
     });
 
+    // Toggle is check-then-act — a double-click fires two concurrent requests
+    // that both observe the same `existing`. Both branches must be idempotent
+    // or the loser 500s (P2025 on the second delete / P2002 on the second add).
     let action: 'add' | 'remove';
     if (existing) {
-      await prisma.messageReaction.delete({ where: { id: existing.id } });
+      await prisma.messageReaction.deleteMany({ where: { messageId, userId, emoji } });
       action = 'remove';
     } else {
       // Check distinct emoji count limit
@@ -356,7 +359,12 @@ messageRouter.put('/:messageId/reactions/:emoji', rateLimitGeneral, async (req: 
       if (distinctCount.length >= LIMITS.MAX_REACTIONS_PER_MESSAGE) {
         throw new BadRequestError(`Maximum of ${LIMITS.MAX_REACTIONS_PER_MESSAGE} different reactions per message`);
       }
-      await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
+      try {
+        await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
+      } catch (err) {
+        // P2002: the concurrent duplicate add won the race — same outcome
+        if (!(err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === 'P2002')) throw err;
+      }
       action = 'add';
     }
 
@@ -378,7 +386,7 @@ messageRouter.put('/:messageId/reactions/:emoji', rateLimitGeneral, async (req: 
 });
 
 // Delete a message
-messageRouter.delete('/:messageId', rateLimitGeneral, async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
+messageRouter.delete('/:messageId', rateLimitInteract, async (req: Request<{ channelId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { channelId, messageId } = req.params;
 

@@ -9,6 +9,16 @@ import { mediaCodecs, getWorkerSettings, getWebRtcTransportOptions } from './med
 const workers: Worker[] = [];
 let nextWorkerIdx = 0;
 
+// Invoked with the affected channelIds when a worker dies, so the voice layer
+// can tear down stranded sessions and tell clients to rejoin (instead of
+// leaving them in a silently dead channel). Wired by index.ts after Socket.IO
+// is initialized — deaths before that have no connected users to notify.
+type WorkerDeathListener = (channelIds: string[]) => void;
+let workerDeathListener: WorkerDeathListener | null = null;
+export function onWorkerDeath(listener: WorkerDeathListener): void {
+  workerDeathListener = listener;
+}
+
 // channelId → Router
 const channelRouters = new Map<string, Router>();
 // Track which worker owns each router (for cleanup on worker death)
@@ -182,10 +192,22 @@ async function createWorker(): Promise<Worker> {
     if (idx !== -1) workers.splice(idx, 1);
 
     // Close all Routers that were on this worker
+    const affectedChannels: string[] = [];
     for (const [channelId, w] of routerWorkerMap.entries()) {
       if (w === worker) {
+        affectedChannels.push(channelId);
         channelRouters.delete(channelId);
         routerWorkerMap.delete(channelId);
+      }
+    }
+
+    // Let the voice layer evict the stranded participants and notify their
+    // clients — otherwise they sit in a dead channel until a manual rejoin
+    if (affectedChannels.length > 0 && workerDeathListener) {
+      try {
+        workerDeathListener(affectedChannels);
+      } catch (err) {
+        console.error('[mediasoup] Worker-death listener failed:', err);
       }
     }
 

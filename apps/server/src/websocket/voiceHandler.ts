@@ -381,6 +381,17 @@ export function createVoiceHandlers(
 
     // Re-apply persisted server-mute/deafen (survives disconnect+rejoin)
     const persisted = await getPersistedServerMuteDeaf(channel.serverId, userId);
+
+    // Bail if the user disconnected/left during the await above. Without this,
+    // the leave that already ran (removing the user + closing transports) gets
+    // overridden by the rest of this join — mirroring a ghost occupant to Redis
+    // and broadcasting voice:user_joined for a user who is gone (MED-6).
+    if (socket.data.voiceChannelId !== channelId || voiceChannelUsers.get(channelId)?.get(userId) !== userMedia) {
+      if (!sendTransport.closed) sendTransport.close();
+      if (!recvTransport.closed) recvTransport.close();
+      return;
+    }
+
     if (persisted.serverMuted) {
       userMedia.serverMuted = true;
       userMedia.selfMute = true; // deafen-implies-mute
@@ -400,6 +411,12 @@ export function createVoiceHandlers(
       where: { id: userId },
       select: { id: true, username: true, displayName: true, avatarUrl: true },
     });
+
+    // Same ghost guard after the user-info await: if the user left during it,
+    // the leave already mirrored the departure — don't broadcast a join.
+    if (socket.data.voiceChannelId !== channelId || voiceChannelUsers.get(channelId)?.get(userId) !== userMedia) {
+      return;
+    }
 
     if (user) {
       // Send existing users in the channel to the joiner
@@ -1237,6 +1254,41 @@ export async function dispatchVoiceEvent(
 }
 
 /**
+ * Tear down every session in the given channels after their mediasoup worker
+ * died (MED-7). The C++ transports are already gone; this evicts the stranded
+ * server-side state, broadcasts voice:user_left, and tells each participant's
+ * client to rejoin — otherwise users sit in a silently dead channel until they
+ * manually leave. Wired to mediasoupManager.onWorkerDeath by index.ts.
+ */
+export function handleWorkerDeath(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  channelIds: string[],
+): void {
+  for (const channelId of channelIds) {
+    const users = voiceChannelUsers.get(channelId);
+    if (!users) continue;
+    console.warn(`[Voice] Worker died — evicting ${users.size} participant(s) from channel ${channelId}`);
+    for (const [uid, media] of [...users.entries()]) {
+      io.to(media.socketId).emit('voice:error', {
+        message: 'Voice server restarted — please rejoin the voice channel.',
+      });
+      // Shim-based leave: works for local sockets AND relayed participants;
+      // all close() calls are safe no-ops on the already-dead C++ handles
+      const shim: VoiceSocket = {
+        id: media.socketId,
+        data: { userId: uid, voiceChannelId: channelId },
+        emit: (() => true) as VoiceSocket['emit'],
+        join: (room) => { io.in(media.socketId).socketsJoin(room); },
+        leave: (room) => { io.in(media.socketId).socketsLeave(room); },
+      };
+      leaveCurrentVoiceChannel(io, shim, uid);
+      shimHandlerTables.delete(media.socketId);
+      dropShim(media.socketId);
+    }
+  }
+}
+
+/**
  * Owner-side sweep: tear down voice sessions whose participant socket no longer
  * exists ANYWHERE in the cluster — its home node crashed, so no disconnect was
  * ever relayed here. Called from the voiceCluster reaper interval.
@@ -1630,6 +1682,55 @@ export function getVoiceDiagnostics(): {
       });
     }
     result.push({ channelId, userCount: users.size, users: userStates });
+  }
+  return result;
+}
+
+/**
+ * Batched variant for the socket-connect hot path: active voice state for MANY
+ * servers in 3 Redis round-trips total. The old per-membership loop called
+ * getVoiceStateForServer once per server, and each call scanned EVERY globally
+ * active channel — a user in 20 servers burned thousands of Redis ops per connect.
+ */
+export async function getVoiceStateForServers(serverIds: string[]): Promise<{ channelId: string; serverId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }> }[]> {
+  if (serverIds.length === 0) return [];
+  const redis = getRedis();
+  const activeChannels = await redis.sMembers('voice:active');
+  if (activeChannels.length === 0) return [];
+
+  const serverPipeline = redis.multi();
+  for (const channelId of activeChannels) {
+    serverPipeline.get(`voice:channel:server:${channelId}`);
+  }
+  const serverIdsRaw = await serverPipeline.exec();
+
+  const wanted = new Set(serverIds);
+  const matching: { channelId: string; serverId: string }[] = [];
+  activeChannels.forEach((channelId, i) => {
+    const sid = String(serverIdsRaw[i]);
+    if (wanted.has(sid)) matching.push({ channelId, serverId: sid });
+  });
+  if (matching.length === 0) return [];
+
+  const usersPipeline = redis.multi();
+  for (const { channelId } of matching) {
+    usersPipeline.hGetAll(`voice:channel:users:${channelId}`);
+  }
+  const usersResultsRaw = await usersPipeline.exec();
+
+  const result: { channelId: string; serverId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }> }[] = [];
+  for (let i = 0; i < matching.length; i++) {
+    const usersData = usersResultsRaw[i] as unknown as Record<string, string>;
+    if (!usersData || typeof usersData !== 'object') continue;
+    const userIds = Object.keys(usersData);
+    if (userIds.length === 0) continue;
+
+    const userStates = new Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }>();
+    for (const [uid, json] of Object.entries(usersData)) {
+      const { selfMute, selfDeaf, serverMuted, serverDeafened } = JSON.parse(json);
+      userStates.set(uid, { selfMute, selfDeaf, serverMuted: serverMuted ?? false, serverDeafened: serverDeafened ?? false });
+    }
+    result.push({ channelId: matching[i].channelId, serverId: matching[i].serverId, userIds, userStates });
   }
   return result;
 }

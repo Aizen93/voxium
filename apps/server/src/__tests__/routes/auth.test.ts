@@ -360,6 +360,33 @@ describe('POST /api/v1/auth/register', () => {
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
   });
+
+  it('checks username uniqueness case-insensitively (MED-4)', async () => {
+    // "alice" already exists — registering "Alice" must be rejected
+    mockPrismaUser.findFirst.mockResolvedValue({ id: 'existing-user' });
+
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({
+        username: 'Alice',
+        email: 'brand-new@example.com',
+        password: 'password123',
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Username or email already in use');
+    // The duplicate lookup must match the username case-insensitively
+    expect(mockPrismaUser.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            { username: { equals: 'Alice', mode: 'insensitive' } },
+          ]),
+        }),
+      }),
+    );
+  });
 });
 
 describe('POST /api/v1/auth/login', () => {
@@ -438,6 +465,29 @@ describe('POST /api/v1/auth/login', () => {
     expect(res.body.success).toBe(false);
     expect(res.body.error).toBe('Invalid credentials');
   });
+
+  it('burns a bcrypt compare for unknown emails so timing matches a wrong password (MED-3)', async () => {
+    const compareSpy = vi.spyOn(bcrypt, 'compare');
+    try {
+      mockPrismaIpBan.findUnique.mockResolvedValue(null);
+      mockPrismaUser.findUnique.mockResolvedValue(null); // unknown email
+
+      const res = await request(app)
+        .post('/api/v1/auth/login')
+        .send({
+          email: 'ghost@example.com',
+          password: 'password123',
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('Invalid credentials');
+      // The timing-equalizer hash must be compared against even with no user
+      // (the first such call also lazily builds the hash via one bcrypt.hash)
+      expect(compareSpy).toHaveBeenCalled();
+    } finally {
+      compareSpy.mockRestore();
+    }
+  }, 20000); // first run pays a cost-12 bcrypt.hash for the equalizer hash
 
   it('normalizes email to lowercase', async () => {
     const hashedPassword = await bcrypt.hash('password123', 4);

@@ -5,6 +5,7 @@ import { getAccessToken, setTokens, clearTokens, isRemembered } from '../service
 import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
 import { useVoiceStore } from './voiceStore';
+import { resetAccountStores } from './resetStores';
 import { processImage } from '../utils/imageProcessing';
 import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
@@ -136,6 +137,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     clearTokens();
     disconnectSocket();
+    // Wipe every account-scoped store — on a shared machine the next login must
+    // never see the previous account's servers, DMs, or support transcript
+    resetAccountStores();
     set({ user: null, isAuthenticated: false });
   },
 

@@ -107,16 +107,11 @@ friendRouter.post('/request', rateLimitFriendRequest, async (req: Request, res: 
         const currentUser = updated.addressee; // me
         const otherUser = updated.requester;    // target
 
-        // Emit accepted to both parties
-        const io = getIO();
-        const sockets = await io.fetchSockets();
-        for (const s of sockets) {
-          if (s.data.userId === targetUser.id) {
-            s.emit('friend:request_accepted', {
-              friendship: toFriendship(updated, currentUser as FriendUser),
-            });
-          }
-        }
+        // Emit accepted to the other party via their per-user room — targeted
+        // and cross-node, instead of serializing every socket on every node
+        getIO().to(`user:${targetUser.id}`).emit('friend:request_accepted', {
+          friendship: toFriendship(updated, currentUser as FriendUser),
+        });
 
         res.json({
           success: true,
@@ -145,16 +140,10 @@ friendRouter.post('/request', rateLimitFriendRequest, async (req: Request, res: 
 
     const currentUser = friendship.requester; // me
 
-    // Emit to target user
-    const io = getIO();
-    const sockets = await io.fetchSockets();
-    for (const s of sockets) {
-      if (s.data.userId === targetUser.id) {
-        s.emit('friend:request_received', {
-          friendship: toFriendship(friendship, currentUser as FriendUser),
-        });
-      }
-    }
+    // Emit to the target user's per-user room (targeted, cross-node)
+    getIO().to(`user:${targetUser.id}`).emit('friend:request_received', {
+      friendship: toFriendship(friendship, currentUser as FriendUser),
+    });
 
     res.status(201).json({
       success: true,
@@ -191,16 +180,10 @@ friendRouter.post('/:friendshipId/accept', async (req: Request<{ friendshipId: s
     const currentUser = updated.addressee; // me
     const otherUser = updated.requester;
 
-    // Emit to requester
-    const io = getIO();
-    const sockets = await io.fetchSockets();
-    for (const s of sockets) {
-      if (s.data.userId === otherUser.id) {
-        s.emit('friend:request_accepted', {
-          friendship: toFriendship(updated, currentUser as FriendUser),
-        });
-      }
-    }
+    // Emit to the requester's per-user room (targeted, cross-node)
+    getIO().to(`user:${otherUser.id}`).emit('friend:request_accepted', {
+      friendship: toFriendship(updated, currentUser as FriendUser),
+    });
 
     res.json({
       success: true,
@@ -230,14 +213,8 @@ friendRouter.delete('/:friendshipId', async (req: Request<{ friendshipId: string
 
     await prisma.friendship.delete({ where: { id: friendshipId } });
 
-    // Notify the other user so their UI updates in real-time
-    const io = getIO();
-    const sockets = await io.fetchSockets();
-    for (const s of sockets) {
-      if (s.data.userId === otherUserId) {
-        s.emit('friend:removed', { userId });
-      }
-    }
+    // Notify the other user via their per-user room (targeted, cross-node)
+    getIO().to(`user:${otherUserId}`).emit('friend:removed', { userId });
 
     res.json({ success: true, message: 'Friendship removed' });
   } catch (err) {

@@ -141,16 +141,23 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
       const { uploadUrl, key } = data.data;
 
-      await fetch(uploadUrl, {
+      const uploadRes = await fetch(uploadUrl, {
         method: 'PUT',
         body: file,
         headers: { 'Content-Type': file.type },
       });
+      // S3 can reject the PUT (expired presign, size/type mismatch) while fetch
+      // resolves fine — without this check the message would be sent with a
+      // permanently broken attachment key.
+      if (!uploadRes.ok) {
+        throw new Error(`S3 attachment upload failed: ${uploadRes.status}`);
+      }
 
       setPendingFiles((prev) =>
         prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'uploaded' as const, s3Key: key } : pf))
       );
-    } catch {
+    } catch (err) {
+      console.error('[Upload] Attachment upload failed:', err);
       setPendingFiles((prev) =>
         prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'error' as const } : pf))
       );

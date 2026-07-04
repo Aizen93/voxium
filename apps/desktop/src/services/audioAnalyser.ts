@@ -156,6 +156,18 @@ export function onSpeakingChange(cb: ((speaking: boolean) => void) | null) {
  */
 export function setSpeakingDetectionPaused(paused: boolean) {
   detectionPaused = paused;
+  if (paused && isSpeaking) {
+    // Muting mid-sentence: with the tick paused, the last broadcast
+    // 'speaking: true' would stick forever — everyone would see the green
+    // speaking ring next to a mic-off icon. Force the silent transition now.
+    isSpeaking = false;
+    silenceStart = 0;
+    if (sdGainNode && sdContext && speakingMode !== 'dm') {
+      sdGainNode.gain.setTargetAtTime(0, sdContext.currentTime, GAIN_RAMP_SEC);
+    }
+    emitSpeaking(false);
+    speakingChangeCallback?.(false);
+  }
 }
 
 export function getAudioLevel(): number {

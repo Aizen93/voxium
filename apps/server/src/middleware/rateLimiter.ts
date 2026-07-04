@@ -39,6 +39,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   markRead:       { keyPrefix: 'rl:markread',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Mark Read' },
   roleManage:     { keyPrefix: 'rl:role',      points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Role Manage' },
   general:        { keyPrefix: 'rl:general',   points: 100, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'General' },
+  interact:       { keyPrefix: 'rl:interact',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Interact' },
   themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
   themeBrowse:    { keyPrefix: 'rl:themebr',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Browse' },
 };
@@ -215,6 +216,10 @@ export const rateLimitResendVerification = createMiddleware('resendVerification'
 export const rateLimitMarkRead = createMiddleware('markRead', byUserId);
 export const rateLimitRoleManage = createMiddleware('roleManage', byUserId);
 export const rateLimitGeneral = createMiddleware('general', byIp);
+// Authenticated message interactions (edit/delete/react). Keyed by userId — the
+// old per-route rateLimitGeneral shared ONE IP bucket with the global api-level
+// limiter, so users behind a NAT split a halved 429 budget between them.
+export const rateLimitInteract = createMiddleware('interact', byUserId);
 export const rateLimitThemeManage = createMiddleware('themeManage', byUserId);
 export const rateLimitThemeBrowse = createMiddleware('themeBrowse', byUserId);
 

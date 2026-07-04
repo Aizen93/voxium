@@ -92,7 +92,8 @@ export function MainLayout() {
     const handleVisibilityChange = () => {
       if (document.hidden) return;
       const serverState = useServerStore.getState();
-      if (serverState.activeChannelId) {
+      // Only when actually in server view — activeChannelId survives switching to DMs
+      if (serverState.activeChannelId && serverState.activeServerId) {
         serverState.clearUnread(serverState.activeChannelId);
         serverState.markChannelRead(serverState.activeChannelId);
       }
@@ -120,10 +121,20 @@ export function MainLayout() {
     let markReadTimer: ReturnType<typeof setTimeout> | null = null;
     let markDMReadTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // "Viewing this server channel" requires BOTH the matching channelId AND being
+    // in server view (activeServerId set). activeChannelId survives switching to the
+    // DM/friends view — without the view check, a message for the last-viewed channel
+    // would append into the DM the user is reading (chatStore is shared) and falsely
+    // mark the channel read. Mirrors the !activeServerId guard the DM handlers use.
+    const isViewingChannel = (channelId: string | null | undefined): boolean => {
+      const serverState = useServerStore.getState();
+      return !!serverState.activeServerId && !!channelId && channelId === serverState.activeChannelId;
+    };
+
     // Store function references so cleanup actually works
     const handlers = {
       messageNew: (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
-        if (message.channelId === useServerStore.getState().activeChannelId) {
+        if (isViewingChannel(message.channelId)) {
           useChatStore.getState().addMessage(message);
           // Debounced mark-as-read so lastReadAt stays current while viewing
           // Capture serverId now — channels array may change if user switches servers before timer fires
@@ -139,7 +150,7 @@ export function MainLayout() {
         // Check if the current user is mentioned
         const isMentioned = !!(currentUser && message.mentions?.some((m) => m.id === currentUser.id));
 
-        const isActiveChannel = message.channelId === useServerStore.getState().activeChannelId;
+        const isActiveChannel = isViewingChannel(message.channelId);
 
         // If viewing this channel and not mentioned, no notification needed
         if (isActiveChannel && !isMentioned) return;
@@ -175,23 +186,23 @@ export function MainLayout() {
         }
       },
       messageUpdate: (message: Message) => {
-        if (message.channelId === useServerStore.getState().activeChannelId) {
+        if (isViewingChannel(message.channelId)) {
           useChatStore.getState().updateMessage(message);
         }
       },
       messageDelete: ({ messageId, channelId }: { messageId: string; channelId: string }) => {
-        if (channelId === useServerStore.getState().activeChannelId) {
+        if (isViewingChannel(channelId)) {
           useChatStore.getState().deleteMessage(messageId);
         }
       },
       typingStart: ({ channelId, userId, username }: { channelId: string; userId: string; username: string }) => {
         const currentUser = useAuthStore.getState().user;
-        if (userId !== currentUser?.id && channelId === useServerStore.getState().activeChannelId) {
+        if (userId !== currentUser?.id && isViewingChannel(channelId)) {
           useChatStore.getState().setTypingUser(userId, username);
         }
       },
       typingStop: ({ channelId, userId }: { channelId: string; userId: string }) => {
-        if (channelId === useServerStore.getState().activeChannelId) {
+        if (isViewingChannel(channelId)) {
           useChatStore.getState().removeTypingUser(userId);
         }
       },
@@ -281,16 +292,17 @@ export function MainLayout() {
         }
       },
       messageReactionUpdate: ({ messageId, channelId, reactions }: { messageId: string; channelId: string; reactions: ReactionGroup[] }) => {
-        if (channelId === useServerStore.getState().activeChannelId) {
+        if (isViewingChannel(channelId)) {
           useChatStore.getState().updateMessageReactions(messageId, reactions);
         }
       },
       unreadInit: ({ unreads }: { unreads: UnreadCount[] }) => {
         const store = useServerStore.getState();
         store.initUnreadCounts(unreads);
-        // If the user is already viewing a channel, clear its unread and mark as read
+        // If the user is actually VIEWING a channel (server view), clear its unread
+        // and mark as read — not when a stale activeChannelId lingers behind the DM view
         const activeChannelId = store.activeChannelId;
-        if (activeChannelId) {
+        if (activeChannelId && store.activeServerId) {
           store.clearUnread(activeChannelId);
           store.markChannelRead(activeChannelId);
         }

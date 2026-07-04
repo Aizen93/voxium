@@ -1,5 +1,32 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { socketRateLimit } from '../../middleware/rateLimiter';
+
+// Minimal Redis mock — getAllRateLimits and socketRateLimit never touch Redis,
+// so the client getters can simply throw if anything reaches for them.
+vi.mock('../../utils/redis', () => ({
+  getRedis: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
+  getRedisPubSub: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
+  getRedisConfigSub: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
+}));
+
+import { socketRateLimit, getAllRateLimits } from '../../middleware/rateLimiter';
+
+describe('getAllRateLimits', () => {
+  it('includes the interact limiter keyed by userId (P2 — NAT-shared IP budgets)', () => {
+    const limits = getAllRateLimits();
+    const interact = limits.find((l) => l.name === 'interact');
+
+    expect(interact).toBeDefined();
+    expect(interact).toMatchObject({ name: 'interact', keyType: 'userId' });
+  });
+
+  it('keeps the general limiter keyed by ip', () => {
+    const limits = getAllRateLimits();
+    const general = limits.find((l) => l.name === 'general');
+
+    expect(general).toBeDefined();
+    expect(general).toMatchObject({ name: 'general', keyType: 'ip' });
+  });
+});
 
 describe('socketRateLimit', () => {
   beforeEach(() => {

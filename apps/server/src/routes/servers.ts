@@ -512,11 +512,13 @@ serverRouter.post(
         throw new ForbiddenError('Cannot kick a member with an equal or higher role');
       }
 
-      // Force-leave the kicked user from voice if they're in a voice channel on THIS server
+      // Force-leave the kicked user from voice if they're in a voice channel on
+      // THIS server. Scoped to the member's own sockets via their per-user room
+      // instead of fetching every socket on every node.
       const io = getIO();
-      const sockets = await io.fetchSockets();
-      for (const s of sockets) {
-        if (s.data.userId === memberId && s.data.voiceChannelId) {
+      const memberSockets = await io.in(`user:${memberId}`).fetchSockets();
+      for (const s of memberSockets) {
+        if (s.data.voiceChannelId) {
           // Verify the voice channel belongs to the server the user is being kicked from
           const voiceChannel = await prisma.channel.findUnique({
             where: { id: s.data.voiceChannelId as string },
@@ -546,13 +548,9 @@ serverRouter.post(
       // Remove kicked user's socket from server room and notify remaining members
       await broadcastMemberLeft(memberId, serverId);
 
-      // Emit member:kicked directly to the kicked user's sockets (they're already out of the server room)
-      const kickedSockets = await io.fetchSockets();
-      for (const s of kickedSockets) {
-        if (s.data.userId === memberId) {
-          s.emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
-        }
-      }
+      // Emit member:kicked directly to the kicked user's per-user room
+      // (they're already out of the server room)
+      io.to(`user:${memberId}`).emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
 
       res.json({ success: true, message: 'Member kicked' });
     } catch (err) {

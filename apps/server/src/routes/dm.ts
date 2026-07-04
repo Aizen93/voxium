@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
-import { rateLimitMessageSend, rateLimitGeneral, rateLimitMarkRead } from '../middleware/rateLimiter';
+import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
 import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, type Message } from '@voxium/shared';
@@ -136,14 +136,11 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
         skipDuplicates: true,
       });
 
-      // Join both users' sockets to the DM room
+      // Join both users' sockets to the DM room via their per-user rooms —
+      // adapter-wide socketsJoin instead of fetching every socket on every node
       const io = getIO();
-      const sockets = await io.fetchSockets();
-      for (const s of sockets) {
-        if (s.data.userId === user1Id || s.data.userId === user2Id) {
-          s.join(`dm:${conversation.id}`);
-        }
-      }
+      io.in(`user:${user1Id}`).socketsJoin(`dm:${conversation.id}`);
+      io.in(`user:${user2Id}`).socketsJoin(`dm:${conversation.id}`);
     }
 
     res.status(isNew ? 201 : 200).json({
@@ -351,7 +348,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
 
 // ─── Edit DM ─────────────────────────────────────────────────────────────────
 
-dmRouter.patch('/:conversationId/messages/:messageId', rateLimitGeneral, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
+dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId, messageId } = req.params;
     const userId = req.user!.userId;
@@ -388,7 +385,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitGeneral, async (
 
 // ─── Delete DM ───────────────────────────────────────────────────────────────
 
-dmRouter.delete('/:conversationId/messages/:messageId', rateLimitGeneral, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
+dmRouter.delete('/:conversationId/messages/:messageId', rateLimitInteract, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId, messageId } = req.params;
     const userId = req.user!.userId;
@@ -419,7 +416,7 @@ dmRouter.delete('/:conversationId/messages/:messageId', rateLimitGeneral, async 
 
 // ─── Toggle reaction on DM ──────────────────────────────────────────────────
 
-dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitGeneral, async (req: Request<{ conversationId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
+dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitInteract, async (req: Request<{ conversationId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId, messageId } = req.params;
     const emoji = decodeURIComponent(req.params.emoji);
@@ -440,9 +437,11 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitG
       where: { messageId_userId_emoji: { messageId, userId, emoji } },
     });
 
+    // Toggle is check-then-act — both branches must be idempotent so a
+    // double-click's losing request doesn't 500 (see messages.ts reactions)
     let action: 'add' | 'remove';
     if (existing) {
-      await prisma.messageReaction.delete({ where: { id: existing.id } });
+      await prisma.messageReaction.deleteMany({ where: { messageId, userId, emoji } });
       action = 'remove';
     } else {
       const distinctCount = await prisma.messageReaction.groupBy({
@@ -452,7 +451,12 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitG
       if (distinctCount.length >= LIMITS.MAX_REACTIONS_PER_MESSAGE) {
         throw new BadRequestError(`Maximum of ${LIMITS.MAX_REACTIONS_PER_MESSAGE} different reactions per message`);
       }
-      await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
+      try {
+        await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
+      } catch (err) {
+        // P2002: the concurrent duplicate add won the race — same outcome
+        if (!(err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === 'P2002')) throw err;
+      }
       action = 'add';
     }
 
@@ -475,7 +479,7 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitG
 
 // ─── Delete conversation ────────────────────────────────────────────────────
 
-dmRouter.delete('/:conversationId', rateLimitGeneral, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
+dmRouter.delete('/:conversationId', rateLimitInteract, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;

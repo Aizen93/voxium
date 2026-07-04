@@ -34,8 +34,8 @@ import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
-import { initMediasoup } from './mediasoup/mediasoupManager';
-import { clearVoiceState, dispatchVoiceEvent } from './websocket/voiceHandler';
+import { initMediasoup, onWorkerDeath } from './mediasoup/mediasoupManager';
+import { clearVoiceState, dispatchVoiceEvent, handleWorkerDeath } from './websocket/voiceHandler';
 import { clearDMVoiceState } from './websocket/dmVoiceHandler';
 import { initVoiceCluster, stopVoiceCluster } from './websocket/voiceCluster';
 import { initVoiceRelay } from './websocket/voiceRelay';
@@ -99,6 +99,10 @@ async function main() {
   // and this node dispatches them against shims.
   await initVoiceRelay(io, (shim, event, args, ack) => dispatchVoiceEvent(io, shim, event, args, ack));
   console.log('[VoiceRelay] Initialized');
+
+  // On mediasoup worker death: evict stranded voice sessions and tell their
+  // clients to rejoin (they'd otherwise sit in a silently dead channel)
+  onWorkerDeath((channelIds) => handleWorkerDeath(io, channelIds));
 
   // Start admin metrics emitter
   startAdminMetricsEmitter(io);
