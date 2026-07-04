@@ -1,7 +1,7 @@
 import type { Server as SocketServer } from 'socket.io';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { getRedis, getRedisPubSub, getRedisConfigSub, NODE_ID, isNodeAlive } from '../utils/redis';
-import { cleanupServerVoice, reapVoiceChannelMirror } from './voiceHandler';
+import { cleanupServerVoice, reapVoiceChannelMirror, reapOrphanedRemoteParticipants } from './voiceHandler';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -40,6 +40,10 @@ export async function initVoiceCluster(io: IO): Promise<void> {
   reaperTimer = setInterval(() => {
     reapDeadNodeVoiceState(io).catch((err) =>
       console.warn('[VoiceCluster] Dead-node voice reap failed:', err));
+    // Owner-side sweep: relayed participants whose HOME node crashed never send
+    // a disconnect — tear down their sessions once their socket is gone
+    reapOrphanedRemoteParticipants(io).catch((err) =>
+      console.warn('[VoiceCluster] Orphaned-participant reap failed:', err));
   }, REAPER_INTERVAL_MS);
   reaperTimer.unref?.();
 }

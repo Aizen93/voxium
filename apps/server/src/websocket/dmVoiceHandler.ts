@@ -255,7 +255,9 @@ function armCallTimeout(
 
 export async function leaveCurrentDMVoiceChannel(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
-  socket: Socket<ClientToServerEvents, ServerToClientEvents>,
+  // Structural subset so voiceHandler can pass either a real Socket or a
+  // relay shim (multi-node) — only id / leave / data are touched here.
+  socket: Pick<Socket<ClientToServerEvents, ServerToClientEvents>, 'id' | 'leave'> & { data: { dmCallConversationId?: string } },
   userId: string,
   opts?: { force?: boolean }
 ) {

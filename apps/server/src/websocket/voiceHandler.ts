@@ -8,9 +8,17 @@ import { isFeatureEnabled } from '../utils/featureFlags';
 import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerRouters, getRouter } from '../mediasoup/mediasoupManager';
 import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { getRedis, NODE_ID, isNodeAlive } from '../utils/redis';
+import { getRedis, NODE_ID, isNodeAlive, socketExistsInCluster } from '../utils/redis';
+import { reapVoiceChannelMirror } from '../utils/voiceMirror';
+import {
+  getRemoteSession, setRemoteSession, clearRemoteSession,
+  relayVoiceEvent, resolveOrClaimChannelOwner, dropShim,
+} from './voiceRelay';
 import { hasChannelPermission, hasServerPermission, getHighestRolePosition } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
+
+// Re-exported for existing consumers (voiceCluster, tests)
+export { reapVoiceChannelMirror };
 
 /** Runtime type guard — returns false if value is not a non-empty string */
 function isString(v: unknown): v is string {
@@ -128,28 +136,6 @@ function mirrorScreenShare(channelId: string, userId: string | null): void {
   }
 }
 
-/**
- * Delete one channel's entire Redis mirror (users hash, server/node mapping,
- * screen-share flag, active-set membership, and the participants' reverse-lookup
- * keys). Returns the userIds that were mirrored so callers can emit
- * voice:user_left for each ghost. Used by boot cleanup and the dead-node reaper.
- */
-export async function reapVoiceChannelMirror(channelId: string): Promise<string[]> {
-  const redis = getRedis();
-  const users = await redis.hGetAll(`voice:channel:users:${channelId}`);
-  const userIds = Object.keys(users ?? {});
-  const pipeline = redis.multi()
-    .del(`voice:channel:users:${channelId}`)
-    .del(`voice:channel:server:${channelId}`)
-    .del(`voice:channel:node:${channelId}`)
-    .del(`voice:screen:${channelId}`)
-    .sRem('voice:active', channelId);
-  for (const uid of userIds) {
-    pipeline.del(`voice:user:${uid}`);
-  }
-  await pipeline.exec();
-  return userIds;
-}
 
 /**
  * Clear stale server-voice Redis mirror state on startup. mediasoup objects are
@@ -215,16 +201,43 @@ export async function clearVoiceState(
   }
 }
 
-// ─── Handler Registration ───────────────────────────────────────────────────
+// ─── Handler creation ────────────────────────────────────────────────────────
 
-export function handleVoiceEvents(
+/**
+ * The socket surface voice handlers touch — satisfied by a real Socket AND by
+ * the owner-side shim that represents a remote participant (see voiceRelay).
+ * Handlers must not use any Socket API beyond this.
+ */
+export type VoiceSocket = {
+  id: string;
+  data: { userId?: string; voiceChannelId?: string; dmCallConversationId?: string };
+  emit: Socket<ClientToServerEvents, ServerToClientEvents>['emit'];
+  join: (room: string | string[]) => void | Promise<void>;
+  leave: (room: string) => void | Promise<void>;
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type VoiceEventHandler = (...args: any[]) => void | Promise<void>;
+export type VoiceHandlerTable = Record<string, VoiceEventHandler>;
+
+/**
+ * Build the voice event handler table for one participant. The same table
+ * serves BOTH locally-connected sockets (registered by handleVoiceEvents) and
+ * remote participants dispatched from the relay against a shim on the
+ * Router-owning node (HIGH-15 channel affinity).
+ */
+export function createVoiceHandlers(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
-  socket: Socket<ClientToServerEvents, ServerToClientEvents>
-) {
+  socket: VoiceSocket,
+): VoiceHandlerTable {
   const userId = socket.data.userId as string;
+  const handlers: VoiceHandlerTable = {};
+  const on = (event: string, handler: VoiceEventHandler): void => {
+    handlers[event] = handler;
+  };
 
   // ── voice:join ────────────────────────────────────────────────────────
-  socket.on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
+  on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
     if (!socketRateLimit(socket, 'voice:join', 10)) return;
     if (!isString(channelId)) return;
     if (!isFeatureEnabled('voice')) {
@@ -449,14 +462,14 @@ export function handleVoiceEvents(
   });
 
   // ── voice:leave ───────────────────────────────────────────────────────
-  socket.on('voice:leave', () => {
+  on('voice:leave', () => {
     if (!socketRateLimit(socket, 'voice:leave', 30)) return;
     console.log(`[Voice] User ${userId} leaving voice channel`);
     leaveCurrentVoiceChannel(io, socket, userId);
   });
 
   // ── voice:transport:connect ───────────────────────────────────────────
-  socket.on('voice:transport:connect', async (data: { transportId: string; dtlsParameters: unknown }, ackCallback) => {
+  on('voice:transport:connect', async (data: { transportId: string; dtlsParameters: unknown }, ackCallback) => {
     if (!socketRateLimit(socket, 'voice:transport:connect', 30)) {
       if (typeof ackCallback === 'function') ackCallback({ error: 'Rate limited' });
       return;
@@ -498,7 +511,7 @@ export function handleVoiceEvents(
   });
 
   // ── voice:produce ─────────────────────────────────────────────────────
-  socket.on('voice:produce', async (
+  on('voice:produce', async (
     data: { kind: 'audio' | 'video'; rtpParameters: unknown; appData?: Record<string, unknown> },
     callback,
   ) => {
@@ -617,7 +630,7 @@ export function handleVoiceEvents(
   // Closing fires 'producerclose' on every remote Consumer, which notifies
   // each viewer via voice:producer_closed. Without this event, stopped-share
   // producers leaked server-side until the user left the channel.
-  socket.on('voice:producer:close', (data: { producerId: string }) => {
+  on('voice:producer:close', (data: { producerId: string }) => {
     if (!socketRateLimit(socket, 'voice:producer:close', 30)) return;
     if (!data || typeof data !== 'object' || !isString(data.producerId)) return;
     const channelId = socket.data.voiceChannelId as string;
@@ -635,7 +648,7 @@ export function handleVoiceEvents(
   });
 
   // ── voice:rtp_capabilities ────────────────────────────────────────────
-  socket.on('voice:rtp_capabilities', async (data: { rtpCapabilities: unknown }) => {
+  on('voice:rtp_capabilities', async (data: { rtpCapabilities: unknown }) => {
     if (!socketRateLimit(socket, 'voice:rtp_capabilities', 10)) return;
     if (!data || typeof data !== 'object' || !data.rtpCapabilities || typeof data.rtpCapabilities !== 'object') return;
     const channelId = socket.data.voiceChannelId as string;
@@ -662,7 +675,7 @@ export function handleVoiceEvents(
   });
 
   // ── voice:consumer:resume ─────────────────────────────────────────────
-  socket.on('voice:consumer:resume', async (data: { consumerId: string }) => {
+  on('voice:consumer:resume', async (data: { consumerId: string }) => {
     if (!socketRateLimit(socket, 'voice:consumer:resume', 60)) return;
     if (!data || typeof data !== 'object' || !isString(data.consumerId)) return;
     const channelId = socket.data.voiceChannelId as string;
@@ -721,7 +734,7 @@ export function handleVoiceEvents(
   }
 
   // ── voice:mute ────────────────────────────────────────────────────────
-  socket.on('voice:mute', (muted: boolean) => {
+  on('voice:mute', (muted: boolean) => {
     if (!socketRateLimit(socket, 'voice:mute', 30)) return;
     if (typeof muted !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
@@ -746,7 +759,7 @@ export function handleVoiceEvents(
   });
 
   // ── voice:deaf ────────────────────────────────────────────────────────
-  socket.on('voice:deaf', (deafened: boolean) => {
+  on('voice:deaf', (deafened: boolean) => {
     if (!socketRateLimit(socket, 'voice:deaf', 30)) return;
     if (typeof deafened !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
@@ -771,7 +784,7 @@ export function handleVoiceEvents(
   });
 
   // ── voice:speaking ────────────────────────────────────────────────────
-  socket.on('voice:speaking', (speaking: boolean) => {
+  on('voice:speaking', (speaking: boolean) => {
     if (!socketRateLimit(socket, 'voice:speaking', 120)) return;
     if (typeof speaking !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
@@ -795,7 +808,7 @@ export function handleVoiceEvents(
   });
 
   // ── voice:server_mute (force-mute another user) ────────────────────────
-  socket.on('voice:server_mute', async (data: unknown) => {
+  on('voice:server_mute', async (data: unknown) => {
     if (!socketRateLimit(socket, 'voice:server_mute', 20)) return;
     if (!data || typeof data !== 'object') return;
     const { userId: targetId, muted } = data as { userId: string; muted: boolean };
@@ -838,7 +851,7 @@ export function handleVoiceEvents(
   });
 
   // ── voice:server_deafen (force-deafen another user) ────────────────────
-  socket.on('voice:server_deafen', async (data: unknown) => {
+  on('voice:server_deafen', async (data: unknown) => {
     if (!socketRateLimit(socket, 'voice:server_deafen', 20)) return;
     if (!data || typeof data !== 'object') return;
     const { userId: targetId, deafened } = data as { userId: string; deafened: boolean };
@@ -891,7 +904,7 @@ export function handleVoiceEvents(
 
   // ── voice:force_move (move another user to a different voice channel) ──
   // Supports cross-channel: actor does NOT need to be in the same channel as target.
-  socket.on('voice:force_move', async (data: unknown) => {
+  on('voice:force_move', async (data: unknown) => {
     if (!socketRateLimit(socket, 'voice:force_move', 10)) return;
     if (!data || typeof data !== 'object') return;
     const { userId: targetId, targetChannelId } = data as { userId: string; targetChannelId: string };
@@ -967,7 +980,7 @@ export function handleVoiceEvents(
 
   // ── voice:signal (kept as no-op for backward compat) ──────────────────
   // No-op: kept for backward compat (SFU replaced P2P). Rate-limited to prevent spam.
-  socket.on('voice:signal', () => {
+  on('voice:signal', () => {
     if (!socketRateLimit(socket, 'voice:signal', 10)) return;
   });
 
@@ -975,7 +988,7 @@ export function handleVoiceEvents(
   // The client claims the sharer slot BEFORE producing (the server derives
   // screen producer authorization from the active sharer), so start must ACK —
   // the client needs to know whether it may proceed.
-  socket.on('voice:screen_share:start', (callback?: (response: { ok: boolean; error?: string }) => void) => {
+  on('voice:screen_share:start', (callback?: (response: { ok: boolean; error?: string }) => void) => {
     const ack = (response: { ok: boolean; error?: string }) => {
       if (typeof callback === 'function') callback(response);
     };
@@ -997,7 +1010,7 @@ export function handleVoiceEvents(
     ack({ ok: true });
   });
 
-  socket.on('voice:screen_share:stop', () => {
+  on('voice:screen_share:stop', () => {
     if (!socketRateLimit(socket, 'voice:screen_share', 10)) return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
@@ -1028,9 +1041,203 @@ export function handleVoiceEvents(
   });
 
   // ── Disconnect cleanup ────────────────────────────────────────────────
-  socket.on('disconnecting', () => {
+  on('disconnecting', () => {
     leaveCurrentVoiceChannel(io, socket, userId);
   });
+
+  return handlers;
+}
+
+// ─── Registration & multi-node routing (HIGH-15) ────────────────────────────
+// A voice channel's mediasoup Router lives on exactly ONE node; every voice
+// event for that channel must execute there. The wrappers below decide per
+// event: local session → run in place; session owned by another node → relay
+// the event over Redis pub/sub (voiceRelay), where it is dispatched against a
+// shim via dispatchVoiceEvent().
+
+/** Events routed by the participant's current session (local vs remote-owned). */
+const ROUTED_VOICE_EVENTS = [
+  'voice:leave', 'voice:transport:connect', 'voice:produce', 'voice:producer:close',
+  'voice:rtp_capabilities', 'voice:consumer:resume', 'voice:mute', 'voice:deaf',
+  'voice:speaking', 'voice:server_mute', 'voice:server_deafen', 'voice:signal',
+  'voice:screen_share:start', 'voice:screen_share:stop',
+] as const;
+
+/** Events whose LAST argument is a client ACK callback (forwarded cross-node). */
+const ACK_VOICE_EVENTS = new Set<string>(['voice:transport:connect', 'voice:produce', 'voice:screen_share:start']);
+
+export function handleVoiceEvents(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  socket: Socket<ClientToServerEvents, ServerToClientEvents>
+) {
+  const userId = socket.data.userId as string;
+  const handlers = createVoiceHandlers(io, socket);
+
+  // ── voice:join — channel ownership decides WHERE the join executes ─────
+  socket.on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
+    // Routing guard only (separate bucket) — the join handler itself keeps its
+    // own 'voice:join' limit, so local joins are not double-charged.
+    if (!socketRateLimit(socket, 'voice:join:route', 30)) return;
+    if (!isString(channelId)) return;
+
+    let ownerNodeId: string;
+    try {
+      ownerNodeId = await resolveOrClaimChannelOwner(channelId);
+    } catch (err) {
+      console.error(`[Voice] Channel ownership resolution failed for ${channelId}:`, err);
+      socket.emit('voice:error', { message: 'Voice server unavailable. Please try again later.' });
+      return;
+    }
+
+    // Moving away from a previous REMOTE session (different channel or owner)
+    const prev = getRemoteSession(socket.id);
+    if (prev && (prev.channelId !== channelId || prev.ownerNodeId !== ownerNodeId)) {
+      void relayVoiceEvent(prev.ownerNodeId, 'voice:leave', socket, []);
+      clearRemoteSession(socket.id);
+    }
+
+    if (ownerNodeId === NODE_ID()) {
+      await handlers['voice:join'](channelId, state);
+      return;
+    }
+
+    // Remote-owned channel: end any LOCALLY-owned session first (mutual
+    // exclusion), then hand the join to the owner. The client's transports
+    // will connect straight to the owner's mediasoup via its announced IP —
+    // only the signaling is relayed.
+    leaveCurrentVoiceChannel(io, socket, userId, { force: true });
+    await leaveCurrentDMVoiceChannel(io, socket, userId, { force: true });
+    setRemoteSession(socket.id, { userId, channelId, ownerNodeId });
+    void relayVoiceEvent(ownerNodeId, 'voice:join', socket, [channelId, state ?? null]);
+  });
+
+  // ── Session-routed events ───────────────────────────────────────────────
+  for (const event of ROUTED_VOICE_EVENTS) {
+    const handler = handlers[event];
+    socket.on(event as 'voice:leave', (...args: unknown[]) => {
+      // Local session → run in place, returning the handler's promise so
+      // awaiting callers (and tests) observe completion
+      if (socket.data.voiceChannelId) return handler(...args);
+
+      const session = getRemoteSession(socket.id);
+      if (session) {
+        if (!socketRateLimit(socket, 'voice:relay', 600)) return;
+        let ack: ((response: unknown) => void) | undefined;
+        if (ACK_VOICE_EVENTS.has(event) && typeof args[args.length - 1] === 'function') {
+          ack = args.pop() as (response: unknown) => void;
+        }
+        void relayVoiceEvent(session.ownerNodeId, event, socket, args, ack);
+        if (event === 'voice:leave') clearRemoteSession(socket.id);
+        return;
+      }
+
+      // No session anywhere — handlers no-op / ack an error safely
+      return handler(...args);
+    });
+  }
+
+  // ── voice:force_move — routed by the TARGET's channel owner ────────────
+  // (the actor may not be in any voice channel; cross-channel moves are supported)
+  socket.on('voice:force_move', async (data: unknown) => {
+    let ownerNodeId: string | null = null;
+    const targetId = (data as { userId?: unknown } | null)?.userId;
+    if (typeof targetId === 'string') {
+      try {
+        const redis = getRedis();
+        const targetChannelId = await redis.get(`voice:user:${targetId}`);
+        if (targetChannelId) ownerNodeId = await redis.get(`voice:channel:node:${targetChannelId}`);
+      } catch (err) {
+        console.warn('[Voice] force_move target owner lookup failed:', err);
+      }
+    }
+    if (ownerNodeId && ownerNodeId !== NODE_ID()) {
+      if (!socketRateLimit(socket, 'voice:relay', 600)) return;
+      void relayVoiceEvent(ownerNodeId, 'voice:force_move', socket, [data]);
+      return;
+    }
+    await handlers['voice:force_move'](data);
+  });
+
+  // ── Disconnect — relay to the owner if the session lives elsewhere ─────
+  socket.on('disconnecting', () => {
+    const session = getRemoteSession(socket.id);
+    if (session) {
+      void relayVoiceEvent(session.ownerNodeId, 'disconnecting', socket, []);
+      clearRemoteSession(socket.id);
+      return;
+    }
+    handlers['disconnecting']();
+  });
+}
+
+// Owner-side handler tables for remote participants, keyed by socketId. Must be
+// stable across relayed events — socket.data written at join persists here.
+const shimHandlerTables = new Map<string, VoiceHandlerTable>();
+
+/**
+ * Execute a relayed voice event on this (Router-owning) node against the
+ * participant's shim. Wired into voiceRelay by index.ts.
+ */
+export async function dispatchVoiceEvent(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  shim: VoiceSocket,
+  event: string,
+  args: unknown[],
+  ack?: (response: unknown) => void,
+): Promise<void> {
+  let table = shimHandlerTables.get(shim.id);
+  if (!table) {
+    table = createVoiceHandlers(io, shim);
+    shimHandlerTables.set(shim.id, table);
+  }
+  const handler = table[event];
+  if (!handler) return;
+  try {
+    if (ack) {
+      await handler(...args, ack);
+    } else {
+      await handler(...args);
+    }
+  } finally {
+    // A completed leave/disconnect ends this remote participant
+    if (event === 'voice:leave' || event === 'disconnecting') {
+      shimHandlerTables.delete(shim.id);
+    }
+  }
+}
+
+/**
+ * Owner-side sweep: tear down voice sessions whose participant socket no longer
+ * exists ANYWHERE in the cluster — its home node crashed, so no disconnect was
+ * ever relayed here. Called from the voiceCluster reaper interval.
+ */
+export async function reapOrphanedRemoteParticipants(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+): Promise<void> {
+  for (const [channelId, users] of [...voiceChannelUsers]) {
+    for (const [uid, media] of [...users.entries()]) {
+      if (io.sockets.sockets.get(media.socketId)) continue; // local & alive
+      let exists: boolean;
+      try {
+        exists = await socketExistsInCluster(io, media.socketId);
+      } catch (err) {
+        console.warn('[Voice] Cluster socket lookup failed during orphan sweep:', err);
+        continue;
+      }
+      if (exists) continue;
+      console.warn(`[Voice] Reaping orphaned participant ${uid} from ${channelId} (socket ${media.socketId} gone cluster-wide)`);
+      const shim: VoiceSocket = {
+        id: media.socketId,
+        data: { userId: uid, voiceChannelId: channelId },
+        emit: (() => true) as VoiceSocket['emit'],
+        join: () => { /* dead socket */ },
+        leave: () => { /* dead socket */ },
+      };
+      leaveCurrentVoiceChannel(io, shim, uid);
+      shimHandlerTables.delete(media.socketId);
+      dropShim(media.socketId);
+    }
+  }
 }
 
 // ─── Consumer creation helper ───────────────────────────────────────────────
@@ -1120,7 +1327,7 @@ async function createConsumerForUser(
 
 export function leaveCurrentVoiceChannel(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
-  socket: Socket<ClientToServerEvents, ServerToClientEvents>,
+  socket: VoiceSocket,
   userId: string,
   opts?: { force?: boolean }
 ) {
@@ -1160,6 +1367,10 @@ export function leaveCurrentVoiceChannel(
       oldSocket.leave(`voice:${channelId}`);
       oldSocket.data.voiceChannelId = undefined;
     }
+    // If the evicted session belonged to a RELAYED participant, drop its
+    // owner-side shim state so reconnect cycles don't accumulate stale shims.
+    dropShim(ownerMedia.socketId);
+    shimHandlerTables.delete(ownerMedia.socketId);
   }
 
   console.log(`[Voice] Removing user ${userId} from channel ${channelId}`);
@@ -1266,6 +1477,11 @@ export function cleanupServerVoice(
         if (socket) {
           socket.leave(`voice:${channelId}`);
           socket.data.voiceChannelId = undefined;
+        } else {
+          // Relayed participant — socket lives on another node; adapter-wide leave
+          io.in(userMedia.socketId).socketsLeave(`voice:${channelId}`);
+          dropShim(userMedia.socketId);
+          shimHandlerTables.delete(userMedia.socketId);
         }
 
         // Clean up Redis mirror for this user

@@ -109,7 +109,20 @@ vi.mock('../../utils/redis', () => ({
   getRedis: vi.fn().mockReturnValue(mockVoiceRedis),
   NODE_ID: vi.fn().mockReturnValue('test-node-1'),
   isNodeAlive: vi.fn().mockResolvedValue(false),
+  socketExistsInCluster: vi.fn().mockResolvedValue(false),
 }));
+
+// Mock the relay layer — routing decisions are tested here; the relay transport
+// itself is covered by voiceRelay.test.ts. Defaults = single-node behavior.
+const mockRelay = vi.hoisted(() => ({
+  getRemoteSession: vi.fn().mockReturnValue(undefined),
+  setRemoteSession: vi.fn(),
+  clearRemoteSession: vi.fn(),
+  relayVoiceEvent: vi.fn().mockResolvedValue(undefined),
+  resolveOrClaimChannelOwner: vi.fn().mockResolvedValue('test-node-1'),
+  dropShim: vi.fn(),
+}));
+vi.mock('../../websocket/voiceRelay', () => mockRelay);
 
 // Mock rate limiter — always allow
 vi.mock('../../middleware/rateLimiter', () => ({
@@ -169,7 +182,7 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
-import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState } from '../../websocket/voiceHandler';
+import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants } from '../../websocket/voiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -876,7 +889,7 @@ describe('voiceHandler — server-muted blocks self-unmute (voice:mute)', () => 
 
 import { hasChannelPermission } from '../../utils/permissionCalculator';
 import { createWebRtcTransport } from '../../mediasoup/mediasoupManager';
-import { isNodeAlive as redisIsNodeAlive } from '../../utils/redis';
+import { isNodeAlive as redisIsNodeAlive, socketExistsInCluster as redisSocketExists } from '../../utils/redis';
 
 /** All transports created since the last vi.clearAllMocks(), in creation order:
  *  [A.send, A.recv, B.send, B.recv, ...] per join. */
@@ -1322,6 +1335,187 @@ describe('voiceHandler — server-deafen enforcement (HIGH-12)', () => {
     consumer.resume.mockClear();
     await b.handlers.get('voice:consumer:resume')!({ consumerId });
     expect(consumer.resume).toHaveBeenCalled();
+  });
+});
+
+describe('voiceHandler — multi-node routing (HIGH-15)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+    mockRelay.getRemoteSession.mockReturnValue(undefined);
+    mockRelay.resolveOrClaimChannelOwner.mockResolvedValue('test-node-1');
+  });
+
+  it('voice:join executes locally when this node owns (or claims) the channel', async () => {
+    const { socket, handlers } = createMockSocket('mn-1', 'sock-mn-1');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-mn-1');
+
+    expect(mockRelay.relayVoiceEvent).not.toHaveBeenCalled();
+    expect(socket.join).toHaveBeenCalledWith('voice:ch-mn-1'); // local join ran
+  });
+
+  it('voice:join relays to a remote owner and records the remote session (no local mediasoup work)', async () => {
+    mockRelay.resolveOrClaimChannelOwner.mockResolvedValue('peer-node');
+    const { socket, handlers } = createMockSocket('mn-2', 'sock-mn-2');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-mn-2', { selfMute: true, selfDeaf: false });
+
+    expect(mockRelay.setRemoteSession).toHaveBeenCalledWith('sock-mn-2', {
+      userId: 'mn-2', channelId: 'ch-mn-2', ownerNodeId: 'peer-node',
+    });
+    expect(mockRelay.relayVoiceEvent).toHaveBeenCalledWith(
+      'peer-node', 'voice:join', socket, ['ch-mn-2', { selfMute: true, selfDeaf: false }],
+    );
+    // No local channel/membership lookups — the OWNER validates and joins
+    expect(prisma.channel.findUnique).not.toHaveBeenCalled();
+    expect(socket.join).not.toHaveBeenCalledWith('voice:ch-mn-2');
+  });
+
+  it('session-routed events relay to the owner when the session is remote', async () => {
+    mockRelay.getRemoteSession.mockReturnValue({ userId: 'mn-3', channelId: 'ch-r', ownerNodeId: 'peer-node' });
+    const { socket, handlers } = createMockSocket('mn-3', 'sock-mn-3');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+
+    handlers.get('voice:mute')!(true);
+
+    expect(mockRelay.relayVoiceEvent).toHaveBeenCalledWith('peer-node', 'voice:mute', socket, [true], undefined);
+  });
+
+  it('forwards the client ACK callback for ack-carrying events', async () => {
+    mockRelay.getRemoteSession.mockReturnValue({ userId: 'mn-4', channelId: 'ch-r', ownerNodeId: 'peer-node' });
+    const { socket, handlers } = createMockSocket('mn-4', 'sock-mn-4');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+
+    const ack = vi.fn();
+    handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, ack);
+
+    expect(mockRelay.relayVoiceEvent).toHaveBeenCalledWith(
+      'peer-node', 'voice:produce', socket, [{ kind: 'audio', rtpParameters: {} }], ack,
+    );
+  });
+
+  it('a LOCAL session always runs in place even if a stale remote session record exists', async () => {
+    mockRelay.getRemoteSession.mockReturnValue({ userId: 'mn-5', channelId: 'ch-r', ownerNodeId: 'peer-node' });
+    const { socket, handlers } = createMockSocket('mn-5', 'sock-mn-5');
+    const io = createMockIO();
+    handleVoiceEvents(io as any, socket as any);
+    socket.data.voiceChannelId = 'ch-local';
+
+    handlers.get('voice:mute')!(true);
+
+    expect(mockRelay.relayVoiceEvent).not.toHaveBeenCalled();
+  });
+
+  it('disconnecting relays the disconnect to the owner instead of tearing down locally', async () => {
+    mockRelay.getRemoteSession.mockReturnValue({ userId: 'mn-6', channelId: 'ch-r', ownerNodeId: 'peer-node' });
+    const { socket, handlers } = createMockSocket('mn-6', 'sock-mn-6');
+    const io = createMockIO();
+    handleVoiceEvents(io as any, socket as any);
+
+    handlers.get('disconnecting')!();
+
+    expect(mockRelay.relayVoiceEvent).toHaveBeenCalledWith('peer-node', 'disconnecting', socket, []);
+    expect(mockRelay.clearRemoteSession).toHaveBeenCalledWith('sock-mn-6');
+    expect(io._emit).not.toHaveBeenCalledWith('voice:user_left', expect.anything());
+  });
+
+  it('voice:force_move relays to the node owning the TARGET\'s channel', async () => {
+    mockVoiceRedis.get.mockImplementation((key: string) => {
+      if (key === 'voice:user:target-x') return Promise.resolve('ch-t');
+      if (key === 'voice:channel:node:ch-t') return Promise.resolve('peer-node');
+      return Promise.resolve(null);
+    });
+    const { socket, handlers } = createMockSocket('mn-7', 'sock-mn-7');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+
+    await handlers.get('voice:force_move')!({ userId: 'target-x', targetChannelId: 'ch-dest' });
+
+    expect(mockRelay.relayVoiceEvent).toHaveBeenCalledWith(
+      'peer-node', 'voice:force_move', socket, [{ userId: 'target-x', targetChannelId: 'ch-dest' }],
+    );
+    // Local handler must NOT run (it would emit 'User is not in a voice channel.')
+    expect(socket.emit).not.toHaveBeenCalledWith('voice:error', expect.anything());
+    mockVoiceRedis.get.mockResolvedValue(null);
+  });
+
+  it('emits voice:error when ownership resolution fails (never a silent hang)', async () => {
+    mockRelay.resolveOrClaimChannelOwner.mockRejectedValueOnce(new Error('redis down'));
+    const { socket, handlers } = createMockSocket('mn-8', 'sock-mn-8');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+
+    await handlers.get('voice:join')!('ch-mn-8');
+
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', { message: 'Voice server unavailable. Please try again later.' });
+    expect(mockRelay.relayVoiceEvent).not.toHaveBeenCalled();
+  });
+
+  it('switching channels ends a previous remote session on its old owner', async () => {
+    mockRelay.getRemoteSession.mockReturnValue({ userId: 'mn-9', channelId: 'ch-old', ownerNodeId: 'old-owner' });
+    mockRelay.resolveOrClaimChannelOwner.mockResolvedValue('test-node-1'); // new channel is local
+    const { socket, handlers } = createMockSocket('mn-9', 'sock-mn-9');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+
+    await handlers.get('voice:join')!('ch-new');
+
+    expect(mockRelay.relayVoiceEvent).toHaveBeenCalledWith('old-owner', 'voice:leave', socket, []);
+    expect(mockRelay.clearRemoteSession).toHaveBeenCalledWith('sock-mn-9');
+  });
+});
+
+describe('voiceHandler — reapOrphanedRemoteParticipants (HIGH-15)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+    mockRelay.getRemoteSession.mockReturnValue(undefined);
+    mockRelay.resolveOrClaimChannelOwner.mockResolvedValue('test-node-1');
+    vi.mocked(redisSocketExists).mockResolvedValue(false);
+  });
+
+  it('tears down sessions whose socket is gone cluster-wide', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('orph-1', 'sock-orph-1');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-orph-1');
+    io._emit.mockClear();
+
+    // Socket is neither local (not in io.sockets.sockets) nor anywhere else
+    await reapOrphanedRemoteParticipants(io as any);
+
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-orph-1', userId: 'orph-1' });
+  });
+
+  it('leaves locally-connected sockets untouched', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('orph-2', 'sock-orph-2');
+    io.sockets.sockets.set('sock-orph-2', socket);
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-orph-2');
+    io._emit.mockClear();
+
+    await reapOrphanedRemoteParticipants(io as any);
+
+    expect(io._emit).not.toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-orph-2', userId: 'orph-2' });
+    // Clean up for other tests
+    handlers.get('voice:leave')!();
+  });
+
+  it('leaves sessions whose socket exists elsewhere in the cluster untouched', async () => {
+    vi.mocked(redisSocketExists).mockResolvedValue(true);
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('orph-3', 'sock-orph-3');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-orph-3');
+    io._emit.mockClear();
+
+    await reapOrphanedRemoteParticipants(io as any);
+
+    expect(io._emit).not.toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-orph-3', userId: 'orph-3' });
+    // Clean up for other tests
+    socket.data.voiceChannelId = 'ch-orph-3';
+    handlers.get('voice:leave')!();
   });
 });
 

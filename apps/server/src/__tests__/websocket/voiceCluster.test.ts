@@ -25,6 +25,7 @@ vi.mock('../../utils/redis', () => ({
 vi.mock('../../websocket/voiceHandler', () => ({
   cleanupServerVoice: mockCleanupServerVoice,
   reapVoiceChannelMirror: mockReapChannelMirror,
+  reapOrphanedRemoteParticipants: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { initVoiceCluster, stopVoiceCluster, broadcastServerVoiceCleanup, reapDeadNodeVoiceState } from '../../websocket/voiceCluster';
