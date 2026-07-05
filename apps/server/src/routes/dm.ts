@@ -64,6 +64,9 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
         },
       },
       orderBy: { updatedAt: 'desc' },
+      // Bounded: most-recently-active first. Each row costs a lastMessage
+      // subquery — an unbounded list grows without limit over an account's life.
+      take: 200,
     });
 
     const data = conversations.map((c) => ({

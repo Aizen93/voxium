@@ -74,6 +74,10 @@ const SCREEN_SHARE_MAX_BITRATE = 2_500_000;
 interface PeerConnection {
   pc: RTCPeerConnection;
   makingOffer: boolean;
+  /** ICE candidates that arrived before the remote description was set —
+   *  applied once it lands instead of being dropped (dropped candidates mean
+   *  slower or outright failed ICE on unlucky signaling order). */
+  pendingCandidates: RTCIceCandidateInit[];
 }
 
 /**
@@ -296,7 +300,7 @@ function createPeerInternal(
   debugLog(`${logPrefix} Creating RTCPeerConnection to ${targetUserId} (initiator: ${initiator})`);
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  const peerConn: PeerConnection = { pc, makingOffer: false };
+  const peerConn: PeerConnection = { pc, makingOffer: false, pendingCandidates: [] };
 
   // Use the best available processed stream:
   // - DM P2P: suppressed stream (clean RNNoise pipeline: source → worklet → dest)
@@ -523,6 +527,17 @@ function handleSignalInternal(
 
   const { pc } = peerConn;
 
+  // Apply ICE candidates queued while the remote description was still unset
+  const flushPendingCandidates = () => {
+    if (peerConn!.pendingCandidates.length === 0) return;
+    const queued = peerConn!.pendingCandidates.splice(0);
+    debugLog(`${logPrefix} Flushing ${queued.length} queued ICE candidate(s) from ${from}`);
+    for (const candidate of queued) {
+      pc.addIceCandidate(new RTCIceCandidate(candidate))
+        .catch((err) => console.error(`${logPrefix} Error adding queued ICE candidate from ${from}:`, err));
+    }
+  };
+
   if (data.type === 'offer') {
     const offerCollision = peerConn.makingOffer || pc.signalingState !== 'stable';
     const isPolite = (localUserId ?? '') < from;
@@ -538,7 +553,10 @@ function handleSignalInternal(
       : pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }));
 
     acceptOffer
-      .then(() => pc.createAnswer())
+      .then(() => {
+        flushPendingCandidates();
+        return pc.createAnswer();
+      })
       .then((answer) => {
         if (answer.sdp) answer.sdp = optimizeOpusSDP(answer.sdp);
         return pc.setLocalDescription(answer);
@@ -560,8 +578,15 @@ function handleSignalInternal(
       return;
     }
     pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }))
+      .then(flushPendingCandidates)
       .catch((err) => console.error(`${logPrefix} Error handling answer from ${from}:`, err));
   } else if (data.type === 'ice-candidate' && data.candidate) {
+    // Candidates racing ahead of the offer/answer used to be dropped silently
+    // (the 'remote description' error was swallowed) — queue them instead
+    if (!pc.remoteDescription) {
+      peerConn.pendingCandidates.push(data.candidate);
+      return;
+    }
     pc.addIceCandidate(new RTCIceCandidate(data.candidate))
       .catch((err) => {
         if (!String(err).includes('remote description')) {

@@ -765,7 +765,7 @@ export function createVoiceHandlers(
 
   // ── voice:mute ────────────────────────────────────────────────────────
   on('voice:mute', (muted: boolean) => {
-    if (!socketRateLimit(socket, 'voice:mute', 30)) return;
+    if (!socketRateLimit(socket, 'voice:mute', 120)) return;
     if (typeof muted !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
@@ -790,7 +790,7 @@ export function createVoiceHandlers(
 
   // ── voice:deaf ────────────────────────────────────────────────────────
   on('voice:deaf', (deafened: boolean) => {
-    if (!socketRateLimit(socket, 'voice:deaf', 30)) return;
+    if (!socketRateLimit(socket, 'voice:deaf', 120)) return;
     if (typeof deafened !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
