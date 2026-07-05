@@ -334,10 +334,19 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       action: 'user.ban',
       targetType: 'user',
       targetId: targetId,
-      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned },
+      // knownIps distinguishes "user had no IPs" from "all IPs already banned"
+      // (createMany with skipDuplicates only counts NEWLY inserted bans)
+      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned, knownIps: ipRecords.length },
     });
 
-    res.json({ success: true, message: ipsBanned > 0 ? `User banned (${ipsBanned} IP(s) also banned)` : banIps ? 'User banned (no known IPs to ban)' : 'User banned' });
+    const message = !banIps
+      ? 'User banned'
+      : ipsBanned > 0
+        ? `User banned (${ipsBanned} IP(s) also banned)`
+        : ipRecords.length > 0
+          ? 'User banned (all known IPs were already banned)'
+          : 'User banned (no known IPs to ban)';
+    res.json({ success: true, message });
   } catch (err) {
     next(err);
   }
