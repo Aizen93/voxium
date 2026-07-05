@@ -121,6 +121,17 @@ export function MainLayout() {
     let markReadTimer: ReturnType<typeof setTimeout> | null = null;
     let markDMReadTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Desktop notifications show raw message content — swap the internal
+    // @[userId] mention markup for readable @DisplayName using the resolved
+    // mentions the server attached to the message.
+    const formatNotificationBody = (content: string, mentions?: Array<{ id: string; displayName?: string; username?: string }>): string => {
+      if (!content || !mentions?.length) return content;
+      return content.replace(/@\[([a-zA-Z0-9_-]+)\]/g, (match, id: string) => {
+        const m = mentions.find((u) => u.id === id);
+        return m ? `@${m.displayName || m.username || 'user'}` : match;
+      });
+    };
+
     // "Viewing this server channel" requires BOTH the matching channelId AND being
     // in server view (activeServerId set). activeChannelId survives switching to the
     // DM/friends view — without the view check, a message for the last-viewed channel
@@ -178,7 +189,8 @@ export function MainLayout() {
           const authorName = message.author?.displayName || message.author?.username || 'Someone';
           const serverName = message.serverName || 'Unknown Server';
           const channelName = message.channelName || 'unknown';
-          const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
+          const readable = formatNotificationBody(message.content, message.mentions);
+          const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
           const title = isMentioned
             ? `${authorName} mentioned you in ${serverName} — #${channelName}`
             : `${serverName} — #${channelName}`;
@@ -341,7 +353,8 @@ export function MainLayout() {
             if (settings.enableNotificationSounds) playMessageSound();
             if (settings.enableDesktopNotifications) {
               const authorName = message.author?.displayName || message.author?.username || 'Someone';
-              const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
+              const readable = formatNotificationBody(message.content, message.mentions);
+              const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
               void notify(`DM — ${authorName}`, body, message.author?.avatarUrl);
             }
           }

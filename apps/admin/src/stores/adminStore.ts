@@ -431,6 +431,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         params: { page: p, limit: 12, search: state.usersSearch, filter: state.usersFilter, sort: state.usersSort },
       });
       set({ users: data.data, usersTotal: data.total, usersPage: p });
+    } catch (err) {
+      // Fetchers must not reject unhandled — surface and log instead
+      console.error('Failed to fetch users:', err);
+      toast.error('Failed to load users');
     } finally {
       set({ loading: false });
     }
@@ -494,6 +498,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         params: { page: p, limit: 12, search: state.serversSearch },
       });
       set({ servers: data.data, serversTotal: data.total, serversPage: p });
+    } catch (err) {
+      // Fetchers must not reject unhandled — surface and log instead
+      console.error('Failed to fetch servers:', err);
+      toast.error('Failed to load servers');
     } finally {
       set({ loading: false });
     }

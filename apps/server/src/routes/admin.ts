@@ -293,34 +293,29 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
 
     const sanitizedReason = reason ? sanitizeText(reason) : null;
 
-    // Ban the account
-    await prisma.user.update({
-      where: { id: targetId },
-      data: {
-        bannedAt: new Date(),
-        banReason: sanitizedReason,
-        tokenVersion: { increment: 1 }, // Invalidate all tokens
-      },
-    });
-
-    // Optionally ban all known IPs
+    // Ban the account + all known IPs ATOMICALLY (MED-13). The old flow updated
+    // the user, then upserted IP bans one-by-one in a loop — a failure midway
+    // left a half-banned state, and N known IPs meant N+1 statements.
     let ipsBanned = 0;
-    if (banIps) {
-      const ipRecords = await prisma.ipRecord.findMany({
-        where: { userId: targetId },
-        select: { ip: true },
-      });
-      for (const record of ipRecords) {
-        try {
-          await prisma.ipBan.upsert({
-            where: { ip: record.ip },
-            update: {},
-            create: { ip: record.ip, reason: sanitizedReason, bannedBy: req.user!.userId },
-          });
-          ipsBanned++;
-        } catch { /* Ignore if already exists */ }
-      }
-    }
+    const ipRecords = banIps
+      ? await prisma.ipRecord.findMany({ where: { userId: targetId }, select: { ip: true } })
+      : [];
+
+    const [, ipBanResult] = await prisma.$transaction([
+      prisma.user.update({
+        where: { id: targetId },
+        data: {
+          bannedAt: new Date(),
+          banReason: sanitizedReason,
+          tokenVersion: { increment: 1 }, // Invalidate all tokens
+        },
+      }),
+      prisma.ipBan.createMany({
+        data: ipRecords.map((r) => ({ ip: r.ip, reason: sanitizedReason, bannedBy: req.user!.userId })),
+        skipDuplicates: true, // already-banned IPs are fine
+      }),
+    ]);
+    ipsBanned = ipBanResult.count;
 
     // Notify servers that user left
     const memberships = await prisma.serverMember.findMany({
@@ -354,32 +349,38 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
     if (!user) throw new NotFoundError('User');
     if (!user.bannedAt) throw new BadRequestError('User is not banned');
 
-    // Remove IP bans for this user's IPs — but only if no other banned user shares that IP
+    // Remove IP bans for this user's IPs — but only if no other banned user
+    // shares that IP. Resolved in ONE query instead of a findFirst per IP
+    // (MED-13: the old loop was N+1 for users seen from many IPs).
     const ipRecords = await prisma.ipRecord.findMany({
       where: { userId: req.params.userId },
       select: { ip: true },
     });
-    const ipsToRelease: string[] = [];
-    for (const { ip } of ipRecords) {
-      const otherBannedOnSameIp = await prisma.ipRecord.findFirst({
-        where: {
-          ip,
-          userId: { not: req.params.userId },
-          user: { bannedAt: { not: null } },
-        },
-      });
-      if (!otherBannedOnSameIp) ipsToRelease.push(ip);
-    }
-    if (ipsToRelease.length > 0) {
-      await prisma.ipBan.deleteMany({
-        where: { ip: { in: ipsToRelease } },
-      });
-    }
+    const ips = ipRecords.map((r) => r.ip);
+    const sharedWithOtherBanned = ips.length > 0
+      ? await prisma.ipRecord.findMany({
+          where: {
+            ip: { in: ips },
+            userId: { not: req.params.userId },
+            user: { bannedAt: { not: null } },
+          },
+          select: { ip: true },
+          distinct: ['ip'],
+        })
+      : [];
+    const stillBannedIps = new Set(sharedWithOtherBanned.map((r) => r.ip));
+    const ipsToRelease = ips.filter((ip) => !stillBannedIps.has(ip));
 
-    await prisma.user.update({
-      where: { id: req.params.userId },
-      data: { bannedAt: null, banReason: null },
-    });
+    // Unban + IP release atomically — no half-unbanned state on failure
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: req.params.userId },
+        data: { bannedAt: null, banReason: null },
+      }),
+      ...(ipsToRelease.length > 0
+        ? [prisma.ipBan.deleteMany({ where: { ip: { in: ipsToRelease } } })]
+        : []),
+    ]);
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -1154,16 +1155,27 @@ adminRouter.get('/top-servers', async (req: Request, res: Response, next: NextFu
   try {
     const limit = Math.min(20, Math.max(1, parseInt(req.query.limit as string, 10) || 10));
 
+    // Aggregate messages and members in separate subqueries. The old double
+    // LEFT JOIN produced a cartesian rowset (messages × members per server) that
+    // COUNT(DISTINCT) then had to deduplicate — one dashboard load could scan
+    // millions of intermediate rows and pin Postgres (MED-12).
     const rows = await prisma.$queryRawUnsafe<Array<{ id: string; name: string; message_count: bigint; member_count: bigint }>>(
       `SELECT s.id, s.name,
-              COUNT(DISTINCT m.id) AS message_count,
-              COUNT(DISTINCT sm.user_id) AS member_count
+              COALESCE(mc.message_count, 0) AS message_count,
+              COALESCE(smc.member_count, 0) AS member_count
        FROM servers s
-       LEFT JOIN channels c ON c.server_id = s.id
-       LEFT JOIN messages m ON m.channel_id = c.id
-       LEFT JOIN server_members sm ON sm.server_id = s.id
-       GROUP BY s.id, s.name
-       ORDER BY message_count DESC
+       LEFT JOIN (
+         SELECT c.server_id, COUNT(m.id) AS message_count
+         FROM channels c
+         JOIN messages m ON m.channel_id = c.id
+         GROUP BY c.server_id
+       ) mc ON mc.server_id = s.id
+       LEFT JOIN (
+         SELECT server_id, COUNT(*) AS member_count
+         FROM server_members
+         GROUP BY server_id
+       ) smc ON smc.server_id = s.id
+       ORDER BY COALESCE(mc.message_count, 0) DESC
        LIMIT $1`,
       limit
     );
@@ -1281,55 +1293,34 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
     }
 
     // ── 2. DB-based aggregation for attachments ──
-    // Top users by attachment storage (grouped by message author)
-    const userAttachments = await prisma.messageAttachment.groupBy({
-      by: ['messageId'],
-      _count: { id: true },
-      _sum: { fileSize: true },
-      where: { expired: false },
-    });
+    // Aggregated in SQL. The old code grouped by messageId then fetched every
+    // message with attachments through an UNBOUNDED `id IN (...)` list — at
+    // scale that's a multi-megabyte query that errors out or pins Postgres
+    // (MED-12). Two grouped queries return at most one row per user/server.
+    const [userRows, serverRows] = await Promise.all([
+      prisma.$queryRawUnsafe<Array<{ entity_id: string; file_count: bigint; total_size: bigint }>>(
+        `SELECT m.author_id AS entity_id, COUNT(a.id) AS file_count, COALESCE(SUM(a.file_size), 0) AS total_size
+         FROM message_attachments a
+         JOIN messages m ON m.id = a.message_id
+         WHERE a.expired = false
+         GROUP BY m.author_id`,
+      ),
+      prisma.$queryRawUnsafe<Array<{ entity_id: string; file_count: bigint; total_size: bigint }>>(
+        `SELECT c.server_id AS entity_id, COUNT(a.id) AS file_count, COALESCE(SUM(a.file_size), 0) AS total_size
+         FROM message_attachments a
+         JOIN messages m ON m.id = a.message_id
+         JOIN channels c ON c.id = m.channel_id
+         WHERE a.expired = false
+         GROUP BY c.server_id`,
+      ),
+    ]);
 
-    // Resolve messageId → authorId
-    const messageIds = userAttachments.map((g) => g.messageId);
-    const messagesWithAuthor = messageIds.length > 0
-      ? await prisma.message.findMany({
-          where: { id: { in: messageIds } },
-          select: { id: true, authorId: true, channelId: true, channel: { select: { serverId: true } } },
-        })
-      : [];
-    const messageInfoMap = new Map(messagesWithAuthor.map((m) => [m.id, m]));
-
-    // Aggregate attachments per user and per server
-    const userAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>();
-    const serverAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>();
-
-    for (const group of userAttachments) {
-      const msgInfo = messageInfoMap.get(group.messageId);
-      if (!msgInfo) continue;
-      const count = group._count.id;
-      const size = group._sum.fileSize ?? 0;
-
-      // Per-user
-      const userEntry = userAttachmentMap.get(msgInfo.authorId);
-      if (userEntry) {
-        userEntry.fileCount += count;
-        userEntry.totalSize += size;
-      } else {
-        userAttachmentMap.set(msgInfo.authorId, { fileCount: count, totalSize: size });
-      }
-
-      // Per-server (only for channel messages)
-      if (msgInfo.channel) {
-        const serverId = msgInfo.channel.serverId;
-        const serverEntry = serverAttachmentMap.get(serverId);
-        if (serverEntry) {
-          serverEntry.fileCount += count;
-          serverEntry.totalSize += size;
-        } else {
-          serverAttachmentMap.set(serverId, { fileCount: count, totalSize: size });
-        }
-      }
-    }
+    const userAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>(
+      userRows.map((r) => [r.entity_id, { fileCount: Number(r.file_count), totalSize: Number(r.total_size) }]),
+    );
+    const serverAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>(
+      serverRows.map((r) => [r.entity_id, { fileCount: Number(r.file_count), totalSize: Number(r.total_size) }]),
+    );
 
     // ── 3. Merge S3 + attachment data ──
     const mergedUsers = new Map<string, { fileCount: number; totalSize: number }>();
@@ -1369,46 +1360,36 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
       }
     }
 
-    // ── 4. Resolve names ──
-    const allUserIds = [...mergedUsers.keys()];
-    const allServerIds = [...mergedServers.keys()];
+    // ── 4. Rank first, then resolve names for ONLY the top 10 ──
+    // (the old code looked up names for every uploader in the instance)
+    const unnamed: Array<Omit<StorageTopUploader, 'entityName'>> = [];
+    for (const [entityId, info] of mergedUsers) {
+      unnamed.push({ entityId, type: 'user', fileCount: info.fileCount, totalSize: info.totalSize });
+    }
+    for (const [entityId, info] of mergedServers) {
+      unnamed.push({ entityId, type: 'server', fileCount: info.fileCount, totalSize: info.totalSize });
+    }
+    unnamed.sort((a, b) => b.totalSize - a.totalSize);
+    const top = unnamed.slice(0, 10);
 
+    const topUserIds = top.filter((e) => e.type === 'user').map((e) => e.entityId);
+    const topServerIds = top.filter((e) => e.type === 'server').map((e) => e.entityId);
     const [users, servers] = await Promise.all([
-      allUserIds.length > 0
-        ? prisma.user.findMany({ where: { id: { in: allUserIds } }, select: { id: true, username: true } })
+      topUserIds.length > 0
+        ? prisma.user.findMany({ where: { id: { in: topUserIds } }, select: { id: true, username: true } })
         : [],
-      allServerIds.length > 0
-        ? prisma.server.findMany({ where: { id: { in: allServerIds } }, select: { id: true, name: true } })
+      topServerIds.length > 0
+        ? prisma.server.findMany({ where: { id: { in: topServerIds } }, select: { id: true, name: true } })
         : [],
     ]);
-
     const nameMap = new Map<string, string>();
     for (const u of users) nameMap.set(u.id, u.username);
     for (const s of servers) nameMap.set(s.id, s.name);
 
-    // ── 5. Build result ──
-    const result: StorageTopUploader[] = [];
-    for (const [entityId, info] of mergedUsers) {
-      result.push({
-        entityId,
-        entityName: nameMap.get(entityId) ?? 'Deleted',
-        type: 'user',
-        fileCount: info.fileCount,
-        totalSize: info.totalSize,
-      });
-    }
-    for (const [entityId, info] of mergedServers) {
-      result.push({
-        entityId,
-        entityName: nameMap.get(entityId) ?? 'Deleted',
-        type: 'server',
-        fileCount: info.fileCount,
-        totalSize: info.totalSize,
-      });
-    }
-    result.sort((a, b) => b.totalSize - a.totalSize);
-
-    const data = result.slice(0, 10);
+    const data: StorageTopUploader[] = top.map((e) => ({
+      ...e,
+      entityName: nameMap.get(e.entityId) ?? 'Deleted',
+    }));
     topUploadersCache = { data, expiresAt: Date.now() + TOP_UPLOADERS_TTL_MS };
 
     res.json({ success: true, data });
@@ -1697,15 +1678,36 @@ adminRouter.post('/feature-flags/:name/reset', async (req: Request<{ name: strin
 
 // ─── Data Export ─────────────────────────────────────────────────────────────
 
+// Exports read whole tables. Fetching them as one statement pins Postgres and
+// can exceed statement timeouts at scale (MED-12) — page through with a stable
+// id cursor in fixed-size batches instead. The response still contains the
+// full dataset (that's what an export is), but each query stays bounded.
+const EXPORT_BATCH_SIZE = 1000;
+
+async function collectInBatches<T extends { id: string }>(
+  fetchPage: (cursor: string | undefined, take: number) => Promise<T[]>,
+): Promise<T[]> {
+  const all: T[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await fetchPage(cursor, EXPORT_BATCH_SIZE);
+    all.push(...page);
+    if (page.length < EXPORT_BATCH_SIZE) return all;
+    cursor = page[page.length - 1].id;
+  }
+}
+
 adminRouter.get('/export/users', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const users = await prisma.user.findMany({
+    const users = await collectInBatches((cursor, take) => prisma.user.findMany({
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
         role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
       },
-      orderBy: { createdAt: 'desc' },
-    });
+      orderBy: { id: 'asc' },
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    }));
     res.json({ success: true, data: users });
   } catch (err) {
     next(err);
@@ -1714,40 +1716,26 @@ adminRouter.get('/export/users', async (_req: Request, res: Response, next: Next
 
 adminRouter.get('/export/servers', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const servers = await prisma.server.findMany({
+    const servers = await collectInBatches((cursor, take) => prisma.server.findMany({
       select: {
         id: true, name: true, iconUrl: true, ownerId: true, createdAt: true,
         owner: { select: { username: true } },
         _count: { select: { members: true, channels: true } },
       },
-      orderBy: { createdAt: 'desc' },
-    });
+      orderBy: { id: 'asc' },
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    }));
 
-    const serverIds = servers.map((s) => s.id);
-    const messageCounts = serverIds.length > 0
-      ? await prisma.message.groupBy({
-          by: ['channelId'],
-          where: { channel: { serverId: { in: serverIds } } },
-          _count: true,
-        })
-      : [];
-
-    const channelToServer = new Map<string, string>();
-    if (serverIds.length > 0) {
-      const channels = await prisma.channel.findMany({
-        where: { serverId: { in: serverIds } },
-        select: { id: true, serverId: true },
-      });
-      for (const ch of channels) channelToServer.set(ch.id, ch.serverId);
-    }
-
-    const serverMessageCounts = new Map<string, number>();
-    for (const mc of messageCounts) {
-      if (mc.channelId) {
-        const sid = channelToServer.get(mc.channelId);
-        if (sid) serverMessageCounts.set(sid, (serverMessageCounts.get(sid) || 0) + mc._count);
-      }
-    }
+    // Per-server message counts in ONE grouped query. The old code grouped ALL
+    // messages by channel and fetched every channel row to remap channel → server.
+    const messageCountRows = await prisma.$queryRawUnsafe<Array<{ server_id: string; message_count: bigint }>>(
+      `SELECT c.server_id, COUNT(m.id) AS message_count
+       FROM channels c
+       JOIN messages m ON m.channel_id = c.id
+       GROUP BY c.server_id`,
+    );
+    const serverMessageCounts = new Map(messageCountRows.map((r) => [r.server_id, Number(r.message_count)]));
 
     const data = servers.map((s) => ({
       id: s.id,
@@ -1769,11 +1757,13 @@ adminRouter.get('/export/servers', async (_req: Request, res: Response, next: Ne
 
 adminRouter.get('/export/bans', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const bans = await prisma.user.findMany({
+    const bans = await collectInBatches((cursor, take) => prisma.user.findMany({
       where: { bannedAt: { not: null } },
       select: { id: true, username: true, displayName: true, email: true, bannedAt: true, banReason: true },
-      orderBy: { bannedAt: 'desc' },
-    });
+      orderBy: { id: 'asc' },
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    }));
     res.json({ success: true, data: bans });
   } catch (err) {
     next(err);
@@ -1782,10 +1772,12 @@ adminRouter.get('/export/bans', async (_req: Request, res: Response, next: NextF
 
 adminRouter.get('/export/ip-bans', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const ipBans = await prisma.ipBan.findMany({
+    const ipBans = await collectInBatches((cursor, take) => prisma.ipBan.findMany({
       select: { id: true, ip: true, reason: true, bannedBy: true, createdAt: true, creator: { select: { username: true } } },
-      orderBy: { createdAt: 'desc' },
-    });
+      orderBy: { id: 'asc' },
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    }));
 
     const data = ipBans.map((b) => ({
       id: b.id,

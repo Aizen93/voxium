@@ -1528,18 +1528,18 @@ describe('dmVoiceHandler — rate limiting', () => {
     expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:decline', 10);
   });
 
-  it('dm:voice:mute uses rate limit of 30 per minute', async () => {
+  it('dm:voice:mute uses rate limit of 120 per minute (PTT presses emit mute/unmute pairs)', async () => {
     vi.mocked(socketRateLimit).mockReturnValueOnce(false);
     const handler = handlers.get('dm:voice:mute')!;
     await handler(true);
-    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:mute', 30);
+    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:mute', 120);
   });
 
-  it('dm:voice:deaf uses rate limit of 30 per minute', async () => {
+  it('dm:voice:deaf uses rate limit of 120 per minute', async () => {
     vi.mocked(socketRateLimit).mockReturnValueOnce(false);
     const handler = handlers.get('dm:voice:deaf')!;
     await handler(true);
-    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:deaf', 30);
+    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:deaf', 120);
   });
 
   it('dm:voice:speaking uses rate limit of 120 per minute', () => {

@@ -83,7 +83,8 @@ vi.mock('../../utils/prisma', () => ({
 // Socket.IO
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
-const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) }));
+const mockSocketsJoin = vi.fn();
+const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]), socketsJoin: mockSocketsJoin, socketsLeave: vi.fn() }));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
@@ -387,6 +388,37 @@ describe('Channel Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('Category not found');
+    });
+
+    it('does NOT seed ChannelRead rows and auto-joins server sockets to the new channel room (MED-15)', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        serverId: 'srv-1',
+        role: 'admin',
+      });
+      prismaMock.channel.count.mockResolvedValue(2);
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-new',
+        name: 'new-channel',
+        type: 'text',
+        serverId: 'srv-1',
+        position: 2,
+        categoryId: null,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'new-channel', type: 'text' });
+
+      expect(res.status).toBe(201);
+      // A brand-new channel has zero messages — unread computation yields 0
+      // without rows, so per-member seeding (multi-second on big servers) is gone
+      expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
+      // One adapter-wide op subscribes every connected member to the new room
+      expect(mockIn).toHaveBeenCalledWith('server:srv-1');
+      expect(mockSocketsJoin).toHaveBeenCalledWith('channel:ch-new');
     });
 
     it('emits channel:created socket event', async () => {

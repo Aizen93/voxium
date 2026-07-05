@@ -521,7 +521,7 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:mute', async (muted: boolean) => {
-    if (!socketRateLimit(socket, 'dm:voice:mute', 30)) return;
+    if (!socketRateLimit(socket, 'dm:voice:mute', 120)) return;
     if (typeof muted !== 'boolean') return;
     // Use socket.data for fast local lookup (source of truth is Redis)
     const conversationId = socket.data.dmCallConversationId as string;
@@ -551,7 +551,7 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:deaf', async (deafened: boolean) => {
-    if (!socketRateLimit(socket, 'dm:voice:deaf', 30)) return;
+    if (!socketRateLimit(socket, 'dm:voice:deaf', 120)) return;
     if (typeof deafened !== 'boolean') return;
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;

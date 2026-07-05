@@ -139,30 +139,18 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
 
     getIO().to(`server:${serverId}`).emit('channel:created', channel as unknown as Channel);
 
-    // Auto-subscribe all server members' sockets to the new text channel room
-    // and seed ChannelRead so existing history doesn't show as unread
-    if (type === 'text') {
-      const socketsInServer = await getIO().in(`server:${serverId}`).fetchSockets();
-      for (const s of socketsInServer) {
-        s.join(`channel:${channel.id}`);
-      }
+    // Auto-subscribe all connected members' sockets to the new channel room —
+    // one adapter-wide op instead of fetching and looping every socket. A new
+    // channel has no permission overrides yet, so everyone can view it. Voice
+    // channels get the room too (it carries voice presence events).
+    getIO().in(`server:${serverId}`).socketsJoin(`channel:${channel.id}`);
 
-      const members = await prisma.serverMember.findMany({
-        where: { serverId },
-        select: { userId: true },
-      });
-      if (members.length > 0) {
-        const now = new Date();
-        await prisma.channelRead.createMany({
-          data: members.map((m) => ({
-            userId: m.userId,
-            channelId: channel.id,
-            lastReadAt: now,
-          })),
-          skipDuplicates: true,
-        });
-      }
-    }
+    // NOTE (MED-15): no per-member ChannelRead seeding here. A brand-new channel
+    // has zero messages, so the unread computation (COALESCE(last_read_at, epoch))
+    // yields 0 for everyone regardless — while seeding wrote one row per member,
+    // making channel creation in a 10k-member server a multi-second, lock-heavy
+    // operation. Rows are created lazily when a member first reads the channel;
+    // join-time seeding (which DOES guard against pre-existing history) stays.
 
     res.status(201).json({ success: true, data: channel });
   } catch (err) {

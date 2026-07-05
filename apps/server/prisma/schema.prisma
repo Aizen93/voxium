@@ -73,7 +73,10 @@ model Server {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  owner      User           @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  // Restrict, NOT Cascade: deleting a user must never silently destroy every
+  // community they own. The admin delete-user flow transfers or explicitly
+  // deletes owned servers first; any other user.delete() now fails safe.
+  owner      User           @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Restrict)
   channels   Channel[]
   categories Category[]
   members    ServerMember[]
@@ -263,6 +266,9 @@ model Message {
   @@index([replyToId])
   @@index([authorId])
   @@index([createdAt])
+  // Trigram GIN index (pg_trgm) accelerating ILIKE '%q%' message search —
+  // without it every search scans the whole messages table (MED-14)
+  @@index([content(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("messages")
 }
 

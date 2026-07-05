@@ -288,7 +288,8 @@ export function initSocketServer(httpServer: HttpServer) {
             }),
           ]);
 
-          await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
+          // updateMany with a status filter: no-op write skipped when already offline
+          await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'offline' } }, data: { status: 'offline' } });
 
           for (const m of membershipList) {
             socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
@@ -544,7 +545,9 @@ export function initSocketServer(httpServer: HttpServer) {
       }
 
       // Update DB status
-      await prisma.user.update({ where: { id: userId }, data: { status: 'online' } });
+      // updateMany with a status filter: reconnect churn / multi-device connects
+      // otherwise rewrite the same 'online' row on every socket (write amplification)
+      await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'online' } }, data: { status: 'online' } });
     } catch (err) {
       console.error(`[WS] Error during connection setup for ${userId}:`, err);
     }

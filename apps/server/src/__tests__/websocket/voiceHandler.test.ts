@@ -391,6 +391,13 @@ describe('voiceHandler — voice:mute', () => {
     expect(io.to).not.toHaveBeenCalled();
   });
 
+  it('applies a 120/min rate limit (P3)', () => {
+    socket.data.voiceChannelId = 'ch-1';
+    const handler = handlers.get('voice:mute')!;
+    handler(true);
+    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'voice:mute', 120);
+  });
+
   it('rejects non-boolean muted value', () => {
     const handler = handlers.get('voice:mute')!;
     handler('yes' as any); // not boolean
@@ -417,6 +424,13 @@ describe('voiceHandler — voice:deaf', () => {
     handlers = created.handlers;
     io = createMockIO();
     handleVoiceEvents(io as any, socket as any);
+  });
+
+  it('applies a 120/min rate limit (P3)', () => {
+    socket.data.voiceChannelId = 'ch-1';
+    const handler = handlers.get('voice:deaf')!;
+    handler(true);
+    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'voice:deaf', 120);
   });
 
   it('rejects non-boolean deafened value', () => {

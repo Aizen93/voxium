@@ -39,6 +39,7 @@ const { mockPrisma } = vi.hoisted(() => {
         findUnique: vi.fn(),
         findMany: vi.fn().mockResolvedValue([]),
         update: vi.fn().mockResolvedValue({}),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       serverMember: {
         findMany: vi.fn().mockResolvedValue([]),
@@ -184,6 +185,7 @@ describe('socketServer — DM presence broadcast on connect', () => {
     mockPrisma.supportTicket.findUnique.mockResolvedValue(null);
     mockPrisma.announcement.findMany.mockResolvedValue([]);
     mockPrisma.user.update.mockResolvedValue({});
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
   });
 
@@ -244,6 +246,28 @@ describe('socketServer — DM presence broadcast on connect', () => {
     httpServer.close();
   });
 
+  it('writes online status via a guarded updateMany, never an unconditional update (write-amplification guard)', async () => {
+    const { socket } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+
+    initSocketServer(httpServer);
+    const connectionHandler = getConnectionHandler();
+
+    mockPrisma.conversation.findMany.mockResolvedValueOnce([]);
+
+    await connectionHandler(socket);
+
+    // Reconnect churn / multi-device connects must skip the no-op write when
+    // the row already says 'online' — the status filter makes it conditional
+    expect(mockPrisma.user.updateMany).toHaveBeenCalledWith({
+      where: { id: 'user-1', NOT: { status: 'online' } },
+      data: { status: 'online' },
+    });
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+
+    httpServer.close();
+  });
+
   it('DM presence broadcast errors do not crash the connection handler', async () => {
     const { socket } = createMockSocket('user-1');
     const httpServer = http.createServer();
@@ -284,6 +308,7 @@ describe('socketServer — DM presence broadcast on disconnect', () => {
     mockPrisma.supportTicket.findUnique.mockResolvedValue(null);
     mockPrisma.announcement.findMany.mockResolvedValue([]);
     mockPrisma.user.update.mockResolvedValue({});
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
   });
 

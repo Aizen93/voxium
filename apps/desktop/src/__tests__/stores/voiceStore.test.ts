@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Mock all external dependencies before importing the store ───────────────
 
@@ -240,7 +240,7 @@ describe('voiceStore', () => {
       const mockPc = { close: vi.fn() };
       const mockAudio = { pause: vi.fn(), srcObject: {}, remove: vi.fn() };
       useVoiceStore.setState({
-        peers: new Map([['user-2', { pc: mockPc as unknown as RTCPeerConnection, makingOffer: false }]]),
+        peers: new Map([['user-2', { pc: mockPc as unknown as RTCPeerConnection, makingOffer: false, pendingCandidates: [] }]]),
         remoteAudios: new Map([['user-2', mockAudio as unknown as HTMLAudioElement]]),
       });
       useVoiceStore.getState().destroyPeer('user-2');
@@ -261,8 +261,8 @@ describe('voiceStore', () => {
       const mockPc2 = { close: vi.fn() };
       useVoiceStore.setState({
         peers: new Map([
-          ['user-2', { pc: mockPc1 as unknown as RTCPeerConnection, makingOffer: false }],
-          ['user-3', { pc: mockPc2 as unknown as RTCPeerConnection, makingOffer: false }],
+          ['user-2', { pc: mockPc1 as unknown as RTCPeerConnection, makingOffer: false, pendingCandidates: [] }],
+          ['user-3', { pc: mockPc2 as unknown as RTCPeerConnection, makingOffer: false, pendingCandidates: [] }],
         ]),
       });
       useVoiceStore.getState().destroyAllPeers();
@@ -529,6 +529,112 @@ describe('voiceStore', () => {
       expect(mic.pause).toHaveBeenCalled();
       expect(screenAudio.pause).not.toHaveBeenCalled();
       expect(useVoiceStore.getState().selfMute).toBe(true);
+    });
+  });
+
+  // ─── P3: ICE candidate queueing in handleDMSignal ─────────────────────────
+
+  describe('handleDMSignal — ICE candidate queue (P3)', () => {
+    /** Minimal RTCPeerConnection double tracking signaling state transitions. */
+    class FakeRTCPeerConnection {
+      static instances: FakeRTCPeerConnection[] = [];
+      localDescription: { type: string; sdp?: string } | null = null;
+      remoteDescription: { type: string; sdp?: string } | null = null;
+      signalingState = 'stable';
+      iceConnectionState = 'new';
+      connectionState = 'new';
+      onnegotiationneeded: (() => void) | null = null;
+      onicecandidate: (() => void) | null = null;
+      oniceconnectionstatechange: (() => void) | null = null;
+      onconnectionstatechange: (() => void) | null = null;
+      ontrack: (() => void) | null = null;
+      addTrack = vi.fn();
+      close = vi.fn();
+      addIceCandidate = vi.fn().mockResolvedValue(undefined);
+      createOffer = vi.fn().mockResolvedValue({ type: 'offer', sdp: 'x' });
+      createAnswer = vi.fn().mockResolvedValue({ type: 'answer', sdp: 'x' });
+      setLocalDescription = vi.fn().mockImplementation((desc: { type: string; sdp?: string }) => {
+        if (desc?.type === 'rollback') {
+          this.localDescription = null;
+          this.signalingState = 'stable';
+        } else {
+          this.localDescription = desc;
+          this.signalingState = desc?.type === 'offer' ? 'have-local-offer' : 'stable';
+        }
+        return Promise.resolve();
+      });
+      setRemoteDescription = vi.fn().mockImplementation((desc: { type: string; sdp?: string }) => {
+        this.remoteDescription = desc;
+        this.signalingState = desc?.type === 'offer' ? 'have-remote-offer' : 'stable';
+        return Promise.resolve();
+      });
+      constructor() {
+        FakeRTCPeerConnection.instances.push(this);
+      }
+    }
+
+    const flushAsync = async () => {
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+    };
+
+    beforeEach(() => {
+      FakeRTCPeerConnection.instances = [];
+      vi.stubGlobal('RTCPeerConnection', FakeRTCPeerConnection);
+      // Identity constructors: `new RTCSessionDescription(init)` → init
+      vi.stubGlobal('RTCSessionDescription', function (this: unknown, init: unknown) { return init; });
+      vi.stubGlobal('RTCIceCandidate', function (this: unknown, init: unknown) { return init; });
+    });
+
+    afterEach(() => {
+      useVoiceStore.getState().destroyAllPeers();
+      vi.unstubAllGlobals();
+    });
+
+    it('queues candidates arriving before the remote description and flushes them on answer', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      useVoiceStore.getState().createDMPeer('peer-x', true);
+      await flushAsync(); // let the initiator offer chain settle
+
+      const pc = FakeRTCPeerConnection.instances[0];
+      expect(pc).toBeDefined();
+      expect(pc.signalingState).toBe('have-local-offer');
+
+      // ICE candidate races ahead of the answer → must be queued, not dropped
+      useVoiceStore.getState().handleDMSignal('peer-x', {
+        type: 'ice-candidate',
+        candidate: { candidate: 'c1' },
+      });
+      expect(pc.addIceCandidate).not.toHaveBeenCalled();
+      expect(useVoiceStore.getState().peers.get('peer-x')!.pendingCandidates).toHaveLength(1);
+
+      // Answer arrives → remote description set → queue flushed
+      useVoiceStore.getState().handleDMSignal('peer-x', { type: 'answer', sdp: 'remote' });
+      await flushAsync();
+
+      expect(pc.addIceCandidate).toHaveBeenCalledTimes(1);
+      expect(pc.addIceCandidate).toHaveBeenCalledWith({ candidate: 'c1' });
+      expect(useVoiceStore.getState().peers.get('peer-x')!.pendingCandidates).toHaveLength(0);
+    });
+
+    it('control: a candidate arriving AFTER the answer is applied immediately', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      useVoiceStore.getState().createDMPeer('peer-x', true);
+      await flushAsync();
+
+      const pc = FakeRTCPeerConnection.instances[0];
+      useVoiceStore.getState().handleDMSignal('peer-x', { type: 'answer', sdp: 'remote' });
+      await flushAsync();
+      expect(pc.remoteDescription).toEqual({ type: 'answer', sdp: 'remote' });
+
+      useVoiceStore.getState().handleDMSignal('peer-x', {
+        type: 'ice-candidate',
+        candidate: { candidate: 'c2' },
+      });
+
+      expect(pc.addIceCandidate).toHaveBeenCalledTimes(1);
+      expect(pc.addIceCandidate).toHaveBeenCalledWith({ candidate: 'c2' });
+      expect(useVoiceStore.getState().peers.get('peer-x')!.pendingCandidates).toHaveLength(0);
     });
   });
 });

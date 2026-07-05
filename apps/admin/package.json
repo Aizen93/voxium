@@ -11,14 +11,14 @@
   },
   "dependencies": {
     "@voxium/shared": "workspace:*",
-    "axios": "^1.13.6",
+    "axios": "^1.18.1",
     "clsx": "^2.1.1",
     "cobe": "^2.0.1",
     "flag-icons": "^7.5.0",
     "lucide-react": "^0.577.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-router-dom": "^7.13.1",
+    "react-router-dom": "^7.18.1",
     "socket.io-client": "^4.8.0",
     "zustand": "^5.0.12"
   },
