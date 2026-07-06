@@ -42,6 +42,24 @@ function formatDuration(ms: number): string {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
+/**
+ * Log-safe summary of a send failure. SMTP servers embed the recipient
+ * address in free-text responses (e.g. "550 5.1.1 <user@x.com>: rejected"),
+ * and nodemailer copies that into err.message — so for SMTP errors log the
+ * machine codes instead, and fall back to the message only for non-SMTP
+ * errors (ECONNREFUSED etc. carry no PII).
+ */
+export function describeEmailError(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as { code?: unknown; responseCode?: unknown };
+    if (typeof e.code === 'string') {
+      return typeof e.responseCode === 'number' ? `${e.code} (SMTP ${e.responseCode})` : e.code;
+    }
+    if (err instanceof Error) return err.message;
+  }
+  return String(err);
+}
+
 export interface CleanupReport {
   startedAt: Date;
   finishedAt: Date;

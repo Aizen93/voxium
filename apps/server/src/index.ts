@@ -39,6 +39,7 @@ import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/a
 import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
 import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
+import { ensureBucketEncryption } from './utils/s3';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
 import { initMediasoup, onWorkerDeath } from './mediasoup/mediasoupManager';
@@ -70,6 +71,10 @@ async function main() {
   // Load feature flags from Redis
   await loadFeatureFlags();
   console.log('[FeatureFlags] Loaded');
+
+  // Apply bucket-default encryption when S3_SSE is set (never throws;
+  // logs loudly if the provider/key can't do it — uploads keep working)
+  await ensureBucketEncryption();
 
   // Initialize mediasoup workers
   await initMediasoup();

@@ -1,6 +1,6 @@
 import { prisma } from './prisma';
 import { deleteMultipleFromS3 } from './s3';
-import { sendCleanupReport } from './email';
+import { sendCleanupReport, describeEmailError } from './email';
 import { LIMITS } from '@voxium/shared';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -100,8 +100,7 @@ async function runCleanup() {
         error,
       });
     } catch (emailErr) {
-      // Log message only — nodemailer errors can carry the recipient address in .envelope
-      console.error('[Cleanup] Failed to send report email:', emailErr instanceof Error ? emailErr.message : String(emailErr));
+      console.error('[Cleanup] Failed to send report email:', describeEmailError(emailErr));
     }
   }
 

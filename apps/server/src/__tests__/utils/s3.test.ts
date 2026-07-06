@@ -1,15 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock the AWS SDK to avoid real S3 connections
+const mockSend = vi.hoisted(() => vi.fn());
 vi.mock('@aws-sdk/client-s3', () => ({
   // Regular function (not arrow) — s3.ts calls `new S3Client(...)` and arrow
   // functions cannot be constructed
-  S3Client: vi.fn(function () { return { send: vi.fn() }; }),
+  S3Client: vi.fn(function () { return { send: mockSend }; }),
   PutObjectCommand: vi.fn(),
   GetObjectCommand: vi.fn(),
   DeleteObjectCommand: vi.fn(),
   DeleteObjectsCommand: vi.fn(),
   ListObjectsV2Command: vi.fn(),
+  GetBucketEncryptionCommand: vi.fn(),
+  PutBucketEncryptionCommand: vi.fn(),
 }));
 
 vi.mock('@aws-sdk/s3-request-presigner', () => ({
@@ -57,11 +60,12 @@ describe('utils/s3 — lazy initialization', () => {
   });
 });
 
-describe('utils/s3 — S3_SSE server-side encryption', () => {
+describe('utils/s3 — S3_SSE bucket-default encryption', () => {
   const savedSSE = process.env.S3_SSE;
 
   beforeEach(() => {
     vi.resetModules();
+    mockSend.mockReset();
     delete process.env.S3_SSE;
   });
 
@@ -74,7 +78,7 @@ describe('utils/s3 — S3_SSE server-side encryption', () => {
     vi.restoreAllMocks();
   });
 
-  it('presigned PUT includes ServerSideEncryption when S3_SSE=AES256', async () => {
+  it('presigned PUT NEVER carries SSE params — even with S3_SSE set (unhoistable header would 403 every client upload)', async () => {
     process.env.S3_SSE = 'AES256';
     const { PutObjectCommand } = await import('@aws-sdk/client-s3');
     vi.mocked(PutObjectCommand).mockClear();
@@ -82,60 +86,84 @@ describe('utils/s3 — S3_SSE server-side encryption', () => {
 
     await generatePresignedPutUrl('avatars/user1-123.webp', 'image/webp');
 
-    expect(PutObjectCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ ServerSideEncryption: 'AES256' }),
-    );
+    const input = vi.mocked(PutObjectCommand).mock.calls[0][0] as Record<string, unknown>;
+    expect('ServerSideEncryption' in input).toBe(false);
   });
 
-  it('presigned PUT includes ServerSideEncryption when S3_SSE=aws:kms', async () => {
-    process.env.S3_SSE = 'aws:kms';
-    const { PutObjectCommand } = await import('@aws-sdk/client-s3');
-    vi.mocked(PutObjectCommand).mockClear();
-    const { generatePresignedPutUrl } = await import('../../utils/s3');
+  it('ensureBucketEncryption is a no-op when S3_SSE is unset', async () => {
+    const { ensureBucketEncryption } = await import('../../utils/s3');
 
-    await generatePresignedPutUrl('avatars/user1-123.webp', 'image/webp');
+    await ensureBucketEncryption();
 
-    expect(PutObjectCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ ServerSideEncryption: 'aws:kms' }),
-    );
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
-  it('presigned PUT omits ServerSideEncryption when S3_SSE is unset', async () => {
-    const { PutObjectCommand } = await import('@aws-sdk/client-s3');
-    vi.mocked(PutObjectCommand).mockClear();
-    const { generatePresignedPutUrl } = await import('../../utils/s3');
+  it('applies PutBucketEncryption when the bucket has no default encryption', async () => {
+    process.env.S3_SSE = 'AES256';
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { GetBucketEncryptionCommand, PutBucketEncryptionCommand } = await import('@aws-sdk/client-s3');
+    vi.mocked(PutBucketEncryptionCommand).mockClear();
+    mockSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof (GetBucketEncryptionCommand as unknown as new () => object)) {
+        return Promise.reject(new Error('ServerSideEncryptionConfigurationNotFoundError'));
+      }
+      return Promise.resolve({});
+    });
+    const { ensureBucketEncryption } = await import('../../utils/s3');
 
-    await generatePresignedPutUrl('avatars/user1-123.webp', 'image/webp');
+    await ensureBucketEncryption();
 
-    expect(PutObjectCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ ServerSideEncryption: undefined }),
+    expect(PutBucketEncryptionCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ServerSideEncryptionConfiguration: {
+          Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }],
+        },
+      }),
     );
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Enabled default encryption'));
   });
 
-  it('warns and ignores an unsupported S3_SSE value', async () => {
+  it('skips PutBucketEncryption when the bucket already matches', async () => {
+    process.env.S3_SSE = 'AES256';
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { PutBucketEncryptionCommand } = await import('@aws-sdk/client-s3');
+    vi.mocked(PutBucketEncryptionCommand).mockClear();
+    mockSend.mockResolvedValue({
+      ServerSideEncryptionConfiguration: {
+        Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }],
+      },
+    });
+    const { ensureBucketEncryption } = await import('../../utils/s3');
+
+    await ensureBucketEncryption();
+
+    expect(PutBucketEncryptionCommand).not.toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('already has default encryption'));
+  });
+
+  it('logs but does NOT throw when the provider rejects PutBucketEncryption', async () => {
+    process.env.S3_SSE = 'AES256';
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockSend.mockRejectedValue(new Error('NotImplemented'));
+    const { ensureBucketEncryption } = await import('../../utils/s3');
+
+    await expect(ensureBucketEncryption()).resolves.toBeUndefined();
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Could not enable default encryption'));
+  });
+
+  it('warns and no-ops on an unsupported S3_SSE value', async () => {
     process.env.S3_SSE = 'rot13';
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { PutObjectCommand } = await import('@aws-sdk/client-s3');
-    vi.mocked(PutObjectCommand).mockClear();
-    const { generatePresignedPutUrl } = await import('../../utils/s3');
+    const { ensureBucketEncryption } = await import('../../utils/s3');
 
-    await generatePresignedPutUrl('avatars/user1-123.webp', 'image/webp');
+    await ensureBucketEncryption();
+    await ensureBucketEncryption();
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('rot13'));
-    expect(PutObjectCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ ServerSideEncryption: undefined }),
-    );
-  });
-
-  it('warns only once — the resolved value is memoized', async () => {
-    process.env.S3_SSE = 'bogus';
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { generatePresignedPutUrl } = await import('../../utils/s3');
-
-    await generatePresignedPutUrl('avatars/user1-123.webp', 'image/webp');
-    await generatePresignedPutUrl('avatars/user2-456.webp', 'image/webp');
-
+    // Memoized: single warning across repeated calls, and no S3 traffic
     expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('rot13'));
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });
 

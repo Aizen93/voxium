@@ -7,7 +7,7 @@ import type { AuthPayload } from '../middleware/auth';
 import type { UserRole } from '@voxium/shared';
 import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, validateUsername } from '@voxium/shared';
-import { sendPasswordResetEmail, sendVerificationEmail } from '../utils/email';
+import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } from '../utils/email';
 import { sanitizeText } from '../utils/sanitize';
 
 // Timing-equalization hash for login attempts against unknown emails (same
@@ -93,8 +93,7 @@ export async function registerUser(username: string, email: string, password: st
 
   // Send verification email (fire-and-forget)
   sendVerificationEmail(user.email, rawVerifyToken).catch((err) => {
-    // Log message only — nodemailer errors can carry the recipient address in .envelope
-    console.error('[Auth] Failed to send verification email:', err instanceof Error ? err.message : String(err));
+    console.error('[Auth] Failed to send verification email:', describeEmailError(err));
   });
 
   const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion });
@@ -317,8 +316,7 @@ export async function requestPasswordReset(email: string) {
   try {
     await sendPasswordResetEmail(user.email, rawToken);
   } catch (err) {
-    // Log message only — nodemailer errors can carry the recipient address in .envelope
-    console.error('[Auth] Failed to send password reset email:', err instanceof Error ? err.message : String(err));
+    console.error('[Auth] Failed to send password reset email:', describeEmailError(err));
   }
 }
 
