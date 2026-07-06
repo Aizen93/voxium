@@ -100,7 +100,8 @@ async function runCleanup() {
         error,
       });
     } catch (emailErr) {
-      console.error('[Cleanup] Failed to send report email:', emailErr);
+      // Log message only — nodemailer errors can carry the recipient address in .envelope
+      console.error('[Cleanup] Failed to send report email:', emailErr instanceof Error ? emailErr.message : String(emailErr));
     }
   }
 

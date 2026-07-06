@@ -594,15 +594,16 @@
     <p class="sec-sub">"Encryption" splits into two very different layers. The roadmap and Architecture.md already commit to the honest framing: server channels stay protected <em>by</em> the server (TLS + at-rest), DMs get optional protection <em>from</em> the server (E2E). I'd build it in that order.</p>
 
     <div class="phase">
-      <div class="phase-head"><span class="phase-tag p0" style="background:var(--ok)">A</span><span class="phase-title">Baseline data-at-rest &amp; in-transit — no UX change</span></div>
+      <div class="phase-head"><span class="phase-tag p0" style="background:var(--ok)">A ✓ SHIPPED</span><span class="phase-title">Baseline data-at-rest &amp; in-transit — no UX change</span><span class="phase-eta">code shipped 2026-07-06 · infra steps in DEPLOYMENT.md §12/§15/§19</span></div>
       <div class="phase-body">
         <p class="goal">Verifiable "the data is secured" without touching the product surface. Mostly infra + a few code checks.</p>
         <ul class="items">
-          <li>Confirm TLS everywhere (nginx already documented); enforce HTTPS/WSS, HSTS <span class="ref">in transit</span></li>
-          <li>Postgres at-rest: encrypted volume / managed-PG encryption; verify backups are encrypted <span class="ref">disk-level</span></li>
-          <li>S3 server-side encryption (SSE) on the assets bucket <span class="ref">attachments/avatars</span></li>
-          <li>Audit that no sensitive material is logged (ties to HIGH-9's user-id logging); confirm TOTP secrets' AES-256-GCM (already done) and extend the pattern to any other secret columns</li>
-          <li>Encrypt DM/attachment content columns at the application layer if you want defense-in-depth before full E2E <span class="ref">optional</span></li>
+          <li>✅ HSTS: 1-year + includeSubDomains from helmet in production; nginx <code>add_header</code> for static files documented (DEPLOYMENT.md §12) <span class="ref">in transit</span></li>
+          <li>✅ Backups: pg_dump now GPG-encrypted (AES-256 symmetric) in the deploy guide; encrypted data volume documented as optional for new instances (§19) <span class="ref">disk-level</span></li>
+          <li>✅ S3 SSE: <code>S3_SSE=AES256</code> env flag applies ServerSideEncryption to every presigned PUT (presigner hoists it to the query string — zero client changes) <span class="ref">attachments/avatars</span></li>
+          <li>✅ Logging audit (agent-swept all 3 apps): no tokens/passwords/secrets logged anywhere; fixed the 3 residual gaps — nodemailer error objects (could carry recipient email) now log message-only, invite codes redacted from JSON access logs, TOTP plaintext fallback now FAILS CLOSED in production (boot refuses + encryptSecret throws)</li>
+          <li>✅ Secret columns audit: password bcrypt-12, backup codes bcrypt-10, reset/verification tokens SHA-256, TOTP secrets AES-256-GCM, refresh/trusted-device tokens stateless (never stored). Only borderline: Invite.code plaintext — accepted (single-use, deletable, now log-redacted)</li>
+          <li>⏭️ App-layer encryption of DM/message content: <b>skipped deliberately</b> — it would break the pg_trgm server-search index shipped in P3 (MED-14), and phase B's E2E supersedes it for DMs <span class="ref">optional</span></li>
         </ul>
       </div>
     </div>
@@ -671,7 +672,7 @@
     </div>
   </section>
 
-  <div class="foot">Voxium v1.7.3 · stabilization audit · 5 surfaces · ~70 findings · ALL PHASES SHIPPED: P0 + P1 + P2-MN + P2 + P3 (PR to develop open) · remaining: P2-MN live 2-node validation → encryption A/B.</div>
+  <div class="foot">Voxium v1.7.3 · stabilization audit · 5 surfaces · ~70 findings · ALL PHASES SHIPPED: P0 + P1 + P2-MN + P2 + P3 + encryption-A (PR to develop open) · remaining: P2-MN live 2-node validation → encryption B (E2E DMs).</div>
 </div>
 </body>
 </html>

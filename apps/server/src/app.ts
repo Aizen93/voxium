@@ -74,6 +74,13 @@ app.use((req, res, next) => {
       },
     },
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+    // HSTS pinned to 1 year in production (helmet's default is ~180 days);
+    // disabled outside production so plain-HTTP localhost dev never caches
+    // the policy. nginx must set the same header for static-file responses
+    // that never reach Express (DEPLOYMENT.md §12).
+    strictTransportSecurity: isProd
+      ? { maxAge: 31536000, includeSubDomains: true }
+      : false,
   })(req, res, next);
 });
 
@@ -111,11 +118,16 @@ function getMorganHandler(): express.RequestHandler {
     const fmt = process.env.LOG_FORMAT || (process.env.NODE_ENV === 'production' ? 'json' : 'dev');
     if (fmt === 'json') {
       morgan.token('body-size', (_rq, rs) => rs.getHeader('content-length') as string || '0');
+      // Invite codes are single-use bearer credentials — keep them out of
+      // durable access logs (tokens/reset codes travel in POST bodies, which
+      // morgan never captures; invite codes are the one credential in a URL)
+      const redactUrl = (url: string | undefined): string | undefined =>
+        url?.replace(/(\/invites\/)[^/?]+/, '$1[redacted]');
       _morganHandler = morgan((tokens, rq, rs) => JSON.stringify({
         ts: new Date().toISOString(),
         rid: rq.id,
         method: tokens.method(rq, rs),
-        url: tokens.url(rq, rs),
+        url: redactUrl(tokens.url(rq, rs)),
         status: Number(tokens.status(rq, rs)),
         ms: Number(tokens['response-time'](rq, rs)),
         bytes: Number(tokens['body-size'](rq, rs)) || 0,

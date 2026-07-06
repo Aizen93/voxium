@@ -30,6 +30,27 @@ function getBucket(): string {
   return process.env.S3_ASSETS_BUCKET!;
 }
 
+// Optional server-side encryption for uploaded objects (encryption-at-rest
+// baseline). S3_SSE=AES256 (SSE-S3) or aws:kms. The presigner hoists x-amz-*
+// params into the query string, so clients uploading via presigned PUT need
+// no changes. Unset = rely on bucket-default encryption (or none) — required
+// for S3-compatible providers that reject SSE params.
+let _sse: 'AES256' | 'aws:kms' | undefined | null = null;
+function getSSE(): 'AES256' | 'aws:kms' | undefined {
+  if (_sse === null) {
+    const v = process.env.S3_SSE;
+    if (!v) {
+      _sse = undefined;
+    } else if (v === 'AES256' || v === 'aws:kms') {
+      _sse = v;
+    } else {
+      console.warn(`[S3] Ignoring unsupported S3_SSE value "${v}" (expected AES256 or aws:kms)`);
+      _sse = undefined;
+    }
+  }
+  return _sse;
+}
+
 /** Regex matching valid S3 asset keys (e.g. avatars/userId-timestamp.webp) */
 export const VALID_S3_KEY_RE = /^(avatars|server-icons)\/[\w-]+\.webp$/;
 
@@ -50,6 +71,7 @@ export async function generatePresignedPutUrl(
     Key: key,
     ContentType: contentType,
     CacheControl: 'public, max-age=31536000, immutable',
+    ServerSideEncryption: getSSE(),
   });
 
   return getSignedUrl(getS3Client(), command, {
