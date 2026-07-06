@@ -5,6 +5,8 @@ import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
   ListObjectsV2Command,
+  GetBucketEncryptionCommand,
+  PutBucketEncryptionCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -30,11 +32,12 @@ function getBucket(): string {
   return process.env.S3_ASSETS_BUCKET!;
 }
 
-// Optional server-side encryption for uploaded objects (encryption-at-rest
-// baseline). S3_SSE=AES256 (SSE-S3) or aws:kms. The presigner hoists x-amz-*
-// params into the query string, so clients uploading via presigned PUT need
-// no changes. Unset = rely on bucket-default encryption (or none) — required
-// for S3-compatible providers that reject SSE params.
+// Optional server-side encryption at rest (S3_SSE=AES256 or aws:kms), applied
+// as BUCKET-DEFAULT encryption at startup — never as a per-request param on
+// presigned PUTs. SSE headers cannot ride a presigned URL: the AWS presigner
+// deliberately marks x-amz-server-side-encryption unhoistable, so it lands in
+// SignedHeaders and clients (who don't send it) would 403 on every upload.
+// Bucket-default encryption covers all uploads with zero client changes.
 let _sse: 'AES256' | 'aws:kms' | undefined | null = null;
 function getSSE(): 'AES256' | 'aws:kms' | undefined {
   if (_sse === null) {
@@ -49,6 +52,45 @@ function getSSE(): 'AES256' | 'aws:kms' | undefined {
     }
   }
   return _sse;
+}
+
+/**
+ * Ensure the assets bucket has default encryption matching S3_SSE.
+ * Called once at startup; no-op when S3_SSE is unset. Never throws — a
+ * provider without bucket-encryption support (or a key lacking the
+ * permission) must not block boot; uploads keep working and the operator
+ * gets a loud log telling them to enable it provider-side.
+ */
+export async function ensureBucketEncryption(): Promise<void> {
+  const sse = getSSE();
+  if (!sse) return;
+  const bucket = getBucket();
+  try {
+    const current = await getS3Client().send(
+      new GetBucketEncryptionCommand({ Bucket: bucket }),
+    ).catch(() => null); // missing config surfaces as an error on most providers
+    const currentAlgo = current?.ServerSideEncryptionConfiguration?.Rules?.[0]
+      ?.ApplyServerSideEncryptionByDefault?.SSEAlgorithm;
+    if (currentAlgo === sse) {
+      console.log(`[S3] Bucket "${bucket}" already has default encryption (${sse})`);
+      return;
+    }
+    await getS3Client().send(
+      new PutBucketEncryptionCommand({
+        Bucket: bucket,
+        ServerSideEncryptionConfiguration: {
+          Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: sse } }],
+        },
+      }),
+    );
+    console.log(`[S3] Enabled default encryption (${sse}) on bucket "${bucket}"`);
+  } catch (err) {
+    console.error(
+      `[S3] Could not enable default encryption on bucket "${bucket}" — uploads will be stored per the provider's current settings. ` +
+      'Enable default encryption in the provider console, or unset S3_SSE to silence this. ' +
+      `Cause: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 /** Regex matching valid S3 asset keys (e.g. avatars/userId-timestamp.webp) */
@@ -71,7 +113,7 @@ export async function generatePresignedPutUrl(
     Key: key,
     ContentType: contentType,
     CacheControl: 'public, max-age=31536000, immutable',
-    ServerSideEncryption: getSSE(),
+    // NO ServerSideEncryption here — see ensureBucketEncryption() above.
   });
 
   return getSignedUrl(getS3Client(), command, {

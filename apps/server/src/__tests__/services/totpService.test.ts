@@ -100,8 +100,13 @@ describe('totpService — setupTOTP', () => {
     expect(updateCall.data.totpSecret).toMatch(/^enc:/);
   });
 
-  it('stores unencrypted secret when TOTP_ENCRYPTION_KEY is not set', async () => {
+  it('stores unencrypted secret when TOTP_ENCRYPTION_KEY is not set (non-production only)', async () => {
     delete process.env.TOTP_ENCRYPTION_KEY;
+    // The plaintext fallback only exists outside production — pin the env so
+    // this test stays valid if the suite ever runs with NODE_ENV=production
+    const savedNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+    savedEnv.NODE_ENV = savedNodeEnv;
 
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
       username: 'testuser',
