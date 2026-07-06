@@ -19,8 +19,15 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// Warn about optional but security-critical env vars
+// TOTP_ENCRYPTION_KEY: fail closed in production — without it TOTP secrets
+// would be stored in PLAINTEXT. Dev keeps the warning-only fallback so local
+// setups don't need the key.
 if (!process.env.TOTP_ENCRYPTION_KEY) {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('\nFATAL: TOTP_ENCRYPTION_KEY is not set — refusing to start in production (TOTP secrets would be stored UNENCRYPTED).');
+    console.error('Generate one with: openssl rand -hex 32\n');
+    process.exit(1);
+  }
   console.warn('\nWARNING: TOTP_ENCRYPTION_KEY is not set. TOTP secrets will be stored UNENCRYPTED in the database.');
   console.warn('Set this to a 32-byte hex string (64 characters) for production use.\n');
 }

@@ -93,7 +93,8 @@ export async function registerUser(username: string, email: string, password: st
 
   // Send verification email (fire-and-forget)
   sendVerificationEmail(user.email, rawVerifyToken).catch((err) => {
-    console.error('[Auth] Failed to send verification email:', err);
+    // Log message only — nodemailer errors can carry the recipient address in .envelope
+    console.error('[Auth] Failed to send verification email:', err instanceof Error ? err.message : String(err));
   });
 
   const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion });
@@ -316,7 +317,8 @@ export async function requestPasswordReset(email: string) {
   try {
     await sendPasswordResetEmail(user.email, rawToken);
   } catch (err) {
-    console.error('[Auth] Failed to send password reset email:', err);
+    // Log message only — nodemailer errors can carry the recipient address in .envelope
+    console.error('[Auth] Failed to send password reset email:', err instanceof Error ? err.message : String(err));
   }
 }
 

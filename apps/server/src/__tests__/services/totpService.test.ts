@@ -116,6 +116,26 @@ describe('totpService — setupTOTP', () => {
     expect(updateCall.data.totpSecret).not.toMatch(/^enc:/);
     expect(updateCall.data.totpSecret).toBe(result.secret);
   });
+
+  it('FAILS CLOSED in production when TOTP_ENCRYPTION_KEY is not set', async () => {
+    delete process.env.TOTP_ENCRYPTION_KEY;
+    const savedNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+        username: 'testuser',
+        totpEnabled: false,
+      } as any);
+
+      await expect(setupTOTP('user-1'))
+        .rejects.toThrow(/TOTP_ENCRYPTION_KEY required in production/);
+      // Nothing plaintext must reach the DB
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    } finally {
+      if (savedNodeEnv !== undefined) process.env.NODE_ENV = savedNodeEnv;
+      else delete process.env.NODE_ENV;
+    }
+  });
 });
 
 describe('totpService — enableTOTP', () => {
