@@ -612,10 +612,10 @@
       "pending": "Pending",
       "addFriend": "Add Friend"
     },
-    "onlineCount": "Online — {{count}}",
-    "allCount": "All Friends — {{count}}",
-    "incomingCount": "Incoming — {{count}}",
-    "outgoingCount": "Outgoing — {{count}}",
+    "onlineCount": "Online, {{count}}",
+    "allCount": "All Friends, {{count}}",
+    "incomingCount": "Incoming, {{count}}",
+    "outgoingCount": "Outgoing, {{count}}",
     "noOnline": "No friends are online right now.",
     "noFriends": "You don't have any friends yet. Try sending a friend request!",
     "noPending": "No pending friend requests.",
@@ -720,24 +720,24 @@
     },
     "stats": {
       "title": "Growing Together",
-      "subtitle": "Real numbers from the Voxium community — updated live.",
+      "subtitle": "Real numbers from the Voxium community, updated live.",
       "users": "Users Registered",
       "servers": "Servers Created",
       "messages": "Messages Sent"
     },
     "features": {
       "title": "Everything you need",
-      "subtitle": "Voice, text, and community — all in one place, with no compromises on privacy or performance.",
+      "subtitle": "Voice, text, and community, all in one place, with no compromises on privacy or performance.",
       "voice": "Crystal-Clear Voice",
-      "voiceDesc": "SFU-powered server voice for 25+ users per channel. DM calls go direct peer-to-peer — no middleman.",
+      "voiceDesc": "SFU-powered server voice for 25+ users per channel. DM calls go direct peer-to-peer, no middleman.",
       "noiseSuppression": "AI Noise Suppression",
-      "noiseSuppressionDesc": "ML-powered RNNoise filter removes keyboard, mouse, and background noise in real time — so only your voice comes through.",
+      "noiseSuppressionDesc": "ML-powered RNNoise filter removes keyboard, mouse, and background noise in real time, so only your voice comes through.",
       "messaging": "Real-Time Messaging",
-      "messagingDesc": "Instant delivery, reactions, typing indicators, and direct messages — all in real time.",
+      "messagingDesc": "Instant delivery, reactions, typing indicators, and direct messages, all in real time.",
       "privacy": "Privacy First",
       "privacyDesc": "No ads, no tracking, no data harvesting. Your conversations stay yours.",
       "servers": "Servers & Communities",
-      "serversDesc": "Create servers, organize channels, invite friends — everything you need to build a community.",
+      "serversDesc": "Create servers, organize channels, invite friends, everything you need to build a community.",
       "calls": "Direct Voice Calls",
       "callsDesc": "1-on-1 voice calls with WebRTC peer-to-peer. Crystal clear, zero latency.",
       "fast": "Fast & Lightweight",
@@ -783,7 +783,7 @@
     "showcase": {
       "title": "Made",
       "titleHighlight": "Yours",
-      "subtitle": "Customize every detail — from colors to languages to who can do what.",
+      "subtitle": "Customize every detail, from colors to languages to who can do what.",
       "themeLabel": "4 Built-in Themes + Custom Editor",
       "languageLabel": "11 Languages with RTL Support",
       "permissionLabel": "20 Permission Flags with Channel Overrides",
@@ -793,7 +793,7 @@
     "why": {
       "title": "Why Voxium?",
       "ownData": "You Own Your Data",
-      "ownDataDesc": "Self-host or use our servers — either way, your data belongs to you. No mining, no selling.",
+      "ownDataDesc": "Self-host or use our servers, either way, your data belongs to you. No mining, no selling.",
       "openSource": "Open Source",
       "openSourceDesc": "Every line of code is public. Audit it, fork it, contribute to it. Full transparency.",
       "communityDriven": "Community-Driven",
@@ -814,7 +814,7 @@
     "cta": {
       "title": "Ready to experience communication, reimagined?",
       "subtitle": "Join the open communication revolution. No credit card. No subscription.",
-      "getStarted": "Get Started — It's Free",
+      "getStarted": "Get Started, It's Free",
       "downloadApp": "Download the App"
     },
     "footer": {
@@ -837,9 +837,9 @@
     "staff": "Staff",
     "supporter": "Supporter",
     "firstSupporter": "First Supporter",
-    "firstSupporterTooltip": "First Supporter — The very first to believe in Voxium",
+    "firstSupporterTooltip": "First Supporter, The very first to believe in Voxium",
     "topSupporter": "Top Supporter",
-    "topSupporterTooltip": "Top Supporter — The most generous supporter of Voxium"
+    "topSupporterTooltip": "Top Supporter, The most generous supporter of Voxium"
   },
 
   "connection": {

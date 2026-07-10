@@ -80,7 +80,7 @@ export function CookiePolicyPage() {
               </table>
             </div>
             <p className="mt-3 text-sm">
-              All stored data is anonymous and functional — none of it is used for tracking, profiling, or
+              All stored data is anonymous and functional, none of it is used for tracking, profiling, or
               advertising. Your email address is only stored server-side for account authentication and is
               never placed in client-side storage.
             </p>
@@ -100,7 +100,7 @@ export function CookiePolicyPage() {
             <p>
               You can clear all Voxium local storage data at any time through your browser settings. Note that
               clearing this data will sign you out and reset your audio preferences to defaults. Since we only
-              use strictly necessary storage, there is no cookie consent banner — these items are required for
+              use strictly necessary storage, there is no cookie consent banner, these items are required for
               the application to work.
             </p>
           </section>

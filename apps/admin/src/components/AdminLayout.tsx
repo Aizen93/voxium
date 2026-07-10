@@ -108,7 +108,7 @@ export function AdminLayout() {
         <div className="p-4 border-b border-vox-border">
           <h1 className="text-lg font-bold text-vox-text-primary">Admin Panel</h1>
           <p className="text-xs text-vox-text-muted">
-            {isSuperAdmin ? 'Super Admin' : 'Admin'} — {user?.username}
+            {isSuperAdmin ? 'Super Admin' : 'Admin'}, {user?.username}
           </p>
         </div>
 

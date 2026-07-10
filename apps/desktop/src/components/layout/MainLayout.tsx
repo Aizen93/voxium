@@ -192,8 +192,8 @@ export function MainLayout() {
           const readable = formatNotificationBody(message.content, message.mentions);
           const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
           const title = isMentioned
-            ? `${authorName} mentioned you in ${serverName} — #${channelName}`
-            : `${serverName} — #${channelName}`;
+            ? `${authorName} mentioned you in ${serverName}, #${channelName}`
+            : `${serverName}, #${channelName}`;
           void notify(title, `${authorName}: ${body}`, message.author?.avatarUrl);
         }
       },
@@ -355,7 +355,7 @@ export function MainLayout() {
               const authorName = message.author?.displayName || message.author?.username || 'Someone';
               const readable = formatNotificationBody(message.content, message.mentions);
               const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
-              void notify(`DM — ${authorName}`, body, message.author?.avatarUrl);
+              void notify(`DM, ${authorName}`, body, message.author?.avatarUrl);
             }
           }
         }

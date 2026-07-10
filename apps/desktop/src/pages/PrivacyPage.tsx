@@ -34,10 +34,10 @@ export function PrivacyPage() {
             <h2 className="text-xl font-semibold text-vox-text-primary mb-3">1. Data We Collect</h2>
             <p className="mb-3">We collect only what is necessary to provide the Service:</p>
             <ul className="list-disc list-inside space-y-1.5 ml-2">
-              <li><strong className="text-vox-text-primary">Account information</strong> — username, email address, and hashed password</li>
-              <li><strong className="text-vox-text-primary">Profile data</strong> — display name, avatar, and bio you choose to provide</li>
-              <li><strong className="text-vox-text-primary">Messages</strong> — text messages you send through servers and direct messages</li>
-              <li><strong className="text-vox-text-primary">Usage data</strong> — server memberships, channel participation, and online presence</li>
+              <li><strong className="text-vox-text-primary">Account information</strong>, username, email address, and hashed password</li>
+              <li><strong className="text-vox-text-primary">Profile data</strong>, display name, avatar, and bio you choose to provide</li>
+              <li><strong className="text-vox-text-primary">Messages</strong>, text messages you send through servers and direct messages</li>
+              <li><strong className="text-vox-text-primary">Usage data</strong>, server memberships, channel participation, and online presence</li>
             </ul>
           </section>
 
@@ -61,7 +61,7 @@ export function PrivacyPage() {
             <p>
               Voice calls use peer-to-peer WebRTC connections. Audio data travels directly between
               participants and is <strong className="text-vox-text-primary">not</strong> routed through or
-              stored on our servers. The server only handles signaling (connection setup) — your actual voice
+              stored on our servers. The server only handles signaling (connection setup), your actual voice
               data never touches our infrastructure.
             </p>
           </section>

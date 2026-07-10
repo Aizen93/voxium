@@ -606,10 +606,10 @@
       "pending": "待处理",
       "addFriend": "添加好友"
     },
-    "onlineCount": "在线 — {{count}}",
-    "allCount": "全部好友 — {{count}}",
-    "incomingCount": "收到的请求 — {{count}}",
-    "outgoingCount": "发出的请求 — {{count}}",
+    "onlineCount": "在线，{{count}}",
+    "allCount": "全部好友，{{count}}",
+    "incomingCount": "收到的请求，{{count}}",
+    "outgoingCount": "发出的请求，{{count}}",
     "noOnline": "当前没有好友在线。",
     "noFriends": "你还没有好友。试试发送好友请求吧！",
     "noPending": "没有待处理的好友请求。",
@@ -713,24 +713,24 @@
     },
     "stats": {
       "title": "共同成长",
-      "subtitle": "来自 Voxium 社区的真实数据 — 实时更新。",
+      "subtitle": "来自 Voxium 社区的真实数据，实时更新。",
       "users": "注册用户",
       "servers": "已创建服务器",
       "messages": "已发送消息"
     },
     "features": {
       "title": "你需要的一切",
-      "subtitle": "语音、文本和社区 — 一站式提供，不在隐私或性能上妥协。",
+      "subtitle": "语音、文本和社区，一站式提供，不在隐私或性能上妥协。",
       "voice": "水晶般清晰的语音",
-      "voiceDesc": "基于 SFU 的服务器语音，每频道支持 25+ 用户。私聊通话直接点对点 — 无中间人。",
+      "voiceDesc": "基于 SFU 的服务器语音，每频道支持 25+ 用户。私聊通话直接点对点，无中间人。",
       "noiseSuppression": "AI 噪音抑制",
-      "noiseSuppressionDesc": "基于 ML 的 RNNoise 滤波器实时去除键盘、鼠标和背景噪音 — 只传递你的声音。",
+      "noiseSuppressionDesc": "基于 ML 的 RNNoise 滤波器实时去除键盘、鼠标和背景噪音，只传递你的声音。",
       "messaging": "实时消息",
-      "messagingDesc": "即时送达、表情回应、输入指示器和私信 — 全部实时。",
+      "messagingDesc": "即时送达、表情回应、输入指示器和私信，全部实时。",
       "privacy": "隐私优先",
       "privacyDesc": "没有广告，没有追踪，没有数据采集。你的对话只属于你。",
       "servers": "服务器与社区",
-      "serversDesc": "创建服务器、组织频道、邀请好友 — 构建社区所需的一切。",
+      "serversDesc": "创建服务器、组织频道、邀请好友，构建社区所需的一切。",
       "calls": "直接语音通话",
       "callsDesc": "通过 WebRTC 点对点的一对一语音通话。水晶般清晰，零延迟。",
       "fast": "快速且轻量",
@@ -776,7 +776,7 @@
     "showcase": {
       "title": "随心",
       "titleHighlight": "定制",
-      "subtitle": "自定义每一个细节——从颜色到语言，再到权限管理。",
+      "subtitle": "自定义每一个细节，从颜色到语言，再到权限管理。",
       "themeLabel": "4 款内置主题 + 自定义编辑器",
       "languageLabel": "11 种语言，支持 RTL",
       "permissionLabel": "20 个权限标志，支持频道级覆盖",
@@ -786,7 +786,7 @@
     "why": {
       "title": "为什么选择 Voxium？",
       "ownData": "数据归你所有",
-      "ownDataDesc": "自托管或使用我们的服务器 — 无论哪种方式，你的数据都属于你。不挖掘，不出售。",
+      "ownDataDesc": "自托管或使用我们的服务器，无论哪种方式，你的数据都属于你。不挖掘，不出售。",
       "openSource": "开源",
       "openSourceDesc": "每一行代码都是公开的。审计、分叉、贡献。完全透明。",
       "communityDriven": "社区驱动",
@@ -807,7 +807,7 @@
     "cta": {
       "title": "准备好体验全新的通信方式了吗？",
       "subtitle": "加入开放通信革命。无需信用卡。无需订阅。",
-      "getStarted": "开始使用 — 完全免费",
+      "getStarted": "开始使用，完全免费",
       "downloadApp": "下载应用"
     },
     "footer": {
@@ -830,9 +830,9 @@
     "staff": "工作人员",
     "supporter": "支持者",
     "firstSupporter": "首位支持者",
-    "firstSupporterTooltip": "首位支持者 — 最早相信 Voxium 的人",
+    "firstSupporterTooltip": "首位支持者，最早相信 Voxium 的人",
     "topSupporter": "顶级支持者",
-    "topSupporterTooltip": "顶级支持者 — Voxium 最慷慨的支持者"
+    "topSupporterTooltip": "顶级支持者，Voxium 最慷慨的支持者"
   },
 
   "connection": {
