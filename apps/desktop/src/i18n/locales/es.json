@@ -606,10 +606,10 @@
       "pending": "Pendientes",
       "addFriend": "Agregar amigo"
     },
-    "onlineCount": "En línea — {{count}}",
-    "allCount": "Todos los amigos — {{count}}",
-    "incomingCount": "Recibidas — {{count}}",
-    "outgoingCount": "Enviadas — {{count}}",
+    "onlineCount": "En línea, {{count}}",
+    "allCount": "Todos los amigos, {{count}}",
+    "incomingCount": "Recibidas, {{count}}",
+    "outgoingCount": "Enviadas, {{count}}",
     "noOnline": "Ningún amigo está en línea en este momento.",
     "noFriends": "Aún no tienes amigos. ¡Intenta enviar una solicitud de amistad!",
     "noPending": "No hay solicitudes de amistad pendientes.",
@@ -713,24 +713,24 @@
     },
     "stats": {
       "title": "Creciendo juntos",
-      "subtitle": "Numeros reales de la comunidad Voxium — actualizados en tiempo real.",
+      "subtitle": "Numeros reales de la comunidad Voxium, actualizados en tiempo real.",
       "users": "Usuarios registrados",
       "servers": "Servidores creados",
       "messages": "Mensajes enviados"
     },
     "features": {
       "title": "Todo lo que necesitas",
-      "subtitle": "Voz, texto y comunidad — todo en un solo lugar, sin comprometer la privacidad ni el rendimiento.",
+      "subtitle": "Voz, texto y comunidad, todo en un solo lugar, sin comprometer la privacidad ni el rendimiento.",
       "voice": "Voz nitida como el cristal",
-      "voiceDesc": "Voz de servidor impulsada por SFU para mas de 25 usuarios por canal. Las llamadas DM van directas entre pares — sin intermediarios.",
+      "voiceDesc": "Voz de servidor impulsada por SFU para mas de 25 usuarios por canal. Las llamadas DM van directas entre pares, sin intermediarios.",
       "noiseSuppression": "Supresion de ruido con IA",
-      "noiseSuppressionDesc": "El filtro RNNoise impulsado por ML elimina el ruido de teclado, raton y fondo en tiempo real — solo se escucha tu voz.",
+      "noiseSuppressionDesc": "El filtro RNNoise impulsado por ML elimina el ruido de teclado, raton y fondo en tiempo real, solo se escucha tu voz.",
       "messaging": "Mensajeria en tiempo real",
-      "messagingDesc": "Entrega instantanea, reacciones, indicadores de escritura y mensajes directos — todo en tiempo real.",
+      "messagingDesc": "Entrega instantanea, reacciones, indicadores de escritura y mensajes directos, todo en tiempo real.",
       "privacy": "Privacidad ante todo",
       "privacyDesc": "Sin anuncios, sin rastreo, sin recopilacion de datos. Tus conversaciones siguen siendo tuyas.",
       "servers": "Servidores y comunidades",
-      "serversDesc": "Crea servidores, organiza canales, invita amigos — todo lo que necesitas para construir una comunidad.",
+      "serversDesc": "Crea servidores, organiza canales, invita amigos, todo lo que necesitas para construir una comunidad.",
       "calls": "Llamadas de voz directas",
       "callsDesc": "Llamadas de voz 1 a 1 con WebRTC entre pares. Calidad cristalina, latencia cero.",
       "fast": "Rapido y ligero",
@@ -776,7 +776,7 @@
     "showcase": {
       "title": "Hecho",
       "titleHighlight": "a tu medida",
-      "subtitle": "Personaliza cada detalle — desde los colores hasta los idiomas y los permisos.",
+      "subtitle": "Personaliza cada detalle, desde los colores hasta los idiomas y los permisos.",
       "themeLabel": "4 temas integrados + editor personalizado",
       "languageLabel": "11 idiomas con soporte RTL",
       "permissionLabel": "20 flags de permisos con anulaciones por canal",
@@ -786,7 +786,7 @@
     "why": {
       "title": "\u00bfPor que Voxium?",
       "ownData": "Tus datos te pertenecen",
-      "ownDataDesc": "Autoaloja o usa nuestros servidores — de cualquier forma, tus datos son tuyos. Sin mineria de datos, sin venta.",
+      "ownDataDesc": "Autoaloja o usa nuestros servidores, de cualquier forma, tus datos son tuyos. Sin mineria de datos, sin venta.",
       "openSource": "Codigo abierto",
       "openSourceDesc": "Cada linea de codigo es publica. Auditalo, bifurcalo, contribuye. Transparencia total.",
       "communityDriven": "Impulsado por la comunidad",
@@ -807,7 +807,7 @@
     "cta": {
       "title": "\u00bfListo para experimentar la comunicacion reinventada?",
       "subtitle": "Unete a la revolucion de la comunicacion abierta. Sin tarjeta de credito. Sin suscripcion.",
-      "getStarted": "Comenzar — Es gratis",
+      "getStarted": "Comenzar, Es gratis",
       "downloadApp": "Descargar la app"
     },
     "footer": {
@@ -830,9 +830,9 @@
     "staff": "Personal",
     "supporter": "Colaborador",
     "firstSupporter": "Primer colaborador",
-    "firstSupporterTooltip": "Primer colaborador — El primero en creer en Voxium",
+    "firstSupporterTooltip": "Primer colaborador, El primero en creer en Voxium",
     "topSupporter": "Mayor colaborador",
-    "topSupporterTooltip": "Mayor colaborador — El colaborador más generoso de Voxium"
+    "topSupporterTooltip": "Mayor colaborador, El colaborador más generoso de Voxium"
   },
 
   "connection": {

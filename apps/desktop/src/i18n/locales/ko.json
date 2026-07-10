@@ -606,10 +606,10 @@
       "pending": "대기 중",
       "addFriend": "친구 추가"
     },
-    "onlineCount": "온라인 — {{count}}",
-    "allCount": "전체 친구 — {{count}}",
-    "incomingCount": "받은 요청 — {{count}}",
-    "outgoingCount": "보낸 요청 — {{count}}",
+    "onlineCount": "온라인, {{count}}",
+    "allCount": "전체 친구, {{count}}",
+    "incomingCount": "받은 요청, {{count}}",
+    "outgoingCount": "보낸 요청, {{count}}",
     "noOnline": "현재 온라인인 친구가 없습니다.",
     "noFriends": "아직 친구가 없습니다. 친구 요청을 보내보세요!",
     "noPending": "대기 중인 친구 요청이 없습니다.",
@@ -713,24 +713,24 @@
     },
     "stats": {
       "title": "함께 성장하기",
-      "subtitle": "Voxium 커뮤니티의 실제 수치 — 실시간 업데이트.",
+      "subtitle": "Voxium 커뮤니티의 실제 수치, 실시간 업데이트.",
       "users": "가입한 사용자",
       "servers": "생성된 서버",
       "messages": "전송된 메시지"
     },
     "features": {
       "title": "필요한 모든 것",
-      "subtitle": "음성, 텍스트, 커뮤니티 — 프라이버시나 성능에 타협 없이 한 곳에서 모두 제공합니다.",
+      "subtitle": "음성, 텍스트, 커뮤니티, 프라이버시나 성능에 타협 없이 한 곳에서 모두 제공합니다.",
       "voice": "수정처럼 맑은 음성",
-      "voiceDesc": "채널당 25명 이상을 지원하는 SFU 기반 서버 음성. DM 통화는 직접 피어 투 피어 — 중간자 없음.",
+      "voiceDesc": "채널당 25명 이상을 지원하는 SFU 기반 서버 음성. DM 통화는 직접 피어 투 피어, 중간자 없음.",
       "noiseSuppression": "AI 노이즈 제거",
-      "noiseSuppressionDesc": "ML 기반 RNNoise 필터가 키보드, 마우스, 배경 소음을 실시간으로 제거 — 목소리만 전달됩니다.",
+      "noiseSuppressionDesc": "ML 기반 RNNoise 필터가 키보드, 마우스, 배경 소음을 실시간으로 제거, 목소리만 전달됩니다.",
       "messaging": "실시간 메시징",
-      "messagingDesc": "즉시 전달, 반응, 입력 표시, 다이렉트 메시지 — 모두 실시간.",
+      "messagingDesc": "즉시 전달, 반응, 입력 표시, 다이렉트 메시지, 모두 실시간.",
       "privacy": "프라이버시 최우선",
       "privacyDesc": "광고 없음, 추적 없음, 데이터 수집 없음. 대화는 오직 여러분의 것입니다.",
       "servers": "서버 및 커뮤니티",
-      "serversDesc": "서버를 만들고, 채널을 정리하고, 친구를 초대하세요 — 커뮤니티 구축에 필요한 모든 것.",
+      "serversDesc": "서버를 만들고, 채널을 정리하고, 친구를 초대하세요, 커뮤니티 구축에 필요한 모든 것.",
       "calls": "1:1 음성 통화",
       "callsDesc": "WebRTC 피어 투 피어 1:1 음성 통화. 수정처럼 맑고, 지연 없음.",
       "fast": "빠르고 가벼움",
@@ -776,7 +776,7 @@
     "showcase": {
       "title": "나만의",
       "titleHighlight": "스타일로",
-      "subtitle": "색상, 언어, 권한까지 — 모든 세부 사항을 원하는 대로 설정하세요.",
+      "subtitle": "색상, 언어, 권한까지, 모든 세부 사항을 원하는 대로 설정하세요.",
       "themeLabel": "4가지 기본 테마 + 커스텀 에디터",
       "languageLabel": "RTL 지원을 포함한 11개 언어",
       "permissionLabel": "채널별 재정의가 가능한 20가지 권한 플래그",
@@ -786,7 +786,7 @@
     "why": {
       "title": "왜 Voxium인가요?",
       "ownData": "데이터는 여러분의 것",
-      "ownDataDesc": "셀프 호스팅하거나 우리 서버를 사용하세요 — 어느 쪽이든 데이터는 여러분의 것입니다. 데이터 마이닝 없음, 판매 없음.",
+      "ownDataDesc": "셀프 호스팅하거나 우리 서버를 사용하세요, 어느 쪽이든 데이터는 여러분의 것입니다. 데이터 마이닝 없음, 판매 없음.",
       "openSource": "오픈 소스",
       "openSourceDesc": "모든 코드가 공개되어 있습니다. 검증하고, 포크하고, 기여하세요. 완전한 투명성.",
       "communityDriven": "커뮤니티 주도",
@@ -807,7 +807,7 @@
     "cta": {
       "title": "새롭게 재탄생한 커뮤니케이션을 경험할 준비가 되셨나요?",
       "subtitle": "오픈 커뮤니케이션 혁명에 동참하세요. 신용카드 필요 없음. 구독 필요 없음.",
-      "getStarted": "시작하기 — 무료입니다",
+      "getStarted": "시작하기, 무료입니다",
       "downloadApp": "앱 다운로드"
     },
     "footer": {
@@ -830,9 +830,9 @@
     "staff": "스태프",
     "supporter": "후원자",
     "firstSupporter": "첫 번째 후원자",
-    "firstSupporterTooltip": "첫 번째 후원자 — Voxium을 가장 먼저 믿어준 분",
+    "firstSupporterTooltip": "첫 번째 후원자, Voxium을 가장 먼저 믿어준 분",
     "topSupporter": "최고 후원자",
-    "topSupporterTooltip": "최고 후원자 — Voxium의 가장 관대한 후원자"
+    "topSupporterTooltip": "최고 후원자, Voxium의 가장 관대한 후원자"
   },
 
   "connection": {

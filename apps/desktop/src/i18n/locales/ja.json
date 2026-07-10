@@ -606,10 +606,10 @@
       "pending": "保留中",
       "addFriend": "フレンドを追加"
     },
-    "onlineCount": "オンライン — {{count}}",
-    "allCount": "すべてのフレンド — {{count}}",
-    "incomingCount": "受信 — {{count}}",
-    "outgoingCount": "送信 — {{count}}",
+    "onlineCount": "オンライン、{{count}}",
+    "allCount": "すべてのフレンド、{{count}}",
+    "incomingCount": "受信、{{count}}",
+    "outgoingCount": "送信、{{count}}",
     "noOnline": "現在オンラインのフレンドはいません。",
     "noFriends": "まだフレンドがいません。フレンドリクエストを送ってみましょう！",
     "noPending": "保留中のフレンドリクエストはありません。",
@@ -713,24 +713,24 @@
     },
     "stats": {
       "title": "共に成長する",
-      "subtitle": "Voxium コミュニティの実際の数字 — リアルタイム更新。",
+      "subtitle": "Voxium コミュニティの実際の数字、リアルタイム更新。",
       "users": "登録ユーザー数",
       "servers": "作成されたサーバー数",
       "messages": "送信されたメッセージ数"
     },
     "features": {
       "title": "必要なすべてが揃っています",
-      "subtitle": "音声、テキスト、コミュニティ — プライバシーやパフォーマンスを妥協することなく、すべてを一か所で。",
+      "subtitle": "音声、テキスト、コミュニティ、プライバシーやパフォーマンスを妥協することなく、すべてを一か所で。",
       "voice": "クリスタルクリアな音声",
-      "voiceDesc": "SFU ベースのサーバー音声でチャンネルあたり 25 人以上をサポート。DM 通話は直接ピアツーピア — 仲介者なし。",
+      "voiceDesc": "SFU ベースのサーバー音声でチャンネルあたり 25 人以上をサポート。DM 通話は直接ピアツーピア、仲介者なし。",
       "noiseSuppression": "AI ノイズ抑制",
-      "noiseSuppressionDesc": "ML ベースの RNNoise フィルターがキーボード、マウス、背景ノイズをリアルタイムで除去 — あなたの声だけが届きます。",
+      "noiseSuppressionDesc": "ML ベースの RNNoise フィルターがキーボード、マウス、背景ノイズをリアルタイムで除去、あなたの声だけが届きます。",
       "messaging": "リアルタイムメッセージ",
-      "messagingDesc": "即時配信、リアクション、入力インジケーター、ダイレクトメッセージ — すべてリアルタイム。",
+      "messagingDesc": "即時配信、リアクション、入力インジケーター、ダイレクトメッセージ、すべてリアルタイム。",
       "privacy": "プライバシー最優先",
       "privacyDesc": "広告なし、トラッキングなし、データ収集なし。会話はあなただけのものです。",
       "servers": "サーバーとコミュニティ",
-      "serversDesc": "サーバーを作成し、チャンネルを整理し、友達を招待 — コミュニティ構築に必要なすべて。",
+      "serversDesc": "サーバーを作成し、チャンネルを整理し、友達を招待、コミュニティ構築に必要なすべて。",
       "calls": "ダイレクト音声通話",
       "callsDesc": "WebRTC ピアツーピアの 1 対 1 音声通話。クリスタルクリア、遅延ゼロ。",
       "fast": "高速で軽量",
@@ -776,7 +776,7 @@
     "showcase": {
       "title": "あなただけの",
       "titleHighlight": "カスタマイズ",
-      "subtitle": "カラー、言語、権限まで — すべてのディテールを自由に設定できます。",
+      "subtitle": "カラー、言語、権限まで、すべてのディテールを自由に設定できます。",
       "themeLabel": "4つの組み込みテーマ + カスタムエディター",
       "languageLabel": "RTL対応を含む11言語",
       "permissionLabel": "チャンネルごとの上書きが可能な20の権限フラグ",
@@ -786,7 +786,7 @@
     "why": {
       "title": "なぜ Voxium？",
       "ownData": "データはあなたのもの",
-      "ownDataDesc": "セルフホストまたは弊社サーバーを利用 — どちらにしても、データはあなたのものです。マイニングなし、販売なし。",
+      "ownDataDesc": "セルフホストまたは弊社サーバーを利用、どちらにしても、データはあなたのものです。マイニングなし、販売なし。",
       "openSource": "オープンソース",
       "openSourceDesc": "すべてのコードが公開されています。監査し、フォークし、貢献してください。完全な透明性。",
       "communityDriven": "コミュニティ主導",
@@ -807,7 +807,7 @@
     "cta": {
       "title": "新しいコミュニケーションを体験する準備はできましたか？",
       "subtitle": "オープンなコミュニケーション革命に参加しましょう。クレジットカード不要。サブスクリプション不要。",
-      "getStarted": "始める — 無料です",
+      "getStarted": "始める、無料です",
       "downloadApp": "アプリをダウンロード"
     },
     "footer": {
@@ -830,9 +830,9 @@
     "staff": "スタッフ",
     "supporter": "サポーター",
     "firstSupporter": "最初のサポーター",
-    "firstSupporterTooltip": "最初のサポーター — Voxium を最初に信じてくれた方",
+    "firstSupporterTooltip": "最初のサポーター、Voxium を最初に信じてくれた方",
     "topSupporter": "トップサポーター",
-    "topSupporterTooltip": "トップサポーター — Voxium の最も寛大なサポーター"
+    "topSupporterTooltip": "トップサポーター、Voxium の最も寛大なサポーター"
   },
 
   "connection": {

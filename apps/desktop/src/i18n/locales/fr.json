@@ -606,10 +606,10 @@
       "pending": "En attente",
       "addFriend": "Ajouter un ami"
     },
-    "onlineCount": "En ligne — {{count}}",
-    "allCount": "Tous les amis — {{count}}",
-    "incomingCount": "Reçues — {{count}}",
-    "outgoingCount": "Envoyées — {{count}}",
+    "onlineCount": "En ligne, {{count}}",
+    "allCount": "Tous les amis, {{count}}",
+    "incomingCount": "Reçues, {{count}}",
+    "outgoingCount": "Envoyées, {{count}}",
     "noOnline": "Aucun ami n'est en ligne pour le moment.",
     "noFriends": "Vous n'avez pas encore d'amis. Essayez d'envoyer une demande d'ami !",
     "noPending": "Aucune demande d'ami en attente.",
@@ -713,24 +713,24 @@
     },
     "stats": {
       "title": "Grandir ensemble",
-      "subtitle": "Les vrais chiffres de la communauté Voxium — mis à jour en temps réel.",
+      "subtitle": "Les vrais chiffres de la communauté Voxium, mis à jour en temps réel.",
       "users": "Utilisateurs inscrits",
       "servers": "Serveurs créés",
       "messages": "Messages envoyés"
     },
     "features": {
       "title": "Tout ce dont vous avez besoin",
-      "subtitle": "Voix, texte et communauté — tout en un seul endroit, sans compromis sur la confidentialité ou les performances.",
+      "subtitle": "Voix, texte et communauté, tout en un seul endroit, sans compromis sur la confidentialité ou les performances.",
       "voice": "Voix cristalline",
-      "voiceDesc": "Voix serveur propulsée par SFU pour plus de 25 utilisateurs par salon. Les appels privés passent en pair-à-pair direct — sans intermédiaire.",
+      "voiceDesc": "Voix serveur propulsée par SFU pour plus de 25 utilisateurs par salon. Les appels privés passent en pair-à-pair direct, sans intermédiaire.",
       "noiseSuppression": "Suppression du bruit par IA",
-      "noiseSuppressionDesc": "Le filtre RNNoise basé sur le ML supprime les bruits de clavier, de souris et d'arrière-plan en temps réel — seule votre voix passe.",
+      "noiseSuppressionDesc": "Le filtre RNNoise basé sur le ML supprime les bruits de clavier, de souris et d'arrière-plan en temps réel, seule votre voix passe.",
       "messaging": "Messagerie en temps réel",
-      "messagingDesc": "Livraison instantanée, réactions, indicateurs de saisie et messages privés — le tout en temps réel.",
+      "messagingDesc": "Livraison instantanée, réactions, indicateurs de saisie et messages privés, le tout en temps réel.",
       "privacy": "Confidentialité avant tout",
       "privacyDesc": "Pas de publicités, pas de pistage, pas de collecte de données. Vos conversations restent les vôtres.",
       "servers": "Serveurs et communautés",
-      "serversDesc": "Créez des serveurs, organisez des salons, invitez des amis — tout ce qu'il faut pour bâtir une communauté.",
+      "serversDesc": "Créez des serveurs, organisez des salons, invitez des amis, tout ce qu'il faut pour bâtir une communauté.",
       "calls": "Appels vocaux directs",
       "callsDesc": "Appels vocaux individuels en WebRTC pair-à-pair. Qualité cristalline, zéro latence.",
       "fast": "Rapide et léger",
@@ -776,7 +776,7 @@
     "showcase": {
       "title": "Fait",
       "titleHighlight": "pour vous",
-      "subtitle": "Personnalisez chaque détail — des couleurs aux langues, en passant par les permissions.",
+      "subtitle": "Personnalisez chaque détail, des couleurs aux langues, en passant par les permissions.",
       "themeLabel": "4 thèmes intégrés + éditeur personnalisé",
       "languageLabel": "11 langues avec prise en charge RTL",
       "permissionLabel": "20 drapeaux de permission avec surcharges par salon",
@@ -786,7 +786,7 @@
     "why": {
       "title": "Pourquoi Voxium ?",
       "ownData": "Vos données vous appartiennent",
-      "ownDataDesc": "Auto-hébergez ou utilisez nos serveurs — dans tous les cas, vos données vous appartiennent. Pas d'exploitation, pas de revente.",
+      "ownDataDesc": "Auto-hébergez ou utilisez nos serveurs, dans tous les cas, vos données vous appartiennent. Pas d'exploitation, pas de revente.",
       "openSource": "Open Source",
       "openSourceDesc": "Chaque ligne de code est publique. Auditez-le, forkez-le, contribuez-y. Transparence totale.",
       "communityDriven": "Porté par la communauté",
@@ -807,7 +807,7 @@
     "cta": {
       "title": "Prêt à découvrir la communication réinventée ?",
       "subtitle": "Rejoignez la révolution de la communication ouverte. Pas de carte bancaire. Pas d'abonnement.",
-      "getStarted": "Commencer — C'est gratuit",
+      "getStarted": "Commencer, C'est gratuit",
       "downloadApp": "Télécharger l'application"
     },
     "footer": {
@@ -830,9 +830,9 @@
     "staff": "Equipe",
     "supporter": "Supporteur",
     "firstSupporter": "Premier supporteur",
-    "firstSupporterTooltip": "Premier supporteur — Le tout premier à croire en Voxium",
+    "firstSupporterTooltip": "Premier supporteur, Le tout premier à croire en Voxium",
     "topSupporter": "Meilleur supporteur",
-    "topSupporterTooltip": "Meilleur supporteur — Le plus généreux supporteur de Voxium"
+    "topSupporterTooltip": "Meilleur supporteur, Le plus généreux supporteur de Voxium"
   },
 
   "connection": {

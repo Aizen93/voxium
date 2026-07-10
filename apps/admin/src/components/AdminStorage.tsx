@@ -232,7 +232,7 @@ export function AdminStorage() {
             deleteTarget.type === 'attachment'
               ? ' This attachment will show as expired in the chat.'
               : deleteTarget.linkedEntity
-              ? ` This file is currently linked to "${deleteTarget.linkedEntity}" — their avatar/icon will be removed.`
+              ? ` This file is currently linked to "${deleteTarget.linkedEntity}", their avatar/icon will be removed.`
               : ' This is an orphaned file.'
           }`}
           confirmLabel="Delete"

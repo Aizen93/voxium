@@ -606,10 +606,10 @@
       "pending": "Ausstehend",
       "addFriend": "Freund hinzufügen"
     },
-    "onlineCount": "Online — {{count}}",
-    "allCount": "Alle Freunde — {{count}}",
-    "incomingCount": "Eingehend — {{count}}",
-    "outgoingCount": "Ausgehend — {{count}}",
+    "onlineCount": "Online, {{count}}",
+    "allCount": "Alle Freunde, {{count}}",
+    "incomingCount": "Eingehend, {{count}}",
+    "outgoingCount": "Ausgehend, {{count}}",
     "noOnline": "Keine Freunde sind gerade online.",
     "noFriends": "Du hast noch keine Freunde. Sende doch eine Freundschaftsanfrage!",
     "noPending": "Keine ausstehenden Freundschaftsanfragen.",
@@ -713,24 +713,24 @@
     },
     "stats": {
       "title": "Gemeinsam wachsen",
-      "subtitle": "Echte Zahlen aus der Voxium-Community — live aktualisiert.",
+      "subtitle": "Echte Zahlen aus der Voxium-Community, live aktualisiert.",
       "users": "Registrierte Nutzer",
       "servers": "Erstellte Server",
       "messages": "Gesendete Nachrichten"
     },
     "features": {
       "title": "Alles, was du brauchst",
-      "subtitle": "Sprache, Text und Community — alles an einem Ort, ohne Kompromisse bei Datenschutz oder Leistung.",
+      "subtitle": "Sprache, Text und Community, alles an einem Ort, ohne Kompromisse bei Datenschutz oder Leistung.",
       "voice": "Kristallklare Sprache",
-      "voiceDesc": "SFU-basierte Server-Sprache fuer ueber 25 Nutzer pro Kanal. DM-Anrufe gehen direkt Peer-to-Peer — kein Mittelsmann.",
+      "voiceDesc": "SFU-basierte Server-Sprache fuer ueber 25 Nutzer pro Kanal. DM-Anrufe gehen direkt Peer-to-Peer, kein Mittelsmann.",
       "noiseSuppression": "KI-Rauschunterdrueckung",
-      "noiseSuppressionDesc": "Der ML-basierte RNNoise-Filter entfernt Tastatur-, Maus- und Hintergrundgeraeusche in Echtzeit — nur deine Stimme kommt durch.",
+      "noiseSuppressionDesc": "Der ML-basierte RNNoise-Filter entfernt Tastatur-, Maus- und Hintergrundgeraeusche in Echtzeit, nur deine Stimme kommt durch.",
       "messaging": "Echtzeit-Nachrichten",
-      "messagingDesc": "Sofortige Zustellung, Reaktionen, Schreibanzeigen und Direktnachrichten — alles in Echtzeit.",
+      "messagingDesc": "Sofortige Zustellung, Reaktionen, Schreibanzeigen und Direktnachrichten, alles in Echtzeit.",
       "privacy": "Datenschutz zuerst",
       "privacyDesc": "Keine Werbung, kein Tracking, kein Datensammeln. Deine Gespraeche bleiben deine.",
       "servers": "Server und Communitys",
-      "serversDesc": "Erstelle Server, organisiere Kanaele, lade Freunde ein — alles, was du brauchst, um eine Community aufzubauen.",
+      "serversDesc": "Erstelle Server, organisiere Kanaele, lade Freunde ein, alles, was du brauchst, um eine Community aufzubauen.",
       "calls": "Direkte Sprachanrufe",
       "callsDesc": "1-zu-1-Sprachanrufe mit WebRTC Peer-to-Peer. Kristallklar, null Latenz.",
       "fast": "Schnell und leichtgewichtig",
@@ -776,7 +776,7 @@
     "showcase": {
       "title": "Ganz",
       "titleHighlight": "nach deinem Geschmack",
-      "subtitle": "Passe jedes Detail an — von Farben über Sprachen bis hin zu Berechtigungen.",
+      "subtitle": "Passe jedes Detail an, von Farben über Sprachen bis hin zu Berechtigungen.",
       "themeLabel": "4 integrierte Themes + benutzerdefinierter Editor",
       "languageLabel": "11 Sprachen mit RTL-Unterstützung",
       "permissionLabel": "20 Berechtigungs-Flags mit Kanal-Überschreibungen",
@@ -786,7 +786,7 @@
     "why": {
       "title": "Warum Voxium?",
       "ownData": "Deine Daten gehoeren dir",
-      "ownDataDesc": "Selbst hosten oder unsere Server nutzen — so oder so, deine Daten gehoeren dir. Kein Data Mining, kein Verkauf.",
+      "ownDataDesc": "Selbst hosten oder unsere Server nutzen, so oder so, deine Daten gehoeren dir. Kein Data Mining, kein Verkauf.",
       "openSource": "Open Source",
       "openSourceDesc": "Jede Zeile Code ist oeffentlich. Pruefe es, forke es, trage dazu bei. Volle Transparenz.",
       "communityDriven": "Von der Community getrieben",
@@ -807,7 +807,7 @@
     "cta": {
       "title": "Bereit, Kommunikation neu zu erleben?",
       "subtitle": "Schliess dich der offenen Kommunikationsrevolution an. Keine Kreditkarte. Kein Abo.",
-      "getStarted": "Loslegen — Kostenlos",
+      "getStarted": "Loslegen, Kostenlos",
       "downloadApp": "App herunterladen"
     },
     "footer": {
@@ -830,9 +830,9 @@
     "staff": "Mitarbeiter",
     "supporter": "Unterstützer",
     "firstSupporter": "Erster Unterstützer",
-    "firstSupporterTooltip": "Erster Unterstützer — Der Allererste, der an Voxium geglaubt hat",
+    "firstSupporterTooltip": "Erster Unterstützer, Der Allererste, der an Voxium geglaubt hat",
     "topSupporter": "Top-Unterstützer",
-    "topSupporterTooltip": "Top-Unterstützer — Der großzügigste Unterstützer von Voxium"
+    "topSupporterTooltip": "Top-Unterstützer, Der großzügigste Unterstützer von Voxium"
   },
 
   "connection": {
