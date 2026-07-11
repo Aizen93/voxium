@@ -129,6 +129,9 @@ export interface Message {
   content: string;
   /** E2E DMs: content is a ciphertext envelope (client decrypts locally). */
   encrypted?: boolean;
+  /** E2E DMs, client-side only: attachment metadata recovered from the
+   *  decrypted payload (real names/keys — never sent to the server). */
+  e2eAttachments?: import('./e2e.js').E2EAttachmentMeta[];
   type?: string;
   channelId: string | null;
   conversationId?: string | null;

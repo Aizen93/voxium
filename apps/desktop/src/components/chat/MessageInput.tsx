@@ -7,7 +7,7 @@ import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { MentionAutocomplete, getMentionQuery, handleMentionKeyDown } from './MentionAutocomplete';
 import { api } from '../../services/api';
-import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize } from '@voxium/shared';
+import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME } from '@voxium/shared';
 import type { ServerMember } from '@voxium/shared';
 import { PlusCircle, Smile, Send, X, FileText, Image, Film, Music, Upload } from 'lucide-react';
 
@@ -27,6 +27,9 @@ interface PendingFile {
   fileSize: number;
   mimeType: string;
   previewUrl?: string;
+  /** E2E conversations: per-file AES-GCM key + nonce, held locally until the
+   *  metas are sealed inside the message ciphertext at send time. */
+  e2e?: { key: string; iv: string };
 }
 
 function formatFileSize(bytes: number): string {
@@ -45,7 +48,7 @@ function getFileIcon(mimeType: string) {
 export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
   const { t } = useTranslation();
   const { sendMessage, sendDMMessage, replyingTo, clearReplyingTo } = useChatStore();
-  // Attachments are not yet supported in E2E conversations (Phase C)
+  // E2E conversations encrypt attachment bytes client-side before upload
   const isEncryptedDM = useDMStore((s) =>
     !!conversationId && !!s.conversations.find((c) => c.id === conversationId)?.encryptedAt
   );
@@ -137,19 +140,37 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
   const uploadFile = async (file: File, fileId: string) => {
     try {
+      // E2E conversations: encrypt the bytes in the WASM engine before they
+      // leave the client; the server sees an opaque octet-stream blob and the
+      // real name/type/size never appear in the presign request or S3 key.
+      let uploadBody: BodyInit = file;
+      let uploadMime = file.type;
+      let presignMeta = { fileName: file.name, fileSize: file.size, mimeType: file.type };
+      let e2e: { key: string; iv: string } | undefined;
+
+      if (isEncryptedDM) {
+        const { initEngine, encryptAttachment } = await import('../../services/e2e/engine');
+        await initEngine();
+        const encryptedFile = encryptAttachment(new Uint8Array(await file.arrayBuffer()));
+        const ciphertext = encryptedFile.takeCiphertext();
+        e2e = { key: encryptedFile.key, iv: encryptedFile.iv };
+        uploadBody = new Blob([ciphertext as BlobPart], { type: E2E_ATTACHMENT_MIME });
+        uploadMime = E2E_ATTACHMENT_MIME;
+        presignMeta = { fileName: E2E_ATTACHMENT_NAME, fileSize: ciphertext.length, mimeType: E2E_ATTACHMENT_MIME };
+      }
+
       const { data } = await api.post('/uploads/presign/attachment', {
-        fileName: file.name,
-        fileSize: file.size,
-        mimeType: file.type,
+        ...presignMeta,
         ...(channelId ? { channelId } : { conversationId }),
+        ...(isEncryptedDM && { encrypted: true }),
       });
 
       const { uploadUrl, key } = data.data;
 
       const uploadRes = await fetch(uploadUrl, {
         method: 'PUT',
-        body: file,
-        headers: { 'Content-Type': file.type },
+        body: uploadBody,
+        headers: { 'Content-Type': uploadMime },
       });
       // S3 can reject the PUT (expired presign, size/type mismatch) while fetch
       // resolves fine — without this check the message would be sent with a
@@ -159,7 +180,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       }
 
       setPendingFiles((prev) =>
-        prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'uploaded' as const, s3Key: key } : pf))
+        prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'uploaded' as const, s3Key: key, e2e } : pf))
       );
     } catch (err) {
       console.error('[Upload] Attachment upload failed:', err);
@@ -171,12 +192,6 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
   const processFiles = (files: FileList) => {
     if (files.length === 0) return;
-
-    // Covers drag-and-drop too, not just the (disabled) attach button
-    if (isEncryptedDM) {
-      toast.error(t('e2e.attachmentsUnavailable'));
-      return;
-    }
 
     const remaining = LIMITS.MAX_ATTACHMENTS_PER_MESSAGE - pendingFiles.length;
     if (remaining <= 0) {
@@ -249,10 +264,29 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       mimeType: pf.mimeType,
     }));
 
+    // E2E: real metadata + file keys are sealed inside the message ciphertext
+    const e2eAttachments = isEncryptedDM
+      ? uploadedFiles
+          .filter((pf) => pf.e2e)
+          .map((pf) => ({
+            s3Key: pf.s3Key!,
+            fileName: pf.fileName,
+            fileSize: pf.fileSize,
+            mimeType: pf.mimeType,
+            key: pf.e2e!.key,
+            iv: pf.e2e!.iv,
+          }))
+      : undefined;
+
     setIsSending(true);
     try {
       if (conversationId) {
-        await sendDMMessage(conversationId, trimmed, attachments.length ? attachments : undefined);
+        await sendDMMessage(
+          conversationId,
+          trimmed,
+          isEncryptedDM || !attachments.length ? undefined : attachments,
+          e2eAttachments?.length ? e2eAttachments : undefined
+        );
       } else if (channelId) {
         await sendMessage(channelId, trimmed, attachments.length ? attachments : undefined);
       }
@@ -433,13 +467,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         replyingTo || pendingFiles.length > 0 ? 'rounded-b-xl border-t-0' : 'rounded-xl'
       }`}>
         <button
-          onClick={() => !isEncryptedDM && fileInputRef.current?.click()}
-          disabled={isEncryptedDM}
-          className={isEncryptedDM
-            ? 'mb-0.5 cursor-not-allowed text-vox-text-muted/40'
-            : 'mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors'}
-          title={isEncryptedDM ? t('e2e.attachmentsUnavailable') : t('messageInput.attachFile')}
-          aria-label={isEncryptedDM ? t('e2e.attachmentsUnavailable') : t('messageInput.attachFile')}
+          onClick={() => fileInputRef.current?.click()}
+          className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
+          title={t('messageInput.attachFile')}
+          aria-label={t('messageInput.attachFile')}
         >
           <PlusCircle size={20} />
         </button>

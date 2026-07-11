@@ -1,5 +1,70 @@
 /* @ts-self-types="./voxium_crypto_engine.d.ts" */
 
+/**
+ * Result of encrypting attachment bytes: random key + nonce (base64) and the
+ * ciphertext (plaintext + 16-byte tag).
+ */
+export class EncryptedAttachment {
+    static __wrap(ptr) {
+        const obj = Object.create(EncryptedAttachment.prototype);
+        obj.__wbg_ptr = ptr;
+        EncryptedAttachmentFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        EncryptedAttachmentFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_encryptedattachment_free(ptr, 0);
+    }
+    /**
+     * @returns {string}
+     */
+    get iv() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.encryptedattachment_iv(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    get key() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.encryptedattachment_key(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Transfers the ciphertext to the caller without copying megabytes twice.
+     * Callable once.
+     * @returns {Uint8Array}
+     */
+    takeCiphertext() {
+        const ret = wasm.encryptedattachment_takeCiphertext(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+}
+if (Symbol.dispose) EncryptedAttachment.prototype[Symbol.dispose] = EncryptedAttachment.prototype.free;
+
 export class EngineAccount {
     static __wrap(ptr) {
         const obj = Object.create(EngineAccount.prototype);
@@ -374,6 +439,42 @@ export class InboundResult {
 if (Symbol.dispose) InboundResult.prototype[Symbol.dispose] = InboundResult.prototype.free;
 
 /**
+ * @param {Uint8Array} ciphertext
+ * @param {string} key_b64
+ * @param {string} iv_b64
+ * @returns {Uint8Array}
+ */
+export function decryptAttachment(ciphertext, key_b64, iv_b64) {
+    const ptr0 = passArray8ToWasm0(ciphertext, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(key_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(iv_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.decryptAttachment(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v4;
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {EncryptedAttachment}
+ */
+export function encryptAttachment(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.encryptAttachment(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return EncryptedAttachment.__wrap(ret[0]);
+}
+
+/**
  * Engine/version identifier baked into envelopes and diagnostics.
  * @returns {string}
  */
@@ -621,6 +722,9 @@ function __wbg_get_imports() {
     };
 }
 
+const EncryptedAttachmentFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_encryptedattachment_free(ptr, 1));
 const EngineAccountFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_engineaccount_free(ptr, 1));

@@ -2,7 +2,7 @@
 // local vault, and the server's key-distribution API. All Olm state mutations
 // run through a serial queue: account/session pickles must be persisted in the
 // same order the ratchet advances, or a crash could roll the ratchet back.
-import { E2E_LIMITS, e2eDeviceCanonical, e2eKeyCanonical, parseE2EEnvelope, buildE2EEnvelope } from '@voxium/shared';
+import { E2E_LIMITS, e2eDeviceCanonical, e2eKeyCanonical, parseE2EEnvelope, buildE2EEnvelope, parseE2EPlaintext } from '@voxium/shared';
 import type { E2EKeyBundle, E2EPreKey } from '@voxium/shared';
 import { api as defaultApi } from '../api';
 import {
@@ -449,16 +449,24 @@ export class E2EService {
     const needle = query.toLowerCase();
     const all = await this.vault.listPlaintexts(conversationId);
     return all
-      .filter(({ entry }) => entry.text.toLowerCase().includes(needle))
+      .map(({ messageId, entry }) => {
+        // entries hold raw plaintext — structured payloads carry text + metas
+        const { text, attachments } = parseE2EPlaintext(entry.text);
+        return { messageId, entry, text, attachments };
+      })
+      .filter(({ text, attachments }) =>
+        text.toLowerCase().includes(needle) ||
+        attachments.some((a) => a.fileName.toLowerCase().includes(needle))
+      )
       .sort((a, b) => {
         if (!a.entry.createdAt) return 1;
         if (!b.entry.createdAt) return -1;
         return b.entry.createdAt.localeCompare(a.entry.createdAt);
       })
       .slice(0, limit)
-      .map(({ messageId, entry }) => ({
+      .map(({ messageId, entry, text }) => ({
         messageId,
-        text: entry.text,
+        text,
         authorId: entry.authorId,
         createdAt: entry.createdAt,
         editedAt: entry.editedAt,

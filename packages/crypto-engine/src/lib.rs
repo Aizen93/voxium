@@ -59,6 +59,89 @@ pub fn engine_version() -> String {
     "olm1/vodozemac-0.10.0".to_string()
 }
 
+// ─── E2E attachment file encryption (spec §13) ───────────────────────────────
+// Per-file AES-256-GCM with a random key + nonce; the key/nonce travel inside
+// the message ciphertext, the encrypted blob goes to S3. GCM's auth tag makes
+// a swapped/corrupted blob fail decryption — no separate content hash needed.
+
+/// Result of encrypting attachment bytes: random key + nonce (base64) and the
+/// ciphertext (plaintext + 16-byte tag).
+#[wasm_bindgen]
+pub struct EncryptedAttachment {
+    key_b64: String,
+    iv_b64: String,
+    ciphertext: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl EncryptedAttachment {
+    #[wasm_bindgen(getter)]
+    pub fn key(&self) -> String {
+        self.key_b64.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn iv(&self) -> String {
+        self.iv_b64.clone()
+    }
+
+    /// Transfers the ciphertext to the caller without copying megabytes twice.
+    /// Callable once.
+    #[wasm_bindgen(js_name = takeCiphertext)]
+    pub fn take_ciphertext(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.ciphertext)
+    }
+}
+
+#[wasm_bindgen(js_name = encryptAttachment)]
+pub fn encrypt_attachment(bytes: &[u8]) -> Result<EncryptedAttachment, JsError> {
+    use aes_gcm::aead::rand_core::RngCore;
+    use aes_gcm::aead::{Aead, KeyInit, OsRng};
+    use aes_gcm::{Aes256Gcm, Nonce};
+
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| JsError::new("cipher init failed"))?;
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), bytes)
+        .map_err(|_| JsError::new("attachment encryption failed"))?;
+
+    let result = EncryptedAttachment {
+        key_b64: base64_encode(key),
+        iv_b64: base64_encode(nonce_bytes),
+        ciphertext,
+    };
+    key.zeroize();
+    Ok(result)
+}
+
+#[wasm_bindgen(js_name = decryptAttachment)]
+pub fn decrypt_attachment(ciphertext: &[u8], key_b64: &str, iv_b64: &str) -> Result<Vec<u8>, JsError> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+
+    let mut key = base64_decode(key_b64).map_err(|_| JsError::new("invalid attachment key"))?;
+    if key.len() != 32 {
+        key.zeroize();
+        return Err(JsError::new("invalid attachment key length"));
+    }
+    let nonce = base64_decode(iv_b64).map_err(|_| JsError::new("invalid attachment iv"))?;
+    if nonce.len() != 12 {
+        key.zeroize();
+        return Err(JsError::new("invalid attachment iv length"));
+    }
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| JsError::new("cipher init failed"))?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce), ciphertext)
+        .map_err(|_| JsError::new("attachment decryption failed"));
+    key.zeroize();
+    plaintext
+}
+
 /// Verify an Ed25519 signature over a UTF-8 message. Strict verification
 /// (vodozemac 0.10 default). Returns an error when invalid.
 #[wasm_bindgen]

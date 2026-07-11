@@ -4,7 +4,8 @@ import { api } from '../services/api';
 import { getSocket } from '../services/socket';
 import { toast } from './toastStore';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
-import type { Message, MessageAuthor, Attachment, ReactionGroup } from '@voxium/shared';
+import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
+import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMeta } from '@voxium/shared';
 
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -32,7 +33,7 @@ interface ChatState {
   toggleReaction: (channelId: string, messageId: string, emoji: string) => Promise<void>;
   fetchDMMessages: (conversationId: string, before?: string) => Promise<void>;
   fetchDMMessagesAround: (conversationId: string, messageId: string) => Promise<void>;
-  sendDMMessage: (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => Promise<void>;
+  sendDMMessage: (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[], e2eAttachments?: E2EAttachmentMeta[]) => Promise<void>;
   editDMMessage: (conversationId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteDMMessage: (conversationId: string, messageId: string) => Promise<void>;
   toggleDMReaction: (conversationId: string, messageId: string, emoji: string) => Promise<void>;
@@ -279,30 +280,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendDMMessage: async (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => {
+  sendDMMessage: async (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[], e2eAttachments?: E2EAttachmentMeta[]) => {
     try {
       const replyingTo = get().replyingTo;
 
-      // E2E conversations: encrypt before anything leaves the client
-      const prepared = await prepareOutgoingDM(conversationId, content);
-      if (prepared && attachments?.length) {
-        toast.error('Attachments are not yet supported in encrypted conversations');
-        return;
-      }
+      // E2E conversations: encrypt before anything leaves the client. Real
+      // attachment metadata travels inside the ciphertext; the server only
+      // receives opaque rows (s3Key + ciphertext size).
+      const prepared = await prepareOutgoingDM(conversationId, content, e2eAttachments);
 
       const body: Record<string, unknown> = prepared
         ? { content: prepared.content, encrypted: true }
         : { content };
       if (replyingTo) body.replyToId = replyingTo.id;
       if (!prepared && attachments?.length) body.attachments = attachments;
+      if (prepared && e2eAttachments?.length) {
+        body.attachments = e2eAttachments.map((meta) => ({
+          s3Key: meta.s3Key,
+          fileName: E2E_ATTACHMENT_NAME,
+          fileSize: meta.fileSize + E2E_GCM_TAG_BYTES, // ciphertext size
+          mimeType: E2E_ATTACHMENT_MIME,
+        }));
+      }
 
       const { data } = await api.post(`/dm/${conversationId}/messages`, body);
       let sent: Message = data.data;
       if (prepared) {
-        // Cache own plaintext under the server id (Olm can't decrypt-to-self),
-        // and show the plaintext locally instead of the envelope
-        await cacheSentPlaintext(sent.id, conversationId, content, null, sent.createdAt);
-        sent = { ...sent, content };
+        // Cache the exact raw plaintext that was encrypted (Olm can't
+        // decrypt-to-self); display fields come from the parsed payload
+        await cacheSentPlaintext(sent.id, conversationId, prepared.plaintext, null, sent.createdAt);
+        sent = {
+          ...sent,
+          content,
+          ...(e2eAttachments?.length && { e2eAttachments }),
+        };
       }
       const exists = get().messages.some((m) => m.id === sent.id);
       if (!exists) {
@@ -328,7 +339,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { data } = await api.patch(`/dm/${conversationId}/messages/${messageId}`, body);
     if (prepared) {
       // cache under the new editedAt version BEFORE the socket echo decrypts it
-      await cacheSentPlaintext(messageId, conversationId, content, data.data.editedAt ?? null, data.data.createdAt);
+      await cacheSentPlaintext(messageId, conversationId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt);
     }
   },
 

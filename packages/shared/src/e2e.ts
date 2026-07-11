@@ -71,6 +71,81 @@ export function parseE2EEnvelope(content: string): E2EEnvelope | null {
   return { v: 1, e: E2E_ENGINE_OLM1, t: obj.t, b: obj.b };
 }
 
+// ─── E2E attachments (spec §13) ──────────────────────────────────────────────
+// The encrypted blob goes to S3 under opaque metadata; the real fileName/
+// mimeType/size plus the AES-256-GCM key+nonce travel INSIDE the message
+// ciphertext as a structured plaintext payload.
+
+/** What the server is allowed to see about an encrypted attachment. */
+export const E2E_ATTACHMENT_MIME = 'application/octet-stream';
+export const E2E_ATTACHMENT_NAME = 'encrypted.bin';
+/** GCM auth tag — ciphertext is exactly plaintext + this many bytes. */
+export const E2E_GCM_TAG_BYTES = 16;
+/** 12-byte GCM nonce, unpadded standard base64. */
+export const E2E_IV_B64_RE = /^[A-Za-z0-9+/]{16}$/;
+
+/**
+ * Structured-plaintext marker. Text-only messages encrypt the raw string
+ * (unchanged from Phase B); messages with attachments encrypt
+ * `{"v":1,"t":text,"a":[metas]}`. The control-character prefix cannot
+ * be typed, so raw text and structured payloads never collide.
+ */
+export const E2E_PAYLOAD_PREFIX = '\u0001';
+
+export interface E2EAttachmentMeta {
+  s3Key: string;
+  /** true file name (server only ever sees E2E_ATTACHMENT_NAME) */
+  fileName: string;
+  /** true plaintext size in bytes */
+  fileSize: number;
+  /** true mime type (server only ever sees E2E_ATTACHMENT_MIME) */
+  mimeType: string;
+  /** AES-256-GCM file key, unpadded base64 */
+  key: string;
+  /** 12-byte GCM nonce, unpadded base64 */
+  iv: string;
+}
+
+export function buildE2EPlaintext(text: string, attachments?: E2EAttachmentMeta[]): string {
+  if (!attachments || attachments.length === 0) return text;
+  return E2E_PAYLOAD_PREFIX + JSON.stringify({ v: 1, t: text, a: attachments });
+}
+
+function isValidAttachmentMeta(a: unknown): a is E2EAttachmentMeta {
+  if (typeof a !== 'object' || a === null) return false;
+  const m = a as Record<string, unknown>;
+  return (
+    typeof m.s3Key === 'string' && m.s3Key.length > 0 && m.s3Key.length <= 512 &&
+    typeof m.fileName === 'string' && m.fileName.length > 0 && m.fileName.length <= 300 &&
+    typeof m.fileSize === 'number' && Number.isFinite(m.fileSize) && m.fileSize > 0 &&
+    typeof m.mimeType === 'string' && m.mimeType.length > 0 && m.mimeType.length <= 100 &&
+    typeof m.key === 'string' && E2E_KEY_B64_RE.test(m.key) &&
+    typeof m.iv === 'string' && E2E_IV_B64_RE.test(m.iv)
+  );
+}
+
+/**
+ * Parse decrypted plaintext into display text + attachment metas.
+ * Raw (legacy / text-only) plaintext passes through untouched; malformed
+ * structured payloads yield empty content (rendered as undecryptable) and
+ * individually invalid metas are dropped — a peer's client authored this, so
+ * it is validated like any untrusted input.
+ */
+export function parseE2EPlaintext(plaintext: string): { text: string; attachments: E2EAttachmentMeta[] } {
+  if (!plaintext.startsWith(E2E_PAYLOAD_PREFIX)) {
+    return { text: plaintext, attachments: [] };
+  }
+  try {
+    const obj = JSON.parse(plaintext.slice(1)) as Record<string, unknown>;
+    if (obj?.v !== 1 || typeof obj.t !== 'string' || !Array.isArray(obj.a)) {
+      return { text: '', attachments: [] };
+    }
+    return { text: obj.t, attachments: obj.a.filter(isValidAttachmentMeta) };
+  } catch {
+    return { text: '', attachments: [] };
+  }
+}
+
 // ─── Canonical signature payloads ────────────────────────────────────────────
 // Signed by the device's Ed25519 key. Pipe-separated with a versioned domain
 // prefix; every field is included so neither the server nor a MITM can splice

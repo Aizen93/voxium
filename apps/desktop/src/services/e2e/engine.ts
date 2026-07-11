@@ -8,6 +8,8 @@ import init, {
   verify_ed25519,
   prekey_message_session_id,
   safety_number,
+  encryptAttachment,
+  decryptAttachment,
 } from '@voxium/crypto-engine';
 // Vite serves the wasm binary as a static asset URL (CSP already allows
 // 'wasm-unsafe-eval' in the Tauri webview)
@@ -31,4 +33,13 @@ export function initEngine(wasmInput?: BufferSource): Promise<void> {
   return initPromise;
 }
 
-export { EngineAccount, EngineSession, engine_version, verify_ed25519, prekey_message_session_id, safety_number };
+export {
+  EngineAccount,
+  EngineSession,
+  engine_version,
+  verify_ed25519,
+  prekey_message_session_id,
+  safety_number,
+  encryptAttachment,
+  decryptAttachment,
+};
