@@ -111,6 +111,24 @@ export async function expireVerificationToken(userId: string): Promise<void> {
   });
 }
 
+/**
+ * Everything the SERVER stores for a DM conversation between two users —
+ * used by the E2E smoke test to prove only ciphertext ever reaches the DB.
+ */
+export async function getConversationServerState(userAId: string, userBId: string) {
+  const db = getPrisma();
+  const [user1Id, user2Id] = userAId < userBId ? [userAId, userBId] : [userBId, userAId];
+  return db.conversation.findUnique({
+    where: { user1Id_user2Id: { user1Id, user2Id } },
+    include: {
+      messages: {
+        orderBy: { createdAt: 'asc' },
+        include: { attachments: true },
+      },
+    },
+  });
+}
+
 /** Disconnect Prisma (call in afterAll or global teardown). */
 export async function disconnectDb() {
   if (prisma) {
