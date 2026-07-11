@@ -936,5 +936,28 @@
     "cannotBanSelf": "Impossible de se bannir soi-m\u00eame",
     "cannotBanSuperAdmin": "Impossible de bannir un super administrateur",
     "onlySuperAdminCanBan": "Seuls les super administrateurs peuvent bannir d'autres administrateurs"
+  },
+  "e2e": {
+    "badgeTitle": "Chiffré de bout en bout — voir le numéro de sécurité",
+    "enableTitle": "Activer le chiffrement de bout en bout",
+    "enableExplainer": "Les messages de cette conversation seront chiffrés sur votre appareil et ne pourront être lus que par vous et votre contact. Le serveur ne stocke que du texte chiffré.",
+    "enablePointIrreversible": "Cette action est irréversible pour cette conversation",
+    "enablePointServer": "L'historique des messages reste sur vos appareils — un nouvel appareil ne peut pas lire les messages plus anciens",
+    "enablePointLimits": "Les pièces jointes et la modification des messages ne sont pas encore disponibles dans les conversations chiffrées",
+    "enableConfirm": "Activer le chiffrement",
+    "enabled": "Chiffrement de bout en bout activé",
+    "enableFailed": "Impossible d'activer le chiffrement",
+    "encryptedMessage": "Message chiffré",
+    "decryptFailed": "Impossible de déchiffrer ce message",
+    "attachmentsUnavailable": "Les pièces jointes ne sont pas encore prises en charge dans les conversations chiffrées",
+    "safetyNumberTitle": "Numéro de sécurité",
+    "safetyNumberExplainer": "Comparez ce numéro avec {{name}} par un autre canal (en personne ou lors d'un appel) pour vérifier que votre conversation est sécurisée. Il change si l'un de vous réinstalle l'application ou réinitialise ses clés de chiffrement.",
+    "safetyNumberUnavailable": "Numéro de sécurité indisponible",
+    "verified": "Vérifié",
+    "notVerified": "Pas encore vérifié",
+    "markVerified": "Marquer comme vérifié",
+    "identityChangedWarning": "Les clés de sécurité de {{name}} ont changé. Cela peut arriver après une réinstallation — vérifiez le nouveau numéro de sécurité avant de faire confiance à cette conversation.",
+    "acceptNewIdentity": "Accepter les nouvelles clés",
+    "identityAccepted": "Nouvelles clés acceptées"
   }
 }

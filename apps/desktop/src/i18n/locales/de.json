@@ -936,5 +936,28 @@
     "cannotBanSelf": "Du kannst dich nicht selbst sperren",
     "cannotBanSuperAdmin": "Ein Superadministrator kann nicht gesperrt werden",
     "onlySuperAdminCanBan": "Nur Superadministratoren können andere Administratoren sperren"
+  },
+  "e2e": {
+    "badgeTitle": "Ende-zu-Ende-verschlüsselt — Sicherheitsnummer anzeigen",
+    "enableTitle": "Ende-zu-Ende-Verschlüsselung aktivieren",
+    "enableExplainer": "Nachrichten in dieser Unterhaltung werden auf deinem Gerät verschlüsselt und können nur von dir und deinem Kontakt gelesen werden. Der Server speichert ausschließlich verschlüsselten Text.",
+    "enablePointIrreversible": "Dies kann für diese Unterhaltung nicht rückgängig gemacht werden",
+    "enablePointServer": "Der Nachrichtenverlauf bleibt auf deinen Geräten — ein neues Gerät kann ältere Nachrichten nicht lesen",
+    "enablePointLimits": "Anhänge und das Bearbeiten von Nachrichten sind in verschlüsselten Unterhaltungen noch nicht verfügbar",
+    "enableConfirm": "Verschlüsselung aktivieren",
+    "enabled": "Ende-zu-Ende-Verschlüsselung aktiviert",
+    "enableFailed": "Verschlüsselung konnte nicht aktiviert werden",
+    "encryptedMessage": "Verschlüsselte Nachricht",
+    "decryptFailed": "Diese Nachricht kann nicht entschlüsselt werden",
+    "attachmentsUnavailable": "Anhänge werden in verschlüsselten Unterhaltungen noch nicht unterstützt",
+    "safetyNumberTitle": "Sicherheitsnummer",
+    "safetyNumberExplainer": "Vergleiche diese Nummer mit {{name}} über einen anderen Kanal (persönlich oder per Anruf), um zu überprüfen, dass eure Unterhaltung sicher ist. Sie ändert sich, wenn einer von euch die App neu installiert oder die Verschlüsselungsschlüssel zurücksetzt.",
+    "safetyNumberUnavailable": "Sicherheitsnummer nicht verfügbar",
+    "verified": "Verifiziert",
+    "notVerified": "Noch nicht verifiziert",
+    "markVerified": "Als verifiziert markieren",
+    "identityChangedWarning": "Die Sicherheitsschlüssel von {{name}} haben sich geändert. Das kann nach einer Neuinstallation passieren — überprüfe die neue Sicherheitsnummer, bevor du dieser Unterhaltung vertraust.",
+    "acceptNewIdentity": "Neue Schlüssel akzeptieren",
+    "identityAccepted": "Neue Schlüssel akzeptiert"
   }
 }

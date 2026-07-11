@@ -936,5 +936,28 @@
     "cannotBanSelf": "自分自身をBANすることはできません",
     "cannotBanSuperAdmin": "スーパー管理者はBANできません",
     "onlySuperAdminCanBan": "他の管理者をBANできるのはスーパー管理者のみです"
+  },
+  "e2e": {
+    "badgeTitle": "エンドツーエンド暗号化済み — 安全番号を表示",
+    "enableTitle": "エンドツーエンド暗号化を有効にする",
+    "enableExplainer": "この会話のメッセージはお使いの端末で暗号化され、あなたと相手だけが読むことができます。サーバーには暗号文のみが保存されます。",
+    "enablePointIrreversible": "この会話では元に戻せません",
+    "enablePointServer": "メッセージ履歴は端末にのみ保存されます — 新しい端末では過去のメッセージを読めません",
+    "enablePointLimits": "暗号化された会話では、添付ファイルとメッセージの編集はまだ利用できません",
+    "enableConfirm": "暗号化を有効にする",
+    "enabled": "エンドツーエンド暗号化が有効になりました",
+    "enableFailed": "暗号化を有効にできませんでした",
+    "encryptedMessage": "暗号化されたメッセージ",
+    "decryptFailed": "このメッセージを復号できません",
+    "attachmentsUnavailable": "暗号化された会話では添付ファイルはまだサポートされていません",
+    "safetyNumberTitle": "安全番号",
+    "safetyNumberExplainer": "この番号を{{name}}さんと別の方法（対面や通話）で照合し、会話が安全であることを確認してください。どちらかがアプリを再インストールしたり暗号鍵をリセットしたりすると、番号は変わります。",
+    "safetyNumberUnavailable": "安全番号を取得できません",
+    "verified": "確認済み",
+    "notVerified": "未確認",
+    "markVerified": "確認済みにする",
+    "identityChangedWarning": "{{name}}さんのセキュリティ鍵が変更されました。アプリの再インストール後に起こることがあります — この会話を信頼する前に、新しい安全番号を確認してください。",
+    "acceptNewIdentity": "新しい鍵を受け入れる",
+    "identityAccepted": "新しい鍵を受け入れました"
   }
 }
