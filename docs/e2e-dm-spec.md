@@ -278,11 +278,59 @@ verification and shows a warning.
   **No GPL/AGPL/LGPL anywhere in the tree.** The watch workflow re-checks on
   dependency changes.
 
-## 11. Known limitations (deliberate, tracked for Phase C)
+## 11. Known limitations
 
-1. Single device per account; new device ⇒ new identity ⇒ safety-number change; no history transfer.
-2. No post-quantum protection (engine swap path reserved via envelope `e` field).
+1. Single device per account; new device ⇒ new identity ⇒ safety-number change; no history transfer. (Design: §12.)
+2. No post-quantum protection — evaluated and deliberately deferred; designed path + revisit triggers in `docs/e2e-pq-evaluation.md`.
 3. ~~Pickle key in localStorage pending OS-keychain wrapping~~ — shipped in Phase C (§7.3); localStorage remains only as the browser-dev / keychain-failure fallback.
-4. No encrypted attachments / edits / client-side search of E2E history.
-5. Group (server-channel) E2E out of scope.
-6. Metadata (participants, timing, sizes) visible to the server, as in Signal-style designs generally.
+4. ~~No edits~~ — shipped in Phase C: edits are fresh ratchet ciphertexts under the same id; the plaintext cache is versioned by `editedAt` (§6, §7.1).
+5. ~~No client-side search~~ — shipped in Phase C: encrypted conversations search this device's plaintext cache (coverage = what this device decrypted; §9).
+6. No encrypted attachments yet (design: §13).
+7. Group (server-channel) E2E out of scope.
+8. Metadata (participants, timing, sizes) visible to the server, as in Signal-style designs generally.
+
+## 12. Multi-device — design sketch (not yet implemented)
+
+The MVP's one-device-per-user constraint is the biggest remaining UX gap. The
+design that fits vodozemac (which ships **Megolm**, Matrix's group ratchet):
+
+- **Schema**: `E2EDevice.userId` loses `@unique` → `@@unique([userId, deviceId])`
+  with a client-generated `deviceId`; per-device one-time-key pools; bundles
+  claimed per `(userId, deviceId)`. `GET /e2e/devices/:userId` returns a
+  device *list* plus a monotonically increasing list version so peers detect
+  new/removed devices.
+- **Message encryption switches to a Megolm-style layer**: each conversation
+  gets an outbound group session; message bodies are encrypted **once**
+  (envelope `e: "megolm1"`), and the group-session key is distributed pairwise
+  over Olm to every participating device (peer's and the sender's own —
+  solving decrypt-to-self, which currently forces the plaintext cache for own
+  messages). O(devices) work per session rotation instead of per message.
+- **Rotation**: new device added / device revoked / N messages / T days ⇒ new
+  outbound group session (bounds compromise windows and gives revocation
+  teeth).
+- **Trust**: MVP = per-device safety numbers (TOFU per device). Stretch: a
+  self-signing account key that cross-signs own devices, so peers verify one
+  number per *account*.
+- **History for new devices**: optional encrypted key/history backup guarded
+  by a user passphrase — explicitly out of scope for the first multi-device
+  cut (the "history stays on your devices" promise holds).
+- **Migration**: existing devices adopt `deviceId = "primary"`; olm1 envelopes
+  keep decrypting; new sessions negotiate megolm1 when every participating
+  device supports it, per-conversation.
+
+## 13. Encrypted attachments — design sketch (not yet implemented)
+
+- Client encrypts file bytes with a random per-file AES-256-GCM key **inside
+  the Rust binding** (RustCrypto `aes-gcm`; keeps the no-crypto-in-JS rule)
+  before the presigned S3 upload; the server stores an opaque blob.
+- The file key, IV, content hash, real `fileName`, `mimeType`, and true size
+  travel **inside the message ciphertext** — the plaintext becomes a small
+  JSON structure (`{text, attachments: [...]}`), so attachment metadata stops
+  leaking to the server. Server-side `MessageAttachment` rows keep only the
+  S3 key, ciphertext size, and `application/octet-stream`.
+- Rendering: download ciphertext (existing authenticated proxy), decrypt in
+  the binding, display via blob URL; existing retention/cleanup jobs work
+  unchanged on ciphertext.
+- Server lifts the attachments-in-encrypted-conversations block only for
+  envelope-accompanied uploads; size cap checked against ciphertext
+  (plaintext + 16-byte tag).
