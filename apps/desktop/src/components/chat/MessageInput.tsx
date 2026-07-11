@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ChangeEvent, type DragEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
+import { useDMStore } from '../../stores/dmStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
@@ -44,6 +45,10 @@ function getFileIcon(mimeType: string) {
 export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
   const { t } = useTranslation();
   const { sendMessage, sendDMMessage, replyingTo, clearReplyingTo } = useChatStore();
+  // Attachments are not yet supported in E2E conversations (Phase C)
+  const isEncryptedDM = useDMStore((s) =>
+    !!conversationId && !!s.conversations.find((c) => c.id === conversationId)?.encryptedAt
+  );
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -166,6 +171,12 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
   const processFiles = (files: FileList) => {
     if (files.length === 0) return;
+
+    // Covers drag-and-drop too, not just the (disabled) attach button
+    if (isEncryptedDM) {
+      toast.error(t('e2e.attachmentsUnavailable'));
+      return;
+    }
 
     const remaining = LIMITS.MAX_ATTACHMENTS_PER_MESSAGE - pendingFiles.length;
     if (remaining <= 0) {
@@ -422,10 +433,13 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         replyingTo || pendingFiles.length > 0 ? 'rounded-b-xl border-t-0' : 'rounded-xl'
       }`}>
         <button
-          onClick={() => fileInputRef.current?.click()}
-          className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
-          title={t('messageInput.attachFile')}
-          aria-label={t('messageInput.attachFile')}
+          onClick={() => !isEncryptedDM && fileInputRef.current?.click()}
+          disabled={isEncryptedDM}
+          className={isEncryptedDM
+            ? 'mb-0.5 cursor-not-allowed text-vox-text-muted/40'
+            : 'mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors'}
+          title={isEncryptedDM ? t('e2e.attachmentsUnavailable') : t('messageInput.attachFile')}
+          aria-label={isEncryptedDM ? t('e2e.attachmentsUnavailable') : t('messageInput.attachFile')}
         >
           <PlusCircle size={20} />
         </button>

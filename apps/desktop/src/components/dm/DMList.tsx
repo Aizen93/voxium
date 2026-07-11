@@ -159,7 +159,10 @@ export function DMList() {
                 {conv.participant.isSupporter && <SupporterBadge tier={conv.participant.supporterTier} />}
                 {conv.lastMessage && (
                   <p className="truncate text-[11px] text-vox-text-muted">
-                    {conv.lastMessage.content}
+                    {conv.lastMessage.encrypted &&
+                     (!conv.lastMessage.content || conv.lastMessage.content.startsWith('{"v":1'))
+                      ? `🔒 ${t('e2e.encryptedMessage')}`
+                      : conv.lastMessage.content}
                   </p>
                 )}
               </div>

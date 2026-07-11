@@ -7,6 +7,7 @@ import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
+import { useE2EStore } from '../../stores/e2eStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { getSocket, getSocketGeneration, onConnectionStatusChange } from '../../services/socket';
 import { ServerSidebar } from '../server/ServerSidebar';
@@ -60,6 +61,14 @@ export function MainLayout() {
   useEffect(() => {
     if (user?.id) {
       useVoiceStore.getState().setLocalUserId(user.id);
+    }
+  }, [user?.id]);
+
+  // Initialize the E2E device (register keys / replenish prekeys) once per
+  // login. Non-blocking: DM E2E features light up when ready.
+  useEffect(() => {
+    if (user?.id) {
+      void useE2EStore.getState().initialize(user.id);
     }
   }, [user?.id]);
 
@@ -323,6 +332,13 @@ export function MainLayout() {
         const dmStore = useDMStore.getState();
         const activeConvId = dmStore.activeConversationId;
 
+        // E2E DMs arrive as ciphertext — decrypt (or resolve from the local
+        // cache) before the message touches any store, preview, or notification
+        if (message.encrypted) {
+          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+          message = await decryptMessageForDisplay(message);
+        }
+
         // Update last message in conversation list
         if (message.conversationId) {
           // If conversation isn't in the local store yet (e.g. brand-new DM), fetch it
@@ -331,7 +347,9 @@ export function MainLayout() {
             await dmStore.fetchConversations();
           } else {
             dmStore.updateLastMessage(message.conversationId, {
+              id: message.id,
               content: message.content,
+              encrypted: message.encrypted,
               createdAt: message.createdAt,
               authorId: message.author?.id,
             });
@@ -453,6 +471,9 @@ export function MainLayout() {
       },
       dmConversationDeleted: ({ conversationId }: { conversationId: string }) => {
         useDMStore.getState().handleConversationDeleted(conversationId);
+      },
+      dmEncryptionEnabled: ({ conversationId, encryptedAt }: { conversationId: string; encryptedAt: string; enabledBy: string }) => {
+        useDMStore.getState().handleEncryptionEnabled(conversationId, encryptedAt);
       },
       friendRequestReceived: (data: { friendship: Friendship }) => {
         useFriendStore.getState().handleRequestReceived(data);
@@ -653,6 +674,7 @@ export function MainLayout() {
       ['dm:voice:signal', handlers.dmVoiceSignal],
       ['dm:voice:ended', handlers.dmVoiceEnded],
       ['dm:conversation:deleted', handlers.dmConversationDeleted],
+      ['dm:encryption_enabled', handlers.dmEncryptionEnabled],
       ['friend:request_received', handlers.friendRequestReceived],
       ['friend:request_accepted', handlers.friendRequestAccepted],
       ['friend:removed', handlers.friendRemoved],

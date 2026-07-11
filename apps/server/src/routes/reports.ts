@@ -63,6 +63,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
     }
 
     let messageContent: string | null = null;
+    let contentSource = 'server';
     let channelId: string | null = null;
     let conversationId: string | null = null;
     let serverId: string | null = null;
@@ -75,6 +76,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
         select: {
           id: true,
           content: true,
+          encrypted: true,
           channelId: true,
           conversationId: true,
           authorId: true,
@@ -106,7 +108,19 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
         if (!conversation) throw new ForbiddenError('You do not have access to this message');
       }
 
-      messageContent = message.content;
+      if (message.encrypted) {
+        // The server only holds ciphertext for E2E messages. The reporter's
+        // client attaches its locally-decrypted plaintext; admins see it
+        // flagged as reporter-provided (unverifiable against the ciphertext).
+        const provided = sanitizeText(req.body.reportedContent ?? '');
+        if (provided.length > LIMITS.MESSAGE_MAX) {
+          throw new BadRequestError(`reportedContent must be at most ${LIMITS.MESSAGE_MAX} characters`);
+        }
+        messageContent = provided.length > 0 ? provided : null;
+        contentSource = 'reporter';
+      } else {
+        messageContent = message.content;
+      }
       channelId = message.channelId;
       conversationId = message.conversationId;
       if (message.channel) {
@@ -122,6 +136,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
         reportedUserId,
         messageId: type === 'message' ? messageId : null,
         messageContent,
+        contentSource,
         channelId,
         conversationId,
         serverId,

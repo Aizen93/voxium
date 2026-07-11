@@ -16,7 +16,9 @@ interface DMState {
   clearActiveConversation: () => void;
   openDM: (userId: string) => Promise<string>;
   addConversation: (conversation: Conversation) => void;
-  updateLastMessage: (conversationId: string, message: { content: string; createdAt: string; authorId: string }) => void;
+  updateLastMessage: (conversationId: string, message: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string }) => void;
+  enableEncryption: (conversationId: string) => Promise<void>;
+  handleEncryptionEnabled: (conversationId: string, encryptedAt: string) => void;
   incrementDMUnread: (conversationId: string) => void;
   clearDMUnread: (conversationId: string) => void;
   initDMUnreadCounts: (unreads: DMUnreadCount[]) => void;
@@ -57,6 +59,24 @@ export const useDMStore = create<DMState>((set, get) => ({
         participantStatuses: { ...state.participantStatuses, ...statuses },
         isLoading: false,
       }));
+
+      // E2E previews arrive as ciphertext — hydrate them from the local
+      // plaintext cache (async; placeholders render until this lands)
+      const encrypted = (conversations as Conversation[]).filter((c) => c.lastMessage?.encrypted);
+      if (encrypted.length > 0) {
+        const { resolveEncryptedPreview } = await import('../services/e2e/dmCrypto');
+        for (const conv of encrypted) {
+          const text = await resolveEncryptedPreview(conv.lastMessage!.id);
+          if (text === null) continue;
+          set((state) => ({
+            conversations: state.conversations.map((c) =>
+              c.id === conv.id && c.lastMessage?.id === conv.lastMessage!.id
+                ? { ...c, lastMessage: { ...c.lastMessage, content: text } }
+                : c
+            ),
+          }));
+        }
+      }
     } catch (err) {
       console.error('Failed to fetch conversations:', err);
       toast.error('Failed to load conversations');
@@ -113,7 +133,22 @@ export const useDMStore = create<DMState>((set, get) => ({
     });
   },
 
-  updateLastMessage: (conversationId: string, message: { content: string; createdAt: string; authorId: string }) => {
+  enableEncryption: async (conversationId: string) => {
+    // Irreversible per conversation — the server rejects plaintext afterwards.
+    // 409 = the other participant has no E2E-capable client yet.
+    const { data } = await api.post(`/dm/${conversationId}/encryption`);
+    get().handleEncryptionEnabled(conversationId, data.data.encryptedAt);
+  },
+
+  handleEncryptionEnabled: (conversationId: string, encryptedAt: string) => {
+    set((state) => ({
+      conversations: state.conversations.map((c) =>
+        c.id === conversationId ? { ...c, encryptedAt } : c
+      ),
+    }));
+  },
+
+  updateLastMessage: (conversationId: string, message: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string }) => {
     set((state) => {
       const updated = state.conversations.map((c) =>
         c.id === conversationId ? { ...c, lastMessage: message } : c

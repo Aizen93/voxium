@@ -141,6 +141,7 @@ export const WS_EVENTS = {
   DM_VOICE_DEAF: 'dm:voice:deaf',
   DM_VOICE_ENDED: 'dm:voice:ended',
   DM_VOICE_DECLINE: 'dm:voice:decline',
+  DM_ENCRYPTION_ENABLED: 'dm:encryption_enabled',
   FRIEND_REQUEST_RECEIVED: 'friend:request_received',
   FRIEND_REQUEST_ACCEPTED: 'friend:request_accepted',
   FRIEND_REMOVED: 'friend:removed',
