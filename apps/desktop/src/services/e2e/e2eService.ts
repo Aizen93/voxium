@@ -329,8 +329,20 @@ export class E2EService {
   }
 
   /** Cache plaintext under the server-assigned message id (spec §7.2). */
-  async cachePlaintext(messageId: string, conversationId: string, text: string, editedAt?: string | null): Promise<void> {
-    await this.vault.putPlaintext(messageId, { conversationId, text, editedAt: editedAt ?? null });
+  async cachePlaintext(
+    messageId: string,
+    conversationId: string,
+    text: string,
+    editedAt?: string | null,
+    meta?: { authorId?: string; createdAt?: string }
+  ): Promise<void> {
+    await this.vault.putPlaintext(messageId, {
+      conversationId,
+      text,
+      editedAt: editedAt ?? null,
+      ...(meta?.authorId && { authorId: meta.authorId }),
+      ...(meta?.createdAt && { createdAt: meta.createdAt }),
+    });
   }
 
   /**
@@ -357,6 +369,7 @@ export class E2EService {
     authorId: string;
     content: string;
     editedAt?: string | null;
+    createdAt?: string;
   }): Promise<DecryptResult> {
     const version = message.editedAt ?? null;
     const cached = await this.vault.getPlaintext(message.id);
@@ -407,13 +420,49 @@ export class E2EService {
           await this.persistSession(message.authorId, session);
         }
 
-        await this.vault.putPlaintext(message.id, { conversationId: message.conversationId, text, editedAt: version });
+        await this.vault.putPlaintext(message.id, {
+          conversationId: message.conversationId,
+          text,
+          editedAt: version,
+          authorId: message.authorId,
+          ...(message.createdAt && { createdAt: message.createdAt }),
+        });
         return { text };
       } catch (err) {
         console.warn(`e2e: failed to decrypt message ${message.id}:`, err instanceof Error ? err.message : err);
         return { text: '', failed: true };
       }
     });
+  }
+
+  /**
+   * Client-side search over locally decrypted E2E history (spec §9 — server
+   * search is structurally blind to ciphertext). Case-insensitive substring
+   * match, newest first; entries cached before Phase C sort last (no
+   * createdAt). Results are only as complete as this device's cache.
+   */
+  async searchDecrypted(
+    conversationId: string,
+    query: string,
+    limit = 50
+  ): Promise<Array<{ messageId: string; text: string; authorId?: string; createdAt?: string; editedAt?: string | null }>> {
+    const needle = query.toLowerCase();
+    const all = await this.vault.listPlaintexts(conversationId);
+    return all
+      .filter(({ entry }) => entry.text.toLowerCase().includes(needle))
+      .sort((a, b) => {
+        if (!a.entry.createdAt) return 1;
+        if (!b.entry.createdAt) return -1;
+        return b.entry.createdAt.localeCompare(a.entry.createdAt);
+      })
+      .slice(0, limit)
+      .map(({ messageId, entry }) => ({
+        messageId,
+        text: entry.text,
+        authorId: entry.authorId,
+        createdAt: entry.createdAt,
+        editedAt: entry.editedAt,
+      }));
   }
 
   // ─── Safety numbers (spec §8) ───────────────────────────────────────────────

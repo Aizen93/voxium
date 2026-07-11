@@ -948,6 +948,7 @@
     "enabled": "Criptografia de ponta a ponta ativada",
     "enableFailed": "Não foi possível ativar a criptografia",
     "encryptedMessage": "Mensagem criptografada",
+    "localSearchHint": "Pesquisando mensagens descriptografadas neste dispositivo — os resultados dependem do que este dispositivo recebeu",
     "decryptFailed": "Não foi possível descriptografar esta mensagem",
     "attachmentsUnavailable": "Anexos ainda não são compatíveis com conversas criptografadas",
     "safetyNumberTitle": "Número de segurança",

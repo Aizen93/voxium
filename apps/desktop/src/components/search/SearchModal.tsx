@@ -6,7 +6,7 @@ import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { Avatar } from '../common/Avatar';
-import { Search, X, Hash } from 'lucide-react';
+import { Search, X, Hash, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import type { SearchResult, Channel } from '@voxium/shared';
 
@@ -32,6 +32,9 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
   const abortRef = useRef<AbortController>(undefined);
 
   const textChannels = channels?.filter((c) => c.type === 'text') ?? [];
+  const isEncryptedDM = useDMStore(
+    (s) => !!conversationId && !!s.conversations.find((c) => c.id === conversationId)?.encryptedAt
+  );
 
   // Auto-focus input + cleanup in-flight requests on unmount
   useEffect(() => {
@@ -57,6 +60,27 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
         setResults([]);
         setHasMore(false);
         setHasSearched(false);
+      }
+      return;
+    }
+
+    // E2E conversations: the server only holds ciphertext, so search runs
+    // over this device's locally decrypted history instead (spec §9)
+    const conversation = conversationId
+      ? useDMStore.getState().conversations.find((c) => c.id === conversationId)
+      : undefined;
+    if (conversation?.encryptedAt) {
+      setIsSearching(true);
+      try {
+        const { searchEncryptedHistory } = await import('../../services/e2e/dmCrypto');
+        const local = await searchEncryptedHistory(conversationId!, searchQuery);
+        setResults(local);
+        setHasMore(false);
+        setHasSearched(true);
+      } catch (err) {
+        console.error('Local E2E search failed:', err);
+      } finally {
+        setIsSearching(false);
       }
       return;
     }
@@ -187,6 +211,14 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
             ESC
           </button>
         </div>
+
+        {/* E2E conversations are searched locally — be honest about coverage */}
+        {isEncryptedDM && (
+          <div className="flex items-center gap-1.5 border-b border-vox-border px-4 py-1.5 text-[11px] text-vox-text-muted">
+            <Lock size={11} className="shrink-0 text-vox-accent-success" />
+            {t('e2e.localSearchHint')}
+          </div>
+        )}
 
         {/* Channel filter (server mode only) */}
         {serverId && textChannels.length > 1 && (

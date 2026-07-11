@@ -955,6 +955,7 @@
     "enabled": "End-to-end encryption enabled",
     "enableFailed": "Could not enable encryption",
     "encryptedMessage": "Encrypted message",
+    "localSearchHint": "Searching messages decrypted on this device — results depend on what this device has received",
     "decryptFailed": "Unable to decrypt this message",
     "attachmentsUnavailable": "Attachments are not yet supported in encrypted conversations",
     "safetyNumberTitle": "Safety number",

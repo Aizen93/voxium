@@ -948,6 +948,7 @@
     "enabled": "Ende-zu-Ende-Verschlüsselung aktiviert",
     "enableFailed": "Verschlüsselung konnte nicht aktiviert werden",
     "encryptedMessage": "Verschlüsselte Nachricht",
+    "localSearchHint": "Durchsucht die auf diesem Gerät entschlüsselten Nachrichten — Ergebnisse hängen davon ab, was dieses Gerät empfangen hat",
     "decryptFailed": "Diese Nachricht kann nicht entschlüsselt werden",
     "attachmentsUnavailable": "Anhänge werden in verschlüsselten Unterhaltungen noch nicht unterstützt",
     "safetyNumberTitle": "Sicherheitsnummer",

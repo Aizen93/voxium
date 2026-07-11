@@ -948,6 +948,7 @@
     "enabled": "Chiffrement de bout en bout activé",
     "enableFailed": "Impossible d'activer le chiffrement",
     "encryptedMessage": "Message chiffré",
+    "localSearchHint": "Recherche dans les messages déchiffrés sur cet appareil — les résultats dépendent de ce que cet appareil a reçu",
     "decryptFailed": "Impossible de déchiffrer ce message",
     "attachmentsUnavailable": "Les pièces jointes ne sont pas encore prises en charge dans les conversations chiffrées",
     "safetyNumberTitle": "Numéro de sécurité",

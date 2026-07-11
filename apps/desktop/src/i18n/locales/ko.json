@@ -948,6 +948,7 @@
     "enabled": "종단간 암호화가 활성화되었습니다",
     "enableFailed": "암호화를 활성화할 수 없습니다",
     "encryptedMessage": "암호화된 메시지",
+    "localSearchHint": "이 기기에서 복호화된 메시지를 검색합니다 — 결과는 이 기기가 수신한 내용에 따라 달라집니다",
     "decryptFailed": "이 메시지를 복호화할 수 없습니다",
     "attachmentsUnavailable": "암호화된 대화에서는 첨부 파일이 아직 지원되지 않습니다",
     "safetyNumberTitle": "안전 번호",
