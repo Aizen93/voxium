@@ -7,10 +7,13 @@
 //   - the decrypted-plaintext message cache (ratchet keys are one-shot; a
 //     ciphertext refetched from the server can never be decrypted again)
 //
-// The 32-byte pickle key is the only secret JS touches. MVP stores it in
-// localStorage next to the vault; wrapping it with the OS keychain via a Tauri
-// command is a planned hardening step (spec §7.3). Keys never leave the device
+// The 32-byte pickle key is the only secret JS touches. In the Tauri app it
+// lives in the OS keychain; browser dev builds fall back to localStorage
+// (spec §7.3, providers in ./pickleKeyProvider). Keys never leave the device
 // either way.
+import { defaultPickleKeyProvider, type PickleKeyProvider } from './pickleKeyProvider';
+
+export type { PickleKeyProvider };
 
 const KV_STORE = 'kv';
 
@@ -26,17 +29,6 @@ export interface CachedPlaintext {
   failed?: boolean;
 }
 
-/** Abstracts pickle-key persistence so tests and future keychain backends can swap it. */
-export interface PickleKeyProvider {
-  load(userId: string): string | null;
-  save(userId: string, keyB64: string): void;
-}
-
-const localStoragePickleKeys: PickleKeyProvider = {
-  load: (userId) => localStorage.getItem(`voxium_e2e_pk_${userId}`),
-  save: (userId, keyB64) => localStorage.setItem(`voxium_e2e_pk_${userId}`, keyB64),
-};
-
 function requestToPromise<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
@@ -50,7 +42,7 @@ export class E2EVault {
 
   constructor(
     private readonly userId: string,
-    private readonly keyProvider: PickleKeyProvider = localStoragePickleKeys
+    private readonly keyProvider: PickleKeyProvider = defaultPickleKeyProvider()
   ) {}
 
   async open(): Promise<void> {
@@ -62,23 +54,28 @@ export class E2EVault {
       }
     };
     this.db = await requestToPromise(req as IDBRequest<IDBDatabase>);
+    // Resolve the pickle key up-front (keychain access is async) so crypto
+    // paths keep a synchronous accessor after open()
+    if (!this.pickleKeyBytes) {
+      this.pickleKeyBytes = await this.loadOrCreatePickleKey();
+    }
   }
 
-  /** The 32-byte vodozemac pickle key for this account (created on first use). */
+  /** The 32-byte vodozemac pickle key for this account (resolved in open()). */
   pickleKey(): Uint8Array {
-    if (this.pickleKeyBytes) return this.pickleKeyBytes;
-    const stored = this.keyProvider.load(this.userId);
+    if (!this.pickleKeyBytes) throw new Error('vault not opened');
+    return this.pickleKeyBytes;
+  }
+
+  private async loadOrCreatePickleKey(): Promise<Uint8Array> {
+    const stored = await this.keyProvider.load(this.userId);
     if (stored) {
       const raw = Uint8Array.from(atob(stored), (c) => c.charCodeAt(0));
-      if (raw.length === 32) {
-        this.pickleKeyBytes = raw;
-        return raw;
-      }
+      if (raw.length === 32) return raw;
       console.warn('e2e: stored pickle key is malformed — generating a new one (existing pickles become unreadable)');
     }
     const fresh = crypto.getRandomValues(new Uint8Array(32));
-    this.keyProvider.save(this.userId, btoa(String.fromCharCode(...fresh)));
-    this.pickleKeyBytes = fresh;
+    await this.keyProvider.save(this.userId, btoa(String.fromCharCode(...fresh)));
     return fresh;
   }
 
