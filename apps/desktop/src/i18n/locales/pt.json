@@ -936,5 +936,28 @@
     "cannotBanSelf": "Não é possível banir a si mesmo",
     "cannotBanSuperAdmin": "Não é possível banir um superadministrador",
     "onlySuperAdminCanBan": "Apenas superadministradores podem banir outros administradores"
+  },
+  "e2e": {
+    "badgeTitle": "Criptografia de ponta a ponta — ver número de segurança",
+    "enableTitle": "Ativar criptografia de ponta a ponta",
+    "enableExplainer": "As mensagens desta conversa serão criptografadas no seu dispositivo e só poderão ser lidas por você e seu contato. O servidor armazena apenas texto criptografado.",
+    "enablePointIrreversible": "Isso não pode ser desfeito nesta conversa",
+    "enablePointServer": "O histórico de mensagens permanece nos seus dispositivos — um dispositivo novo não consegue ler mensagens antigas",
+    "enablePointLimits": "Anexos e edição de mensagens ainda não estão disponíveis em conversas criptografadas",
+    "enableConfirm": "Ativar criptografia",
+    "enabled": "Criptografia de ponta a ponta ativada",
+    "enableFailed": "Não foi possível ativar a criptografia",
+    "encryptedMessage": "Mensagem criptografada",
+    "decryptFailed": "Não foi possível descriptografar esta mensagem",
+    "attachmentsUnavailable": "Anexos ainda não são compatíveis com conversas criptografadas",
+    "safetyNumberTitle": "Número de segurança",
+    "safetyNumberExplainer": "Compare este número com {{name}} por outro canal (pessoalmente ou em uma chamada) para verificar se a conversa é segura. Ele muda se um de vocês reinstalar o aplicativo ou redefinir as chaves de criptografia.",
+    "safetyNumberUnavailable": "Número de segurança indisponível",
+    "verified": "Verificado",
+    "notVerified": "Ainda não verificado",
+    "markVerified": "Marcar como verificado",
+    "identityChangedWarning": "As chaves de segurança de {{name}} mudaram. Isso pode acontecer após uma reinstalação — verifique o novo número de segurança antes de confiar nesta conversa.",
+    "acceptNewIdentity": "Aceitar novas chaves",
+    "identityAccepted": "Novas chaves aceitas"
   }
 }

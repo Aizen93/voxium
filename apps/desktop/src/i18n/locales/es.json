@@ -936,5 +936,28 @@
     "cannotBanSelf": "No puedes banearte a ti mismo",
     "cannotBanSuperAdmin": "No se puede banear a un superadministrador",
     "onlySuperAdminCanBan": "Solo los superadministradores pueden banear a otros administradores"
+  },
+  "e2e": {
+    "badgeTitle": "Cifrado de extremo a extremo — ver número de seguridad",
+    "enableTitle": "Activar el cifrado de extremo a extremo",
+    "enableExplainer": "Los mensajes de esta conversación se cifran en tu dispositivo y solo tú y tu contacto pueden leerlos. El servidor solo almacena texto cifrado.",
+    "enablePointIrreversible": "Esto no se puede deshacer en esta conversación",
+    "enablePointServer": "El historial de mensajes permanece en tus dispositivos — un dispositivo nuevo no puede leer los mensajes anteriores",
+    "enablePointLimits": "Los archivos adjuntos y la edición de mensajes aún no están disponibles en conversaciones cifradas",
+    "enableConfirm": "Activar cifrado",
+    "enabled": "Cifrado de extremo a extremo activado",
+    "enableFailed": "No se pudo activar el cifrado",
+    "encryptedMessage": "Mensaje cifrado",
+    "decryptFailed": "No se puede descifrar este mensaje",
+    "attachmentsUnavailable": "Los archivos adjuntos aún no son compatibles en conversaciones cifradas",
+    "safetyNumberTitle": "Número de seguridad",
+    "safetyNumberExplainer": "Compara este número con {{name}} por otro canal (en persona o en una llamada) para verificar que la conversación es segura. Cambia si alguno de los dos reinstala la aplicación o restablece sus claves de cifrado.",
+    "safetyNumberUnavailable": "Número de seguridad no disponible",
+    "verified": "Verificado",
+    "notVerified": "Aún sin verificar",
+    "markVerified": "Marcar como verificado",
+    "identityChangedWarning": "Las claves de seguridad de {{name}} han cambiado. Esto puede ocurrir tras una reinstalación — verifica el nuevo número de seguridad antes de confiar en esta conversación.",
+    "acceptNewIdentity": "Aceptar las nuevas claves",
+    "identityAccepted": "Nuevas claves aceptadas"
   }
 }

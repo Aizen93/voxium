@@ -936,5 +936,28 @@
     "cannotBanSelf": "不能封禁自己",
     "cannotBanSuperAdmin": "无法封禁超级管理员",
     "onlySuperAdminCanBan": "只有超级管理员才能封禁其他管理员"
+  },
+  "e2e": {
+    "badgeTitle": "已端到端加密 — 查看安全码",
+    "enableTitle": "启用端到端加密",
+    "enableExplainer": "此对话中的消息将在你的设备上加密，只有你和对方能够阅读。服务器只存储密文。",
+    "enablePointIrreversible": "此操作在该对话中无法撤销",
+    "enablePointServer": "消息记录仅保存在你的设备上 — 新设备无法读取较早的消息",
+    "enablePointLimits": "加密对话暂不支持附件和消息编辑",
+    "enableConfirm": "启用加密",
+    "enabled": "端到端加密已启用",
+    "enableFailed": "无法启用加密",
+    "encryptedMessage": "加密消息",
+    "decryptFailed": "无法解密此消息",
+    "attachmentsUnavailable": "加密对话暂不支持附件",
+    "safetyNumberTitle": "安全码",
+    "safetyNumberExplainer": "请通过其他渠道（当面或通话）与 {{name}} 核对此安全码，以确认对话是安全的。若任何一方重新安装应用或重置加密密钥，该安全码将会改变。",
+    "safetyNumberUnavailable": "安全码不可用",
+    "verified": "已验证",
+    "notVerified": "尚未验证",
+    "markVerified": "标记为已验证",
+    "identityChangedWarning": "{{name}} 的安全密钥已更改。这可能发生在重新安装应用之后 — 请先核对新的安全码，再信任此对话。",
+    "acceptNewIdentity": "接受新密钥",
+    "identityAccepted": "已接受新密钥"
   }
 }

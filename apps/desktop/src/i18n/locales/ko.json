@@ -936,5 +936,28 @@
     "cannotBanSelf": "자신을 차단할 수 없습니다",
     "cannotBanSuperAdmin": "최고 관리자는 차단할 수 없습니다",
     "onlySuperAdminCanBan": "최고 관리자만 다른 관리자를 차단할 수 있습니다"
+  },
+  "e2e": {
+    "badgeTitle": "종단간 암호화됨 — 안전 번호 보기",
+    "enableTitle": "종단간 암호화 사용",
+    "enableExplainer": "이 대화의 메시지는 기기에서 암호화되며 나와 상대방만 읽을 수 있습니다. 서버에는 암호문만 저장됩니다.",
+    "enablePointIrreversible": "이 대화에서는 되돌릴 수 없습니다",
+    "enablePointServer": "메시지 기록은 기기에만 보관됩니다 — 새 기기에서는 이전 메시지를 읽을 수 없습니다",
+    "enablePointLimits": "암호화된 대화에서는 첨부 파일과 메시지 수정을 아직 사용할 수 없습니다",
+    "enableConfirm": "암호화 사용",
+    "enabled": "종단간 암호화가 활성화되었습니다",
+    "enableFailed": "암호화를 활성화할 수 없습니다",
+    "encryptedMessage": "암호화된 메시지",
+    "decryptFailed": "이 메시지를 복호화할 수 없습니다",
+    "attachmentsUnavailable": "암호화된 대화에서는 첨부 파일이 아직 지원되지 않습니다",
+    "safetyNumberTitle": "안전 번호",
+    "safetyNumberExplainer": "이 번호를 다른 방법(직접 만나거나 통화)으로 {{name}} 님과 비교하여 대화가 안전한지 확인하세요. 둘 중 한 명이 앱을 재설치하거나 암호화 키를 재설정하면 번호가 변경됩니다.",
+    "safetyNumberUnavailable": "안전 번호를 사용할 수 없습니다",
+    "verified": "확인됨",
+    "notVerified": "아직 확인되지 않음",
+    "markVerified": "확인됨으로 표시",
+    "identityChangedWarning": "{{name}} 님의 보안 키가 변경되었습니다. 앱 재설치 후 발생할 수 있습니다 — 이 대화를 신뢰하기 전에 새 안전 번호를 확인하세요.",
+    "acceptNewIdentity": "새 키 수락",
+    "identityAccepted": "새 키를 수락했습니다"
   }
 }
