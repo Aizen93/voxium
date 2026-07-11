@@ -943,7 +943,7 @@
     "enableExplainer": "Los mensajes de esta conversación se cifran en tu dispositivo y solo tú y tu contacto pueden leerlos. El servidor solo almacena texto cifrado.",
     "enablePointIrreversible": "Esto no se puede deshacer en esta conversación",
     "enablePointServer": "El historial de mensajes permanece en tus dispositivos — un dispositivo nuevo no puede leer los mensajes anteriores",
-    "enablePointLimits": "Los archivos adjuntos y la edición de mensajes aún no están disponibles en conversaciones cifradas",
+    "enablePointLimits": "Los archivos adjuntos aún no están disponibles en conversaciones cifradas",
     "enableConfirm": "Activar cifrado",
     "enabled": "Cifrado de extremo a extremo activado",
     "enableFailed": "No se pudo activar el cifrado",

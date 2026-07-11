@@ -26,6 +26,9 @@ export interface PinnedIdentity {
 export interface CachedPlaintext {
   conversationId: string;
   text: string;
+  /** Version marker: an edit is a fresh ciphertext for the same message id,
+   *  so cache entries are only valid for the editedAt they were decrypted at. */
+  editedAt?: string | null;
   failed?: boolean;
 }
 

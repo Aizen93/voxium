@@ -187,6 +187,47 @@ describe('E2EService (client crypto core)', () => {
     }
   });
 
+  it('versions the plaintext cache by editedAt: edits decrypt fresh, stale entries never served', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+
+    // original message
+    const original = await alice.service.encryptMessage(bob.userId, 'original text');
+    const first = await bob.service.decryptMessage({
+      id: 'm1', conversationId: 'c1', authorId: alice.userId, content: original, editedAt: null,
+    });
+    expect(first.text).toBe('original text');
+
+    // alice edits: fresh ciphertext, same id, new editedAt
+    const edited = await alice.service.encryptMessage(bob.userId, 'edited text');
+    const second = await bob.service.decryptMessage({
+      id: 'm1', conversationId: 'c1', authorId: alice.userId, content: edited, editedAt: '2026-07-12T10:00:00.000Z',
+    });
+    expect(second.text).toBe('edited text');
+
+    // repeat with the same version → cache hit on the edited entry
+    const third = await bob.service.decryptMessage({
+      id: 'm1', conversationId: 'c1', authorId: alice.userId, content: edited, editedAt: '2026-07-12T10:00:00.000Z',
+    });
+    expect(third.text).toBe('edited text');
+
+    // version-checked reads reject the stale version, unversioned reads serve latest
+    expect(await bob.service.getCachedPlaintext('m1', null)).toBeNull();
+    expect(await bob.service.getCachedPlaintext('m1', '2026-07-12T10:00:00.000Z')).toBe('edited text');
+    expect(await bob.service.getCachedPlaintext('m1')).toBe('edited text');
+
+    // sender side: own edit cached under the new version
+    await alice.service.cachePlaintext('m1', 'c1', 'edited text', '2026-07-12T10:00:00.000Z');
+    const own = await alice.service.decryptMessage({
+      id: 'm1', conversationId: 'c1', authorId: alice.userId, content: 'irrelevant', editedAt: '2026-07-12T10:00:00.000Z',
+    });
+    expect(own.text).toBe('edited text');
+  });
+
   it('decryption is idempotent via the plaintext cache (one-shot ratchet keys)', async () => {
     uniq++;
     const server = createFakeServer();

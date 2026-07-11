@@ -329,13 +329,20 @@ export class E2EService {
   }
 
   /** Cache plaintext under the server-assigned message id (spec §7.2). */
-  async cachePlaintext(messageId: string, conversationId: string, text: string): Promise<void> {
-    await this.vault.putPlaintext(messageId, { conversationId, text });
+  async cachePlaintext(messageId: string, conversationId: string, text: string, editedAt?: string | null): Promise<void> {
+    await this.vault.putPlaintext(messageId, { conversationId, text, editedAt: editedAt ?? null });
   }
 
-  async getCachedPlaintext(messageId: string): Promise<string | null> {
+  /**
+   * Read cached plaintext. Pass `editedAt` to require that exact version
+   * (edits produce new ciphertext under the same id); omit it to accept
+   * whichever version is cached (e.g. reply previews).
+   */
+  async getCachedPlaintext(messageId: string, editedAt?: string | null): Promise<string | null> {
     const cached = await this.vault.getPlaintext(messageId);
-    return cached && !cached.failed ? cached.text : null;
+    if (!cached || cached.failed) return null;
+    if (editedAt !== undefined && (cached.editedAt ?? null) !== (editedAt ?? null)) return null;
+    return cached.text;
   }
 
   /**
@@ -349,9 +356,15 @@ export class E2EService {
     conversationId: string;
     authorId: string;
     content: string;
+    editedAt?: string | null;
   }): Promise<DecryptResult> {
+    const version = message.editedAt ?? null;
     const cached = await this.vault.getPlaintext(message.id);
-    if (cached) return { text: cached.text, failed: cached.failed };
+    if (cached && (cached.editedAt ?? null) === version) {
+      return { text: cached.text, failed: cached.failed };
+    }
+    // cache miss OR a stale pre-edit entry: the edit is a fresh ratchet
+    // ciphertext, so it decrypts like any new message and replaces the entry
 
     if (message.authorId === this.userId) {
       // Own message missing from the cache (cleared vault / other install):
@@ -394,7 +407,7 @@ export class E2EService {
           await this.persistSession(message.authorId, session);
         }
 
-        await this.vault.putPlaintext(message.id, { conversationId: message.conversationId, text });
+        await this.vault.putPlaintext(message.id, { conversationId: message.conversationId, text, editedAt: version });
         return { text };
       } catch (err) {
         console.warn(`e2e: failed to decrypt message ${message.id}:`, err instanceof Error ? err.message : err);

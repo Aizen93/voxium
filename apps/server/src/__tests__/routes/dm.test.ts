@@ -819,7 +819,7 @@ describe('DM routes — encrypted conversation message enforcement', () => {
     expect(res.body.error).toMatch(/not end-to-end encrypted/i);
   });
 
-  it('refuses editing an encrypted message', async () => {
+  it('rejects a plaintext edit of an encrypted message (no downgrade)', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(encryptedConversation as any);
     vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({
       ...mockMessage, encrypted: true, content: validEnvelope,
@@ -830,8 +830,81 @@ describe('DM routes — encrypted conversation message enforcement', () => {
       .patch('/api/v1/dm/conv-1/messages/msg-1')
       .send({ content: 'new text' });
 
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/end-to-end encrypted/i);
     expect(prisma.message.update).not.toHaveBeenCalled();
+  });
+
+  it('accepts an envelope edit of an encrypted message and stores it verbatim', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(encryptedConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({
+      ...mockMessage, encrypted: true, content: validEnvelope,
+    } as any);
+    const editEnvelope = JSON.stringify({ v: 1, e: 'olm1', t: 1, b: 'ZWRpdGVkY2lwaGVydGV4dA' });
+    vi.mocked(prisma.message.update).mockResolvedValueOnce({
+      ...mockMessage, encrypted: true, content: editEnvelope, editedAt: new Date('2026-07-12'), reactions: [],
+    } as any);
+
+    const app = createApp();
+    const res = await request(app)
+      .patch('/api/v1/dm/conv-1/messages/msg-1')
+      .send({ content: editEnvelope, encrypted: true });
+
+    expect(res.status).toBe(200);
+    expect(prisma.message.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ content: editEnvelope }),
+      })
+    );
+    expect(mockEmit).toHaveBeenCalledWith('dm:message:update', expect.objectContaining({ encrypted: true }));
+  });
+
+  it('rejects a malformed envelope on an encrypted edit', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(encryptedConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({
+      ...mockMessage, encrypted: true, content: validEnvelope,
+    } as any);
+
+    const app = createApp();
+    const res = await request(app)
+      .patch('/api/v1/dm/conv-1/messages/msg-1')
+      .send({ content: 'not an envelope', encrypted: true });
+
+    expect(res.status).toBe(400);
+    expect(prisma.message.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an encrypted edit of a plaintext message', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(encryptedConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({
+      ...mockMessage, encrypted: false, content: 'pre-encryption plaintext history',
+    } as any);
+
+    const app = createApp();
+    const res = await request(app)
+      .patch('/api/v1/dm/conv-1/messages/msg-1')
+      .send({ content: validEnvelope, encrypted: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/not end-to-end encrypted/i);
+    expect(prisma.message.update).not.toHaveBeenCalled();
+  });
+
+  it('still allows plaintext edits of pre-encryption history in an encrypted conversation', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(encryptedConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({
+      ...mockMessage, encrypted: false, content: 'old plaintext',
+    } as any);
+    vi.mocked(prisma.message.update).mockResolvedValueOnce({
+      ...mockMessage, content: 'edited plaintext', editedAt: new Date('2026-07-12'), reactions: [],
+    } as any);
+
+    const app = createApp();
+    const res = await request(app)
+      .patch('/api/v1/dm/conv-1/messages/msg-1')
+      .send({ content: 'edited plaintext' });
+
+    expect(res.status).toBe(200);
   });
 });
 

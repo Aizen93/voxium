@@ -245,9 +245,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 onClose={() => setShowReactionPicker(false)}
               />
             )}
-            {isOwn && !message.encrypted && (
-              // E2E messages can't be edited (Phase C): an edit is a fresh
-              // ratchet ciphertext peers may never be able to decrypt
+            {isOwn && (
               <button
                 onClick={handleStartEdit}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"

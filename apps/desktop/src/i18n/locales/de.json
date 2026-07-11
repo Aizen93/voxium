@@ -943,7 +943,7 @@
     "enableExplainer": "Nachrichten in dieser Unterhaltung werden auf deinem Gerät verschlüsselt und können nur von dir und deinem Kontakt gelesen werden. Der Server speichert ausschließlich verschlüsselten Text.",
     "enablePointIrreversible": "Dies kann für diese Unterhaltung nicht rückgängig gemacht werden",
     "enablePointServer": "Der Nachrichtenverlauf bleibt auf deinen Geräten — ein neues Gerät kann ältere Nachrichten nicht lesen",
-    "enablePointLimits": "Anhänge und das Bearbeiten von Nachrichten sind in verschlüsselten Unterhaltungen noch nicht verfügbar",
+    "enablePointLimits": "Anhänge sind in verschlüsselten Unterhaltungen noch nicht verfügbar",
     "enableConfirm": "Verschlüsselung aktivieren",
     "enabled": "Ende-zu-Ende-Verschlüsselung aktiviert",
     "enableFailed": "Verschlüsselung konnte nicht aktiviert werden",

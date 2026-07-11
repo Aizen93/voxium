@@ -950,7 +950,7 @@
     "enableExplainer": "Messages in this conversation will be encrypted on your device and can only be read by you and your contact. The server only ever stores ciphertext.",
     "enablePointIrreversible": "This cannot be undone for this conversation",
     "enablePointServer": "Message history stays on your devices — a new device cannot read older messages",
-    "enablePointLimits": "Attachments and message editing are not available in encrypted conversations yet",
+    "enablePointLimits": "Attachments are not available in encrypted conversations yet",
     "enableConfirm": "Enable encryption",
     "enabled": "End-to-end encryption enabled",
     "enableFailed": "Could not enable encryption",
