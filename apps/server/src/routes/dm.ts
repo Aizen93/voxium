@@ -3,7 +3,7 @@ import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, parseE2EEnvelope, WS_EVENTS, type Message } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, parseE2EEnvelope, WS_EVENTS, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
@@ -287,7 +287,25 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
         throw new BadRequestError('This conversation is end-to-end encrypted; update your client to send messages');
       }
       if (attachments !== undefined) {
-        throw new BadRequestError('Attachments are not yet supported in encrypted conversations');
+        // E2E attachments (spec §13): the server stores opaque AES-GCM blobs.
+        // Real fileName/mimeType/size live inside the message ciphertext —
+        // only the S3 key and the ciphertext size are validated here.
+        if (!Array.isArray(attachments)) throw new BadRequestError('attachments must be an array');
+        if (attachments.length === 0 || attachments.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE) {
+          throw new BadRequestError(`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments`);
+        }
+        const expectedPrefix = `attachments/dm-${conversationId}/`;
+        const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
+        for (const a of attachments) {
+          if (!a || typeof a !== 'object') throw new BadRequestError('Invalid attachment');
+          if (typeof a.s3Key !== 'string' || typeof a.fileSize !== 'number') {
+            throw new BadRequestError('Invalid attachment fields');
+          }
+          if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
+          if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this conversation');
+          if (a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
+          if (a.mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be opaque');
+        }
       }
       if (!parseE2EEnvelope(req.body.content)) {
         throw new BadRequestError('Invalid encrypted message envelope');
@@ -351,7 +369,9 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
           data: attachments.map((a) => ({
             messageId: msg.id,
             s3Key: a.s3Key,
-            fileName: a.fileName,
+            // never trust/store a client-supplied name for E2E blobs — the
+            // real name lives inside the message ciphertext
+            fileName: wantsEncrypted ? E2E_ATTACHMENT_NAME : a.fileName,
             fileSize: a.fileSize,
             mimeType: a.mimeType,
           })),

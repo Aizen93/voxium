@@ -420,6 +420,47 @@ describe('uploads — POST /presign/attachment', () => {
     expect(res.status).toBe(400);
   });
 
+  it('presigns E2E attachments as opaque blobs — real file name never reaches the S3 key', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
+      id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2',
+    } as any);
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/uploads/presign/attachment')
+      .send({
+        fileName: 'encrypted.bin',
+        fileSize: 8 * 1024 * 1024 + 16, // ciphertext above the plain 8MB cap — allowed for E2E
+        mimeType: 'application/octet-stream',
+        conversationId: 'conv-1',
+        encrypted: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.key).toMatch(/^attachments\/dm-conv-1\/[a-f0-9]{16}-encrypted\.bin$/);
+  });
+
+  it('rejects E2E presigns with a non-opaque mime, oversized ciphertext, or channel context', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
+      id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2',
+    } as any);
+    const app = createApp();
+    const base = { fileName: 'encrypted.bin', fileSize: 1024, conversationId: 'conv-1', encrypted: true };
+
+    let res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ ...base, mimeType: 'image/png' });
+    expect(res.status).toBe(400);
+
+    res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ ...base, mimeType: 'application/octet-stream', fileSize: 12 * 1024 * 1024 + 17 });
+    expect(res.status).toBe(400);
+
+    res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ fileName: 'encrypted.bin', fileSize: 1024, mimeType: 'application/octet-stream', channelId: 'ch-1', encrypted: true });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/direct messages/i);
+  });
+
   it('rejects disallowed file types', async () => {
     const app = createApp();
     const res = await request(app)

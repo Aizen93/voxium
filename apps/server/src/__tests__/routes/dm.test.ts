@@ -791,8 +791,23 @@ describe('DM routes — encrypted conversation message enforcement', () => {
     }
   });
 
-  it('rejects attachments in encrypted conversations', async () => {
+  it('accepts opaque encrypted attachments and never stores a client-supplied name', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(encryptedConversation as any);
+    let attachmentRows: any;
+    vi.mocked(prisma.$transaction).mockImplementationOnce(async (fn: any) =>
+      fn({
+        message: {
+          create: vi.fn().mockResolvedValue({ id: 'msg-e2' }),
+          findUniqueOrThrow: vi.fn().mockResolvedValue({ ...mockMessage, id: 'msg-e2', encrypted: true, content: validEnvelope }),
+        },
+        messageAttachment: {
+          createMany: vi.fn().mockImplementation((args: any) => {
+            attachmentRows = args.data;
+          }),
+        },
+      })
+    );
+    vi.mocked(prisma.conversation.update).mockResolvedValueOnce(mockConversation as any);
 
     const app = createApp();
     const res = await request(app)
@@ -800,11 +815,42 @@ describe('DM routes — encrypted conversation message enforcement', () => {
       .send({
         content: validEnvelope,
         encrypted: true,
-        attachments: [{ s3Key: 'attachments/dm-conv-1/abc-file.png', fileName: 'f.png', fileSize: 10, mimeType: 'image/png' }],
+        attachments: [{
+          s3Key: 'attachments/dm-conv-1/abc123-encrypted.bin',
+          fileName: 'real-secret-name.png', // must be discarded server-side
+          fileSize: 1024,
+          mimeType: 'application/octet-stream',
+        }],
       });
 
+    expect(res.status).toBe(201);
+    expect(attachmentRows[0].fileName).toBe('encrypted.bin');
+    expect(attachmentRows[0].mimeType).toBe('application/octet-stream');
+  });
+
+  it('rejects non-opaque or invalid encrypted attachments', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(encryptedConversation as any);
+    const app = createApp();
+    const base = { content: validEnvelope, encrypted: true };
+    const valid = { s3Key: 'attachments/dm-conv-1/abc123-encrypted.bin', fileName: 'encrypted.bin', fileSize: 1024, mimeType: 'application/octet-stream' };
+
+    // real mime type leaking through
+    let res = await request(app).post('/api/v1/dm/conv-1/messages')
+      .send({ ...base, attachments: [{ ...valid, mimeType: 'image/png' }] });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/attachment/i);
+    expect(res.body.error).toMatch(/opaque/i);
+
+    // ciphertext larger than the outer cap (video max + GCM tag)
+    res = await request(app).post('/api/v1/dm/conv-1/messages')
+      .send({ ...base, attachments: [{ ...valid, fileSize: 12 * 1024 * 1024 + 17 }] });
+    expect(res.status).toBe(400);
+
+    // key belonging to another conversation
+    res = await request(app).post('/api/v1/dm/conv-1/messages')
+      .send({ ...base, attachments: [{ ...valid, s3Key: 'attachments/dm-other/abc123-encrypted.bin' }] });
+    expect(res.status).toBe(400);
+
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it('rejects encrypted payloads in a plaintext conversation', async () => {

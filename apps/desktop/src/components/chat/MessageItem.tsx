@@ -8,6 +8,7 @@ import { EmojiPicker } from '../common/EmojiPicker';
 import { Avatar } from '../common/Avatar';
 import { MessageContent } from './MessageContent';
 import { AttachmentDisplay } from './AttachmentDisplay';
+import { E2EAttachmentDisplay } from './E2EAttachmentDisplay';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Pencil, Trash2, SmilePlus, Reply, Flag, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
@@ -317,13 +318,22 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                       <div className="text-sm text-vox-text-primary break-words">
                         <MessageContent content={message.content} mentions={message.mentions} />
                       </div>
-                    ) : message.encrypted ? (
+                    ) : message.encrypted && !message.e2eAttachments?.length ? (
                       <div className="flex items-center gap-1 text-sm italic text-vox-text-muted">
                         <Lock size={12} />
                         {t('e2e.decryptFailed')}
                       </div>
                     ) : null}
-                    {message.attachments && message.attachments.length > 0 && (
+                    {/* E2E: server-side rows are opaque blobs — render only the
+                        metas recovered from the decrypted payload */}
+                    {message.e2eAttachments && message.e2eAttachments.length > 0 && (
+                      <div className="flex flex-col">
+                        {message.e2eAttachments.map((meta) => (
+                          <E2EAttachmentDisplay key={meta.s3Key} meta={meta} />
+                        ))}
+                      </div>
+                    )}
+                    {!message.encrypted && message.attachments && message.attachments.length > 0 && (
                       <div className="flex flex-col">
                         {message.attachments.map((a) => (
                           <AttachmentDisplay key={a.id} attachment={a} />
@@ -354,13 +364,20 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                         <span className="text-[10px] text-vox-text-muted">{t('messageItem.edited')}</span>
                       )}
                     </div>
-                  ) : message.encrypted ? (
+                  ) : message.encrypted && !message.e2eAttachments?.length ? (
                     <div className="flex items-center gap-1 text-sm italic text-vox-text-muted">
                       <Lock size={12} />
                       {t('e2e.decryptFailed')}
                     </div>
                   ) : null}
-                  {message.attachments && message.attachments.length > 0 && (
+                  {message.e2eAttachments && message.e2eAttachments.length > 0 && (
+                    <div className="flex flex-col">
+                      {message.e2eAttachments.map((meta) => (
+                        <E2EAttachmentDisplay key={meta.s3Key} meta={meta} />
+                      ))}
+                    </div>
+                  )}
+                  {!message.encrypted && message.attachments && message.attachments.length > 0 && (
                     <div className="flex flex-col">
                       {message.attachments.map((a) => (
                         <AttachmentDisplay key={a.id} attachment={a} />

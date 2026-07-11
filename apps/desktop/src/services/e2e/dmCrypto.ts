@@ -6,10 +6,17 @@
 // captures every account store's initial state at module-eval time, so a
 // static store import from a service pulled in by chatStore would create an
 // eval-order cycle that crashes at boot.
-import type { Message } from '@voxium/shared';
+import { buildE2EPlaintext, parseE2EPlaintext } from '@voxium/shared';
+import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError } from './e2eService';
 
 export { E2EIdentityChangedError };
+
+/** Split raw decrypted plaintext into display fields on a message. */
+function applyPlaintext(message: Message, raw: string): Message {
+  const { text, attachments } = parseE2EPlaintext(raw);
+  return { ...message, content: text, ...(attachments.length > 0 && { e2eAttachments: attachments }) };
+}
 
 async function currentUserId(): Promise<string | null> {
   const { useAuthStore } = await import('../../stores/authStore');
@@ -22,7 +29,9 @@ export const DECRYPT_FAILED_CONTENT = '';
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
   if (!message.replyTo?.encrypted) return message;
   const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id);
-  return { ...message, replyTo: { ...message.replyTo, content: cached ?? '' } };
+  // cached entries hold raw plaintext — structured payloads carry the text field
+  const preview = cached ? parseE2EPlaintext(cached).text : '';
+  return { ...message, replyTo: { ...message.replyTo, content: preview } };
 }
 
 /**
@@ -42,7 +51,7 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
       // version-checked: an edit echo must not serve the pre-edit cache entry
       const cached = await service.getCachedPlaintext(message.id, message.editedAt ?? null);
       if (cached !== null) {
-        return resolveReplyPreview({ ...message, content: cached }, userId);
+        return resolveReplyPreview(applyPlaintext(message, cached), userId);
       }
       await new Promise((r) => setTimeout(r, 150));
     }
@@ -57,8 +66,10 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
     editedAt: message.editedAt ?? null,
     createdAt: message.createdAt,
   });
-  const content = result.failed ? DECRYPT_FAILED_CONTENT : result.text;
-  return resolveReplyPreview({ ...message, content }, userId);
+  if (result.failed) {
+    return resolveReplyPreview({ ...message, content: DECRYPT_FAILED_CONTENT }, userId);
+  }
+  return resolveReplyPreview(applyPlaintext(message, result.text), userId);
 }
 
 /** Decrypt a fetched page of messages (order preserved; plaintext untouched). */
@@ -74,24 +85,32 @@ export async function decryptMessagesForDisplay(messages: Message[]): Promise<Me
 }
 
 /**
- * Prepare an outgoing DM: returns the ciphertext envelope when the
- * conversation is E2E, or null for plaintext conversations. Identity changes
- * are flagged for the UI and rethrown — the message must NOT be sent.
+ * Prepare an outgoing DM: returns the ciphertext envelope (and the exact raw
+ * plaintext that was encrypted, for the sender's cache) when the conversation
+ * is E2E, or null for plaintext conversations. Attachment metas — real
+ * names/keys — go inside the ciphertext, never in the returned envelope's
+ * surroundings. Identity changes are flagged for the UI and rethrown — the
+ * message must NOT be sent.
  */
 export async function prepareOutgoingDM(
   conversationId: string,
-  plaintext: string
-): Promise<{ content: string } | null> {
+  text: string,
+  attachments?: E2EAttachmentMeta[]
+): Promise<{ content: string; plaintext: string } | null> {
   const { useDMStore } = await import('../../stores/dmStore');
   const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
-  if (!conversation?.encryptedAt) return null;
+  if (!conversation?.encryptedAt) {
+    if (attachments?.length) throw new Error('E2E attachments on a plaintext conversation');
+    return null;
+  }
 
   const userId = await currentUserId();
   if (!userId) throw new Error('Not authenticated');
 
+  const plaintext = buildE2EPlaintext(text, attachments);
   try {
     const content = await getE2EService(userId).encryptMessage(conversation.participant.id, plaintext);
-    return { content };
+    return { content, plaintext };
   } catch (err) {
     if (err instanceof E2EIdentityChangedError) {
       const { useE2EStore } = await import('../../stores/e2eStore');

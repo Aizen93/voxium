@@ -626,6 +626,21 @@
     </div>
 
     <div class="phase">
+      <div class="phase-head"><span class="phase-tag p2" style="background:var(--ok)">C — 3/5 SHIPPED</span><span class="phase-title">E2E completeness &amp; hardening</span><span class="phase-eta">2026-07-11 · branch feat/e2e-dms</span></div>
+      <div class="phase-body">
+        <p class="goal">Hardening and feature-completeness on top of the Phase B MVP. Three candidates shipped with tests; the two structural ones (multi-device, PQ) got full designs/decision memos so implementation starts from a plan, not a blank page.</p>
+        <ul class="items">
+          <li>✅ <b>Pickle key → OS keychain</b>: Tauri commands over <code>keyring</code> v3 (Windows Credential Manager / macOS Keychain / Linux Secret Service, vendored dbus); async <code>PickleKeyProvider</code>; verified-read-back migration out of localStorage; fail-soft fallback <span class="ref">spec §7.3</span></li>
+          <li>✅ <b>E2E message edits</b>: sticky encryption state on PATCH (envelope-only for encrypted, plaintext history stays plaintext), plaintext cache versioned by <code>editedAt</code> — edit echoes/refetches decrypt exactly once, stale entries never served</li>
+          <li>✅ <b>Client-side search</b>: encrypted conversations search this device's decrypted cache (authorId/createdAt captured at write time, vault cursor scan, SearchModal local branch + honest coverage hint, +1 i18n key × 11 locales)</li>
+          <li>📐 <b>Multi-device — designed</b> (spec §12): per-device key pools + device-list versioning, Megolm group-session layer (encrypt once, distribute key pairwise — also fixes decrypt-to-self), rotation on membership change, migration path from olm1</li>
+          <li>📐 <b>Post-quantum — evaluated, deliberately deferred</b> (docs/e2e-pq-evaluation.md): Signal's Triple Ratchet is not adoptable in a webview (no third-party WASM build); vodozemac has no upstream PQ yet; designed fallback = <code>olm1+mlkem</code> hybrid outer layer (ML-KEM-768 in the Rust binding). Revisit triggers documented; crypto-deps-watch flags upstream movement</li>
+          <li>✅ <b>E2E attachments</b> (spec §13): per-file AES-256-GCM in the Rust binding; structured plaintext payload (control-char prefix — no collision with raw text) seals real name/type/size + file keys inside the message ciphertext; server presigns/stores only opaque <code>encrypted.bin</code> octet-stream blobs and discards client-supplied names; download→decrypt→blob-URL rendering; GCM tag = integrity (no separate hash); search matches encrypted file names</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase">
       <div class="phase-head"><span class="phase-tag p2" style="background:var(--ok)">C</span><span class="phase-title">E2E completeness</span></div>
       <div class="phase-body">
         <p class="goal">Everything a DM can contain, plus multi-device.</p>

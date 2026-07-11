@@ -1,6 +1,23 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/**
+ * Result of encrypting attachment bytes: random key + nonce (base64) and the
+ * ciphertext (plaintext + 16-byte tag).
+ */
+export class EncryptedAttachment {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Transfers the ciphertext to the caller without copying megabytes twice.
+     * Callable once.
+     */
+    takeCiphertext(): Uint8Array;
+    readonly iv: string;
+    readonly key: string;
+}
+
 export class EngineAccount {
     free(): void;
     [Symbol.dispose](): void;
@@ -76,6 +93,10 @@ export class InboundResult {
     readonly plaintext: string;
 }
 
+export function decryptAttachment(ciphertext: Uint8Array, key_b64: string, iv_b64: string): Uint8Array;
+
+export function encryptAttachment(bytes: Uint8Array): EncryptedAttachment;
+
 /**
  * Engine/version identifier baked into envelopes and diagnostics.
  */
@@ -104,9 +125,15 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_encryptedattachment_free: (a: number, b: number) => void;
     readonly __wbg_engineaccount_free: (a: number, b: number) => void;
     readonly __wbg_enginesession_free: (a: number, b: number) => void;
     readonly __wbg_inboundresult_free: (a: number, b: number) => void;
+    readonly decryptAttachment: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly encryptAttachment: (a: number, b: number) => [number, number, number];
+    readonly encryptedattachment_iv: (a: number) => [number, number];
+    readonly encryptedattachment_key: (a: number) => [number, number];
+    readonly encryptedattachment_takeCiphertext: (a: number) => [number, number];
     readonly engine_version: () => [number, number];
     readonly engineaccount_createInboundSession: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly engineaccount_createOutboundSession: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -136,10 +163,10 @@ export interface InitOutput {
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

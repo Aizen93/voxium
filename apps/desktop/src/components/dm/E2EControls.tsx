@@ -101,7 +101,6 @@ function EnableEncryptionModal({ conversation, onClose }: Props & { onClose: () 
       <ul className="mb-4 list-inside list-disc space-y-1 text-xs text-vox-text-muted">
         <li>{t('e2e.enablePointIrreversible')}</li>
         <li>{t('e2e.enablePointServer')}</li>
-        <li>{t('e2e.enablePointLimits')}</li>
       </ul>
       <div className="flex justify-end gap-2">
         <button

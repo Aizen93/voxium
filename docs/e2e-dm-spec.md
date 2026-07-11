@@ -259,8 +259,8 @@ verification and shows a warning.
 | Notifications | client decrypts first → body shows plaintext locally (never leaves device) |
 | Server search | E2E messages excluded server-side; client-side search is Phase C |
 | Reports | reporter's client attaches its decrypted plaintext (`reportedContent`); stored with `contentSource: "reporter"` — flagged unverifiable, ciphertext never copied |
-| Attachments | blocked in E2E conversations (Phase C: client-side encrypted attachments) |
-| Edits | blocked for E2E messages (Phase C) |
+| Attachments | encrypted client-side (AES-256-GCM in the binding); real metadata inside the message ciphertext; server stores opaque blobs (§13) |
+| Edits | fresh ratchet ciphertext under the same id; plaintext cache versioned by editedAt |
 | Logout | WASM objects freed, vault closed but **kept** (device keys persist like trusted-device tokens) |
 
 ## 10. Supply-chain policy
@@ -285,7 +285,7 @@ verification and shows a warning.
 3. ~~Pickle key in localStorage pending OS-keychain wrapping~~ — shipped in Phase C (§7.3); localStorage remains only as the browser-dev / keychain-failure fallback.
 4. ~~No edits~~ — shipped in Phase C: edits are fresh ratchet ciphertexts under the same id; the plaintext cache is versioned by `editedAt` (§6, §7.1).
 5. ~~No client-side search~~ — shipped in Phase C: encrypted conversations search this device's plaintext cache (coverage = what this device decrypted; §9).
-6. No encrypted attachments yet (design: §13).
+6. ~~No encrypted attachments~~ — shipped in Phase C (§13); the server can still see ciphertext sizes and upload timing (metadata, limitation 8).
 7. Group (server-channel) E2E out of scope.
 8. Metadata (participants, timing, sizes) visible to the server, as in Signal-style designs generally.
 
@@ -318,19 +318,30 @@ design that fits vodozemac (which ships **Megolm**, Matrix's group ratchet):
   keep decrypting; new sessions negotiate megolm1 when every participating
   device supports it, per-conversation.
 
-## 13. Encrypted attachments — design sketch (not yet implemented)
+## 13. Encrypted attachments (Phase C, shipped)
 
-- Client encrypts file bytes with a random per-file AES-256-GCM key **inside
-  the Rust binding** (RustCrypto `aes-gcm`; keeps the no-crypto-in-JS rule)
-  before the presigned S3 upload; the server stores an opaque blob.
-- The file key, IV, content hash, real `fileName`, `mimeType`, and true size
-  travel **inside the message ciphertext** — the plaintext becomes a small
-  JSON structure (`{text, attachments: [...]}`), so attachment metadata stops
-  leaking to the server. Server-side `MessageAttachment` rows keep only the
-  S3 key, ciphertext size, and `application/octet-stream`.
-- Rendering: download ciphertext (existing authenticated proxy), decrypt in
-  the binding, display via blob URL; existing retention/cleanup jobs work
-  unchanged on ciphertext.
-- Server lifts the attachments-in-encrypted-conversations block only for
-  envelope-accompanied uploads; size cap checked against ciphertext
-  (plaintext + 16-byte tag).
+- Client encrypts file bytes with a random per-file **AES-256-GCM** key inside
+  the Rust binding (`encryptAttachment`/`decryptAttachment`, RustCrypto
+  `aes-gcm` — the no-crypto-in-JS rule holds) before the presigned S3 upload;
+  the server stores an opaque blob. GCM's auth tag makes a swapped or
+  corrupted blob fail decryption, so no separate content hash is needed.
+- **Structured plaintext**: messages with attachments encrypt
+  `"" + JSON {v:1, t:text, a:[metas]}`; text-only messages remain raw
+  strings (wire-compatible with Phase B). The control-character prefix cannot
+  be typed, so raw text and payloads never collide. Each meta carries the real
+  `fileName`/`mimeType`/`fileSize` plus `key`/`iv` — peer-authored metas are
+  validated like any untrusted input and invalid ones dropped
+  (`parseE2EPlaintext`, shared).
+- **What the server sees**: presign requests with `encrypted: true`
+  (DM-only) are forced to `application/octet-stream`, the S3 key ends in
+  `-encrypted.bin` (never the real name), and `MessageAttachment` rows store
+  only the key + ciphertext size — a client-supplied fileName is discarded
+  server-side. Outer size cap = largest plaintext cap + 16-byte tag; the
+  per-type plaintext caps are client-enforced (the server cannot see the real
+  type — documented trade-off).
+- Rendering: ciphertext is fetched through the existing authenticated proxy,
+  decrypted in the binding, displayed via blob URLs (`E2EAttachmentDisplay`);
+  retention/cleanup jobs work unchanged on ciphertext.
+- The sender caches the **raw structured plaintext** (spec §7.2), so refetch,
+  reply previews, and client-side search all recover text + attachment names
+  (search matches file names too).

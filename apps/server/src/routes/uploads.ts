@@ -4,7 +4,7 @@ import { rateLimitUpload, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions } from '@voxium/shared';
+import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, LIMITS, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
 import crypto from 'crypto';
 import { Readable } from 'stream';
 import { hasServerPermission, hasChannelPermission } from '../utils/permissionCalculator';
@@ -61,7 +61,7 @@ uploadRouter.post(
   rateLimitUpload,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { fileName, fileSize, mimeType, channelId, conversationId } = req.body;
+      const { fileName, fileSize, mimeType, channelId, conversationId, encrypted } = req.body;
 
       // Validate exactly one context
       if (channelId !== undefined && typeof channelId !== 'string') throw new BadRequestError('channelId must be a string');
@@ -72,12 +72,26 @@ uploadRouter.post(
 
       if (!fileName || typeof fileName !== 'string') throw new BadRequestError('fileName required');
       if (!mimeType || typeof mimeType !== 'string') throw new BadRequestError('mimeType required');
-      if (!ALLOWED_ATTACHMENT_TYPES.includes(mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) {
-        throw new BadRequestError('File type not allowed');
-      }
-      const maxSize = getMaxAttachmentSize(mimeType);
-      if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxSize) {
-        throw new BadRequestError(`Invalid file size (max ${maxSize / 1024 / 1024}MB)`);
+
+      if (encrypted === true) {
+        // E2E attachment: the server stores an opaque AES-GCM blob. The real
+        // mime/size are inside the message ciphertext, so only the outer cap
+        // (largest allowed plaintext + GCM tag) is enforceable here — clients
+        // enforce the per-type plaintext caps before encrypting (spec §13).
+        if (!conversationId) throw new BadRequestError('Encrypted attachments are only supported in direct messages');
+        if (mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be uploaded as application/octet-stream');
+        const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
+        if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxCipherSize) {
+          throw new BadRequestError(`Invalid file size (max ${LIMITS.MAX_VIDEO_ATTACHMENT_SIZE / 1024 / 1024}MB)`);
+        }
+      } else {
+        if (!ALLOWED_ATTACHMENT_TYPES.includes(mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) {
+          throw new BadRequestError('File type not allowed');
+        }
+        const maxSize = getMaxAttachmentSize(mimeType);
+        if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxSize) {
+          throw new BadRequestError(`Invalid file size (max ${maxSize / 1024 / 1024}MB)`);
+        }
       }
 
       // Authorization
@@ -102,7 +116,10 @@ uploadRouter.post(
       }
 
       const contextPrefix = channelId ? `ch-${channelId}` : `dm-${conversationId}`;
-      const sanitizedName = fileName.replace(/[^\w.-]/g, '_').slice(0, 100);
+      // Encrypted attachments never leak the real file name into the S3 key
+      const sanitizedName = encrypted === true
+        ? E2E_ATTACHMENT_NAME
+        : fileName.replace(/[^\w.-]/g, '_').slice(0, 100);
       const attachmentId = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
       const key = `attachments/${contextPrefix}/${attachmentId}-${sanitizedName}`;
       const uploadUrl = await generatePresignedPutUrl(key, mimeType);

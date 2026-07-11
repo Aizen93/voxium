@@ -11,6 +11,8 @@ import init, {
   verify_ed25519,
   prekey_message_session_id,
   safety_number,
+  encryptAttachment,
+  decryptAttachment,
 } from '@voxium/crypto-engine';
 
 const require = createRequire(import.meta.url);
@@ -174,6 +176,39 @@ describe('crypto engine (vodozemac olm1)', () => {
     const msg = aliceSession.encrypt('via fallback') as { messageType: number; body: string };
     const inbound = bob.createInboundSession(alice.curve25519Key(), msg.body);
     expect(inbound.plaintext).toBe('via fallback');
+  });
+
+  it('encrypts and decrypts attachment bytes (AES-256-GCM round-trip)', () => {
+    const original = new Uint8Array(64 * 1024);
+    for (let i = 0; i < original.length; i++) original[i] = i % 251;
+
+    const encrypted = encryptAttachment(original);
+    const key = encrypted.key;
+    const iv = encrypted.iv;
+    expect(key).toMatch(/^[A-Za-z0-9+/]{43}$/); // 32 bytes
+    expect(iv).toMatch(/^[A-Za-z0-9+/]{16}$/); // 12 bytes
+    const ciphertext = encrypted.takeCiphertext();
+    expect(ciphertext.length).toBe(original.length + 16); // GCM tag
+    // ciphertext must not contain the plaintext
+    expect(Buffer.from(ciphertext.slice(0, 64)).equals(Buffer.from(original.slice(0, 64)))).toBe(false);
+
+    const decrypted = decryptAttachment(ciphertext, key, iv);
+    expect(Buffer.from(decrypted).equals(Buffer.from(original))).toBe(true);
+  });
+
+  it('rejects tampered attachment ciphertext and wrong keys (GCM authentication)', () => {
+    const encrypted = encryptAttachment(new Uint8Array([1, 2, 3, 4, 5]));
+    const key = encrypted.key;
+    const iv = encrypted.iv;
+    const ciphertext = encrypted.takeCiphertext();
+
+    const tampered = new Uint8Array(ciphertext);
+    tampered[2] ^= 0xff;
+    expect(() => decryptAttachment(tampered, key, iv)).toThrow();
+
+    const otherKey = encryptAttachment(new Uint8Array([9])).key;
+    expect(() => decryptAttachment(ciphertext, otherKey, iv)).toThrow();
+    expect(() => decryptAttachment(ciphertext, 'short', iv)).toThrow();
   });
 
   it('computes matching 60-digit safety numbers on both sides', () => {
