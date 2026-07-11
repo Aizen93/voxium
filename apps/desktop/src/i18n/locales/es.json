@@ -948,6 +948,7 @@
     "enabled": "Cifrado de extremo a extremo activado",
     "enableFailed": "No se pudo activar el cifrado",
     "encryptedMessage": "Mensaje cifrado",
+    "localSearchHint": "Buscando en los mensajes descifrados en este dispositivo — los resultados dependen de lo que este dispositivo haya recibido",
     "decryptFailed": "No se puede descifrar este mensaje",
     "attachmentsUnavailable": "Los archivos adjuntos aún no son compatibles en conversaciones cifradas",
     "safetyNumberTitle": "Número de seguridad",

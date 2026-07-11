@@ -948,6 +948,7 @@
     "enabled": "エンドツーエンド暗号化が有効になりました",
     "enableFailed": "暗号化を有効にできませんでした",
     "encryptedMessage": "暗号化されたメッセージ",
+    "localSearchHint": "この端末で復号されたメッセージを検索します — 結果はこの端末が受信した内容に依存します",
     "decryptFailed": "このメッセージを復号できません",
     "attachmentsUnavailable": "暗号化された会話では添付ファイルはまだサポートされていません",
     "safetyNumberTitle": "安全番号",

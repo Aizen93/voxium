@@ -301,7 +301,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (prepared) {
         // Cache own plaintext under the server id (Olm can't decrypt-to-self),
         // and show the plaintext locally instead of the envelope
-        await cacheSentPlaintext(sent.id, conversationId, content);
+        await cacheSentPlaintext(sent.id, conversationId, content, null, sent.createdAt);
         sent = { ...sent, content };
       }
       const exists = get().messages.some((m) => m.id === sent.id);
@@ -328,7 +328,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { data } = await api.patch(`/dm/${conversationId}/messages/${messageId}`, body);
     if (prepared) {
       // cache under the new editedAt version BEFORE the socket echo decrypts it
-      await cacheSentPlaintext(messageId, conversationId, content, data.data.editedAt ?? null);
+      await cacheSentPlaintext(messageId, conversationId, content, data.data.editedAt ?? null, data.data.createdAt);
     }
   },
 

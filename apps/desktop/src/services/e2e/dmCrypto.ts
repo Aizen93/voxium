@@ -55,6 +55,7 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
     authorId: message.author?.id ?? '',
     content: message.content,
     editedAt: message.editedAt ?? null,
+    createdAt: message.createdAt,
   });
   const content = result.failed ? DECRYPT_FAILED_CONTENT : result.text;
   return resolveReplyPreview({ ...message, content }, userId);
@@ -105,11 +106,59 @@ export async function cacheSentPlaintext(
   messageId: string,
   conversationId: string,
   plaintext: string,
-  editedAt?: string | null
+  editedAt?: string | null,
+  createdAt?: string
 ): Promise<void> {
   const userId = await currentUserId();
   if (!userId) return;
-  await getE2EService(userId).cachePlaintext(messageId, conversationId, plaintext, editedAt);
+  await getE2EService(userId).cachePlaintext(messageId, conversationId, plaintext, editedAt, {
+    authorId: userId,
+    ...(createdAt && { createdAt }),
+  });
+}
+
+/**
+ * Client-side search of an encrypted conversation (spec §9): the server only
+ * holds ciphertext, so encrypted DMs are searched over this device's local
+ * plaintext cache. Returns rows shaped like server SearchResults so the
+ * search UI can render either source.
+ */
+export async function searchEncryptedHistory(
+  conversationId: string,
+  query: string
+): Promise<Message[]> {
+  const userId = await currentUserId();
+  if (!userId) return [];
+  const { useAuthStore } = await import('../../stores/authStore');
+  const { useDMStore } = await import('../../stores/dmStore');
+  const me = useAuthStore.getState().user;
+  const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
+
+  const hits = (await getE2EService(userId).searchDecrypted(conversationId, query))
+    // pre-Phase-C cache entries lack createdAt — they can't be rendered or
+    // jumped to reliably, so they're excluded rather than shown broken
+    .filter((hit) => hit.createdAt);
+  return hits.map((hit) => {
+    // Resolve the author from the two possible DM participants; pre-Phase-C
+    // cache entries have no authorId and render anonymously rather than wrong
+    const author = hit.authorId === userId && me
+      ? { id: me.id, username: me.username, displayName: me.displayName, avatarUrl: me.avatarUrl }
+      : hit.authorId && hit.authorId === conversation?.participant.id
+        ? conversation.participant
+        : { id: hit.authorId ?? '', username: '', displayName: '?', avatarUrl: null };
+    return {
+      id: hit.messageId,
+      content: hit.text,
+      encrypted: true,
+      type: 'user',
+      channelId: null,
+      conversationId,
+      author,
+      createdAt: hit.createdAt ?? '',
+      editedAt: hit.editedAt ?? null,
+      reactions: [],
+    } as Message;
+  });
 }
 
 /** Resolve an encrypted conversation-list preview from the local cache. */

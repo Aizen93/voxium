@@ -29,6 +29,10 @@ export interface CachedPlaintext {
   /** Version marker: an edit is a fresh ciphertext for the same message id,
    *  so cache entries are only valid for the editedAt they were decrypted at. */
   editedAt?: string | null;
+  /** Display metadata for client-side search of E2E history (server search
+   *  can't see ciphertext). Entries written before Phase C lack these. */
+  authorId?: string;
+  createdAt?: string;
   failed?: boolean;
 }
 
@@ -132,6 +136,32 @@ export class E2EVault {
   }
   putPlaintext(messageId: string, entry: CachedPlaintext): Promise<void> {
     return this.put(`pt:${messageId}`, entry);
+  }
+
+  /**
+   * Scan all cached plaintexts of one conversation (client-side E2E search).
+   * Cursor over the `pt:` key range — DM history volumes make a linear scan
+   * cheap, and it avoids a schema migration for a dedicated index.
+   */
+  listPlaintexts(conversationId: string): Promise<Array<{ messageId: string; entry: CachedPlaintext }>> {
+    return new Promise((resolve, reject) => {
+      const results: Array<{ messageId: string; entry: CachedPlaintext }> = [];
+      const range = IDBKeyRange.bound('pt:', 'pt:￿');
+      const cursorReq = this.store('readonly').openCursor(range);
+      cursorReq.onerror = () => reject(cursorReq.error ?? new Error('IndexedDB cursor failed'));
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (!cursor) {
+          resolve(results);
+          return;
+        }
+        const entry = cursor.value as CachedPlaintext;
+        if (entry.conversationId === conversationId && !entry.failed) {
+          results.push({ messageId: String(cursor.key).slice(3), entry });
+        }
+        cursor.continue();
+      };
+    });
   }
 
   close(): void {

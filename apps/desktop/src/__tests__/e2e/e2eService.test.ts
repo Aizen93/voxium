@@ -362,6 +362,38 @@ describe('E2EService (client crypto core)', () => {
     expect(truncated.failed).toBe(true);
   });
 
+  it('searches locally decrypted history per conversation, newest first', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+
+    const send = async (id: string, text: string, createdAt: string) => {
+      const envelope = await alice.service.encryptMessage(bob.userId, text);
+      const result = await bob.service.decryptMessage({
+        id, conversationId: 'c1', authorId: alice.userId, content: envelope, createdAt,
+      });
+      expect(result.failed).toBeUndefined();
+    };
+    await send('m1', 'the quick brown fox', '2026-07-11T10:00:00.000Z');
+    await send('m2', 'lazy dog sleeps', '2026-07-11T11:00:00.000Z');
+    await send('m3', 'another FOX appears', '2026-07-11T12:00:00.000Z');
+    // a different conversation must not leak into results
+    const other = await alice.service.encryptMessage(bob.userId, 'fox in another room');
+    await bob.service.decryptMessage({
+      id: 'x1', conversationId: 'c2', authorId: alice.userId, content: other, createdAt: '2026-07-11T13:00:00.000Z',
+    });
+
+    const hits = await bob.service.searchDecrypted('c1', 'fox');
+    expect(hits.map((h) => h.messageId)).toEqual(['m3', 'm1']); // newest first, case-insensitive
+    expect(hits[0].authorId).toBe(alice.userId);
+    expect(hits[0].createdAt).toBe('2026-07-11T12:00:00.000Z');
+
+    expect(await bob.service.searchDecrypted('c1', 'zebra')).toEqual([]);
+  });
+
   it('computes identical safety numbers on both sides and tracks verification', async () => {
     uniq++;
     const server = createFakeServer();

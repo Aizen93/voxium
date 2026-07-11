@@ -948,6 +948,7 @@
     "enabled": "端到端加密已启用",
     "enableFailed": "无法启用加密",
     "encryptedMessage": "加密消息",
+    "localSearchHint": "正在搜索此设备上已解密的消息 — 结果取决于此设备收到的内容",
     "decryptFailed": "无法解密此消息",
     "attachmentsUnavailable": "加密对话暂不支持附件",
     "safetyNumberTitle": "安全码",
