@@ -8,9 +8,12 @@ export async function clearRateLimits() {
   const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
   try {
     await redis.connect();
+    // redis v5: scanIterator yields BATCHES of keys, not single keys
     const keysToDelete: string[] = [];
-    for await (const key of redis.scanIterator({ MATCH: 'rl:*', COUNT: 100 })) {
-      if (key !== 'rl:config') keysToDelete.push(key);
+    for await (const batch of redis.scanIterator({ MATCH: 'rl:*', COUNT: 100 })) {
+      for (const key of batch) {
+        if (key !== 'rl:config') keysToDelete.push(key);
+      }
     }
     if (keysToDelete.length > 0) {
       await redis.del(keysToDelete);
