@@ -609,16 +609,18 @@
     </div>
 
     <div class="phase">
-      <div class="phase-head"><span class="phase-tag p1" style="background:var(--ok)">B</span><span class="phase-title">End-to-end encrypted DMs — MVP (opt-in, text)</span></div>
+      <div class="phase-head"><span class="phase-tag p1" style="background:var(--ok)">B ✓ SHIPPED (MVP)</span><span class="phase-title">End-to-end encrypted DMs — opt-in, text</span><span class="phase-eta">2026-07-11 · branch feat/e2e-dms · spec: docs/e2e-dm-spec.md</span></div>
       <div class="phase-body">
-        <p class="goal">The privacy differentiator. Server stores ciphertext + public keys only; it cannot read message bodies.</p>
+        <p class="goal">The privacy differentiator, shipped. Server stores ciphertext + signed public keys only; it cannot read message bodies. <b>Engine decision (user, 2026-07-11): vodozemac</b> — Matrix's audited (Least Authority 2022), actively-maintained, Apache-2.0 Rust implementation of the Olm Double Ratchet — over the unmaintained libsignal TS port (option A) and desktop-only native libsignal (option C). Compiled to WASM behind our own marshalling-only binding (<code>packages/crypto-engine</code>, ~430KB, artifact vendored so builds don't need Rust).</p>
         <ul class="items">
-          <li>New <code>UserDevice</code> model: identity public key (X25519), signed prekey, one-time prekeys, registrationId — <b>private keys never leave the device</b> (Tauri secure storage / OS keychain)</li>
-          <li>Adopt a vetted library (Signal Protocol / Double Ratchet, e.g. libsignal) rather than hand-rolling crypto — client-side only, no third-party service, consistent with the privacy stance</li>
-          <li>Server endpoints serve prekey <em>bundles</em>; message ciphertext stored as an opaque blob with only sender/recipient/timestamp metadata</li>
-          <li>Opt-in per conversation with a key-verification step (safety numbers / QR); "E2E Encrypted" badge</li>
-          <li>Graceful degradation: recipient without keys (old client) → fall back with an explicit warning, never silently plaintext</li>
-          <li>Single device first; multi-device fanout in Phase C</li>
+          <li>✅ <b>Engine v1 "olm1"</b>: vodozemac pinned <code>=0.10.0</code> (ships the Feb-2026 report's defense-in-depth fixes: fallible all-zero DH check, strict Ed25519 default). Versioned envelope <code>{v,e,t,b}</code> keeps a clean swap path to a post-quantum engine at Phase C <span class="ref">user req #1, #4</span></li>
+          <li>✅ <b>Binding = pure marshalling</b> — all key derivation/ratcheting/verification inside vodozemac; only secret in JS is the 32-byte pickle key; pickles encrypted inside the engine <span class="ref">user req #2</span></li>
+          <li>✅ <b>Authenticated key distribution</b>: Ed25519 device root signs identity + every one-time/fallback key over domain-separated canonicals; server verifies on upload (hygiene), clients verify + TOFU-pin before ANY session; identity change = hard error until explicitly accepted <span class="ref">user req #3 · spec §4</span></li>
+          <li>✅ <b>Server</b>: E2EDevice/E2EOneTimeKey tables (additive migration), /e2e routes (register, status, replenish, bundle claim w/ atomic SKIP-LOCKED OTK pop + fallback-key exhaustion path), per-conversation irreversible enable (both devices required), plaintext REJECTED in encrypted conversations (never silent downgrade), envelope strictly validated + never sanitized, search-excluded; reports carry reporter-provided plaintext flagged unverifiable</li>
+          <li>✅ <b>Client</b>: IndexedDB vault (account/session pickles, pinned identities, plaintext cache — ratchet keys are one-shot so decrypt-once-cache-forever), serial crypto queue, OTK replenishment, 60-digit safety numbers + verify flow + identity-change warnings, lock badge/enable modal, graceful placeholders for undecryptable history</li>
+          <li>✅ <b>Supply chain</b>: weekly crypto-deps-watch CI (new-release gate + cargo audit + license policy); tree verified 100% Apache/MIT/BSD — no GPL/AGPL <span class="ref">user req #4, #5</span></li>
+          <li>✅ 59 new tests (1091 server + 108 desktop green): two-party ratchet, out-of-order, replay/tamper rejection, key-splice rejection, restart persistence, identity-change recovery, fallback exhaustion, cache idempotency, downgrade rejection</li>
+          <li>⏭️ Deferred to Phase C: OS-keychain wrapping of the pickle key (seam in place), E2E attachments, edits, client-side search, multi-device, PQ engine evaluation</li>
         </ul>
       </div>
     </div>
@@ -672,7 +674,7 @@
     </div>
   </section>
 
-  <div class="foot">Voxium v1.7.3 · stabilization audit · 5 surfaces · ~70 findings · ALL PHASES SHIPPED: P0 + P1 + P2-MN + P2 + P3 + encryption-A (PR to develop open) · remaining: P2-MN live 2-node validation → encryption B (E2E DMs).</div>
+  <div class="foot">Voxium v1.7.3 · stabilization audit · 5 surfaces · ~70 findings · ALL PHASES SHIPPED: P0 + P1 + P2-MN + P2 + P3 + encryption-A + encryption-B MVP (vodozemac E2E DMs, feat/e2e-dms) · remaining: P2-MN live 2-node validation → encryption-C hardening (keychain pickle key, E2E attachments, multi-device, PQ engine).</div>
 </div>
 </body>
 </html>

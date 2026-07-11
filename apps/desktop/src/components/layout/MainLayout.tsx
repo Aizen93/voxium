@@ -378,7 +378,13 @@ export function MainLayout() {
           }
         }
       },
-      dmMessageUpdate: (message: Message) => {
+      dmMessageUpdate: async (message: Message) => {
+        // E2E edits arrive as fresh ciphertext — decrypt before the store
+        // (the plaintext cache is versioned by editedAt)
+        if (message.encrypted) {
+          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+          message = await decryptMessageForDisplay(message);
+        }
         const activeConvId = useDMStore.getState().activeConversationId;
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().updateMessage(message);

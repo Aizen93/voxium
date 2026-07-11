@@ -943,7 +943,7 @@
     "enableExplainer": "As mensagens desta conversa serão criptografadas no seu dispositivo e só poderão ser lidas por você e seu contato. O servidor armazena apenas texto criptografado.",
     "enablePointIrreversible": "Isso não pode ser desfeito nesta conversa",
     "enablePointServer": "O histórico de mensagens permanece nos seus dispositivos — um dispositivo novo não consegue ler mensagens antigas",
-    "enablePointLimits": "Anexos e edição de mensagens ainda não estão disponíveis em conversas criptografadas",
+    "enablePointLimits": "Anexos ainda não estão disponíveis em conversas criptografadas",
     "enableConfirm": "Ativar criptografia",
     "enabled": "Criptografia de ponta a ponta ativada",
     "enableFailed": "Não foi possível ativar a criptografia",

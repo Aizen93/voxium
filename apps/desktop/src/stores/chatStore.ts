@@ -322,7 +322,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   editDMMessage: async (conversationId: string, messageId: string, content: string) => {
-    await api.patch(`/dm/${conversationId}/messages/${messageId}`, { content });
+    // E2E conversations: an edit is a fresh ciphertext for the same id
+    const prepared = await prepareOutgoingDM(conversationId, content);
+    const body = prepared ? { content: prepared.content, encrypted: true } : { content };
+    const { data } = await api.patch(`/dm/${conversationId}/messages/${messageId}`, body);
+    if (prepared) {
+      // cache under the new editedAt version BEFORE the socket echo decrypts it
+      await cacheSentPlaintext(messageId, conversationId, content, data.data.editedAt ?? null);
+    }
   },
 
   requestDeleteDMMessage: async (conversationId: string, messageId: string) => {

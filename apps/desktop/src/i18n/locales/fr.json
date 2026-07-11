@@ -943,7 +943,7 @@
     "enableExplainer": "Les messages de cette conversation seront chiffrés sur votre appareil et ne pourront être lus que par vous et votre contact. Le serveur ne stocke que du texte chiffré.",
     "enablePointIrreversible": "Cette action est irréversible pour cette conversation",
     "enablePointServer": "L'historique des messages reste sur vos appareils — un nouvel appareil ne peut pas lire les messages plus anciens",
-    "enablePointLimits": "Les pièces jointes et la modification des messages ne sont pas encore disponibles dans les conversations chiffrées",
+    "enablePointLimits": "Les pièces jointes ne sont pas encore disponibles dans les conversations chiffrées",
     "enableConfirm": "Activer le chiffrement",
     "enabled": "Chiffrement de bout en bout activé",
     "enableFailed": "Impossible d'activer le chiffrement",

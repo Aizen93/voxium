@@ -943,7 +943,7 @@
     "enableExplainer": "이 대화의 메시지는 기기에서 암호화되며 나와 상대방만 읽을 수 있습니다. 서버에는 암호문만 저장됩니다.",
     "enablePointIrreversible": "이 대화에서는 되돌릴 수 없습니다",
     "enablePointServer": "메시지 기록은 기기에만 보관됩니다 — 새 기기에서는 이전 메시지를 읽을 수 없습니다",
-    "enablePointLimits": "암호화된 대화에서는 첨부 파일과 메시지 수정을 아직 사용할 수 없습니다",
+    "enablePointLimits": "암호화된 대화에서는 첨부 파일을 아직 사용할 수 없습니다",
     "enableConfirm": "암호화 사용",
     "enabled": "종단간 암호화가 활성화되었습니다",
     "enableFailed": "암호화를 활성화할 수 없습니다",

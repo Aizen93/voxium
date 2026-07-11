@@ -447,20 +447,33 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
   try {
     const { conversationId, messageId } = req.params;
     const userId = req.user!.userId;
-    const content = sanitizeText(req.body.content ?? '');
-
-    const contentErr = validateMessageContent(content);
-    if (contentErr) throw new BadRequestError(contentErr);
+    const wantsEncrypted = req.body.encrypted === true;
 
     await getConversationOrThrow(conversationId, userId);
 
     const message = await prisma.message.findUnique({ where: { id: messageId } });
     if (!message || message.conversationId !== conversationId) throw new NotFoundError('Message');
     if (message.authorId !== userId) throw new ForbiddenError('You can only edit your own messages');
-    // Editing E2E messages is deferred to Phase C: an edit is a brand-new
-    // ratchet ciphertext, and peers that miss the socket event could never
-    // decrypt the refetched body (message keys are one-shot).
-    if (message.encrypted) throw new ForbiddenError('Encrypted messages cannot be edited yet');
+
+    // An edit must keep the message's encryption state: encrypted messages
+    // take a fresh ciphertext envelope (a new ratchet message — clients
+    // version their plaintext cache by editedAt); plaintext messages (incl.
+    // pre-encryption history) stay plaintext.
+    let content: string;
+    if (message.encrypted) {
+      if (!wantsEncrypted) {
+        throw new BadRequestError('This message is end-to-end encrypted; update your client to edit it');
+      }
+      if (!parseE2EEnvelope(req.body.content)) {
+        throw new BadRequestError('Invalid encrypted message envelope');
+      }
+      content = req.body.content as string; // verbatim — never sanitized
+    } else {
+      if (wantsEncrypted) throw new BadRequestError('Message is not end-to-end encrypted');
+      content = sanitizeText(req.body.content ?? '');
+      const contentErr = validateMessageContent(content);
+      if (contentErr) throw new BadRequestError(contentErr);
+    }
 
     const updated = await prisma.message.update({
       where: { id: messageId },

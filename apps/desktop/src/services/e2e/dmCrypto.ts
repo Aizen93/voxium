@@ -39,7 +39,8 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
 
   if (message.author?.id === userId) {
     for (let attempt = 0; attempt < 4; attempt++) {
-      const cached = await service.getCachedPlaintext(message.id);
+      // version-checked: an edit echo must not serve the pre-edit cache entry
+      const cached = await service.getCachedPlaintext(message.id, message.editedAt ?? null);
       if (cached !== null) {
         return resolveReplyPreview({ ...message, content: cached }, userId);
       }
@@ -53,6 +54,7 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
     conversationId: message.conversationId ?? '',
     authorId: message.author?.id ?? '',
     content: message.content,
+    editedAt: message.editedAt ?? null,
   });
   const content = result.failed ? DECRYPT_FAILED_CONTENT : result.text;
   return resolveReplyPreview({ ...message, content }, userId);
@@ -98,11 +100,16 @@ export async function prepareOutgoingDM(
   }
 }
 
-/** Store the sent plaintext under the server-assigned message id. */
-export async function cacheSentPlaintext(messageId: string, conversationId: string, plaintext: string): Promise<void> {
+/** Store the sent plaintext under the server-assigned message id + version. */
+export async function cacheSentPlaintext(
+  messageId: string,
+  conversationId: string,
+  plaintext: string,
+  editedAt?: string | null
+): Promise<void> {
   const userId = await currentUserId();
   if (!userId) return;
-  await getE2EService(userId).cachePlaintext(messageId, conversationId, plaintext);
+  await getE2EService(userId).cachePlaintext(messageId, conversationId, plaintext, editedAt);
 }
 
 /** Resolve an encrypted conversation-list preview from the local cache. */
