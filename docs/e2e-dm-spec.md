@@ -216,12 +216,24 @@ to the vault in the same order the ratchet advances.
 
 32 random bytes per account; the only secret JS handles. Pickle
 encryption/decryption itself happens inside vodozemac; the binding zeroizes
-its copy after each use. MVP stores it in localStorage
-(`voxium_e2e_pk_{userId}`). **Planned hardening (tracked, Phase C):** wrap it
-with the OS keychain via a Tauri command (`keyring` crate); the
-`PickleKeyProvider` interface in `vault.ts` is the seam. If the pickle key is
-lost while the vault survives, the client detects undecryptable pickles and
-regenerates a fresh identity (safety number changes — the honest signal).
+its copy after each use.
+
+**Storage (Phase C hardening, shipped):** in the Tauri desktop app the key
+lives in the **OS credential store** (Windows Credential Manager / macOS
+Keychain / Linux Secret Service) under service `app.voxium.e2e-pickle-key`,
+account = userId, via the `e2e_pickle_key_get/set` Tauri commands (`keyring`
+crate v3; the service name is hardcoded on the Rust side of the IPC boundary
+so webview code can only reach Voxium's own entries, and inputs are
+shape-validated). Pre-keychain installs are migrated out of localStorage on
+first load — the plaintext copy is deleted only after a verified read-back
+from the keychain. Browser dev builds (and keychain failures) fall back to
+localStorage (`voxium_e2e_pk_{userId}`) — fail-soft, because a key that can't
+be persisted at all would orphan every pickle in the vault. Backends implement
+`PickleKeyProvider` (`services/e2e/pickleKeyProvider.ts`).
+
+If the pickle key is lost while the vault survives, the client detects
+undecryptable pickles and regenerates a fresh identity (safety number
+changes — the honest signal).
 
 ## 8. Safety numbers
 
@@ -270,7 +282,7 @@ verification and shows a warning.
 
 1. Single device per account; new device ⇒ new identity ⇒ safety-number change; no history transfer.
 2. No post-quantum protection (engine swap path reserved via envelope `e` field).
-3. Pickle key in localStorage pending OS-keychain wrapping (§7.3).
+3. ~~Pickle key in localStorage pending OS-keychain wrapping~~ — shipped in Phase C (§7.3); localStorage remains only as the browser-dev / keychain-failure fallback.
 4. No encrypted attachments / edits / client-side search of E2E history.
 5. Group (server-channel) E2E out of scope.
 6. Metadata (participants, timing, sizes) visible to the server, as in Signal-style designs generally.

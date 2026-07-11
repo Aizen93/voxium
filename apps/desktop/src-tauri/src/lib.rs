@@ -142,13 +142,64 @@ fn notify_with_avatar(
     }
 }
 
+// ─── E2E pickle key in the OS keychain (docs/e2e-dm-spec.md §7.3) ────────────
+// The 32-byte vodozemac pickle key is the one secret the webview handles.
+// These commands move it from localStorage into the platform credential store
+// (Windows Credential Manager / macOS Keychain / Linux Secret Service). The
+// service name is hardcoded server-side of the IPC boundary so webview code
+// can only ever touch Voxium's own E2E entries.
+
+const E2E_KEYCHAIN_SERVICE: &str = "app.voxium.e2e-pickle-key";
+
+fn valid_e2e_user_id(user_id: &str) -> bool {
+    !user_id.is_empty()
+        && user_id.len() <= 64
+        && user_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+#[tauri::command]
+fn e2e_pickle_key_get(user_id: String) -> Result<Option<String>, String> {
+    if !valid_e2e_user_id(&user_id) {
+        return Err("invalid user id".to_string());
+    }
+    let entry = keyring::Entry::new(E2E_KEYCHAIN_SERVICE, &user_id).map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn e2e_pickle_key_set(user_id: String, key_b64: String) -> Result<(), String> {
+    if !valid_e2e_user_id(&user_id) {
+        return Err("invalid user id".to_string());
+    }
+    // exactly one 32-byte base64 key (43 unpadded / 44 padded chars)
+    let valid_shape = (key_b64.len() == 43 || key_b64.len() == 44)
+        && key_b64
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+    if !valid_shape {
+        return Err("invalid key format".to_string());
+    }
+    let entry = keyring::Entry::new(E2E_KEYCHAIN_SERVICE, &user_id).map_err(|e| e.to_string())?;
+    entry.set_password(&key_b64).map_err(|e| e.to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![notify_with_avatar])
+        .invoke_handler(tauri::generate_handler![
+            notify_with_avatar,
+            e2e_pickle_key_get,
+            e2e_pickle_key_set
+        ])
         .setup(|app| {
             use tauri::Manager;
 

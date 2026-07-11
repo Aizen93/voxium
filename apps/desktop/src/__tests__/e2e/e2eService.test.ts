@@ -114,8 +114,8 @@ function createFakeServer() {
 function memoryKeyProvider(): PickleKeyProvider {
   const keys = new Map<string, string>();
   return {
-    load: (userId) => keys.get(userId) ?? null,
-    save: (userId, key) => void keys.set(userId, key),
+    load: async (userId) => keys.get(userId) ?? null,
+    save: async (userId, key) => void keys.set(userId, key),
   };
 }
 
