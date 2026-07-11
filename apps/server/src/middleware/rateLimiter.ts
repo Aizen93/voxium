@@ -42,6 +42,13 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   interact:       { keyPrefix: 'rl:interact',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Interact' },
   themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
   themeBrowse:    { keyPrefix: 'rl:themebr',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Browse' },
+  // E2E key distribution: registration is rare (per install / key reset);
+  // bundle claims consume the TARGET user's one-time keys, so they get a
+  // tighter budget than plain reads to slow deliberate prekey draining.
+  e2eDevice:      { keyPrefix: 'rl:e2edev',    points: 5,   duration: 3600, blockDuration: 0,  keyType: 'userId', label: 'E2E Device Register' },
+  e2eKeys:        { keyPrefix: 'rl:e2ekeys',   points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Key Upload' },
+  e2eBundle:      { keyPrefix: 'rl:e2ebundle', points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Bundle Claim' },
+  e2eStatus:      { keyPrefix: 'rl:e2estat',   points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Device Status' },
 };
 
 // Overrides loaded from Redis on init, updated via admin API
@@ -222,6 +229,10 @@ export const rateLimitGeneral = createMiddleware('general', byIp);
 export const rateLimitInteract = createMiddleware('interact', byUserId);
 export const rateLimitThemeManage = createMiddleware('themeManage', byUserId);
 export const rateLimitThemeBrowse = createMiddleware('themeBrowse', byUserId);
+export const rateLimitE2EDevice = createMiddleware('e2eDevice', byUserId);
+export const rateLimitE2EKeys = createMiddleware('e2eKeys', byUserId);
+export const rateLimitE2EBundle = createMiddleware('e2eBundle', byUserId);
+export const rateLimitE2EStatus = createMiddleware('e2eStatus', byUserId);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────
 

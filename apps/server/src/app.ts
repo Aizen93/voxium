@@ -22,6 +22,7 @@ import { adminRouter } from './routes/admin';
 import { supportRouter } from './routes/support';
 import { roleRouter } from './routes/roles';
 import { themeRouter } from './routes/themes';
+import { e2eRouter } from './routes/e2e';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 
@@ -229,6 +230,7 @@ api.use('/stats', statsRouter);
 api.use('/admin', adminRouter);
 api.use('/support', supportRouter);
 api.use('/themes', themeRouter);
+api.use('/e2e', e2eRouter);
 
 app.use('/api/v1', api);
 

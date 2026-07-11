@@ -138,6 +138,9 @@ importers:
       '@timephy/rnnoise-wasm':
         specifier: ^1.0.0
         version: 1.0.0
+      '@voxium/crypto-engine':
+        specifier: workspace:*
+        version: link:../../packages/crypto-engine
       '@voxium/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -211,6 +214,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.0.1
         version: 6.0.1(vite@8.1.4(@types/node@25.5.0)(esbuild@0.28.1)(jiti@2.6.1)(tsx@4.21.0))
+      fake-indexeddb:
+        specifier: ^6.2.5
+        version: 6.2.5
       jsdom:
         specifier: ^29.1.1
         version: 29.1.1(@noble/hashes@2.0.1)
@@ -350,6 +356,8 @@ importers:
       vitest:
         specifier: ^4.1.0
         version: 4.1.0(@types/node@25.5.0)(jsdom@29.1.1(@noble/hashes@2.0.1))(vite@8.1.4(@types/node@25.5.0)(esbuild@0.28.1)(jiti@2.6.1)(tsx@4.21.0))
+
+  packages/crypto-engine: {}
 
   packages/shared:
     devDependencies:
@@ -2297,6 +2305,10 @@ packages:
 
   extend@3.0.2:
     resolution: {integrity: sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g==}
+
+  fake-indexeddb@6.2.5:
+    resolution: {integrity: sha512-CGnyrvbhPlWYMngksqrSSUT1BAVP49dZocrHuK0SvtR0D5TMs5wP0o3j7jexDJW01KSadjBp1M/71o/KR3nD1w==}
+    engines: {node: '>=18'}
 
   fake-mediastreamtrack@2.2.1:
     resolution: {integrity: sha512-SITLc7UTDirSdgLGORrlmqjWLJtbtfIz/xO7DwVbJH3f0ds+NQok4ccl/WEzz49NSgiUlXf2wDW0+y5C+TO6EA==}
@@ -6213,6 +6225,8 @@ snapshots:
   exsolve@1.0.8: {}
 
   extend@3.0.2: {}
+
+  fake-indexeddb@6.2.5: {}
 
   fake-mediastreamtrack@2.2.1:
     dependencies:

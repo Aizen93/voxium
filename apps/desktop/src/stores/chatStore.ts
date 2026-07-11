@@ -3,6 +3,7 @@ import axios from 'axios';
 import { api } from '../services/api';
 import { getSocket } from '../services/socket';
 import { toast } from './toastStore';
+import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
 import type { Message, MessageAuthor, Attachment, ReactionGroup } from '@voxium/shared';
 
 // Track typing timers per user to prevent leaks
@@ -211,7 +212,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/dm/${conversationId}/messages?${params}`, {
         signal: controller.signal,
       });
-      const newMessages = data.data;
+      // E2E conversations: ciphertext never reaches the store or the DOM
+      const newMessages = await decryptMessagesForDisplay(data.data);
 
       if (controller.signal.aborted) return;
 
@@ -254,11 +256,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/dm/${conversationId}/messages?around=${messageId}`, {
         signal: controller.signal,
       });
+      const decrypted = await decryptMessagesForDisplay(data.data);
 
       if (controller.signal.aborted) return;
 
       set({
-        messages: data.data,
+        messages: decrypted,
         hasMore: data.hasMore,
         hasMoreAfter: data.hasMoreAfter ?? false,
         targetMessageId: data.targetMessageId ?? messageId,
@@ -279,14 +282,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sendDMMessage: async (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => {
     try {
       const replyingTo = get().replyingTo;
-      const body: Record<string, unknown> = { content };
+
+      // E2E conversations: encrypt before anything leaves the client
+      const prepared = await prepareOutgoingDM(conversationId, content);
+      if (prepared && attachments?.length) {
+        toast.error('Attachments are not yet supported in encrypted conversations');
+        return;
+      }
+
+      const body: Record<string, unknown> = prepared
+        ? { content: prepared.content, encrypted: true }
+        : { content };
       if (replyingTo) body.replyToId = replyingTo.id;
-      if (attachments?.length) body.attachments = attachments;
+      if (!prepared && attachments?.length) body.attachments = attachments;
 
       const { data } = await api.post(`/dm/${conversationId}/messages`, body);
-      const exists = get().messages.some((m) => m.id === data.data.id);
+      let sent: Message = data.data;
+      if (prepared) {
+        // Cache own plaintext under the server id (Olm can't decrypt-to-self),
+        // and show the plaintext locally instead of the envelope
+        await cacheSentPlaintext(sent.id, conversationId, content);
+        sent = { ...sent, content };
+      }
+      const exists = get().messages.some((m) => m.id === sent.id);
       if (!exists) {
-        set((state) => ({ messages: [...state.messages, data.data] }));
+        set((state) => ({ messages: [...state.messages, sent] }));
       }
 
       if (replyingTo) set({ replyingTo: null });

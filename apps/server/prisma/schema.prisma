@@ -58,6 +58,7 @@ model User {
   supportTicketsClaimed SupportTicket[]  @relation("SupportTicketClaimer")
   supportMessages       SupportMessage[] @relation("SupportMessageAuthor")
   communityThemes       CommunityTheme[]
+  e2eDevice             E2EDevice?
 
   @@map("users")
 }
@@ -244,6 +245,9 @@ model Channel {
 model Message {
   id             String    @id @default(cuid())
   content        String
+  // E2E DMs: when true, content is an opaque ciphertext envelope (see
+  // docs/e2e-dm-spec.md §6) — never sanitized, searched, or mention-resolved.
+  encrypted      Boolean   @default(false)
   type           String    @default("user")
   channelId      String?   @map("channel_id")
   conversationId String?   @map("conversation_id")
@@ -331,6 +335,9 @@ model Conversation {
   id        String   @id @default(cuid())
   user1Id   String   @map("user1_id")
   user2Id   String   @map("user2_id")
+  // E2E DMs: set when either participant enables encryption. Irreversible —
+  // once set, the server rejects plaintext user messages in this conversation.
+  encryptedAt DateTime? @map("encrypted_at")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -476,6 +483,10 @@ model Report {
   reportedUserId  String    @map("reported_user_id")
   messageId       String?   @map("message_id")
   messageContent  String?   @map("message_content")
+  // "server" = content copied server-side (plaintext messages).
+  // "reporter" = decrypted plaintext supplied by the reporting client for E2E
+  // messages — the server cannot verify it against the ciphertext.
+  contentSource   String    @default("server") @map("content_source")
   channelId       String?   @map("channel_id")
   conversationId  String?   @map("conversation_id")
   serverId        String?   @map("server_id")
@@ -558,4 +569,39 @@ model SupportMessage {
   @@index([ticketId, createdAt])
   @@index([authorId])
   @@map("support_messages")
+}
+
+// ─── E2E Encryption (DMs — docs/e2e-dm-spec.md) ──────────────────────────────
+
+model E2EDevice {
+  id                   String   @id @default(cuid())
+  userId               String   @unique @map("user_id") // MVP: one device per user (multi-device is Phase C)
+  curve25519Key        String   @map("curve25519_key") // Olm identity key, unpadded base64
+  ed25519Key           String   @map("ed25519_key") // device signing key, unpadded base64
+  deviceSignature      String   @map("device_signature") // Ed25519 over the canonical device binding (spec §4)
+  fallbackKeyId        String?  @map("fallback_key_id")
+  fallbackKey          String?  @map("fallback_key")
+  fallbackKeySignature String?  @map("fallback_key_signature")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  oneTimeKeys E2EOneTimeKey[]
+
+  @@map("e2e_devices")
+}
+
+model E2EOneTimeKey {
+  id        String   @id @default(cuid())
+  deviceId  String   @map("device_id")
+  keyId     String   @map("key_id") // vodozemac KeyId, unpadded base64
+  publicKey String   @map("public_key") // Curve25519, unpadded base64
+  signature String // Ed25519 over the canonical OTK binding (spec §4)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  device E2EDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, keyId])
+  @@index([deviceId, createdAt])
+  @@map("e2e_one_time_keys")
 }

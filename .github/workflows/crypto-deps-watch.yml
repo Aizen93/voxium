@@ -1,0 +1,73 @@
+# Watches the E2E crypto engine's supply chain (docs/e2e-dm-spec.md §10):
+#  - a newer vodozemac release than our exact pin → fail, so the bump is
+#    reviewed deliberately (changelog + RustSec) instead of rotting silently
+#  - RustSec advisories against the locked dependency tree (cargo audit)
+#  - license policy: no GPL/AGPL/LGPL may enter the crypto dependency tree
+name: crypto-deps-watch
+
+on:
+  schedule:
+    - cron: '17 6 * * 1' # weekly, Monday 06:17 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packages/crypto-engine/Cargo.toml'
+      - 'packages/crypto-engine/Cargo.lock'
+      - '.github/workflows/crypto-deps-watch.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/crypto-engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check for a newer vodozemac release
+        run: |
+          PINNED=$(grep -oP 'vodozemac = "=\K[0-9.]+' Cargo.toml)
+          LATEST=$(curl -s -A "voxium-crypto-deps-watch" https://crates.io/api/v1/crates/vodozemac \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['crate']['max_stable_version'])")
+          echo "pinned=$PINNED latest=$LATEST"
+          if [ "$PINNED" != "$LATEST" ]; then
+            echo "::error::vodozemac $LATEST is available (pinned: $PINNED). Review the changelog and RustSec, then bump the pin in packages/crypto-engine/Cargo.toml and rebuild the WASM artifact (pnpm --filter @voxium/crypto-engine build:wasm)."
+            exit 1
+          fi
+
+      - name: Ensure lockfile (committed lockfile is authoritative)
+        run: test -f Cargo.lock || cargo generate-lockfile
+
+      - name: RustSec advisory audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - name: License policy (no GPL/AGPL/LGPL in the crypto tree)
+        run: |
+          VIOLATIONS=$(cargo metadata --format-version 1 \
+            | python3 -c "
+          import json, sys
+          meta = json.load(sys.stdin)
+          bad = []
+          for p in meta['packages']:
+              lic = (p.get('license') or 'UNKNOWN')
+              # 'OR' alternatives are fine as long as a permissive option exists
+              options = [o.strip() for part in lic.split(' OR ') for o in [part]]
+              permissive = any(not any(g in o for g in ('GPL', 'AGPL', 'LGPL')) for o in options)
+              if not permissive or lic == 'UNKNOWN':
+                  bad.append(f\"{p['name']}@{p['version']}: {lic}\")
+          print('\n'.join(bad))
+          ")
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::copyleft/unknown licenses entered the crypto dependency tree:"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+          echo "license tree clean"

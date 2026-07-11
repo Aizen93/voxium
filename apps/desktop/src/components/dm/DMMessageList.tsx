@@ -4,7 +4,7 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from '../chat/MessageItem';
-import { Phone, ArrowDown } from 'lucide-react';
+import { Phone, ArrowDown, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 
 interface Props {
@@ -118,10 +118,15 @@ export function DMMessageList({ conversationId }: Props) {
                   ? t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') })
                   : format(date, 'MM/dd/yyyy h:mm a');
 
+              const isEncryptionNotice = message.content.toLowerCase().includes('encryption');
               return (
                 <div className="my-3 flex items-center justify-center gap-2">
                   <div className="flex items-center gap-2 rounded-full bg-vox-bg-secondary px-4 py-1.5">
-                    <Phone size={14} className="text-vox-text-muted" />
+                    {isEncryptionNotice ? (
+                      <Lock size={14} className="text-vox-accent-success" />
+                    ) : (
+                      <Phone size={14} className="text-vox-text-muted" />
+                    )}
                     <span className="text-xs text-vox-text-secondary">{message.content}</span>
                     <span className="text-[10px] text-vox-text-muted">{timeStr}</span>
                   </div>

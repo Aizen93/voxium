@@ -5,6 +5,8 @@ import { useFriendStore } from './friendStore';
 import { useSupportStore } from './supportStore';
 import { useAnnouncementStore } from './announcementStore';
 import { useVoiceStore } from './voiceStore';
+import { useE2EStore } from './e2eStore';
+import { disposeE2EService } from '../services/e2e/e2eService';
 
 /**
  * Account-scoped stores that MUST be wiped on logout. Without this, the next
@@ -24,6 +26,7 @@ const ACCOUNT_STORES = [
   useSupportStore,
   useAnnouncementStore,
   useVoiceStore,
+  useE2EStore,
 ] as const;
 
 // Captured at module import — before any user interaction — so this is each
@@ -50,4 +53,8 @@ export function resetAccountStores(): void {
 
   useVoiceStore.setState({ selfMute, selfDeaf });
   useAnnouncementStore.setState({ dismissedIds });
+
+  // Free the WASM crypto objects and close the vault. Key material stays in
+  // the vault (device keys persist across logout, like trusted-device tokens).
+  disposeE2EService();
 }

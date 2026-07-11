@@ -9,7 +9,7 @@ import { Avatar } from '../common/Avatar';
 import { MessageContent } from './MessageContent';
 import { AttachmentDisplay } from './AttachmentDisplay';
 import { UserHoverTarget } from '../common/UserHoverTarget';
-import { Pencil, Trash2, SmilePlus, Reply, Flag } from 'lucide-react';
+import { Pencil, Trash2, SmilePlus, Reply, Flag, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
@@ -170,9 +170,15 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
 
   const replyPreview = (() => {
     if (message.replyTo) {
-      const truncated = message.replyTo.content.length > 80
-        ? message.replyTo.content.slice(0, 80) + '...'
+      // Encrypted parent whose plaintext isn't in the local cache: never show
+      // the ciphertext envelope — show a lock placeholder instead
+      const replySource = message.replyTo.encrypted &&
+        (!message.replyTo.content || message.replyTo.content.startsWith('{"v":1'))
+        ? t('e2e.encryptedMessage')
         : message.replyTo.content;
+      const truncated = replySource.length > 80
+        ? replySource.slice(0, 80) + '...'
+        : replySource;
       return (
         <div
           onClick={handleScrollToReply}
@@ -239,7 +245,9 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 onClose={() => setShowReactionPicker(false)}
               />
             )}
-            {isOwn && (
+            {isOwn && !message.encrypted && (
+              // E2E messages can't be edited (Phase C): an edit is a fresh
+              // ratchet ciphertext peers may never be able to decrypt
               <button
                 onClick={handleStartEdit}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
@@ -307,11 +315,16 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                   <div className="mt-1">{editArea}</div>
                 ) : (
                   <>
-                    {message.content && (
+                    {message.content ? (
                       <div className="text-sm text-vox-text-primary break-words">
                         <MessageContent content={message.content} mentions={message.mentions} />
                       </div>
-                    )}
+                    ) : message.encrypted ? (
+                      <div className="flex items-center gap-1 text-sm italic text-vox-text-muted">
+                        <Lock size={12} />
+                        {t('e2e.decryptFailed')}
+                      </div>
+                    ) : null}
                     {message.attachments && message.attachments.length > 0 && (
                       <div className="flex flex-col">
                         {message.attachments.map((a) => (
@@ -336,14 +349,19 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
 
               {isEditing ? editArea : (
                 <div className="min-w-0 flex-1">
-                  {message.content && (
+                  {message.content ? (
                     <div className="text-sm text-vox-text-primary break-words">
                       <MessageContent content={message.content} mentions={message.mentions} />
                       {message.editedAt && (
                         <span className="text-[10px] text-vox-text-muted">{t('messageItem.edited')}</span>
                       )}
                     </div>
-                  )}
+                  ) : message.encrypted ? (
+                    <div className="flex items-center gap-1 text-sm italic text-vox-text-muted">
+                      <Lock size={12} />
+                      {t('e2e.decryptFailed')}
+                    </div>
+                  ) : null}
                   {message.attachments && message.attachments.length > 0 && (
                     <div className="flex flex-col">
                       {message.attachments.map((a) => (
@@ -373,6 +391,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
           type="message"
           reportedUserId={message.author.id}
           messageId={message.id}
+          reportedContent={message.encrypted ? message.content : undefined}
           onClose={() => setShowReportModal(false)}
         />
       )}

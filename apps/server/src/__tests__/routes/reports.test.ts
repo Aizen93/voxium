@@ -99,3 +99,103 @@ describe('Report Routes — input validation', () => {
     expect(res.body.error).toMatch(/invalid report type/i);
   });
 });
+
+describe('Report Routes — E2E message reports', () => {
+  const baseDMMessage = {
+    id: 'msg-1',
+    content: 'server-side content',
+    encrypted: false,
+    channelId: null,
+    conversationId: 'conv-1',
+    authorId: 'user-2',
+    channel: null,
+  };
+
+  function mockHappyPath(message: Record<string, unknown>) {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-2' } as any);
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null);
+    vi.mocked(prisma.message.findUnique).mockResolvedValue(message as any);
+    vi.mocked(prisma.conversation.findFirst).mockResolvedValue({ id: 'conv-1' } as any);
+    vi.mocked(prisma.report.create).mockResolvedValue({ id: 'report-1' } as any);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.report.count).mockResolvedValue(0);
+  });
+
+  it('copies server content for plaintext messages (contentSource=server)', async () => {
+    mockHappyPath(baseDMMessage);
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/reports')
+      .send({ type: 'message', reportedUserId: 'user-2', messageId: 'msg-1', reason: 'Harassment in this DM' });
+
+    expect(res.status).toBe(201);
+    expect(prisma.report.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ messageContent: 'server-side content', contentSource: 'server' }),
+      })
+    );
+  });
+
+  it('uses reporter-provided plaintext for encrypted messages (contentSource=reporter)', async () => {
+    mockHappyPath({ ...baseDMMessage, encrypted: true, content: '{"v":1,"e":"olm1","t":1,"b":"QWJj"}' });
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/reports')
+      .send({
+        type: 'message',
+        reportedUserId: 'user-2',
+        messageId: 'msg-1',
+        reason: 'Harassment in this DM',
+        reportedContent: 'the decrypted text I saw',
+      });
+
+    expect(res.status).toBe(201);
+    expect(prisma.report.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ messageContent: 'the decrypted text I saw', contentSource: 'reporter' }),
+      })
+    );
+    // the ciphertext itself must never be copied into the report
+    const created = vi.mocked(prisma.report.create).mock.calls[0][0] as any;
+    expect(created.data.messageContent).not.toContain('olm1');
+  });
+
+  it('stores null content for encrypted messages when the reporter provides none', async () => {
+    mockHappyPath({ ...baseDMMessage, encrypted: true, content: '{"v":1,"e":"olm1","t":1,"b":"QWJj"}' });
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/reports')
+      .send({ type: 'message', reportedUserId: 'user-2', messageId: 'msg-1', reason: 'Harassment in this DM' });
+
+    expect(res.status).toBe(201);
+    expect(prisma.report.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ messageContent: null, contentSource: 'reporter' }),
+      })
+    );
+  });
+
+  it('rejects oversized reporter-provided content', async () => {
+    mockHappyPath({ ...baseDMMessage, encrypted: true });
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/reports')
+      .send({
+        type: 'message',
+        reportedUserId: 'user-2',
+        messageId: 'msg-1',
+        reason: 'Harassment in this DM',
+        reportedContent: 'x'.repeat(4001),
+      });
+
+    expect(res.status).toBe(400);
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+});

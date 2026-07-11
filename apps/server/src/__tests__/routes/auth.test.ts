@@ -138,6 +138,10 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitRoleManage: passthroughMiddleware,
   rateLimitThemeManage: passthroughMiddleware,
   rateLimitThemeBrowse: passthroughMiddleware,
+  rateLimitE2EDevice: passthroughMiddleware,
+  rateLimitE2EKeys: passthroughMiddleware,
+  rateLimitE2EBundle: passthroughMiddleware,
+  rateLimitE2EStatus: passthroughMiddleware,
   socketRateLimit: vi.fn().mockReturnValue(true),
 }));
 

@@ -128,6 +128,9 @@ searchRouter.get('/dm/:conversationId/messages', async (req: Request<{ conversat
       conversationId,
       content: { contains: q, mode: 'insensitive' },
       type: 'user',
+      // E2E messages store ciphertext — never match (or return) them in
+      // server search; encrypted history is searched client-side only
+      encrypted: false,
     };
     if (before) {
       where.createdAt = { lt: parseDateParam(before, 'before') };

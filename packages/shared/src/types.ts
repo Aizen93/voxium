@@ -127,6 +127,8 @@ export interface Attachment {
 export interface Message {
   id: string;
   content: string;
+  /** E2E DMs: content is a ciphertext envelope (client decrypts locally). */
+  encrypted?: boolean;
   type?: string;
   channelId: string | null;
   conversationId?: string | null;
@@ -134,6 +136,7 @@ export interface Message {
   replyTo?: {
     id: string;
     content: string;
+    encrypted?: boolean;
     author: MessageAuthor;
   } | null;
   author: MessageAuthor;
@@ -220,7 +223,9 @@ export interface Conversation {
   user1Id: string;
   user2Id: string;
   participant: MessageAuthor; // the OTHER user (populated at query time)
-  lastMessage: { content: string; createdAt: string; authorId: string } | null;
+  lastMessage: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string } | null;
+  /** E2E DMs: set once encryption is enabled (irreversible). */
+  encryptedAt?: string | null;
   createdAt: string;
 }
 
@@ -316,6 +321,7 @@ export interface ServerToClientEvents {
   'dm:voice:signal': (data: { from: string; signal: unknown }) => void;
   'dm:voice:ended': (data: { conversationId: string }) => void;
   'dm:conversation:deleted': (data: { conversationId: string }) => void;
+  'dm:encryption_enabled': (data: { conversationId: string; encryptedAt: string; enabledBy: string }) => void;
   'friend:request_received': (data: { friendship: Friendship }) => void;
   'friend:request_accepted': (data: { friendship: Friendship }) => void;
   'friend:removed': (data: { userId: string }) => void;
