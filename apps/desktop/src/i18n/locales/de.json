@@ -959,6 +959,20 @@
     "markVerified": "Als verifiziert markieren",
     "identityChangedWarning": "Die Sicherheitsschlüssel von {{name}} haben sich geändert. Das kann nach einer Neuinstallation passieren — überprüfe die neue Sicherheitsnummer, bevor du dieser Unterhaltung vertraust.",
     "acceptNewIdentity": "Neue Schlüssel akzeptieren",
-    "identityAccepted": "Neue Schlüssel akzeptiert"
+    "identityAccepted": "Neue Schlüssel akzeptiert",
+    "perDeviceSafetyExplainer": "Jedes Gerät von {{name}} hat eine eigene Sicherheitsnummer.",
+    "newDeviceBadgeTitle": "Neues Gerät hinzugefügt — Geräte überprüfen",
+    "newDeviceWarning": "{{name}} hat ein neues Gerät hinzugefügt. Überprüfe die Geräte, um sicherzugehen, dass es wirklich diese Person ist.",
+    "reviewDevices": "Geräte überprüfen",
+    "devicesReviewed": "Geräte überprüft",
+    "manageDevices": "Geräte verwalten",
+    "deviceManagerTitle": "Deine Geräte",
+    "deviceManagerExplainer": "Für dein Konto registrierte Geräte. Widerrufe Geräte, die du nicht mehr nutzt oder nicht erkennst — neue Nachrichten werden sofort ohne dieses Gerät neu verschlüsselt.",
+    "thisDevice": "Dieses Gerät",
+    "deviceAdded": "Hinzugefügt am {{date}}",
+    "revokeDevice": "Widerrufen",
+    "revokeConfirm": "Dieses Gerät widerrufen? Es kann dann keine neuen Nachrichten mehr lesen, und jede verschlüsselte Unterhaltung wird neu verschlüsselt.",
+    "revokeFailed": "Gerät konnte nicht widerrufen werden",
+    "revoked": "Gerät widerrufen"
   }
 }

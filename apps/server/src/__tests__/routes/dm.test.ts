@@ -98,6 +98,7 @@ vi.mock('../../utils/prisma', () => ({
     },
     e2EDevice: {
       count: vi.fn(),
+      findMany: vi.fn(),
     },
     conversationRead: {
       createMany: vi.fn(),
@@ -172,6 +173,7 @@ function resetPrismaMocks() {
   vi.mocked(prisma.conversation.findUniqueOrThrow).mockReset();
   vi.mocked(prisma.conversation.updateMany).mockReset();
   vi.mocked(prisma.e2EDevice.count).mockReset();
+  vi.mocked(prisma.e2EDevice.findMany).mockReset();
   vi.mocked(prisma.$transaction).mockReset();
 }
 
@@ -656,6 +658,8 @@ const encryptedConversation = {
 
 /** A structurally valid olm1 envelope (content validation is structural only). */
 const validEnvelope = JSON.stringify({ v: 1, e: 'olm1', t: 0, b: 'QWJjZGVmZ2hpamtsbW5vcA' });
+/** …and the multi-device megolm1 variant — both engines are valid on the wire. */
+const validMegolmEnvelope = JSON.stringify({ v: 1, e: 'megolm1', sid: 'c2Vzc2lvbklk', b: 'QWJjZGVmZ2hpamtsbW5vcA' });
 
 describe('DM routes — POST /:conversationId/encryption', () => {
   beforeEach(() => {
@@ -665,7 +669,7 @@ describe('DM routes — POST /:conversationId/encryption', () => {
 
   it('enables encryption when both participants have devices', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-    vi.mocked(prisma.e2EDevice.count).mockResolvedValueOnce(2);
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValueOnce([{ userId: 'user-1' }, { userId: 'user-2' }] as any);
     vi.mocked(prisma.conversation.updateMany).mockResolvedValueOnce({ count: 1 } as any);
     vi.mocked(prisma.conversation.findUniqueOrThrow).mockResolvedValueOnce({ encryptedAt: new Date('2026-07-11T10:00:00Z') } as any);
     vi.mocked(prisma.message.create).mockResolvedValueOnce({
@@ -697,14 +701,15 @@ describe('DM routes — POST /:conversationId/encryption', () => {
     const res = await request(app).post('/api/v1/dm/conv-1/encryption');
 
     expect(res.status).toBe(200);
-    expect(prisma.e2EDevice.count).not.toHaveBeenCalled();
+    expect(prisma.e2EDevice.findMany).not.toHaveBeenCalled();
     expect(prisma.conversation.updateMany).not.toHaveBeenCalled();
     expect(mockEmit).not.toHaveBeenCalled();
   });
 
   it('409s when a participant has no E2E device', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-    vi.mocked(prisma.e2EDevice.count).mockResolvedValueOnce(1);
+    // one participant has two devices — still only ONE E2E-capable user
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValueOnce([{ userId: 'user-1' }] as any);
 
     const app = createApp();
     const res = await request(app).post('/api/v1/dm/conv-1/encryption');
@@ -756,6 +761,52 @@ describe('DM routes — encrypted conversation message enforcement', () => {
     // ciphertext must be stored byte-for-byte — no sanitizeText pass
     expect(createdData.content).toBe(validEnvelope);
     expect(createdData.encrypted).toBe(true);
+  });
+
+  it('accepts a megolm1 group-ratchet envelope and stores it verbatim', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(encryptedConversation as any);
+    let createdData: any;
+    vi.mocked(prisma.$transaction).mockImplementationOnce(async (fn: any) => {
+      return fn({
+        message: {
+          create: vi.fn().mockImplementation((args: any) => {
+            createdData = args.data;
+            return { id: 'msg-m1' };
+          }),
+          findUniqueOrThrow: vi.fn().mockResolvedValue({ ...mockMessage, id: 'msg-m1', content: validMegolmEnvelope, encrypted: true }),
+        },
+        messageAttachment: { createMany: vi.fn() },
+      });
+    });
+    vi.mocked(prisma.conversation.update).mockResolvedValueOnce(mockConversation as any);
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/dm/conv-1/messages')
+      .send({ content: validMegolmEnvelope, encrypted: true });
+
+    expect(res.status).toBe(201);
+    // the server is engine-agnostic: it stores whatever parseE2EEnvelope accepts
+    expect(createdData.content).toBe(validMegolmEnvelope);
+    expect(createdData.encrypted).toBe(true);
+  });
+
+  it('rejects malformed megolm1 envelopes', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(encryptedConversation as any);
+    const app = createApp();
+
+    const bad = [
+      JSON.stringify({ v: 1, e: 'megolm1', b: 'QWJj' }), // missing sid
+      JSON.stringify({ v: 1, e: 'megolm1', sid: 'not a sid!', b: 'QWJj' }), // sid charset
+      JSON.stringify({ v: 1, e: 'megolm1', sid: '', b: 'QWJj' }), // empty sid
+      JSON.stringify({ v: 1, e: 'megolm1', sid: 'AAAA', b: 'not base64 !!' }), // body charset
+      JSON.stringify({ v: 1, e: 'megolm1', sid: 'AAAA', t: 0, b: 'QWJj' }), // extra key
+      JSON.stringify({ v: 1, e: 'megolm2', sid: 'AAAA', b: 'QWJj' }), // unknown engine
+    ];
+    for (const content of bad) {
+      const res = await request(app).post('/api/v1/dm/conv-1/messages').send({ content, encrypted: true });
+      expect(res.status).toBe(400);
+    }
   });
 
   it('rejects plaintext sends into an encrypted conversation (no silent downgrade)', async () => {

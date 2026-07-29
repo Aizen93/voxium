@@ -59,6 +59,69 @@ export class EngineAccount {
     sign(message: string): string;
 }
 
+/**
+ * Outbound Megolm group session — the sending half. Owns the signing key, so
+ * its pickle is secret material and never leaves the vault.
+ */
+export class EngineGroupSession {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Encrypt UTF-8 plaintext. Returns the unpadded-base64 MegolmMessage.
+     */
+    encrypt(plaintext: string): string;
+    static fromPickle(encrypted_pickle: string, pickle_key: Uint8Array): EngineGroupSession;
+    /**
+     * Number of messages already encrypted (== the index the next message
+     * will use).
+     */
+    messageIndex(): number;
+    /**
+     * Create a fresh outbound group session. Megolm session config is pinned
+     * to version 1 (the interoperable, non-experimental variant).
+     */
+    constructor();
+    pickle(pickle_key: Uint8Array): string;
+    /**
+     * Globally unique session id (base64 of the session's Ed25519 public key).
+     */
+    sessionId(): string;
+    /**
+     * Export the session key at the CURRENT ratchet index, base64-encoded.
+     * This is the secret shared with recipient devices (and with our own
+     * device, so the sender can decrypt its own history). Recipients can only
+     * decrypt messages from this index onwards.
+     */
+    sessionKey(): string;
+}
+
+/**
+ * Inbound Megolm group session — the receiving half, rebuilt from a session
+ * key that arrived over the authenticated pairwise Olm channel.
+ */
+export class EngineInboundGroupSession {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Decrypt an unpadded-base64 MegolmMessage.
+     */
+    decrypt(ciphertext_b64: string): GroupDecryptResult;
+    /**
+     * Lowest ratchet index this session can decrypt. Messages sent before the
+     * key was exported are permanently unreadable by this importer.
+     */
+    firstKnownIndex(): number;
+    static fromPickle(encrypted_pickle: string, pickle_key: Uint8Array): EngineInboundGroupSession;
+    /**
+     * Build an inbound session from a base64 session key produced by
+     * `EngineGroupSession.sessionKey()`.
+     */
+    static fromSessionKey(session_key_b64: string): EngineInboundGroupSession;
+    pickle(pickle_key: Uint8Array): string;
+    sessionId(): string;
+}
+
 export class EngineSession {
     private constructor();
     free(): void;
@@ -76,6 +139,18 @@ export class EngineSession {
     hasReceivedMessage(): boolean;
     pickle(pickle_key: Uint8Array): string;
     sessionId(): string;
+}
+
+/**
+ * Result of a Megolm decryption: the plaintext and the ratchet index the
+ * message was encrypted at (callers use the index for replay detection).
+ */
+export class GroupDecryptResult {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    readonly messageIndex: number;
+    readonly plaintext: string;
 }
 
 /**
@@ -127,7 +202,10 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_encryptedattachment_free: (a: number, b: number) => void;
     readonly __wbg_engineaccount_free: (a: number, b: number) => void;
+    readonly __wbg_enginegroupsession_free: (a: number, b: number) => void;
+    readonly __wbg_engineinboundgroupsession_free: (a: number, b: number) => void;
     readonly __wbg_enginesession_free: (a: number, b: number) => void;
+    readonly __wbg_groupdecryptresult_free: (a: number, b: number) => void;
     readonly __wbg_inboundresult_free: (a: number, b: number) => void;
     readonly decryptAttachment: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly encryptAttachment: (a: number, b: number) => [number, number, number];
@@ -149,12 +227,27 @@ export interface InitOutput {
     readonly engineaccount_oneTimeKeys: (a: number) => [number, number, number];
     readonly engineaccount_pickle: (a: number, b: number, c: number) => [number, number, number, number];
     readonly engineaccount_sign: (a: number, b: number, c: number) => [number, number];
+    readonly enginegroupsession_encrypt: (a: number, b: number, c: number) => [number, number];
+    readonly enginegroupsession_fromPickle: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly enginegroupsession_messageIndex: (a: number) => number;
+    readonly enginegroupsession_new: () => number;
+    readonly enginegroupsession_pickle: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly enginegroupsession_sessionId: (a: number) => [number, number];
+    readonly enginegroupsession_sessionKey: (a: number) => [number, number];
+    readonly engineinboundgroupsession_decrypt: (a: number, b: number, c: number) => [number, number, number];
+    readonly engineinboundgroupsession_firstKnownIndex: (a: number) => number;
+    readonly engineinboundgroupsession_fromPickle: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly engineinboundgroupsession_fromSessionKey: (a: number, b: number) => [number, number, number];
+    readonly engineinboundgroupsession_pickle: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly engineinboundgroupsession_sessionId: (a: number) => [number, number];
     readonly enginesession_decrypt: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly enginesession_encrypt: (a: number, b: number, c: number) => [number, number, number];
     readonly enginesession_fromPickle: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly enginesession_hasReceivedMessage: (a: number) => number;
     readonly enginesession_pickle: (a: number, b: number, c: number) => [number, number, number, number];
     readonly enginesession_sessionId: (a: number) => [number, number];
+    readonly groupdecryptresult_messageIndex: (a: number) => number;
+    readonly groupdecryptresult_plaintext: (a: number) => [number, number];
     readonly inboundresult_plaintext: (a: number) => [number, number];
     readonly inboundresult_takeSession: (a: number) => [number, number, number];
     readonly prekey_message_session_id: (a: number, b: number) => [number, number, number, number];

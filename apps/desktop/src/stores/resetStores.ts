@@ -7,6 +7,7 @@ import { useAnnouncementStore } from './announcementStore';
 import { useVoiceStore } from './voiceStore';
 import { useE2EStore } from './e2eStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
+import { stopE2EDeviceListWatch } from './e2eStore';
 
 /**
  * Account-scoped stores that MUST be wiped on logout. Without this, the next
@@ -56,5 +57,6 @@ export function resetAccountStores(): void {
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).
+  stopE2EDeviceListWatch();
   disposeE2EService();
 }

@@ -13,6 +13,10 @@
 
 use serde::Serialize;
 use sha2::{Digest, Sha512};
+use vodozemac::megolm::{
+    GroupSession, GroupSessionPickle, InboundGroupSession, InboundGroupSessionPickle, MegolmMessage,
+    SessionConfig as MegolmSessionConfig, SessionKey,
+};
 use vodozemac::olm::{
     Account, AccountPickle, OlmMessage, Session, SessionConfig, SessionPickle,
 };
@@ -439,5 +443,169 @@ impl EngineSession {
             .decrypt(&message)
             .map_err(|e| JsError::new(&format!("decryption failed: {e}")))?;
         String::from_utf8(plaintext).map_err(|_| JsError::new("plaintext is not valid UTF-8"))
+    }
+}
+
+// ─── Megolm group sessions ("megolm1", spec §12) ─────────────────────────────
+// One outbound GroupSession per conversation encrypts every message once; the
+// session key is fanned out to each peer device over the pairwise Olm channel
+// (never to the server). Recipients rebuild an InboundGroupSession from that
+// key. Same rule as above: this is marshalling only — the ratchet, the MAC and
+// the Ed25519 signature all live inside vodozemac.
+
+/// Result of a Megolm decryption: the plaintext and the ratchet index the
+/// message was encrypted at (callers use the index for replay detection).
+#[wasm_bindgen]
+pub struct GroupDecryptResult {
+    plaintext: String,
+    message_index: u32,
+}
+
+#[wasm_bindgen]
+impl GroupDecryptResult {
+    #[wasm_bindgen(getter)]
+    pub fn plaintext(&self) -> String {
+        self.plaintext.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = messageIndex)]
+    pub fn message_index(&self) -> u32 {
+        self.message_index
+    }
+}
+
+/// Outbound Megolm group session — the sending half. Owns the signing key, so
+/// its pickle is secret material and never leaves the vault.
+#[wasm_bindgen]
+pub struct EngineGroupSession {
+    inner: GroupSession,
+}
+
+#[wasm_bindgen]
+impl EngineGroupSession {
+    /// Create a fresh outbound group session. Megolm session config is pinned
+    /// to version 1 (the interoperable, non-experimental variant).
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> EngineGroupSession {
+        EngineGroupSession { inner: GroupSession::new(MegolmSessionConfig::version_1()) }
+    }
+
+    #[wasm_bindgen(js_name = fromPickle)]
+    pub fn from_pickle(
+        encrypted_pickle: &str,
+        pickle_key: &[u8],
+    ) -> Result<EngineGroupSession, JsError> {
+        let mut key = pickle_key_from_js(pickle_key)?;
+        let result = GroupSessionPickle::from_encrypted(encrypted_pickle, &key)
+            .map(|p| EngineGroupSession { inner: GroupSession::from_pickle(p) })
+            .map_err(|_| JsError::new("failed to decrypt group session pickle"));
+        key.zeroize();
+        result
+    }
+
+    pub fn pickle(&self, pickle_key: &[u8]) -> Result<String, JsError> {
+        let mut key = pickle_key_from_js(pickle_key)?;
+        let pickled = self.inner.pickle().encrypt(&key);
+        key.zeroize();
+        Ok(pickled)
+    }
+
+    /// Globally unique session id (base64 of the session's Ed25519 public key).
+    #[wasm_bindgen(js_name = sessionId)]
+    pub fn session_id(&self) -> String {
+        self.inner.session_id()
+    }
+
+    /// Export the session key at the CURRENT ratchet index, base64-encoded.
+    /// This is the secret shared with recipient devices (and with our own
+    /// device, so the sender can decrypt its own history). Recipients can only
+    /// decrypt messages from this index onwards.
+    #[wasm_bindgen(js_name = sessionKey)]
+    pub fn session_key(&self) -> String {
+        self.inner.session_key().to_base64()
+    }
+
+    /// Number of messages already encrypted (== the index the next message
+    /// will use).
+    #[wasm_bindgen(js_name = messageIndex)]
+    pub fn message_index(&self) -> u32 {
+        self.inner.message_index()
+    }
+
+    /// Encrypt UTF-8 plaintext. Returns the unpadded-base64 MegolmMessage.
+    pub fn encrypt(&mut self, plaintext: &str) -> String {
+        self.inner.encrypt(plaintext.as_bytes()).to_base64()
+    }
+}
+
+impl Default for EngineGroupSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Inbound Megolm group session — the receiving half, rebuilt from a session
+/// key that arrived over the authenticated pairwise Olm channel.
+#[wasm_bindgen]
+pub struct EngineInboundGroupSession {
+    inner: InboundGroupSession,
+}
+
+#[wasm_bindgen]
+impl EngineInboundGroupSession {
+    /// Build an inbound session from a base64 session key produced by
+    /// `EngineGroupSession.sessionKey()`.
+    #[wasm_bindgen(js_name = fromSessionKey)]
+    pub fn from_session_key(session_key_b64: &str) -> Result<EngineInboundGroupSession, JsError> {
+        let key = SessionKey::from_base64(session_key_b64)
+            .map_err(|_| JsError::new("invalid megolm session key"))?;
+        Ok(EngineInboundGroupSession {
+            inner: InboundGroupSession::new(&key, MegolmSessionConfig::version_1()),
+        })
+    }
+
+    #[wasm_bindgen(js_name = fromPickle)]
+    pub fn from_pickle(
+        encrypted_pickle: &str,
+        pickle_key: &[u8],
+    ) -> Result<EngineInboundGroupSession, JsError> {
+        let mut key = pickle_key_from_js(pickle_key)?;
+        let result = InboundGroupSessionPickle::from_encrypted(encrypted_pickle, &key)
+            .map(|p| EngineInboundGroupSession { inner: InboundGroupSession::from_pickle(p) })
+            .map_err(|_| JsError::new("failed to decrypt inbound group session pickle"));
+        key.zeroize();
+        result
+    }
+
+    pub fn pickle(&self, pickle_key: &[u8]) -> Result<String, JsError> {
+        let mut key = pickle_key_from_js(pickle_key)?;
+        let pickled = self.inner.pickle().encrypt(&key);
+        key.zeroize();
+        Ok(pickled)
+    }
+
+    #[wasm_bindgen(js_name = sessionId)]
+    pub fn session_id(&self) -> String {
+        self.inner.session_id()
+    }
+
+    /// Lowest ratchet index this session can decrypt. Messages sent before the
+    /// key was exported are permanently unreadable by this importer.
+    #[wasm_bindgen(js_name = firstKnownIndex)]
+    pub fn first_known_index(&self) -> u32 {
+        self.inner.first_known_index()
+    }
+
+    /// Decrypt an unpadded-base64 MegolmMessage.
+    pub fn decrypt(&mut self, ciphertext_b64: &str) -> Result<GroupDecryptResult, JsError> {
+        let message = MegolmMessage::from_base64(ciphertext_b64)
+            .map_err(|_| JsError::new("invalid megolm message encoding"))?;
+        let decrypted = self
+            .inner
+            .decrypt(&message)
+            .map_err(|e| JsError::new(&format!("group decryption failed: {e}")))?;
+        let plaintext = String::from_utf8(decrypted.plaintext)
+            .map_err(|_| JsError::new("plaintext is not valid UTF-8"))?;
+        Ok(GroupDecryptResult { plaintext, message_index: decrypted.message_index })
     }
 }

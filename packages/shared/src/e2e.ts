@@ -5,8 +5,13 @@
 // prekey signatures are computed over. No crypto happens here — only encoding
 // and validation.
 
-/** Engine identifier for envelope `e` field. v1 = Olm via vodozemac. */
+/**
+ * Engine identifier for envelope `e` field.
+ * `olm1` = pairwise Olm (legacy 1:1 sessions + key-share transport),
+ * `megolm1` = per-conversation group ratchet (multi-device, spec §12).
+ */
 export const E2E_ENGINE_OLM1 = 'olm1';
+export const E2E_ENGINE_MEGOLM1 = 'megolm1';
 
 export const E2E_LIMITS = {
   /** Max length of the serialized envelope stored as message content. */
@@ -19,6 +24,22 @@ export const E2E_LIMITS = {
   OTK_TARGET: 50,
   /** …and replenishes when the count drops below this. */
   OTK_LOW_WATER: 20,
+  /** Max registered devices per user (server-enforced). */
+  MAX_DEVICES: 5,
+  /** Rotate the outbound group session after this many messages… */
+  GROUP_SESSION_MAX_MESSAGES: 100,
+  /** …or once it reaches this age (7 days). */
+  GROUP_SESSION_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000,
+  /** Max key shares per POST /e2e/keyshares batch. */
+  KEYSHARE_BATCH_MAX: 50,
+  /** Max pending key shares stored per recipient device (oldest evicted). */
+  /** Max stored shares per (sender, recipient device) — eviction is scoped to
+   *  the sender so nobody can flush another sender's pending session keys. */
+  KEYSHARE_STORE_CAP_PER_SENDER: 100,
+  /** Undelivered shares are swept after this long (cleanup job). */
+  KEYSHARE_MAX_AGE_MS: 30 * 24 * 60 * 60 * 1000,
+  /** Max key shares returned (and deleted) by one GET /e2e/keyshares claim. */
+  KEYSHARE_CLAIM_MAX: 100,
 } as const;
 
 /** 32-byte key, unpadded standard base64 (vodozemac canonical encoding). */
@@ -27,29 +48,50 @@ export const E2E_KEY_B64_RE = /^[A-Za-z0-9+/]{43}$/;
 export const E2E_SIGNATURE_B64_RE = /^[A-Za-z0-9+/]{86}$/;
 /** vodozemac KeyId, unpadded standard base64 (short). */
 export const E2E_KEY_ID_B64_RE = /^[A-Za-z0-9+/]{1,32}$/;
+/** Client-generated device id — stable per install, URL-safe. */
+export const E2E_DEVICE_ID_RE = /^[A-Za-z0-9_-]{8,32}$/;
+/** Megolm session id, unpadded standard base64. */
+export const E2E_SESSION_ID_B64_RE = /^[A-Za-z0-9+/]{1,64}$/;
 /** Envelope body: unpadded standard base64 ciphertext. */
 const E2E_BODY_B64_RE = /^[A-Za-z0-9+/]+$/;
 
 /**
  * Ciphertext envelope stored as `Message.content` when `Message.encrypted`.
- * `v` = envelope version, `e` = engine id, `t` = Olm message type
- * (0 = pre-key, 1 = normal), `b` = unpadded-base64 ciphertext.
+ * `v` = envelope version, `e` = engine id, `b` = unpadded-base64 ciphertext.
+ *
+ * olm1 additionally carries `t` (Olm message type: 0 = pre-key, 1 = normal);
+ * megolm1 carries `sid` (the group session id the body was encrypted under).
  */
-export interface E2EEnvelope {
+export interface E2EOlmEnvelope {
   v: 1;
   e: typeof E2E_ENGINE_OLM1;
   t: 0 | 1;
   b: string;
 }
 
+export interface E2EMegolmEnvelope {
+  v: 1;
+  e: typeof E2E_ENGINE_MEGOLM1;
+  sid: string;
+  b: string;
+}
+
+export type E2EEnvelope = E2EOlmEnvelope | E2EMegolmEnvelope;
+
 export function buildE2EEnvelope(messageType: 0 | 1, bodyB64: string): string {
   return JSON.stringify({ v: 1, e: E2E_ENGINE_OLM1, t: messageType, b: bodyB64 });
+}
+
+/** Megolm group-ratchet envelope: one ciphertext for every device in the room. */
+export function buildMegolmEnvelope(sessionId: string, bodyB64: string): string {
+  return JSON.stringify({ v: 1, e: E2E_ENGINE_MEGOLM1, sid: sessionId, b: bodyB64 });
 }
 
 /**
  * Strict structural validation. Returns the parsed envelope or null.
  * Used by the server before storing (never sanitizes/trusts ciphertext) and
- * by clients before attempting decryption.
+ * by clients before attempting decryption. Both engines are accepted: olm1
+ * remains valid for legacy history and for the pairwise key-share transport.
  */
 export function parseE2EEnvelope(content: string): E2EEnvelope | null {
   if (typeof content !== 'string' || content.length === 0 || content.length > E2E_LIMITS.ENVELOPE_MAX) {
@@ -65,10 +107,17 @@ export function parseE2EEnvelope(content: string): E2EEnvelope | null {
   const obj = parsed as Record<string, unknown>;
   if (Object.keys(obj).length !== 4) return null;
   if (obj.v !== 1) return null;
-  if (obj.e !== E2E_ENGINE_OLM1) return null;
-  if (obj.t !== 0 && obj.t !== 1) return null;
   if (typeof obj.b !== 'string' || obj.b.length === 0 || !E2E_BODY_B64_RE.test(obj.b)) return null;
-  return { v: 1, e: E2E_ENGINE_OLM1, t: obj.t, b: obj.b };
+
+  if (obj.e === E2E_ENGINE_OLM1) {
+    if (obj.t !== 0 && obj.t !== 1) return null;
+    return { v: 1, e: E2E_ENGINE_OLM1, t: obj.t, b: obj.b };
+  }
+  if (obj.e === E2E_ENGINE_MEGOLM1) {
+    if (typeof obj.sid !== 'string' || !E2E_SESSION_ID_B64_RE.test(obj.sid)) return null;
+    return { v: 1, e: E2E_ENGINE_MEGOLM1, sid: obj.sid, b: obj.b };
+  }
+  return null;
 }
 
 // ─── E2E attachments (spec §13) ──────────────────────────────────────────────
@@ -152,21 +201,30 @@ export function parseE2EPlaintext(plaintext: string): { text: string; attachment
 // keys between users or identities. Verified client-side before any session is
 // established (and server-side on upload as hygiene).
 
-const E2E_SIG_DOMAIN = 'voxium-e2e-v1';
+// v2 binds the deviceId too: with multiple devices per account, a signature
+// that omitted it could be replayed by the server under a different device
+// slot of the same user. There is no v1 verification path anywhere.
+const E2E_SIG_DOMAIN = 'voxium-e2e-v2';
 
 /** Binding of a user's device identity: Curve25519 (Olm) + Ed25519 (signing). */
-export function e2eDeviceCanonical(userId: string, curve25519Key: string, ed25519Key: string): string {
-  return `${E2E_SIG_DOMAIN}|device|${userId}|${curve25519Key}|${ed25519Key}`;
+export function e2eDeviceCanonical(
+  userId: string,
+  deviceId: string,
+  curve25519Key: string,
+  ed25519Key: string
+): string {
+  return `${E2E_SIG_DOMAIN}|device|${userId}|${deviceId}|${curve25519Key}|${ed25519Key}`;
 }
 
 /** Binding of a one-time or fallback key to the device identity that published it. */
 export function e2eKeyCanonical(
   userId: string,
+  deviceId: string,
   curve25519IdentityKey: string,
   keyId: string,
   publicKey: string
 ): string {
-  return `${E2E_SIG_DOMAIN}|key|${userId}|${curve25519IdentityKey}|${keyId}|${publicKey}`;
+  return `${E2E_SIG_DOMAIN}|key|${userId}|${deviceId}|${curve25519IdentityKey}|${keyId}|${publicKey}`;
 }
 
 // ─── Key distribution payload shapes ─────────────────────────────────────────
@@ -178,6 +236,7 @@ export interface E2EPreKey {
 }
 
 export interface E2EDeviceRegistration {
+  deviceId: string;
   curve25519Key: string;
   ed25519Key: string;
   deviceSignature: string;
@@ -188,17 +247,55 @@ export interface E2EDeviceRegistration {
 /** Public device info (identity pinning + "can this user do E2E?"). */
 export interface E2EDeviceInfo {
   userId: string;
+  deviceId: string;
   curve25519Key: string;
   ed25519Key: string;
   deviceSignature: string;
   updatedAt: string;
 }
 
-/** One-shot key bundle for establishing an outbound session. */
+/** One entry of a user's published device list. */
+export interface E2EDeviceEntry {
+  deviceId: string;
+  curve25519Key: string;
+  ed25519Key: string;
+  deviceSignature: string;
+  createdAt: string;
+}
+
+/**
+ * A user's full device list. `listVersion` is bumped on every add/revoke so
+ * peers can detect changes (and rotate their outbound group session).
+ */
+export interface E2EDeviceList {
+  devices: E2EDeviceEntry[];
+  listVersion: number;
+}
+
+/** One-shot key bundle for establishing an outbound session with ONE device. */
 export interface E2EKeyBundle {
   userId: string;
+  deviceId: string;
   curve25519Key: string;
   ed25519Key: string;
   deviceSignature: string;
   preKey: E2EPreKey & { type: 'otk' | 'fallback' };
+}
+
+// ─── Group-session key distribution (spec §12) ───────────────────────────────
+
+/**
+ * Plaintext of a key share, encrypted pairwise with Olm before it ever leaves
+ * the device. The server stores only the resulting olm1 envelope — it never
+ * sees `sessionKey`. The importer must check `conversationId`/`sessionId`
+ * against what it asked for and record `senderUserId` with the inbound
+ * session, so a session can never be used to forge another user's messages.
+ */
+export interface E2EKeySharePayload {
+  v: 2;
+  conversationId: string;
+  sessionId: string;
+  sessionKey: string;
+  senderUserId: string;
+  senderDeviceId: string;
 }
