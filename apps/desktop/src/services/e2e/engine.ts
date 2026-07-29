@@ -4,6 +4,9 @@
 import init, {
   EngineAccount,
   EngineSession,
+  EngineGroupSession,
+  EngineInboundGroupSession,
+  GroupDecryptResult,
   engine_version,
   verify_ed25519,
   prekey_message_session_id,
@@ -36,6 +39,9 @@ export function initEngine(wasmInput?: BufferSource): Promise<void> {
 export {
   EngineAccount,
   EngineSession,
+  EngineGroupSession,
+  EngineInboundGroupSession,
+  GroupDecryptResult,
   engine_version,
   verify_ed25519,
   prekey_message_session_id,

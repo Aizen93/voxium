@@ -959,6 +959,20 @@
     "markVerified": "Marcar como verificado",
     "identityChangedWarning": "As chaves de segurança de {{name}} mudaram. Isso pode acontecer após uma reinstalação — verifique o novo número de segurança antes de confiar nesta conversa.",
     "acceptNewIdentity": "Aceitar novas chaves",
-    "identityAccepted": "Novas chaves aceitas"
+    "identityAccepted": "Novas chaves aceitas",
+    "perDeviceSafetyExplainer": "Cada dispositivo de {{name}} tem seu próprio número de segurança.",
+    "newDeviceBadgeTitle": "Novo dispositivo adicionado — revisar dispositivos",
+    "newDeviceWarning": "{{name}} adicionou um novo dispositivo. Revise os dispositivos dele para confirmar que é realmente essa pessoa.",
+    "reviewDevices": "Revisar dispositivos",
+    "devicesReviewed": "Dispositivos revisados",
+    "manageDevices": "Gerenciar dispositivos",
+    "deviceManagerTitle": "Seus dispositivos",
+    "deviceManagerExplainer": "Dispositivos registrados na sua conta. Revogue qualquer dispositivo que você não use mais ou não reconheça — as novas mensagens serão recriptografadas sem ele imediatamente.",
+    "thisDevice": "Este dispositivo",
+    "deviceAdded": "Adicionado em {{date}}",
+    "revokeDevice": "Revogar",
+    "revokeConfirm": "Revogar este dispositivo? Ele não poderá mais ler novas mensagens, e cada conversa criptografada será recriptografada.",
+    "revokeFailed": "Não foi possível revogar o dispositivo",
+    "revoked": "Dispositivo revogado"
   }
 }

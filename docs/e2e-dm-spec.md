@@ -280,7 +280,7 @@ verification and shows a warning.
 
 ## 11. Known limitations
 
-1. Single device per account; new device ⇒ new identity ⇒ safety-number change; no history transfer. (Design: §12.)
+1. ~~Single device per account~~ — shipped in Phase C (§12): up to 5 devices, Megolm group sessions with pairwise key shares. History still does not follow a new device (no key backup). (Design: §12.)
 2. No post-quantum protection — evaluated and deliberately deferred; designed path + revisit triggers in `docs/e2e-pq-evaluation.md`.
 3. ~~Pickle key in localStorage pending OS-keychain wrapping~~ — shipped in Phase C (§7.3); localStorage remains only as the browser-dev / keychain-failure fallback.
 4. ~~No edits~~ — shipped in Phase C: edits are fresh ratchet ciphertexts under the same id; the plaintext cache is versioned by `editedAt` (§6, §7.1).
@@ -289,34 +289,113 @@ verification and shows a warning.
 7. Group (server-channel) E2E out of scope.
 8. Metadata (participants, timing, sizes) visible to the server, as in Signal-style designs generally.
 
-## 12. Multi-device — design sketch (not yet implemented)
+## 12. Multi-device (Phase C, shipped)
 
-The MVP's one-device-per-user constraint is the biggest remaining UX gap. The
-design that fits vodozemac (which ships **Megolm**, Matrix's group ratchet):
+Each account may register up to `E2E_LIMITS.MAX_DEVICES` (5) devices. Message
+bodies are encrypted **once** with Megolm; the group-session key is distributed
+pairwise over Olm to every participating device — the peer's and the sender's
+own others.
 
-- **Schema**: `E2EDevice.userId` loses `@unique` → `@@unique([userId, deviceId])`
-  with a client-generated `deviceId`; per-device one-time-key pools; bundles
-  claimed per `(userId, deviceId)`. `GET /e2e/devices/:userId` returns a
-  device *list* plus a monotonically increasing list version so peers detect
-  new/removed devices.
-- **Message encryption switches to a Megolm-style layer**: each conversation
-  gets an outbound group session; message bodies are encrypted **once**
-  (envelope `e: "megolm1"`), and the group-session key is distributed pairwise
-  over Olm to every participating device (peer's and the sender's own —
-  solving decrypt-to-self, which currently forces the plaintext cache for own
-  messages). O(devices) work per session rotation instead of per message.
-- **Rotation**: new device added / device revoked / N messages / T days ⇒ new
-  outbound group session (bounds compromise windows and gives revocation
-  teeth).
-- **Trust**: MVP = per-device safety numbers (TOFU per device). Stretch: a
-  self-signing account key that cross-signs own devices, so peers verify one
-  number per *account*.
-- **History for new devices**: optional encrypted key/history backup guarded
-  by a user passphrase — explicitly out of scope for the first multi-device
-  cut (the "history stays on your devices" promise holds).
-- **Migration**: existing devices adopt `deviceId = "primary"`; olm1 envelopes
-  keep decrypting; new sessions negotiate megolm1 when every participating
-  device supports it, per-conversation.
+### 12.1 Identity and registration
+
+- `deviceId` is client-generated (`/^[A-Za-z0-9_-]{8,32}$/`), stable per
+  install, stored in the vault. `E2EDevice` is keyed `@@unique([userId, deviceId])`.
+- Signature canonicals are **v2** and include the deviceId, so a signature can
+  never be replayed onto a different device or user:
+  `voxium-e2e-v2|device|<userId>|<deviceId>|<curve>|<ed>` and
+  `voxium-e2e-v2|key|<userId>|<deviceId>|<curveIdentity>|<keyId>|<key>`.
+- `E2EDeviceRegistry.version` is bumped in the **same transaction** as any
+  device add or revoke; `GET /e2e/devices/:userId` returns `{devices[], listVersion}`.
+
+### 12.2 Envelope
+
+New sends use `{"v":1,"e":"megolm1","sid":"<session id>","b":"<ciphertext>"}`.
+`olm1` remains valid: it is the key-share transport, and legacy history keeps
+decrypting. Both are validated structurally by `parseE2EEnvelope`.
+
+### 12.3 Key shares (`E2EKeyShare` mailbox)
+
+Share plaintext (inside the pairwise Olm ciphertext):
+`{v:2, conversationId, sessionId, sessionKey, senderUserId, senderDeviceId}`.
+
+Server-side rules — every one of these is load-bearing:
+
+- **Sender attribution** must be truthful: the claimed sender device must belong
+  to the caller.
+- **Conversation gate**: the sender must be a participant of the share's
+  `conversationId`, and the recipient must be the sender (own other device) or
+  the other participant. Without this, a DM peer could plant inbound-session
+  records labelled with a conversation they are not in.
+- **Recipient devices must exist**. Rows addressed to fabricated device ids
+  would never be claimable and never expire — an unbounded, third-party-writable
+  storage sink.
+- **The inbox cap is per (sender, recipient device)** and evicts only that
+  sender's oldest rows (`KEYSHARE_STORE_CAP_PER_SENDER`). A shared per-recipient
+  cap would let anyone who can DM a victim flood the mailbox and evict the
+  session keys a legitimate peer had queued — remote, unprivileged censorship of
+  an E2E conversation.
+- Claiming (`GET /e2e/keyshares?deviceId=`) is **claim-and-delete**, ownership
+  checked, `FOR UPDATE SKIP LOCKED` (Olm pre-key bodies are one-shot).
+- Undelivered shares are swept after `KEYSHARE_MAX_AGE_MS` (30 days) by
+  `utils/keyShareCleanup.ts`. The table intentionally has no FK to `User`, so
+  the sweep is also what reclaims rows after account deletion.
+
+Client-side, the importer verifies the share's `sessionId` and `conversationId`
+match the row, takes sender attribution from the **authenticated Olm session**
+(pinned per-device identity) rather than the share body, and re-derives the
+session id from the key. On Megolm decrypt, `message.authorId` must equal the
+inbound session's `senderUserId`, else the message is treated as undecryptable.
+
+### 12.4 Rotation
+
+A new outbound session is created when: none exists, either participant's
+**device set** changed, `GROUP_SESSION_MAX_MESSAGES` (100) is reached, or the
+session is older than `GROUP_SESSION_MAX_AGE_MS` (7 days).
+
+Rotation keys off the device **set fingerprint**, not the server-supplied
+`listVersion` — a server that injects a device while replaying the old version
+must still force a re-key. The rotation decision always fetches device lists
+with `force: true`, so a revoked device cannot keep receiving keys for the
+cache window.
+
+An undelivered share does **not** rotate. The index-0 session key is kept in the
+outbound record and the share is retried on the same session behind a 30s
+backoff: rotating on every transient failure would burn peer one-time keys,
+flood inboxes, and self-amplify — and the retry is lossless, because the
+recipient still gets the key from index 0.
+
+### 12.5 Trust and detection
+
+- Per-device TOFU pinning (`identity:{userId}:{deviceId}`) and per-device safety
+  numbers; a pinned device whose keys change is a hard `E2EIdentityChangedError`.
+- **The device set — not `listVersion` — drives the new-device warning.** A
+  hostile server can replay or roll back the version; it cannot make the set it
+  serves match what the user acknowledged.
+- The service emits device-list change events (`onDeviceListChanged`), which the
+  store subscribes to, so a device appearing mid-conversation raises the warning
+  immediately instead of at the next component mount.
+- `acceptNewIdentity` re-pins every device unverified, drops pairwise sessions,
+  drops **inbound group sessions attributed to that user** (otherwise the holder
+  of the old keys could keep publishing into a session we still trust), and
+  clears outbound sessions to force a re-key.
+
+### 12.6 Known gaps
+
+- The `MAX_DEVICES` check is read-then-write inside a transaction with no
+  DB-level constraint; two concurrent registrations could both observe 4. Bounded
+  by `rateLimitE2EDevice` (5/hour) and harmless (a 6th device is still fully
+  authenticated).
+- History does not follow a new device (no key backup) — by design, §11.
+- Cross-signing (one safety number per account instead of per device) is the
+  natural next step; today users verify per device.
+
+### 12.7 Pre-release reset
+
+E2E shipped in the same unmerged PR, so the migration
+(`20260730120000_e2e_multi_device`) simply `DELETE`s existing `e2e_devices`
+rows rather than carrying a compatibility path. Clients re-register their
+**existing identity keys** under a deviceId, so pinned identities survive; old
+`olm1` history keeps decrypting from pickled sessions and the plaintext cache.
 
 ## 13. Encrypted attachments (Phase C, shipped)
 

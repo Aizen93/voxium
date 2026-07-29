@@ -959,6 +959,20 @@
     "markVerified": "标记为已验证",
     "identityChangedWarning": "{{name}} 的安全密钥已更改。这可能发生在重新安装应用之后 — 请先核对新的安全码，再信任此对话。",
     "acceptNewIdentity": "接受新密钥",
-    "identityAccepted": "已接受新密钥"
+    "identityAccepted": "已接受新密钥",
+    "perDeviceSafetyExplainer": "{{name}} 的每台设备都有各自的安全码。",
+    "newDeviceBadgeTitle": "新增设备 — 请查看设备列表",
+    "newDeviceWarning": "{{name}} 添加了一台新设备。请查看其设备列表，确认确实是本人。",
+    "reviewDevices": "查看设备",
+    "devicesReviewed": "已查看设备",
+    "manageDevices": "管理设备",
+    "deviceManagerTitle": "你的设备",
+    "deviceManagerExplainer": "注册到你账户的设备。撤销任何你不再使用或无法识别的设备 — 新消息将立即改用不包含该设备的密钥重新加密。",
+    "thisDevice": "此设备",
+    "deviceAdded": "添加于 {{date}}",
+    "revokeDevice": "撤销",
+    "revokeConfirm": "撤销此设备？该设备将无法再读取新消息，且所有加密对话都会重新加密。",
+    "revokeFailed": "无法撤销设备",
+    "revoked": "设备已撤销"
   }
 }

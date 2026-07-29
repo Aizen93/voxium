@@ -959,6 +959,20 @@
     "markVerified": "確認済みにする",
     "identityChangedWarning": "{{name}}さんのセキュリティ鍵が変更されました。アプリの再インストール後に起こることがあります — この会話を信頼する前に、新しい安全番号を確認してください。",
     "acceptNewIdentity": "新しい鍵を受け入れる",
-    "identityAccepted": "新しい鍵を受け入れました"
+    "identityAccepted": "新しい鍵を受け入れました",
+    "perDeviceSafetyExplainer": "{{name}}さんの各端末にはそれぞれ固有の安全番号があります。",
+    "newDeviceBadgeTitle": "新しい端末が追加されました — 端末を確認してください",
+    "newDeviceWarning": "{{name}}さんが新しい端末を追加しました。本人であることを確認するため、端末を確認してください。",
+    "reviewDevices": "端末を確認",
+    "devicesReviewed": "端末を確認しました",
+    "manageDevices": "端末を管理",
+    "deviceManagerTitle": "あなたの端末",
+    "deviceManagerExplainer": "あなたのアカウントに登録されている端末です。使用していない、または心当たりのない端末は取り消してください — 新しいメッセージはその端末を除いて直ちに再暗号化されます。",
+    "thisDevice": "この端末",
+    "deviceAdded": "追加日: {{date}}",
+    "revokeDevice": "取り消す",
+    "revokeConfirm": "この端末を取り消しますか？ この端末は新しいメッセージを読めなくなり、暗号化された各会話は再暗号化されます。",
+    "revokeFailed": "端末を取り消せませんでした",
+    "revoked": "端末を取り消しました"
   }
 }

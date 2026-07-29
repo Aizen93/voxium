@@ -3,7 +3,18 @@
 // messages stay raw strings; attachment-bearing messages become a
 // control-character-prefixed JSON payload. Both directions validated here.
 import { describe, it, expect } from 'vitest';
-import { buildE2EPlaintext, parseE2EPlaintext, E2E_PAYLOAD_PREFIX } from '@voxium/shared';
+import {
+  buildE2EPlaintext,
+  parseE2EPlaintext,
+  E2E_PAYLOAD_PREFIX,
+  buildE2EEnvelope,
+  buildMegolmEnvelope,
+  parseE2EEnvelope,
+  e2eDeviceCanonical,
+  e2eKeyCanonical,
+  E2E_LIMITS,
+  E2E_DEVICE_ID_RE,
+} from '@voxium/shared';
 import type { E2EAttachmentMeta } from '@voxium/shared';
 
 const meta: E2EAttachmentMeta = {
@@ -63,5 +74,81 @@ describe('E2E plaintext payload', () => {
     const parsed = parseE2EPlaintext(raw);
     expect(parsed.text).toBe('mixed');
     expect(parsed.attachments).toEqual([meta]);
+  });
+});
+
+// ─── Envelopes (both engines) ───────────────────────────────────────────────
+
+describe('E2E envelope', () => {
+  it('round-trips an olm1 envelope (legacy history + key-share transport)', () => {
+    for (const t of [0, 1] as const) {
+      const raw = buildE2EEnvelope(t, 'QWJjZGVm');
+      expect(parseE2EEnvelope(raw)).toEqual({ v: 1, e: 'olm1', t, b: 'QWJjZGVm' });
+    }
+  });
+
+  it('round-trips a megolm1 envelope', () => {
+    const raw = buildMegolmEnvelope('c2Vzc2lvbklk', 'QWJjZGVm');
+    expect(JSON.parse(raw)).toEqual({ v: 1, e: 'megolm1', sid: 'c2Vzc2lvbklk', b: 'QWJjZGVm' });
+    expect(parseE2EEnvelope(raw)).toEqual({ v: 1, e: 'megolm1', sid: 'c2Vzc2lvbklk', b: 'QWJjZGVm' });
+  });
+
+  it('rejects structurally invalid envelopes', () => {
+    for (const bad of [
+      '',
+      'not json',
+      '[]',
+      JSON.stringify({ v: 2, e: 'olm1', t: 0, b: 'QWJj' }),
+      JSON.stringify({ v: 1, e: 'other', t: 0, b: 'QWJj' }),
+      JSON.stringify({ v: 1, e: 'olm1', t: 2, b: 'QWJj' }),
+      JSON.stringify({ v: 1, e: 'olm1', t: 0, b: '' }),
+      JSON.stringify({ v: 1, e: 'olm1', t: 0, b: 'not base64 !!' }),
+      JSON.stringify({ v: 1, e: 'olm1', t: 0, b: 'QWJj', x: 1 }), // extra key
+      JSON.stringify({ v: 1, e: 'olm1', b: 'QWJj' }), // too few keys
+      JSON.stringify({ v: 1, e: 'megolm1', b: 'QWJj' }), // sid missing
+      JSON.stringify({ v: 1, e: 'megolm1', sid: '', b: 'QWJj' }),
+      JSON.stringify({ v: 1, e: 'megolm1', sid: 'bad sid!', b: 'QWJj' }),
+      JSON.stringify({ v: 1, e: 'megolm1', sid: 'AAAA', t: 0, b: 'QWJj' }), // extra key
+      // the two engines never share fields — an olm1 `t` cannot ride on megolm1
+      JSON.stringify({ v: 1, e: 'megolm1', sid: 'A'.repeat(65), b: 'QWJj' }),
+    ]) {
+      expect(parseE2EEnvelope(bad)).toBeNull();
+    }
+  });
+
+  it('caps envelope size', () => {
+    const oversized = buildMegolmEnvelope('AAAA', 'A'.repeat(E2E_LIMITS.ENVELOPE_MAX));
+    expect(parseE2EEnvelope(oversized)).toBeNull();
+  });
+});
+
+// ─── Canonical signature payloads (v2 binds the deviceId) ───────────────────
+
+describe('E2E canonical strings', () => {
+  it('binds userId, deviceId and both identity keys', () => {
+    expect(e2eDeviceCanonical('u1', 'device-aaaa1111', 'CURVE', 'ED')).toBe(
+      'voxium-e2e-v2|device|u1|device-aaaa1111|CURVE|ED'
+    );
+    expect(e2eKeyCanonical('u1', 'device-aaaa1111', 'CURVE', 'kid', 'PUB')).toBe(
+      'voxium-e2e-v2|key|u1|device-aaaa1111|CURVE|kid|PUB'
+    );
+  });
+
+  it('produces a different canonical per device slot (no cross-device replay)', () => {
+    expect(e2eDeviceCanonical('u1', 'device-aaaa1111', 'C', 'E')).not.toBe(
+      e2eDeviceCanonical('u1', 'device-bbbb2222', 'C', 'E')
+    );
+    expect(e2eKeyCanonical('u1', 'device-aaaa1111', 'C', 'k', 'P')).not.toBe(
+      e2eKeyCanonical('u1', 'device-bbbb2222', 'C', 'k', 'P')
+    );
+  });
+
+  it('accepts only URL-safe device ids of 8–32 chars', () => {
+    for (const ok of ['abcd1234', 'A-_'.padEnd(8, 'x'), 'x'.repeat(32)]) {
+      expect(E2E_DEVICE_ID_RE.test(ok)).toBe(true);
+    }
+    for (const bad of ['short', 'x'.repeat(33), 'has space', 'plus+slash/', '']) {
+      expect(E2E_DEVICE_ID_RE.test(bad)).toBe(false);
+    }
   });
 });

@@ -265,6 +265,260 @@ export class EngineAccount {
 }
 if (Symbol.dispose) EngineAccount.prototype[Symbol.dispose] = EngineAccount.prototype.free;
 
+/**
+ * Outbound Megolm group session — the sending half. Owns the signing key, so
+ * its pickle is secret material and never leaves the vault.
+ */
+export class EngineGroupSession {
+    static __wrap(ptr) {
+        const obj = Object.create(EngineGroupSession.prototype);
+        obj.__wbg_ptr = ptr;
+        EngineGroupSessionFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        EngineGroupSessionFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_enginegroupsession_free(ptr, 0);
+    }
+    /**
+     * Encrypt UTF-8 plaintext. Returns the unpadded-base64 MegolmMessage.
+     * @param {string} plaintext
+     * @returns {string}
+     */
+    encrypt(plaintext) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(plaintext, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.enginegroupsession_encrypt(this.__wbg_ptr, ptr0, len0);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * @param {string} encrypted_pickle
+     * @param {Uint8Array} pickle_key
+     * @returns {EngineGroupSession}
+     */
+    static fromPickle(encrypted_pickle, pickle_key) {
+        const ptr0 = passStringToWasm0(encrypted_pickle, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(pickle_key, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.enginegroupsession_fromPickle(ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EngineGroupSession.__wrap(ret[0]);
+    }
+    /**
+     * Number of messages already encrypted (== the index the next message
+     * will use).
+     * @returns {number}
+     */
+    messageIndex() {
+        const ret = wasm.enginegroupsession_messageIndex(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Create a fresh outbound group session. Megolm session config is pinned
+     * to version 1 (the interoperable, non-experimental variant).
+     */
+    constructor() {
+        const ret = wasm.enginegroupsession_new();
+        this.__wbg_ptr = ret;
+        EngineGroupSessionFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @param {Uint8Array} pickle_key
+     * @returns {string}
+     */
+    pickle(pickle_key) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passArray8ToWasm0(pickle_key, wasm.__wbindgen_malloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.enginegroupsession_pickle(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * Globally unique session id (base64 of the session's Ed25519 public key).
+     * @returns {string}
+     */
+    sessionId() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.enginegroupsession_sessionId(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Export the session key at the CURRENT ratchet index, base64-encoded.
+     * This is the secret shared with recipient devices (and with our own
+     * device, so the sender can decrypt its own history). Recipients can only
+     * decrypt messages from this index onwards.
+     * @returns {string}
+     */
+    sessionKey() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.enginegroupsession_sessionKey(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+}
+if (Symbol.dispose) EngineGroupSession.prototype[Symbol.dispose] = EngineGroupSession.prototype.free;
+
+/**
+ * Inbound Megolm group session — the receiving half, rebuilt from a session
+ * key that arrived over the authenticated pairwise Olm channel.
+ */
+export class EngineInboundGroupSession {
+    static __wrap(ptr) {
+        const obj = Object.create(EngineInboundGroupSession.prototype);
+        obj.__wbg_ptr = ptr;
+        EngineInboundGroupSessionFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        EngineInboundGroupSessionFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_engineinboundgroupsession_free(ptr, 0);
+    }
+    /**
+     * Decrypt an unpadded-base64 MegolmMessage.
+     * @param {string} ciphertext_b64
+     * @returns {GroupDecryptResult}
+     */
+    decrypt(ciphertext_b64) {
+        const ptr0 = passStringToWasm0(ciphertext_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.engineinboundgroupsession_decrypt(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return GroupDecryptResult.__wrap(ret[0]);
+    }
+    /**
+     * Lowest ratchet index this session can decrypt. Messages sent before the
+     * key was exported are permanently unreadable by this importer.
+     * @returns {number}
+     */
+    firstKnownIndex() {
+        const ret = wasm.engineinboundgroupsession_firstKnownIndex(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {string} encrypted_pickle
+     * @param {Uint8Array} pickle_key
+     * @returns {EngineInboundGroupSession}
+     */
+    static fromPickle(encrypted_pickle, pickle_key) {
+        const ptr0 = passStringToWasm0(encrypted_pickle, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(pickle_key, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.engineinboundgroupsession_fromPickle(ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EngineInboundGroupSession.__wrap(ret[0]);
+    }
+    /**
+     * Build an inbound session from a base64 session key produced by
+     * `EngineGroupSession.sessionKey()`.
+     * @param {string} session_key_b64
+     * @returns {EngineInboundGroupSession}
+     */
+    static fromSessionKey(session_key_b64) {
+        const ptr0 = passStringToWasm0(session_key_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.engineinboundgroupsession_fromSessionKey(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EngineInboundGroupSession.__wrap(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} pickle_key
+     * @returns {string}
+     */
+    pickle(pickle_key) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passArray8ToWasm0(pickle_key, wasm.__wbindgen_malloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.engineinboundgroupsession_pickle(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    sessionId() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.engineinboundgroupsession_sessionId(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+}
+if (Symbol.dispose) EngineInboundGroupSession.prototype[Symbol.dispose] = EngineInboundGroupSession.prototype.free;
+
 export class EngineSession {
     static __wrap(ptr) {
         const obj = Object.create(EngineSession.prototype);
@@ -387,6 +641,52 @@ export class EngineSession {
     }
 }
 if (Symbol.dispose) EngineSession.prototype[Symbol.dispose] = EngineSession.prototype.free;
+
+/**
+ * Result of a Megolm decryption: the plaintext and the ratchet index the
+ * message was encrypted at (callers use the index for replay detection).
+ */
+export class GroupDecryptResult {
+    static __wrap(ptr) {
+        const obj = Object.create(GroupDecryptResult.prototype);
+        obj.__wbg_ptr = ptr;
+        GroupDecryptResultFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        GroupDecryptResultFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_groupdecryptresult_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get messageIndex() {
+        const ret = wasm.groupdecryptresult_messageIndex(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {string}
+     */
+    get plaintext() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.groupdecryptresult_plaintext(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+}
+if (Symbol.dispose) GroupDecryptResult.prototype[Symbol.dispose] = GroupDecryptResult.prototype.free;
 
 /**
  * Result of creating an inbound session from a pre-key message: the new
@@ -728,9 +1028,18 @@ const EncryptedAttachmentFinalization = (typeof FinalizationRegistry === 'undefi
 const EngineAccountFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_engineaccount_free(ptr, 1));
+const EngineGroupSessionFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_enginegroupsession_free(ptr, 1));
+const EngineInboundGroupSessionFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_engineinboundgroupsession_free(ptr, 1));
 const EngineSessionFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_enginesession_free(ptr, 1));
+const GroupDecryptResultFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_groupdecryptresult_free(ptr, 1));
 const InboundResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_inboundresult_free(ptr, 1));

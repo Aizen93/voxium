@@ -966,6 +966,20 @@
     "markVerified": "Mark as verified",
     "identityChangedWarning": "{{name}}'s security keys changed. This can happen after a reinstall — verify the new safety number before trusting this conversation.",
     "acceptNewIdentity": "Accept new keys",
-    "identityAccepted": "New keys accepted"
+    "identityAccepted": "New keys accepted",
+    "perDeviceSafetyExplainer": "Each of {{name}}'s devices has its own safety number.",
+    "newDeviceBadgeTitle": "New device added — review devices",
+    "newDeviceWarning": "{{name}} added a new device. Review their devices to make sure it's really them.",
+    "reviewDevices": "Review devices",
+    "devicesReviewed": "Devices reviewed",
+    "manageDevices": "Manage devices",
+    "deviceManagerTitle": "Your devices",
+    "deviceManagerExplainer": "Devices registered to your account. Revoke any device you no longer use or don't recognize — new messages will be re-keyed away from it immediately.",
+    "thisDevice": "This device",
+    "deviceAdded": "Added {{date}}",
+    "revokeDevice": "Revoke",
+    "revokeConfirm": "Revoke this device? It will no longer be able to read new messages, and every encrypted conversation will re-key.",
+    "revokeFailed": "Could not revoke device",
+    "revoked": "Device revoked"
   }
 }

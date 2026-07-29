@@ -58,7 +58,7 @@ model User {
   supportTicketsClaimed SupportTicket[]  @relation("SupportTicketClaimer")
   supportMessages       SupportMessage[] @relation("SupportMessageAuthor")
   communityThemes       CommunityTheme[]
-  e2eDevice             E2EDevice?
+  e2eDevices            E2EDevice[]
 
   @@map("users")
 }
@@ -575,7 +575,8 @@ model SupportMessage {
 
 model E2EDevice {
   id                   String   @id @default(cuid())
-  userId               String   @unique @map("user_id") // MVP: one device per user (multi-device is Phase C)
+  userId               String   @map("user_id")
+  deviceId             String   @map("device_id") // client-generated, stable per install (E2E_DEVICE_ID_RE)
   curve25519Key        String   @map("curve25519_key") // Olm identity key, unpadded base64
   ed25519Key           String   @map("ed25519_key") // device signing key, unpadded base64
   deviceSignature      String   @map("device_signature") // Ed25519 over the canonical device binding (spec §4)
@@ -588,7 +589,37 @@ model E2EDevice {
   user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   oneTimeKeys E2EOneTimeKey[]
 
+  @@unique([userId, deviceId])
+  @@index([userId])
   @@map("e2e_devices")
+}
+
+/// Monotonic version of a user's device list — bumped in the SAME transaction
+/// as any device add/revoke so peers can detect membership changes and rotate
+/// their outbound group session (spec §12).
+model E2EDeviceRegistry {
+  userId  String @id @map("user_id")
+  version Int    @default(0)
+
+  @@map("e2e_device_registry")
+}
+
+/// A pending Megolm group-session key, encrypted pairwise with Olm for exactly
+/// one recipient device. `body` is an opaque olm1 envelope — the server never
+/// sees the session key. Claim-and-delete: Olm pre-key bodies are one-shot.
+model E2EKeyShare {
+  id                String   @id @default(cuid())
+  recipientUserId   String   @map("recipient_user_id")
+  recipientDeviceId String   @map("recipient_device_id")
+  senderUserId      String   @map("sender_user_id")
+  senderDeviceId    String   @map("sender_device_id")
+  conversationId    String   @map("conversation_id")
+  sessionId         String   @map("session_id")
+  body              String // olm1 envelope (JSON string)
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([recipientUserId, recipientDeviceId, createdAt])
+  @@map("e2e_key_shares")
 }
 
 model E2EOneTimeKey {

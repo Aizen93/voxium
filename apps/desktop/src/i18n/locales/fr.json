@@ -959,6 +959,20 @@
     "markVerified": "Marquer comme vérifié",
     "identityChangedWarning": "Les clés de sécurité de {{name}} ont changé. Cela peut arriver après une réinstallation — vérifiez le nouveau numéro de sécurité avant de faire confiance à cette conversation.",
     "acceptNewIdentity": "Accepter les nouvelles clés",
-    "identityAccepted": "Nouvelles clés acceptées"
+    "identityAccepted": "Nouvelles clés acceptées",
+    "perDeviceSafetyExplainer": "Chaque appareil de {{name}} a son propre numéro de sécurité.",
+    "newDeviceBadgeTitle": "Nouvel appareil ajouté — vérifier les appareils",
+    "newDeviceWarning": "{{name}} a ajouté un nouvel appareil. Vérifiez ses appareils pour vous assurer qu'il s'agit bien de cette personne.",
+    "reviewDevices": "Vérifier les appareils",
+    "devicesReviewed": "Appareils vérifiés",
+    "manageDevices": "Gérer les appareils",
+    "deviceManagerTitle": "Vos appareils",
+    "deviceManagerExplainer": "Appareils enregistrés sur votre compte. Révoquez tout appareil que vous n'utilisez plus ou que vous ne reconnaissez pas — les nouveaux messages seront aussitôt rechiffrés sans lui.",
+    "thisDevice": "Cet appareil",
+    "deviceAdded": "Ajouté le {{date}}",
+    "revokeDevice": "Révoquer",
+    "revokeConfirm": "Révoquer cet appareil ? Il ne pourra plus lire les nouveaux messages, et chaque conversation chiffrée sera rechiffrée.",
+    "revokeFailed": "Impossible de révoquer l'appareil",
+    "revoked": "Appareil révoqué"
   }
 }

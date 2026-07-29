@@ -7,6 +7,8 @@ import { createRequire } from 'node:module';
 import init, {
   EngineAccount,
   EngineSession,
+  EngineGroupSession,
+  EngineInboundGroupSession,
   engine_version,
   verify_ed25519,
   prekey_message_session_id,
@@ -232,5 +234,134 @@ describe('crypto engine (vodozemac olm1)', () => {
       'user-bob', bob.ed25519Key(), bob.curve25519Key()
     );
     expect(changed).not.toBe(fromAlice);
+  });
+});
+
+describe('crypto engine (vodozemac megolm1 group sessions)', () => {
+  it('round-trips outbound encrypt → inbound decrypt with message indexes', () => {
+    const outbound = new EngineGroupSession();
+    expect(outbound.messageIndex()).toBe(0);
+    expect(outbound.sessionId()).toMatch(/^[A-Za-z0-9+/]+$/);
+
+    // Session key exported at index 0 → importer sees the whole history
+    const inbound = EngineInboundGroupSession.fromSessionKey(outbound.sessionKey());
+    expect(inbound.sessionId()).toBe(outbound.sessionId());
+    expect(inbound.firstKnownIndex()).toBe(0);
+
+    for (let i = 0; i < 5; i++) {
+      expect(outbound.messageIndex()).toBe(i);
+      const ciphertext = outbound.encrypt(`group message ${i} ✓🔐`);
+      expect(typeof ciphertext).toBe('string');
+      expect(ciphertext).not.toContain('group message');
+      const result = inbound.decrypt(ciphertext);
+      expect(result.plaintext).toBe(`group message ${i} ✓🔐`);
+      expect(result.messageIndex).toBe(i);
+    }
+    expect(outbound.messageIndex()).toBe(5);
+  });
+
+  it('decrypts out of order and re-decrypts the same ciphertext (megolm keys are not one-shot)', () => {
+    const outbound = new EngineGroupSession();
+    const inbound = EngineInboundGroupSession.fromSessionKey(outbound.sessionKey());
+
+    const m0 = outbound.encrypt('m0');
+    const m1 = outbound.encrypt('m1');
+    const m2 = outbound.encrypt('m2');
+
+    expect(inbound.decrypt(m2).plaintext).toBe('m2');
+    expect(inbound.decrypt(m0).plaintext).toBe('m0');
+    expect(inbound.decrypt(m1).plaintext).toBe('m1');
+    // Unlike Olm, replaying a megolm message decrypts again — history re-reads
+    // must work for every device that holds the session.
+    expect(inbound.decrypt(m0).plaintext).toBe('m0');
+  });
+
+  it('lets a second importer decrypt the same ciphertext (multi-device fanout)', () => {
+    const outbound = new EngineGroupSession();
+    const sessionKey = outbound.sessionKey();
+    const deviceA = EngineInboundGroupSession.fromSessionKey(sessionKey);
+    const deviceB = EngineInboundGroupSession.fromSessionKey(sessionKey);
+
+    const ciphertext = outbound.encrypt('shared with both devices');
+    const a = deviceA.decrypt(ciphertext);
+    const b = deviceB.decrypt(ciphertext);
+    expect(a.plaintext).toBe('shared with both devices');
+    expect(b.plaintext).toBe('shared with both devices');
+    expect(a.messageIndex).toBe(b.messageIndex);
+    expect(deviceB.sessionId()).toBe(outbound.sessionId());
+  });
+
+  it('cannot decrypt messages sent before a late importer received the key', () => {
+    const outbound = new EngineGroupSession();
+    const early = outbound.encrypt('before the share');
+    const middle = outbound.encrypt('also before the share');
+
+    // Key exported after 2 messages → first known index is 2
+    const late = EngineInboundGroupSession.fromSessionKey(outbound.sessionKey());
+    expect(late.firstKnownIndex()).toBe(2);
+    expect(() => late.decrypt(early)).toThrow();
+    expect(() => late.decrypt(middle)).toThrow();
+
+    const after = outbound.encrypt('after the share');
+    const result = late.decrypt(after);
+    expect(result.plaintext).toBe('after the share');
+    expect(result.messageIndex).toBe(2);
+  });
+
+  it('rejects tampered group ciphertext and garbage input', () => {
+    const outbound = new EngineGroupSession();
+    const inbound = EngineInboundGroupSession.fromSessionKey(outbound.sessionKey());
+    const ciphertext = outbound.encrypt('integrity matters');
+
+    const bytes = Buffer.from(ciphertext, 'base64');
+    bytes[bytes.length - 5] ^= 0xff;
+    const tampered = bytes.toString('base64').replace(/=+$/, '');
+    expect(() => inbound.decrypt(tampered)).toThrow();
+
+    expect(() => inbound.decrypt('not base64 !!!')).toThrow();
+    expect(() => EngineInboundGroupSession.fromSessionKey('nonsense')).toThrow();
+
+    // A different session's ciphertext must not verify against this session
+    const other = new EngineGroupSession();
+    expect(() => inbound.decrypt(other.encrypt('foreign'))).toThrow();
+
+    // untouched ciphertext still decrypts
+    expect(inbound.decrypt(ciphertext).plaintext).toBe('integrity matters');
+  });
+
+  it('pickles and restores both group session halves with a 32-byte key', () => {
+    const pickleKey = new Uint8Array(32).fill(11);
+    const wrongKey = new Uint8Array(32).fill(12);
+
+    const outbound = new EngineGroupSession();
+    const inbound = EngineInboundGroupSession.fromSessionKey(outbound.sessionKey());
+    const first = outbound.encrypt('before pickle');
+    expect(inbound.decrypt(first).plaintext).toBe('before pickle');
+
+    const restoredOutbound = EngineGroupSession.fromPickle(outbound.pickle(pickleKey), pickleKey);
+    expect(restoredOutbound.sessionId()).toBe(outbound.sessionId());
+    expect(restoredOutbound.messageIndex()).toBe(outbound.messageIndex());
+
+    const restoredInbound = EngineInboundGroupSession.fromPickle(
+      inbound.pickle(pickleKey),
+      pickleKey
+    );
+    expect(restoredInbound.sessionId()).toBe(inbound.sessionId());
+    expect(restoredInbound.firstKnownIndex()).toBe(inbound.firstKnownIndex());
+
+    // The restored halves keep interoperating across the pickle boundary
+    const next = restoredOutbound.encrypt('after pickle');
+    const result = restoredInbound.decrypt(next);
+    expect(result.plaintext).toBe('after pickle');
+    expect(result.messageIndex).toBe(1);
+    // ...and the restored inbound session still reads pre-pickle history
+    expect(restoredInbound.decrypt(first).plaintext).toBe('before pickle');
+
+    expect(() => EngineGroupSession.fromPickle(outbound.pickle(pickleKey), wrongKey)).toThrow();
+    expect(() =>
+      EngineInboundGroupSession.fromPickle(inbound.pickle(pickleKey), wrongKey)
+    ).toThrow();
+    expect(() => outbound.pickle(new Uint8Array(16))).toThrow();
+    expect(() => inbound.pickle(new Uint8Array(16))).toThrow();
   });
 });

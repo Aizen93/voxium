@@ -419,10 +419,14 @@ dmRouter.post('/:conversationId/encryption', rateLimitInteract, async (req: Requ
       return;
     }
 
-    const devices = await prisma.e2EDevice.count({
+    // Count DISTINCT participants with a device — a single user owning several
+    // devices must not satisfy the "both sides are E2E-capable" check.
+    const equippedUsers = await prisma.e2EDevice.findMany({
       where: { userId: { in: [conversation.user1Id, conversation.user2Id] } },
+      select: { userId: true },
+      distinct: ['userId'],
     });
-    if (devices < 2) {
+    if (equippedUsers.length < 2) {
       throw new ConflictError('Both participants need an E2E-capable client before encryption can be enabled');
     }
 

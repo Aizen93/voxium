@@ -35,9 +35,10 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
 }
 
 /**
- * Decrypt one message for display. Own encrypted echoes race the send path's
- * cache write (the socket broadcast can beat the POST response), so own
- * messages retry the cache briefly before reporting failure.
+ * Decrypt one message for display. Megolm messages decrypt on every device of
+ * both participants (including our own sends), so the normal path handles them.
+ * Own echoes can still race the send path's cache write, and legacy olm1 own
+ * messages are cache-only, so own messages fall back to retrying the cache.
  */
 export async function decryptMessageForDisplay(message: Message): Promise<Message> {
   if (!message.encrypted) return message;
@@ -45,18 +46,7 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
   if (!userId) return { ...message, content: DECRYPT_FAILED_CONTENT };
 
   const service = getE2EService(userId);
-
-  if (message.author?.id === userId) {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      // version-checked: an edit echo must not serve the pre-edit cache entry
-      const cached = await service.getCachedPlaintext(message.id, message.editedAt ?? null);
-      if (cached !== null) {
-        return resolveReplyPreview(applyPlaintext(message, cached), userId);
-      }
-      await new Promise((r) => setTimeout(r, 150));
-    }
-    return { ...message, content: DECRYPT_FAILED_CONTENT };
-  }
+  const own = message.author?.id === userId;
 
   const result = await service.decryptMessage({
     id: message.id,
@@ -66,10 +56,22 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
     editedAt: message.editedAt ?? null,
     createdAt: message.createdAt,
   });
-  if (result.failed) {
-    return resolveReplyPreview({ ...message, content: DECRYPT_FAILED_CONTENT }, userId);
+  if (!result.failed) {
+    return resolveReplyPreview(applyPlaintext(message, result.text), userId);
   }
-  return resolveReplyPreview(applyPlaintext(message, result.text), userId);
+
+  if (own) {
+    // The socket echo can beat the POST response that writes the cache entry.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await new Promise((r) => setTimeout(r, 150));
+      // version-checked: an edit echo must not serve the pre-edit cache entry
+      const cached = await service.getCachedPlaintext(message.id, message.editedAt ?? null);
+      if (cached !== null) {
+        return resolveReplyPreview(applyPlaintext(message, cached), userId);
+      }
+    }
+  }
+  return resolveReplyPreview({ ...message, content: DECRYPT_FAILED_CONTENT }, userId);
 }
 
 /** Decrypt a fetched page of messages (order preserved; plaintext untouched). */
@@ -109,7 +111,12 @@ export async function prepareOutgoingDM(
 
   const plaintext = buildE2EPlaintext(text, attachments);
   try {
-    const content = await getE2EService(userId).encryptMessage(conversation.participant.id, plaintext);
+    // group session per conversation — the peer id drives the share fanout
+    const content = await getE2EService(userId).encryptMessage(
+      conversationId,
+      conversation.participant.id,
+      plaintext
+    );
     return { content, plaintext };
   } catch (err) {
     if (err instanceof E2EIdentityChangedError) {
