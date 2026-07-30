@@ -548,8 +548,13 @@ function validateShare(raw: RawShare, index: number): ValidShare {
     throw new BadRequestError(`${at}: invalid sessionId`);
   }
   // The body must be a well-formed pairwise-Olm envelope: never sanitized,
-  // never inspected beyond its structure.
-  const envelope = typeof raw.body === 'string' ? parseE2EEnvelope(raw.body) : null;
+  // never inspected beyond its structure. It is also size-capped well below
+  // ENVELOPE_MAX — a real Olm key share is ~600 bytes, and this mailbox is
+  // writable by anyone who shares a conversation with the recipient.
+  if (typeof raw.body !== 'string' || raw.body.length > E2E_LIMITS.KEYSHARE_BODY_MAX) {
+    throw new BadRequestError(`${at}: key share body too large`);
+  }
+  const envelope = parseE2EEnvelope(raw.body);
   if (!envelope || envelope.e !== E2E_ENGINE_OLM1) {
     throw new BadRequestError(`${at}: invalid body envelope`);
   }
@@ -613,16 +618,6 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
       if (entry) entry.incoming++;
       else targets.set(key, { recipientUserId: s.recipientUserId, recipientDeviceId: s.recipientDeviceId, incoming: 1 });
     }
-    const knownDevices = await prisma.e2EDevice.findMany({
-      where: {
-        OR: [...targets.values()].map((t) => ({ userId: t.recipientUserId, deviceId: t.recipientDeviceId })),
-      },
-      select: { userId: true, deviceId: true },
-    });
-    const knownSet = new Set(knownDevices.map((d) => recipientKey(d.userId, d.deviceId)));
-    for (const key of targets.keys()) {
-      if (!knownSet.has(key)) throw new BadRequestError('Unknown recipient device');
-    }
 
     // The inbox cap is scoped per (sender, recipient device) and evicts only
     // the SENDER'S own oldest rows: one sender must never be able to push
@@ -630,6 +625,27 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
     // With the recipient-device existence check above, total storage is
     // bounded by (conversations x recipient devices x cap).
     const evicted = await prisma.$transaction(async (tx) => {
+      // Inside the transaction: a device revoked concurrently must not leave
+      // orphaned rows behind (revocation deletes that device's shares).
+      const knownDevices = await tx.e2EDevice.findMany({
+        where: {
+          OR: [...targets.values()].map((t) => ({ userId: t.recipientUserId, deviceId: t.recipientDeviceId })),
+        },
+        select: { userId: true, deviceId: true },
+      });
+      const knownSet = new Set(knownDevices.map((d) => recipientKey(d.userId, d.deviceId)));
+      for (const key of targets.keys()) {
+        if (!knownSet.has(key)) throw new BadRequestError('Unknown recipient device');
+      }
+
+      // Global per-sender ceiling. The per-recipient cap alone is not a bound:
+      // any account can open a DM with any user (no friendship required), so
+      // "conversations" is attacker-chosen.
+      const senderTotal = await tx.e2EKeyShare.count({ where: { senderUserId } });
+      if (senderTotal + valid.length > E2E_LIMITS.KEYSHARE_SENDER_TOTAL_CAP) {
+        throw new ConflictError('Too many undelivered key shares — retry once recipients come online');
+      }
+
       let evictedCount = 0;
       for (const { recipientUserId, recipientDeviceId, incoming } of targets.values()) {
         const scope = { recipientUserId, recipientDeviceId, senderUserId };

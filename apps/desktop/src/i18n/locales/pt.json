@@ -973,6 +973,10 @@
     "revokeDevice": "Revogar",
     "revokeConfirm": "Revogar este dispositivo? Ele não poderá mais ler novas mensagens, e cada conversa criptografada será recriptografada.",
     "revokeFailed": "Não foi possível revogar o dispositivo",
-    "revoked": "Dispositivo revogado"
+    "revoked": "Dispositivo revogado",
+    "ownDeviceBadgeTitle": "Um dispositivo foi adicionado à sua conta — revise",
+    "ownDeviceWarning": "Um dispositivo que você talvez não reconheça foi adicionado à sua conta ({{count}}). Ele pode ler suas conversas criptografadas. Revogue-o se não for seu.",
+    "ownDevicesReviewed": "Estes são os meus dispositivos",
+    "unrecognisedDevice": "novo"
   }
 }

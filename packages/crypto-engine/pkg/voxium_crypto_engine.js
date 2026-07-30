@@ -438,6 +438,25 @@ export class EngineInboundGroupSession {
         return GroupDecryptResult.__wrap(ret[0]);
     }
     /**
+     * Export this session's key at its earliest known ratchet index, so a
+     * recipient that missed the original share can still read the whole
+     * session. The session id is preserved (it is derived from the signing
+     * key, which the exported key carries).
+     * @returns {string}
+     */
+    exportAtFirstKnownIndex() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.engineinboundgroupsession_exportAtFirstKnownIndex(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * Lowest ratchet index this session can decrypt. Messages sent before the
      * key was exported are permanently unreadable by this importer.
      * @returns {number}
@@ -445,6 +464,23 @@ export class EngineInboundGroupSession {
     firstKnownIndex() {
         const ret = wasm.engineinboundgroupsession_firstKnownIndex(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Build an inbound session from an EXPORTED session key (as produced by
+     * `exportAtFirstKnownIndex`). Used when a key share is re-sent from an
+     * already-imported session, so the sender never has to keep raw key
+     * material outside an encrypted pickle (spec §12.4).
+     * @param {string} exported_key_b64
+     * @returns {EngineInboundGroupSession}
+     */
+    static fromExportedSessionKey(exported_key_b64) {
+        const ptr0 = passStringToWasm0(exported_key_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.engineinboundgroupsession_fromExportedSessionKey(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EngineInboundGroupSession.__wrap(ret[0]);
     }
     /**
      * @param {string} encrypted_pickle

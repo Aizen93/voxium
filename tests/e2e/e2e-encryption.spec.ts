@@ -139,7 +139,9 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     expect(userMessages.length).toBeGreaterThanOrEqual(3); // secretA(edited), secretB, attachment msg
     for (const m of userMessages) {
       expect(m.encrypted).toBe(true);
-      expect(m.content).toMatch(/^\{"v":1,"e":"olm1","t":[01],"b":"[A-Za-z0-9+/]+"\}$/);
+      // multi-device sends use the Megolm group envelope; olm1 is only the
+      // pairwise key-share transport and pre-multi-device history
+      expect(m.content).toMatch(/^\{"v":1,"e":"megolm1","sid":"[A-Za-z0-9+/]+","b":"[A-Za-z0-9+/]+"\}$/);
       // none of the plaintexts may appear anywhere in stored content
       for (const secret of [secretA, secretB, editedText, 'pixel.png', 'encrypted file']) {
         expect(m.content).not.toContain(secret);

@@ -738,6 +738,81 @@ describe('E2EService (client crypto core)', () => {
     expect(await alice.service.deviceListStatus(bobId)).toMatchObject({ changed: false, newDeviceIds: [] });
   });
 
+  it('keeps warning after an injected device is withdrawn again (flap-back)', async () => {
+    // The device already holds the session key it was fanned; erasing the
+    // warning because the list reverted would hide that entirely.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const bobPhone = makeDevice(server, bobId);
+    await alice.service.initialize();
+    await bobPhone.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+    await alice.service.acknowledgeDeviceList(bobId);
+
+    const injected = makeDevice(server, bobId);
+    await injected.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+    expect((await alice.service.deviceListStatus(bobId)).changed).toBe(true);
+
+    // server withdraws it and replays the acknowledged version
+    server.users.get(bobId)!.devices.delete(injected.service.deviceId);
+    server.users.get(bobId)!.listVersion = 1;
+    await alice.service.fetchDeviceList(bobId, true);
+
+    const status = await alice.service.deviceListStatus(bobId);
+    expect(status.changed).toBe(true);
+    expect(status.newDeviceIds).toContain(injected.service.deviceId);
+  });
+
+  it('acknowledges only the devices the UI actually showed', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const bobPhone = makeDevice(server, bobId);
+    await alice.service.initialize();
+    await bobPhone.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+    await alice.service.acknowledgeDeviceList(bobId);
+
+    const first = makeDevice(server, bobId);
+    await first.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+    const shown = (await alice.service.deviceListStatus(bobId)).deviceIds;
+
+    // a second device slips in between render and click
+    const second = makeDevice(server, bobId);
+    await second.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+
+    await alice.service.acknowledgeDeviceList(bobId, shown);
+    const status = await alice.service.deviceListStatus(bobId);
+    expect(status.changed).toBe(true);
+    expect(status.newDeviceIds).toEqual([second.service.deviceId]);
+  });
+
+  it('refuses to send when every device of the peer fails signature verification', async () => {
+    // A tampered device entry is dropped, not trusted. Encrypting to an empty
+    // device set would hand the user ciphertext their peer can never read.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+
+    const impostor = makeParty(server, 'impostor');
+    await impostor.service.initialize();
+    const evil = server.deviceOf(impostor.userId, impostor.service.deviceId);
+    const target = server.deviceOf(bob.userId, bob.service.deviceId);
+    target.curve25519Key = evil.curve25519Key;
+    target.ed25519Key = evil.ed25519Key; // signature no longer covers these keys
+
+    await expect(alice.service.encryptMessage('c1', bob.userId, 'nope')).rejects.toThrow(/no usable E2E device/);
+  });
+
   it('detects a device injected WITHOUT a listVersion bump (hostile server)', async () => {
     // The device SET is authoritative: a server that adds a device it controls
     // and replays the old listVersion must still trigger the warning, or it

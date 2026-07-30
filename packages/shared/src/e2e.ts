@@ -32,7 +32,6 @@ export const E2E_LIMITS = {
   GROUP_SESSION_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000,
   /** Max key shares per POST /e2e/keyshares batch. */
   KEYSHARE_BATCH_MAX: 50,
-  /** Max pending key shares stored per recipient device (oldest evicted). */
   /** Max stored shares per (sender, recipient device) — eviction is scoped to
    *  the sender so nobody can flush another sender's pending session keys. */
   KEYSHARE_STORE_CAP_PER_SENDER: 100,
@@ -40,6 +39,14 @@ export const E2E_LIMITS = {
   KEYSHARE_MAX_AGE_MS: 30 * 24 * 60 * 60 * 1000,
   /** Max key shares returned (and deleted) by one GET /e2e/keyshares claim. */
   KEYSHARE_CLAIM_MAX: 100,
+  /**
+   * Max serialized key-share body. A real Olm pre-key share is ~600 bytes;
+   * allowing the full ENVELOPE_MAX here would let a sender inflate the shared
+   * mailbox 50x for free.
+   */
+  KEYSHARE_BODY_MAX: 2048,
+  /** Max pending shares one sender may hold across ALL recipients. */
+  KEYSHARE_SENDER_TOTAL_CAP: 2000,
 } as const;
 
 /** 32-byte key, unpadded standard base64 (vodozemac canonical encoding). */
@@ -244,15 +251,6 @@ export interface E2EDeviceRegistration {
   fallbackKey: E2EPreKey;
 }
 
-/** Public device info (identity pinning + "can this user do E2E?"). */
-export interface E2EDeviceInfo {
-  userId: string;
-  deviceId: string;
-  curve25519Key: string;
-  ed25519Key: string;
-  deviceSignature: string;
-  updatedAt: string;
-}
 
 /** One entry of a user's published device list. */
 export interface E2EDeviceEntry {
@@ -296,6 +294,12 @@ export interface E2EKeySharePayload {
   conversationId: string;
   sessionId: string;
   sessionKey: string;
+  /**
+   * How `sessionKey` is encoded. Absent/'session' = a fresh Megolm SessionKey.
+   * 'exported' = an ExportedSessionKey re-derived from the sender's own copy
+   * of the session (key-share retries — the sender keeps no raw key at rest).
+   */
+  keyType?: 'session' | 'exported';
   senderUserId: string;
   senderDeviceId: string;
 }

@@ -46,6 +46,13 @@ export interface DeviceListState {
   deviceIds: string[];
   acknowledgedVersion: number;
   acknowledgedDeviceIds: string[];
+  /**
+   * Union of every device id seen since the last acknowledgement. Sticky on
+   * purpose: a server that adds a device and then removes it again would
+   * otherwise erase the warning while the device keeps the session key it was
+   * already given. Cleared ONLY by acknowledgeDeviceList.
+   */
+  unacknowledgedDeviceIds?: string[];
 }
 
 /** Our outbound Megolm session for one conversation (spec §12, D9). */
@@ -66,11 +73,10 @@ export interface OutboundGroupSessionRecord {
   /** `${userId}|${deviceId}` entries whose key share could not be delivered */
   pendingShareFailures: string[];
   /**
-   * The index-0 session key, kept so an undelivered share can be RETRIED on
-   * this same session (with no history gap) instead of forcing a rotation —
-   * rotating on every transient failure is self-amplifying.
+   * Attempts made to deliver `pendingShareFailures`. Retrying forever would
+   * hammer the bundle endpoint for a target that can never be served.
    */
-  initialSessionKey?: string;
+  shareRetryCount?: number;
   /** epoch ms of the last share-retry attempt (backoff) */
   lastShareAttemptAt?: number;
 }

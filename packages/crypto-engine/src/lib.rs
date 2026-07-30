@@ -14,8 +14,8 @@
 use serde::Serialize;
 use sha2::{Digest, Sha512};
 use vodozemac::megolm::{
-    GroupSession, GroupSessionPickle, InboundGroupSession, InboundGroupSessionPickle, MegolmMessage,
-    SessionConfig as MegolmSessionConfig, SessionKey,
+    ExportedSessionKey, GroupSession, GroupSessionPickle, InboundGroupSession,
+    InboundGroupSessionPickle, MegolmMessage, SessionConfig as MegolmSessionConfig, SessionKey,
 };
 use vodozemac::olm::{
     Account, AccountPickle, OlmMessage, Session, SessionConfig, SessionPickle,
@@ -562,6 +562,30 @@ impl EngineInboundGroupSession {
         Ok(EngineInboundGroupSession {
             inner: InboundGroupSession::new(&key, MegolmSessionConfig::version_1()),
         })
+    }
+
+    /// Build an inbound session from an EXPORTED session key (as produced by
+    /// `exportAtFirstKnownIndex`). Used when a key share is re-sent from an
+    /// already-imported session, so the sender never has to keep raw key
+    /// material outside an encrypted pickle (spec §12.4).
+    #[wasm_bindgen(js_name = fromExportedSessionKey)]
+    pub fn from_exported_session_key(
+        exported_key_b64: &str,
+    ) -> Result<EngineInboundGroupSession, JsError> {
+        let key = ExportedSessionKey::from_base64(exported_key_b64)
+            .map_err(|_| JsError::new("invalid exported megolm session key"))?;
+        Ok(EngineInboundGroupSession {
+            inner: InboundGroupSession::import(&key, MegolmSessionConfig::version_1()),
+        })
+    }
+
+    /// Export this session's key at its earliest known ratchet index, so a
+    /// recipient that missed the original share can still read the whole
+    /// session. The session id is preserved (it is derived from the signing
+    /// key, which the exported key carries).
+    #[wasm_bindgen(js_name = exportAtFirstKnownIndex)]
+    pub fn export_at_first_known_index(&self) -> String {
+        self.inner.export_at_first_known_index().to_base64()
     }
 
     #[wasm_bindgen(js_name = fromPickle)]

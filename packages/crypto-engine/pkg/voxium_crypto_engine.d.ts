@@ -108,10 +108,24 @@ export class EngineInboundGroupSession {
      */
     decrypt(ciphertext_b64: string): GroupDecryptResult;
     /**
+     * Export this session's key at its earliest known ratchet index, so a
+     * recipient that missed the original share can still read the whole
+     * session. The session id is preserved (it is derived from the signing
+     * key, which the exported key carries).
+     */
+    exportAtFirstKnownIndex(): string;
+    /**
      * Lowest ratchet index this session can decrypt. Messages sent before the
      * key was exported are permanently unreadable by this importer.
      */
     firstKnownIndex(): number;
+    /**
+     * Build an inbound session from an EXPORTED session key (as produced by
+     * `exportAtFirstKnownIndex`). Used when a key share is re-sent from an
+     * already-imported session, so the sender never has to keep raw key
+     * material outside an encrypted pickle (spec §12.4).
+     */
+    static fromExportedSessionKey(exported_key_b64: string): EngineInboundGroupSession;
     static fromPickle(encrypted_pickle: string, pickle_key: Uint8Array): EngineInboundGroupSession;
     /**
      * Build an inbound session from a base64 session key produced by
@@ -235,7 +249,9 @@ export interface InitOutput {
     readonly enginegroupsession_sessionId: (a: number) => [number, number];
     readonly enginegroupsession_sessionKey: (a: number) => [number, number];
     readonly engineinboundgroupsession_decrypt: (a: number, b: number, c: number) => [number, number, number];
+    readonly engineinboundgroupsession_exportAtFirstKnownIndex: (a: number) => [number, number];
     readonly engineinboundgroupsession_firstKnownIndex: (a: number) => number;
+    readonly engineinboundgroupsession_fromExportedSessionKey: (a: number, b: number) => [number, number, number];
     readonly engineinboundgroupsession_fromPickle: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly engineinboundgroupsession_fromSessionKey: (a: number, b: number) => [number, number, number];
     readonly engineinboundgroupsession_pickle: (a: number, b: number, c: number) => [number, number, number, number];

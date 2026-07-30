@@ -980,6 +980,10 @@
     "revokeDevice": "Revoke",
     "revokeConfirm": "Revoke this device? It will no longer be able to read new messages, and every encrypted conversation will re-key.",
     "revokeFailed": "Could not revoke device",
-    "revoked": "Device revoked"
+    "revoked": "Device revoked",
+    "ownDeviceBadgeTitle": "A device was added to your account — review it",
+    "ownDeviceWarning": "A device you may not recognise was added to your account ({{count}}). It can read your encrypted conversations. Revoke it if it is not yours.",
+    "ownDevicesReviewed": "These are my devices",
+    "unrecognisedDevice": "new"
   }
 }

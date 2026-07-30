@@ -24,6 +24,13 @@ interface E2EState {
   identityWarnings: Record<string, boolean>;
   /** peers who added devices since the user last acknowledged their list (spec §12) */
   newDeviceWarnings: Record<string, string[]>;
+  /**
+   * Device ids that appeared on OUR OWN account without the user adding them.
+   * A hostile server can register a device under the victim's userId and it
+   * would otherwise receive every future group-session key with no signal —
+   * the mirror image of the peer-side injection warning (spec §12.5).
+   */
+  ownDeviceWarnings: string[];
   /** this account's own registered devices, as last loaded from the server */
   ownDevices: E2EOwnDevices | null;
   ownDevicesLoading: boolean;
@@ -32,9 +39,10 @@ interface E2EState {
   flagIdentityChanged: (peerUserId: string) => void;
   acceptNewIdentity: (userId: string, peerUserId: string) => Promise<void>;
   refreshDeviceList: (userId: string, peerUserId: string) => Promise<void>;
-  acknowledgeDeviceList: (userId: string, peerUserId: string) => Promise<void>;
+  acknowledgeDeviceList: (userId: string, peerUserId: string, seenDeviceIds?: string[]) => Promise<void>;
   loadOwnDevices: (userId: string) => Promise<void>;
   revokeDevice: (userId: string, deviceId: string) => Promise<void>;
+  acknowledgeOwnDevices: (userId: string, seenDeviceIds: string[]) => Promise<void>;
 }
 
 export const useE2EStore = create<E2EState>((set, get) => ({
@@ -43,6 +51,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   error: null,
   identityWarnings: {},
   newDeviceWarnings: {},
+  ownDeviceWarnings: [],
   ownDevices: null,
   ownDevicesLoading: false,
 
@@ -57,11 +66,16 @@ export const useE2EStore = create<E2EState>((set, get) => ({
       // receive session keys while the UI badge stayed green until remount.
       if (unsubscribeDeviceListChanges) unsubscribeDeviceListChanges();
       unsubscribeDeviceListChanges = service.onDeviceListChanged((changedUserId) => {
-        if (changedUserId === userId) return; // own devices: shown in the device manager
         void service
           .deviceListStatus(changedUserId)
           .then((status) => {
             set((state) => {
+              // Our own list: a device we did not add is as dangerous as an
+              // injected peer device — it receives every session key we fan out.
+              if (changedUserId === userId) {
+                const mine = status.newDeviceIds.filter((id) => id !== service.deviceId);
+                return { ownDeviceWarnings: status.changed ? mine : [] };
+              }
               const newDeviceWarnings = { ...state.newDeviceWarnings };
               if (status.changed) newDeviceWarnings[changedUserId] = status.newDeviceIds;
               else delete newDeviceWarnings[changedUserId];
@@ -117,13 +131,20 @@ export const useE2EStore = create<E2EState>((set, get) => ({
     });
   },
 
-  acknowledgeDeviceList: async (userId: string, peerUserId: string) => {
-    await getE2EService(userId).acknowledgeDeviceList(peerUserId);
+  acknowledgeDeviceList: async (userId: string, peerUserId: string, seenDeviceIds?: string[]) => {
+    await getE2EService(userId).acknowledgeDeviceList(peerUserId, seenDeviceIds);
     set((state) => {
       const newDeviceWarnings = { ...state.newDeviceWarnings };
       delete newDeviceWarnings[peerUserId];
       return { newDeviceWarnings };
     });
+  },
+
+  /** The user has reviewed their own device list — clear the warning. */
+  acknowledgeOwnDevices: async (userId: string, seenDeviceIds: string[]) => {
+    await getE2EService(userId).acknowledgeDeviceList(userId, seenDeviceIds);
+    const status = await getE2EService(userId).deviceListStatus(userId);
+    set({ ownDeviceWarnings: status.changed ? status.newDeviceIds : [] });
   },
 
   /** Device-manager UI: (re)load this account's registered devices. */

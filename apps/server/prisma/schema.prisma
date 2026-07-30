@@ -619,6 +619,9 @@ model E2EKeyShare {
   createdAt         DateTime @default(now()) @map("created_at")
 
   @@index([recipientUserId, recipientDeviceId, createdAt])
+  // the retention sweep deletes by age across all recipients
+  @@index([createdAt])
+  @@index([senderUserId])
   @@map("e2e_key_shares")
 }
 

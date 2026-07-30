@@ -71,8 +71,8 @@ re-establishing sessions; old envelopes remain decodable from the cache.
 
 ## 4. Key hierarchy & authenticated key distribution
 
-Each user has **one E2E device** (MVP; multi-device is Phase C). A device is a
-vodozemac `Account` holding:
+Each user may register up to `E2E_LIMITS.MAX_DEVICES` (5) devices — see §12
+for the multi-device protocol. A device is a vodozemac `Account` holding:
 
 | Key | Type | Role |
 |---|---|---|
@@ -91,13 +91,14 @@ Signed with the device's Ed25519 key over UTF-8 strings with a versioned
 domain prefix (`packages/shared/src/e2e.ts` is the single source of truth):
 
 ```
-device binding:  voxium-e2e-v1|device|<userId>|<curve25519_b64>|<ed25519_b64>
-key binding:     voxium-e2e-v1|key|<userId>|<curve25519_identity_b64>|<keyId_b64>|<key_b64>
+device binding:  voxium-e2e-v2|device|<userId>|<deviceId>|<curve25519_b64>|<ed25519_b64>
+key binding:     voxium-e2e-v2|key|<userId>|<deviceId>|<curve25519_identity_b64>|<keyId_b64>|<key_b64>
 ```
 
 Every field is included so neither the server nor a MITM can splice keys
-across users or identities: a one-time key is bound to the user AND the
-identity key it belongs to.
+across users, devices, or identities: a one-time key is bound to the user, the
+**device**, AND the identity key it belongs to. There is no v1 verification
+path anywhere — the domain string changed with multi-device (§12.1).
 
 ### 4.2 Registration (`PUT /api/v1/e2e/devices`)
 
@@ -114,7 +115,7 @@ fallbackKey}` where every key entry is `{keyId, key, signature}`. The server:
 Re-registering with a different identity invalidates the previous install —
 one active E2E device per user (MVP). Peers see a safety-number change.
 
-### 4.3 Bundle claim (`POST /api/v1/e2e/bundles/:userId`)
+### 4.3 Bundle claim (`POST /api/v1/e2e/bundles/:userId/:deviceId`)
 
 Guards: requester must share a conversation with the target (limits pre-key
 harvesting); per-user rate limit (`e2eBundle`, 15/min) further slows draining;
@@ -126,7 +127,7 @@ concurrent claims can never receive the same one-time key. When none remain it
 returns the (reusable) fallback key, marked `type: "fallback"`.
 
 **Client-side verification — MANDATORY before any session is built**
-(`e2eService.createOutboundSession` / `verifyAndPinIdentity`):
+(`e2eService.ensureOlmSession` / `pinDevice`):
 
 1. Verify `deviceSignature` over the device canonical with the bundle's
    `ed25519Key` (binds ed25519 ↔ curve25519 ↔ userId).
@@ -194,8 +195,18 @@ Per account, IndexedDB `voxium-e2e-{userId}` (`services/e2e/vault.ts`):
 |---|---|
 | `account` | Olm account pickle (encrypted **inside vodozemac**, ChaCha20-Poly1305, pickle key) |
 | `session:{peerUserId}` | Olm session pickle (same encryption) |
-| `identity:{peerUserId}` | pinned `{curve25519Key, ed25519Key, verified}` |
+| `identity:{peerUserId}:{deviceId}` | pinned `{curve25519Key, ed25519Key, verified}`, per device |
+| `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5) |
+| `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
+| `igs:{sessionId}` | an inbound Megolm session + the attribution it arrived under |
 | `pt:{messageId}` | decrypted plaintext `{conversationId, text}` |
+
+Only the `pickle` fields are encrypted (by vodozemac, under the pickle key).
+Everything else in a record — session ids, device ids, counters, and the
+plaintext cache — is readable by anyone who can read the IndexedDB file. **No
+raw Megolm or Olm key material is ever stored outside a pickle**: key-share
+retries re-derive the key from the encrypted inbound session via
+`exportAtFirstKnownIndex()` rather than keeping a copy (§12.4).
 
 ### 7.1 Why a plaintext cache is load-bearing
 
@@ -336,9 +347,20 @@ Server-side rules — every one of these is load-bearing:
   an E2E conversation.
 - Claiming (`GET /e2e/keyshares?deviceId=`) is **claim-and-delete**, ownership
   checked, `FOR UPDATE SKIP LOCKED` (Olm pre-key bodies are one-shot).
+- Bodies are capped at `KEYSHARE_BODY_MAX` (2 KB — a real Olm share is ~600
+  bytes; `ENVELOPE_MAX` would allow 50x that), and a sender may hold at most
+  `KEYSHARE_SENDER_TOTAL_CAP` (2000) undelivered shares across **all**
+  recipients. The per-recipient cap alone is not a bound, because any account
+  can open a DM with any user, making "number of conversations" attacker-chosen.
+- Recipient-device existence is checked **inside** the write transaction, so a
+  concurrent revoke cannot leave orphaned rows.
 - Undelivered shares are swept after `KEYSHARE_MAX_AGE_MS` (30 days) by
-  `utils/keyShareCleanup.ts`. The table intentionally has no FK to `User`, so
-  the sweep is also what reclaims rows after account deletion.
+  `utils/keyShareCleanup.ts`, which is indexed on `created_at` (the sweep runs
+  across all recipients; the recipient-scoped composite index cannot serve it).
+  The table intentionally has no FK to `User`, so the sweep is also what
+  reclaims rows after account deletion.
+- Claiming drains **every** page, not just the first: the inbox is oldest-first,
+  so stopping at one page would let queued older shares delay a live one.
 
 Client-side, the importer verifies the share's `sessionId` and `conversationId`
 match the row, takes sender attribution from the **authenticated Olm session**
@@ -358,11 +380,25 @@ must still force a re-key. The rotation decision always fetches device lists
 with `force: true`, so a revoked device cannot keep receiving keys for the
 cache window.
 
-An undelivered share does **not** rotate. The index-0 session key is kept in the
-outbound record and the share is retried on the same session behind a 30s
-backoff: rotating on every transient failure would burn peer one-time keys,
-flood inboxes, and self-amplify — and the retry is lossless, because the
-recipient still gets the key from index 0.
+An undelivered share does **not** rotate. The share is retried on the same
+session behind a 30s backoff and is dropped after 10 rounds: rotating on every
+transient failure would burn peer one-time keys, flood inboxes, and
+self-amplify. The retry is lossless — the key is re-derived at the session's
+first known index from our own (encrypted) inbound copy via
+`exportAtFirstKnownIndex()`, so the recovering device can still read the
+messages it missed. Because it travels as an **ExportedSessionKey**, the share
+payload carries `keyType: 'exported'` and the importer uses
+`fromExportedSessionKey`.
+
+The peer's device list is always fetched fresh when deciding to rotate — a
+revoked device must stop receiving keys immediately — while our own list is
+allowed a 15s window. Concurrent fetches for the same user are coalesced, and
+`e2eStatus` is budgeted for the resulting read rate (300/min), because these
+reads sit on the message-send path.
+
+If **every** device of the peer fails signature verification (or they revoked
+them all), sending fails loudly rather than producing ciphertext nobody can
+read.
 
 ### 12.5 Trust and detection
 
@@ -374,6 +410,21 @@ recipient still gets the key from index 0.
 - The service emits device-list change events (`onDeviceListChanged`), which the
   store subscribes to, so a device appearing mid-conversation raises the warning
   immediately instead of at the next component mount.
+- **This applies to our OWN account too.** A server that registers a device
+  under the local user's id would otherwise receive every session key we fan
+  out with no signal at all — the mirror image of peer injection. Unrecognised
+  own devices raise the same warning badge and are highlighted in the device
+  manager until acknowledged.
+- Warnings are **sticky**: the set of device ids seen since the last
+  acknowledgement is persisted, so a server that adds a device and then
+  withdraws it cannot erase the notice — the device keeps whatever session key
+  it was already given. Acknowledgement applies only to the exact devices the
+  UI displayed, so one confirmation can never bless a change the user was not
+  shown.
+- Detection is advisory, not blocking: a newly-appeared device still receives
+  the session key in the same operation (matching Signal's model). The control
+  is that the user is told, verifiably and promptly — not that key delivery is
+  withheld.
 - `acceptNewIdentity` re-pins every device unverified, drops pairwise sessions,
   drops **inbound group sessions attributed to that user** (otherwise the holder
   of the old keys could keep publishing into a session we still trust), and

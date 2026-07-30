@@ -973,6 +973,10 @@
     "revokeDevice": "撤销",
     "revokeConfirm": "撤销此设备？该设备将无法再读取新消息，且所有加密对话都会重新加密。",
     "revokeFailed": "无法撤销设备",
-    "revoked": "设备已撤销"
+    "revoked": "设备已撤销",
+    "ownDeviceBadgeTitle": "您的账户新增了一台设备 — 请查看",
+    "ownDeviceWarning": "您的账户新增了一台可能不认识的设备（{{count}}）。它可以读取您的加密对话。如果不是您的设备，请撤销。",
+    "ownDevicesReviewed": "这些是我的设备",
+    "unrecognisedDevice": "新"
   }
 }

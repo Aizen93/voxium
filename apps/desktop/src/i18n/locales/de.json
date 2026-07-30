@@ -973,6 +973,10 @@
     "revokeDevice": "Widerrufen",
     "revokeConfirm": "Dieses Gerät widerrufen? Es kann dann keine neuen Nachrichten mehr lesen, und jede verschlüsselte Unterhaltung wird neu verschlüsselt.",
     "revokeFailed": "Gerät konnte nicht widerrufen werden",
-    "revoked": "Gerät widerrufen"
+    "revoked": "Gerät widerrufen",
+    "ownDeviceBadgeTitle": "Deinem Konto wurde ein Gerät hinzugefügt — bitte prüfen",
+    "ownDeviceWarning": "Deinem Konto wurde ein möglicherweise unbekanntes Gerät hinzugefügt ({{count}}). Es kann deine verschlüsselten Unterhaltungen mitlesen. Widerrufe es, wenn es nicht deins ist.",
+    "ownDevicesReviewed": "Das sind meine Geräte",
+    "unrecognisedDevice": "neu"
   }
 }

@@ -973,6 +973,10 @@
     "revokeDevice": "取り消す",
     "revokeConfirm": "この端末を取り消しますか？ この端末は新しいメッセージを読めなくなり、暗号化された各会話は再暗号化されます。",
     "revokeFailed": "端末を取り消せませんでした",
-    "revoked": "端末を取り消しました"
+    "revoked": "端末を取り消しました",
+    "ownDeviceBadgeTitle": "アカウントにデバイスが追加されました — 確認してください",
+    "ownDeviceWarning": "心当たりのないデバイスがアカウントに追加されました（{{count}}）。暗号化された会話を読み取れます。自分のものでなければ失効させてください。",
+    "ownDevicesReviewed": "これは自分のデバイスです",
+    "unrecognisedDevice": "新規"
   }
 }
