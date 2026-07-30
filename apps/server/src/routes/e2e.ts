@@ -168,7 +168,25 @@ const DEVICE_LIST_SELECT = {
   createdAt: true,
 } as const;
 
-/** The account-level master key pair, or nulls when cross-signing is unused. */
+/**
+ * Tells the client this node understands cross-signing (spec §14.6).
+ *
+ * A node that predates it omits the master-key fields entirely, which a client
+ * cannot tell apart from "this account has no master key" — and acting on that
+ * reading mints a replacement key, resetting account trust for every peer. So
+ * the absence of this flag, not the absence of a key, is what clients key off
+ * during a rolling deploy.
+ */
+const CROSS_SIGNING_CAPABILITY = { crossSigning: true } as const;
+
+/**
+ * Bound the shape of a transfer row id before it reaches a query. Deliberately
+ * wider than today's cuid: pinning it to the current generator would turn a
+ * later switch to cuid2/uuid into a silent 400 on every ack. Prisma
+ * parameterizes anyway — this is a length/charset guard, not the defence.
+ */
+const TRANSFER_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+
 async function getMasterKeyInfo(userId: string): Promise<{ masterKey: string | null; masterSignature: string | null }> {
   const row = await prisma.e2EMasterKey.findUnique({
     where: { userId },
@@ -311,6 +329,7 @@ e2eRouter.get('/devices/me', rateLimitE2EStatus, async (req: Request, res: Respo
       devices: devices.map(serializeDevice),
       listVersion,
       ...master,
+      ...CROSS_SIGNING_CAPABILITY,
     };
 
     if (!deviceId) {
@@ -400,7 +419,7 @@ e2eRouter.get('/devices/:userId', rateLimitE2EStatus, async (req: Request<{ user
 
     res.json({
       success: true,
-      data: { devices: devices.map(serializeDevice), listVersion, ...master },
+      data: { devices: devices.map(serializeDevice), listVersion, ...master, ...CROSS_SIGNING_CAPABILITY },
     });
   } catch (err) {
     next(err);
@@ -1046,33 +1065,66 @@ e2eRouter.get('/master-transfers', rateLimitE2EShares, async (req: Request, res:
     });
     if (!device) throw new ForbiddenError('Unknown device');
 
-    // Claim-and-delete in one statement — the body is an Olm pre-key message,
-    // decryptable exactly once, so it must never be handed to two pollers.
-    const rows = await prisma.$queryRaw<
-      Array<{ id: string; sender_device_id: string; body: string; created_at: Date }>
-    >`
-      DELETE FROM e2e_master_transfers
-      WHERE id IN (
-        SELECT id FROM e2e_master_transfers
-        WHERE user_id = ${userId} AND recipient_device_id = ${deviceId}
-        ORDER BY created_at, id
-        LIMIT ${E2E_LIMITS.MASTER_TRANSFER_STORE_CAP}
-        FOR UPDATE SKIP LOCKED
-      )
-      RETURNING id, sender_device_id, body, created_at
-    `;
+    // Read without deleting; the client acks what it actually used (spec
+    // §14.6). Deleting here would make the read itself the point of no return:
+    // the approving device publishes the cross-signature straight after
+    // queueing, so a claimant that reads the row and then fails — rate limit,
+    // dropped connection, a key it cannot yet check — would be permanently
+    // cross-signed, permanently keyless, and no longer offered for approval.
+    // Rows are capped per recipient device and swept, so unacked ones are
+    // bounded.
+    const rows = await prisma.e2EMasterTransfer.findMany({
+      where: { userId, recipientDeviceId: deviceId },
+      select: { id: true, senderDeviceId: true, body: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: E2E_LIMITS.MASTER_TRANSFER_STORE_CAP,
+    });
 
     res.json({
       success: true,
       data: {
         transfers: rows.map((r) => ({
           id: r.id,
-          senderDeviceId: r.sender_device_id,
+          senderDeviceId: r.senderDeviceId,
           body: r.body,
-          createdAt: new Date(r.created_at).toISOString(),
+          createdAt: r.createdAt.toISOString(),
         })),
       },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Drop transfers this device has finished with — imported, or rejected as
+ * unusable. Scoped to the caller's own account and its own device, so it can
+ * only ever delete rows addressed to itself.
+ */
+e2eRouter.post('/master-transfers/ack', rateLimitE2EShares, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const { deviceId: rawDeviceId, ids } = req.body as { deviceId?: unknown; ids?: unknown };
+    const deviceId = validateDeviceId(rawDeviceId);
+
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > E2E_LIMITS.MASTER_TRANSFER_STORE_CAP) {
+      throw new BadRequestError('ids must be a non-empty array within the transfer cap');
+    }
+    if (!ids.every((id) => typeof id === 'string' && TRANSFER_ID_RE.test(id))) {
+      throw new BadRequestError('Invalid transfer id');
+    }
+
+    const device = await prisma.e2EDevice.findUnique({
+      where: { userId_deviceId: { userId, deviceId } },
+      select: { id: true },
+    });
+    if (!device) throw new ForbiddenError('Unknown device');
+
+    const { count } = await prisma.e2EMasterTransfer.deleteMany({
+      where: { id: { in: ids as string[] }, userId, recipientDeviceId: deviceId },
+    });
+
+    res.json({ success: true, data: { cleared: count } });
   } catch (err) {
     next(err);
   }

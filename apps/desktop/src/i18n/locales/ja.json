@@ -29,7 +29,6 @@
     "creating": "作成中...",
     "deleting": "削除中..."
   },
-
   "auth": {
     "login": {
       "title": "おかえりなさい！",
@@ -119,7 +118,6 @@
       "checkSpam": "メールが届きませんか？迷惑メールフォルダを確認するか、再送信をお試しください。"
     }
   },
-
   "settings": {
     "title": "設定",
     "tabs": {
@@ -234,7 +232,6 @@
       "selectLanguage": "言語を選択"
     }
   },
-
   "serverSettings": {
     "title": "サーバー設定",
     "tabs": {
@@ -310,30 +307,88 @@
       "failedToLoad": "サーバー制限の読み込みに失敗しました"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "チャンネルを見る", "description": "メンバーがテキストチャンネルとボイスチャンネルを閲覧できるようにします" },
-    "MANAGE_CHANNELS": { "name": "チャンネルの管理", "description": "メンバーがチャンネルを作成、編集、削除できるようにします" },
-    "MANAGE_CATEGORIES": { "name": "カテゴリの管理", "description": "メンバーがカテゴリを作成、編集、削除できるようにします" },
-    "MANAGE_SERVER": { "name": "サーバーの管理", "description": "メンバーがサーバー名、アイコン、設定を編集できるようにします" },
-    "MANAGE_ROLES": { "name": "ロールの管理", "description": "メンバーが自分より下位のロールを作成、編集、削除できるようにします" },
-    "CREATE_INVITES": { "name": "招待を作成", "description": "メンバーがサーバーの招待リンクを作成できるようにします" },
-    "KICK_MEMBERS": { "name": "メンバーをキック", "description": "メンバーが下位のロールを持つ他のメンバーをキックできるようにします" },
-    "MANAGE_NICKNAMES": { "name": "ニックネームの管理", "description": "メンバーが他のメンバーの表示名を変更できるようにします" },
-    "CHANGE_NICKNAME": { "name": "ニックネームの変更", "description": "メンバーが自分の表示名を変更できるようにします" },
-    "SEND_MESSAGES": { "name": "メッセージを送信", "description": "メンバーがテキストチャンネルでメッセージを送信できるようにします" },
-    "MANAGE_MESSAGES": { "name": "メッセージの管理", "description": "メンバーが他のメンバーのメッセージを削除できるようにします" },
-    "ATTACH_FILES": { "name": "ファイルを添付", "description": "メンバーがファイル添付をアップロードできるようにします" },
-    "ADD_REACTIONS": { "name": "リアクションを追加", "description": "メンバーがメッセージにリアクションを追加できるようにします" },
-    "MENTION_EVERYONE": { "name": "全員にメンション", "description": "メンバーが @everyone メンションを使用できるようにします" },
-    "CONNECT": { "name": "接続", "description": "メンバーがボイスチャンネルに参加できるようにします" },
-    "SPEAK": { "name": "発言", "description": "メンバーがボイスチャンネルで話せるようにします" },
-    "MUTE_MEMBERS": { "name": "メンバーをミュート", "description": "メンバーがボイスで他のメンバーをミュートできるようにします" },
-    "DEAFEN_MEMBERS": { "name": "メンバーをスピーカーミュート", "description": "メンバーがボイスで他のメンバーをスピーカーミュートできるようにします" },
-    "MOVE_MEMBERS": { "name": "メンバーを移動", "description": "メンバーが他のメンバーをボイスチャンネル間で移動できるようにします" },
-    "ADMINISTRATOR": { "name": "管理者", "description": "すべての権限を付与し、すべてのチャンネルオーバーライドを無視します" }
+    "VIEW_CHANNEL": {
+      "name": "チャンネルを見る",
+      "description": "メンバーがテキストチャンネルとボイスチャンネルを閲覧できるようにします"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "チャンネルの管理",
+      "description": "メンバーがチャンネルを作成、編集、削除できるようにします"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "カテゴリの管理",
+      "description": "メンバーがカテゴリを作成、編集、削除できるようにします"
+    },
+    "MANAGE_SERVER": {
+      "name": "サーバーの管理",
+      "description": "メンバーがサーバー名、アイコン、設定を編集できるようにします"
+    },
+    "MANAGE_ROLES": {
+      "name": "ロールの管理",
+      "description": "メンバーが自分より下位のロールを作成、編集、削除できるようにします"
+    },
+    "CREATE_INVITES": {
+      "name": "招待を作成",
+      "description": "メンバーがサーバーの招待リンクを作成できるようにします"
+    },
+    "KICK_MEMBERS": {
+      "name": "メンバーをキック",
+      "description": "メンバーが下位のロールを持つ他のメンバーをキックできるようにします"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "ニックネームの管理",
+      "description": "メンバーが他のメンバーの表示名を変更できるようにします"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "ニックネームの変更",
+      "description": "メンバーが自分の表示名を変更できるようにします"
+    },
+    "SEND_MESSAGES": {
+      "name": "メッセージを送信",
+      "description": "メンバーがテキストチャンネルでメッセージを送信できるようにします"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "メッセージの管理",
+      "description": "メンバーが他のメンバーのメッセージを削除できるようにします"
+    },
+    "ATTACH_FILES": {
+      "name": "ファイルを添付",
+      "description": "メンバーがファイル添付をアップロードできるようにします"
+    },
+    "ADD_REACTIONS": {
+      "name": "リアクションを追加",
+      "description": "メンバーがメッセージにリアクションを追加できるようにします"
+    },
+    "MENTION_EVERYONE": {
+      "name": "全員にメンション",
+      "description": "メンバーが @everyone メンションを使用できるようにします"
+    },
+    "CONNECT": {
+      "name": "接続",
+      "description": "メンバーがボイスチャンネルに参加できるようにします"
+    },
+    "SPEAK": {
+      "name": "発言",
+      "description": "メンバーがボイスチャンネルで話せるようにします"
+    },
+    "MUTE_MEMBERS": {
+      "name": "メンバーをミュート",
+      "description": "メンバーがボイスで他のメンバーをミュートできるようにします"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "メンバーをスピーカーミュート",
+      "description": "メンバーがボイスで他のメンバーをスピーカーミュートできるようにします"
+    },
+    "MOVE_MEMBERS": {
+      "name": "メンバーを移動",
+      "description": "メンバーが他のメンバーをボイスチャンネル間で移動できるようにします"
+    },
+    "ADMINISTRATOR": {
+      "name": "管理者",
+      "description": "すべての権限を付与し、すべてのチャンネルオーバーライドを無視します"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "一般",
@@ -365,7 +420,6 @@
     "failedToUpdate": "エラーが発生しました",
     "failedToDelete": "エラーが発生しました"
   },
-
   "channelPermissions": {
     "title": "チャンネル権限",
     "roles": "ロール",
@@ -383,7 +437,6 @@
     "current": "現在:",
     "clickToCycle": "クリックで切り替え。"
   },
-
   "contextMenu": {
     "roles": "ロール",
     "voice": "ボイス",
@@ -417,7 +470,6 @@
     "failedToSetNickname": "ニックネームの設定に失敗しました",
     "failedToClearNickname": "ニックネームのクリアに失敗しました"
   },
-
   "userProfile": {
     "status": {
       "online": "オンライン",
@@ -442,7 +494,6 @@
     "failedToDecline": "フレンドリクエストの拒否に失敗しました",
     "failedToRemove": "フレンドの削除に失敗しました"
   },
-
   "messageItem": {
     "todayAt": "今日 {{time}}",
     "yesterdayAt": "昨日 {{time}}",
@@ -456,7 +507,6 @@
     "originalDeleted": "元のメッセージは削除されました",
     "failedToToggleReaction": "リアクションの変更に失敗しました"
   },
-
   "messageInput": {
     "replyingTo": "返信先",
     "cancelReply": "返信をキャンセル",
@@ -465,7 +515,6 @@
     "uploadFailed": "失敗",
     "attachFile": "ファイルを添付"
   },
-
   "server": {
     "create": {
       "createTitle": "サーバーを作成",
@@ -494,7 +543,6 @@
       "failedToCreate": "招待の作成に失敗しました"
     }
   },
-
   "channel": {
     "createChannel": "チャンネルを作成",
     "deleteChannel": "チャンネルを削除",
@@ -528,7 +576,6 @@
     "newChannelPlaceholder": "新しい{{type}}チャンネル",
     "editPermissions": "権限を編集"
   },
-
   "chat": {
     "messagePlaceholder": "#{{channel}} にメッセージを送信",
     "dmPlaceholder": "@{{user}} にメッセージを送信",
@@ -579,7 +626,6 @@
     "fileTooLarge": "{{name}} が大きすぎます（最大 {{max}}MB）",
     "searchMessages": "メッセージを検索 (Ctrl+K)"
   },
-
   "dm": {
     "title": "ダイレクトメッセージ",
     "friends": "フレンド",
@@ -597,7 +643,6 @@
     "conversationStart": "ダイレクトメッセージの履歴の始まりです。",
     "welcomeMessage": "サイドバーから会話を選択するか、サーバーのメンバーをクリックして新しい会話を始めましょう。"
   },
-
   "friends": {
     "title": "フレンド",
     "tabs": {
@@ -630,7 +675,6 @@
     "failedToAccept": "フレンドリクエストの承認に失敗しました",
     "failedToRemove": "フレンド関係の削除に失敗しました"
   },
-
   "members": {
     "owner": "オーナー",
     "adminsCount": "管理者 - {{count}}",
@@ -638,7 +682,6 @@
     "onlineCount": "オンライン - {{count}}",
     "offlineCount": "オフライン - {{count}}"
   },
-
   "voice": {
     "connected": "ボイス接続済み",
     "voiceChannel": "ボイスチャンネル",
@@ -662,7 +705,6 @@
     "decline": "拒否",
     "failedToAccept": "通話の応答に失敗しました"
   },
-
   "attachment": {
     "expired": "期限切れ",
     "fileExpired": "ファイル期限切れ",
@@ -672,7 +714,6 @@
     "loadingVideo": "動画を読み込み中...",
     "loadingAudio": "音声を読み込み中..."
   },
-
   "support": {
     "title": "サポート",
     "open": "オープン",
@@ -685,7 +726,6 @@
     "failedToSend": "メッセージの送信に失敗しました",
     "failedToReopen": "チケットの再開に失敗しました"
   },
-
   "invite": {
     "youveBeenInvited": "招待されました！",
     "loadingInvite": "招待を読み込み中...",
@@ -695,7 +735,6 @@
     "joining": "参加中...",
     "join": "{{name}} に参加"
   },
-
   "landing": {
     "nav": {
       "signIn": "ログイン",
@@ -822,10 +861,9 @@
       "cookiePolicy": "Cookie ポリシー",
       "community": "コミュニティ",
       "contributing": "貢献する",
-      "copyright": "\u00a9 2026 Voxium. All rights reserved."
+      "copyright": "© 2026 Voxium. All rights reserved."
     }
   },
-
   "badges": {
     "staff": "スタッフ",
     "supporter": "サポーター",
@@ -834,12 +872,10 @@
     "topSupporter": "トップサポーター",
     "topSupporterTooltip": "トップサポーター、Voxium の最も寛大なサポーター"
   },
-
   "connection": {
     "reconnecting": "Voxium に再接続中...",
     "lost": "接続が切断されました。再接続を試みています..."
   },
-
   "errorBoundary": {
     "title": "問題が発生しました",
     "tryAgain": "もう一度試す",
@@ -849,7 +885,6 @@
     "tryToRecover": "復旧を試みる",
     "reloadPage": "ページを再読み込み"
   },
-
   "serverErrors": {
     "invalidCredentials": "認証情報が無効です",
     "usernameOrEmailTaken": "ユーザー名またはメールアドレスは既に使用されています",
@@ -990,6 +1025,14 @@
     "cannotApproveExplainer": "この端末はまだ他の端末を承認できません。すでにアカウント鍵にアクセスできる端末から承認してください。",
     "accountSafetyNumberUnavailable": "アカウントの安全番号を取得できません — 端末ごとの番号のみ表示しています。",
     "unsignedDeviceBadgeTitle": "アカウント鍵で署名されていないデバイスがあります — 確認してください",
-    "unsignedDevicesWarning": "{{name}}さんのデバイス{{count}}台がアカウント鍵で署名されていません。新しいメッセージは読めてしまうため、既存のデバイスから承認されるまで未確認として扱ってください。"
+    "unsignedDevicesWarning": "{{name}}さんのデバイス{{count}}台がアカウント鍵で署名されていません。新しいメッセージは読めてしまうため、既存のデバイスから承認されるまで未確認として扱ってください。",
+    "thisDeviceUnsignedBadgeTitle": "このデバイスはまだ承認されていません — 別のデバイスから承認してください",
+    "masterConflictBadgeTitle": "アカウントキーがこのデバイスと一致しません — 確認してください",
+    "masterConflictExplainer": "アカウントには、このデバイスが作成しておらず置き換えることもできない鍵が公開されています。メッセージの送信は続けられますが、アカウントIDをリセットするまで新しいデバイスは承認できません。",
+    "resetIdentityExplainer": "承認できるデバイスすべてにアクセスできなくなりましたか？新しいアカウントIDを作成します。最後の手段としてのみ実行してください。",
+    "resetIdentityAction": "アカウントIDをリセット",
+    "resetIdentityConfirm": "アカウントキーが置き換わります。やり取りしている全員の安全番号が変わり、あなたを再度確認する必要があります。他のデバイスの承認も無効になります。",
+    "resetIdentitySuccess": "アカウントIDをリセットしました",
+    "resetIdentityFailed": "アカウントIDをリセットできませんでした"
   }
 }

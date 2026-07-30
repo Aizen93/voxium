@@ -108,6 +108,11 @@ function createFakeServer() {
   let shareSeq = 0;
   let transferSeq = 0;
   let failKeyshareUploads = false;
+  let failSignaturePublish = false;
+  let failDeviceListReads = false;
+  let crossSigningSupported = true;
+  /** Keys the server LIES about for a device, to test what we sign (C1). */
+  const forgedOwnKeys = new Map<string, { curve25519Key: string; ed25519Key: string }>();
 
   const ok = (data: unknown) => ({ data: { success: true, data } });
   const userOf = (userId: string): StoredUser => {
@@ -127,10 +132,11 @@ function createFakeServer() {
     masterSignature: d.masterSignature,
     createdAt: d.createdAt,
   });
-  const masterOf = (user: StoredUser) => ({
-    masterKey: user.masterKey,
-    masterSignature: user.masterSignature,
-  });
+  const masterOf = (user: StoredUser) =>
+    // An old node has none of these fields at all — not even as null.
+    crossSigningSupported
+      ? { masterKey: user.masterKey, masterSignature: user.masterSignature, crossSigning: true }
+      : {};
   const split = (url: string): [string, URLSearchParams] => {
     const [path, query] = url.split('?');
     return [path, new URLSearchParams(query ?? '')];
@@ -145,9 +151,8 @@ function createFakeServer() {
           const deviceId = query.get('deviceId')!;
           if (!userOf(userId).devices.has(deviceId)) throw new Error('403: unknown device');
           const mine = transfers.filter((t) => t.userId === userId && t.recipientDeviceId === deviceId);
+          // read-only: rows survive until the claimant acks them
           const claimed = mine.slice(0, E2E_LIMITS.MASTER_TRANSFER_STORE_CAP);
-          // claim-and-delete: the body is a one-shot Olm pre-key message
-          for (const t of claimed) transfers.splice(transfers.indexOf(t), 1);
           return ok({
             transfers: claimed.map(({ userId: _u, recipientDeviceId: _r, ...rest }) => rest),
           });
@@ -155,7 +160,10 @@ function createFakeServer() {
 
         if (path === '/e2e/devices/me') {
           const user = userOf(userId);
-          const all = [...user.devices.values()];
+          const all = [...user.devices.values()].map((d) => {
+            const forged = forgedOwnKeys.get(`${userId}/${d.deviceId}`);
+            return forged ? { ...d, ...forged } : d;
+          });
           const base = { devices: all.map(serialize), listVersion: user.listVersion, ...masterOf(user) };
           const deviceId = query.get('deviceId');
           const self = deviceId ? user.devices.get(deviceId) : undefined;
@@ -183,9 +191,15 @@ function createFakeServer() {
 
         const deviceMatch = path.match(/^\/e2e\/devices\/(.+)$/);
         if (deviceMatch) {
+          if (failDeviceListReads) throw new Error('429: too many requests');
           const user = userOf(deviceMatch[1]);
           return ok({
-            devices: [...user.devices.values()].map(serialize),
+            devices: [...user.devices.values()]
+              .map((d) => {
+                const forged = forgedOwnKeys.get(`${deviceMatch[1]}/${d.deviceId}`);
+                return forged ? { ...d, ...forged } : d;
+              })
+              .map(serialize),
             listVersion: user.listVersion,
             ...masterOf(user),
           });
@@ -336,8 +350,24 @@ function createFakeServer() {
           return ok({ stored: body.transfers.length, evicted });
         }
 
+        if (path === '/e2e/master-transfers/ack') {
+          const user = userOf(userId);
+          if (!user.devices.has(body.deviceId)) throw new Error('403: unknown device');
+          if (!Array.isArray(body.ids) || body.ids.length === 0) throw new Error('400: bad ids');
+          let cleared = 0;
+          for (let i = transfers.length - 1; i >= 0; i--) {
+            const row = transfers[i];
+            if (row.userId === userId && row.recipientDeviceId === body.deviceId && body.ids.includes(row.id)) {
+              transfers.splice(i, 1);
+              cleared++;
+            }
+          }
+          return ok({ cleared });
+        }
+
         const signatureMatch = path.match(/^\/e2e\/devices\/([^/]+)\/signature$/);
         if (signatureMatch) {
+          if (failSignaturePublish) throw new Error('503: signature publish unavailable');
           const user = userOf(userId);
           const device = user.devices.get(signatureMatch[1]);
           if (!device) throw new Error('404: E2E device');
@@ -415,6 +445,15 @@ function createFakeServer() {
     deviceOf: (u: string, d: string) => userOf(u).devices.get(d)!,
     userOf,
     setKeyshareUploadFailure: (fail: boolean) => { failKeyshareUploads = fail; },
+    setSignaturePublishFailure: (fail: boolean) => { failSignaturePublish = fail; },
+    /** Rate limit / network blip on device-list reads. */
+    setDeviceListReadFailure: (fail: boolean) => { failDeviceListReads = fail; },
+    /** Simulate a node that predates cross-signing (mid-rollout). */
+    setCrossSigningSupported: (supported: boolean) => { crossSigningSupported = supported; },
+    /** Answer device-list reads with keys the server chose for someone's device. */
+    forgeDeviceKeys: (u: string, d: string, keys: { curve25519Key: string; ed25519Key: string }) => {
+      forgedOwnKeys.set(`${u}/${d}`, keys);
+    },
     /** Simulate an account registered before cross-signing shipped (D11). */
     clearCrossSigning: (u: string) => {
       const user = userOf(u);
@@ -1276,7 +1315,20 @@ describe('E2EService (client crypto core)', () => {
     expect(after.find((d) => d.deviceId === bobTablet.service.deviceId)!.verified).toBe(false);
     expect((await alice.service.safetyNumber(bobId))!.verified).toBe(false); // not every device
 
+    // Comparing the ACCOUNT number vouches for the account key, and through it
+    // for every device that key signs — but not for the tablet, which Bob
+    // never approved. Blessing that one would put "Verified" on precisely the
+    // device cross-signing exists to expose.
     await alice.service.markIdentityVerified(bobId);
+    const afterAccount = await alice.service.perDeviceSafetyNumbers(bobId);
+    expect(afterAccount.find((d) => d.deviceId === bobTablet.service.deviceId)!.verified).toBe(false);
+    expect((await alice.service.safetyNumber(bobId))!.verified).toBe(false);
+
+    // Once Bob approves the tablet, it is covered by the same comparison —
+    // no second number to read out.
+    await bobPhone.service.approveDevice(bobTablet.service.deviceId);
+    const afterApproval = await alice.service.perDeviceSafetyNumbers(bobId);
+    expect(afterApproval.every((d) => d.verified)).toBe(true);
     expect((await alice.service.safetyNumber(bobId))!.verified).toBe(true);
   });
 
@@ -1767,5 +1819,236 @@ describe('E2EService (cross-signing)', () => {
     // per-device verification is still the fallback control there
     await alice.service.markIdentityVerified(bobId);
     expect((await alice.service.perDeviceSafetyNumbers(bobId)).every((d) => d.verified)).toBe(true);
+  });
+
+  it('cross-signs the keys it holds, not the ones the server reports (C1)', async () => {
+    // We own this device's private halves, so taking the server's word for the
+    // public ones is pure downside: a server that answers with an Olm identity
+    // IT generated would collect a valid account signature over a key it
+    // controls, and every peer who compared the account safety number would
+    // then trust that device silently — the exact attack cross-signing exists
+    // to stop, with the warning switched off.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+
+    const realKeys = server.deviceOf(aliceId, phone.service.deviceId);
+    const imposter = new EngineAccount();
+    server.forgeDeviceKeys(aliceId, phone.service.deviceId, {
+      curve25519Key: imposter.curve25519Key(),
+      ed25519Key: imposter.ed25519Key(),
+    });
+    // drop the existing signature so bootstrap re-signs on the next launch
+    server.deviceOf(aliceId, phone.service.deviceId).masterSignature = null;
+
+    const restarted = makeDevice(server, aliceId, {
+      keyProvider: phone.keyProvider,
+      vaultNamespace: phone.vaultNamespace,
+    });
+    await restarted.service.initialize();
+    await flushQueue();
+
+    const masterKey = server.userOf(aliceId).masterKey!;
+    const published = server.deviceOf(aliceId, phone.service.deviceId).masterSignature;
+    expect(published).toBeTruthy();
+    // signs OUR keys…
+    expect(
+      verifyEd25519(
+        masterKey,
+        e2eDeviceCrossCanonical(aliceId, phone.service.deviceId, realKeys.curve25519Key, realKeys.ed25519Key),
+        published!
+      )
+    ).toBe(true);
+    // …and never the server's substitutes
+    expect(
+      verifyEd25519(
+        masterKey,
+        e2eDeviceCrossCanonical(
+          aliceId,
+          phone.service.deviceId,
+          imposter.curve25519Key(),
+          imposter.ed25519Key()
+        ),
+        published!
+      )
+    ).toBe(false);
+  });
+
+  it('does not treat a master key seen on a quiet response as acknowledged (C2)', async () => {
+    // The H2 gate is "only a key the user acknowledged may vouch for devices".
+    // Advancing it whenever nothing is outstanding hands the attack back in two
+    // steps: publish the forged key alone (looks settled), then add a device
+    // signed by it (now "transitively trusted"). Splitting one response into
+    // two must not buy the server anything.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const bobPhone = makeDevice(server, bobId);
+    await alice.service.initialize();
+    await bobPhone.service.initialize();
+
+    // Alice knows Bob from before cross-signing: no master key in sight.
+    server.clearCrossSigning(bobId);
+    await alice.service.fetchDeviceList(bobId, true);
+    await alice.service.acknowledgeDeviceList(bobId);
+
+    // Response 1: a forged account key, alone, nothing else changed.
+    const forged = new EngineMasterKey();
+    const bob = server.userOf(bobId);
+    bob.masterKey = forged.publicKey();
+    bob.masterSignature = forged.sign(e2eMasterCanonical(bobId, forged.publicKey()));
+    bob.listVersion += 1;
+    await alice.service.fetchDeviceList(bobId, true);
+
+    // Response 2: a device the forged key vouches for.
+    const injected = makeDevice(server, bobId);
+    await injected.service.initialize();
+    const victimDevice = server.deviceOf(bobId, injected.service.deviceId);
+    victimDevice.masterSignature = forged.sign(
+      e2eDeviceCrossCanonical(bobId, victimDevice.deviceId, victimDevice.curve25519Key, victimDevice.ed25519Key)
+    );
+    await alice.service.fetchDeviceList(bobId, true);
+
+    const status = await alice.service.deviceListStatus(bobId);
+    expect(status.changed).toBe(true);
+    expect(status.newDeviceIds).toContain(injected.service.deviceId);
+  });
+
+  it('keeps sending when our own account key conflicts, and offers a way out (C3/P9)', async () => {
+    // fetchDeviceList refreshes OUR OWN list on every send. Raising the
+    // peer-facing "identity changed" error there would not inform anyone — it
+    // would make encrypted DMs permanently unsendable, with no UI able to
+    // clear it because the warning is filed under our own id.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const bob = makeParty(server, 'bob');
+    await phone.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    await phone.service.encryptMessage('c1', bob.userId, 'before the swap');
+
+    const replacement = new EngineMasterKey();
+    const user = server.userOf(aliceId);
+    user.masterKey = replacement.publicKey();
+    user.masterSignature = replacement.sign(e2eMasterCanonical(aliceId, replacement.publicKey()));
+    for (const device of user.devices.values()) device.masterSignature = null;
+
+    const restarted = makeDevice(server, aliceId, {
+      keyProvider: phone.keyProvider,
+      vaultNamespace: phone.vaultNamespace,
+    });
+    await restarted.service.initialize();
+    await flushQueue();
+    expect(restarted.service.hasMasterKeyConflict()).toBe(true);
+
+    // still usable — the conflict is a warning, not a lockout
+    const envelope = await restarted.service.encryptMessage('c1', bob.userId, 'still sending');
+    expect(envelope).toBeTruthy();
+
+    // and the user has an exit: a deliberate new account identity
+    await restarted.service.resetAccountIdentity();
+    expect(restarted.service.hasMasterKeyConflict()).toBe(false);
+    expect(server.userOf(aliceId).masterKey).not.toBe(replacement.publicKey());
+    const own = server.deviceOf(aliceId, restarted.service.deviceId);
+    expect(
+      verifyEd25519(
+        server.userOf(aliceId).masterKey!,
+        e2eDeviceCrossCanonical(aliceId, own.deviceId, own.curve25519Key, own.ed25519Key),
+        own.masterSignature!
+      )
+    ).toBe(true);
+  });
+
+  it('does not bootstrap an account key against a node that predates cross-signing (P10)', async () => {
+    // An old node omits the master-key fields entirely, which reads exactly
+    // like "this account has no key". Acting on that during a rolling deploy
+    // would mint a replacement for an account that already has one, wiping
+    // every signature and prompting every peer.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+    const established = server.userOf(aliceId).masterKey;
+    expect(established).toBeTruthy();
+
+    server.setCrossSigningSupported(false);
+    const laptop = makeDevice(server, aliceId);
+    await laptop.service.initialize();
+    await flushQueue();
+
+    // nothing minted, nothing replaced, nothing pinned from a blank answer
+    expect(server.userOf(aliceId).masterKey).toBe(established);
+    expect(laptop.service.hasMasterSecret()).toBe(false);
+    expect(laptop.service.hasMasterKeyConflict()).toBe(false);
+
+    // and a device the old node cannot describe is not reported as unsigned
+    const status = await laptop.service.deviceListStatus(aliceId);
+    expect(status.unsignedDeviceIds).toEqual([]);
+  });
+
+  it('leaves a master transfer in place until it has actually been used (P1)', async () => {
+    // The approving device publishes the cross-signature right after queueing
+    // the secret, so a claim that consumed the row and then failed would leave
+    // a device everyone trusts, that holds no key, and that is no longer
+    // offered for approval — unrecoverable. Reads must not consume.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+    await phone.service.approveDevice(laptop.service.deviceId);
+    expect(server.transfers).toHaveLength(1);
+
+    // a claim that fails partway — a rate limit on a laptop that just woke up —
+    // must leave the row where it is
+    server.setDeviceListReadFailure(true);
+    await expect(laptop.service.claimMasterTransfers()).rejects.toThrow();
+    expect(server.transfers).toHaveLength(1);
+    expect(laptop.service.hasMasterSecret()).toBe(false);
+
+    // the retry then works off the same row
+    server.setDeviceListReadFailure(false);
+    expect(await laptop.service.claimMasterTransfers()).toBe(true);
+    expect(laptop.service.hasMasterSecret()).toBe(true);
+    expect(server.transfers).toHaveLength(0); // acked only after it was used
+  });
+
+  it('hands over the secret before publishing the signature (P11)', async () => {
+    // Order is load-bearing: a device that is cross-signed but never received
+    // the key looks fully trusted to every peer while being unable to approve
+    // anything, and the approve button is gone because approval is only
+    // offered for unsigned devices.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    server.setSignaturePublishFailure(true);
+    await expect(phone.service.approveDevice(laptop.service.deviceId)).rejects.toThrow();
+
+    // the signature did not land…
+    expect(server.deviceOf(aliceId, laptop.service.deviceId).masterSignature).toBeNull();
+    // …but the secret is already waiting, so retrying is all it takes
+    expect(server.transfers).toHaveLength(1);
+
+    server.setSignaturePublishFailure(false);
+    await phone.service.approveDevice(laptop.service.deviceId);
+    expect(server.deviceOf(aliceId, laptop.service.deviceId).masterSignature).toBeTruthy();
+    expect(await laptop.service.claimMasterTransfers()).toBe(true);
   });
 });

@@ -185,6 +185,12 @@ export class EngineSession {
     [Symbol.dispose](): void;
     /**
      * Decrypt a message previously produced by the peer's session.
+     *
+     * A device-approval payload is refused here even though it decrypts fine:
+     * Olm gives no domain separation of its own, so without this check a
+     * server could re-file an approval envelope into any other mailbox (key
+     * shares, DM ciphertext) and have the client hand it back as a plaintext
+     * JS string — the one thing `encryptMasterSecret` exists to prevent.
      */
     decrypt(message_type: number, body_b64: string): string;
     /**

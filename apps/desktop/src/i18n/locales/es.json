@@ -29,7 +29,6 @@
     "creating": "Creando...",
     "deleting": "Eliminando..."
   },
-
   "auth": {
     "login": {
       "title": "¡Bienvenido de nuevo!",
@@ -119,7 +118,6 @@
       "checkSpam": "¿No recibiste el correo? Revisa tu carpeta de spam o intenta reenviarlo."
     }
   },
-
   "settings": {
     "title": "Ajustes",
     "tabs": {
@@ -234,7 +232,6 @@
       "selectLanguage": "Seleccionar idioma"
     }
   },
-
   "serverSettings": {
     "title": "Ajustes del servidor",
     "tabs": {
@@ -310,30 +307,88 @@
       "failedToLoad": "No se pudieron cargar los límites del servidor"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "Ver canales", "description": "Permite a los miembros ver canales de texto y voz" },
-    "MANAGE_CHANNELS": { "name": "Gestionar canales", "description": "Permite a los miembros crear, editar y eliminar canales" },
-    "MANAGE_CATEGORIES": { "name": "Gestionar categorías", "description": "Permite a los miembros crear, editar y eliminar categorías" },
-    "MANAGE_SERVER": { "name": "Gestionar servidor", "description": "Permite a los miembros editar el nombre, ícono y ajustes del servidor" },
-    "MANAGE_ROLES": { "name": "Gestionar roles", "description": "Permite a los miembros crear, editar y eliminar roles inferiores al suyo" },
-    "CREATE_INVITES": { "name": "Crear invitaciones", "description": "Permite a los miembros crear enlaces de invitación al servidor" },
-    "KICK_MEMBERS": { "name": "Expulsar miembros", "description": "Permite a los miembros expulsar a otros miembros con roles inferiores" },
-    "MANAGE_NICKNAMES": { "name": "Gestionar apodos", "description": "Permite a los miembros cambiar los nombres de otros miembros" },
-    "CHANGE_NICKNAME": { "name": "Cambiar apodo", "description": "Permite a los miembros cambiar su propio nombre para mostrar" },
-    "SEND_MESSAGES": { "name": "Enviar mensajes", "description": "Permite a los miembros enviar mensajes en canales de texto" },
-    "MANAGE_MESSAGES": { "name": "Gestionar mensajes", "description": "Permite a los miembros eliminar mensajes de otros miembros" },
-    "ATTACH_FILES": { "name": "Adjuntar archivos", "description": "Permite a los miembros subir archivos adjuntos" },
-    "ADD_REACTIONS": { "name": "Agregar reacciones", "description": "Permite a los miembros agregar reacciones a los mensajes" },
-    "MENTION_EVERYONE": { "name": "Mencionar a todos", "description": "Permite a los miembros usar menciones @everyone" },
-    "CONNECT": { "name": "Conectar", "description": "Permite a los miembros unirse a canales de voz" },
-    "SPEAK": { "name": "Hablar", "description": "Permite a los miembros hablar en canales de voz" },
-    "MUTE_MEMBERS": { "name": "Silenciar miembros", "description": "Permite a los miembros silenciar a otros miembros en voz" },
-    "DEAFEN_MEMBERS": { "name": "Ensordecer miembros", "description": "Permite a los miembros ensordecer a otros miembros en voz" },
-    "MOVE_MEMBERS": { "name": "Mover miembros", "description": "Permite a los miembros mover a otros miembros entre canales de voz" },
-    "ADMINISTRATOR": { "name": "Administrador", "description": "Otorga todos los permisos y omite todos los reemplazos de canal" }
+    "VIEW_CHANNEL": {
+      "name": "Ver canales",
+      "description": "Permite a los miembros ver canales de texto y voz"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "Gestionar canales",
+      "description": "Permite a los miembros crear, editar y eliminar canales"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "Gestionar categorías",
+      "description": "Permite a los miembros crear, editar y eliminar categorías"
+    },
+    "MANAGE_SERVER": {
+      "name": "Gestionar servidor",
+      "description": "Permite a los miembros editar el nombre, ícono y ajustes del servidor"
+    },
+    "MANAGE_ROLES": {
+      "name": "Gestionar roles",
+      "description": "Permite a los miembros crear, editar y eliminar roles inferiores al suyo"
+    },
+    "CREATE_INVITES": {
+      "name": "Crear invitaciones",
+      "description": "Permite a los miembros crear enlaces de invitación al servidor"
+    },
+    "KICK_MEMBERS": {
+      "name": "Expulsar miembros",
+      "description": "Permite a los miembros expulsar a otros miembros con roles inferiores"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "Gestionar apodos",
+      "description": "Permite a los miembros cambiar los nombres de otros miembros"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "Cambiar apodo",
+      "description": "Permite a los miembros cambiar su propio nombre para mostrar"
+    },
+    "SEND_MESSAGES": {
+      "name": "Enviar mensajes",
+      "description": "Permite a los miembros enviar mensajes en canales de texto"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "Gestionar mensajes",
+      "description": "Permite a los miembros eliminar mensajes de otros miembros"
+    },
+    "ATTACH_FILES": {
+      "name": "Adjuntar archivos",
+      "description": "Permite a los miembros subir archivos adjuntos"
+    },
+    "ADD_REACTIONS": {
+      "name": "Agregar reacciones",
+      "description": "Permite a los miembros agregar reacciones a los mensajes"
+    },
+    "MENTION_EVERYONE": {
+      "name": "Mencionar a todos",
+      "description": "Permite a los miembros usar menciones @everyone"
+    },
+    "CONNECT": {
+      "name": "Conectar",
+      "description": "Permite a los miembros unirse a canales de voz"
+    },
+    "SPEAK": {
+      "name": "Hablar",
+      "description": "Permite a los miembros hablar en canales de voz"
+    },
+    "MUTE_MEMBERS": {
+      "name": "Silenciar miembros",
+      "description": "Permite a los miembros silenciar a otros miembros en voz"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "Ensordecer miembros",
+      "description": "Permite a los miembros ensordecer a otros miembros en voz"
+    },
+    "MOVE_MEMBERS": {
+      "name": "Mover miembros",
+      "description": "Permite a los miembros mover a otros miembros entre canales de voz"
+    },
+    "ADMINISTRATOR": {
+      "name": "Administrador",
+      "description": "Otorga todos los permisos y omite todos los reemplazos de canal"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "General",
@@ -365,7 +420,6 @@
     "failedToUpdate": "Ha ocurrido un error",
     "failedToDelete": "Ha ocurrido un error"
   },
-
   "channelPermissions": {
     "title": "Permisos del canal",
     "roles": "Roles",
@@ -383,7 +437,6 @@
     "current": "Actual:",
     "clickToCycle": "Haz clic para cambiar."
   },
-
   "contextMenu": {
     "roles": "Roles",
     "voice": "Voz",
@@ -417,7 +470,6 @@
     "failedToSetNickname": "No se pudo establecer el apodo",
     "failedToClearNickname": "No se pudo borrar el apodo"
   },
-
   "userProfile": {
     "status": {
       "online": "En línea",
@@ -442,7 +494,6 @@
     "failedToDecline": "No se pudo rechazar la solicitud de amistad",
     "failedToRemove": "No se pudo eliminar al amigo"
   },
-
   "messageItem": {
     "todayAt": "Hoy a las {{time}}",
     "yesterdayAt": "Ayer a las {{time}}",
@@ -456,7 +507,6 @@
     "originalDeleted": "El mensaje original fue eliminado",
     "failedToToggleReaction": "No se pudo cambiar la reacción"
   },
-
   "messageInput": {
     "replyingTo": "Respondiendo a",
     "cancelReply": "Cancelar respuesta",
@@ -465,7 +515,6 @@
     "uploadFailed": "Error",
     "attachFile": "Adjuntar archivo"
   },
-
   "server": {
     "create": {
       "createTitle": "Crear un servidor",
@@ -494,7 +543,6 @@
       "failedToCreate": "No se pudo crear la invitación"
     }
   },
-
   "channel": {
     "createChannel": "Crear canal",
     "deleteChannel": "Eliminar canal",
@@ -528,7 +576,6 @@
     "newChannelPlaceholder": "Nuevo canal {{type}}",
     "editPermissions": "Editar permisos"
   },
-
   "chat": {
     "messagePlaceholder": "Mensaje en #{{channel}}",
     "dmPlaceholder": "Mensaje a @{{user}}",
@@ -579,7 +626,6 @@
     "fileTooLarge": "{{name}} es demasiado grande (máx. {{max}} MB)",
     "searchMessages": "Buscar mensajes (Ctrl+K)"
   },
-
   "dm": {
     "title": "Mensajes directos",
     "friends": "Amigos",
@@ -597,7 +643,6 @@
     "conversationStart": "Este es el inicio de tu historial de mensajes directos.",
     "welcomeMessage": "Selecciona una conversación de la barra lateral, o haz clic en un miembro de cualquier servidor para iniciar una nueva."
   },
-
   "friends": {
     "title": "Amigos",
     "tabs": {
@@ -630,7 +675,6 @@
     "failedToAccept": "No se pudo aceptar la solicitud de amistad",
     "failedToRemove": "No se pudo eliminar la amistad"
   },
-
   "members": {
     "owner": "Propietario",
     "adminsCount": "Administradores - {{count}}",
@@ -638,7 +682,6 @@
     "onlineCount": "En línea - {{count}}",
     "offlineCount": "Desconectados - {{count}}"
   },
-
   "voice": {
     "connected": "Voz conectada",
     "voiceChannel": "Canal de voz",
@@ -662,7 +705,6 @@
     "decline": "Rechazar",
     "failedToAccept": "No se pudo aceptar la llamada"
   },
-
   "attachment": {
     "expired": "Expirado",
     "fileExpired": "Archivo expirado",
@@ -672,7 +714,6 @@
     "loadingVideo": "Cargando vídeo...",
     "loadingAudio": "Cargando audio..."
   },
-
   "support": {
     "title": "Soporte",
     "open": "Abierto",
@@ -685,7 +726,6 @@
     "failedToSend": "No se pudo enviar el mensaje",
     "failedToReopen": "No se pudo reabrir el ticket"
   },
-
   "invite": {
     "youveBeenInvited": "¡Has sido invitado!",
     "loadingInvite": "Cargando invitación...",
@@ -695,7 +735,6 @@
     "joining": "Uniéndose...",
     "join": "Unirse a {{name}}"
   },
-
   "landing": {
     "nav": {
       "signIn": "Iniciar sesion",
@@ -784,7 +823,7 @@
       "permissionHint": "@everyone → Roles → Anulaciones por canal"
     },
     "why": {
-      "title": "\u00bfPor que Voxium?",
+      "title": "¿Por que Voxium?",
       "ownData": "Tus datos te pertenecen",
       "ownDataDesc": "Autoaloja o usa nuestros servidores, de cualquier forma, tus datos son tuyos. Sin mineria de datos, sin venta.",
       "openSource": "Codigo abierto",
@@ -805,7 +844,7 @@
       "supporterBadge": "Los colaboradores reciben una insignia especial en la app para mostrar su contribucion"
     },
     "cta": {
-      "title": "\u00bfListo para experimentar la comunicacion reinventada?",
+      "title": "¿Listo para experimentar la comunicacion reinventada?",
       "subtitle": "Unete a la revolucion de la comunicacion abierta. Sin tarjeta de credito. Sin suscripcion.",
       "getStarted": "Comenzar, Es gratis",
       "downloadApp": "Descargar la app"
@@ -822,10 +861,9 @@
       "cookiePolicy": "Politica de cookies",
       "community": "Comunidad",
       "contributing": "Contribuir",
-      "copyright": "\u00a9 2026 Voxium. Todos los derechos reservados."
+      "copyright": "© 2026 Voxium. Todos los derechos reservados."
     }
   },
-
   "badges": {
     "staff": "Personal",
     "supporter": "Colaborador",
@@ -834,12 +872,10 @@
     "topSupporter": "Mayor colaborador",
     "topSupporterTooltip": "Mayor colaborador, El colaborador más generoso de Voxium"
   },
-
   "connection": {
     "reconnecting": "Reconectando a Voxium...",
     "lost": "Conexión perdida. Intentando reconectar..."
   },
-
   "errorBoundary": {
     "title": "Algo salió mal",
     "tryAgain": "Intentar de nuevo",
@@ -849,7 +885,6 @@
     "tryToRecover": "Intentar recuperar",
     "reloadPage": "Recargar página"
   },
-
   "serverErrors": {
     "invalidCredentials": "Credenciales no válidas",
     "usernameOrEmailTaken": "El nombre de usuario o correo electrónico ya está en uso",
@@ -990,6 +1025,14 @@
     "cannotApproveExplainer": "Este dispositivo aún no puede aprobar otros. Apruébalo desde un dispositivo que ya tenga acceso a la clave de tu cuenta.",
     "accountSafetyNumberUnavailable": "Número de seguridad de la cuenta no disponible — mostrando solo números por dispositivo.",
     "unsignedDeviceBadgeTitle": "Un dispositivo no está firmado con la clave de la cuenta — revísalo",
-    "unsignedDevicesWarning": "{{count}} dispositivo de {{name}} no está firmado con su clave de cuenta. Aun así puede leer los mensajes nuevos: trátalo como no verificado hasta que lo apruebe desde un dispositivo que ya use."
+    "unsignedDevicesWarning": "{{count}} dispositivo de {{name}} no está firmado con su clave de cuenta. Aun así puede leer los mensajes nuevos: trátalo como no verificado hasta que lo apruebe desde un dispositivo que ya use.",
+    "thisDeviceUnsignedBadgeTitle": "Este dispositivo aún no está aprobado: apruébalo desde otro dispositivo",
+    "masterConflictBadgeTitle": "La clave de tu cuenta no coincide con este dispositivo: revísalo",
+    "masterConflictExplainer": "Tu cuenta publica una clave que este dispositivo no creó ni puede reemplazar. Tus mensajes se siguen enviando, pero no podrás aprobar dispositivos nuevos hasta que restablezcas la identidad de la cuenta.",
+    "resetIdentityExplainer": "¿Perdiste el acceso a todos los dispositivos que podían aprobar? Crea una nueva identidad de cuenta. Hazlo solo como último recurso.",
+    "resetIdentityAction": "Restablecer identidad de la cuenta",
+    "resetIdentityConfirm": "Esto reemplaza la clave de tu cuenta. Todas tus conversaciones verán cambiar tu número de seguridad y tendrán que verificarte otra vez. Los demás dispositivos pierden su aprobación.",
+    "resetIdentitySuccess": "Identidad de la cuenta restablecida",
+    "resetIdentityFailed": "No se pudo restablecer la identidad de la cuenta"
   }
 }

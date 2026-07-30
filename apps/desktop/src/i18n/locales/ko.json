@@ -29,7 +29,6 @@
     "creating": "생성 중...",
     "deleting": "삭제 중..."
   },
-
   "auth": {
     "login": {
       "title": "다시 오신 것을 환영합니다!",
@@ -119,7 +118,6 @@
       "checkSpam": "이메일을 받지 못하셨나요? 스팸 폴더를 확인하거나 재발송해보세요."
     }
   },
-
   "settings": {
     "title": "설정",
     "tabs": {
@@ -234,7 +232,6 @@
       "selectLanguage": "언어 선택"
     }
   },
-
   "serverSettings": {
     "title": "서버 설정",
     "tabs": {
@@ -310,30 +307,88 @@
       "failedToLoad": "서버 제한을 불러오지 못했습니다"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "채널 보기", "description": "멤버가 텍스트 및 음성 채널을 볼 수 있도록 허용합니다" },
-    "MANAGE_CHANNELS": { "name": "채널 관리", "description": "멤버가 채널을 생성, 편집 및 삭제할 수 있도록 허용합니다" },
-    "MANAGE_CATEGORIES": { "name": "카테고리 관리", "description": "멤버가 카테고리를 생성, 편집 및 삭제할 수 있도록 허용합니다" },
-    "MANAGE_SERVER": { "name": "서버 관리", "description": "멤버가 서버 이름, 아이콘 및 설정을 편집할 수 있도록 허용합니다" },
-    "MANAGE_ROLES": { "name": "역할 관리", "description": "멤버가 자신보다 낮은 역할을 생성, 편집 및 삭제할 수 있도록 허용합니다" },
-    "CREATE_INVITES": { "name": "초대 만들기", "description": "멤버가 서버 초대 링크를 만들 수 있도록 허용합니다" },
-    "KICK_MEMBERS": { "name": "멤버 추방", "description": "멤버가 낮은 역할을 가진 다른 멤버를 추방할 수 있도록 허용합니다" },
-    "MANAGE_NICKNAMES": { "name": "닉네임 관리", "description": "멤버가 다른 멤버의 표시 이름을 변경할 수 있도록 허용합니다" },
-    "CHANGE_NICKNAME": { "name": "닉네임 변경", "description": "멤버가 자신의 표시 이름을 변경할 수 있도록 허용합니다" },
-    "SEND_MESSAGES": { "name": "메시지 보내기", "description": "멤버가 텍스트 채널에서 메시지를 보낼 수 있도록 허용합니다" },
-    "MANAGE_MESSAGES": { "name": "메시지 관리", "description": "멤버가 다른 멤버의 메시지를 삭제할 수 있도록 허용합니다" },
-    "ATTACH_FILES": { "name": "파일 첨부", "description": "멤버가 파일 첨부를 업로드할 수 있도록 허용합니다" },
-    "ADD_REACTIONS": { "name": "반응 추가", "description": "멤버가 메시지에 반응을 추가할 수 있도록 허용합니다" },
-    "MENTION_EVERYONE": { "name": "전체 멘션", "description": "멤버가 @everyone 멘션을 사용할 수 있도록 허용합니다" },
-    "CONNECT": { "name": "연결", "description": "멤버가 음성 채널에 참여할 수 있도록 허용합니다" },
-    "SPEAK": { "name": "말하기", "description": "멤버가 음성 채널에서 말할 수 있도록 허용합니다" },
-    "MUTE_MEMBERS": { "name": "멤버 음소거", "description": "멤버가 음성에서 다른 멤버를 음소거할 수 있도록 허용합니다" },
-    "DEAFEN_MEMBERS": { "name": "멤버 소리 끄기", "description": "멤버가 음성에서 다른 멤버의 소리를 끌 수 있도록 허용합니다" },
-    "MOVE_MEMBERS": { "name": "멤버 이동", "description": "멤버가 다른 멤버를 음성 채널 간에 이동할 수 있도록 허용합니다" },
-    "ADMINISTRATOR": { "name": "관리자", "description": "모든 권한을 부여하고 모든 채널 재정의를 무시합니다" }
+    "VIEW_CHANNEL": {
+      "name": "채널 보기",
+      "description": "멤버가 텍스트 및 음성 채널을 볼 수 있도록 허용합니다"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "채널 관리",
+      "description": "멤버가 채널을 생성, 편집 및 삭제할 수 있도록 허용합니다"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "카테고리 관리",
+      "description": "멤버가 카테고리를 생성, 편집 및 삭제할 수 있도록 허용합니다"
+    },
+    "MANAGE_SERVER": {
+      "name": "서버 관리",
+      "description": "멤버가 서버 이름, 아이콘 및 설정을 편집할 수 있도록 허용합니다"
+    },
+    "MANAGE_ROLES": {
+      "name": "역할 관리",
+      "description": "멤버가 자신보다 낮은 역할을 생성, 편집 및 삭제할 수 있도록 허용합니다"
+    },
+    "CREATE_INVITES": {
+      "name": "초대 만들기",
+      "description": "멤버가 서버 초대 링크를 만들 수 있도록 허용합니다"
+    },
+    "KICK_MEMBERS": {
+      "name": "멤버 추방",
+      "description": "멤버가 낮은 역할을 가진 다른 멤버를 추방할 수 있도록 허용합니다"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "닉네임 관리",
+      "description": "멤버가 다른 멤버의 표시 이름을 변경할 수 있도록 허용합니다"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "닉네임 변경",
+      "description": "멤버가 자신의 표시 이름을 변경할 수 있도록 허용합니다"
+    },
+    "SEND_MESSAGES": {
+      "name": "메시지 보내기",
+      "description": "멤버가 텍스트 채널에서 메시지를 보낼 수 있도록 허용합니다"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "메시지 관리",
+      "description": "멤버가 다른 멤버의 메시지를 삭제할 수 있도록 허용합니다"
+    },
+    "ATTACH_FILES": {
+      "name": "파일 첨부",
+      "description": "멤버가 파일 첨부를 업로드할 수 있도록 허용합니다"
+    },
+    "ADD_REACTIONS": {
+      "name": "반응 추가",
+      "description": "멤버가 메시지에 반응을 추가할 수 있도록 허용합니다"
+    },
+    "MENTION_EVERYONE": {
+      "name": "전체 멘션",
+      "description": "멤버가 @everyone 멘션을 사용할 수 있도록 허용합니다"
+    },
+    "CONNECT": {
+      "name": "연결",
+      "description": "멤버가 음성 채널에 참여할 수 있도록 허용합니다"
+    },
+    "SPEAK": {
+      "name": "말하기",
+      "description": "멤버가 음성 채널에서 말할 수 있도록 허용합니다"
+    },
+    "MUTE_MEMBERS": {
+      "name": "멤버 음소거",
+      "description": "멤버가 음성에서 다른 멤버를 음소거할 수 있도록 허용합니다"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "멤버 소리 끄기",
+      "description": "멤버가 음성에서 다른 멤버의 소리를 끌 수 있도록 허용합니다"
+    },
+    "MOVE_MEMBERS": {
+      "name": "멤버 이동",
+      "description": "멤버가 다른 멤버를 음성 채널 간에 이동할 수 있도록 허용합니다"
+    },
+    "ADMINISTRATOR": {
+      "name": "관리자",
+      "description": "모든 권한을 부여하고 모든 채널 재정의를 무시합니다"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "일반",
@@ -365,7 +420,6 @@
     "failedToUpdate": "오류가 발생했습니다",
     "failedToDelete": "오류가 발생했습니다"
   },
-
   "channelPermissions": {
     "title": "채널 권한",
     "roles": "역할",
@@ -383,7 +437,6 @@
     "current": "현재:",
     "clickToCycle": "클릭하여 전환."
   },
-
   "contextMenu": {
     "roles": "역할",
     "voice": "음성",
@@ -417,7 +470,6 @@
     "failedToSetNickname": "닉네임 설정에 실패했습니다",
     "failedToClearNickname": "닉네임 지우기에 실패했습니다"
   },
-
   "userProfile": {
     "status": {
       "online": "온라인",
@@ -442,7 +494,6 @@
     "failedToDecline": "친구 요청 거절에 실패했습니다",
     "failedToRemove": "친구 삭제에 실패했습니다"
   },
-
   "messageItem": {
     "todayAt": "오늘 {{time}}",
     "yesterdayAt": "어제 {{time}}",
@@ -456,7 +507,6 @@
     "originalDeleted": "원본 메시지가 삭제되었습니다",
     "failedToToggleReaction": "반응 변경에 실패했습니다"
   },
-
   "messageInput": {
     "replyingTo": "답장 대상",
     "cancelReply": "답장 취소",
@@ -465,7 +515,6 @@
     "uploadFailed": "실패",
     "attachFile": "파일 첨부"
   },
-
   "server": {
     "create": {
       "createTitle": "서버 만들기",
@@ -494,7 +543,6 @@
       "failedToCreate": "초대 생성에 실패했습니다"
     }
   },
-
   "channel": {
     "createChannel": "채널 만들기",
     "deleteChannel": "채널 삭제",
@@ -528,7 +576,6 @@
     "newChannelPlaceholder": "새 {{type}} 채널",
     "editPermissions": "권한 편집"
   },
-
   "chat": {
     "messagePlaceholder": "#{{channel}}에 메시지 보내기",
     "dmPlaceholder": "@{{user}}에게 메시지 보내기",
@@ -579,7 +626,6 @@
     "fileTooLarge": "{{name}} 파일이 너무 큽니다 (최대 {{max}}MB)",
     "searchMessages": "메시지 검색 (Ctrl+K)"
   },
-
   "dm": {
     "title": "다이렉트 메시지",
     "friends": "친구",
@@ -597,7 +643,6 @@
     "conversationStart": "다이렉트 메시지 기록의 시작입니다.",
     "welcomeMessage": "사이드바에서 대화를 선택하거나, 서버의 멤버를 클릭하여 새 대화를 시작하세요."
   },
-
   "friends": {
     "title": "친구",
     "tabs": {
@@ -630,7 +675,6 @@
     "failedToAccept": "친구 요청 수락에 실패했습니다",
     "failedToRemove": "친구 관계 삭제에 실패했습니다"
   },
-
   "members": {
     "owner": "소유자",
     "adminsCount": "관리자 - {{count}}",
@@ -638,7 +682,6 @@
     "onlineCount": "온라인 - {{count}}",
     "offlineCount": "오프라인 - {{count}}"
   },
-
   "voice": {
     "connected": "음성 연결됨",
     "voiceChannel": "음성 채널",
@@ -662,7 +705,6 @@
     "decline": "거절",
     "failedToAccept": "통화 수락에 실패했습니다"
   },
-
   "attachment": {
     "expired": "만료됨",
     "fileExpired": "파일 만료됨",
@@ -672,7 +714,6 @@
     "loadingVideo": "비디오 로딩 중...",
     "loadingAudio": "오디오 로딩 중..."
   },
-
   "support": {
     "title": "지원",
     "open": "열림",
@@ -685,7 +726,6 @@
     "failedToSend": "메시지 전송에 실패했습니다",
     "failedToReopen": "티켓 다시 열기에 실패했습니다"
   },
-
   "invite": {
     "youveBeenInvited": "초대를 받았습니다!",
     "loadingInvite": "초대 로딩 중...",
@@ -695,7 +735,6 @@
     "joining": "참여 중...",
     "join": "{{name}} 참여"
   },
-
   "landing": {
     "nav": {
       "signIn": "로그인",
@@ -822,10 +861,9 @@
       "cookiePolicy": "쿠키 정책",
       "community": "커뮤니티",
       "contributing": "기여하기",
-      "copyright": "\u00a9 2026 Voxium. All rights reserved."
+      "copyright": "© 2026 Voxium. All rights reserved."
     }
   },
-
   "badges": {
     "staff": "스태프",
     "supporter": "후원자",
@@ -834,12 +872,10 @@
     "topSupporter": "최고 후원자",
     "topSupporterTooltip": "최고 후원자, Voxium의 가장 관대한 후원자"
   },
-
   "connection": {
     "reconnecting": "Voxium에 다시 연결 중...",
     "lost": "연결이 끊어졌습니다. 다시 연결을 시도 중..."
   },
-
   "errorBoundary": {
     "title": "문제가 발생했습니다",
     "tryAgain": "다시 시도",
@@ -849,7 +885,6 @@
     "tryToRecover": "복구 시도",
     "reloadPage": "페이지 새로고침"
   },
-
   "serverErrors": {
     "invalidCredentials": "잘못된 인증 정보입니다",
     "usernameOrEmailTaken": "이미 사용 중인 사용자 이름 또는 이메일입니다",
@@ -990,6 +1025,14 @@
     "cannotApproveExplainer": "이 기기는 아직 다른 기기를 승인할 수 없습니다. 이미 계정 키에 접근할 수 있는 기기에서 승인하세요.",
     "accountSafetyNumberUnavailable": "계정 안전 번호를 사용할 수 없습니다 — 기기별 번호만 표시합니다.",
     "unsignedDeviceBadgeTitle": "계정 키로 서명되지 않은 기기가 있습니다 — 확인하세요",
-    "unsignedDevicesWarning": "{{name}} 님의 기기 {{count}}대가 계정 키로 서명되지 않았습니다. 새 메시지는 읽을 수 있으므로, 이미 사용 중인 기기에서 승인할 때까지 미확인으로 취급하세요."
+    "unsignedDevicesWarning": "{{name}} 님의 기기 {{count}}대가 계정 키로 서명되지 않았습니다. 새 메시지는 읽을 수 있으므로, 이미 사용 중인 기기에서 승인할 때까지 미확인으로 취급하세요.",
+    "thisDeviceUnsignedBadgeTitle": "이 기기는 아직 승인되지 않았습니다 — 다른 기기에서 승인하세요",
+    "masterConflictBadgeTitle": "계정 키가 이 기기와 일치하지 않습니다 — 확인하세요",
+    "masterConflictExplainer": "계정에 이 기기가 만들지 않았고 교체할 수도 없는 키가 게시되어 있습니다. 메시지는 계속 전송되지만 계정 ID를 재설정하기 전까지 새 기기를 승인할 수 없습니다.",
+    "resetIdentityExplainer": "승인할 수 있는 모든 기기에 접근할 수 없나요? 새 계정 ID를 시작하세요. 최후의 수단으로만 사용하세요.",
+    "resetIdentityAction": "계정 ID 재설정",
+    "resetIdentityConfirm": "계정 키가 교체됩니다. 대화 상대 모두의 보안 번호가 바뀜 다시 확인해야 합니다. 다른 기기의 승인도 해제됩니다.",
+    "resetIdentitySuccess": "계정 ID가 재설정되었습니다",
+    "resetIdentityFailed": "계정 ID를 재설정할 수 없습니다"
   }
 }

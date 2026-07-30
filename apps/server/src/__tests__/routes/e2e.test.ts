@@ -379,6 +379,7 @@ describe('E2E routes — device lists', () => {
       listVersion: 7,
       masterKey: null,
       masterSignature: null,
+      crossSigning: true,
     });
   });
 
@@ -440,7 +441,13 @@ describe('E2E routes — device lists', () => {
 
     const res = await request(createApp()).get('/api/v1/e2e/devices/user-2');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ devices: [], listVersion: 0, masterKey: null, masterSignature: null });
+    expect(res.body.data).toEqual({
+      devices: [],
+      listVersion: 0,
+      masterKey: null,
+      masterSignature: null,
+      crossSigning: true,
+    });
   });
 
   it('allows fetching your own list through the public route without a conversation', async () => {
@@ -1331,6 +1338,63 @@ describe('E2E routes — device lists with cross-signing', () => {
     expect(res.body.data.masterKey).toBe(master.masterKey);
     expect(res.body.data.devices[0].masterSignature).toBe('cross-a');
   });
+
+  // The capability flag is how a client tells "this node predates cross-signing"
+  // apart from "this account has no master key yet". Reading the second from a
+  // node that means the first mints a REPLACEMENT master key and resets account
+  // trust for every peer, so its presence is load-bearing during a rolling
+  // deploy — on both list endpoints, and on the keyless responses in particular.
+  it('advertises the cross-signing capability on GET /devices/me', async () => {
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([deviceRow(DEVICE_A)] as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+
+    const res = await request(createApp()).get('/api/v1/e2e/devices/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.crossSigning).toBe(true);
+    // ...precisely in the case a client could otherwise misread: no master key
+    expect(res.body.data.masterKey).toBeNull();
+  });
+
+  it('advertises the cross-signing capability on the ?deviceId form of /devices/me', async () => {
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([deviceRow(DEVICE_A)] as any);
+    vi.mocked(prisma.e2EOneTimeKey.count).mockResolvedValue(3);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+
+    const res = await request(createApp()).get(`/api/v1/e2e/devices/me?deviceId=${DEVICE_A}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.registered).toBe(true);
+    expect(res.body.data.crossSigning).toBe(true);
+  });
+
+  it("advertises the cross-signing capability on a peer's GET /devices/:userId", async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(mockConversation as any);
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([deviceRow(DEVICE_B)] as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+
+    const res = await request(createApp()).get('/api/v1/e2e/devices/user-2');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.crossSigning).toBe(true);
+    expect(res.body.data.masterKey).toBeNull();
+  });
+
+  it('advertises the capability even when the device list is empty', async () => {
+    // The emptiest possible response is still the one a bootstrapping client
+    // reads before deciding whether to mint a master key.
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([] as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+
+    const mine = await request(createApp()).get('/api/v1/e2e/devices/me');
+    expect(mine.body.data.registered).toBe(false);
+    expect(mine.body.data.crossSigning).toBe(true);
+
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(mockConversation as any);
+    const peer = await request(createApp()).get('/api/v1/e2e/devices/user-2');
+    expect(peer.body.data.devices).toEqual([]);
+    expect(peer.body.data.crossSigning).toBe(true);
+  });
 });
 
 // ─── Master-secret transfers (device approval, spec §14) ────────────────────
@@ -1462,52 +1526,293 @@ describe('E2E routes — POST /master-transfers', () => {
   });
 });
 
+/** A pending transfer row as prisma returns it (cuid id, Date createdAt). */
+function transferRow(id: string, over: Record<string, unknown> = {}) {
+  return {
+    id,
+    senderDeviceId: DEVICE_B,
+    body: transferBody,
+    createdAt: new Date('2026-07-30T10:00:00Z'),
+    ...over,
+  };
+}
+
+/** Valid cuid-shaped transfer ids (the route bounds them with /^[a-z0-9]{20,40}$/). */
+function transferId(n: number): string {
+  return `cm${String(n).padStart(22, '0')}`;
+}
+
 describe('E2E routes — GET /master-transfers', () => {
-  it('claims pending transfers atomically and deletes them', async () => {
+  beforeEach(() => {
     vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
-    vi.mocked(prisma.$queryRaw).mockResolvedValue([
-      {
-        id: 'mt-1',
-        sender_device_id: DEVICE_B,
-        body: transferBody,
-        created_at: new Date('2026-07-30T10:00:00Z'),
-      },
-    ]);
+  });
+
+  it('reads pending transfers WITHOUT consuming them', async () => {
+    // Draining on read would make the read itself the point of no return: the
+    // approving device cross-signs right after queueing, so a claimant that
+    // reads and then fails would be permanently signed and permanently keyless.
+    vi.mocked(prisma.e2EMasterTransfer.findMany).mockResolvedValue([transferRow(transferId(1))] as any);
 
     const res = await request(createApp()).get(`/api/v1/e2e/master-transfers?deviceId=${DEVICE_A}`);
 
     expect(res.status).toBe(200);
     expect(res.body.data.transfers).toEqual([
-      { id: 'mt-1', senderDeviceId: DEVICE_B, body: transferBody, createdAt: '2026-07-30T10:00:00.000Z' },
+      { id: transferId(1), senderDeviceId: DEVICE_B, body: transferBody, createdAt: '2026-07-30T10:00:00.000Z' },
     ]);
+    // Scoped to the caller's own mailbox, deterministically ordered, bounded.
+    expect(prisma.e2EMasterTransfer.findMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1', recipientDeviceId: DEVICE_A },
+      select: { id: true, senderDeviceId: true, body: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: E2E_LIMITS.MASTER_TRANSFER_STORE_CAP,
+    });
+    // Nothing is removed — not through the ORM and not through raw SQL.
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
 
-    const call = vi.mocked(prisma.$queryRaw).mock.calls[0];
-    const sql = (call[0] as unknown as string[]).join('?');
-    // one statement: an Olm pre-key body decrypts exactly once
-    expect(sql).toContain('DELETE FROM e2e_master_transfers');
-    expect(sql).toContain('RETURNING');
-    expect(sql).toContain('FOR UPDATE SKIP LOCKED');
-    expect(call.slice(1)).toEqual(['user-1', DEVICE_A, E2E_LIMITS.MASTER_TRANSFER_STORE_CAP]);
+  it('returns the SAME rows on a second read (a failed import can retry)', async () => {
+    // Backed by a store that only the ack route may mutate: if the read deleted,
+    // the second call would come back empty.
+    const store = [transferRow(transferId(1)), transferRow(transferId(2), { senderDeviceId: 'device-cccc3333' })];
+    vi.mocked(prisma.e2EMasterTransfer.findMany).mockImplementation((async () => store) as any);
+
+    const app = createApp();
+    const first = await request(app).get(`/api/v1/e2e/master-transfers?deviceId=${DEVICE_A}`);
+    const second = await request(app).get(`/api/v1/e2e/master-transfers?deviceId=${DEVICE_A}`);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.data.transfers.map((t: { id: string }) => t.id)).toEqual([transferId(1), transferId(2)]);
+    expect(second.body.data.transfers).toEqual(first.body.data.transfers);
+    expect(store).toHaveLength(2);
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
   });
 
   it('returns an empty list when nothing is pending', async () => {
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
-    vi.mocked(prisma.$queryRaw).mockResolvedValue([]);
+    vi.mocked(prisma.e2EMasterTransfer.findMany).mockResolvedValue([] as any);
     const res = await request(createApp()).get(`/api/v1/e2e/master-transfers?deviceId=${DEVICE_A}`);
     expect(res.status).toBe(200);
     expect(res.body.data.transfers).toEqual([]);
   });
 
-  it('refuses to drain a mailbox for a device the caller does not own', async () => {
+  it('refuses to read a mailbox for a device the caller does not own', async () => {
     vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
     const res = await request(createApp()).get(`/api/v1/e2e/master-transfers?deviceId=${DEVICE_B}`);
     expect(res.status).toBe(403);
-    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    expect(prisma.e2EMasterTransfer.findMany).not.toHaveBeenCalled();
+    expect(prisma.e2EDevice.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId_deviceId: { userId: 'user-1', deviceId: DEVICE_B } } })
+    );
   });
 
   it('rejects a malformed deviceId', async () => {
     const res = await request(createApp()).get('/api/v1/e2e/master-transfers?deviceId=nope');
     expect(res.status).toBe(400);
     expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
+    expect(prisma.e2EMasterTransfer.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /master-transfers/ack ─────────────────────────────────────────────
+// The delete half of the read/ack split above: the claimant drops rows it has
+// finished with (imported, or rejected as unusable). The where clause is the
+// whole security boundary — it must pin the caller's OWN account and the device
+// it just proved it owns, never anything taken from the request body.
+
+describe('E2E routes — POST /master-transfers/ack', () => {
+  /**
+   * Stands in for the table so the where clause is actually exercised: rows the
+   * clause does not select survive, exactly as postgres would leave them.
+   */
+  function seedStore(rows: Array<{ id: string; userId: string; recipientDeviceId: string }>) {
+    vi.mocked(prisma.e2EMasterTransfer.deleteMany).mockImplementation((async (args: any) => {
+      const where = args?.where ?? {};
+      const ids: string[] = where.id?.in ?? [];
+      // An absent scope key means "no filter", exactly as postgres would read
+      // it — so dropping one from the route widens the blast radius here too.
+      const matched = rows.filter(
+        (r) =>
+          ids.includes(r.id) &&
+          (where.userId === undefined || r.userId === where.userId) &&
+          (where.recipientDeviceId === undefined || r.recipientDeviceId === where.recipientDeviceId)
+      );
+      for (const m of matched) rows.splice(rows.indexOf(m), 1);
+      return { count: matched.length };
+    }) as any);
+    return rows;
+  }
+
+  beforeEach(() => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    vi.mocked(prisma.e2EMasterTransfer.deleteMany).mockResolvedValue({ count: 0 } as any);
+  });
+
+  it('clears the acked rows and reports how many went', async () => {
+    const store = seedStore([
+      { id: transferId(1), userId: 'user-1', recipientDeviceId: DEVICE_A },
+      { id: transferId(2), userId: 'user-1', recipientDeviceId: DEVICE_A },
+      { id: transferId(3), userId: 'user-1', recipientDeviceId: DEVICE_A },
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers/ack')
+      .send({ deviceId: DEVICE_A, ids: [transferId(1), transferId(2)] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ cleared: 2 });
+    expect(prisma.e2EMasterTransfer.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: [transferId(1), transferId(2)] }, userId: 'user-1', recipientDeviceId: DEVICE_A },
+    });
+    // The unacked row is untouched — acking is per-row, not a mailbox flush.
+    expect(store.map((r) => r.id)).toEqual([transferId(3)]);
+  });
+
+  it('reports cleared:0 for ids that matched nothing (idempotent re-ack)', async () => {
+    seedStore([]);
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers/ack')
+      .send({ deviceId: DEVICE_A, ids: [transferId(1)] });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ cleared: 0 });
+  });
+
+  it("cannot clear another account's rows, even with the right row ids", async () => {
+    // The userId in the where clause comes from the session, never the payload:
+    // a leaked/guessed cuid must not let user-1 flush user-9's mailbox.
+    const store = seedStore([
+      { id: transferId(1), userId: 'user-9', recipientDeviceId: DEVICE_A },
+      { id: transferId(2), userId: 'user-9', recipientDeviceId: DEVICE_A },
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers/ack')
+      .send({ deviceId: DEVICE_A, ids: [transferId(1), transferId(2)], userId: 'user-9' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ cleared: 0 });
+    // the spoofed userId is ignored — the clause pins the authenticated caller
+    expect(prisma.e2EMasterTransfer.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: [transferId(1), transferId(2)] }, userId: 'user-1', recipientDeviceId: DEVICE_A },
+    });
+    expect(store).toHaveLength(2);
+  });
+
+  it("cannot clear another DEVICE's rows of the same account", async () => {
+    // Sibling devices share a userId, so the device scope is what keeps one
+    // device from flushing the approval a sibling has not imported yet.
+    const store = seedStore([
+      { id: transferId(1), userId: 'user-1', recipientDeviceId: DEVICE_B },
+      { id: transferId(2), userId: 'user-1', recipientDeviceId: DEVICE_A },
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers/ack')
+      .send({ deviceId: DEVICE_A, ids: [transferId(1), transferId(2)], recipientDeviceId: DEVICE_B });
+
+    expect(res.status).toBe(200);
+    // only its OWN row went; the sibling's survives
+    expect(res.body.data).toEqual({ cleared: 1 });
+    expect(store.map((r) => r.id)).toEqual([transferId(1)]);
+    expect(prisma.e2EMasterTransfer.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: [transferId(1), transferId(2)] }, userId: 'user-1', recipientDeviceId: DEVICE_A },
+    });
+  });
+
+  it('403s for a device the caller does not own, deleting nothing', async () => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers/ack')
+      .send({ deviceId: DEVICE_B, ids: [transferId(1)] });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/unknown device/i);
+    // ownership is proved by the composite lookup, not by the body
+    expect(prisma.e2EDevice.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId_deviceId: { userId: 'user-1', deviceId: DEVICE_B } } })
+    );
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing or empty ids array', async () => {
+    const app = createApp();
+    for (const ids of [undefined, [], 'nope', {}, null]) {
+      const res = await request(app).post('/api/v1/e2e/master-transfers/ack').send({ deviceId: DEVICE_A, ids });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/ids/i);
+    }
+    // validation runs before the device lookup and before any delete
+    expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects more ids than a mailbox can ever hold', async () => {
+    const tooMany = Array.from({ length: E2E_LIMITS.MASTER_TRANSFER_STORE_CAP + 1 }, (_, i) => transferId(i));
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers/ack')
+      .send({ deviceId: DEVICE_A, ids: tooMany });
+
+    expect(res.status).toBe(400);
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
+
+    // exactly at the cap is fine
+    const atCap = tooMany.slice(0, E2E_LIMITS.MASTER_TRANSFER_STORE_CAP);
+    const ok = await request(createApp())
+      .post('/api/v1/e2e/master-transfers/ack')
+      .send({ deviceId: DEVICE_A, ids: atCap });
+    expect(ok.status).toBe(200);
+    expect(prisma.e2EMasterTransfer.deleteMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: { in: atCap } }) })
+    );
+  });
+
+  it('rejects ids that are not id-shaped (nothing unbounded reaches the query)', async () => {
+    const app = createApp();
+    // The guard is on length and charset, not on today's id generator: pinning
+    // it to cuid would turn a later move to cuid2/uuid into a silent 400 on
+    // every ack. So a uuid passes and only genuinely malformed input fails.
+    const bad: unknown[] = [
+      'short',
+      'a'.repeat(15),
+      'a'.repeat(65),
+      'cm000000000000000.01',
+      "cm0000000000000000001' OR 1=1 --",
+      'cm00000000 000000001',
+      123,
+      null,
+      { id: transferId(1) },
+    ];
+    for (const id of bad) {
+      const res = await request(app).post('/api/v1/e2e/master-transfers/ack').send({ deviceId: DEVICE_A, ids: [id] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/transfer id/i);
+    }
+    // one bad entry rejects the whole batch, not just itself
+    const mixed = await request(app)
+      .post('/api/v1/e2e/master-transfers/ack')
+      .send({ deviceId: DEVICE_A, ids: [transferId(1), 'nope'] });
+    expect(mixed.status).toBe(400);
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
+
+    // shapes a future id generator could produce must NOT be rejected
+    for (const id of ['3f8b1c2e-4d5a-6b7c-8d9e-0f1a2b3c4d5e', 'A'.repeat(24), 'k1_2-3aBc9XyZ0000000']) {
+      const res = await request(app).post('/api/v1/e2e/master-transfers/ack').send({ deviceId: DEVICE_A, ids: [id] });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it('rejects a missing or malformed deviceId before anything else', async () => {
+    const app = createApp();
+    for (const deviceId of [undefined, 'x', 'has spaces here', 'x'.repeat(33), 'bad/chars+here']) {
+      const res = await request(app)
+        .post('/api/v1/e2e/master-transfers/ack')
+        .send({ deviceId, ids: [transferId(1)] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/deviceId/i);
+    }
+    expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
   });
 });
