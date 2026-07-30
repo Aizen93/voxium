@@ -655,6 +655,13 @@ export interface Report {
   reportedUsername: string;
   messageId: string | null;
   messageContent: string | null;
+  /**
+   * Where `messageContent` came from. 'server' = copied from the stored
+   * message. 'reporter' = supplied by the reporting client because the message
+   * is end-to-end encrypted — the server CANNOT verify it against the
+   * ciphertext, so moderators must treat it as an unverified claim.
+   */
+  contentSource: 'server' | 'reporter';
   channelId: string | null;
   conversationId: string | null;
   serverId: string | null;
