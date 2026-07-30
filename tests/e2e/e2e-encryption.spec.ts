@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import { registerUser, sendFriendRequest, acceptFriendRequest, API_URL } from './helpers/api';
-import { getConversationServerState } from './helpers/db';
+import { getConversationServerState, getE2EDevices, getE2EKeyShareCount } from './helpers/db';
 
 // Live two-client smoke test of the full E2E DM flow (docs/e2e-dm-spec.md):
 // enable + badge, cross-client encrypt/decrypt, matching safety numbers,
@@ -14,6 +14,25 @@ const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64'
 );
+
+const BADGE = 'button[title="End-to-end encrypted — view safety number"]';
+const BADGE_NEW_DEVICE = 'button[title="New device added — review devices"]';
+const BADGE_OWN_DEVICE = 'button[title="A device was added to your account — review it"]';
+
+/** Open the DM with a user from the Friends list. */
+async function openDMWith(page: Page, username: string) {
+  await page.getByText('Friends').first().click();
+  await page.getByText('All').click();
+  await expect(page.getByText(username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+  await page.locator('button[title="Message"]').first().click();
+  await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });
+}
+
+async function sendMessage(page: Page, text: string) {
+  await page.locator('textarea').first().fill(text);
+  await page.locator('textarea').first().press('Enter');
+  await expect(page.getByText(text).first()).toBeVisible({ timeout: 15_000 });
+}
 
 /** The 60-digit safety number shown in the modal, as one string. */
 async function readSafetyNumber(page: Page): Promise<string> {
@@ -163,6 +182,115 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     });
     expect(downgrade.status()).toBe(400);
 
+    await contextB.close();
+  });
+
+  test('multi-device: second device receives key shares, and loses access after revocation', async ({ page, request, browser }) => {
+    test.setTimeout(180_000);
+
+    // ── Setup: A (device 1) and B, friends, encrypted DM ──
+    const userA = testUser('mda');
+    const userB = testUser('mdb');
+    const dataA = await registerUser(request, userA);
+    const dataB = await registerUser(request, userB);
+    await sendFriendRequest(request, dataA.accessToken, userB.username);
+    await acceptFriendRequest(request, dataB.accessToken, dataA.user.id);
+
+    await injectAuth(page, dataA); // A, device 1
+    const contextB = await browser.newContext();
+    const pageB = await contextB.newPage();
+    await injectAuth(pageB, dataB);
+
+    await openDMWith(page, userB.username);
+    const enableButton = page.locator('button[title="Enable end-to-end encryption"]');
+    await expect(enableButton).toBeVisible({ timeout: 20_000 });
+    await enableButton.click();
+    await page.getByRole('button', { name: 'Enable encryption', exact: true }).click();
+    await expect(page.locator(BADGE)).toBeVisible({ timeout: 10_000 });
+
+    // B opens the conversation so both clients are live
+    await expect(pageB.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+    await pageB.getByText(userA.username, { exact: true }).first().click();
+
+    const beforeSecond = `sent before the second device ${Date.now()}`;
+    await sendMessage(page, beforeSecond);
+    await expect(pageB.getByText(beforeSecond).first()).toBeVisible({ timeout: 15_000 });
+
+    expect(await getE2EDevices(dataA.user.id)).toHaveLength(1);
+
+    // ── A signs in on a SECOND device (fresh context ⇒ fresh vault ⇒ new deviceId) ──
+    const contextA2 = await browser.newContext();
+    const pageA2 = await contextA2.newPage();
+    await injectAuth(pageA2, dataA);
+    await expect(pageA2.getByRole('heading', { name: 'Direct Messages' }).first()).toBeVisible({ timeout: 20_000 });
+
+    await expect
+      .poll(async () => (await getE2EDevices(dataA.user.id)).length, { timeout: 30_000 })
+      .toBe(2);
+    const devices = await getE2EDevices(dataA.user.id);
+    const secondDeviceId = devices[1].deviceId;
+    // distinct identity keys per device — never a copy of the first
+    expect(devices[0].curve25519Key).not.toBe(devices[1].curve25519Key);
+
+    // ── B notices A's device list grew ──
+    // (B's send path re-reads the peer list before rotating)
+    const afterSecondB = `reply after A added a device ${Date.now()}`;
+    await sendMessage(pageB, afterSecondB);
+    await expect(pageB.locator(BADGE_NEW_DEVICE)).toBeVisible({ timeout: 20_000 });
+
+    // ── The second device decrypts BOTH directions ──
+    await pageA2.getByText(userB.username, { exact: true }).first().click({ timeout: 20_000 });
+    // B's message was encrypted to a session shared with device 2
+    await expect(pageA2.getByText(afterSecondB).first()).toBeVisible({ timeout: 30_000 });
+
+    // and A's own device 1 fans its key to device 2 (decrypt-to-self across devices)
+    const fromDevice1 = `from device one after fanout ${Date.now()}`;
+    await sendMessage(page, fromDevice1);
+    await expect(pageA2.getByText(fromDevice1).first()).toBeVisible({ timeout: 30_000 });
+
+    // device 2 can send too, and device 1 reads it
+    const fromDevice2 = `from device two ${Date.now()}`;
+    await sendMessage(pageA2, fromDevice2);
+    await expect(page.getByText(fromDevice2).first()).toBeVisible({ timeout: 30_000 });
+    await expect(pageB.getByText(fromDevice2).first()).toBeVisible({ timeout: 30_000 });
+
+    // history predating the device stays unreadable there (no key backup, spec §11)
+    await expect(pageA2.getByText(beforeSecond)).toHaveCount(0);
+
+    // ── A's OWN badge warns about the device it did not add (spec §12.5) ──
+    // This is the mirror of the peer-injection warning: a device registered
+    // under your own account receives every session key you fan out.
+    await expect(page.locator(BADGE_OWN_DEVICE)).toBeVisible({ timeout: 20_000 });
+
+    // ── Revoke device 2 from device 1 ──
+    await page.locator(BADGE_OWN_DEVICE).click();
+    await page.locator('button[title="Manage devices"]').click();
+    await expect(page.getByText('Your devices')).toBeVisible({ timeout: 10_000 });
+    // the unrecognised device is called out in the manager itself
+    await expect(page.getByText('A device you may not recognise', { exact: false })).toBeVisible({ timeout: 10_000 });
+    await page.locator('button[title="Revoke"]').first().click();
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await expect
+      .poll(async () => (await getE2EDevices(dataA.user.id)).length, { timeout: 20_000 })
+      .toBe(1);
+    expect((await getE2EDevices(dataA.user.id))[0].deviceId).not.toBe(secondDeviceId);
+    // pending shares for the revoked device are dropped with it
+    expect(await getE2EKeyShareCount(dataA.user.id, secondDeviceId)).toBe(0);
+    // the device manager sits above the safety modal (z-[60]); close both
+    await page.getByRole('button', { name: 'Close' }).last().click();
+    await closeModal(page);
+
+    // ── Post-revocation traffic must NOT reach the revoked device ──
+    await expect(page.locator(BADGE)).toBeVisible({ timeout: 20_000 });
+
+    const afterRevoke = `only for the remaining device ${Date.now()}`;
+    await sendMessage(page, afterRevoke);
+    await expect(pageB.getByText(afterRevoke).first()).toBeVisible({ timeout: 20_000 });
+    // the revoked client is still open; it must never render this plaintext
+    await expect(pageA2.getByText(afterRevoke)).toHaveCount(0);
+    expect(await getE2EKeyShareCount(dataA.user.id, secondDeviceId)).toBe(0);
+
+    await contextA2.close();
     await contextB.close();
   });
 });

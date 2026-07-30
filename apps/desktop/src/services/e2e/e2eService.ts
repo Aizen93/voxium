@@ -123,13 +123,6 @@ const SHARE_RETRY_BACKOFF_MS = 30_000;
 const MAX_SHARE_RETRIES = 10;
 /** Hard stop when draining the key-share inbox (guards a hostile server). */
 const MAX_CLAIM_PAGES = 20;
-/**
- * Our OWN device list may be a few seconds stale on the send path: an injected
- * own-device is caught by the same check on the next send, at init, and in the
- * device manager. The PEER list is always fetched fresh — a revoked device must
- * stop receiving keys immediately.
- */
-const OWN_DEVICE_LIST_FRESHNESS_MS = 15_000;
 
 /** Client-generated, stable per install (D2): 22 chars of base64url randomness. */
 function generateDeviceId(): string {
@@ -1077,14 +1070,15 @@ export class E2EService {
     conversationId: string,
     peerUserId: string
   ): Promise<{ session: EngineGroupSession; record: OutboundGroupSessionRecord }> {
-    // The rotation decision must not run on a stale peer list — a revoked
-    // device would keep receiving session keys for the cache window. In-flight
-    // coalescing keeps concurrent sends to a single request, and the own-list
-    // read is allowed a short window, so fast typing does not spend the
-    // per-user read budget twice per message.
+    // BOTH lists are fetched fresh. Stale peer data would keep feeding session
+    // keys to a revoked device; stale OWN data silently skips the fanout to a
+    // device the user just added, leaving those messages permanently
+    // unreadable there (caught by the live multi-device test). In-flight
+    // coalescing collapses concurrent sends into one request, and e2eStatus is
+    // budgeted (300/min) for two reads per message.
     const [peer, own] = await Promise.all([
       this.fetchDeviceList(peerUserId, true),
-      this.fetchDeviceList(this.userId, OWN_DEVICE_LIST_FRESHNESS_MS),
+      this.fetchDeviceList(this.userId, true),
     ]);
     // Every device of the peer failed signature verification (or they revoked
     // them all): encrypting anyway would produce ciphertext nobody can read,
@@ -1402,6 +1396,18 @@ export class E2EService {
       await this.vault.deleteIdentity(this.userId, deviceId);
       this.deviceListCache.delete(this.userId);
       await this.clearOutboundGroupSessions();
+
+      // Revoking IS the user dealing with the device: drop it from the sticky
+      // unacknowledged set, or the warning would keep firing for a device that
+      // no longer exists.
+      const state = await this.vault.getDeviceListState(this.userId);
+      if (state) {
+        await this.vault.putDeviceListState(this.userId, {
+          ...state,
+          deviceIds: state.deviceIds.filter((id) => id !== deviceId),
+          unacknowledgedDeviceIds: (state.unacknowledgedDeviceIds ?? []).filter((id) => id !== deviceId),
+        });
+      }
     });
   }
 

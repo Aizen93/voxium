@@ -390,11 +390,16 @@ messages it missed. Because it travels as an **ExportedSessionKey**, the share
 payload carries `keyType: 'exported'` and the importer uses
 `fromExportedSessionKey`.
 
-The peer's device list is always fetched fresh when deciding to rotate — a
-revoked device must stop receiving keys immediately — while our own list is
-allowed a 15s window. Concurrent fetches for the same user are coalesced, and
-`e2eStatus` is budgeted for the resulting read rate (300/min), because these
-reads sit on the message-send path.
+**Both** device lists are fetched fresh when deciding to rotate. A stale peer
+list keeps feeding session keys to a revoked device; a stale *own* list
+silently skips the fanout to a device the user just added, leaving those
+messages permanently unreadable there (a 15s window was tried and the live
+multi-device test caught exactly that). Concurrent fetches for the same user
+are coalesced into one request, and `e2eStatus` is budgeted for the resulting
+read rate (300/min) because these reads sit on the message-send path.
+
+Revoking a device also clears it from the unacknowledged set — revocation *is*
+the user dealing with it, and the warning must not outlive the device.
 
 If **every** device of the peer fails signature verification (or they revoked
 them all), sending fails loudly rather than producing ciphertext nobody can
