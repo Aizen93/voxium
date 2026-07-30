@@ -160,8 +160,12 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   },
 
   revokeDevice: async (userId: string, deviceId: string) => {
-    await getE2EService(userId).revokeDevice(deviceId);
+    const service = getE2EService(userId);
+    await service.revokeDevice(deviceId);
     await get().loadOwnDevices(userId);
+    // the revoked device must stop being reported as unrecognised
+    const status = await service.deviceListStatus(userId);
+    set({ ownDeviceWarnings: status.changed ? status.newDeviceIds.filter((id) => id !== service.deviceId) : [] });
   },
 }));
 

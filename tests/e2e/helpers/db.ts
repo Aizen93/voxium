@@ -129,6 +129,24 @@ export async function getConversationServerState(userAId: string, userBId: strin
   });
 }
 
+/** Registered E2E devices for a user, oldest first (multi-device assertions). */
+export async function getE2EDevices(userId: string) {
+  const db = getPrisma();
+  return db.e2EDevice.findMany({
+    where: { userId },
+    orderBy: { createdAt: 'asc' },
+    select: { deviceId: true, curve25519Key: true, ed25519Key: true, createdAt: true },
+  });
+}
+
+/** Undelivered key shares addressed to a device (fanout assertions). */
+export async function getE2EKeyShareCount(recipientUserId: string, recipientDeviceId?: string) {
+  const db = getPrisma();
+  return db.e2EKeyShare.count({
+    where: { recipientUserId, ...(recipientDeviceId ? { recipientDeviceId } : {}) },
+  });
+}
+
 /** Disconnect Prisma (call in afterAll or global teardown). */
 export async function disconnectDb() {
   if (prisma) {
