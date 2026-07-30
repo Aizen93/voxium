@@ -10,6 +10,14 @@ import { toast } from '../../stores/toastStore';
 import { getE2EService, type E2EDeviceSafetyNumber } from '../../services/e2e/e2eService';
 import type { Conversation } from '@voxium/shared';
 
+/**
+ * Stable empty array for selectors. Defaulting INSIDE a zustand selector
+ * (`?? []`) allocates a new reference on every read, so useSyncExternalStore
+ * never sees an equal snapshot and React re-renders forever — it took down the
+ * whole chat area behind the error boundary.
+ */
+const NO_DEVICES: string[] = [];
+
 interface Props {
   conversation: Conversation;
 }
@@ -154,7 +162,7 @@ function SafetyNumberModal({ conversation, onClose }: Props & { onClose: () => v
   const peerId = conversation.participant.id;
   const peerName = conversation.participant.displayName;
   const identityWarning = useE2EStore((s) => !!s.identityWarnings[peerId]);
-  const newDeviceIds = useE2EStore((s) => s.newDeviceWarnings[peerId] ?? []);
+  const newDeviceIds = useE2EStore((s) => s.newDeviceWarnings[peerId]) ?? NO_DEVICES;
   const [devices, setDevices] = useState<E2EDeviceSafetyNumber[] | null>(null);
   const [error, setError] = useState(false);
   const [showDeviceManager, setShowDeviceManager] = useState(false);
