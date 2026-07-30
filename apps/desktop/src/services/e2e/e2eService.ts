@@ -119,6 +119,17 @@ const SHARE_CLAIM_RETRY_MS = 15_000;
 const DEVICE_LIST_CACHE_MS = 10_000;
 /** Undelivered key shares are retried on the SAME session at most this often. */
 const SHARE_RETRY_BACKOFF_MS = 30_000;
+/** Give up on a target after this many failed retry rounds (see spec §12.4). */
+const MAX_SHARE_RETRIES = 10;
+/** Hard stop when draining the key-share inbox (guards a hostile server). */
+const MAX_CLAIM_PAGES = 20;
+/**
+ * Our OWN device list may be a few seconds stale on the send path: an injected
+ * own-device is caught by the same check on the next send, at init, and in the
+ * device manager. The PEER list is always fetched fresh — a revoked device must
+ * stop receiving keys immediately.
+ */
+const OWN_DEVICE_LIST_FRESHNESS_MS = 15_000;
 
 /** Client-generated, stable per install (D2): 22 chars of base64url randomness. */
 function generateDeviceId(): string {
@@ -139,9 +150,17 @@ function sameDeviceSet(a: string[], b: string[]): boolean {
   return sortedA.every((id, i) => id === sortedB[i]);
 }
 
-/** Canonical fingerprint of a device list — the rotation trigger (see D9). */
-function deviceSetFingerprint(deviceIds: string[]): string {
-  return [...deviceIds].sort().join(',');
+/**
+ * Canonical fingerprint of a device list — the rotation trigger (see D9).
+ * Includes each device's identity key, so re-registering new keys under an
+ * existing deviceId also forces a re-key (otherwise the peer would keep
+ * sending on a session our side has already torn down).
+ */
+function deviceSetFingerprint(devices: Array<{ deviceId: string; curve25519Key: string }>): string {
+  return devices
+    .map((d) => `${d.deviceId}:${d.curve25519Key}`)
+    .sort()
+    .join(',');
 }
 
 function errText(err: unknown): string {
@@ -163,6 +182,7 @@ export class E2EService {
   /** inbound group sessions, keyed by megolm session id */
   private inbound = new Map<string, { session: EngineInboundGroupSession; record: InboundGroupSessionRecord }>();
   private deviceListCache = new Map<string, { at: number; list: E2EPinnedDeviceList }>();
+  private deviceListInFlight = new Map<string, Promise<E2EPinnedDeviceList>>();
 
   private queue: Promise<unknown> = Promise.resolve();
   private initialized = false;
@@ -385,10 +405,31 @@ export class E2EService {
    * signature (v2 canonical, D4) before it can be used. Devices with a broken
    * signature are dropped, never trusted — the server is untrusted storage.
    */
-  async fetchDeviceList(userId: string, force = false): Promise<E2EPinnedDeviceList> {
+  async fetchDeviceList(
+    userId: string,
+    freshness: boolean | number = false
+  ): Promise<E2EPinnedDeviceList> {
+    // `freshness`: false = normal cache, true = force a round trip, or a
+    // max-age in ms. The send path passes a small max-age instead of forcing —
+    // two uncached GETs per message would exhaust the per-user rate limit
+    // during fast typing and start failing sends outright.
+    const maxAge =
+      freshness === true ? 0 : freshness === false ? this.deviceListCacheMs : freshness;
     const cached = this.deviceListCache.get(userId);
-    if (!force && cached && Date.now() - cached.at < this.deviceListCacheMs) return cached.list;
+    if (cached && Date.now() - cached.at < maxAge) return cached.list;
 
+    // Coalesce concurrent fetches for the same user (parallel sends, or a send
+    // racing the UI refresh) into a single request.
+    const inFlight = this.deviceListInFlight.get(userId);
+    if (inFlight) return inFlight;
+    const run = this.fetchDeviceListUncached(userId).finally(() => {
+      this.deviceListInFlight.delete(userId);
+    });
+    this.deviceListInFlight.set(userId, run);
+    return run;
+  }
+
+  private async fetchDeviceListUncached(userId: string): Promise<E2EPinnedDeviceList> {
     const res = await this.api.get(`/e2e/devices/${userId}`);
     const data = res.data.data as { devices?: E2EDeviceEntry[]; listVersion?: number };
     const devices: E2EDeviceIdentity[] = [];
@@ -453,7 +494,19 @@ export class E2EService {
       return;
     }
     if (state.version === list.listVersion && sameDeviceSet(state.deviceIds, deviceIds)) return;
-    await this.vault.putDeviceListState(userId, { ...state, version: list.listVersion, deviceIds });
+    // Sticky: remember every id seen since the last acknowledgement. A server
+    // that adds a device and then withdraws it must not be able to erase the
+    // warning — the device keeps whatever session key it was already given.
+    const unacknowledged = new Set(state.unacknowledgedDeviceIds ?? []);
+    for (const id of deviceIds) {
+      if (!state.acknowledgedDeviceIds.includes(id)) unacknowledged.add(id);
+    }
+    await this.vault.putDeviceListState(userId, {
+      ...state,
+      version: list.listVersion,
+      deviceIds,
+      unacknowledgedDeviceIds: [...unacknowledged],
+    });
     this.emitDeviceListChanged(userId);
   }
 
@@ -468,13 +521,20 @@ export class E2EService {
   async deviceListStatus(userId: string): Promise<E2EDeviceListStatus> {
     const state = await this.vault.getDeviceListState(userId);
     if (!state) return { version: 0, deviceIds: [], newDeviceIds: [], changed: false };
-    const newDeviceIds = state.deviceIds.filter((id) => !state.acknowledgedDeviceIds.includes(id));
+    // Union of "here now" and "seen since the last acknowledgement": a device
+    // that appeared and vanished again still has to be reported.
+    const newDeviceIds = [
+      ...new Set([
+        ...state.deviceIds.filter((id) => !state.acknowledgedDeviceIds.includes(id)),
+        ...(state.unacknowledgedDeviceIds ?? []).filter((id) => !state.acknowledgedDeviceIds.includes(id)),
+      ]),
+    ];
     const setChanged = !sameDeviceSet(state.deviceIds, state.acknowledgedDeviceIds);
     return {
       version: state.version,
       deviceIds: state.deviceIds,
       newDeviceIds,
-      changed: setChanged || state.acknowledgedVersion !== state.version,
+      changed: newDeviceIds.length > 0 || setChanged || state.acknowledgedVersion !== state.version,
     };
   }
 
@@ -496,15 +556,40 @@ export class E2EService {
     }
   }
 
-  /** UI: the user has seen the current device list — stop warning about it. */
-  async acknowledgeDeviceList(userId: string): Promise<void> {
-    const state = await this.vault.getDeviceListState(userId);
-    if (!state) return;
-    await this.vault.putDeviceListState(userId, {
-      ...state,
-      acknowledgedVersion: state.version,
-      acknowledgedDeviceIds: [...state.deviceIds],
-    });
+  /**
+   * UI: the user has seen these devices — stop warning about them.
+   *
+   * `seenDeviceIds` is what the UI actually rendered. Anything that appeared
+   * after the render (the send path refreshes lists constantly) stays
+   * unacknowledged, so one confirmation can never bless a change the user was
+   * not shown.
+   */
+  async acknowledgeDeviceList(userId: string, seenDeviceIds?: string[]): Promise<void> {
+    return this.enqueue(() => this.acknowledgeDeviceListUnqueued(userId, seenDeviceIds));
+  }
+
+  /** Queue-free variant for callers that already hold the serial queue. */
+  private async acknowledgeDeviceListUnqueued(userId: string, seenDeviceIds?: string[]): Promise<void> {
+    {
+      const state = await this.vault.getDeviceListState(userId);
+      if (!state) return;
+      const acknowledged = seenDeviceIds
+        ? state.acknowledgedDeviceIds.concat(seenDeviceIds.filter((id) => state.deviceIds.includes(id)))
+        : [...state.deviceIds];
+      const acknowledgedDeviceIds = [...new Set(acknowledged)];
+      const stillUnacknowledged = (state.unacknowledgedDeviceIds ?? []).filter(
+        (id) => !acknowledgedDeviceIds.includes(id)
+      );
+      await this.vault.putDeviceListState(userId, {
+        ...state,
+        // only claim the version when the whole current set is acknowledged
+        acknowledgedVersion: sameDeviceSet(acknowledgedDeviceIds, state.deviceIds)
+          ? state.version
+          : state.acknowledgedVersion,
+        acknowledgedDeviceIds,
+        unacknowledgedDeviceIds: stillUnacknowledged,
+      });
+    }
   }
 
   /**
@@ -558,7 +643,7 @@ export class E2EService {
       }
 
       this.deviceListCache.delete(peerUserId);
-      await this.acknowledgeDeviceList(peerUserId);
+      await this.acknowledgeDeviceListUnqueued(peerUserId);
       await this.clearOutboundGroupSessions();
     });
   }
@@ -691,8 +776,11 @@ export class E2EService {
       try {
         const text = await this.olmDecryptFromDevice(userId, deviceId, envelope);
         if (text !== null) return text;
-      } catch {
-        // wrong device for this ciphertext — try the next one
+      } catch (err) {
+        // Expected while probing: a pre-key body only decrypts under the one
+        // device session it was created for. Logged at debug volume so a real
+        // fault (e.g. a corrupt pickle) is still visible.
+        console.debug(`e2e: share probe against / failed:`, errText(err));
       }
     }
     return this.olmDecryptLegacy(userId, envelope);
@@ -778,11 +866,22 @@ export class E2EService {
 
   private async importInboundGroupSession(
     sessionKey: string,
-    meta: { sessionId: string; conversationId: string; senderUserId: string; senderDeviceId: string }
+    meta: {
+      sessionId: string;
+      conversationId: string;
+      senderUserId: string;
+      senderDeviceId: string;
+      keyType?: 'session' | 'exported';
+    }
   ): Promise<boolean> {
     const existing = await this.loadInbound(meta.sessionId);
     if (existing) return false; // already imported (shares may be re-delivered)
-    const session = EngineInboundGroupSession.fromSessionKey(sessionKey);
+    // A re-shared key arrives as an EXPORTED key (the sender no longer holds
+    // the original in the clear); both forms yield the same session id.
+    const session =
+      meta.keyType === 'exported'
+        ? EngineInboundGroupSession.fromExportedSessionKey(sessionKey)
+        : EngineInboundGroupSession.fromSessionKey(sessionKey);
     if (session.sessionId() !== meta.sessionId) {
       session.free();
       throw new Error('session key does not match the announced session id');
@@ -809,8 +908,8 @@ export class E2EService {
     // while replaying the old listVersion must still force a re-key. (Records
     // written before fingerprints existed have none → one extra rotation.)
     const fingerprints = record.deviceListFingerprints ?? {};
-    if (fingerprints[peerUserId] !== deviceSetFingerprint(peer.devices.map((d) => d.deviceId))) return true;
-    if (fingerprints[this.userId] !== deviceSetFingerprint(own.devices.map((d) => d.deviceId))) return true;
+    if (fingerprints[peerUserId] !== deviceSetFingerprint(peer.devices)) return true;
+    if (fingerprints[this.userId] !== deviceSetFingerprint(own.devices)) return true;
     if (record.messageCount >= E2E_LIMITS.GROUP_SESSION_MAX_MESSAGES) return true;
     if (Date.now() - record.createdAt >= E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS) return true;
     // NOTE: pendingShareFailures deliberately does NOT rotate — a transient
@@ -875,8 +974,20 @@ export class E2EService {
     entry: { session: EngineGroupSession; record: OutboundGroupSessionRecord }
   ): Promise<void> {
     const { record } = entry;
-    if (record.pendingShareFailures.length === 0 || !record.initialSessionKey) return;
+    if (record.pendingShareFailures.length === 0) return;
     if (Date.now() - (record.lastShareAttemptAt ?? 0) < SHARE_RETRY_BACKOFF_MS) return;
+    if ((record.shareRetryCount ?? 0) >= MAX_SHARE_RETRIES) return;
+
+    // Re-derive the index-0 key from our OWN inbound copy of this session,
+    // which lives in the vault as an encrypted pickle. Keeping the raw key in
+    // the record would leave Megolm key material readable in IndexedDB without
+    // the OS-keychain pickle key (spec §7.3).
+    const own = await this.loadInbound(record.sessionId);
+    if (!own) {
+      console.warn(`e2e: no local copy of session ${record.sessionId} — cannot retry key shares`);
+      return;
+    }
+    const exportedKey = own.session.exportAtFirstKnownIndex();
 
     const targets = record.pendingShareFailures
       .map((key) => {
@@ -889,12 +1000,14 @@ export class E2EService {
       v: 2,
       conversationId,
       sessionId: record.sessionId,
-      sessionKey: record.initialSessionKey,
+      sessionKey: exportedKey,
+      keyType: 'exported',
       senderUserId: this.userId,
       senderDeviceId: this.deviceId,
     });
 
     record.pendingShareFailures = stillPending;
+    record.shareRetryCount = stillPending.length > 0 ? (record.shareRetryCount ?? 0) + 1 : 0;
     record.lastShareAttemptAt = Date.now();
     await this.vault.putOutboundGroupSession(conversationId, record);
   }
@@ -945,11 +1058,11 @@ export class E2EService {
       messageCount: 0,
       deviceListVersions: { [peerUserId]: peer.listVersion, [this.userId]: own.listVersion },
       deviceListFingerprints: {
-        [peerUserId]: deviceSetFingerprint(peer.devices.map((d) => d.deviceId)),
-        [this.userId]: deviceSetFingerprint(own.devices.map((d) => d.deviceId)),
+        [peerUserId]: deviceSetFingerprint(peer.devices),
+        [this.userId]: deviceSetFingerprint(own.devices),
       },
       pendingShareFailures: pending,
-      initialSessionKey: sessionKey,
+      shareRetryCount: 0,
       lastShareAttemptAt: Date.now(),
     };
 
@@ -964,12 +1077,22 @@ export class E2EService {
     conversationId: string,
     peerUserId: string
   ): Promise<{ session: EngineGroupSession; record: OutboundGroupSessionRecord }> {
-    // force: the rotation decision must not run on a stale cached list —
-    // a revoked device would keep receiving keys for the cache window.
+    // The rotation decision must not run on a stale peer list — a revoked
+    // device would keep receiving session keys for the cache window. In-flight
+    // coalescing keeps concurrent sends to a single request, and the own-list
+    // read is allowed a short window, so fast typing does not spend the
+    // per-user read budget twice per message.
     const [peer, own] = await Promise.all([
       this.fetchDeviceList(peerUserId, true),
-      this.fetchDeviceList(this.userId, true),
+      this.fetchDeviceList(this.userId, OWN_DEVICE_LIST_FRESHNESS_MS),
     ]);
+    // Every device of the peer failed signature verification (or they revoked
+    // them all): encrypting anyway would produce ciphertext nobody can read,
+    // while the UI reported the message as sent.
+    if (peer.devices.length === 0) {
+      throw new Error(`no usable E2E device for ${peerUserId}`);
+    }
+
     const current = await this.loadOutbound(conversationId);
     if (current && !this.needsRotation(current.record, peerUserId, peer, own)) {
       await this.retryPendingShares(conversationId, current);
@@ -997,16 +1120,21 @@ export class E2EService {
   private async claimKeyShares(): Promise<number> {
     if (this.claimInFlight) return this.claimInFlight;
     const run = (async () => {
-      const res = await this.api.get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}`);
-      const shares = (res.data.data as { shares?: unknown[] }).shares;
-      if (!Array.isArray(shares) || shares.length === 0) return 0;
       let imported = 0;
-      for (const share of shares) {
-        try {
-          if (await this.importKeyShare(share as Record<string, unknown>)) imported++;
-        } catch (err) {
-          console.warn('e2e: discarding an unusable key share:', errText(err));
+      // Drain every page: the inbox is oldest-first and capped per response, so
+      // stopping at one page would let queued older shares delay a live one.
+      for (let page = 0; page < MAX_CLAIM_PAGES; page++) {
+        const res = await this.api.get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}`);
+        const shares = (res.data.data as { shares?: unknown[] }).shares;
+        if (!Array.isArray(shares) || shares.length === 0) break;
+        for (const share of shares) {
+          try {
+            if (await this.importKeyShare(share as Record<string, unknown>)) imported++;
+          } catch (err) {
+            console.warn('e2e: discarding an unusable key share:', errText(err));
+          }
         }
+        if (shares.length < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
       }
       return imported;
     })().finally(() => {
@@ -1060,6 +1188,7 @@ export class E2EService {
     }
 
     return this.importInboundGroupSession(payload.sessionKey, {
+      keyType: payload.keyType === 'exported' ? 'exported' : 'session',
       sessionId,
       conversationId,
       senderUserId,

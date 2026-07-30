@@ -973,6 +973,10 @@
     "revokeDevice": "Revocar",
     "revokeConfirm": "¿Revocar este dispositivo? Ya no podrá leer los mensajes nuevos, y cada conversación cifrada se volverá a cifrar.",
     "revokeFailed": "No se pudo revocar el dispositivo",
-    "revoked": "Dispositivo revocado"
+    "revoked": "Dispositivo revocado",
+    "ownDeviceBadgeTitle": "Se añadió un dispositivo a tu cuenta — revísalo",
+    "ownDeviceWarning": "Se añadió a tu cuenta un dispositivo que quizá no reconozcas ({{count}}). Puede leer tus conversaciones cifradas. Revócalo si no es tuyo.",
+    "ownDevicesReviewed": "Estos son mis dispositivos",
+    "unrecognisedDevice": "nuevo"
   }
 }

@@ -973,6 +973,10 @@
     "revokeDevice": "해지",
     "revokeConfirm": "이 기기를 해지할까요? 이 기기는 더 이상 새 메시지를 읽을 수 없으며, 암호화된 모든 대화가 다시 암호화됩니다.",
     "revokeFailed": "기기를 해지할 수 없습니다",
-    "revoked": "기기가 해지되었습니다"
+    "revoked": "기기가 해지되었습니다",
+    "ownDeviceBadgeTitle": "계정에 기기가 추가되었습니다 — 확인하세요",
+    "ownDeviceWarning": "알 수 없는 기기가 계정에 추가되었습니다({{count}}). 암호화된 대화를 읽을 수 있습니다. 본인의 기기가 아니면 해지하세요.",
+    "ownDevicesReviewed": "내 기기가 맞습니다",
+    "unrecognisedDevice": "신규"
   }
 }

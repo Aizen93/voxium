@@ -782,6 +782,25 @@ describe('E2E routes — POST /keyshares', () => {
     expect(prisma.e2EKeyShare.createMany).toHaveBeenCalled();
   });
 
+  it('rejects an oversized key-share body', async () => {
+    const huge = JSON.stringify({ v: 1, e: 'olm1', t: 0, b: 'Q'.repeat(E2E_LIMITS.KEYSHARE_BODY_MAX) });
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({ deviceId: DEVICE_A, shares: [share({ body: huge })] });
+    expect(res.status).toBe(400);
+    expect(prisma.e2EKeyShare.createMany).not.toHaveBeenCalled();
+  });
+
+  it('enforces a global per-sender ceiling (conversations are attacker-chosen)', async () => {
+    // The per-recipient cap alone is no bound: anyone can open a DM with anyone.
+    vi.mocked(prisma.e2EKeyShare.count).mockResolvedValue(E2E_LIMITS.KEYSHARE_SENDER_TOTAL_CAP);
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({ deviceId: DEVICE_A, shares: [share()] });
+    expect(res.status).toBe(409);
+    expect(prisma.e2EKeyShare.createMany).not.toHaveBeenCalled();
+  });
+
   it('scopes the inbox cap and eviction to the SENDER (no cross-sender flushing)', async () => {
     // Otherwise anyone sharing a DM with the victim could flood their inbox and
     // evict the session keys a legitimate peer had queued for them.

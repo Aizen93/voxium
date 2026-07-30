@@ -48,7 +48,10 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   e2eDevice:      { keyPrefix: 'rl:e2edev',    points: 5,   duration: 3600, blockDuration: 0,  keyType: 'userId', label: 'E2E Device Register' },
   e2eKeys:        { keyPrefix: 'rl:e2ekeys',   points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Key Upload' },
   e2eBundle:      { keyPrefix: 'rl:e2ebundle', points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Bundle Claim' },
-  e2eStatus:      { keyPrefix: 'rl:e2estat',   points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Device Status' },
+  // Device-list reads sit on the message send path (every encrypted send
+  // re-checks the peer's devices before rotating), so this budget has to cover
+  // a fast typist, not just UI refreshes.
+  e2eStatus:      { keyPrefix: 'rl:e2estat',   points: 300, duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Device Status' },
   // Group-session key fan-out: one batched POST per rotation plus periodic
   // claims, so a modest budget covers normal multi-device use.
   e2eShares:      { keyPrefix: 'rl:e2eshare',  points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Key Shares' },

@@ -973,6 +973,10 @@
     "revokeDevice": "Révoquer",
     "revokeConfirm": "Révoquer cet appareil ? Il ne pourra plus lire les nouveaux messages, et chaque conversation chiffrée sera rechiffrée.",
     "revokeFailed": "Impossible de révoquer l'appareil",
-    "revoked": "Appareil révoqué"
+    "revoked": "Appareil révoqué",
+    "ownDeviceBadgeTitle": "Un appareil a été ajouté à votre compte — vérifiez-le",
+    "ownDeviceWarning": "Un appareil que vous ne reconnaissez peut-être pas a été ajouté à votre compte ({{count}}). Il peut lire vos conversations chiffrées. Révoquez-le s'il n'est pas le vôtre.",
+    "ownDevicesReviewed": "Ce sont mes appareils",
+    "unrecognisedDevice": "nouveau"
   }
 }

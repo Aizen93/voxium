@@ -25,6 +25,9 @@ export function E2EControls({ conversation }: Props) {
   const peerId = conversation.participant.id;
   const identityWarning = useE2EStore((s) => !!s.identityWarnings[peerId]);
   const newDeviceWarning = useE2EStore((s) => (s.newDeviceWarnings[peerId]?.length ?? 0) > 0);
+  // A device added to OUR account that we did not add is as dangerous as an
+  // injected peer device: it receives every session key we fan out (§12.5).
+  const ownDeviceWarning = useE2EStore((s) => s.ownDeviceWarnings.length > 0);
   const [modal, setModal] = useState<'enable' | 'safety' | null>(null);
 
   const encrypted = !!conversation.encryptedAt;
@@ -38,7 +41,7 @@ export function E2EControls({ conversation }: Props) {
 
   if (!e2eReady) return null;
 
-  const warning = identityWarning || newDeviceWarning;
+  const warning = identityWarning || newDeviceWarning || ownDeviceWarning;
 
   return (
     <>
@@ -53,9 +56,9 @@ export function E2EControls({ conversation }: Props) {
               : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary'
         )}
         title={
-          identityWarning
-            ? t('e2e.badgeTitle')
-            : newDeviceWarning
+          ownDeviceWarning
+            ? t('e2e.ownDeviceBadgeTitle')
+            : newDeviceWarning && !identityWarning
               ? t('e2e.newDeviceBadgeTitle')
               : encrypted
                 ? t('e2e.badgeTitle')
@@ -199,7 +202,9 @@ function SafetyNumberModal({ conversation, onClose }: Props & { onClose: () => v
   const handleReviewDevices = async () => {
     if (!user?.id) return;
     try {
-      await useE2EStore.getState().acknowledgeDeviceList(user.id, peerId);
+      // Acknowledge exactly the devices this modal rendered — anything that
+      // appeared since must keep warning.
+      await useE2EStore.getState().acknowledgeDeviceList(user.id, peerId, (devices ?? []).map((d) => d.deviceId));
       toast.success(t('e2e.devicesReviewed'));
     } catch (err) {
       console.warn('e2e: acknowledging device list failed:', err instanceof Error ? err.message : err);
@@ -313,12 +318,25 @@ function DeviceManagerModal({ onClose }: { onClose: () => void }) {
   const user = useAuthStore((s) => s.user);
   const ownDevices = useE2EStore((s) => s.ownDevices);
   const loading = useE2EStore((s) => s.ownDevicesLoading);
+  const ownDeviceWarnings = useE2EStore((s) => s.ownDeviceWarnings);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   useEffect(() => {
     if (user?.id) void useE2EStore.getState().loadOwnDevices(user.id);
   }, [user?.id]);
+
+  const handleAcknowledge = async () => {
+    if (!user?.id || !ownDevices) return;
+    try {
+      await useE2EStore
+        .getState()
+        .acknowledgeOwnDevices(user.id, ownDevices.devices.map((d) => d.deviceId));
+      toast.success(t('e2e.devicesReviewed'));
+    } catch (err) {
+      console.warn('e2e: acknowledging own devices failed:', err instanceof Error ? err.message : err);
+    }
+  };
 
   const handleRevoke = async (deviceId: string) => {
     if (!user?.id) return;
@@ -352,20 +370,47 @@ function DeviceManagerModal({ onClose }: { onClose: () => void }) {
         </div>
         <p className="mb-3 text-xs text-vox-text-muted">{t('e2e.deviceManagerExplainer')}</p>
 
+        {ownDeviceWarnings.length > 0 && (
+          <div className="mb-3 flex items-start gap-2 rounded-md bg-vox-accent-warning/10 p-3 text-xs text-vox-accent-warning">
+            <ShieldAlert size={16} className="mt-0.5 shrink-0" />
+            <div>
+              <p className="mb-2">{t('e2e.ownDeviceWarning', { count: ownDeviceWarnings.length })}</p>
+              <button
+                onClick={handleAcknowledge}
+                className="rounded bg-vox-accent-warning px-2 py-1 font-medium text-black hover:opacity-90"
+              >
+                {t('e2e.ownDevicesReviewed')}
+              </button>
+            </div>
+          </div>
+        )}
+
         {loading && !ownDevices ? (
           <p className="text-sm text-vox-text-muted">{t('common.loading')}</p>
         ) : (
           <div className="max-h-80 space-y-2 overflow-y-auto">
             {ownDevices?.devices.map((device) => {
               const isCurrent = device.deviceId === ownDevices.currentDeviceId;
+              const unrecognised = ownDeviceWarnings.includes(device.deviceId);
               return (
-                <div key={device.deviceId} className="rounded-md bg-vox-bg-secondary p-3">
+                <div
+                  key={device.deviceId}
+                  className={clsx(
+                    'rounded-md p-3',
+                    unrecognised ? 'bg-vox-accent-warning/10 ring-1 ring-vox-accent-warning/40' : 'bg-vox-bg-secondary'
+                  )}
+                >
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="truncate font-mono text-xs text-vox-text-primary">
                           {shortDeviceId(device.deviceId)}
                         </span>
+                        {unrecognised && (
+                          <span className="rounded bg-vox-accent-warning/20 px-1.5 py-0.5 text-[10px] font-medium text-vox-accent-warning">
+                            {t('e2e.unrecognisedDevice')}
+                          </span>
+                        )}
                         {isCurrent && (
                           <span className="shrink-0 rounded bg-vox-accent-success/15 px-1.5 py-0.5 text-[10px] font-medium text-vox-accent-success">
                             {t('e2e.thisDevice')}
