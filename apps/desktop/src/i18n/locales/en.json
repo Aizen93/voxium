@@ -30,7 +30,6 @@
     "deleting": "Deleting...",
     "clear": "Clear"
   },
-
   "auth": {
     "login": {
       "title": "Welcome back!",
@@ -120,7 +119,6 @@
       "checkSpam": "Didn't receive the email? Check your spam folder or try resending."
     }
   },
-
   "settings": {
     "title": "Settings",
     "tabs": {
@@ -237,7 +235,6 @@
       "selectLanguage": "Select Language"
     }
   },
-
   "serverSettings": {
     "title": "Server Settings",
     "tabs": {
@@ -313,30 +310,88 @@
       "failedToLoad": "Failed to load server limits"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "View Channels", "description": "Allows members to view text and voice channels" },
-    "MANAGE_CHANNELS": { "name": "Manage Channels", "description": "Allows members to create, edit, and delete channels" },
-    "MANAGE_CATEGORIES": { "name": "Manage Categories", "description": "Allows members to create, edit, and delete categories" },
-    "MANAGE_SERVER": { "name": "Manage Server", "description": "Allows members to edit server name, icon, and settings" },
-    "MANAGE_ROLES": { "name": "Manage Roles", "description": "Allows members to create, edit, and delete roles below their own" },
-    "CREATE_INVITES": { "name": "Create Invites", "description": "Allows members to create server invite links" },
-    "KICK_MEMBERS": { "name": "Kick Members", "description": "Allows members to kick other members with lower roles" },
-    "MANAGE_NICKNAMES": { "name": "Manage Nicknames", "description": "Allows members to change other members' display names" },
-    "CHANGE_NICKNAME": { "name": "Change Nickname", "description": "Allows members to change their own display name" },
-    "SEND_MESSAGES": { "name": "Send Messages", "description": "Allows members to send messages in text channels" },
-    "MANAGE_MESSAGES": { "name": "Manage Messages", "description": "Allows members to delete messages from other members" },
-    "ATTACH_FILES": { "name": "Attach Files", "description": "Allows members to upload file attachments" },
-    "ADD_REACTIONS": { "name": "Add Reactions", "description": "Allows members to add reactions to messages" },
-    "MENTION_EVERYONE": { "name": "Mention Everyone", "description": "Allows members to use @everyone mentions" },
-    "CONNECT": { "name": "Connect", "description": "Allows members to join voice channels" },
-    "SPEAK": { "name": "Speak", "description": "Allows members to speak in voice channels" },
-    "MUTE_MEMBERS": { "name": "Mute Members", "description": "Allows members to mute other members in voice" },
-    "DEAFEN_MEMBERS": { "name": "Deafen Members", "description": "Allows members to deafen other members in voice" },
-    "MOVE_MEMBERS": { "name": "Move Members", "description": "Allows members to move other members between voice channels" },
-    "ADMINISTRATOR": { "name": "Administrator", "description": "Grants all permissions and bypasses all channel overrides" }
+    "VIEW_CHANNEL": {
+      "name": "View Channels",
+      "description": "Allows members to view text and voice channels"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "Manage Channels",
+      "description": "Allows members to create, edit, and delete channels"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "Manage Categories",
+      "description": "Allows members to create, edit, and delete categories"
+    },
+    "MANAGE_SERVER": {
+      "name": "Manage Server",
+      "description": "Allows members to edit server name, icon, and settings"
+    },
+    "MANAGE_ROLES": {
+      "name": "Manage Roles",
+      "description": "Allows members to create, edit, and delete roles below their own"
+    },
+    "CREATE_INVITES": {
+      "name": "Create Invites",
+      "description": "Allows members to create server invite links"
+    },
+    "KICK_MEMBERS": {
+      "name": "Kick Members",
+      "description": "Allows members to kick other members with lower roles"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "Manage Nicknames",
+      "description": "Allows members to change other members' display names"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "Change Nickname",
+      "description": "Allows members to change their own display name"
+    },
+    "SEND_MESSAGES": {
+      "name": "Send Messages",
+      "description": "Allows members to send messages in text channels"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "Manage Messages",
+      "description": "Allows members to delete messages from other members"
+    },
+    "ATTACH_FILES": {
+      "name": "Attach Files",
+      "description": "Allows members to upload file attachments"
+    },
+    "ADD_REACTIONS": {
+      "name": "Add Reactions",
+      "description": "Allows members to add reactions to messages"
+    },
+    "MENTION_EVERYONE": {
+      "name": "Mention Everyone",
+      "description": "Allows members to use @everyone mentions"
+    },
+    "CONNECT": {
+      "name": "Connect",
+      "description": "Allows members to join voice channels"
+    },
+    "SPEAK": {
+      "name": "Speak",
+      "description": "Allows members to speak in voice channels"
+    },
+    "MUTE_MEMBERS": {
+      "name": "Mute Members",
+      "description": "Allows members to mute other members in voice"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "Deafen Members",
+      "description": "Allows members to deafen other members in voice"
+    },
+    "MOVE_MEMBERS": {
+      "name": "Move Members",
+      "description": "Allows members to move other members between voice channels"
+    },
+    "ADMINISTRATOR": {
+      "name": "Administrator",
+      "description": "Grants all permissions and bypasses all channel overrides"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "General",
@@ -368,7 +423,6 @@
     "failedToUpdate": "An error occurred",
     "failedToDelete": "An error occurred"
   },
-
   "channelPermissions": {
     "title": "Channel Permissions",
     "roles": "Roles",
@@ -386,7 +440,6 @@
     "current": "Current:",
     "clickToCycle": "Click to cycle."
   },
-
   "contextMenu": {
     "roles": "Roles",
     "voice": "Voice",
@@ -420,7 +473,6 @@
     "failedToSetNickname": "Failed to set nickname",
     "failedToClearNickname": "Failed to clear nickname"
   },
-
   "userProfile": {
     "status": {
       "online": "Online",
@@ -445,7 +497,6 @@
     "failedToDecline": "Failed to decline friend request",
     "failedToRemove": "Failed to remove friend"
   },
-
   "messageItem": {
     "todayAt": "Today at {{time}}",
     "yesterdayAt": "Yesterday at {{time}}",
@@ -459,7 +510,6 @@
     "originalDeleted": "Original message was deleted",
     "failedToToggleReaction": "Failed to toggle reaction"
   },
-
   "messageInput": {
     "replyingTo": "Replying to",
     "cancelReply": "Cancel reply",
@@ -471,7 +521,6 @@
     "sendMessage": "Send message",
     "removeAttachment": "Remove attachment"
   },
-
   "server": {
     "create": {
       "createTitle": "Create a Server",
@@ -500,7 +549,6 @@
       "failedToCreate": "Failed to create invite"
     }
   },
-
   "channel": {
     "createChannel": "Create channel",
     "deleteChannel": "Delete channel",
@@ -534,7 +582,6 @@
     "newChannelPlaceholder": "New {{type}} channel",
     "editPermissions": "Edit Permissions"
   },
-
   "chat": {
     "messagePlaceholder": "Message #{{channel}}",
     "dmPlaceholder": "Message @{{user}}",
@@ -585,7 +632,6 @@
     "fileTooLarge": "{{name}} is too large (max {{max}}MB)",
     "searchMessages": "Search Messages (Ctrl+K)"
   },
-
   "dm": {
     "title": "Direct Messages",
     "friends": "Friends",
@@ -603,7 +649,6 @@
     "conversationStart": "This is the start of your direct message history.",
     "welcomeMessage": "Select a conversation from the sidebar, or click on a member in any server to start a new one."
   },
-
   "friends": {
     "title": "Friends",
     "tabs": {
@@ -636,7 +681,6 @@
     "failedToAccept": "Failed to accept friend request",
     "failedToRemove": "Failed to remove friendship"
   },
-
   "members": {
     "owner": "Owner",
     "adminsCount": "Admins - {{count}}",
@@ -644,7 +688,6 @@
     "onlineCount": "Online - {{count}}",
     "offlineCount": "Offline - {{count}}"
   },
-
   "voice": {
     "connected": "Voice Connected",
     "voiceChannel": "Voice Channel",
@@ -668,7 +711,6 @@
     "decline": "Decline",
     "failedToAccept": "Failed to accept call"
   },
-
   "attachment": {
     "expired": "Expired",
     "fileExpired": "File expired",
@@ -678,7 +720,6 @@
     "loadingVideo": "Loading video...",
     "loadingAudio": "Loading audio..."
   },
-
   "support": {
     "title": "Support",
     "open": "Open",
@@ -692,7 +733,6 @@
     "failedToReopen": "Failed to reopen ticket",
     "sendMessage": "Send message"
   },
-
   "invite": {
     "youveBeenInvited": "You've been invited!",
     "loadingInvite": "Loading invite...",
@@ -702,7 +742,6 @@
     "joining": "Joining...",
     "join": "Join {{name}}"
   },
-
   "landing": {
     "nav": {
       "signIn": "Sign In",
@@ -832,7 +871,6 @@
       "copyright": "© 2026 Voxium. All rights reserved."
     }
   },
-
   "badges": {
     "staff": "Staff",
     "supporter": "Supporter",
@@ -841,12 +879,10 @@
     "topSupporter": "Top Supporter",
     "topSupporterTooltip": "Top Supporter, The most generous supporter of Voxium"
   },
-
   "connection": {
     "reconnecting": "Reconnecting to Voxium...",
     "lost": "Connection lost. Attempting to reconnect..."
   },
-
   "errorBoundary": {
     "title": "Something went wrong",
     "tryAgain": "Try again",
@@ -856,7 +892,6 @@
     "tryToRecover": "Try to Recover",
     "reloadPage": "Reload Page"
   },
-
   "serverErrors": {
     "invalidCredentials": "Invalid credentials",
     "usernameOrEmailTaken": "Username or email already in use",
@@ -997,6 +1032,14 @@
     "cannotApproveExplainer": "This device can't approve others yet. Approve it from a device that already has access to your account key.",
     "accountSafetyNumberUnavailable": "Account safety number unavailable — showing per-device numbers only.",
     "unsignedDeviceBadgeTitle": "A device is not signed by the account key — review it",
-    "unsignedDevicesWarning": "{{count}} of {{name}}'s devices is not signed by their account key. It can still read new messages, so treat it as unverified until they approve it from a device they already use."
+    "unsignedDevicesWarning": "{{count}} of {{name}}'s devices is not signed by their account key. It can still read new messages, so treat it as unverified until they approve it from a device they already use.",
+    "thisDeviceUnsignedBadgeTitle": "This device is not approved yet - approve it from another device",
+    "masterConflictBadgeTitle": "Your account key does not match this device - review it",
+    "masterConflictExplainer": "Your account publishes a key this device didn't create and can't replace. Your messages still send, but new devices can't be approved until you reset your account identity.",
+    "resetIdentityExplainer": "Lost access to every device that could approve? Start a new account identity. Only do this as a last resort.",
+    "resetIdentityAction": "Reset account identity",
+    "resetIdentityConfirm": "This replaces your account key. Everyone you message will see your safety number change and will have to verify you again. Other devices lose their approval.",
+    "resetIdentitySuccess": "Account identity reset",
+    "resetIdentityFailed": "Could not reset the account identity"
   }
 }

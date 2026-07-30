@@ -44,6 +44,10 @@ export function E2EControls({ conversation }: Props) {
   // exists to expose — it must reach the badge, not just the advanced panel.
   const unsignedPeerWarning = useE2EStore((s) => (s.unsignedDeviceWarnings[peerId]?.length ?? 0) > 0);
   const ownUnsignedWarning = useE2EStore((s) => s.ownUnsignedDevices.length > 0);
+  // This device itself unapproved, or an account key we can neither prove nor
+  // replace: both are states the user can only learn about from us.
+  const thisDeviceUnsigned = useE2EStore((s) => s.thisDeviceUnsigned);
+  const masterKeyConflict = useE2EStore((s) => s.masterKeyConflict);
   const [modal, setModal] = useState<'enable' | 'safety' | null>(null);
 
   const encrypted = !!conversation.encryptedAt;
@@ -58,7 +62,13 @@ export function E2EControls({ conversation }: Props) {
   if (!e2eReady) return null;
 
   const warning =
-    identityWarning || newDeviceWarning || ownDeviceWarning || unsignedPeerWarning || ownUnsignedWarning;
+    identityWarning ||
+    newDeviceWarning ||
+    ownDeviceWarning ||
+    unsignedPeerWarning ||
+    ownUnsignedWarning ||
+    thisDeviceUnsigned ||
+    masterKeyConflict;
 
   return (
     <>
@@ -73,7 +83,11 @@ export function E2EControls({ conversation }: Props) {
               : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary'
         )}
         title={
-          ownUnsignedWarning || unsignedPeerWarning
+          masterKeyConflict
+            ? t('e2e.masterConflictBadgeTitle')
+            : thisDeviceUnsigned
+            ? t('e2e.thisDeviceUnsignedBadgeTitle')
+            : ownUnsignedWarning || unsignedPeerWarning
             ? t('e2e.unsignedDeviceBadgeTitle')
             : ownDeviceWarning
             ? t('e2e.ownDeviceBadgeTitle')
@@ -430,8 +444,11 @@ function DeviceManagerModal({ onClose }: { onClose: () => void }) {
   const loading = useE2EStore((s) => s.ownDevicesLoading);
   const ownDeviceWarnings = useE2EStore((s) => s.ownDeviceWarnings);
   const canApprove = useE2EStore((s) => s.canApprove);
+  const masterKeyConflict = useE2EStore((s) => s.masterKeyConflict);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
     if (user?.id) void useE2EStore.getState().loadOwnDevices(user.id);
@@ -478,7 +495,26 @@ function DeviceManagerModal({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const handleReset = async () => {
+    if (!user?.id) return;
+    setResetting(true);
+    try {
+      await useE2EStore.getState().resetAccountIdentity(user.id);
+      toast.success(t('e2e.resetIdentitySuccess'));
+      setConfirmingReset(false);
+    } catch (err) {
+      console.warn('e2e: resetting account identity failed:', err instanceof Error ? err.message : err);
+      toast.error(t('e2e.resetIdentityFailed'));
+    } finally {
+      setResetting(false);
+    }
+  };
+
   const hasUnsignedDevice = !!ownDevices?.devices.some((d) => !d.crossSigned);
+  // Nothing on this device can sign, so no device the user still has access to
+  // may be able to either — the only remaining move is a new account identity
+  // (spec §14.4). Also the only exit from a conflicting published key.
+  const canReset = masterKeyConflict || (hasUnsignedDevice && !canApprove);
 
   return createPortal(
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={onClose}>
@@ -497,10 +533,51 @@ function DeviceManagerModal({ onClose }: { onClose: () => void }) {
         </div>
         <p className="mb-3 text-xs text-vox-text-muted">{t('e2e.deviceManagerExplainer')}</p>
 
+        {masterKeyConflict && (
+          <p className="mb-3 rounded-md bg-vox-accent-warning/10 p-2 text-xs text-vox-accent-warning">
+            {t('e2e.masterConflictExplainer')}
+          </p>
+        )}
+
         {hasUnsignedDevice && !canApprove && (
           <p className="mb-3 rounded-md bg-vox-bg-secondary p-2 text-xs text-vox-text-muted">
             {t('e2e.cannotApproveExplainer')}
           </p>
+        )}
+
+        {canReset && (
+          <div className="mb-3 rounded-md bg-vox-bg-secondary p-2 text-xs text-vox-text-muted">
+            {confirmingReset ? (
+              <>
+                <p className="mb-2 text-vox-accent-warning">{t('e2e.resetIdentityConfirm')}</p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleReset}
+                    disabled={resetting}
+                    className="rounded bg-vox-accent-danger px-2 py-1 font-medium text-white hover:opacity-90 disabled:opacity-50"
+                  >
+                    {resetting ? t('common.loading') : t('e2e.resetIdentityAction')}
+                  </button>
+                  <button
+                    onClick={() => setConfirmingReset(false)}
+                    className="rounded px-2 py-1 hover:text-vox-text-primary"
+                  >
+                    {t('common.cancel')}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="mb-2">{t('e2e.resetIdentityExplainer')}</p>
+                <button
+                  onClick={() => setConfirmingReset(true)}
+                  className="rounded border border-vox-accent-danger px-2 py-1 font-medium text-vox-accent-danger hover:bg-vox-accent-danger/10"
+                >
+                  {t('e2e.resetIdentityAction')}
+                </button>
+              </>
+            )}
+          </div>
         )}
 
         {ownDeviceWarnings.length > 0 && (

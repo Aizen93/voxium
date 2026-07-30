@@ -544,6 +544,27 @@ Two rules follow from this and are load-bearing:
    repeatable trust reset that also trains users to click through the one
    dialog the whole model depends on.
 
+Two consequences of that ordering are easy to get wrong, and both were:
+
+- **Our own device's keys come from the account, not the response.** We hold
+  this device's private halves, so cross-signing what the *server* says its
+  public halves are is pure downside: the server would collect a valid account
+  signature over an Olm identity it generated, and every peer who compared the
+  account safety number would trust it silently.
+- **A conflict on our OWN account is a warning, not an exception.** The send
+  path re-reads our own device list on every message, so raising the
+  peer-facing `E2EIdentityChangedError` there would not inform anyone — it
+  would make encrypted DMs permanently unsendable. The pinned key is kept, the
+  conflict is surfaced (`hasMasterKeyConflict`), and §14.4's reset is the exit.
+
+**Rollout.** Cross-signing fields are absent from a node that predates them,
+which reads exactly like "this account has no master key" — and acting on that
+mints a replacement, wiping every signature and prompting every peer. So every
+device-list response from a capable node carries `crossSigning: true`, and the
+client bootstraps only when it sees that flag. Without it, it defers: no mint,
+no pin, no conflict, and previously known cross-signatures are carried forward
+rather than being read as "every device just lost its signature".
+
 ### 14.3 Peer verification and the auto-trust window
 
 `fetchDeviceList` verifies, in order: the master self-signature; the master key
@@ -560,6 +581,16 @@ signs proves nothing, and *seeing* a key twice is not acknowledgement either.
 Without that gate, a server could mint a master key for an account that never
 had one, sign its own device with it, and have it silently trusted — strictly
 worse than the pre-cross-signing warning it replaced.
+
+`acknowledgedMasterKey` advances **only** in `acknowledgeDeviceList`, i.e. from
+an explicit user action. Advancing it anywhere else — including on a response
+where nothing looks outstanding — restores the same attack in two steps:
+publish the forged key alone, then add a device signed by it.
+
+Comparing the account number also does not stamp "verified" on devices the
+account key refuses to sign. Cross-signed devices inherit the comparison at
+read time; unsigned ones stay unsigned, which is the whole point. (Accounts
+with no master key at all keep the per-device behaviour of §12.)
 
 Devices without a valid cross-signature warn, are labelled "not signed by
 <name>'s account key" in the badge, the safety-number modal and the device
@@ -578,15 +609,35 @@ disappears with it, because approval is only offered for unsigned devices.
 
 The secret is assembled, encrypted, parsed and checked **inside the engine**
 (`EngineSession.encryptMasterSecret` / `decryptMasterSecret`,
-`EngineAccount.createInboundSessionForMasterSecret` for the pre-key case). The
-private half has no JS-facing accessor at all, so §7's "the pickle key is the
-only secret JS handles" still holds. The importer requires the derived public
-key to equal the published master key, and the ciphertext to decrypt under the
-sending device's pinned Olm identity.
+`EngineAccount.createInboundSessionForMasterSecret` for the pre-key case), so
+§7's "the pickle key is the only secret JS handles" holds. Keeping it true takes
+three guards, not just the absence of a getter:
 
-If no approved device is available, the honest outcome is a new account
-identity: peers see a changed safety number, which is the correct signal.
-Encrypted key backup (Matrix's SSSS) is deliberately out of scope.
+- the generic `openSecret`/`sealSecret` refuse the `master_secret` context, or
+  one call with the (constant, published) context would return the raw key —
+  the sealed blob and the pickle key are both reachable from JS;
+- the generic `EngineSession.decrypt` refuses any plaintext carrying the
+  approval prefix, because Olm has no domain separation of its own and a server
+  could otherwise re-file an approval envelope into the key-share mailbox;
+- the base64 secret is zeroized after use — WASM linear memory is never
+  returned to the OS and is readable from JS.
+
+The importer requires the derived public key to equal the published master key,
+and the ciphertext to decrypt under the sending device's pinned Olm identity.
+
+**Claiming is retryable.** The mailbox read does not delete; the claimant acks
+the rows it actually used or rejected. A read that consumed them would make
+every transient failure permanent — the target is already cross-signed by then,
+so it looks fully trusted to every peer, holds no key, and is no longer offered
+for approval.
+
+**Recovery.** If no approved device is available — a reinstall that lost the
+vault, a lost keychain, an account key this device cannot prove — the honest
+outcome is a new account identity: `resetAccountIdentity` mints and publishes a
+fresh master key, and peers see the safety number change. Minting is safe there
+precisely because the *user* asked; the danger §14.2 guards against is a
+*server* provoking it. Encrypted key backup (Matrix's SSSS) is deliberately out
+of scope.
 
 ### 14.5 At rest
 
@@ -598,11 +649,14 @@ access. `master:{userId}` holds public material only.
 ### 14.6 Server surface
 
 `PUT /e2e/master-key` (publish + optionally sign devices), `POST
-/e2e/devices/:deviceId/signature`, and a self-only `POST`/`GET
-/e2e/master-transfers` mailbox (claim-and-delete, `FOR UPDATE SKIP LOCKED`,
-per-device cap, swept with the key-share retention job). The server verifies
-every signature it stores and rejects the whole request on any bad one, but it
-is never the authority on trust — the client re-verifies everything.
+/e2e/devices/:deviceId/signature`, and a self-only master-transfer mailbox:
+`POST /e2e/master-transfers` to queue, `GET` to read (non-destructive),
+`POST /e2e/master-transfers/ack` to drop rows once used or rejected — all
+scoped to the caller's own account and own device, per-device capped, and swept
+with the key-share retention job. Every device-list response also carries
+`crossSigning: true` (§14.2). The server verifies every signature it stores and
+rejects the whole request on any bad one, but it is never the authority on
+trust — the client re-verifies everything.
 
 Cross-signing writes use their own rate limiter: sharing the 5/hour device
 registration bucket made a normal multi-device setup 429 halfway through an
@@ -616,5 +670,11 @@ approval.
 - Trust on first use remains for a peer's very first master key, as in any
   system without a prior channel. The safety number is what closes it.
 - No encrypted key backup, so an account with no approved device online starts
-  a new identity rather than recovering the old one.
+  a new identity rather than recovering the old one (§14.4 makes that an
+  explicit action instead of a dead end).
+- The engine ships as a committed WASM binary, so CI enforces that
+  `pkg/.source-hash` matches the Rust source
+  (`pnpm --filter @voxium/crypto-engine check:wasm-fresh`). Without it, a fix
+  could live in the repository and in no user's hands: every other check reads
+  `pkg/`, not `src/`.
 

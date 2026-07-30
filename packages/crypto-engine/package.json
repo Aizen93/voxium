@@ -18,6 +18,7 @@
     "pkg"
   ],
   "scripts": {
-    "build:wasm": "wasm-pack build --target web --release --out-dir pkg && node -e \"require('fs').rmSync('pkg/.gitignore',{force:true})\""
+    "build:wasm": "wasm-pack build --target web --release --out-dir pkg && node -e \"require('fs').rmSync('pkg/.gitignore',{force:true})\" && node scripts/source-hash.mjs",
+    "check:wasm-fresh": "node scripts/source-hash.mjs --check"
   }
 }

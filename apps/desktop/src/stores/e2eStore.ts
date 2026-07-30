@@ -8,6 +8,26 @@ import { getE2EService, E2EIdentityChangedError, type E2EOwnDevices } from '../s
 /** Live device-list subscription; re-created per login, cleared on reset. */
 let unsubscribeDeviceListChanges: (() => void) | null = null;
 
+/**
+ * The own-account slice of a device-list status, in one place: every caller
+ * that recomputes it has to agree on which device is "this" one, or the badge
+ * ends up warning about the device the user is sitting in front of (or worse,
+ * staying silent about the one they are not).
+ */
+function ownStatusPatch(
+  service: { deviceId: string; hasMasterSecret(): boolean; canApproveDevices(): boolean; hasMasterKeyConflict(): boolean },
+  status: { changed: boolean; newDeviceIds: string[]; unsignedDeviceIds: string[] }
+) {
+  return {
+    ownDeviceWarnings: status.changed ? status.newDeviceIds.filter((id) => id !== service.deviceId) : [],
+    ownUnsignedDevices: status.unsignedDeviceIds.filter((id) => id !== service.deviceId),
+    thisDeviceUnsigned: status.unsignedDeviceIds.includes(service.deviceId),
+    masterReady: service.hasMasterSecret(),
+    canApprove: service.canApproveDevices(),
+    masterKeyConflict: service.hasMasterKeyConflict(),
+  };
+}
+
 /** Called by resetAccountStores on logout — the service itself is disposed there. */
 export function stopE2EDeviceListWatch(): void {
   if (unsubscribeDeviceListChanges) {
@@ -39,6 +59,19 @@ interface E2EState {
   /** the same, for OUR OWN account (excluding this device) */
   ownUnsignedDevices: string[];
   /**
+   * THIS device is not vouched for by the account key: it was installed but
+   * never approved from an existing device. It cannot approve others, and
+   * every peer sees it flagged — so the user needs to be told here rather
+   * than only hearing about it from the person they are messaging.
+   */
+  thisDeviceUnsigned: boolean;
+  /**
+   * The account publishes a master key this device can neither prove nor
+   * replace (spec §14.2). Sending still works — the pinned key is kept — but
+   * the account's cross-signing is stuck until the user resets the identity.
+   */
+  masterKeyConflict: boolean;
+  /**
    * Device ids that appeared on OUR OWN account without the user adding them.
    * A hostile server can register a device under the victim's userId and it
    * would otherwise receive every future group-session key with no signal —
@@ -59,6 +92,7 @@ interface E2EState {
   approveDevice: (userId: string, deviceId: string) => Promise<void>;
   acknowledgeOwnDevices: (userId: string, seenDeviceIds: string[]) => Promise<void>;
   markAccountVerified: (userId: string, peerUserId: string) => Promise<void>;
+  resetAccountIdentity: (userId: string) => Promise<void>;
 }
 
 export const useE2EStore = create<E2EState>((set, get) => ({
@@ -72,6 +106,8 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   newDeviceWarnings: {},
   unsignedDeviceWarnings: {},
   ownUnsignedDevices: [],
+  thisDeviceUnsigned: false,
+  masterKeyConflict: false,
   ownDeviceWarnings: [],
   ownDevices: null,
   ownDevicesLoading: false,
@@ -94,13 +130,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
               // Our own list: a device we did not add is as dangerous as an
               // injected peer device — it receives every session key we fan out.
               if (changedUserId === userId) {
-                const mine = status.newDeviceIds.filter((id) => id !== service.deviceId);
-                return {
-                  ownDeviceWarnings: status.changed ? mine : [],
-                  ownUnsignedDevices: status.unsignedDeviceIds.filter((id) => id !== service.deviceId),
-                  masterReady: service.hasMasterSecret(),
-                  canApprove: service.canApproveDevices(),
-                };
+                return ownStatusPatch(service, status);
               }
               const newDeviceWarnings = { ...state.newDeviceWarnings };
               if (status.changed) newDeviceWarnings[changedUserId] = status.newDeviceIds;
@@ -123,17 +153,34 @@ export const useE2EStore = create<E2EState>((set, get) => ({
         initializing: false,
         masterReady: service.hasMasterSecret(),
         canApprove: service.canApproveDevices(),
+        masterKeyConflict: service.hasMasterKeyConflict(),
       });
       // The master secret may still be in flight (initialize claims pending
       // transfers fire-and-forget): re-read once it settles so an approved
       // device flips to "can approve" without a restart.
+      //
+      // Re-read unconditionally. When the claim that runs inside initialize()
+      // wins the race, this one returns false because there is nothing left to
+      // import — which is exactly the case where the flags need updating.
       void service
         .claimMasterTransfers()
-        .then((imported) => {
-          if (imported) set({ masterReady: true, canApprove: service.canApproveDevices() });
+        .then(() => {
+          set({ masterReady: service.hasMasterSecret(), canApprove: service.canApproveDevices() });
         })
         .catch((err) => {
           console.warn('e2e: master-secret claim failed:', err instanceof Error ? err.message : err);
+        });
+      // Warnings about our OWN devices are otherwise only computed when the
+      // list CHANGES. On a device that was installed and never approved,
+      // nothing changes for the whole session, so the badge would sit green
+      // while the account key does not vouch for it.
+      void service
+        .deviceListStatus(userId)
+        .then((status) => {
+          set(ownStatusPatch(service, status));
+        })
+        .catch((err) => {
+          console.warn('e2e: own device status check failed:', err instanceof Error ? err.message : err);
         });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'E2E initialization failed';
@@ -208,10 +255,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
     const service = getE2EService(userId);
     await service.acknowledgeDeviceList(userId, seenDeviceIds);
     const status = await service.deviceListStatus(userId);
-    set({
-      ownDeviceWarnings: status.changed ? status.newDeviceIds.filter((id) => id !== service.deviceId) : [],
-      ownUnsignedDevices: status.unsignedDeviceIds.filter((id) => id !== service.deviceId),
-    });
+    set(ownStatusPatch(service, status));
   },
 
   /** The user compared the peer's ACCOUNT safety number out of band (D9). */
@@ -238,10 +282,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
     await get().loadOwnDevices(userId);
     // the revoked device must stop being reported as unrecognised / unsigned
     const status = await service.deviceListStatus(userId);
-    set({
-      ownDeviceWarnings: status.changed ? status.newDeviceIds.filter((id) => id !== service.deviceId) : [],
-      ownUnsignedDevices: status.unsignedDeviceIds.filter((id) => id !== service.deviceId),
-    });
+    set(ownStatusPatch(service, status));
   },
 
   /**
@@ -254,10 +295,21 @@ export const useE2EStore = create<E2EState>((set, get) => ({
     await service.approveDevice(deviceId);
     await get().loadOwnDevices(userId);
     const status = await service.deviceListStatus(userId);
-    set({
-      ownDeviceWarnings: status.changed ? status.newDeviceIds.filter((id) => id !== service.deviceId) : [],
-      ownUnsignedDevices: status.unsignedDeviceIds.filter((id) => id !== service.deviceId),
-    });
+    set(ownStatusPatch(service, status));
+  },
+
+  /**
+   * Start a new account identity (spec §14.4). The way out when no device
+   * holds the account key any more — a reinstall that lost the vault, or a
+   * published key this device cannot prove. Peers see the account safety
+   * number change, which is the honest signal that trust has to be re-earned.
+   */
+  resetAccountIdentity: async (userId: string) => {
+    const service = getE2EService(userId);
+    await service.resetAccountIdentity();
+    await get().loadOwnDevices(userId);
+    const status = await service.deviceListStatus(userId);
+    set(ownStatusPatch(service, status));
   },
 }));
 

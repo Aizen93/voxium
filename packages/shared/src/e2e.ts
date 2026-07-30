@@ -50,9 +50,11 @@ export const E2E_LIMITS = {
   /** Max master-secret transfers per POST /e2e/master-transfers batch (§14). */
   MASTER_TRANSFER_BATCH_MAX: 5,
   /**
-   * Max stored (and per-claim returned) master-secret transfers per recipient
+   * Max stored (and per-read returned) master-secret transfers per recipient
    * device. Tiny on purpose: this mailbox only ever carries a handful of
    * device-approval handshakes, never bulk traffic. Overflow evicts oldest.
+   * Reads do not consume (§14.4), so this is also what bounds a mailbox whose
+   * acks never arrive — until the retention sweep clears it.
    */
   MASTER_TRANSFER_STORE_CAP: 10,
 } as const;

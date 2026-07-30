@@ -211,9 +211,27 @@ impl MasterInboundResult {
 const SEAL_NONCE_LEN: usize = 12;
 const SEAL_TAG_LEN: usize = 16;
 
+/// The vault contexts JS is not allowed to seal or open for itself. The master
+/// secret is the account's private half: it may only enter or leave the vault
+/// through `EngineMasterKey`, which never hands it to JS. Without this the
+/// generic sealer would be a complete bypass of that invariant — the sealed
+/// blob and the pickle key are both readable from JS, so one `openSecret` call
+/// with the (published, constant) context would return the raw secret.
+fn reject_reserved_context(context: &str) -> Result<(), JsError> {
+    if context == MASTER_SECRET_CONTEXT {
+        return Err(JsError::new("this context is reserved for the engine"));
+    }
+    Ok(())
+}
+
 /// Seal a UTF-8 secret under a 32-byte key. Output: base64(nonce || ciphertext).
 #[wasm_bindgen(js_name = sealSecret)]
 pub fn seal_secret(plaintext: &str, context: &str, pickle_key: &[u8]) -> Result<String, JsError> {
+    reject_reserved_context(context)?;
+    seal_secret_internal(plaintext, context, pickle_key)
+}
+
+fn seal_secret_internal(plaintext: &str, context: &str, pickle_key: &[u8]) -> Result<String, JsError> {
     use aes_gcm::aead::rand_core::RngCore;
     use aes_gcm::aead::{Aead, KeyInit, OsRng};
     use aes_gcm::{Aes256Gcm, Nonce};
@@ -244,6 +262,11 @@ pub fn seal_secret(plaintext: &str, context: &str, pickle_key: &[u8]) -> Result<
 /// (GCM auth tag). Error messages never carry key or plaintext material.
 #[wasm_bindgen(js_name = openSecret)]
 pub fn open_secret(sealed_b64: &str, context: &str, pickle_key: &[u8]) -> Result<String, JsError> {
+    reject_reserved_context(context)?;
+    open_secret_internal(sealed_b64, context, pickle_key)
+}
+
+fn open_secret_internal(sealed_b64: &str, context: &str, pickle_key: &[u8]) -> Result<String, JsError> {
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Nonce};
 
@@ -399,7 +422,7 @@ impl EngineMasterKey {
     /// Restore a master key from a `sealSecret` blob (the vault's at-rest form).
     #[wasm_bindgen(js_name = fromSealed)]
     pub fn from_sealed(sealed_b64: &str, pickle_key: &[u8]) -> Result<EngineMasterKey, JsError> {
-        let mut secret_b64 = open_secret(sealed_b64, MASTER_SECRET_CONTEXT, pickle_key)?;
+        let mut secret_b64 = open_secret_internal(sealed_b64, MASTER_SECRET_CONTEXT, pickle_key)?;
         let result = Ed25519SecretKey::from_base64(&secret_b64)
             .map(|inner| EngineMasterKey { inner })
             .map_err(|_| JsError::new("invalid master key material"));
@@ -428,7 +451,7 @@ impl EngineMasterKey {
     /// Seal the private half for storage (AES-256-GCM under the vault key).
     pub fn seal(&self, pickle_key: &[u8]) -> Result<String, JsError> {
         let mut secret_b64 = self.inner.to_base64();
-        let result = seal_secret(&secret_b64, MASTER_SECRET_CONTEXT, pickle_key);
+        let result = seal_secret_internal(&secret_b64, MASTER_SECRET_CONTEXT, pickle_key);
         secret_b64.zeroize();
         result
     }
@@ -641,8 +664,19 @@ impl EngineAccount {
             .inner
             .create_inbound_session(SessionConfig::version_1(), identity, &message)
             .map_err(|e| JsError::new(&format!("inbound session creation failed: {e}")))?;
-        let plaintext = String::from_utf8(result.plaintext)
+        let mut plaintext = String::from_utf8(result.plaintext)
             .map_err(|_| JsError::new("plaintext is not valid UTF-8"))?;
+        // Same refusal as EngineSession::decrypt, and this is the likelier of
+        // the two paths: an approval addressed to a sibling device that has
+        // never talked to this one arrives precisely as a pre-key message. A
+        // server that re-files that envelope into the key-share mailbox would
+        // otherwise have the client hand back the account's private key as a
+        // plaintext JS string. Approvals have one entrance:
+        // createInboundSessionForMasterSecret.
+        if plaintext.starts_with(MASTER_TRANSFER_PREFIX) {
+            plaintext.zeroize();
+            return Err(JsError::new("refusing to return a device-approval payload"));
+        }
         Ok(InboundResult {
             session: Some(EngineSession { inner: result.session }),
             plaintext,
@@ -710,12 +744,20 @@ impl EngineSession {
     /// never becomes a JS string; the caller only ever sees Olm ciphertext.
     #[wasm_bindgen(js_name = encryptMasterSecret)]
     pub fn encrypt_master_secret(&mut self, master: &EngineMasterKey) -> Result<JsValue, JsError> {
-        let mut payload = format!(
-            "{}{}|{}",
-            MASTER_TRANSFER_PREFIX,
-            master.secret_b64_internal(),
-            master.public_key()
+        // Assembled by hand rather than with format!: the temporary holding the
+        // base64 secret has to be a named binding so it can be zeroized. WASM
+        // linear memory is never returned to the OS and is reachable from JS,
+        // so a dropped-but-unscrubbed copy stays readable for the session.
+        let mut secret_b64 = master.secret_b64_internal();
+        let public_b64 = master.public_key();
+        let mut payload = String::with_capacity(
+            MASTER_TRANSFER_PREFIX.len() + secret_b64.len() + 1 + public_b64.len(),
         );
+        payload.push_str(MASTER_TRANSFER_PREFIX);
+        payload.push_str(&secret_b64);
+        payload.push('|');
+        payload.push_str(&public_b64);
+        secret_b64.zeroize();
         let encrypted = self
             .inner
             .encrypt(payload.as_bytes())
@@ -739,12 +781,27 @@ impl EngineSession {
         body_b64: &str,
         expected_master_key: &str,
     ) -> Result<EngineMasterKey, JsError> {
-        let plaintext = self.decrypt(message_type, body_b64)?;
+        let plaintext = self.decrypt_internal(message_type, body_b64)?;
         parse_master_transfer(plaintext, expected_master_key)
     }
 
     /// Decrypt a message previously produced by the peer's session.
+    ///
+    /// A device-approval payload is refused here even though it decrypts fine:
+    /// Olm gives no domain separation of its own, so without this check a
+    /// server could re-file an approval envelope into any other mailbox (key
+    /// shares, DM ciphertext) and have the client hand it back as a plaintext
+    /// JS string — the one thing `encryptMasterSecret` exists to prevent.
     pub fn decrypt(&mut self, message_type: usize, body_b64: &str) -> Result<String, JsError> {
+        let mut plaintext = self.decrypt_internal(message_type, body_b64)?;
+        if plaintext.starts_with(MASTER_TRANSFER_PREFIX) {
+            plaintext.zeroize();
+            return Err(JsError::new("refusing to return a device-approval payload"));
+        }
+        Ok(plaintext)
+    }
+
+    fn decrypt_internal(&mut self, message_type: usize, body_b64: &str) -> Result<String, JsError> {
         let bytes = base64_decode(body_b64).map_err(|_| JsError::new("invalid base64 body"))?;
         let message = OlmMessage::from_parts(message_type, &bytes)
             .map_err(|_| JsError::new("invalid message encoding"))?;

@@ -29,7 +29,6 @@
     "creating": "Wird erstellt...",
     "deleting": "Wird gelöscht..."
   },
-
   "auth": {
     "login": {
       "title": "Willkommen zurück!",
@@ -119,7 +118,6 @@
       "checkSpam": "Keine E-Mail erhalten? Überprüfe deinen Spam-Ordner oder versuche es erneut."
     }
   },
-
   "settings": {
     "title": "Einstellungen",
     "tabs": {
@@ -234,7 +232,6 @@
       "selectLanguage": "Sprache auswählen"
     }
   },
-
   "serverSettings": {
     "title": "Servereinstellungen",
     "tabs": {
@@ -310,30 +307,88 @@
       "failedToLoad": "Serverlimits konnten nicht geladen werden"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "Kanäle ansehen", "description": "Erlaubt Mitgliedern, Text- und Sprachkanäle zu sehen" },
-    "MANAGE_CHANNELS": { "name": "Kanäle verwalten", "description": "Erlaubt Mitgliedern, Kanäle zu erstellen, zu bearbeiten und zu löschen" },
-    "MANAGE_CATEGORIES": { "name": "Kategorien verwalten", "description": "Erlaubt Mitgliedern, Kategorien zu erstellen, zu bearbeiten und zu löschen" },
-    "MANAGE_SERVER": { "name": "Server verwalten", "description": "Erlaubt Mitgliedern, den Servernamen, das Symbol und die Einstellungen zu bearbeiten" },
-    "MANAGE_ROLES": { "name": "Rollen verwalten", "description": "Erlaubt Mitgliedern, Rollen unterhalb ihrer eigenen zu erstellen, zu bearbeiten und zu löschen" },
-    "CREATE_INVITES": { "name": "Einladungen erstellen", "description": "Erlaubt Mitgliedern, Server-Einladungslinks zu erstellen" },
-    "KICK_MEMBERS": { "name": "Mitglieder entfernen", "description": "Erlaubt Mitgliedern, andere Mitglieder mit niedrigeren Rollen zu entfernen" },
-    "MANAGE_NICKNAMES": { "name": "Spitznamen verwalten", "description": "Erlaubt Mitgliedern, die Anzeigenamen anderer Mitglieder zu ändern" },
-    "CHANGE_NICKNAME": { "name": "Spitznamen ändern", "description": "Erlaubt Mitgliedern, ihren eigenen Anzeigenamen zu ändern" },
-    "SEND_MESSAGES": { "name": "Nachrichten senden", "description": "Erlaubt Mitgliedern, Nachrichten in Textkanälen zu senden" },
-    "MANAGE_MESSAGES": { "name": "Nachrichten verwalten", "description": "Erlaubt Mitgliedern, Nachrichten anderer Mitglieder zu löschen" },
-    "ATTACH_FILES": { "name": "Dateien anhängen", "description": "Erlaubt Mitgliedern, Dateianhänge hochzuladen" },
-    "ADD_REACTIONS": { "name": "Reaktionen hinzufügen", "description": "Erlaubt Mitgliedern, Reaktionen zu Nachrichten hinzuzufügen" },
-    "MENTION_EVERYONE": { "name": "Alle erwähnen", "description": "Erlaubt Mitgliedern, @everyone-Erwähnungen zu verwenden" },
-    "CONNECT": { "name": "Verbinden", "description": "Erlaubt Mitgliedern, Sprachkanälen beizutreten" },
-    "SPEAK": { "name": "Sprechen", "description": "Erlaubt Mitgliedern, in Sprachkanälen zu sprechen" },
-    "MUTE_MEMBERS": { "name": "Mitglieder stummschalten", "description": "Erlaubt Mitgliedern, andere Mitglieder im Sprachkanal stummzuschalten" },
-    "DEAFEN_MEMBERS": { "name": "Mitglieder lautlos schalten", "description": "Erlaubt Mitgliedern, andere Mitglieder im Sprachkanal lautlos zu schalten" },
-    "MOVE_MEMBERS": { "name": "Mitglieder verschieben", "description": "Erlaubt Mitgliedern, andere Mitglieder zwischen Sprachkanälen zu verschieben" },
-    "ADMINISTRATOR": { "name": "Administrator", "description": "Gewährt alle Berechtigungen und umgeht alle Kanalüberschreibungen" }
+    "VIEW_CHANNEL": {
+      "name": "Kanäle ansehen",
+      "description": "Erlaubt Mitgliedern, Text- und Sprachkanäle zu sehen"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "Kanäle verwalten",
+      "description": "Erlaubt Mitgliedern, Kanäle zu erstellen, zu bearbeiten und zu löschen"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "Kategorien verwalten",
+      "description": "Erlaubt Mitgliedern, Kategorien zu erstellen, zu bearbeiten und zu löschen"
+    },
+    "MANAGE_SERVER": {
+      "name": "Server verwalten",
+      "description": "Erlaubt Mitgliedern, den Servernamen, das Symbol und die Einstellungen zu bearbeiten"
+    },
+    "MANAGE_ROLES": {
+      "name": "Rollen verwalten",
+      "description": "Erlaubt Mitgliedern, Rollen unterhalb ihrer eigenen zu erstellen, zu bearbeiten und zu löschen"
+    },
+    "CREATE_INVITES": {
+      "name": "Einladungen erstellen",
+      "description": "Erlaubt Mitgliedern, Server-Einladungslinks zu erstellen"
+    },
+    "KICK_MEMBERS": {
+      "name": "Mitglieder entfernen",
+      "description": "Erlaubt Mitgliedern, andere Mitglieder mit niedrigeren Rollen zu entfernen"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "Spitznamen verwalten",
+      "description": "Erlaubt Mitgliedern, die Anzeigenamen anderer Mitglieder zu ändern"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "Spitznamen ändern",
+      "description": "Erlaubt Mitgliedern, ihren eigenen Anzeigenamen zu ändern"
+    },
+    "SEND_MESSAGES": {
+      "name": "Nachrichten senden",
+      "description": "Erlaubt Mitgliedern, Nachrichten in Textkanälen zu senden"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "Nachrichten verwalten",
+      "description": "Erlaubt Mitgliedern, Nachrichten anderer Mitglieder zu löschen"
+    },
+    "ATTACH_FILES": {
+      "name": "Dateien anhängen",
+      "description": "Erlaubt Mitgliedern, Dateianhänge hochzuladen"
+    },
+    "ADD_REACTIONS": {
+      "name": "Reaktionen hinzufügen",
+      "description": "Erlaubt Mitgliedern, Reaktionen zu Nachrichten hinzuzufügen"
+    },
+    "MENTION_EVERYONE": {
+      "name": "Alle erwähnen",
+      "description": "Erlaubt Mitgliedern, @everyone-Erwähnungen zu verwenden"
+    },
+    "CONNECT": {
+      "name": "Verbinden",
+      "description": "Erlaubt Mitgliedern, Sprachkanälen beizutreten"
+    },
+    "SPEAK": {
+      "name": "Sprechen",
+      "description": "Erlaubt Mitgliedern, in Sprachkanälen zu sprechen"
+    },
+    "MUTE_MEMBERS": {
+      "name": "Mitglieder stummschalten",
+      "description": "Erlaubt Mitgliedern, andere Mitglieder im Sprachkanal stummzuschalten"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "Mitglieder lautlos schalten",
+      "description": "Erlaubt Mitgliedern, andere Mitglieder im Sprachkanal lautlos zu schalten"
+    },
+    "MOVE_MEMBERS": {
+      "name": "Mitglieder verschieben",
+      "description": "Erlaubt Mitgliedern, andere Mitglieder zwischen Sprachkanälen zu verschieben"
+    },
+    "ADMINISTRATOR": {
+      "name": "Administrator",
+      "description": "Gewährt alle Berechtigungen und umgeht alle Kanalüberschreibungen"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "Allgemein",
@@ -365,7 +420,6 @@
     "failedToUpdate": "Ein Fehler ist aufgetreten",
     "failedToDelete": "Ein Fehler ist aufgetreten"
   },
-
   "channelPermissions": {
     "title": "Kanalberechtigungen",
     "roles": "Rollen",
@@ -383,7 +437,6 @@
     "current": "Aktuell:",
     "clickToCycle": "Klicke zum Wechseln."
   },
-
   "contextMenu": {
     "roles": "Rollen",
     "voice": "Sprache",
@@ -417,7 +470,6 @@
     "failedToSetNickname": "Spitzname konnte nicht gesetzt werden",
     "failedToClearNickname": "Spitzname konnte nicht gelöscht werden"
   },
-
   "userProfile": {
     "status": {
       "online": "Online",
@@ -442,7 +494,6 @@
     "failedToDecline": "Freundschaftsanfrage konnte nicht abgelehnt werden",
     "failedToRemove": "Freund konnte nicht entfernt werden"
   },
-
   "messageItem": {
     "todayAt": "Heute um {{time}}",
     "yesterdayAt": "Gestern um {{time}}",
@@ -456,7 +507,6 @@
     "originalDeleted": "Originalnachricht wurde gelöscht",
     "failedToToggleReaction": "Reaktion konnte nicht geändert werden"
   },
-
   "messageInput": {
     "replyingTo": "Antwort an",
     "cancelReply": "Antwort abbrechen",
@@ -465,7 +515,6 @@
     "uploadFailed": "Fehlgeschlagen",
     "attachFile": "Datei anhängen"
   },
-
   "server": {
     "create": {
       "createTitle": "Server erstellen",
@@ -494,7 +543,6 @@
       "failedToCreate": "Einladung konnte nicht erstellt werden"
     }
   },
-
   "channel": {
     "createChannel": "Kanal erstellen",
     "deleteChannel": "Kanal löschen",
@@ -528,7 +576,6 @@
     "newChannelPlaceholder": "Neuer {{type}}-Kanal",
     "editPermissions": "Berechtigungen bearbeiten"
   },
-
   "chat": {
     "messagePlaceholder": "Nachricht an #{{channel}}",
     "dmPlaceholder": "Nachricht an @{{user}}",
@@ -579,7 +626,6 @@
     "fileTooLarge": "{{name}} ist zu groß (max. {{max}} MB)",
     "searchMessages": "Nachrichten durchsuchen (Strg+K)"
   },
-
   "dm": {
     "title": "Direktnachrichten",
     "friends": "Freunde",
@@ -597,7 +643,6 @@
     "conversationStart": "Dies ist der Beginn deines Direktnachrichtenverlaufs.",
     "welcomeMessage": "Wähle eine Unterhaltung in der Seitenleiste aus oder klicke auf ein Mitglied in einem beliebigen Server, um eine neue zu starten."
   },
-
   "friends": {
     "title": "Freunde",
     "tabs": {
@@ -630,7 +675,6 @@
     "failedToAccept": "Freundschaftsanfrage konnte nicht angenommen werden",
     "failedToRemove": "Freundschaft konnte nicht entfernt werden"
   },
-
   "members": {
     "owner": "Eigentümer",
     "adminsCount": "Administratoren - {{count}}",
@@ -638,7 +682,6 @@
     "onlineCount": "Online - {{count}}",
     "offlineCount": "Offline - {{count}}"
   },
-
   "voice": {
     "connected": "Sprache verbunden",
     "voiceChannel": "Sprachkanal",
@@ -662,7 +705,6 @@
     "decline": "Ablehnen",
     "failedToAccept": "Anruf konnte nicht angenommen werden"
   },
-
   "attachment": {
     "expired": "Abgelaufen",
     "fileExpired": "Datei abgelaufen",
@@ -672,7 +714,6 @@
     "loadingVideo": "Video wird geladen...",
     "loadingAudio": "Audio wird geladen..."
   },
-
   "support": {
     "title": "Support",
     "open": "Offen",
@@ -685,7 +726,6 @@
     "failedToSend": "Nachricht konnte nicht gesendet werden",
     "failedToReopen": "Ticket konnte nicht wieder geöffnet werden"
   },
-
   "invite": {
     "youveBeenInvited": "Du wurdest eingeladen!",
     "loadingInvite": "Einladung wird geladen...",
@@ -695,7 +735,6 @@
     "joining": "Beitritt läuft...",
     "join": "{{name}} beitreten"
   },
-
   "landing": {
     "nav": {
       "signIn": "Anmelden",
@@ -822,10 +861,9 @@
       "cookiePolicy": "Cookie-Richtlinie",
       "community": "Community",
       "contributing": "Mitwirken",
-      "copyright": "\u00a9 2026 Voxium. Alle Rechte vorbehalten."
+      "copyright": "© 2026 Voxium. Alle Rechte vorbehalten."
     }
   },
-
   "badges": {
     "staff": "Mitarbeiter",
     "supporter": "Unterstützer",
@@ -834,12 +872,10 @@
     "topSupporter": "Top-Unterstützer",
     "topSupporterTooltip": "Top-Unterstützer, Der großzügigste Unterstützer von Voxium"
   },
-
   "connection": {
     "reconnecting": "Verbindung zu Voxium wird wiederhergestellt...",
     "lost": "Verbindung verloren. Versuche, die Verbindung wiederherzustellen..."
   },
-
   "errorBoundary": {
     "title": "Etwas ist schiefgelaufen",
     "tryAgain": "Erneut versuchen",
@@ -849,7 +885,6 @@
     "tryToRecover": "Wiederherstellen versuchen",
     "reloadPage": "Seite neu laden"
   },
-
   "serverErrors": {
     "invalidCredentials": "Ungültige Anmeldedaten",
     "usernameOrEmailTaken": "Benutzername oder E-Mail-Adresse wird bereits verwendet",
@@ -990,6 +1025,14 @@
     "cannotApproveExplainer": "Dieses Gerät kann noch keine anderen genehmigen. Genehmige es von einem Gerät aus, das bereits Zugriff auf deinen Kontoschlüssel hat.",
     "accountSafetyNumberUnavailable": "Konto-Sicherheitsnummer nicht verfügbar — es werden nur Nummern pro Gerät angezeigt.",
     "unsignedDeviceBadgeTitle": "Ein Gerät ist nicht mit dem Kontoschlüssel signiert — bitte prüfen",
-    "unsignedDevicesWarning": "{{count}} Gerät von {{name}} ist nicht mit dem Kontoschlüssel signiert. Es kann neue Nachrichten trotzdem lesen — behandle es als nicht verifiziert, bis es von einem bereits genutzten Gerät freigegeben wird."
+    "unsignedDevicesWarning": "{{count}} Gerät von {{name}} ist nicht mit dem Kontoschlüssel signiert. Es kann neue Nachrichten trotzdem lesen — behandle es als nicht verifiziert, bis es von einem bereits genutzten Gerät freigegeben wird.",
+    "thisDeviceUnsignedBadgeTitle": "Dieses Gerät ist noch nicht freigegeben — gib es von einem anderen Gerät frei",
+    "masterConflictBadgeTitle": "Der Kontoschlüssel passt nicht zu diesem Gerät — bitte prüfen",
+    "masterConflictExplainer": "Dein Konto veröffentlicht einen Schlüssel, den dieses Gerät nicht erstellt hat und nicht ersetzen kann. Nachrichten werden weiterhin gesendet, aber neue Geräte lassen sich erst freigeben, wenn du die Kontoidentität zurücksetzt.",
+    "resetIdentityExplainer": "Kein Zugriff mehr auf ein Gerät, das freigeben kann? Beginne eine neue Kontoidentität. Nur als letzter Ausweg.",
+    "resetIdentityAction": "Kontoidentität zurücksetzen",
+    "resetIdentityConfirm": "Das ersetzt deinen Kontoschlüssel. Alle deine Kontakte sehen eine geänderte Sicherheitsnummer und müssen dich erneut verifizieren. Andere Geräte verlieren ihre Freigabe.",
+    "resetIdentitySuccess": "Kontoidentität zurückgesetzt",
+    "resetIdentityFailed": "Kontoidentität konnte nicht zurückgesetzt werden"
   }
 }

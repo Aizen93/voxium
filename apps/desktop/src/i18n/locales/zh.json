@@ -29,7 +29,6 @@
     "creating": "创建中...",
     "deleting": "删除中..."
   },
-
   "auth": {
     "login": {
       "title": "欢迎回来！",
@@ -119,7 +118,6 @@
       "checkSpam": "没收到邮件？请检查垃圾邮件文件夹或尝试重新发送。"
     }
   },
-
   "settings": {
     "title": "设置",
     "tabs": {
@@ -234,7 +232,6 @@
       "selectLanguage": "选择语言"
     }
   },
-
   "serverSettings": {
     "title": "服务器设置",
     "tabs": {
@@ -310,30 +307,88 @@
       "failedToLoad": "服务器限制加载失败"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "查看频道", "description": "允许成员查看文字和语音频道" },
-    "MANAGE_CHANNELS": { "name": "管理频道", "description": "允许成员创建、编辑和删除频道" },
-    "MANAGE_CATEGORIES": { "name": "管理分类", "description": "允许成员创建、编辑和删除分类" },
-    "MANAGE_SERVER": { "name": "管理服务器", "description": "允许成员编辑服务器名称、图标和设置" },
-    "MANAGE_ROLES": { "name": "管理角色", "description": "允许成员创建、编辑和删除低于自己的角色" },
-    "CREATE_INVITES": { "name": "创建邀请", "description": "允许成员创建服务器邀请链接" },
-    "KICK_MEMBERS": { "name": "踢出成员", "description": "允许成员踢出拥有较低角色的其他成员" },
-    "MANAGE_NICKNAMES": { "name": "管理昵称", "description": "允许成员更改其他成员的显示名称" },
-    "CHANGE_NICKNAME": { "name": "更改昵称", "description": "允许成员更改自己的显示名称" },
-    "SEND_MESSAGES": { "name": "发送消息", "description": "允许成员在文字频道中发送消息" },
-    "MANAGE_MESSAGES": { "name": "管理消息", "description": "允许成员删除其他成员的消息" },
-    "ATTACH_FILES": { "name": "附加文件", "description": "允许成员上传文件附件" },
-    "ADD_REACTIONS": { "name": "添加表情", "description": "允许成员为消息添加表情回应" },
-    "MENTION_EVERYONE": { "name": "提及所有人", "description": "允许成员使用 @everyone 提及" },
-    "CONNECT": { "name": "连接", "description": "允许成员加入语音频道" },
-    "SPEAK": { "name": "发言", "description": "允许成员在语音频道中发言" },
-    "MUTE_MEMBERS": { "name": "静音成员", "description": "允许成员在语音中将其他成员静音" },
-    "DEAFEN_MEMBERS": { "name": "关闭成员声音", "description": "允许成员在语音中关闭其他成员的声音" },
-    "MOVE_MEMBERS": { "name": "移动成员", "description": "允许成员在语音频道之间移动其他成员" },
-    "ADMINISTRATOR": { "name": "管理员", "description": "授予所有权限并绕过所有频道覆盖" }
+    "VIEW_CHANNEL": {
+      "name": "查看频道",
+      "description": "允许成员查看文字和语音频道"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "管理频道",
+      "description": "允许成员创建、编辑和删除频道"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "管理分类",
+      "description": "允许成员创建、编辑和删除分类"
+    },
+    "MANAGE_SERVER": {
+      "name": "管理服务器",
+      "description": "允许成员编辑服务器名称、图标和设置"
+    },
+    "MANAGE_ROLES": {
+      "name": "管理角色",
+      "description": "允许成员创建、编辑和删除低于自己的角色"
+    },
+    "CREATE_INVITES": {
+      "name": "创建邀请",
+      "description": "允许成员创建服务器邀请链接"
+    },
+    "KICK_MEMBERS": {
+      "name": "踢出成员",
+      "description": "允许成员踢出拥有较低角色的其他成员"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "管理昵称",
+      "description": "允许成员更改其他成员的显示名称"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "更改昵称",
+      "description": "允许成员更改自己的显示名称"
+    },
+    "SEND_MESSAGES": {
+      "name": "发送消息",
+      "description": "允许成员在文字频道中发送消息"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "管理消息",
+      "description": "允许成员删除其他成员的消息"
+    },
+    "ATTACH_FILES": {
+      "name": "附加文件",
+      "description": "允许成员上传文件附件"
+    },
+    "ADD_REACTIONS": {
+      "name": "添加表情",
+      "description": "允许成员为消息添加表情回应"
+    },
+    "MENTION_EVERYONE": {
+      "name": "提及所有人",
+      "description": "允许成员使用 @everyone 提及"
+    },
+    "CONNECT": {
+      "name": "连接",
+      "description": "允许成员加入语音频道"
+    },
+    "SPEAK": {
+      "name": "发言",
+      "description": "允许成员在语音频道中发言"
+    },
+    "MUTE_MEMBERS": {
+      "name": "静音成员",
+      "description": "允许成员在语音中将其他成员静音"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "关闭成员声音",
+      "description": "允许成员在语音中关闭其他成员的声音"
+    },
+    "MOVE_MEMBERS": {
+      "name": "移动成员",
+      "description": "允许成员在语音频道之间移动其他成员"
+    },
+    "ADMINISTRATOR": {
+      "name": "管理员",
+      "description": "授予所有权限并绕过所有频道覆盖"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "常规",
@@ -365,7 +420,6 @@
     "failedToUpdate": "发生了一个错误",
     "failedToDelete": "发生了一个错误"
   },
-
   "channelPermissions": {
     "title": "频道权限",
     "roles": "角色",
@@ -383,7 +437,6 @@
     "current": "当前：",
     "clickToCycle": "点击切换。"
   },
-
   "contextMenu": {
     "roles": "角色",
     "voice": "语音",
@@ -417,7 +470,6 @@
     "failedToSetNickname": "昵称设置失败",
     "failedToClearNickname": "昵称清除失败"
   },
-
   "userProfile": {
     "status": {
       "online": "在线",
@@ -442,7 +494,6 @@
     "failedToDecline": "好友请求拒绝失败",
     "failedToRemove": "好友删除失败"
   },
-
   "messageItem": {
     "todayAt": "今天 {{time}}",
     "yesterdayAt": "昨天 {{time}}",
@@ -456,7 +507,6 @@
     "originalDeleted": "原始消息已被删除",
     "failedToToggleReaction": "表情更改失败"
   },
-
   "messageInput": {
     "replyingTo": "回复",
     "cancelReply": "取消回复",
@@ -465,7 +515,6 @@
     "uploadFailed": "失败",
     "attachFile": "附加文件"
   },
-
   "server": {
     "create": {
       "createTitle": "创建服务器",
@@ -494,7 +543,6 @@
       "failedToCreate": "邀请创建失败"
     }
   },
-
   "channel": {
     "createChannel": "创建频道",
     "deleteChannel": "删除频道",
@@ -528,7 +576,6 @@
     "newChannelPlaceholder": "新{{type}}频道",
     "editPermissions": "编辑权限"
   },
-
   "chat": {
     "messagePlaceholder": "在 #{{channel}} 中发消息",
     "dmPlaceholder": "给 @{{user}} 发消息",
@@ -579,7 +626,6 @@
     "fileTooLarge": "{{name}} 太大（最大 {{max}}MB）",
     "searchMessages": "搜索消息 (Ctrl+K)"
   },
-
   "dm": {
     "title": "私信",
     "friends": "好友",
@@ -597,7 +643,6 @@
     "conversationStart": "这是你们私信记录的开始。",
     "welcomeMessage": "从侧边栏选择一个对话，或点击任意服务器中的成员来开始新的对话。"
   },
-
   "friends": {
     "title": "好友",
     "tabs": {
@@ -630,7 +675,6 @@
     "failedToAccept": "好友请求接受失败",
     "failedToRemove": "好友关系删除失败"
   },
-
   "members": {
     "owner": "所有者",
     "adminsCount": "管理员 - {{count}}",
@@ -638,7 +682,6 @@
     "onlineCount": "在线 - {{count}}",
     "offlineCount": "离线 - {{count}}"
   },
-
   "voice": {
     "connected": "语音已连接",
     "voiceChannel": "语音频道",
@@ -662,7 +705,6 @@
     "decline": "拒绝",
     "failedToAccept": "接听失败"
   },
-
   "attachment": {
     "expired": "已过期",
     "fileExpired": "文件已过期",
@@ -672,7 +714,6 @@
     "loadingVideo": "加载视频中...",
     "loadingAudio": "加载音频中..."
   },
-
   "support": {
     "title": "客服",
     "open": "开放",
@@ -685,7 +726,6 @@
     "failedToSend": "消息发送失败",
     "failedToReopen": "工单重新打开失败"
   },
-
   "invite": {
     "youveBeenInvited": "你收到了邀请！",
     "loadingInvite": "加载邀请中...",
@@ -695,7 +735,6 @@
     "joining": "加入中...",
     "join": "加入 {{name}}"
   },
-
   "landing": {
     "nav": {
       "signIn": "登录",
@@ -748,7 +787,7 @@
       "title": "Voxium 对比",
       "subtitle": "看看 Voxium 与其他方案相比如何。我们相信通信软件应该是开放的、私密的、由社区拥有的。",
       "feature": "功能",
-      "footnote": "基于 2026 年 3 月免费方案的对比。标记为\u201c计划中\u201d的功能在路线图中。",
+      "footnote": "基于 2026 年 3 月免费方案的对比。标记为“计划中”的功能在路线图中。",
       "openSource": "开源",
       "selfHostable": "可自托管",
       "freeVoiceChat": "免费语音聊天",
@@ -822,10 +861,9 @@
       "cookiePolicy": "Cookie 政策",
       "community": "社区",
       "contributing": "参与贡献",
-      "copyright": "\u00a9 2026 Voxium. All rights reserved."
+      "copyright": "© 2026 Voxium. All rights reserved."
     }
   },
-
   "badges": {
     "staff": "工作人员",
     "supporter": "支持者",
@@ -834,12 +872,10 @@
     "topSupporter": "顶级支持者",
     "topSupporterTooltip": "顶级支持者，Voxium 最慷慨的支持者"
   },
-
   "connection": {
     "reconnecting": "正在重新连接 Voxium...",
     "lost": "连接已断开，正在尝试重新连接..."
   },
-
   "errorBoundary": {
     "title": "出了点问题",
     "tryAgain": "重试",
@@ -849,7 +885,6 @@
     "tryToRecover": "尝试恢复",
     "reloadPage": "重新加载页面"
   },
-
   "serverErrors": {
     "invalidCredentials": "凭据无效",
     "usernameOrEmailTaken": "用户名或邮箱已被使用",
@@ -990,6 +1025,14 @@
     "cannotApproveExplainer": "此设备暂时无法批准其他设备。请从已可访问你账户密钥的设备进行批准。",
     "accountSafetyNumberUnavailable": "账户安全码不可用 — 仅显示按设备的安全码。",
     "unsignedDeviceBadgeTitle": "有设备未经账户密钥签名 — 请查看",
-    "unsignedDevicesWarning": "{{name}} 有 {{count}} 台设备未经其账户密钥签名。它仍能读取新消息，请在对方用已有设备批准之前将其视为未验证。"
+    "unsignedDevicesWarning": "{{name}} 有 {{count}} 台设备未经其账户密钥签名。它仍能读取新消息，请在对方用已有设备批准之前将其视为未验证。",
+    "thisDeviceUnsignedBadgeTitle": "此设备尚未获批准 — 请从另一台设备批准",
+    "masterConflictBadgeTitle": "账户密钥与此设备不匹配 — 请查看",
+    "masterConflictExplainer": "你的账户发布了一个此设备既未创建也无法替换的密钥。消息仍可发送，但在重置账户身份前无法批准新设备。",
+    "resetIdentityExplainer": "所有能批准的设备都无法访问了？请创建新的账户身份。仅在万不得已时使用。",
+    "resetIdentityAction": "重置账户身份",
+    "resetIdentityConfirm": "这会替换你的账户密钥。所有与你聊天的人都会看到安全号码变化，并需要重新验证你。其他设备也会失去批准状态。",
+    "resetIdentitySuccess": "账户身份已重置",
+    "resetIdentityFailed": "无法重置账户身份"
   }
 }

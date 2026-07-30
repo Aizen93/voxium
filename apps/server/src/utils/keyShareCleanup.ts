@@ -4,9 +4,11 @@ import { E2E_LIMITS } from '@voxium/shared';
 // Sweeps undeliverable E2E key shares (docs/e2e-dm-spec.md §12) and stale
 // master-secret transfers (§14).
 //
-// Both are normally claim-and-delete: a device drains its inbox and the rows
-// disappear. Rows that are never claimed — a device that never comes back, or
-// an account that was deleted (neither table has an FK to User, so nothing
+// Key shares are claim-and-delete. Master transfers are read-then-ack (§14.4:
+// a read that consumed the row would strand a device that fails mid-claim), so
+// this sweep is their only automatic reclaimer when the ack itself never
+// arrives. Rows that are never cleared — a device that never comes back, or an
+// account that was deleted (neither table has an FK to User, so nothing
 // cascades) — would otherwise live forever, holding routing metadata (who
 // key-shared or device-approved with whom, when) long past its use.
 

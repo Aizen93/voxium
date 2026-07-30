@@ -29,7 +29,6 @@
     "creating": "جارٍ الإنشاء...",
     "deleting": "جارٍ الحذف..."
   },
-
   "auth": {
     "login": {
       "title": "مرحبًا بعودتك!",
@@ -119,7 +118,6 @@
       "checkSpam": "لم تتلقَّ البريد؟ تحقق من مجلد البريد المزعج أو حاول إعادة الإرسال."
     }
   },
-
   "settings": {
     "title": "الإعدادات",
     "tabs": {
@@ -234,7 +232,6 @@
       "selectLanguage": "اختر اللغة"
     }
   },
-
   "serverSettings": {
     "title": "إعدادات الخادم",
     "tabs": {
@@ -310,30 +307,88 @@
       "failedToLoad": "فشل تحميل حدود الخادم"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "عرض القنوات", "description": "يسمح للأعضاء بعرض قنوات النص والصوت" },
-    "MANAGE_CHANNELS": { "name": "إدارة القنوات", "description": "يسمح للأعضاء بإنشاء وتعديل وحذف القنوات" },
-    "MANAGE_CATEGORIES": { "name": "إدارة الفئات", "description": "يسمح للأعضاء بإنشاء وتعديل وحذف الفئات" },
-    "MANAGE_SERVER": { "name": "إدارة الخادم", "description": "يسمح للأعضاء بتعديل اسم الخادم والأيقونة والإعدادات" },
-    "MANAGE_ROLES": { "name": "إدارة الأدوار", "description": "يسمح للأعضاء بإنشاء وتعديل وحذف الأدوار الأقل من دورهم" },
-    "CREATE_INVITES": { "name": "إنشاء دعوات", "description": "يسمح للأعضاء بإنشاء روابط دعوة للخادم" },
-    "KICK_MEMBERS": { "name": "طرد الأعضاء", "description": "يسمح للأعضاء بطرد أعضاء آخرين ذوي أدوار أقل" },
-    "MANAGE_NICKNAMES": { "name": "إدارة الألقاب", "description": "يسمح للأعضاء بتغيير أسماء العرض للأعضاء الآخرين" },
-    "CHANGE_NICKNAME": { "name": "تغيير اللقب", "description": "يسمح للأعضاء بتغيير اسم العرض الخاص بهم" },
-    "SEND_MESSAGES": { "name": "إرسال الرسائل", "description": "يسمح للأعضاء بإرسال رسائل في قنوات النص" },
-    "MANAGE_MESSAGES": { "name": "إدارة الرسائل", "description": "يسمح للأعضاء بحذف رسائل الأعضاء الآخرين" },
-    "ATTACH_FILES": { "name": "إرفاق الملفات", "description": "يسمح للأعضاء برفع الملفات المرفقة" },
-    "ADD_REACTIONS": { "name": "إضافة التفاعلات", "description": "يسمح للأعضاء بإضافة تفاعلات على الرسائل" },
-    "MENTION_EVERYONE": { "name": "الإشارة للجميع", "description": "يسمح للأعضاء باستخدام إشارات @everyone" },
-    "CONNECT": { "name": "الاتصال", "description": "يسمح للأعضاء بالانضمام إلى قنوات الصوت" },
-    "SPEAK": { "name": "التحدث", "description": "يسمح للأعضاء بالتحدث في قنوات الصوت" },
-    "MUTE_MEMBERS": { "name": "كتم صوت الأعضاء", "description": "يسمح للأعضاء بكتم صوت أعضاء آخرين في المحادثة الصوتية" },
-    "DEAFEN_MEMBERS": { "name": "كتم سماع الأعضاء", "description": "يسمح للأعضاء بكتم سماع أعضاء آخرين في المحادثة الصوتية" },
-    "MOVE_MEMBERS": { "name": "نقل الأعضاء", "description": "يسمح للأعضاء بنقل أعضاء آخرين بين قنوات الصوت" },
-    "ADMINISTRATOR": { "name": "مدير", "description": "يمنح جميع الصلاحيات ويتجاوز جميع تجاوزات القنوات" }
+    "VIEW_CHANNEL": {
+      "name": "عرض القنوات",
+      "description": "يسمح للأعضاء بعرض قنوات النص والصوت"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "إدارة القنوات",
+      "description": "يسمح للأعضاء بإنشاء وتعديل وحذف القنوات"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "إدارة الفئات",
+      "description": "يسمح للأعضاء بإنشاء وتعديل وحذف الفئات"
+    },
+    "MANAGE_SERVER": {
+      "name": "إدارة الخادم",
+      "description": "يسمح للأعضاء بتعديل اسم الخادم والأيقونة والإعدادات"
+    },
+    "MANAGE_ROLES": {
+      "name": "إدارة الأدوار",
+      "description": "يسمح للأعضاء بإنشاء وتعديل وحذف الأدوار الأقل من دورهم"
+    },
+    "CREATE_INVITES": {
+      "name": "إنشاء دعوات",
+      "description": "يسمح للأعضاء بإنشاء روابط دعوة للخادم"
+    },
+    "KICK_MEMBERS": {
+      "name": "طرد الأعضاء",
+      "description": "يسمح للأعضاء بطرد أعضاء آخرين ذوي أدوار أقل"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "إدارة الألقاب",
+      "description": "يسمح للأعضاء بتغيير أسماء العرض للأعضاء الآخرين"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "تغيير اللقب",
+      "description": "يسمح للأعضاء بتغيير اسم العرض الخاص بهم"
+    },
+    "SEND_MESSAGES": {
+      "name": "إرسال الرسائل",
+      "description": "يسمح للأعضاء بإرسال رسائل في قنوات النص"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "إدارة الرسائل",
+      "description": "يسمح للأعضاء بحذف رسائل الأعضاء الآخرين"
+    },
+    "ATTACH_FILES": {
+      "name": "إرفاق الملفات",
+      "description": "يسمح للأعضاء برفع الملفات المرفقة"
+    },
+    "ADD_REACTIONS": {
+      "name": "إضافة التفاعلات",
+      "description": "يسمح للأعضاء بإضافة تفاعلات على الرسائل"
+    },
+    "MENTION_EVERYONE": {
+      "name": "الإشارة للجميع",
+      "description": "يسمح للأعضاء باستخدام إشارات @everyone"
+    },
+    "CONNECT": {
+      "name": "الاتصال",
+      "description": "يسمح للأعضاء بالانضمام إلى قنوات الصوت"
+    },
+    "SPEAK": {
+      "name": "التحدث",
+      "description": "يسمح للأعضاء بالتحدث في قنوات الصوت"
+    },
+    "MUTE_MEMBERS": {
+      "name": "كتم صوت الأعضاء",
+      "description": "يسمح للأعضاء بكتم صوت أعضاء آخرين في المحادثة الصوتية"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "كتم سماع الأعضاء",
+      "description": "يسمح للأعضاء بكتم سماع أعضاء آخرين في المحادثة الصوتية"
+    },
+    "MOVE_MEMBERS": {
+      "name": "نقل الأعضاء",
+      "description": "يسمح للأعضاء بنقل أعضاء آخرين بين قنوات الصوت"
+    },
+    "ADMINISTRATOR": {
+      "name": "مدير",
+      "description": "يمنح جميع الصلاحيات ويتجاوز جميع تجاوزات القنوات"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "عام",
@@ -365,7 +420,6 @@
     "failedToUpdate": "حدث خطأ",
     "failedToDelete": "حدث خطأ"
   },
-
   "channelPermissions": {
     "title": "صلاحيات القناة",
     "roles": "الأدوار",
@@ -383,7 +437,6 @@
     "current": "الحالي:",
     "clickToCycle": "انقر للتبديل."
   },
-
   "contextMenu": {
     "roles": "الأدوار",
     "voice": "الصوت",
@@ -417,7 +470,6 @@
     "failedToSetNickname": "فشل تعيين اللقب",
     "failedToClearNickname": "فشل مسح اللقب"
   },
-
   "userProfile": {
     "status": {
       "online": "متصل",
@@ -442,7 +494,6 @@
     "failedToDecline": "فشل رفض طلب الصداقة",
     "failedToRemove": "فشل إزالة الصديق"
   },
-
   "messageItem": {
     "todayAt": "اليوم الساعة {{time}}",
     "yesterdayAt": "أمس الساعة {{time}}",
@@ -456,7 +507,6 @@
     "originalDeleted": "تم حذف الرسالة الأصلية",
     "failedToToggleReaction": "فشل تغيير التفاعل"
   },
-
   "messageInput": {
     "replyingTo": "رد على",
     "cancelReply": "إلغاء الرد",
@@ -465,7 +515,6 @@
     "uploadFailed": "فشل",
     "attachFile": "إرفاق ملف"
   },
-
   "server": {
     "create": {
       "createTitle": "إنشاء خادم",
@@ -494,7 +543,6 @@
       "failedToCreate": "فشل إنشاء الدعوة"
     }
   },
-
   "channel": {
     "createChannel": "إنشاء قناة",
     "deleteChannel": "حذف القناة",
@@ -528,7 +576,6 @@
     "newChannelPlaceholder": "قناة {{type}} جديدة",
     "editPermissions": "تعديل الأذونات"
   },
-
   "chat": {
     "messagePlaceholder": "أرسل رسالة في #{{channel}}",
     "dmPlaceholder": "أرسل رسالة إلى @{{user}}",
@@ -579,7 +626,6 @@
     "fileTooLarge": "{{name}} كبير جدًا (الحد الأقصى {{max}} ميجابايت)",
     "searchMessages": "البحث في الرسائل (Ctrl+K)"
   },
-
   "dm": {
     "title": "الرسائل المباشرة",
     "friends": "الأصدقاء",
@@ -597,7 +643,6 @@
     "conversationStart": "هذه بداية سجل رسائلك المباشرة.",
     "welcomeMessage": "اختر محادثة من الشريط الجانبي، أو انقر على عضو في أي خادم لبدء محادثة جديدة."
   },
-
   "friends": {
     "title": "الأصدقاء",
     "tabs": {
@@ -630,7 +675,6 @@
     "failedToAccept": "فشل قبول طلب الصداقة",
     "failedToRemove": "فشل إزالة الصداقة"
   },
-
   "members": {
     "owner": "المالك",
     "adminsCount": "المديرون - {{count}}",
@@ -638,7 +682,6 @@
     "onlineCount": "متصل - {{count}}",
     "offlineCount": "غير متصل - {{count}}"
   },
-
   "voice": {
     "connected": "متصل بالصوت",
     "voiceChannel": "قناة صوتية",
@@ -662,7 +705,6 @@
     "decline": "رفض",
     "failedToAccept": "فشل قبول المكالمة"
   },
-
   "attachment": {
     "expired": "منتهي الصلاحية",
     "fileExpired": "ملف منتهي الصلاحية",
@@ -672,7 +714,6 @@
     "loadingVideo": "جارٍ تحميل الفيديو...",
     "loadingAudio": "جارٍ تحميل الصوت..."
   },
-
   "support": {
     "title": "الدعم",
     "open": "مفتوح",
@@ -685,7 +726,6 @@
     "failedToSend": "فشل إرسال الرسالة",
     "failedToReopen": "فشل إعادة فتح التذكرة"
   },
-
   "invite": {
     "youveBeenInvited": "لقد تمت دعوتك!",
     "loadingInvite": "جارٍ تحميل الدعوة...",
@@ -695,7 +735,6 @@
     "joining": "جارٍ الانضمام...",
     "join": "الانضمام إلى {{name}}"
   },
-
   "landing": {
     "nav": {
       "signIn": "تسجيل الدخول",
@@ -822,10 +861,9 @@
       "cookiePolicy": "سياسة ملفات تعريف الارتباط",
       "community": "المجتمع",
       "contributing": "المساهمة",
-      "copyright": "\u00a9 2026 Voxium. جميع الحقوق محفوظة."
+      "copyright": "© 2026 Voxium. جميع الحقوق محفوظة."
     }
   },
-
   "badges": {
     "staff": "فريق العمل",
     "supporter": "داعم",
@@ -834,12 +872,10 @@
     "topSupporter": "أكبر داعم",
     "topSupporterTooltip": "أكبر داعم، الداعم الأكثر سخاءً لـ Voxium"
   },
-
   "connection": {
     "reconnecting": "جارٍ إعادة الاتصال بـ Voxium...",
     "lost": "انقطع الاتصال. جارٍ محاولة إعادة الاتصال..."
   },
-
   "errorBoundary": {
     "title": "حدث خطأ ما",
     "tryAgain": "حاول مرة أخرى",
@@ -849,7 +885,6 @@
     "tryToRecover": "محاولة الاسترداد",
     "reloadPage": "إعادة تحميل الصفحة"
   },
-
   "serverErrors": {
     "invalidCredentials": "بيانات الاعتماد غير صالحة",
     "usernameOrEmailTaken": "اسم المستخدم أو البريد الإلكتروني مستخدم بالفعل",
@@ -990,6 +1025,14 @@
     "cannotApproveExplainer": "لا يمكن لهذا الجهاز الموافقة على أجهزة أخرى بعد. وافق عليه من جهاز لديه بالفعل إمكانية الوصول إلى مفتاح حسابك.",
     "accountSafetyNumberUnavailable": "رقم أمان الحساب غير متاح — يتم عرض الأرقام الخاصة بكل جهاز فقط.",
     "unsignedDeviceBadgeTitle": "جهاز غير موقَّع بمفتاح الحساب — راجعه",
-    "unsignedDevicesWarning": "هناك {{count}} من أجهزة {{name}} غير موقَّعة بمفتاح حسابه. لا يزال بإمكانه قراءة الرسائل الجديدة، لذا اعتبره غير موثَّق حتى تتم الموافقة عليه من جهاز يستخدمه بالفعل."
+    "unsignedDevicesWarning": "هناك {{count}} من أجهزة {{name}} غير موقَّعة بمفتاح حسابه. لا يزال بإمكانه قراءة الرسائل الجديدة، لذا اعتبره غير موثَّق حتى تتم الموافقة عليه من جهاز يستخدمه بالفعل.",
+    "thisDeviceUnsignedBadgeTitle": "لم تتم الموافقة على هذا الجهاز بعد — وافق عليه من جهاز آخر",
+    "masterConflictBadgeTitle": "مفتاح حسابك لا يطابق هذا الجهاز — راجع الأمر",
+    "masterConflictExplainer": "ينشر حسابك مفتاحًا لم ينشئه هذا الجهاز ولا يمكنه استبداله. لا تزال رسائلك تُرسل، لكن لا يمكن الموافقة على أجهزة جديدة حتى تعيد ضبط هوية الحساب.",
+    "resetIdentityExplainer": "فقدت الوصول إلى كل جهاز يمكنه الموافقة؟ ابدأ هوية حساب جديدة. لا تفعل ذلك إلا كملاذ أخير.",
+    "resetIdentityAction": "إعادة ضبط هوية الحساب",
+    "resetIdentityConfirm": "سيؤدي هذا إلى استبدال مفتاح حسابك. سيرى كل من تراسلهم رقم الأمان وقد تغيّر وسيتعين عليهم التحقق منك مجددًا. وستفقد الأجهزة الأخرى موافقتها.",
+    "resetIdentitySuccess": "تمت إعادة ضبط هوية الحساب",
+    "resetIdentityFailed": "تعذّرت إعادة ضبط هوية الحساب"
   }
 }

@@ -48,6 +48,12 @@ jobs:
         working-directory: apps/server
         run: npx prisma generate
 
+      # The crypto engine ships as a committed binary, so an edit to its Rust
+      # source that was never rebuilt would pass every other check here and
+      # then be absent from the installers release.yml builds.
+      - name: Crypto engine WASM matches its Rust source
+        run: pnpm --filter @voxium/crypto-engine check:wasm-fresh
+
       - name: Typecheck (shared -> server -> desktop -> admin)
         run: pnpm typecheck
 

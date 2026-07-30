@@ -29,7 +29,6 @@
     "creating": "Création…",
     "deleting": "Suppression…"
   },
-
   "auth": {
     "login": {
       "title": "Bon retour !",
@@ -119,7 +118,6 @@
       "checkSpam": "Vous n'avez pas reçu l'e-mail ? Vérifiez votre dossier de courrier indésirable ou essayez de le renvoyer."
     }
   },
-
   "settings": {
     "title": "Paramètres",
     "tabs": {
@@ -234,7 +232,6 @@
       "selectLanguage": "Sélectionner la langue"
     }
   },
-
   "serverSettings": {
     "title": "Paramètres du serveur",
     "tabs": {
@@ -310,30 +307,88 @@
       "failedToLoad": "Impossible de charger les limites du serveur"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "Voir les salons", "description": "Permet aux membres de voir les salons textuels et vocaux" },
-    "MANAGE_CHANNELS": { "name": "Gérer les salons", "description": "Permet aux membres de créer, modifier et supprimer des salons" },
-    "MANAGE_CATEGORIES": { "name": "Gérer les catégories", "description": "Permet aux membres de créer, modifier et supprimer des catégories" },
-    "MANAGE_SERVER": { "name": "Gérer le serveur", "description": "Permet aux membres de modifier le nom, l'icône et les paramètres du serveur" },
-    "MANAGE_ROLES": { "name": "Gérer les rôles", "description": "Permet aux membres de créer, modifier et supprimer des rôles inférieurs au leur" },
-    "CREATE_INVITES": { "name": "Créer des invitations", "description": "Permet aux membres de créer des liens d'invitation au serveur" },
-    "KICK_MEMBERS": { "name": "Expulser des membres", "description": "Permet aux membres d'expulser d'autres membres ayant des rôles inférieurs" },
-    "MANAGE_NICKNAMES": { "name": "Gérer les pseudos", "description": "Permet aux membres de modifier les noms d'affichage des autres membres" },
-    "CHANGE_NICKNAME": { "name": "Changer de pseudo", "description": "Permet aux membres de modifier leur propre nom d'affichage" },
-    "SEND_MESSAGES": { "name": "Envoyer des messages", "description": "Permet aux membres d'envoyer des messages dans les salons textuels" },
-    "MANAGE_MESSAGES": { "name": "Gérer les messages", "description": "Permet aux membres de supprimer les messages des autres membres" },
-    "ATTACH_FILES": { "name": "Joindre des fichiers", "description": "Permet aux membres de téléverser des fichiers en pièce jointe" },
-    "ADD_REACTIONS": { "name": "Ajouter des réactions", "description": "Permet aux membres d'ajouter des réactions aux messages" },
-    "MENTION_EVERYONE": { "name": "Mentionner tout le monde", "description": "Permet aux membres d'utiliser les mentions @everyone" },
-    "CONNECT": { "name": "Se connecter", "description": "Permet aux membres de rejoindre les salons vocaux" },
-    "SPEAK": { "name": "Parler", "description": "Permet aux membres de parler dans les salons vocaux" },
-    "MUTE_MEMBERS": { "name": "Couper le micro des membres", "description": "Permet aux membres de couper le micro d'autres membres en vocal" },
-    "DEAFEN_MEMBERS": { "name": "Mettre en sourdine des membres", "description": "Permet aux membres de mettre en sourdine d'autres membres en vocal" },
-    "MOVE_MEMBERS": { "name": "Déplacer des membres", "description": "Permet aux membres de déplacer d'autres membres entre les salons vocaux" },
-    "ADMINISTRATOR": { "name": "Administrateur", "description": "Accorde toutes les permissions et contourne toutes les dérogations de salon" }
+    "VIEW_CHANNEL": {
+      "name": "Voir les salons",
+      "description": "Permet aux membres de voir les salons textuels et vocaux"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "Gérer les salons",
+      "description": "Permet aux membres de créer, modifier et supprimer des salons"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "Gérer les catégories",
+      "description": "Permet aux membres de créer, modifier et supprimer des catégories"
+    },
+    "MANAGE_SERVER": {
+      "name": "Gérer le serveur",
+      "description": "Permet aux membres de modifier le nom, l'icône et les paramètres du serveur"
+    },
+    "MANAGE_ROLES": {
+      "name": "Gérer les rôles",
+      "description": "Permet aux membres de créer, modifier et supprimer des rôles inférieurs au leur"
+    },
+    "CREATE_INVITES": {
+      "name": "Créer des invitations",
+      "description": "Permet aux membres de créer des liens d'invitation au serveur"
+    },
+    "KICK_MEMBERS": {
+      "name": "Expulser des membres",
+      "description": "Permet aux membres d'expulser d'autres membres ayant des rôles inférieurs"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "Gérer les pseudos",
+      "description": "Permet aux membres de modifier les noms d'affichage des autres membres"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "Changer de pseudo",
+      "description": "Permet aux membres de modifier leur propre nom d'affichage"
+    },
+    "SEND_MESSAGES": {
+      "name": "Envoyer des messages",
+      "description": "Permet aux membres d'envoyer des messages dans les salons textuels"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "Gérer les messages",
+      "description": "Permet aux membres de supprimer les messages des autres membres"
+    },
+    "ATTACH_FILES": {
+      "name": "Joindre des fichiers",
+      "description": "Permet aux membres de téléverser des fichiers en pièce jointe"
+    },
+    "ADD_REACTIONS": {
+      "name": "Ajouter des réactions",
+      "description": "Permet aux membres d'ajouter des réactions aux messages"
+    },
+    "MENTION_EVERYONE": {
+      "name": "Mentionner tout le monde",
+      "description": "Permet aux membres d'utiliser les mentions @everyone"
+    },
+    "CONNECT": {
+      "name": "Se connecter",
+      "description": "Permet aux membres de rejoindre les salons vocaux"
+    },
+    "SPEAK": {
+      "name": "Parler",
+      "description": "Permet aux membres de parler dans les salons vocaux"
+    },
+    "MUTE_MEMBERS": {
+      "name": "Couper le micro des membres",
+      "description": "Permet aux membres de couper le micro d'autres membres en vocal"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "Mettre en sourdine des membres",
+      "description": "Permet aux membres de mettre en sourdine d'autres membres en vocal"
+    },
+    "MOVE_MEMBERS": {
+      "name": "Déplacer des membres",
+      "description": "Permet aux membres de déplacer d'autres membres entre les salons vocaux"
+    },
+    "ADMINISTRATOR": {
+      "name": "Administrateur",
+      "description": "Accorde toutes les permissions et contourne toutes les dérogations de salon"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "Général",
@@ -365,7 +420,6 @@
     "failedToUpdate": "Une erreur est survenue",
     "failedToDelete": "Une erreur est survenue"
   },
-
   "channelPermissions": {
     "title": "Permissions du salon",
     "roles": "Rôles",
@@ -383,7 +437,6 @@
     "current": "Actuel :",
     "clickToCycle": "Cliquez pour changer."
   },
-
   "contextMenu": {
     "roles": "Rôles",
     "voice": "Vocal",
@@ -417,7 +470,6 @@
     "failedToSetNickname": "Impossible de définir le pseudo",
     "failedToClearNickname": "Impossible d'effacer le pseudo"
   },
-
   "userProfile": {
     "status": {
       "online": "En ligne",
@@ -442,7 +494,6 @@
     "failedToDecline": "Impossible de refuser la demande d'ami",
     "failedToRemove": "Impossible de retirer l'ami"
   },
-
   "messageItem": {
     "todayAt": "Aujourd'hui à {{time}}",
     "yesterdayAt": "Hier à {{time}}",
@@ -456,7 +507,6 @@
     "originalDeleted": "Le message original a été supprimé",
     "failedToToggleReaction": "Impossible de basculer la réaction"
   },
-
   "messageInput": {
     "replyingTo": "En réponse à",
     "cancelReply": "Annuler la réponse",
@@ -465,7 +515,6 @@
     "uploadFailed": "Échec",
     "attachFile": "Joindre un fichier"
   },
-
   "server": {
     "create": {
       "createTitle": "Créer un serveur",
@@ -494,7 +543,6 @@
       "failedToCreate": "Impossible de créer l'invitation"
     }
   },
-
   "channel": {
     "createChannel": "Créer un salon",
     "deleteChannel": "Supprimer le salon",
@@ -528,7 +576,6 @@
     "newChannelPlaceholder": "Nouveau salon {{type}}",
     "editPermissions": "Modifier les permissions"
   },
-
   "chat": {
     "messagePlaceholder": "Envoyer un message dans #{{channel}}",
     "dmPlaceholder": "Envoyer un message à @{{user}}",
@@ -579,7 +626,6 @@
     "fileTooLarge": "{{name}} est trop volumineux (max {{max}} Mo)",
     "searchMessages": "Rechercher des messages (Ctrl+K)"
   },
-
   "dm": {
     "title": "Messages privés",
     "friends": "Amis",
@@ -597,7 +643,6 @@
     "conversationStart": "Ceci est le début de votre historique de messages privés.",
     "welcomeMessage": "Sélectionnez une conversation dans la barre latérale, ou cliquez sur un membre dans n'importe quel serveur pour en démarrer une nouvelle."
   },
-
   "friends": {
     "title": "Amis",
     "tabs": {
@@ -630,7 +675,6 @@
     "failedToAccept": "Impossible d'accepter la demande d'ami",
     "failedToRemove": "Impossible de retirer l'ami"
   },
-
   "members": {
     "owner": "Propriétaire",
     "adminsCount": "Administrateurs - {{count}}",
@@ -638,7 +682,6 @@
     "onlineCount": "En ligne - {{count}}",
     "offlineCount": "Hors ligne - {{count}}"
   },
-
   "voice": {
     "connected": "Connecté en vocal",
     "voiceChannel": "Salon vocal",
@@ -662,7 +705,6 @@
     "decline": "Refuser",
     "failedToAccept": "Impossible d'accepter l'appel"
   },
-
   "attachment": {
     "expired": "Expiré",
     "fileExpired": "Fichier expiré",
@@ -672,7 +714,6 @@
     "loadingVideo": "Chargement de la vidéo…",
     "loadingAudio": "Chargement de l'audio…"
   },
-
   "support": {
     "title": "Support",
     "open": "Ouvert",
@@ -685,7 +726,6 @@
     "failedToSend": "Impossible d'envoyer le message",
     "failedToReopen": "Impossible de rouvrir le ticket"
   },
-
   "invite": {
     "youveBeenInvited": "Vous avez été invité !",
     "loadingInvite": "Chargement de l'invitation…",
@@ -695,7 +735,6 @@
     "joining": "Connexion…",
     "join": "Rejoindre {{name}}"
   },
-
   "landing": {
     "nav": {
       "signIn": "Se connecter",
@@ -825,7 +864,6 @@
       "copyright": "© 2026 Voxium. Tous droits réservés."
     }
   },
-
   "badges": {
     "staff": "Equipe",
     "supporter": "Supporteur",
@@ -834,12 +872,10 @@
     "topSupporter": "Meilleur supporteur",
     "topSupporterTooltip": "Meilleur supporteur, Le plus généreux supporteur de Voxium"
   },
-
   "connection": {
     "reconnecting": "Reconnexion à Voxium…",
     "lost": "Connexion perdue. Tentative de reconnexion…"
   },
-
   "errorBoundary": {
     "title": "Une erreur est survenue",
     "tryAgain": "Réessayer",
@@ -849,91 +885,90 @@
     "tryToRecover": "Essayer de récupérer",
     "reloadPage": "Recharger la page"
   },
-
   "serverErrors": {
     "invalidCredentials": "Identifiants invalides",
-    "usernameOrEmailTaken": "Nom d'utilisateur ou adresse e-mail d\u00e9j\u00e0 utilis\u00e9(e)",
-    "accountBanned": "Votre compte a \u00e9t\u00e9 banni",
-    "tokenRevoked": "Le jeton a \u00e9t\u00e9 r\u00e9voqu\u00e9",
-    "invalidRefreshToken": "Jeton de rafra\u00eechissement invalide",
-    "refreshTokenRequired": "Le jeton de rafra\u00eechissement est requis",
-    "registrationDisabled": "Les inscriptions sont actuellement d\u00e9sactiv\u00e9es",
+    "usernameOrEmailTaken": "Nom d'utilisateur ou adresse e-mail déjà utilisé(e)",
+    "accountBanned": "Votre compte a été banni",
+    "tokenRevoked": "Le jeton a été révoqué",
+    "invalidRefreshToken": "Jeton de rafraîchissement invalide",
+    "refreshTokenRequired": "Le jeton de rafraîchissement est requis",
+    "registrationDisabled": "Les inscriptions sont actuellement désactivées",
     "usernameRequired": "Le nom d'utilisateur est requis",
     "emailRequired": "L'adresse e-mail est requise",
     "passwordRequired": "Le mot de passe est requis",
     "currentPasswordRequired": "Le mot de passe actuel est requis",
     "newPasswordRequired": "Le nouveau mot de passe est requis",
     "currentPasswordIncorrect": "Le mot de passe actuel est incorrect",
-    "resetTokenRequired": "Le jeton de r\u00e9initialisation est requis",
-    "invalidResetToken": "Jeton de r\u00e9initialisation invalide ou expir\u00e9",
-    "verificationTokenRequired": "Le jeton de v\u00e9rification est requis",
-    "invalidVerificationLink": "Lien de v\u00e9rification invalide ou expir\u00e9",
+    "resetTokenRequired": "Le jeton de réinitialisation est requis",
+    "invalidResetToken": "Jeton de réinitialisation invalide ou expiré",
+    "verificationTokenRequired": "Le jeton de vérification est requis",
+    "invalidVerificationLink": "Lien de vérification invalide ou expiré",
     "totpTokenRequired": "Le jeton TOTP est requis",
-    "verificationCodeRequired": "Le code de v\u00e9rification est requis",
-    "invalidTotpToken": "Jeton TOTP invalide ou expir\u00e9",
+    "verificationCodeRequired": "Le code de vérification est requis",
+    "invalidTotpToken": "Jeton TOTP invalide ou expiré",
     "invalidTokenPurpose": "Objectif du jeton invalide",
-    "invalidVerificationCode": "Code de v\u00e9rification invalide",
-    "totpAlreadyEnabled": "L'authentification \u00e0 deux facteurs est d\u00e9j\u00e0 activ\u00e9e",
-    "totpSetupRequired": "Veuillez d'abord configurer l'authentification \u00e0 deux facteurs",
-    "totpNotEnabled": "L'authentification \u00e0 deux facteurs n'est pas activ\u00e9e",
+    "invalidVerificationCode": "Code de vérification invalide",
+    "totpAlreadyEnabled": "L'authentification à deux facteurs est déjà activée",
+    "totpSetupRequired": "Veuillez d'abord configurer l'authentification à deux facteurs",
+    "totpNotEnabled": "L'authentification à deux facteurs n'est pas activée",
     "totpSecretNotFound": "Secret TOTP introuvable",
-    "serverCreationDisabled": "La cr\u00e9ation de serveurs est actuellement d\u00e9sactiv\u00e9e",
-    "alreadyMember": "Vous \u00eates d\u00e9j\u00e0 membre de ce serveur",
-    "notAMember": "Vous n'\u00eates pas membre de ce serveur",
-    "noPermissionManageChannels": "Vous n'avez pas l'autorisation de g\u00e9rer les salons",
+    "serverCreationDisabled": "La création de serveurs est actuellement désactivée",
+    "alreadyMember": "Vous êtes déjà membre de ce serveur",
+    "notAMember": "Vous n'êtes pas membre de ce serveur",
+    "noPermissionManageChannels": "Vous n'avez pas l'autorisation de gérer les salons",
     "cannotSendToVoice": "Impossible d'envoyer des messages dans un salon vocal",
-    "invalidChannelType": "Le type de salon doit \u00eatre texte ou vocal",
-    "noPermissionManageCategories": "Vous n'avez pas l'autorisation de g\u00e9rer les cat\u00e9gories",
-    "noPermissionManageRoles": "Vous n'avez pas l'autorisation de g\u00e9rer les r\u00f4les",
-    "cannotGrantPermissions": "Impossible d'accorder des autorisations que vous ne poss\u00e9dez pas",
-    "cannotEditHigherRole": "Impossible de modifier un r\u00f4le de rang \u00e9gal ou sup\u00e9rieur au v\u00f4tre",
-    "cannotDeleteEveryone": "Impossible de supprimer le r\u00f4le @everyone",
-    "cannotDeleteHigherRole": "Impossible de supprimer un r\u00f4le de rang \u00e9gal ou sup\u00e9rieur au v\u00f4tre",
-    "roleNameExists": "Un r\u00f4le portant ce nom existe d\u00e9j\u00e0",
+    "invalidChannelType": "Le type de salon doit être texte ou vocal",
+    "noPermissionManageCategories": "Vous n'avez pas l'autorisation de gérer les catégories",
+    "noPermissionManageRoles": "Vous n'avez pas l'autorisation de gérer les rôles",
+    "cannotGrantPermissions": "Impossible d'accorder des autorisations que vous ne possédez pas",
+    "cannotEditHigherRole": "Impossible de modifier un rôle de rang égal ou supérieur au vôtre",
+    "cannotDeleteEveryone": "Impossible de supprimer le rôle @everyone",
+    "cannotDeleteHigherRole": "Impossible de supprimer un rôle de rang égal ou supérieur au vôtre",
+    "roleNameExists": "Un rôle portant ce nom existe déjà",
     "canOnlyEditOwnMessages": "Vous ne pouvez modifier que vos propres messages",
     "noPermissionSendMessages": "Vous n'avez pas l'autorisation d'envoyer des messages dans ce salon",
     "noPermissionAttachFiles": "Vous n'avez pas l'autorisation de joindre des fichiers dans ce salon",
-    "noPermissionAddReactions": "Vous n'avez pas l'autorisation d'ajouter des r\u00e9actions dans ce salon",
+    "noPermissionAddReactions": "Vous n'avez pas l'autorisation d'ajouter des réactions dans ce salon",
     "noPermissionViewChannel": "Vous n'avez pas l'autorisation de voir ce salon",
-    "cannotDmSelf": "Impossible de cr\u00e9er une conversation avec vous-m\u00eame",
-    "notAParticipant": "Vous n'\u00eates pas un participant de cette conversation",
-    "voiceDisabled": "Les salons vocaux sont actuellement d\u00e9sactiv\u00e9s",
-    "voiceCallsDisabled": "Les appels vocaux sont actuellement d\u00e9sactiv\u00e9s",
+    "cannotDmSelf": "Impossible de créer une conversation avec vous-même",
+    "notAParticipant": "Vous n'êtes pas un participant de cette conversation",
+    "voiceDisabled": "Les salons vocaux sont actuellement désactivés",
+    "voiceCallsDisabled": "Les appels vocaux sont actuellement désactivés",
     "voiceChannelFull": "Le salon vocal est plein",
     "voiceChannelNotFound": "Salon vocal introuvable",
-    "notServerMember": "Vous n'\u00eates pas membre de ce serveur",
+    "notServerMember": "Vous n'êtes pas membre de ce serveur",
     "noPermissionJoinVoice": "Vous n'avez pas l'autorisation de rejoindre ce salon vocal",
-    "voiceServerUnavailable": "Serveur vocal indisponible. Veuillez r\u00e9essayer plus tard.",
-    "voiceConnectionFailed": "\u00c9chec de la cr\u00e9ation de la connexion vocale",
-    "callAlreadyFull": "Cet appel est d\u00e9j\u00e0 complet",
+    "voiceServerUnavailable": "Serveur vocal indisponible. Veuillez réessayer plus tard.",
+    "voiceConnectionFailed": "Échec de la création de la connexion vocale",
+    "callAlreadyFull": "Cet appel est déjà complet",
     "voiceServiceUnavailable": "Service vocal temporairement indisponible",
     "noPermissionMuteMembers": "Vous n'avez pas l'autorisation de couper le micro des membres",
-    "cannotMuteHigherRole": "Impossible de couper le micro d'un membre de rang \u00e9gal ou sup\u00e9rieur",
+    "cannotMuteHigherRole": "Impossible de couper le micro d'un membre de rang égal ou supérieur",
     "noPermissionDeafenMembers": "Vous n'avez pas l'autorisation de couper le son des membres",
-    "cannotDeafenHigherRole": "Impossible de couper le son d'un membre de rang \u00e9gal ou sup\u00e9rieur",
-    "noPermissionMoveMembers": "Vous n'avez pas l'autorisation de d\u00e9placer des membres",
-    "cannotMoveHigherRole": "Impossible de d\u00e9placer un membre de rang \u00e9gal ou sup\u00e9rieur",
+    "cannotDeafenHigherRole": "Impossible de couper le son d'un membre de rang égal ou supérieur",
+    "noPermissionMoveMembers": "Vous n'avez pas l'autorisation de déplacer des membres",
+    "cannotMoveHigherRole": "Impossible de déplacer un membre de rang égal ou supérieur",
     "userNotInVoice": "L'utilisateur n'est pas dans un salon vocal",
     "invalidTargetVoiceChannel": "Salon vocal cible invalide",
     "targetNoPermissionJoinVoice": "L'utilisateur cible n'a pas l'autorisation de rejoindre ce salon",
     "targetVoiceChannelFull": "Le salon vocal cible est plein",
-    "cannotFriendSelf": "Impossible de s'envoyer une demande d'ami \u00e0 soi-m\u00eame",
-    "alreadyFriends": "D\u00e9j\u00e0 amis",
-    "friendRequestAlreadySent": "Demande d'ami d\u00e9j\u00e0 envoy\u00e9e",
+    "cannotFriendSelf": "Impossible de s'envoyer une demande d'ami à soi-même",
+    "alreadyFriends": "Déjà amis",
+    "friendRequestAlreadySent": "Demande d'ami déjà envoyée",
     "onlyAddresseeCanAccept": "Seul le destinataire peut accepter une demande d'ami",
     "requestNotPending": "Cette demande n'est pas en attente",
-    "invitesDisabled": "Les invitations du serveur sont actuellement d\u00e9sactiv\u00e9es",
-    "invitesLocked": "Les invitations sont verrouill\u00e9es pour ce serveur",
-    "noPermissionCreateInvites": "Vous n'avez pas l'autorisation de cr\u00e9er des invitations",
-    "inviteExpired": "Cette invitation a expir\u00e9",
-    "alreadyMemberInvite": "Vous \u00eates d\u00e9j\u00e0 membre de ce serveur",
-    "fileTypeNotAllowed": "Type de fichier non autoris\u00e9",
-    "noPermissionChangeIcon": "Vous n'avez pas l'autorisation de changer l'ic\u00f4ne du serveur",
-    "cannotReportSelf": "Vous ne pouvez pas vous signaler vous-m\u00eame",
-    "reportAlreadyPending": "Vous avez d\u00e9j\u00e0 un signalement en attente contre cette cible",
-    "supportDisabled": "Les tickets d'assistance sont actuellement d\u00e9sactiv\u00e9s",
-    "ticketClosed": "Le ticket est ferm\u00e9. Rouvrez-le pour envoyer des messages.",
-    "cannotBanSelf": "Impossible de se bannir soi-m\u00eame",
+    "invitesDisabled": "Les invitations du serveur sont actuellement désactivées",
+    "invitesLocked": "Les invitations sont verrouillées pour ce serveur",
+    "noPermissionCreateInvites": "Vous n'avez pas l'autorisation de créer des invitations",
+    "inviteExpired": "Cette invitation a expiré",
+    "alreadyMemberInvite": "Vous êtes déjà membre de ce serveur",
+    "fileTypeNotAllowed": "Type de fichier non autorisé",
+    "noPermissionChangeIcon": "Vous n'avez pas l'autorisation de changer l'icône du serveur",
+    "cannotReportSelf": "Vous ne pouvez pas vous signaler vous-même",
+    "reportAlreadyPending": "Vous avez déjà un signalement en attente contre cette cible",
+    "supportDisabled": "Les tickets d'assistance sont actuellement désactivés",
+    "ticketClosed": "Le ticket est fermé. Rouvrez-le pour envoyer des messages.",
+    "cannotBanSelf": "Impossible de se bannir soi-même",
     "cannotBanSuperAdmin": "Impossible de bannir un super administrateur",
     "onlySuperAdminCanBan": "Seuls les super administrateurs peuvent bannir d'autres administrateurs"
   },
@@ -990,6 +1025,14 @@
     "cannotApproveExplainer": "Cet appareil ne peut pas encore en approuver d'autres. Approuvez-le depuis un appareil ayant déjà accès à la clé de votre compte.",
     "accountSafetyNumberUnavailable": "Numéro de sécurité du compte indisponible — affichage des numéros par appareil uniquement.",
     "unsignedDeviceBadgeTitle": "Un appareil n'est pas signé par la clé du compte — vérifiez-le",
-    "unsignedDevicesWarning": "{{count}} appareil de {{name}} n'est pas signé par sa clé de compte. Il peut malgré tout lire les nouveaux messages : considérez-le comme non vérifié tant qu'il n'est pas approuvé depuis un appareil déjà utilisé."
+    "unsignedDevicesWarning": "{{count}} appareil de {{name}} n'est pas signé par sa clé de compte. Il peut malgré tout lire les nouveaux messages : considérez-le comme non vérifié tant qu'il n'est pas approuvé depuis un appareil déjà utilisé.",
+    "thisDeviceUnsignedBadgeTitle": "Cet appareil n'est pas encore approuvé — approuvez-le depuis un autre appareil",
+    "masterConflictBadgeTitle": "La clé de votre compte ne correspond pas à cet appareil — vérifiez",
+    "masterConflictExplainer": "Votre compte publie une clé que cet appareil n'a pas créée et ne peut pas remplacer. Vos messages partent toujours, mais aucun nouvel appareil ne peut être approuvé tant que vous n'avez pas réinitialisé l'identité du compte.",
+    "resetIdentityExplainer": "Vous avez perdu l'accès à tous les appareils pouvant approuver ? Créez une nouvelle identité de compte. À faire en dernier recours seulement.",
+    "resetIdentityAction": "Réinitialiser l'identité du compte",
+    "resetIdentityConfirm": "Cela remplace la clé de votre compte. Toutes vos conversations verront votre numéro de sécurité changer et devront vous vérifier à nouveau. Les autres appareils perdent leur approbation.",
+    "resetIdentitySuccess": "Identité du compte réinitialisée",
+    "resetIdentityFailed": "Impossible de réinitialiser l'identité du compte"
   }
 }

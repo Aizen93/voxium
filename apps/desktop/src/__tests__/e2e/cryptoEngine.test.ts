@@ -519,12 +519,238 @@ describe('crypto engine (cross-signing master key)', () => {
 });
 
 describe('crypto engine (sealed-secret domain separation)', () => {
+  // The reserved context (see below) is deliberately NOT used here — the AAD
+  // binding has to hold for the ordinary vault fields JS is allowed to seal.
   it('refuses to open a blob under a different context (AAD)', () => {
     const key = new Uint8Array(32).fill(9);
-    const sealed = sealSecret('account key material', 'voxium-vault/master_secret', key);
-    expect(openSecret(sealed, 'voxium-vault/master_secret', key)).toBe('account key material');
+    const sealed = sealSecret('account key material', 'voxium-vault/field_a', key);
+    expect(openSecret(sealed, 'voxium-vault/field_a', key)).toBe('account key material');
     // the same blob under a different vault field must fail closed, so two
     // sealed fields can never be swapped by someone with IndexedDB write access
     expect(() => openSecret(sealed, 'voxium-vault/something_else', key)).toThrow();
+  });
+
+  // The sealed master secret lives in IndexedDB and the pickle key is already
+  // handed to JS, so the AAD alone would not protect it: the context is a
+  // published constant, and one `openSecret(blob, MASTER_SECRET_CONTEXT, key)`
+  // call would return the account's raw Ed25519 private key as a JS string.
+  // The engine therefore reserves that context for itself — the master secret
+  // may only enter/leave the vault through EngineMasterKey.
+  const MASTER_SECRET_CONTEXT = 'voxium-vault/master_secret';
+
+  it('reserves the master-secret context: JS can neither seal nor open it', () => {
+    const key = new Uint8Array(32).fill(5);
+    const master = new EngineMasterKey();
+    const sealedMaster = master.seal(key);
+
+    expect(() => sealSecret('smuggled material', MASTER_SECRET_CONTEXT, key)).toThrow(
+      /reserved for the engine/
+    );
+    // The real at-rest blob, the real pickle key, the real context — and the
+    // generic opener still refuses to hand the private half to JS.
+    expect(() => openSecret(sealedMaster, MASTER_SECRET_CONTEXT, key)).toThrow(
+      /reserved for the engine/
+    );
+
+    // ...while the engine's own path still opens that exact blob
+    expect(EngineMasterKey.fromSealed(sealedMaster, key).publicKey()).toBe(master.publicKey());
+  });
+
+  it('reserves only that exact context — every other vault field still works', () => {
+    const key = new Uint8Array(32).fill(6);
+    for (const context of [
+      'voxium-vault/test',
+      'voxium-vault/master_secret_backup', // near miss: reserved is a prefix of it
+      'voxium-vault/master_secre', // near miss: a prefix of reserved
+      'voxium-vault/Master_Secret', // case differs
+      '',
+    ]) {
+      const sealed = sealSecret('ordinary vault field ✓🔐', context, key);
+      expect(openSecret(sealed, context, key)).toBe('ordinary vault field ✓🔐');
+    }
+  });
+});
+
+// ─── Device-approval domain separation (spec §14 / D6) ───────────────────────
+// Olm has no domain separation of its own: an approval envelope is just another
+// ciphertext on the pairwise session. Without a check on the way out, a server
+// could re-file it into any other mailbox (key shares, DM ciphertext) and have
+// the client hand the master secret back as a plaintext JS string — exactly what
+// encryptMasterSecret exists to prevent.
+const MASTER_TRANSFER_PREFIX = 'voxium-master-v1|';
+
+describe('crypto engine (device-approval payload domain separation)', () => {
+  /**
+   * Establishes a session over bob's FALLBACK key rather than a one-time key.
+   * A fallback key is not consumed on use, so the very same approval ciphertext
+   * can be fed to both the generic and the dedicated inbound path.
+   */
+  function establishOverFallback(alice: EngineAccount, bob: EngineAccount) {
+    bob.generateFallbackKey();
+    const fallback = bob.fallbackKey() as OneTimeKey | null;
+    expect(fallback).toBeTruthy();
+    bob.markKeysAsPublished();
+
+    const aliceSession = alice.createOutboundSession(bob.curve25519Key(), fallback!.key);
+    const hello = aliceSession.encrypt('hello bob') as { messageType: number; body: string };
+    const bobSession = bob.createInboundSession(alice.curve25519Key(), hello.body).takeSession();
+    return { aliceSession, bobSession };
+  }
+
+  it('refuses a device-approval payload arriving as a pre-key message', () => {
+    // The likelier of the two entrances: an approval addressed to a sibling
+    // device that has never talked to this one IS a pre-key message, so it
+    // lands in createInboundSession rather than decrypt. A server that re-files
+    // that envelope into the key-share mailbox would otherwise get the client
+    // to hand back the account's private key as a plaintext JS string.
+    const alice = new EngineAccount();
+    const bob = new EngineAccount();
+    bob.generateFallbackKey();
+    const fallback = bob.fallbackKey() as { keyId: string; key: string };
+
+    const master = new EngineMasterKey();
+    const outbound = alice.createOutboundSession(bob.curve25519Key(), fallback.key);
+    const approval = outbound.encryptMasterSecret(master) as { messageType: number; body: string };
+    expect(approval.messageType).toBe(0);
+
+    expect(() => bob.createInboundSession(alice.curve25519Key(), approval.body)).toThrow(
+      /refusing to return a device-approval payload/
+    );
+
+    // the dedicated entrance still works on the very same ciphertext
+    const result = bob.createInboundSessionForMasterSecret(
+      alice.curve25519Key(),
+      approval.body,
+      master.publicKey()
+    );
+    expect(result.takeMasterKey().publicKey()).toBe(master.publicKey());
+  });
+
+  it('refuses to return a device-approval payload from the generic decrypt', () => {
+    const alice = new EngineAccount();
+    const bob = new EngineAccount();
+    const { aliceSession, bobSession } = establishOverFallback(alice, bob);
+
+    const master = new EngineMasterKey();
+    const approval = aliceSession.encryptMasterSecret(master) as {
+      messageType: number;
+      body: string;
+    };
+    // A pre-key message like any other — nothing in the envelope marks it.
+    expect(approval.messageType).toBe(0);
+    expect(approval.body).not.toContain(MASTER_TRANSFER_PREFIX);
+
+    // The generic decrypt CAN decrypt it (the ratchet is the same) but must
+    // refuse to return the plaintext.
+    expect(() => bobSession.decrypt(approval.messageType, approval.body)).toThrow(
+      /refusing to return a device-approval payload/
+    );
+
+    // The legitimate path accepts that very same ciphertext and yields the key
+    // itself — never a string.
+    const result = bob.createInboundSessionForMasterSecret(
+      alice.curve25519Key(),
+      approval.body,
+      master.publicKey()
+    );
+    const received = result.takeMasterKey();
+    expect(received.publicKey()).toBe(master.publicKey());
+    // deterministic Ed25519: the transferred key is the same private half
+    const canonical = `voxium-e2e-v2|master|user-alice|${master.publicKey()}`;
+    expect(received.sign(canonical)).toBe(master.sign(canonical));
+    expect(() => verify_ed25519(master.publicKey(), canonical, received.sign(canonical))).not.toThrow();
+    // ...and the session it established is usable for ordinary traffic
+    const sibling = result.takeSession();
+    const follow = aliceSession.encrypt('now approved') as { messageType: number; body: string };
+    expect(sibling.decrypt(follow.messageType, follow.body)).toBe('now approved');
+  });
+
+  it('refuses a hand-crafted payload that merely looks like an approval', () => {
+    const alice = new EngineAccount();
+    const bob = new EngineAccount();
+    const { aliceSession, bobSession } = establishOverFallback(alice, bob);
+
+    // The guard is on the plaintext shape, not on which API produced it: a peer
+    // that sends the prefix as ordinary chat text cannot use it to probe the
+    // generic decrypt either.
+    const spoof = aliceSession.encrypt(`${MASTER_TRANSFER_PREFIX}AAA|BBB`) as {
+      messageType: number;
+      body: string;
+    };
+    expect(() => bobSession.decrypt(spoof.messageType, spoof.body)).toThrow(
+      /refusing to return a device-approval payload/
+    );
+  });
+
+  it('keeps the session usable for ordinary messages after a refusal', () => {
+    const alice = new EngineAccount();
+    const bob = new EngineAccount();
+    const { aliceSession, bobSession } = establishOverFallback(alice, bob);
+
+    const approval = aliceSession.encryptMasterSecret(new EngineMasterKey()) as {
+      messageType: number;
+      body: string;
+    };
+    expect(() => bobSession.decrypt(approval.messageType, approval.body)).toThrow();
+
+    const normal = aliceSession.encrypt('ordinary message') as {
+      messageType: number;
+      body: string;
+    };
+    expect(bobSession.decrypt(normal.messageType, normal.body)).toBe('ordinary message');
+    // a message that merely CONTAINS the prefix (not at the start) is fine
+    const embedded = aliceSession.encrypt(`look: ${MASTER_TRANSFER_PREFIX}x`) as {
+      messageType: number;
+      body: string;
+    };
+    expect(bobSession.decrypt(embedded.messageType, embedded.body)).toBe(
+      `look: ${MASTER_TRANSFER_PREFIX}x`
+    );
+  });
+
+  it('still accepts approvals on the dedicated session path, pinned to the published key', () => {
+    const alice = new EngineAccount();
+    const bob = new EngineAccount();
+    const { aliceSession, bobSession } = establishOverFallback(alice, bob);
+
+    const master = new EngineMasterKey();
+    const approval = aliceSession.encryptMasterSecret(master) as {
+      messageType: number;
+      body: string;
+    };
+    // decryptMasterSecret on an already-established session is the other half of
+    // the pair and must keep working.
+    const received = bobSession.decryptMasterSecret(
+      approval.messageType,
+      approval.body,
+      master.publicKey()
+    );
+    expect(received.publicKey()).toBe(master.publicKey());
+
+    // The published-key pin is enforced in Rust, so JS cannot skip it: an
+    // approval for a DIFFERENT account key is rejected, not returned.
+    const second = aliceSession.encryptMasterSecret(master) as {
+      messageType: number;
+      body: string;
+    };
+    expect(() =>
+      bobSession.decryptMasterSecret(
+        second.messageType,
+        second.body,
+        new EngineMasterKey().publicKey()
+      )
+    ).toThrow(/does not match the published account key/);
+
+    const third = aliceSession.encryptMasterSecret(master) as {
+      messageType: number;
+      body: string;
+    };
+    expect(() =>
+      bob.createInboundSessionForMasterSecret(
+        alice.curve25519Key(),
+        third.body,
+        new EngineMasterKey().publicKey()
+      )
+    ).toThrow(/does not match the published account key/);
   });
 });
