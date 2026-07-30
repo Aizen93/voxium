@@ -24,6 +24,7 @@ const prismaMock: Record<string, any> = {
   },
   report: {
     findUnique: vi.fn(),
+    findMany: vi.fn().mockResolvedValue([]),
     update: vi.fn().mockResolvedValue({}),
     count: vi.fn().mockResolvedValue(0),
   },
@@ -292,5 +293,65 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       .send({ action: 'ban' });
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe('GET /admin/reports — evidence provenance', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.report.count.mockResolvedValue(1);
+  });
+
+  function mockReportRow(contentSource: string) {
+    prismaMock.report.findMany.mockResolvedValue([
+      {
+        id: 'rep-1',
+        type: 'message',
+        status: 'pending',
+        reason: 'harassment in this DM',
+        reporterId: 'user-2',
+        reporter: { username: 'reporter' },
+        reportedUserId: 'user-3',
+        reportedUser: { username: 'accused' },
+        messageId: 'msg-1',
+        messageContent: 'the text a moderator will act on',
+        contentSource,
+        channelId: null,
+        conversationId: 'conv-1',
+        serverId: null,
+        resolvedById: null,
+        resolvedBy: null,
+        resolution: null,
+        createdAt: new Date('2026-07-30'),
+        resolvedAt: null,
+      },
+    ]);
+  }
+
+  it('marks E2E evidence as reporter-supplied so moderators know it is unverifiable', async () => {
+    // The server only holds ciphertext for E2E messages, so this text is the
+    // reporter's claim. Losing the flag would let fabricated quotes read as
+    // server-captured evidence.
+    mockUsers({ 'admin-1': { role: 'admin' } });
+    mockReportRow('reporter');
+
+    const res = await request(createApp())
+      .get('/api/v1/admin/reports')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].contentSource).toBe('reporter');
+  });
+
+  it('marks plaintext evidence as server-captured', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' } });
+    mockReportRow('server');
+
+    const res = await request(createApp())
+      .get('/api/v1/admin/reports')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].contentSource).toBe('server');
   });
 });

@@ -105,7 +105,19 @@ export function AdminReports() {
             </button>
           )}
           {expandedReport === report.id && report.messageContent && (
-            <div className="mt-1 p-2 rounded bg-vox-bg-hover text-xs text-vox-text-muted border border-vox-border">
+            <div
+              className={`mt-1 p-2 rounded text-xs border ${
+                report.contentSource === 'reporter'
+                  ? 'bg-vox-accent-warning/10 border-vox-accent-warning/40 text-vox-text-secondary'
+                  : 'bg-vox-bg-hover border-vox-border text-vox-text-muted'
+              }`}
+            >
+              {report.contentSource === 'reporter' && (
+                <div className="mb-1 font-medium text-vox-accent-warning">
+                  Supplied by the reporter — this conversation is end-to-end encrypted, so the
+                  server cannot verify this text against the stored message.
+                </div>
+              )}
               {report.messageContent}
             </div>
           )}

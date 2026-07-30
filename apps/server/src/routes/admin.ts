@@ -2104,6 +2104,7 @@ adminRouter.get('/reports', async (req: Request, res: Response, next: NextFuncti
       reportedUsername: r.reportedUser.username,
       messageId: r.messageId,
       messageContent: r.messageContent,
+      contentSource: r.contentSource,
       channelId: r.channelId,
       conversationId: r.conversationId,
       serverId: r.serverId,
