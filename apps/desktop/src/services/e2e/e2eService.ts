@@ -16,8 +16,12 @@ import {
   E2E_ENGINE_OLM1,
   E2E_ENGINE_MEGOLM1,
   E2E_DEVICE_ID_RE,
+  E2E_KEY_B64_RE,
+  E2E_SIGNATURE_B64_RE,
   e2eDeviceCanonical,
+  e2eDeviceCrossCanonical,
   e2eKeyCanonical,
+  e2eMasterCanonical,
   parseE2EEnvelope,
   buildE2EEnvelope,
   buildMegolmEnvelope,
@@ -27,6 +31,7 @@ import type {
   E2EDeviceEntry,
   E2EKeyBundle,
   E2EKeySharePayload,
+  E2EMasterTransferPayload,
   E2EOlmEnvelope,
   E2EPreKey,
 } from '@voxium/shared';
@@ -34,12 +39,14 @@ import { api as defaultApi } from '../api';
 import {
   initEngine,
   EngineAccount,
+  EngineMasterKey,
   EngineSession,
   EngineGroupSession,
   EngineInboundGroupSession,
   verify_ed25519,
   prekey_message_session_id,
   safety_number,
+  master_safety_number,
 } from './engine';
 import {
   E2EVault,
@@ -64,12 +71,20 @@ export interface E2EDeviceIdentity {
   deviceId: string;
   curve25519Key: string;
   ed25519Key: string;
+  /**
+   * Out-of-band verified. Cross-signed devices INHERIT the account-level
+   * verification of the master key that signed them (spec §14, D9).
+   */
   verified: boolean;
+  /** Carries a valid signature from the account master key (§14, D2/D7). */
+  crossSigned: boolean;
 }
 
 export interface E2EPinnedDeviceList {
   devices: E2EDeviceIdentity[];
   listVersion: number;
+  /** The account master key this list was verified against (§14), if any. */
+  masterKey: string | null;
 }
 
 /** UI signal: this peer's device list changed since the user acknowledged it. */
@@ -78,6 +93,12 @@ export interface E2EDeviceListStatus {
   deviceIds: string[];
   /** devices present now that were not there at the last acknowledgement */
   newDeviceIds: string[];
+  /**
+   * Devices of an account that HAS a master key but which that key does not
+   * vouch for (spec §14, D8). Rendered as "not signed by <name>'s account key";
+   * acknowledgement cannot clear them — only cross-signing or revocation can.
+   */
+  unsignedDeviceIds: string[];
   changed: boolean;
 }
 
@@ -85,13 +106,31 @@ export interface E2EDeviceSafetyNumber {
   deviceId: string;
   digits: string;
   verified: boolean;
+  /** signed by the account master key (§14) — false when unknown offline */
+  crossSigned: boolean;
+}
+
+/** One of our devices as the server knows it, plus its cross-signing state. */
+export interface E2EOwnDeviceEntry extends E2EDeviceEntry {
+  crossSigned: boolean;
 }
 
 /** A device of ours as the server knows it (device management UI). */
 export interface E2EOwnDevices {
   currentDeviceId: string;
-  devices: E2EDeviceEntry[];
+  devices: E2EOwnDeviceEntry[];
   listVersion: number;
+  /** This account's published master key, or null before bootstrap (§14). */
+  masterKey: string | null;
+  /** True when THIS device holds the master secret and can approve others. */
+  canApprove: boolean;
+}
+
+/** The account-level safety number of a peer (spec §14, D3). */
+export interface E2EAccountSafetyNumber {
+  digits: string;
+  /** the master key was compared out of band (D9) */
+  verified: boolean;
 }
 
 /** The peer registered a new identity for a known device — trust must be re-confirmed. */
@@ -167,6 +206,10 @@ export class E2EService {
   private readonly deviceListCacheMs: number;
 
   private account: EngineAccount | null = null;
+  /** This account's cross-signing master key — only if THIS device holds it. */
+  private masterKey: EngineMasterKey | null = null;
+  /** Set when the server serves a master key we can neither prove nor match. */
+  private masterKeyConflict = false;
   private myDeviceId: string | null = null;
   /** pairwise Olm sessions, keyed `${userId}|${deviceId}` */
   private olmSessions = new Map<string, EngineSession>();
@@ -233,12 +276,23 @@ export class E2EService {
     }
 
     await this.ensureRegistered();
+    // Cross-signing bootstrap (spec §14, D5). Never fatal: a device that cannot
+    // publish or hold a master key still encrypts — it is only "unsigned".
+    try {
+      await this.bootstrapMasterKey();
+    } catch (err) {
+      console.warn('e2e: cross-signing bootstrap failed — this device stays unsigned:', errText(err));
+    }
     this.initialized = true;
 
-    // Neither of these may block the UI: key shares are re-claimed lazily on a
-    // decrypt miss, and replenishment only matters for future peers.
+    // None of these may block the UI: key shares are re-claimed lazily on a
+    // decrypt miss, replenishment only matters for future peers, and the master
+    // secret only arrives once another device approves this one.
     this.enqueue(() => this.claimKeyShares()).catch((err) => {
       console.warn('e2e: initial key-share claim failed:', errText(err));
+    });
+    this.enqueue(() => this.claimMasterTransfersUnqueued()).catch((err) => {
+      console.warn('e2e: initial master-transfer claim failed:', errText(err));
     });
     this.replenishOneTimeKeys().catch((err) => {
       console.warn('e2e: one-time key replenishment failed:', errText(err));
@@ -248,6 +302,8 @@ export class E2EService {
   dispose(): void {
     this.account?.free();
     this.account = null;
+    this.masterKey?.free();
+    this.masterKey = null;
     for (const session of this.olmSessions.values()) session.free();
     this.olmSessions.clear();
     for (const { session } of this.outbound.values()) session.free();
@@ -358,6 +414,325 @@ export class E2EService {
     });
   }
 
+  // ─── Cross-signing: the account master key (spec §14) ───────────────────────
+
+  /** True when THIS device holds the account master secret. */
+  hasMasterSecret(): boolean {
+    return this.masterKey !== null;
+  }
+
+  /** Only a device holding the master secret can approve another one (D6). */
+  canApproveDevices(): boolean {
+    return this.masterKey !== null;
+  }
+
+  /**
+   * A published master key is only usable once its SELF-signature checks out
+   * (D1) — otherwise the server could serve any key it likes and every device
+   * "signed" by it would look account-approved. Returns null (= this account
+   * has no master key) rather than throwing: cross-signing is warn-not-block.
+   */
+  private verifiedMasterKey(userId: string, masterKey: unknown, masterSignature: unknown): string | null {
+    if (typeof masterKey !== 'string' || !E2E_KEY_B64_RE.test(masterKey)) return null;
+    if (typeof masterSignature !== 'string' || !E2E_SIGNATURE_B64_RE.test(masterSignature)) return null;
+    try {
+      verify_ed25519(masterKey, e2eMasterCanonical(userId, masterKey), masterSignature);
+      return masterKey;
+    } catch (err) {
+      console.warn(`e2e: master key of ${userId} has an invalid self-signature — ignored:`, errText(err));
+      return null;
+    }
+  }
+
+  /** Does `masterKey` vouch for this device (D2)? Never throws. */
+  private hasValidCrossSignature(
+    userId: string,
+    entry: { deviceId: string; curve25519Key: string; ed25519Key: string; masterSignature?: string | null },
+    masterKey: string | null
+  ): boolean {
+    if (!masterKey) return false;
+    const signature = entry.masterSignature;
+    if (typeof signature !== 'string' || !E2E_SIGNATURE_B64_RE.test(signature)) return false;
+    try {
+      verify_ed25519(
+        masterKey,
+        e2eDeviceCrossCanonical(userId, entry.deviceId, entry.curve25519Key, entry.ed25519Key),
+        signature
+      );
+      return true;
+    } catch (err) {
+      console.warn(`e2e: device ${entry.deviceId} of ${userId} carries an invalid cross-signature:`, errText(err));
+      return false;
+    }
+  }
+
+  /**
+   * Bootstrap this account's cross-signing state (D5), run once per initialize:
+   *
+   * - no master key published → generate one, seal it, publish it, and
+   *   cross-sign THIS device (the first device is trusted from the start);
+   * - published and we hold the secret → make sure this device is signed;
+   * - published and we do NOT hold the secret → register normally and stay
+   *   UNSIGNED until another device approves us (D6). Never a failure.
+   *
+   * A published master key is NEVER silently replaced: that is an account
+   * identity change and every peer would see a new safety number.
+   */
+  /**
+   * Establish this device's relationship to the account's cross-signing key
+   * (spec §14). The ordering of these cases is the whole security model:
+   *
+   *   the secret we hold  >  the key we pinned earlier  >  what the server says
+   *
+   * The server is untrusted storage. It must never be able to make us adopt a
+   * master key we cannot prove, discard one we hold, or mint a replacement for
+   * one we already pinned — each of those would silently re-root account trust.
+   */
+  private async bootstrapMasterKey(): Promise<void> {
+    const sealed = await this.vault.getMasterSecret();
+    if (sealed && !this.masterKey) {
+      try {
+        this.masterKey = EngineMasterKey.fromSealed(sealed, this.vault.pickleKey());
+      } catch (err) {
+        // Pickle key lost/rotated — the sealed copy is gone for good. The
+        // account key itself survives on whichever device still holds it.
+        console.warn('e2e: master secret unreadable — this device can no longer approve devices:', errText(err));
+        await this.vault.deleteMasterSecret();
+      }
+    }
+
+    const res = await this.api.get(`/e2e/devices/me?deviceId=${encodeURIComponent(this.deviceId)}`);
+    const data = res.data.data as {
+      devices?: E2EDeviceEntry[];
+      masterKey?: string | null;
+      masterSignature?: string | null;
+    };
+    const own = (data.devices ?? []).find((d) => d?.deviceId === this.deviceId);
+    const published = this.verifiedMasterKey(this.userId, data.masterKey, data.masterSignature);
+    const pinned = await this.vault.getMasterIdentity(this.userId);
+
+    // ── A. We hold the secret: it is the account key, full stop. ──
+    if (this.masterKey) {
+      const mine = this.masterKey.publicKey();
+      if (pinned?.masterKey !== mine) {
+        await this.vault.putMasterIdentity(this.userId, { masterKey: mine, verified: true });
+      }
+      if (!published) {
+        // Server has none yet (fresh account, or it lost the row): publish ours.
+        await this.publishMasterKey(this.masterKey, own ? [own] : []);
+        this.deviceListCache.delete(this.userId);
+      } else if (published !== mine) {
+        // A key we did not create is published under our account. Do NOT delete
+        // our secret and do NOT adopt theirs — either would hand the account to
+        // whoever produced it. Surface it and stop.
+        this.masterKeyConflict = true;
+        console.error('e2e: the account has a published master key this device did not create — refusing to adopt it');
+      } else if (own && !this.hasValidCrossSignature(this.userId, own, mine)) {
+        // We hold the key but this device is not signed by it (approved
+        // elsewhere, or registered before cross-signing existed).
+        await this.crossSignOwnDevice(this.masterKey, own);
+        this.deviceListCache.delete(this.userId);
+      }
+      return;
+    }
+
+    // ── B. No secret, but we already know our account key. ──
+    if (pinned) {
+      if (published && published !== pinned.masterKey) {
+        // Someone replaced the account key without us. Never adopt it silently:
+        // adopting is exactly the "trust reset" a hostile server wants.
+        this.masterKeyConflict = true;
+        console.error('e2e: the published account master key differs from the pinned one');
+      }
+      // Either way this device stays unsigned until an existing device approves
+      // it. Minting a replacement here would reset trust for every peer.
+      return;
+    }
+
+    // ── C. No secret, no pin, but the account already has a key. ──
+    if (published) {
+      // Trust on first use for our OWN account — we cannot prove this key is
+      // ours, so it is pinned UNVERIFIED and this device stays unsigned until
+      // another device approves it. (Marking it verified here would let a
+      // server-supplied key silently bless server-injected devices.)
+      await this.vault.putMasterIdentity(this.userId, { masterKey: published, verified: false });
+      return;
+    }
+
+    // ── D. Genuinely the first device on this account: mint the key. ──
+    const master = new EngineMasterKey();
+    this.masterKey = master;
+    // Sealed BEFORE publishing: a crash between the two would otherwise publish
+    // a key nobody holds, and it can never be replaced silently.
+    await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
+    await this.publishMasterKey(master, own ? [own] : []);
+    await this.vault.putMasterIdentity(this.userId, { masterKey: master.publicKey(), verified: true });
+    this.deviceListCache.delete(this.userId);
+  }
+
+  /** Publish (or re-publish) our master key, optionally signing devices with it. */
+  private async publishMasterKey(
+    master: EngineMasterKey,
+    devices: Array<{ deviceId: string; curve25519Key: string; ed25519Key: string }>
+  ): Promise<void> {
+    const masterKey = master.publicKey();
+    const deviceSignatures = devices.map((device) => ({
+      deviceId: device.deviceId,
+      signature: master.sign(
+        e2eDeviceCrossCanonical(this.userId, device.deviceId, device.curve25519Key, device.ed25519Key)
+      ),
+    }));
+    await this.api.put('/e2e/master-key', {
+      masterKey,
+      masterSignature: master.sign(e2eMasterCanonical(this.userId, masterKey)),
+      ...(deviceSignatures.length > 0 && { deviceSignatures }),
+    });
+  }
+
+  private async crossSignOwnDevice(
+    master: EngineMasterKey,
+    device: { deviceId: string; curve25519Key: string; ed25519Key: string }
+  ): Promise<void> {
+    await this.api.post(`/e2e/devices/${encodeURIComponent(device.deviceId)}/signature`, {
+      signature: master.sign(
+        e2eDeviceCrossCanonical(this.userId, device.deviceId, device.curve25519Key, device.ed25519Key)
+      ),
+    });
+  }
+
+  /**
+   * Pin OUR OWN account master key. Holding the secret is proof the key is
+   * ours, so that case always (re)pins; without the secret a differing key is
+   * left unpinned, and fetchDeviceList then raises E2EIdentityChangedError —
+   * the same honest signal peers get.
+   */
+
+  /**
+   * Approve another device of THIS account (D6): cross-sign it, publish the
+   * signature, then hand it the master secret over the pairwise Olm channel so
+   * it can approve future devices in turn. The secret is encrypted end-to-end
+   * between our two devices — the server only ever relays an olm1 envelope.
+   */
+  async approveDevice(deviceId: string): Promise<void> {
+    if (deviceId === this.deviceId) throw new Error('This device is already approved');
+    if (!E2E_DEVICE_ID_RE.test(deviceId)) throw new Error('Invalid device id');
+    return this.enqueue(async () => {
+      const master = this.masterKey;
+      if (!master) throw new Error('This device does not hold the account key and cannot approve devices');
+
+      const list = await this.fetchDeviceList(this.userId, true);
+      const target = list.devices.find((d) => d.deviceId === deviceId);
+      if (!target) throw new Error(`Unknown device ${deviceId}`);
+
+      // Order matters: queue the secret FIRST, publish the signature second.
+      // The reverse leaves a device that everyone treats as fully trusted but
+      // which never received the key — and the approve button disappears with
+      // it, because approval is offered only for unsigned devices. Failing
+      // before the signature just means the user retries.
+      // The payload is assembled inside the engine: the private half never
+      // becomes a JS string (spec §7 — the pickle key is the only secret JS
+      // handles).
+      const olm = await this.ensureOlmSession(this.userId, deviceId);
+      const { messageType, body } = olm.encryptMasterSecret(master) as { messageType: 0 | 1; body: string };
+      await this.persistOlmSession(this.userId, deviceId, olm);
+      await this.api.post('/e2e/master-transfers', {
+        deviceId: this.deviceId,
+        transfers: [{ recipientDeviceId: deviceId, body: buildE2EEnvelope(messageType, body) }],
+      });
+
+      await this.crossSignOwnDevice(master, target);
+
+      // The device is trusted from now on — re-read so the local warning state
+      // drops it (a cross-signed device is acknowledged automatically, D8).
+      this.deviceListCache.delete(this.userId);
+      await this.fetchDeviceList(this.userId, true);
+    });
+  }
+
+  /**
+   * Claim this device's pending master-secret transfers (D6). Returns true when
+   * one was accepted — after which this device can approve others.
+   */
+  async claimMasterTransfers(): Promise<boolean> {
+    return this.enqueue(() => this.claimMasterTransfersUnqueued());
+  }
+
+  /** Callers must already hold the serial queue (this advances Olm state). */
+  private async claimMasterTransfersUnqueued(): Promise<boolean> {
+    if (this.masterKey) return false; // already approved — nothing to import
+    const res = await this.api.get(`/e2e/master-transfers?deviceId=${encodeURIComponent(this.deviceId)}`);
+    const transfers = (res.data.data as { transfers?: unknown[] }).transfers;
+    if (!Array.isArray(transfers) || transfers.length === 0) return false;
+
+    // What the account actually publishes, self-signature verified — the only
+    // thing an incoming secret is allowed to be.
+    const published = (await this.fetchDeviceList(this.userId, true)).masterKey;
+    if (!published) {
+      console.warn('e2e: master-secret transfer arrived but this account publishes no master key');
+      return false;
+    }
+
+    for (const transfer of transfers) {
+      try {
+        if (await this.importMasterTransfer(transfer as Record<string, unknown>, published)) return true;
+      } catch (err) {
+        console.warn('e2e: discarding an unusable master-secret transfer:', errText(err));
+      }
+    }
+    return false;
+  }
+
+  private async importMasterTransfer(
+    transfer: Record<string, unknown>,
+    publishedMasterKey: string
+  ): Promise<boolean> {
+    const senderDeviceId = transfer.senderDeviceId;
+    if (
+      typeof senderDeviceId !== 'string' ||
+      !E2E_DEVICE_ID_RE.test(senderDeviceId) ||
+      typeof transfer.body !== 'string'
+    ) {
+      throw new Error('malformed master-secret transfer');
+    }
+    if (senderDeviceId === this.deviceId) throw new Error('master-secret transfer attributed to this device');
+    const envelope = parseE2EEnvelope(transfer.body);
+    if (!envelope || envelope.e !== E2E_ENGINE_OLM1) {
+      throw new Error('master-secret transfer body is not an olm1 envelope');
+    }
+
+    // Authenticated by the sending device's pinned identity, exactly like a key
+    // share: only a device of this account can produce readable ciphertext.
+    let identity = await this.vault.getIdentity(this.userId, senderDeviceId);
+    if (!identity) {
+      await this.fetchDeviceList(this.userId, true);
+      identity = await this.vault.getIdentity(this.userId, senderDeviceId);
+    }
+    if (!identity) throw new Error(`unknown sender device ${senderDeviceId}`);
+
+    // Decrypted inside the engine, which also enforces that the secret derives
+    // to the published account key — JS never sees the private half and cannot
+    // skip the check.
+    const master = await this.olmDecryptMasterSecret(senderDeviceId, envelope, publishedMasterKey);
+    if (!master) throw new Error('no Olm session for this master-secret transfer');
+
+    await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
+    this.masterKey?.free();
+    this.masterKey = master;
+    return true;
+  }
+
+  /** Our own account master key (held or pinned), for safety numbers. */
+  private async ownMasterKey(): Promise<string | null> {
+    if (this.masterKey) return this.masterKey.publicKey();
+    const pinned = await this.vault.getMasterIdentity(this.userId);
+    return pinned?.masterKey ?? null;
+  }
+
+  /** UI: the server published an account key we cannot prove or match (§14). */
+  hasMasterKeyConflict(): boolean {
+    return this.masterKeyConflict;
+  }
+
   // ─── Device lists & identity pinning (spec §4, §12) ─────────────────────────
 
   /**
@@ -424,8 +799,30 @@ export class E2EService {
 
   private async fetchDeviceListUncached(userId: string): Promise<E2EPinnedDeviceList> {
     const res = await this.api.get(`/e2e/devices/${userId}`);
-    const data = res.data.data as { devices?: E2EDeviceEntry[]; listVersion?: number };
+    const data = res.data.data as {
+      devices?: E2EDeviceEntry[];
+      listVersion?: number;
+      masterKey?: string | null;
+      masterSignature?: string | null;
+    };
     const devices: E2EDeviceIdentity[] = [];
+
+    // ── D7 step 1+2: authenticate and TOFU-pin the ACCOUNT master key ──
+    // A master key whose self-signature does not verify is treated as absent.
+    // A CHANGED master key is an account identity change, not a new device.
+    const served = this.verifiedMasterKey(userId, data.masterKey, data.masterSignature);
+    const pinnedMaster = await this.vault.getMasterIdentity(userId);
+    if (pinnedMaster && served && pinnedMaster.masterKey !== served) {
+      throw new E2EIdentityChangedError(userId);
+    }
+    if (!pinnedMaster && served) {
+      await this.vault.putMasterIdentity(userId, { masterKey: served, verified: false });
+    }
+    // Cross-signatures are checked against the PINNED key: a server that
+    // withdraws the master key cannot strip trust from devices it already
+    // signed, it can only fail to add new ones.
+    const masterKey = pinnedMaster?.masterKey ?? served;
+    const masterVerified = pinnedMaster?.verified ?? false;
 
     for (const entry of data.devices ?? []) {
       if (
@@ -448,6 +845,9 @@ export class E2EService {
         console.warn(`e2e: device ${entry.deviceId} of ${userId} has an invalid signature — ignored:`, errText(err));
         continue;
       }
+      // D7 step 3: does the account's master key vouch for this device?
+      const crossSigned = this.hasValidCrossSignature(userId, entry, masterKey);
+
       // Our own current device needs no pin: we hold its private keys.
       if (userId === this.userId && entry.deviceId === this.myDeviceId) {
         devices.push({
@@ -455,6 +855,7 @@ export class E2EService {
           curve25519Key: entry.curve25519Key,
           ed25519Key: entry.ed25519Key,
           verified: true,
+          crossSigned,
         });
         continue;
       }
@@ -463,11 +864,18 @@ export class E2EService {
         deviceId: entry.deviceId,
         curve25519Key: pinned.curve25519Key,
         ed25519Key: pinned.ed25519Key,
-        verified: pinned.verified,
+        // D9: a cross-signed device inherits the account-level verification —
+        // one out-of-band comparison covers every device the master key signs.
+        verified: pinned.verified || (crossSigned && masterVerified),
+        crossSigned,
       });
     }
 
-    const list: E2EPinnedDeviceList = { devices, listVersion: data.listVersion ?? 0 };
+    const list: E2EPinnedDeviceList = {
+      devices,
+      listVersion: data.listVersion ?? 0,
+      masterKey: masterKey ?? null,
+    };
     await this.recordDeviceListState(userId, list);
     this.deviceListCache.set(userId, { at: Date.now(), list });
     return list;
@@ -475,6 +883,7 @@ export class E2EService {
 
   private async recordDeviceListState(userId: string, list: E2EPinnedDeviceList): Promise<void> {
     const deviceIds = list.devices.map((d) => d.deviceId);
+    const crossSigned = new Set(list.devices.filter((d) => d.crossSigned).map((d) => d.deviceId));
     const state = await this.vault.getDeviceListState(userId);
     if (!state) {
       // First sight of this user's devices: nothing to warn about yet (TOFU).
@@ -483,22 +892,64 @@ export class E2EService {
         deviceIds,
         acknowledgedVersion: list.listVersion,
         acknowledgedDeviceIds: deviceIds,
+        masterKey: list.masterKey,
+        acknowledgedMasterKey: list.masterKey,
+        crossSignedDeviceIds: [...crossSigned],
       });
       return;
     }
-    if (state.version === list.listVersion && sameDeviceSet(state.deviceIds, deviceIds)) return;
-    // Sticky: remember every id seen since the last acknowledgement. A server
-    // that adds a device and then withdraws it must not be able to erase the
-    // warning — the device keeps whatever session key it was already given.
-    const unacknowledged = new Set(state.unacknowledgedDeviceIds ?? []);
+
+    // D8: a device the account's master key vouches for is trusted transitively
+    // — acknowledged automatically (no "new device" warning, peer or own) and
+    // never in the sticky set.
+    //
+    // BUT only under a master key the user has actually acknowledged (or
+    // verified out of band). A key that first appears in the SAME response as
+    // the devices it signs proves nothing: a hostile server can mint one and
+    // sign its own device with it. Seeing a key twice is not acknowledgement
+    // either, so this compares against acknowledgedMasterKey, not masterKey.
+    const pinnedMaster = await this.vault.getMasterIdentity(userId);
+    const masterTrusted =
+      !!list.masterKey &&
+      ((state.acknowledgedMasterKey ?? null) === list.masterKey || !!pinnedMaster?.verified);
+    const autoTrusted = (id: string) => masterTrusted && crossSigned.has(id);
+
+    const acknowledgedDeviceIds = [
+      ...new Set([...state.acknowledgedDeviceIds, ...deviceIds.filter(autoTrusted)]),
+    ];
+    // Sticky: remember every unsigned id seen since the last acknowledgement. A
+    // server that adds a device and then withdraws it must not be able to erase
+    // the warning — the device keeps whatever session key it was already given.
+    const unacknowledged = new Set(
+      (state.unacknowledgedDeviceIds ?? []).filter((id) => !autoTrusted(id))
+    );
     for (const id of deviceIds) {
-      if (!state.acknowledgedDeviceIds.includes(id)) unacknowledged.add(id);
+      if (autoTrusted(id)) continue;
+      if (!acknowledgedDeviceIds.includes(id)) unacknowledged.add(id);
     }
+
+    const unchanged =
+      state.version === list.listVersion &&
+      sameDeviceSet(state.deviceIds, deviceIds) &&
+      sameDeviceSet(acknowledgedDeviceIds, state.acknowledgedDeviceIds) &&
+      sameDeviceSet([...unacknowledged], state.unacknowledgedDeviceIds ?? []) &&
+      (state.masterKey ?? null) === list.masterKey;
+    if (unchanged) return;
+
+    // Claim the version only when nothing is outstanding, so the arrival of a
+    // cross-signed device does not leave `changed` stuck on the version alone.
+    const settled = unacknowledged.size === 0 && deviceIds.every((id) => acknowledgedDeviceIds.includes(id));
     await this.vault.putDeviceListState(userId, {
       ...state,
       version: list.listVersion,
       deviceIds,
+      acknowledgedDeviceIds,
+      acknowledgedVersion: settled ? list.listVersion : state.acknowledgedVersion,
       unacknowledgedDeviceIds: [...unacknowledged],
+      masterKey: list.masterKey,
+      // acknowledgedMasterKey is advanced ONLY by acknowledgeDeviceList
+      acknowledgedMasterKey: settled ? list.masterKey : (state.acknowledgedMasterKey ?? null),
+      crossSignedDeviceIds: [...crossSigned],
     });
     this.emitDeviceListChanged(userId);
   }
@@ -513,7 +964,11 @@ export class E2EService {
    */
   async deviceListStatus(userId: string): Promise<E2EDeviceListStatus> {
     const state = await this.vault.getDeviceListState(userId);
-    if (!state) return { version: 0, deviceIds: [], newDeviceIds: [], changed: false };
+    if (!state) return { version: 0, deviceIds: [], newDeviceIds: [], unsignedDeviceIds: [], changed: false };
+    const crossSigned = new Set(state.crossSignedDeviceIds ?? []);
+    // Only meaningful once the account HAS a master key: before cross-signing
+    // is bootstrapped every device is unsigned, which is not a signal (D11).
+    const unsignedDeviceIds = state.masterKey ? state.deviceIds.filter((id) => !crossSigned.has(id)) : [];
     // Union of "here now" and "seen since the last acknowledgement": a device
     // that appeared and vanished again still has to be reported.
     const newDeviceIds = [
@@ -527,6 +982,7 @@ export class E2EService {
       version: state.version,
       deviceIds: state.deviceIds,
       newDeviceIds,
+      unsignedDeviceIds,
       changed: newDeviceIds.length > 0 || setChanged || state.acknowledgedVersion !== state.version,
     };
   }
@@ -556,6 +1012,10 @@ export class E2EService {
    * after the render (the send path refreshes lists constantly) stays
    * unacknowledged, so one confirmation can never bless a change the user was
    * not shown.
+   *
+   * Since cross-signing (D8) acknowledgement is NOT enough for a device the
+   * account's master key does not vouch for: those stay flagged until they are
+   * approved or revoked. Clicking "I've seen it" cannot manufacture trust.
    */
   async acknowledgeDeviceList(userId: string, seenDeviceIds?: string[]): Promise<void> {
     return this.enqueue(() => this.acknowledgeDeviceListUnqueued(userId, seenDeviceIds));
@@ -566,19 +1026,30 @@ export class E2EService {
     {
       const state = await this.vault.getDeviceListState(userId);
       if (!state) return;
+      const crossSigned = new Set(state.crossSignedDeviceIds ?? []);
+      // Accounts without a master key keep the pre-cross-signing behaviour
+      // (D11) — there is nothing they could be signed by.
+      const acknowledgeable = (id: string) => !state.masterKey || crossSigned.has(id);
       const acknowledged = seenDeviceIds
         ? state.acknowledgedDeviceIds.concat(seenDeviceIds.filter((id) => state.deviceIds.includes(id)))
         : [...state.deviceIds];
-      const acknowledgedDeviceIds = [...new Set(acknowledged)];
+      const acknowledgedDeviceIds = [
+        ...new Set(acknowledged.filter((id) => state.acknowledgedDeviceIds.includes(id) || acknowledgeable(id))),
+      ];
       const stillUnacknowledged = (state.unacknowledgedDeviceIds ?? []).filter(
         (id) => !acknowledgedDeviceIds.includes(id)
       );
+      const fullyAcknowledged = sameDeviceSet(acknowledgedDeviceIds, state.deviceIds);
       await this.vault.putDeviceListState(userId, {
         ...state,
         // only claim the version when the whole current set is acknowledged
-        acknowledgedVersion: sameDeviceSet(acknowledgedDeviceIds, state.deviceIds)
-          ? state.version
-          : state.acknowledgedVersion,
+        acknowledgedVersion: fullyAcknowledged ? state.version : state.acknowledgedVersion,
+        // acknowledging these devices also acknowledges the account key that
+        // vouches for them — that is what makes future cross-signed devices
+        // trustworthy without another prompt (the D8 payoff)
+        acknowledgedMasterKey: fullyAcknowledged
+          ? (state.masterKey ?? null)
+          : (state.acknowledgedMasterKey ?? null),
         acknowledgedDeviceIds,
         unacknowledgedDeviceIds: stillUnacknowledged,
       });
@@ -593,9 +1064,23 @@ export class E2EService {
   async acceptNewIdentity(peerUserId: string): Promise<void> {
     return this.enqueue(async () => {
       const res = await this.api.get(`/e2e/devices/${peerUserId}`);
-      const data = res.data.data as { devices?: E2EDeviceEntry[]; listVersion?: number };
+      const data = res.data.data as {
+        devices?: E2EDeviceEntry[];
+        listVersion?: number;
+        masterKey?: string | null;
+        masterSignature?: string | null;
+      };
       const entries = data.devices ?? [];
       if (entries.length === 0) throw new Error('peer has no E2E device');
+
+      // Re-pin the ACCOUNT master key too (spec §14): a changed master key is
+      // exactly what this recovery path exists for, and leaving the old pin
+      // would make every subsequent fetch throw again. Unverified — the account
+      // safety number changed, so any earlier comparison is void.
+      const master = this.verifiedMasterKey(peerUserId, data.masterKey, data.masterSignature);
+      if (master) {
+        await this.vault.putMasterIdentity(peerUserId, { masterKey: master, verified: false });
+      }
 
       for (const [key, session] of this.olmSessions) {
         if (key.startsWith(`${peerUserId}|`)) {
@@ -636,6 +1121,14 @@ export class E2EService {
       }
 
       this.deviceListCache.delete(peerUserId);
+      // Refresh before acknowledging: the stored cross-signing state is what
+      // decides which devices an acknowledgement may clear (D8), and it was
+      // recorded under the identity we just replaced.
+      try {
+        await this.fetchDeviceList(peerUserId, true);
+      } catch (err) {
+        console.warn(`e2e: could not re-read the device list of ${peerUserId} after acceptance:`, errText(err));
+      }
       await this.acknowledgeDeviceListUnqueued(peerUserId);
       await this.clearOutboundGroupSessions();
     });
@@ -715,6 +1208,47 @@ export class E2EService {
   }
 
   /** Decrypt an olm1 body known to come from one specific device. */
+  /**
+   * Olm-decrypt a device-approval payload from one of OUR devices straight into
+   * a master key. Mirrors olmDecryptFromDevice, but the plaintext (which holds
+   * the account private key) never crosses into JS.
+   */
+  private async olmDecryptMasterSecret(
+    senderDeviceId: string,
+    envelope: E2EOlmEnvelope,
+    expectedMasterKey: string
+  ): Promise<EngineMasterKey | null> {
+    const identity = await this.vault.getIdentity(this.userId, senderDeviceId);
+    if (!identity) return null;
+    const account = this.requireAccount();
+    const session = await this.loadOlmSession(this.userId, senderDeviceId);
+
+    if (envelope.t === 0) {
+      if (session && prekey_message_session_id(envelope.b) === session.sessionId()) {
+        const master = session.decryptMasterSecret(envelope.t, envelope.b, expectedMasterKey);
+        await this.persistOlmSession(this.userId, senderDeviceId, session);
+        return master;
+      }
+      const inbound = account.createInboundSessionForMasterSecret(
+        identity.curve25519Key,
+        envelope.b,
+        expectedMasterKey
+      );
+      const fresh = inbound.takeSession();
+      const master = inbound.takeMasterKey();
+      session?.free();
+      this.olmSessions.set(shareKey(this.userId, senderDeviceId), fresh);
+      await this.persistOlmSession(this.userId, senderDeviceId, fresh);
+      await this.persistAccount(); // the used one-time key was consumed
+      return master;
+    }
+
+    if (!session) return null;
+    const master = session.decryptMasterSecret(envelope.t, envelope.b, expectedMasterKey);
+    await this.persistOlmSession(this.userId, senderDeviceId, session);
+    return master;
+  }
+
   private async olmDecryptFromDevice(
     userId: string,
     deviceId: string,
@@ -1372,11 +1906,28 @@ export class E2EService {
   /** This account's registered devices, as the server sees them. */
   async listOwnDevices(): Promise<E2EOwnDevices> {
     const res = await this.api.get(`/e2e/devices/me?deviceId=${encodeURIComponent(this.deviceId)}`);
-    const data = res.data.data as { devices?: E2EDeviceEntry[]; listVersion?: number };
+    const data = res.data.data as {
+      devices?: E2EDeviceEntry[];
+      listVersion?: number;
+      masterKey?: string | null;
+      masterSignature?: string | null;
+    };
+    // Verified locally, never taken on the server's word: an "approved" badge
+    // must mean a signature this client checked (§14).
+    // Judge against the pinned account key, never one served in this response:
+    // this list is exactly where the user decides whether to revoke a device.
+    const served = this.verifiedMasterKey(this.userId, data.masterKey, data.masterSignature);
+    const pinnedMaster = await this.vault.getMasterIdentity(this.userId);
+    const masterKey = pinnedMaster?.masterKey ?? served;
     return {
       currentDeviceId: this.deviceId,
-      devices: data.devices ?? [],
+      devices: (data.devices ?? []).map((entry) => ({
+        ...entry,
+        crossSigned: this.hasValidCrossSignature(this.userId, entry, masterKey),
+      })),
       listVersion: data.listVersion ?? 0,
+      masterKey,
+      canApprove: this.canApproveDevices(),
     };
   }
 
@@ -1405,6 +1956,9 @@ export class E2EService {
         await this.vault.putDeviceListState(this.userId, {
           ...state,
           deviceIds: state.deviceIds.filter((id) => id !== deviceId),
+          // device ids are client-chosen and reusable: leaving a revoked id in
+          // the acknowledged set would silently bless a re-registration of it
+          acknowledgedDeviceIds: state.acknowledgedDeviceIds.filter((id) => id !== deviceId),
           unacknowledgedDeviceIds: (state.unacknowledgedDeviceIds ?? []).filter((id) => id !== deviceId),
         });
       }
@@ -1425,10 +1979,12 @@ export class E2EService {
       devices = (await this.vault.listIdentities(peerUserId)).map(({ deviceId, identity }) => ({
         deviceId,
         ...identity,
+        crossSigned: false, // unknown offline — the list is what carries proof
       }));
     }
     return devices.map((device) => ({
       deviceId: device.deviceId,
+      crossSigned: device.crossSigned,
       digits: safety_number(
         this.userId,
         account.ed25519Key(),
@@ -1439,6 +1995,35 @@ export class E2EService {
       ),
       verified: device.verified,
     }));
+  }
+
+  /**
+   * The ACCOUNT-level safety number (spec §14, D3) — the primary UX. One
+   * 60-digit number per peer, derived from both master keys, stable across
+   * every device either side adds as long as the account keys do not change.
+   * Null when either account has not bootstrapped cross-signing.
+   */
+  async accountSafetyNumber(peerUserId: string): Promise<E2EAccountSafetyNumber | null> {
+    const own = await this.ownMasterKey();
+    if (!own) return null;
+    try {
+      await this.fetchDeviceList(peerUserId);
+    } catch (err) {
+      if (err instanceof E2EIdentityChangedError) throw err;
+      // fall back to the pin: an offline client must still show the number
+      console.warn(`e2e: falling back to the pinned master key of ${peerUserId}:`, errText(err));
+    }
+    const pinned = await this.vault.getMasterIdentity(peerUserId);
+    if (!pinned) return null;
+    return {
+      digits: master_safety_number(this.userId, own, peerUserId, pinned.masterKey),
+      verified: pinned.verified,
+    };
+  }
+
+  /** Has the peer's ACCOUNT key been compared out of band (D9)? */
+  async isAccountVerified(peerUserId: string): Promise<boolean> {
+    return (await this.vault.getMasterIdentity(peerUserId))?.verified ?? false;
   }
 
   /** Mark ONE device of a peer as verified out of band. */
@@ -1459,8 +2044,17 @@ export class E2EService {
     return { digits: all[0].digits, verified: all.every((d) => d.verified) };
   }
 
-  /** Mark every currently pinned device of a peer as verified. */
+  /**
+   * The user compared a peer's number out of band (D9). This now marks the
+   * ACCOUNT master key verified — every cross-signed device inherits it,
+   * including ones the peer adds later. Devices pinned today are still marked
+   * individually so accounts without a master key (D11) keep working.
+   */
   async markIdentityVerified(peerUserId: string): Promise<void> {
+    const master = await this.vault.getMasterIdentity(peerUserId);
+    if (master && !master.verified) {
+      await this.vault.putMasterIdentity(peerUserId, { ...master, verified: true });
+    }
     const pinned = await this.vault.listIdentities(peerUserId);
     for (const { deviceId, identity } of pinned) {
       if (identity.verified) continue;

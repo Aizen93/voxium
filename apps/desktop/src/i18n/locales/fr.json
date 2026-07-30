@@ -977,6 +977,19 @@
     "ownDeviceBadgeTitle": "Un appareil a été ajouté à votre compte — vérifiez-le",
     "ownDeviceWarning": "Un appareil que vous ne reconnaissez peut-être pas a été ajouté à votre compte ({{count}}). Il peut lire vos conversations chiffrées. Révoquez-le s'il n'est pas le vôtre.",
     "ownDevicesReviewed": "Ce sont mes appareils",
-    "unrecognisedDevice": "nouveau"
+    "unrecognisedDevice": "nouveau",
+    "accountSafetyExplainer": "Comparez ce numéro avec {{name}} par un autre canal (en personne ou lors d'un appel) pour vérifier votre compte. Il est identique sur chaque appareil que vous utilisez tous les deux, et ne change que si une clé de compte est réinitialisée.",
+    "markAccountVerified": "Marquer le compte comme vérifié",
+    "advancedDevices": "Avancé : détails par appareil",
+    "crossSignedChip": "Vérifié par la clé de compte",
+    "unsignedChip": "Non signé par la clé de compte de {{name}}",
+    "unsignedChipOwn": "Non signé par votre clé de compte",
+    "approveDevice": "Approuver cet appareil",
+    "approveDeviceSuccess": "Appareil approuvé",
+    "approveDeviceFailed": "Impossible d'approuver l'appareil",
+    "cannotApproveExplainer": "Cet appareil ne peut pas encore en approuver d'autres. Approuvez-le depuis un appareil ayant déjà accès à la clé de votre compte.",
+    "accountSafetyNumberUnavailable": "Numéro de sécurité du compte indisponible — affichage des numéros par appareil uniquement.",
+    "unsignedDeviceBadgeTitle": "Un appareil n'est pas signé par la clé du compte — vérifiez-le",
+    "unsignedDevicesWarning": "{{count}} appareil de {{name}} n'est pas signé par sa clé de compte. Il peut malgré tout lire les nouveaux messages : considérez-le comme non vérifié tant qu'il n'est pas approuvé depuis un appareil déjà utilisé."
   }
 }

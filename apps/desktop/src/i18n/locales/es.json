@@ -977,6 +977,19 @@
     "ownDeviceBadgeTitle": "Se añadió un dispositivo a tu cuenta — revísalo",
     "ownDeviceWarning": "Se añadió a tu cuenta un dispositivo que quizá no reconozcas ({{count}}). Puede leer tus conversaciones cifradas. Revócalo si no es tuyo.",
     "ownDevicesReviewed": "Estos son mis dispositivos",
-    "unrecognisedDevice": "nuevo"
+    "unrecognisedDevice": "nuevo",
+    "accountSafetyExplainer": "Compara este número con {{name}} por otro canal (en persona o en una llamada) para verificar tu cuenta. Es el mismo en todos los dispositivos que use cada uno, y solo cambia si se restablece una clave de cuenta.",
+    "markAccountVerified": "Marcar cuenta como verificada",
+    "advancedDevices": "Avanzado: detalles por dispositivo",
+    "crossSignedChip": "Verificado por la clave de la cuenta",
+    "unsignedChip": "No firmado por la clave de la cuenta de {{name}}",
+    "unsignedChipOwn": "No firmado por la clave de tu cuenta",
+    "approveDevice": "Aprobar este dispositivo",
+    "approveDeviceSuccess": "Dispositivo aprobado",
+    "approveDeviceFailed": "No se pudo aprobar el dispositivo",
+    "cannotApproveExplainer": "Este dispositivo aún no puede aprobar otros. Apruébalo desde un dispositivo que ya tenga acceso a la clave de tu cuenta.",
+    "accountSafetyNumberUnavailable": "Número de seguridad de la cuenta no disponible — mostrando solo números por dispositivo.",
+    "unsignedDeviceBadgeTitle": "Un dispositivo no está firmado con la clave de la cuenta — revísalo",
+    "unsignedDevicesWarning": "{{count}} dispositivo de {{name}} no está firmado con su clave de cuenta. Aun así puede leer los mensajes nuevos: trátalo como no verificado hasta que lo apruebe desde un dispositivo que ya use."
   }
 }

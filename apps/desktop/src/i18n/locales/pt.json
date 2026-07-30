@@ -977,6 +977,19 @@
     "ownDeviceBadgeTitle": "Um dispositivo foi adicionado à sua conta — revise",
     "ownDeviceWarning": "Um dispositivo que você talvez não reconheça foi adicionado à sua conta ({{count}}). Ele pode ler suas conversas criptografadas. Revogue-o se não for seu.",
     "ownDevicesReviewed": "Estes são os meus dispositivos",
-    "unrecognisedDevice": "novo"
+    "unrecognisedDevice": "novo",
+    "accountSafetyExplainer": "Compare este número com {{name}} por outro canal (pessoalmente ou em uma chamada) para verificar sua conta. Ele é o mesmo em todos os dispositivos que qualquer um de vocês usar, e só muda se uma chave da conta for redefinida.",
+    "markAccountVerified": "Marcar conta como verificada",
+    "advancedDevices": "Avançado: detalhes por dispositivo",
+    "crossSignedChip": "Verificado pela chave da conta",
+    "unsignedChip": "Não assinado pela chave da conta de {{name}}",
+    "unsignedChipOwn": "Não assinado pela chave da sua conta",
+    "approveDevice": "Aprovar este dispositivo",
+    "approveDeviceSuccess": "Dispositivo aprovado",
+    "approveDeviceFailed": "Não foi possível aprovar o dispositivo",
+    "cannotApproveExplainer": "Este dispositivo ainda não pode aprovar outros. Aprove-o a partir de um dispositivo que já tenha acesso à chave da sua conta.",
+    "accountSafetyNumberUnavailable": "Número de segurança da conta indisponível — mostrando apenas números por dispositivo.",
+    "unsignedDeviceBadgeTitle": "Um dispositivo não está assinado pela chave da conta — revise",
+    "unsignedDevicesWarning": "{{count}} dispositivo de {{name}} não está assinado pela chave da conta. Ele ainda pode ler mensagens novas: trate-o como não verificado até ser aprovado a partir de um dispositivo já usado."
   }
 }

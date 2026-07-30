@@ -442,8 +442,8 @@ read.
   by `rateLimitE2EDevice` (5/hour) and harmless (a 6th device is still fully
   authenticated).
 - History does not follow a new device (no key backup) — by design, §11.
-- Cross-signing (one safety number per account instead of per device) is the
-  natural next step; today users verify per device.
+- ~~Cross-signing~~ — shipped, see §14: one safety number per account, and
+  device trust is now a signature check rather than a user judgement call.
 
 ### 12.7 Pre-release reset
 
@@ -480,3 +480,141 @@ rows rather than carrying a compatibility path. Clients re-register their
 - The sender caches the **raw structured plaintext** (spec §7.2), so refetch,
   reply previews, and client-side search all recover text + attachment names
   (search matches file names too).
+
+## 14. Cross-signing (Phase C, shipped)
+
+Verifying a contact used to mean comparing a 60-digit number with **every one
+of their devices**, and every device they added raised a warning the user had
+to judge. Cross-signing replaces that with one number per account, and turns
+"an unknown device appeared" from a UX prompt into a cryptographic fact: a
+device either carries a valid signature from the account's master key or it
+does not.
+
+### 14.1 Keys
+
+Each account has one Ed25519 **master key**. Its public half is published; the
+private half never leaves a device unsealed.
+
+```
+master binding:  voxium-e2e-v2|master|<userId>|<masterKeyB64>          signed by MSK
+device binding:  voxium-e2e-v2|device-cross|<userId>|<deviceId>|<curve25519>|<ed25519>   signed by MSK
+```
+
+The self-signature proves possession of the key being published. The device
+binding names the user, the device, **and both of that device's public keys**,
+so a signature cannot be replayed onto another device, another account, or the
+same device after it re-registers with new keys.
+
+There is deliberately **no separate self-signing key** (Matrix's SSK). That
+layer exists so a master key can stay offline; ours lives in the same vault as
+everything else, so it would add a level of indirection and no isolation. The
+master key signs devices directly.
+
+The existing per-device self-signature (§4.1) is unchanged and still verified —
+cross-signing is an additional layer, not a replacement.
+
+### 14.2 Trust ordering (the part that matters)
+
+The server is untrusted storage. Every decision follows one precedence:
+
+> **the secret we hold  >  the key we pinned earlier  >  what the server says**
+
+Concretely, on startup (`bootstrapMasterKey`):
+
+- **We hold the secret** → it *is* the account key. If the server publishes a
+  different one we neither adopt it nor delete ours; the conflict is surfaced
+  (`hasMasterKeyConflict`). If the server has none, we publish ours.
+- **No secret but a pin** → we already know our account key. A different
+  published key raises the conflict; we never mint a replacement. This device
+  stays unsigned until an existing device approves it.
+- **No secret, no pin, key published** → trust on first use, pinned
+  **unverified**. Marking it verified here would let a server-supplied key
+  bless server-injected devices.
+- **Nothing at all** → genuinely the first device: mint, seal, publish,
+  self-sign.
+
+Two rules follow from this and are load-bearing:
+
+1. **Never delete local key material on the server's assertion.** A server that
+   serves a plausible wrong key would otherwise strip every device of its
+   approval capability and break sending outright.
+2. **Never mint a replacement for a key we have pinned.** "The account has no
+   master key" is the server's word; believing it would wipe every device
+   signature and force an identity-change prompt on every peer — a remote,
+   repeatable trust reset that also trains users to click through the one
+   dialog the whole model depends on.
+
+### 14.3 Peer verification and the auto-trust window
+
+`fetchDeviceList` verifies, in order: the master self-signature; the master key
+against the TOFU pin (`master:{userId}` — a change raises
+`E2EIdentityChangedError`); then each device's self-signature and its
+cross-signature **against the pinned key**, never one supplied in the same
+response.
+
+Cross-signed devices are acknowledged automatically — no warning, no prompt.
+That is the entire UX payoff, and it is gated: auto-trust applies only under a
+master key the user has **acknowledged** (`acknowledgedMasterKey`) or verified
+out of band. A key that first appears in the same response as the devices it
+signs proves nothing, and *seeing* a key twice is not acknowledgement either.
+Without that gate, a server could mint a master key for an account that never
+had one, sign its own device with it, and have it silently trusted — strictly
+worse than the pre-cross-signing warning it replaced.
+
+Devices without a valid cross-signature warn, are labelled "not signed by
+<name>'s account key" in the badge, the safety-number modal and the device
+manager, and cannot be cleared by acknowledgement alone.
+
+### 14.4 Device approval
+
+A device holding the master secret can approve another of its own devices:
+
+1. queue the master secret to the target over the existing pairwise Olm channel
+2. publish the target's cross-signature
+
+**That order is deliberate.** The reverse leaves a device everyone treats as
+fully trusted but which never received the key — and the approve button
+disappears with it, because approval is only offered for unsigned devices.
+
+The secret is assembled, encrypted, parsed and checked **inside the engine**
+(`EngineSession.encryptMasterSecret` / `decryptMasterSecret`,
+`EngineAccount.createInboundSessionForMasterSecret` for the pre-key case). The
+private half has no JS-facing accessor at all, so §7's "the pickle key is the
+only secret JS handles" still holds. The importer requires the derived public
+key to equal the published master key, and the ciphertext to decrypt under the
+sending device's pinned Olm identity.
+
+If no approved device is available, the honest outcome is a new account
+identity: peers see a changed safety number, which is the correct signal.
+Encrypted key backup (Matrix's SSSS) is deliberately out of scope.
+
+### 14.5 At rest
+
+The master secret is stored sealed (`sealSecret`, AES-256-GCM under the vault
+pickle key) at `master_secret`. Sealed blobs carry the vault field name as
+**AAD**, so two sealed fields cannot be swapped by anyone with IndexedDB write
+access. `master:{userId}` holds public material only.
+
+### 14.6 Server surface
+
+`PUT /e2e/master-key` (publish + optionally sign devices), `POST
+/e2e/devices/:deviceId/signature`, and a self-only `POST`/`GET
+/e2e/master-transfers` mailbox (claim-and-delete, `FOR UPDATE SKIP LOCKED`,
+per-device cap, swept with the key-share retention job). The server verifies
+every signature it stores and rejects the whole request on any bad one, but it
+is never the authority on trust — the client re-verifies everything.
+
+Cross-signing writes use their own rate limiter: sharing the 5/hour device
+registration bucket made a normal multi-device setup 429 halfway through an
+approval.
+
+### 14.7 Known gaps
+
+- Fanout is unchanged: unsigned devices still receive session keys (warn, don't
+  block — §12.5). Blocking would lock a user out of a new device with no way to
+  approve it.
+- Trust on first use remains for a peer's very first master key, as in any
+  system without a prior channel. The safety number is what closes it.
+- No encrypted key backup, so an account with no approved device online starts
+  a new identity rather than recovering the old one.
+

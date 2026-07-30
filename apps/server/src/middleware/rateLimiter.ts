@@ -55,6 +55,10 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // Group-session key fan-out: one batched POST per rotation plus periodic
   // claims, so a modest budget covers normal multi-device use.
   e2eShares:      { keyPrefix: 'rl:e2eshare',  points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Key Shares' },
+  // Cross-signing writes must NOT share the 5/hour device-registration
+  // bucket: setting up several devices costs a publish plus one approval
+  // each, and a 429 mid-approval leaves a device half-approved.
+  e2eApprove:     { keyPrefix: 'rl:e2eappr',   points: 30,  duration: 3600, blockDuration: 0,  keyType: 'userId', label: 'E2E Approval' },
 };
 
 // Overrides loaded from Redis on init, updated via admin API
@@ -240,6 +244,7 @@ export const rateLimitE2EKeys = createMiddleware('e2eKeys', byUserId);
 export const rateLimitE2EBundle = createMiddleware('e2eBundle', byUserId);
 export const rateLimitE2EStatus = createMiddleware('e2eStatus', byUserId);
 export const rateLimitE2EShares = createMiddleware('e2eShares', byUserId);
+export const rateLimitE2EApprove = createMiddleware('e2eApprove', byUserId);
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────
 

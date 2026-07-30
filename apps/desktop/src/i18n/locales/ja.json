@@ -977,6 +977,19 @@
     "ownDeviceBadgeTitle": "アカウントにデバイスが追加されました — 確認してください",
     "ownDeviceWarning": "心当たりのないデバイスがアカウントに追加されました（{{count}}）。暗号化された会話を読み取れます。自分のものでなければ失効させてください。",
     "ownDevicesReviewed": "これは自分のデバイスです",
-    "unrecognisedDevice": "新規"
+    "unrecognisedDevice": "新規",
+    "accountSafetyExplainer": "この番号を{{name}}さんと別の方法（対面や通話）で照合し、アカウントを確認してください。どちらかが使用するすべての端末で同じ番号になり、アカウント鍵をリセットした場合のみ変わります。",
+    "markAccountVerified": "アカウントを確認済みにする",
+    "advancedDevices": "詳細設定：端末ごとの情報",
+    "crossSignedChip": "アカウント鍵で確認済み",
+    "unsignedChip": "{{name}}さんのアカウント鍵で署名されていません",
+    "unsignedChipOwn": "あなたのアカウント鍵で署名されていません",
+    "approveDevice": "この端末を承認",
+    "approveDeviceSuccess": "端末を承認しました",
+    "approveDeviceFailed": "端末を承認できませんでした",
+    "cannotApproveExplainer": "この端末はまだ他の端末を承認できません。すでにアカウント鍵にアクセスできる端末から承認してください。",
+    "accountSafetyNumberUnavailable": "アカウントの安全番号を取得できません — 端末ごとの番号のみ表示しています。",
+    "unsignedDeviceBadgeTitle": "アカウント鍵で署名されていないデバイスがあります — 確認してください",
+    "unsignedDevicesWarning": "{{name}}さんのデバイス{{count}}台がアカウント鍵で署名されていません。新しいメッセージは読めてしまうため、既存のデバイスから承認されるまで未確認として扱ってください。"
   }
 }

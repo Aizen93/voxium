@@ -2,7 +2,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { generateKeyPairSync, sign as cryptoSign, randomBytes } from 'node:crypto';
-import { e2eDeviceCanonical, e2eKeyCanonical, E2E_LIMITS, buildE2EEnvelope, buildMegolmEnvelope } from '@voxium/shared';
+import {
+  e2eDeviceCanonical,
+  e2eDeviceCrossCanonical,
+  e2eKeyCanonical,
+  e2eMasterCanonical,
+  E2E_LIMITS,
+  buildE2EEnvelope,
+  buildMegolmEnvelope,
+} from '@voxium/shared';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -22,6 +30,7 @@ vi.mock('../../middleware/rateLimiter', () => {
     rateLimitE2EBundle: passthrough,
     rateLimitE2EStatus: passthrough,
     rateLimitE2EShares: passthrough,
+    rateLimitE2EApprove: passthrough,
   };
 });
 
@@ -32,6 +41,7 @@ vi.mock('../../utils/prisma', () => ({
       findMany: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       delete: vi.fn(),
       count: vi.fn(),
     },
@@ -43,6 +53,16 @@ vi.mock('../../utils/prisma', () => ({
     e2EDeviceRegistry: {
       findUnique: vi.fn(),
       upsert: vi.fn(),
+    },
+    e2EMasterKey: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+    },
+    e2EMasterTransfer: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+      createMany: vi.fn(),
+      deleteMany: vi.fn(),
     },
     e2EKeyShare: {
       count: vi.fn(),
@@ -88,6 +108,27 @@ function makeTestDevice(userId: string, deviceId: string) {
     deviceSignature: signRaw(e2eDeviceCanonical(userId, deviceId, curve25519Key, ed25519Key)),
     signRaw,
     oneTimeKey,
+  };
+}
+
+/**
+ * An account master key with a real signing key (spec §14). Signs the D1 self
+ * canonical and the D2 device-cross canonical — the routes verify both with the
+ * production node:crypto path, so nothing here can be faked with a stub.
+ */
+function makeTestMasterKey(userId: string) {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const spki = publicKey.export({ format: 'der', type: 'spki' }) as Buffer;
+  const masterKey = unpadded(spki.subarray(spki.length - 32).toString('base64'));
+  const signRaw = (message: string) =>
+    unpadded(cryptoSign(null, Buffer.from(message, 'utf8'), privateKey).toString('base64'));
+  return {
+    masterKey,
+    signRaw,
+    masterSignature: signRaw(e2eMasterCanonical(userId, masterKey)),
+    /** Cross-signature over a device identity — what makes a device trusted. */
+    crossSign: (deviceId: string, curve25519Key: string, ed25519Key: string) =>
+      signRaw(e2eDeviceCrossCanonical(userId, deviceId, curve25519Key, ed25519Key)),
   };
 }
 
@@ -318,6 +359,8 @@ describe('E2E routes — device lists', () => {
         curve25519Key: `curve-${DEVICE_A}`,
         ed25519Key: `ed-${DEVICE_A}`,
         deviceSignature: `sig-${DEVICE_A}`,
+        // pre-cross-signing rows carry no signature — explicit null, not absent
+        masterSignature: null,
         createdAt: '2026-07-20T00:00:00.000Z',
       },
       expect.objectContaining({ deviceId: DEVICE_B }),
@@ -330,7 +373,13 @@ describe('E2E routes — device lists', () => {
     vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([] as any);
     const res = await request(createApp()).get('/api/v1/e2e/devices/me');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ registered: false, devices: [], listVersion: 7 });
+    expect(res.body.data).toEqual({
+      registered: false,
+      devices: [],
+      listVersion: 7,
+      masterKey: null,
+      masterSignature: null,
+    });
   });
 
   it('reports this device key stock when ?deviceId is given', async () => {
@@ -391,7 +440,7 @@ describe('E2E routes — device lists', () => {
 
     const res = await request(createApp()).get('/api/v1/e2e/devices/user-2');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ devices: [], listVersion: 0 });
+    expect(res.body.data).toEqual({ devices: [], listVersion: 0, masterKey: null, masterSignature: null });
   });
 
   it('allows fetching your own list through the public route without a conversation', async () => {
@@ -420,6 +469,10 @@ describe('E2E routes — device revocation', () => {
     expect(prisma.e2EDevice.delete).toHaveBeenCalledWith({ where: { id: 'row-a' } });
     expect(prisma.e2EKeyShare.deleteMany).toHaveBeenCalledWith({
       where: { recipientUserId: 'user-1', recipientDeviceId: DEVICE_A },
+    });
+    // a pending master-secret handoff is undecryptable once the device is gone
+    expect(prisma.e2EMasterTransfer.deleteMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1', recipientDeviceId: DEVICE_A },
     });
     expect(prisma.e2EDeviceRegistry.upsert).toHaveBeenCalled();
   });
@@ -887,6 +940,573 @@ describe('E2E routes — GET /keyshares', () => {
 
   it('rejects a malformed deviceId', async () => {
     const res = await request(createApp()).get('/api/v1/e2e/keyshares?deviceId=nope');
+    expect(res.status).toBe(400);
+    expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+// ─── PUT /master-key (cross-signing, spec §14) ───────────────────────────────
+
+describe('E2E routes — PUT /master-key', () => {
+  beforeEach(() => {
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.e2EMasterKey.upsert).mockResolvedValue({
+      userId: 'user-1',
+      publicKey: 'x',
+      signature: 'y',
+      updatedAt: new Date('2026-07-30T00:00:00Z'),
+    } as any);
+  });
+
+  it('publishes a self-signed master key and bumps the list version', async () => {
+    const master = makeTestMasterKey('user-1');
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({ masterKey: master.masterKey, masterSignature: master.masterSignature });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.masterKey).toBe(master.masterKey);
+    expect(res.body.data.signedDevices).toBe(0);
+    expect(res.body.data.listVersion).toBe(3);
+    expect(prisma.e2EMasterKey.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: 'user-1' },
+        update: { publicKey: master.masterKey, signature: master.masterSignature },
+      })
+    );
+    // peers key their re-fetch off the registry version
+    expect(prisma.e2EDeviceRegistry.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: 'user-1' }, update: { version: { increment: 1 } } })
+    );
+  });
+
+  it('rejects a master key whose self-signature does not verify', async () => {
+    const master = makeTestMasterKey('user-1');
+    const other = makeTestMasterKey('user-1');
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({ masterKey: master.masterKey, masterSignature: other.masterSignature });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/signature verification failed/i);
+    expect(prisma.e2EMasterKey.upsert).not.toHaveBeenCalled();
+    expect(prisma.e2EDeviceRegistry.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a self-signature made for a DIFFERENT user (no canonical splicing)', async () => {
+    // Same key, signature bound to another userId — the canonical includes the
+    // user, so a stolen self-signature cannot be replayed into another account.
+    const foreign = makeTestMasterKey('user-9');
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({ masterKey: foreign.masterKey, masterSignature: foreign.masterSignature });
+
+    expect(res.status).toBe(400);
+    expect(prisma.e2EMasterKey.upsert).not.toHaveBeenCalled();
+  });
+
+  it('validates masterKey / masterSignature encodings', async () => {
+    const app = createApp();
+    const master = makeTestMasterKey('user-1');
+    const bad = [
+      {},
+      { masterKey: 'short', masterSignature: master.masterSignature },
+      { masterKey: master.masterKey },
+      { masterKey: master.masterKey, masterSignature: 'nope' },
+      { masterKey: 12, masterSignature: master.masterSignature },
+    ];
+    for (const body of bad) {
+      expect((await request(app).put('/api/v1/e2e/master-key').send(body)).status).toBe(400);
+    }
+    expect(prisma.e2EMasterKey.upsert).not.toHaveBeenCalled();
+  });
+
+  it('applies device cross-signatures in the same transaction', async () => {
+    const master = makeTestMasterKey('user-1');
+    const device = makeTestDevice('user-1', DEVICE_A);
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([
+      { id: 'row-a', deviceId: DEVICE_A, curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key },
+    ] as any);
+
+    const signature = master.crossSign(DEVICE_A, device.curve25519Key, device.ed25519Key);
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({
+        masterKey: master.masterKey,
+        masterSignature: master.masterSignature,
+        deviceSignatures: [{ deviceId: DEVICE_A, signature }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.signedDevices).toBe(1);
+    expect(prisma.e2EDevice.update).toHaveBeenCalledWith({
+      where: { id: 'row-a' },
+      data: { masterSignature: signature },
+    });
+  });
+
+  it('rejects the WHOLE request when one device signature is bad', async () => {
+    const master = makeTestMasterKey('user-1');
+    const impostor = makeTestMasterKey('user-1');
+    const a = makeTestDevice('user-1', DEVICE_A);
+    const b = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([
+      { id: 'row-a', deviceId: DEVICE_A, curve25519Key: a.curve25519Key, ed25519Key: a.ed25519Key },
+      { id: 'row-b', deviceId: DEVICE_B, curve25519Key: b.curve25519Key, ed25519Key: b.ed25519Key },
+    ] as any);
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({
+        masterKey: master.masterKey,
+        masterSignature: master.masterSignature,
+        deviceSignatures: [
+          { deviceId: DEVICE_A, signature: master.crossSign(DEVICE_A, a.curve25519Key, a.ed25519Key) },
+          // signed by a key that is NOT the published master key
+          { deviceId: DEVICE_B, signature: impostor.crossSign(DEVICE_B, b.curve25519Key, b.ed25519Key) },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/cross-signature verification failed/i);
+  });
+
+  it("rejects signatures for devices that are not the caller's", async () => {
+    const master = makeTestMasterKey('user-1');
+    const device = makeTestDevice('user-1', DEVICE_B);
+    // scoped lookup returns nothing — the device belongs to somebody else
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([] as any);
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({
+        masterKey: master.masterKey,
+        masterSignature: master.masterSignature,
+        deviceSignatures: [
+          { deviceId: DEVICE_B, signature: master.crossSign(DEVICE_B, device.curve25519Key, device.ed25519Key) },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/unknown device/i);
+    expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
+    // the scoped lookup never leaves the caller's own devices
+    expect(prisma.e2EDevice.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: 'user-1', deviceId: { in: [DEVICE_B] } } })
+    );
+  });
+
+  it('validates the deviceSignatures batch shape', async () => {
+    const app = createApp();
+    const master = makeTestMasterKey('user-1');
+    const base = { masterKey: master.masterKey, masterSignature: master.masterSignature };
+    const bad = [
+      { ...base, deviceSignatures: 'nope' },
+      { ...base, deviceSignatures: [{ deviceId: 'x', signature: master.masterSignature }] },
+      { ...base, deviceSignatures: [{ deviceId: DEVICE_A, signature: 'nope' }] },
+      { ...base, deviceSignatures: [null] },
+      // duplicate entries for the same device
+      {
+        ...base,
+        deviceSignatures: [
+          { deviceId: DEVICE_A, signature: master.masterSignature },
+          { deviceId: DEVICE_A, signature: master.masterSignature },
+        ],
+      },
+      {
+        ...base,
+        deviceSignatures: Array.from({ length: E2E_LIMITS.MAX_DEVICES + 1 }, (_, i) => ({
+          deviceId: `device-zzzz${String(i).padStart(4, '0')}`,
+          signature: master.masterSignature,
+        })),
+      },
+    ];
+    for (const body of bad) {
+      expect((await request(app).put('/api/v1/e2e/master-key').send(body)).status).toBe(400);
+    }
+    expect(prisma.e2EMasterKey.upsert).not.toHaveBeenCalled();
+  });
+
+  it('clears stale cross-signatures when the master key is REPLACED', async () => {
+    // Every stored signature was made by the old key: it would fail on every
+    // client, so serving it would only produce confusing "unsigned" states.
+    const master = makeTestMasterKey('user-1');
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: 'AAAAold' } as any);
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({ masterKey: master.masterKey, masterSignature: master.masterSignature });
+
+    expect(res.status).toBe(200);
+    expect(prisma.e2EDevice.updateMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+      data: { masterSignature: null },
+    });
+  });
+
+  it('does NOT clear signatures when re-publishing the same master key', async () => {
+    const master = makeTestMasterKey('user-1');
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({ masterKey: master.masterKey, masterSignature: master.masterSignature });
+
+    expect(res.status).toBe(200);
+    expect(prisma.e2EDevice.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /devices/:deviceId/signature ──────────────────────────────────────
+
+describe('E2E routes — device cross-signature', () => {
+  it('stores a valid cross-signature and bumps the list version', async () => {
+    const master = makeTestMasterKey('user-1');
+    const device = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'row-b',
+      curve25519Key: device.curve25519Key,
+      ed25519Key: device.ed25519Key,
+    } as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
+    vi.mocked(prisma.e2EDeviceRegistry.upsert).mockResolvedValue({ version: 11 } as any);
+
+    const signature = master.crossSign(DEVICE_B, device.curve25519Key, device.ed25519Key);
+    const res = await request(createApp())
+      .post(`/api/v1/e2e/devices/${DEVICE_B}/signature`)
+      .send({ signature });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ deviceId: DEVICE_B, signed: true, listVersion: 11 });
+    expect(prisma.e2EDevice.update).toHaveBeenCalledWith({
+      where: { id: 'row-b' },
+      data: { masterSignature: signature },
+    });
+  });
+
+  it('rejects a signature made by a key other than the published master key', async () => {
+    const master = makeTestMasterKey('user-1');
+    const impostor = makeTestMasterKey('user-1');
+    const device = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'row-b',
+      curve25519Key: device.curve25519Key,
+      ed25519Key: device.ed25519Key,
+    } as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
+
+    const res = await request(createApp())
+      .post(`/api/v1/e2e/devices/${DEVICE_B}/signature`)
+      .send({ signature: impostor.crossSign(DEVICE_B, device.curve25519Key, device.ed25519Key) });
+
+    expect(res.status).toBe(400);
+    expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
+    expect(prisma.e2EDeviceRegistry.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a signature over a DIFFERENT device identity', async () => {
+    // The canonical binds the deviceId and both keys — a signature minted for
+    // device A can never be moved onto device B's slot.
+    const master = makeTestMasterKey('user-1');
+    const a = makeTestDevice('user-1', DEVICE_A);
+    const b = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'row-b',
+      curve25519Key: b.curve25519Key,
+      ed25519Key: b.ed25519Key,
+    } as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
+
+    const res = await request(createApp())
+      .post(`/api/v1/e2e/devices/${DEVICE_B}/signature`)
+      .send({ signature: master.crossSign(DEVICE_A, a.curve25519Key, a.ed25519Key) });
+
+    expect(res.status).toBe(400);
+    expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
+  });
+
+  it('404s for a device the caller does not own', async () => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    const master = makeTestMasterKey('user-1');
+
+    const res = await request(createApp())
+      .post(`/api/v1/e2e/devices/${DEVICE_B}/signature`)
+      .send({ signature: master.masterSignature });
+
+    expect(res.status).toBe(404);
+    expect(prisma.e2EDevice.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId_deviceId: { userId: 'user-1', deviceId: DEVICE_B } } })
+    );
+    expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
+  });
+
+  it('409s when the account has no published master key', async () => {
+    const device = makeTestDevice('user-1', DEVICE_B);
+    const master = makeTestMasterKey('user-1');
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'row-b',
+      curve25519Key: device.curve25519Key,
+      ed25519Key: device.ed25519Key,
+    } as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+
+    const res = await request(createApp())
+      .post(`/api/v1/e2e/devices/${DEVICE_B}/signature`)
+      .send({ signature: master.crossSign(DEVICE_B, device.curve25519Key, device.ed25519Key) });
+
+    expect(res.status).toBe(409);
+    expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
+  });
+
+  it('validates the deviceId and the signature encoding', async () => {
+    const app = createApp();
+    const master = makeTestMasterKey('user-1');
+    expect(
+      (await request(app).post('/api/v1/e2e/devices/nope/signature').send({ signature: master.masterSignature })).status
+    ).toBe(400);
+    expect((await request(app).post(`/api/v1/e2e/devices/${DEVICE_A}/signature`).send({})).status).toBe(400);
+    expect((await request(app).post(`/api/v1/e2e/devices/${DEVICE_A}/signature`).send({ signature: 'short' })).status).toBe(400);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Device lists carry the master key (spec §14) ───────────────────────────
+
+describe('E2E routes — device lists with cross-signing', () => {
+  it("returns a peer's master key and per-device cross-signature", async () => {
+    const master = makeTestMasterKey('user-2');
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(mockConversation as any);
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([
+      deviceRow(DEVICE_A, { masterSignature: 'cross-a' }),
+      deviceRow(DEVICE_B, { masterSignature: null }),
+    ] as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({
+      publicKey: master.masterKey,
+      signature: master.masterSignature,
+    } as any);
+
+    const res = await request(createApp()).get('/api/v1/e2e/devices/user-2');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.masterKey).toBe(master.masterKey);
+    expect(res.body.data.masterSignature).toBe(master.masterSignature);
+    expect(res.body.data.devices[0].masterSignature).toBe('cross-a');
+    // an unsigned device still appears — fanout is warn-not-block
+    expect(res.body.data.devices[1].masterSignature).toBeNull();
+    expect(prisma.e2EMasterKey.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: 'user-2' } })
+    );
+  });
+
+  it('lists devices registered BEFORE cross-signing without crashing (D11)', async () => {
+    // Legacy rows have no master_signature value at all.
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([deviceRow(DEVICE_A)] as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+
+    const res = await request(createApp()).get('/api/v1/e2e/devices/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.devices[0].masterSignature).toBeNull();
+    expect(res.body.data.masterKey).toBeNull();
+    expect(res.body.data.masterSignature).toBeNull();
+  });
+
+  it('includes the master key in the ?deviceId form of /devices/me', async () => {
+    const master = makeTestMasterKey('user-1');
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([
+      deviceRow(DEVICE_A, { masterSignature: 'cross-a' }),
+    ] as any);
+    vi.mocked(prisma.e2EOneTimeKey.count).mockResolvedValue(5);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({
+      publicKey: master.masterKey,
+      signature: master.masterSignature,
+    } as any);
+
+    const res = await request(createApp()).get(`/api/v1/e2e/devices/me?deviceId=${DEVICE_A}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.masterKey).toBe(master.masterKey);
+    expect(res.body.data.devices[0].masterSignature).toBe('cross-a');
+  });
+});
+
+// ─── Master-secret transfers (device approval, spec §14) ────────────────────
+
+const transferBody = buildE2EEnvelope(0, 'bWFzdGVyU2VjcmV0Q2lwaGVydGV4dA');
+
+function transfer(over: Record<string, unknown> = {}) {
+  return { recipientDeviceId: DEVICE_B, body: transferBody, ...over };
+}
+
+describe('E2E routes — POST /master-transfers', () => {
+  beforeEach(() => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    // Ownership check: by default every requested recipient is one of ours
+    vi.mocked(prisma.e2EDevice.findMany).mockImplementation(((args: any) =>
+      Promise.resolve(((args?.where?.deviceId?.in ?? []) as string[]).map((deviceId) => ({ deviceId })))) as any);
+    vi.mocked(prisma.e2EMasterTransfer.count).mockResolvedValue(0);
+  });
+
+  it('queues a transfer for another device of the SAME account', async () => {
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers')
+      .send({ deviceId: DEVICE_A, transfers: [transfer()] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toEqual({ stored: 1, evicted: 0 });
+    expect(prisma.e2EMasterTransfer.createMany).toHaveBeenCalledWith({
+      data: [{ userId: 'user-1', recipientDeviceId: DEVICE_B, senderDeviceId: DEVICE_A, body: transferBody }],
+    });
+    // there is no recipientUserId anywhere: the mailbox is structurally self-only
+    expect(prisma.e2EDevice.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: 'user-1', deviceId: { in: [DEVICE_B] } } })
+    );
+  });
+
+  it('rejects a recipient device belonging to another user (cross-user attempt)', async () => {
+    // The scoped lookup simply never finds it — no cross-user path exists.
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([] as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers')
+      .send({ deviceId: DEVICE_A, transfers: [transfer({ recipientDeviceId: 'device-ffff9999' })] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/unknown recipient device/i);
+    expect(prisma.e2EMasterTransfer.createMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown sender device (no forged attribution)', async () => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers')
+      .send({ deviceId: DEVICE_A, transfers: [transfer()] });
+    expect(res.status).toBe(403);
+    expect(prisma.e2EMasterTransfer.createMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses a transfer addressed to the sending device itself', async () => {
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers')
+      .send({ deviceId: DEVICE_A, transfers: [transfer({ recipientDeviceId: DEVICE_A })] });
+    expect(res.status).toBe(400);
+    expect(prisma.e2EMasterTransfer.createMany).not.toHaveBeenCalled();
+  });
+
+  it('enforces the batch cap and rejects empty batches', async () => {
+    const app = createApp();
+    expect(
+      (await request(app).post('/api/v1/e2e/master-transfers').send({ deviceId: DEVICE_A, transfers: [] })).status
+    ).toBe(400);
+    expect((await request(app).post('/api/v1/e2e/master-transfers').send({ deviceId: DEVICE_A })).status).toBe(400);
+
+    const tooMany = Array.from({ length: E2E_LIMITS.MASTER_TRANSFER_BATCH_MAX + 1 }, () => transfer());
+    expect(
+      (await request(app).post('/api/v1/e2e/master-transfers').send({ deviceId: DEVICE_A, transfers: tooMany })).status
+    ).toBe(400);
+    expect(prisma.e2EMasterTransfer.createMany).not.toHaveBeenCalled();
+  });
+
+  it('validates every field of every transfer', async () => {
+    const app = createApp();
+    const bad = [
+      transfer({ recipientDeviceId: 'nope' }),
+      transfer({ body: 'not an envelope' }),
+      // megolm bodies are not pairwise transfers
+      transfer({ body: buildMegolmEnvelope('c2Vzc2lvbklk', 'QWJjZA') }),
+      transfer({ body: 123 }),
+      transfer({ body: JSON.stringify({ v: 1, e: 'olm1', t: 0, b: 'Q'.repeat(E2E_LIMITS.KEYSHARE_BODY_MAX) }) }),
+      null,
+    ];
+    for (const t of bad) {
+      const res = await request(app).post('/api/v1/e2e/master-transfers').send({ deviceId: DEVICE_A, transfers: [t] });
+      expect(res.status).toBe(400);
+    }
+    expect(
+      (await request(app).post('/api/v1/e2e/master-transfers').send({ deviceId: 'x', transfers: [transfer()] })).status
+    ).toBe(400);
+    expect(prisma.e2EMasterTransfer.createMany).not.toHaveBeenCalled();
+  });
+
+  it('evicts the oldest pending transfers when the per-device cap is reached', async () => {
+    vi.mocked(prisma.e2EMasterTransfer.count).mockResolvedValue(E2E_LIMITS.MASTER_TRANSFER_STORE_CAP);
+    vi.mocked(prisma.e2EMasterTransfer.findMany).mockResolvedValue([{ id: 'old-1' }] as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers')
+      .send({ deviceId: DEVICE_A, transfers: [transfer()] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toEqual({ stored: 1, evicted: 1 });
+    expect(prisma.e2EMasterTransfer.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: 'user-1', recipientDeviceId: DEVICE_B },
+        orderBy: { createdAt: 'asc' },
+        take: 1,
+      })
+    );
+    expect(prisma.e2EMasterTransfer.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['old-1'] } } });
+  });
+
+  it('does not evict while the mailbox has room', async () => {
+    vi.mocked(prisma.e2EMasterTransfer.count).mockResolvedValue(1);
+    const res = await request(createApp())
+      .post('/api/v1/e2e/master-transfers')
+      .send({ deviceId: DEVICE_A, transfers: [transfer()] });
+    expect(res.status).toBe(201);
+    expect(res.body.data.evicted).toBe(0);
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('E2E routes — GET /master-transfers', () => {
+  it('claims pending transfers atomically and deletes them', async () => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([
+      {
+        id: 'mt-1',
+        sender_device_id: DEVICE_B,
+        body: transferBody,
+        created_at: new Date('2026-07-30T10:00:00Z'),
+      },
+    ]);
+
+    const res = await request(createApp()).get(`/api/v1/e2e/master-transfers?deviceId=${DEVICE_A}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.transfers).toEqual([
+      { id: 'mt-1', senderDeviceId: DEVICE_B, body: transferBody, createdAt: '2026-07-30T10:00:00.000Z' },
+    ]);
+
+    const call = vi.mocked(prisma.$queryRaw).mock.calls[0];
+    const sql = (call[0] as unknown as string[]).join('?');
+    // one statement: an Olm pre-key body decrypts exactly once
+    expect(sql).toContain('DELETE FROM e2e_master_transfers');
+    expect(sql).toContain('RETURNING');
+    expect(sql).toContain('FOR UPDATE SKIP LOCKED');
+    expect(call.slice(1)).toEqual(['user-1', DEVICE_A, E2E_LIMITS.MASTER_TRANSFER_STORE_CAP]);
+  });
+
+  it('returns an empty list when nothing is pending', async () => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([]);
+    const res = await request(createApp()).get(`/api/v1/e2e/master-transfers?deviceId=${DEVICE_A}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.transfers).toEqual([]);
+  });
+
+  it('refuses to drain a mailbox for a device the caller does not own', async () => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    const res = await request(createApp()).get(`/api/v1/e2e/master-transfers?deviceId=${DEVICE_B}`);
+    expect(res.status).toBe(403);
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed deviceId', async () => {
+    const res = await request(createApp()).get('/api/v1/e2e/master-transfers?deviceId=nope');
     expect(res.status).toBe(400);
     expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
   });
