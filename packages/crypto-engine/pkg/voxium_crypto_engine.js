@@ -102,6 +102,28 @@ export class EngineAccount {
         return InboundResult.__wrap(ret[0]);
     }
     /**
+     * Device approval arriving as a PRE-KEY message (the usual case for a
+     * device that has never talked to its sibling): establishes the session and
+     * returns the master key without the secret ever reaching JS.
+     * @param {string} their_identity_key_b64
+     * @param {string} prekey_body_b64
+     * @param {string} expected_master_key
+     * @returns {MasterInboundResult}
+     */
+    createInboundSessionForMasterSecret(their_identity_key_b64, prekey_body_b64, expected_master_key) {
+        const ptr0 = passStringToWasm0(their_identity_key_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(prekey_body_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(expected_master_key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.engineaccount_createInboundSessionForMasterSecret(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return MasterInboundResult.__wrap(ret[0]);
+    }
+    /**
      * Establish an outbound session to a peer from their (already
      * signature-verified) identity key and one-time/fallback key.
      * @param {string} their_identity_key_b64
@@ -555,6 +577,134 @@ export class EngineInboundGroupSession {
 }
 if (Symbol.dispose) EngineInboundGroupSession.prototype[Symbol.dispose] = EngineInboundGroupSession.prototype.free;
 
+/**
+ * Account cross-signing master key. Wraps a vodozemac `Ed25519SecretKey`.
+ */
+export class EngineMasterKey {
+    static __wrap(ptr) {
+        const obj = Object.create(EngineMasterKey.prototype);
+        obj.__wbg_ptr = ptr;
+        EngineMasterKeyFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        EngineMasterKeyFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_enginemasterkey_free(ptr, 0);
+    }
+    /**
+     * Restore a master key from a `sealSecret` blob (the vault's at-rest form).
+     * @param {string} sealed_b64
+     * @param {Uint8Array} pickle_key
+     * @returns {EngineMasterKey}
+     */
+    static fromSealed(sealed_b64, pickle_key) {
+        const ptr0 = passStringToWasm0(sealed_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(pickle_key, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.enginemasterkey_fromSealed(ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EngineMasterKey.__wrap(ret[0]);
+    }
+    /**
+     * Restore a master key from its raw base64 secret — the form transferred
+     * to another of the account's own devices over the pairwise Olm channel
+     * (D6). Callers MUST check `publicKey()` against the published master key
+     * before storing.
+     * @param {string} secret_b64
+     * @returns {EngineMasterKey}
+     */
+    static fromSecret(secret_b64) {
+        const ptr0 = passStringToWasm0(secret_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.enginemasterkey_fromSecret(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EngineMasterKey.__wrap(ret[0]);
+    }
+    /**
+     * Generate a fresh master key.
+     */
+    constructor() {
+        const ret = wasm.enginemasterkey_new();
+        this.__wbg_ptr = ret;
+        EngineMasterKeyFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Base64 of the public master key (the account identity that is published
+     * and compared out of band as the account safety number).
+     * @returns {string}
+     */
+    publicKey() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.enginemasterkey_publicKey(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Seal the private half for storage (AES-256-GCM under the vault key).
+     * @param {Uint8Array} pickle_key
+     * @returns {string}
+     */
+    seal(pickle_key) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passArray8ToWasm0(pickle_key, wasm.__wbindgen_malloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.enginemasterkey_seal(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * Sign a canonical UTF-8 string (master self-signature, device
+     * cross-signature). Verified with the existing `verify_ed25519`.
+     * @param {string} message
+     * @returns {string}
+     */
+    sign(message) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(message, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.enginemasterkey_sign(this.__wbg_ptr, ptr0, len0);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+}
+if (Symbol.dispose) EngineMasterKey.prototype[Symbol.dispose] = EngineMasterKey.prototype.free;
+
 export class EngineSession {
     static __wrap(ptr) {
         const obj = Object.create(EngineSession.prototype);
@@ -599,6 +749,26 @@ export class EngineSession {
         }
     }
     /**
+     * Decrypt a device-approval payload into a usable master key. The expected
+     * public key is checked HERE, so JS cannot skip the check, and the private
+     * half is never exposed to it.
+     * @param {number} message_type
+     * @param {string} body_b64
+     * @param {string} expected_master_key
+     * @returns {EngineMasterKey}
+     */
+    decryptMasterSecret(message_type, body_b64, expected_master_key) {
+        const ptr0 = passStringToWasm0(body_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(expected_master_key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.enginesession_decryptMasterSecret(this.__wbg_ptr, message_type, ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EngineMasterKey.__wrap(ret[0]);
+    }
+    /**
      * Encrypt UTF-8 plaintext. Returns { messageType, body } where body is
      * unpadded base64 and messageType is 0 (pre-key) or 1 (normal).
      * @param {string} plaintext
@@ -608,6 +778,21 @@ export class EngineSession {
         const ptr0 = passStringToWasm0(plaintext, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.enginesession_encrypt(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Encrypt this account's master secret to another of OUR devices (spec
+     * §14, device approval). The payload is assembled here so the private key
+     * never becomes a JS string; the caller only ever sees Olm ciphertext.
+     * @param {EngineMasterKey} master
+     * @returns {any}
+     */
+    encryptMasterSecret(master) {
+        _assertClass(master, EngineMasterKey);
+        const ret = wasm.enginesession_encryptMasterSecret(this.__wbg_ptr, master.__wbg_ptr);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -775,6 +960,50 @@ export class InboundResult {
 if (Symbol.dispose) InboundResult.prototype[Symbol.dispose] = InboundResult.prototype.free;
 
 /**
+ * An inbound Olm session established BY a device-approval pre-key message,
+ * plus the master key it carried.
+ */
+export class MasterInboundResult {
+    static __wrap(ptr) {
+        const obj = Object.create(MasterInboundResult.prototype);
+        obj.__wbg_ptr = ptr;
+        MasterInboundResultFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        MasterInboundResultFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_masterinboundresult_free(ptr, 0);
+    }
+    /**
+     * @returns {EngineMasterKey}
+     */
+    takeMasterKey() {
+        const ret = wasm.masterinboundresult_takeMasterKey(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EngineMasterKey.__wrap(ret[0]);
+    }
+    /**
+     * @returns {EngineSession}
+     */
+    takeSession() {
+        const ret = wasm.masterinboundresult_takeSession(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EngineSession.__wrap(ret[0]);
+    }
+}
+if (Symbol.dispose) MasterInboundResult.prototype[Symbol.dispose] = MasterInboundResult.prototype.free;
+
+/**
  * @param {Uint8Array} ciphertext
  * @param {string} key_b64
  * @param {string} iv_b64
@@ -824,6 +1053,78 @@ export function engine_version() {
         return getStringFromWasm0(ret[0], ret[1]);
     } finally {
         wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Account-level safety number over the PUBLIC cross-signing master keys
+ * (spec §14 / decision D3). Same construction and shape as `safety_number`
+ * — 30 digits per party, halves sorted, 60 digits total — but seeded from the
+ * account master key instead of a single device's identity keys, so one
+ * comparison covers every cross-signed device of that account.
+ * @param {string} user_a
+ * @param {string} master_a_b64
+ * @param {string} user_b
+ * @param {string} master_b_b64
+ * @returns {string}
+ */
+export function master_safety_number(user_a, master_a_b64, user_b, master_b_b64) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const ptr0 = passStringToWasm0(user_a, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(master_a_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(user_b, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(master_b_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.master_safety_number(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var ptr5 = ret[0];
+        var len5 = ret[1];
+        if (ret[3]) {
+            ptr5 = 0; len5 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred6_0 = ptr5;
+        deferred6_1 = len5;
+        return getStringFromWasm0(ptr5, len5);
+    } finally {
+        wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
+ * Open a blob produced by `sealSecret`. Fails on a wrong key or any tampering
+ * (GCM auth tag). Error messages never carry key or plaintext material.
+ * @param {string} sealed_b64
+ * @param {string} context
+ * @param {Uint8Array} pickle_key
+ * @returns {string}
+ */
+export function openSecret(sealed_b64, context, pickle_key) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(sealed_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(context, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(pickle_key, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.openSecret(ptr0, len0, ptr1, len1, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
     }
 }
 
@@ -894,6 +1195,38 @@ export function safety_number(user_a, ed_a_b64, curve_a_b64, user_b, ed_b_b64, c
         return getStringFromWasm0(ptr7, len7);
     } finally {
         wasm.__wbindgen_free(deferred8_0, deferred8_1, 1);
+    }
+}
+
+/**
+ * Seal a UTF-8 secret under a 32-byte key. Output: base64(nonce || ciphertext).
+ * @param {string} plaintext
+ * @param {string} context
+ * @param {Uint8Array} pickle_key
+ * @returns {string}
+ */
+export function sealSecret(plaintext, context, pickle_key) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(plaintext, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(context, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(pickle_key, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.sealSecret(ptr0, len0, ptr1, len1, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
     }
 }
 
@@ -1070,6 +1403,9 @@ const EngineGroupSessionFinalization = (typeof FinalizationRegistry === 'undefin
 const EngineInboundGroupSessionFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_engineinboundgroupsession_free(ptr, 1));
+const EngineMasterKeyFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_enginemasterkey_free(ptr, 1));
 const EngineSessionFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_enginesession_free(ptr, 1));
@@ -1079,11 +1415,20 @@ const GroupDecryptResultFinalization = (typeof FinalizationRegistry === 'undefin
 const InboundResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_inboundresult_free(ptr, 1));
+const MasterInboundResultFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_masterinboundresult_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
     wasm.__wbindgen_externrefs.set(idx, obj);
     return idx;
+}
+
+function _assertClass(instance, klass) {
+    if (!(instance instanceof klass)) {
+        throw new Error(`expected instance of ${klass.name}`);
+    }
 }
 
 function getArrayU8FromWasm0(ptr, len) {

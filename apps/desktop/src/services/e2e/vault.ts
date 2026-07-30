@@ -5,6 +5,8 @@
 //
 //   device_id                        this install's device id (spec §12, D2)
 //   account                          Olm account pickle (vodozemac-encrypted)
+//   master_secret                    OUR account master key, SEALED (spec §14)
+//   master:{userId}                  pinned account master key (TOFU, §14 D7)
 //   session:{userId}:{deviceId}      pairwise Olm session pickle, per DEVICE
 //   session:{userId}                 legacy pre-multi-device session pickle
 //   identity:{userId}:{deviceId}     pinned device identity (TOFU, per device)
@@ -13,6 +15,11 @@
 //   gs:{conversationId}              our outbound Megolm session for a DM
 //   igs:{sessionId}                  an inbound Megolm session + its attribution
 //   pt:{messageId}                   decrypted-plaintext cache entry
+//
+// `master_secret` holds the Ed25519 master private key that cross-signs this
+// account's devices. Like every other secret it is stored SEALED (AES-256-GCM
+// inside the engine, under the same pickle key) — raw key material must never
+// sit in IndexedDB (§7). `master:{userId}` stores only public material.
 //
 // Megolm ciphertext is re-decryptable, so `pt:` is an optimization for the
 // group path (search/previews depend on it) but remains the ONLY way to read
@@ -37,6 +44,17 @@ export interface PinnedIdentity {
 }
 
 /**
+ * A user's pinned ACCOUNT master key (spec §14, D7). Pinned on first sight like
+ * a device identity; a change is an account identity change, not a new device.
+ * `verified` means the account safety number was compared out of band — every
+ * cross-signed device of that account inherits it (D9).
+ */
+export interface PinnedMasterKey {
+  masterKey: string;
+  verified: boolean;
+}
+
+/**
  * What we last saw of a user's published device list. `acknowledged*` is what
  * the local user has confirmed in the UI — a divergence means "this account
  * added or removed a device since you last looked".
@@ -50,9 +68,26 @@ export interface DeviceListState {
    * Union of every device id seen since the last acknowledgement. Sticky on
    * purpose: a server that adds a device and then removes it again would
    * otherwise erase the warning while the device keeps the session key it was
-   * already given. Cleared ONLY by acknowledgeDeviceList.
+   * already given. Cleared ONLY by acknowledgeDeviceList — and, since
+   * cross-signing, only for devices the account's master key vouches for
+   * (spec §14, D8): acknowledgement alone can never bless an unsigned device.
    */
   unacknowledgedDeviceIds?: string[];
+  /**
+   * The account master key seen with this list, or null when the account has
+   * not bootstrapped cross-signing (pre-§14 devices). Recorded so
+   * acknowledge/status can reason about signatures without a round trip.
+   */
+  masterKey?: string | null;
+  /**
+   * The master key under which the user last acknowledged this device list.
+   * Cross-signed devices are auto-trusted ONLY under this key: a key that has
+   * merely been *seen* (possibly served by a hostile server alongside the very
+   * devices it signs) must not be able to bless anything.
+   */
+  acknowledgedMasterKey?: string | null;
+  /** Device ids carrying a VALID cross-signature at the last fetch (§14 D8). */
+  crossSignedDeviceIds?: string[];
 }
 
 /** Our outbound Megolm session for one conversation (spec §12, D9). */
@@ -203,6 +238,26 @@ export class E2EVault {
   }
   putAccountPickle(pickle: string): Promise<void> {
     return this.put('account', pickle);
+  }
+
+  // ── Account master key (cross-signing, spec §14) ──
+  /** Our own master private key, SEALED with the pickle key (never raw). */
+  getMasterSecret(): Promise<string | undefined> {
+    return this.get('master_secret');
+  }
+  putMasterSecret(sealed: string): Promise<void> {
+    return this.put('master_secret', sealed);
+  }
+  deleteMasterSecret(): Promise<void> {
+    return this.delete('master_secret');
+  }
+
+  /** Pinned account master key of a user (TOFU, public material only). */
+  getMasterIdentity(userId: string): Promise<PinnedMasterKey | undefined> {
+    return this.get(`master:${userId}`);
+  }
+  putMasterIdentity(userId: string, pinned: PinnedMasterKey): Promise<void> {
+    return this.put(`master:${userId}`, pinned);
   }
 
   // ── Pairwise Olm session pickles (one per REMOTE DEVICE) ──

@@ -47,6 +47,14 @@ export const E2E_LIMITS = {
   KEYSHARE_BODY_MAX: 2048,
   /** Max pending shares one sender may hold across ALL recipients. */
   KEYSHARE_SENDER_TOTAL_CAP: 2000,
+  /** Max master-secret transfers per POST /e2e/master-transfers batch (§14). */
+  MASTER_TRANSFER_BATCH_MAX: 5,
+  /**
+   * Max stored (and per-claim returned) master-secret transfers per recipient
+   * device. Tiny on purpose: this mailbox only ever carries a handful of
+   * device-approval handshakes, never bulk traffic. Overflow evicts oldest.
+   */
+  MASTER_TRANSFER_STORE_CAP: 10,
 } as const;
 
 /** 32-byte key, unpadded standard base64 (vodozemac canonical encoding). */
@@ -234,6 +242,31 @@ export function e2eKeyCanonical(
   return `${E2E_SIG_DOMAIN}|key|${userId}|${deviceId}|${curve25519IdentityKey}|${keyId}|${publicKey}`;
 }
 
+// ─── Cross-signing canonicals (spec §14) ─────────────────────────────────────
+// The account-level master key (Ed25519) signs itself once — proving possession
+// of the private half — and then signs each of the account's devices. A device
+// carrying a valid master signature is trusted transitively: peers verify the
+// master key ONCE (out-of-band safety number) instead of every device.
+//
+// Deviation from Matrix: there is no separate self-signing key. Our master
+// private key lives in the same vault as everything else, so the extra layer
+// would buy no isolation — the master key signs devices directly.
+
+/** Self-signature payload proving possession of the master private key. */
+export function e2eMasterCanonical(userId: string, masterKeyB64: string): string {
+  return `${E2E_SIG_DOMAIN}|master|${userId}|${masterKeyB64}`;
+}
+
+/** Binding of a device identity to the account master key (the cross-signature). */
+export function e2eDeviceCrossCanonical(
+  userId: string,
+  deviceId: string,
+  curve25519Key: string,
+  ed25519Key: string
+): string {
+  return `${E2E_SIG_DOMAIN}|device-cross|${userId}|${deviceId}|${curve25519Key}|${ed25519Key}`;
+}
+
 // ─── Key distribution payload shapes ─────────────────────────────────────────
 
 export interface E2EPreKey {
@@ -258,16 +291,53 @@ export interface E2EDeviceEntry {
   curve25519Key: string;
   ed25519Key: string;
   deviceSignature: string;
+  /**
+   * Cross-signature by the account master key over `e2eDeviceCrossCanonical`
+   * (spec §14). `null` for devices registered before cross-signing, or not yet
+   * approved from a device holding the master secret — such devices still work
+   * (warn-not-block) but are surfaced as unsigned.
+   */
+  masterSignature?: string | null;
   createdAt: string;
 }
 
+/** A user's published account master key plus its self-signature (spec §14). */
+export interface E2EMasterKeyInfo {
+  masterKey: string;
+  masterSignature: string;
+}
+
 /**
- * A user's full device list. `listVersion` is bumped on every add/revoke so
- * peers can detect changes (and rotate their outbound group session).
+ * A user's full device list. `listVersion` is bumped on every add/revoke, on a
+ * master-key publish/replace, and on any device signature change, so peers can
+ * detect changes (and rotate their outbound group session).
+ *
+ * `masterKey`/`masterSignature` are the ACCOUNT-level pair (null when the user
+ * has not bootstrapped cross-signing); each device's own `masterSignature` is
+ * the cross-signature over that device.
  */
 export interface E2EDeviceList {
   devices: E2EDeviceEntry[];
   listVersion: number;
+  masterKey: string | null;
+  masterSignature: string | null;
+}
+
+/**
+ * Plaintext of a master-secret transfer (spec §14 / D6), encrypted pairwise
+ * with Olm to another device of the SAME account before it leaves the device.
+ * The server only ever stores the resulting olm1 envelope.
+ *
+ * The importer MUST derive the public key from `masterSecret` and check it
+ * against the published master key before storing — any 32 bytes form a
+ * syntactically valid Ed25519 secret.
+ */
+export interface E2EMasterTransferPayload {
+  v: 1;
+  /** Ed25519 master secret, unpadded base64. NEVER leaves a device unsealed. */
+  masterSecret: string;
+  /** Public half, for the pre-store consistency check. */
+  masterKey: string;
 }
 
 /** One-shot key bundle for establishing an outbound session with ONE device. */

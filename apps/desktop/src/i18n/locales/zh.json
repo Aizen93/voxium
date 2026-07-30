@@ -977,6 +977,19 @@
     "ownDeviceBadgeTitle": "您的账户新增了一台设备 — 请查看",
     "ownDeviceWarning": "您的账户新增了一台可能不认识的设备（{{count}}）。它可以读取您的加密对话。如果不是您的设备，请撤销。",
     "ownDevicesReviewed": "这些是我的设备",
-    "unrecognisedDevice": "新"
+    "unrecognisedDevice": "新",
+    "accountSafetyExplainer": "请通过其他渠道（当面或通话）与 {{name}} 核对此号码，以验证你们的账户。无论使用哪台设备，该号码都相同，只有在账户密钥被重置时才会改变。",
+    "markAccountVerified": "将账户标记为已验证",
+    "advancedDevices": "高级：按设备查看详情",
+    "crossSignedChip": "已通过账户密钥验证",
+    "unsignedChip": "未经 {{name}} 的账户密钥签名",
+    "unsignedChipOwn": "未经你的账户密钥签名",
+    "approveDevice": "批准此设备",
+    "approveDeviceSuccess": "设备已批准",
+    "approveDeviceFailed": "无法批准设备",
+    "cannotApproveExplainer": "此设备暂时无法批准其他设备。请从已可访问你账户密钥的设备进行批准。",
+    "accountSafetyNumberUnavailable": "账户安全码不可用 — 仅显示按设备的安全码。",
+    "unsignedDeviceBadgeTitle": "有设备未经账户密钥签名 — 请查看",
+    "unsignedDevicesWarning": "{{name}} 有 {{count}} 台设备未经其账户密钥签名。它仍能读取新消息，请在对方用已有设备批准之前将其视为未验证。"
   }
 }

@@ -580,6 +580,10 @@ model E2EDevice {
   curve25519Key        String   @map("curve25519_key") // Olm identity key, unpadded base64
   ed25519Key           String   @map("ed25519_key") // device signing key, unpadded base64
   deviceSignature      String   @map("device_signature") // Ed25519 over the canonical device binding (spec §4)
+  /// Cross-signature by the account master key over the device-cross canonical
+  /// (spec §14). Null = device not (yet) approved from a device holding the
+  /// master secret; it still receives session keys but is flagged as unsigned.
+  masterSignature      String?  @map("master_signature")
   fallbackKeyId        String?  @map("fallback_key_id")
   fallbackKey          String?  @map("fallback_key")
   fallbackKeySignature String?  @map("fallback_key_signature")
@@ -623,6 +627,37 @@ model E2EKeyShare {
   @@index([createdAt])
   @@index([senderUserId])
   @@map("e2e_key_shares")
+}
+
+/// A user's account-level cross-signing master key (spec §14). The public half
+/// only — the private half never leaves a device unsealed. `signature` is the
+/// self-signature over the master canonical, proving possession; the server
+/// verifies it before storing and clients re-verify on every fetch.
+model E2EMasterKey {
+  userId    String   @id @map("user_id")
+  publicKey String   @map("public_key") // Ed25519, unpadded base64
+  signature String // Ed25519 self-signature over the master canonical
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("e2e_master_keys")
+}
+
+/// A pending master-secret handoff between two devices of the SAME account
+/// (device approval, spec §14). `body` is an opaque olm1 envelope — the server
+/// never sees the master secret. Claim-and-delete, like key shares.
+model E2EMasterTransfer {
+  id                String   @id @default(cuid())
+  userId            String   @map("user_id") // owner: both sender and recipient
+  recipientDeviceId String   @map("recipient_device_id")
+  senderDeviceId    String   @map("sender_device_id")
+  body              String // olm1 envelope (JSON string)
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([userId, recipientDeviceId, createdAt])
+  // the retention sweep deletes by age across all recipients
+  @@index([createdAt])
+  @@map("e2e_master_transfers")
 }
 
 model E2EOneTimeKey {

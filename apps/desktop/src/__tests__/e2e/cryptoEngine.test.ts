@@ -9,10 +9,14 @@ import init, {
   EngineSession,
   EngineGroupSession,
   EngineInboundGroupSession,
+  EngineMasterKey,
   engine_version,
   verify_ed25519,
   prekey_message_session_id,
   safety_number,
+  master_safety_number,
+  sealSecret,
+  openSecret,
   encryptAttachment,
   decryptAttachment,
 } from '@voxium/crypto-engine';
@@ -363,5 +367,164 @@ describe('crypto engine (vodozemac megolm1 group sessions)', () => {
     ).toThrow();
     expect(() => outbound.pickle(new Uint8Array(16))).toThrow();
     expect(() => inbound.pickle(new Uint8Array(16))).toThrow();
+  });
+});
+
+// ─── Cross-signing primitives (spec §14: master key, sealed secrets, account
+// safety number). Canonical strings are duplicated here as literals on purpose:
+// the test pins the exact byte sequence the protocol signs.
+const CTX = 'voxium-vault/test';
+
+describe('crypto engine (cross-signing master key)', () => {
+  const KEY_A = new Uint8Array(32).fill(7);
+  const KEY_B = new Uint8Array(32).fill(9);
+
+  const masterCanonical = (userId: string, masterKey: string) =>
+    `voxium-e2e-v2|master|${userId}|${masterKey}`;
+  const deviceCrossCanonical = (
+    userId: string,
+    deviceId: string,
+    curve25519Key: string,
+    ed25519Key: string
+  ) => `voxium-e2e-v2|device-cross|${userId}|${deviceId}|${curve25519Key}|${ed25519Key}`;
+
+  it('signs its own publication and its devices, verifiable with verify_ed25519', () => {
+    const master = new EngineMasterKey();
+    const pub = master.publicKey();
+    expect(pub).toMatch(/^[A-Za-z0-9+/]{43}$/); // 32 bytes, unpadded base64
+
+    // D1: master self-signature proves possession of the private half
+    const selfCanonical = masterCanonical('user-alice', pub);
+    const selfSignature = master.sign(selfCanonical);
+    expect(selfSignature).toMatch(/^[A-Za-z0-9+/]{86}$/); // 64 bytes
+    expect(() => verify_ed25519(pub, selfCanonical, selfSignature)).not.toThrow();
+
+    // D2: the master key signs a device's identity keys
+    const device = new EngineAccount();
+    const canonical = deviceCrossCanonical(
+      'user-alice',
+      'device-aaaa1111',
+      device.curve25519Key(),
+      device.ed25519Key()
+    );
+    const crossSignature = master.sign(canonical);
+    expect(() => verify_ed25519(pub, canonical, crossSignature)).not.toThrow();
+
+    // wrong message, wrong signer, and swapped signatures all fail
+    expect(() =>
+      verify_ed25519(pub, deviceCrossCanonical('user-mallory', 'device-aaaa1111',
+        device.curve25519Key(), device.ed25519Key()), crossSignature)
+    ).toThrow();
+    expect(() => verify_ed25519(new EngineMasterKey().publicKey(), canonical, crossSignature))
+      .toThrow();
+    expect(() => verify_ed25519(pub, selfCanonical, crossSignature)).toThrow();
+  });
+
+  it('seals and opens secrets, rejecting a wrong key or a tampered blob', () => {
+    const secret = 'super secret master material ✓🔐';
+    const sealed = sealSecret(secret, CTX, KEY_A);
+    expect(sealed).not.toContain(secret);
+    expect(openSecret(sealed, CTX, KEY_A)).toBe(secret);
+
+    // wrong pickle key → GCM auth failure
+    expect(() => openSecret(sealed, CTX, KEY_B)).toThrow();
+    // malformed key lengths are rejected on both sides
+    expect(() => sealSecret(secret, CTX, new Uint8Array(16))).toThrow();
+    expect(() => openSecret(sealed, CTX, new Uint8Array(16))).toThrow();
+
+    // tampered ciphertext byte → GCM auth failure
+    const raw = Buffer.from(sealed, 'base64');
+    const tamperedCipher = Buffer.from(raw);
+    tamperedCipher[raw.length - 1] ^= 0xff;
+    expect(() => openSecret(tamperedCipher.toString('base64'), CTX, KEY_A)).toThrow();
+
+    // tampered nonce (first 12 bytes) → GCM auth failure
+    const tamperedNonce = Buffer.from(raw);
+    tamperedNonce[0] ^= 0xff;
+    expect(() => openSecret(tamperedNonce.toString('base64'), CTX, KEY_A)).toThrow();
+
+    // truncated / non-base64 blobs are rejected, never panic
+    expect(() => openSecret(raw.subarray(0, 10).toString('base64'), CTX, KEY_A)).toThrow();
+    expect(() => openSecret('not base64 !!!', CTX, KEY_A)).toThrow();
+  });
+
+  it('uses a fresh nonce per seal (same secret → different blobs)', () => {
+    const master = new EngineMasterKey();
+    const first = master.seal(KEY_A);
+    const second = master.seal(KEY_A);
+    expect(first).not.toBe(second);
+    expect(sealSecret('same input', CTX, KEY_A)).not.toBe(sealSecret('same input', CTX, KEY_A));
+  });
+
+  it('restores an identical key from a sealed blob and from a raw secret', () => {
+    const master = new EngineMasterKey();
+    const canonical = masterCanonical('user-alice', master.publicKey());
+    const signature = master.sign(canonical);
+
+    const restored = EngineMasterKey.fromSealed(master.seal(KEY_A), KEY_A);
+    expect(restored.publicKey()).toBe(master.publicKey());
+    expect(() => verify_ed25519(restored.publicKey(), canonical, signature)).not.toThrow();
+    // deterministic Ed25519: the restored key produces the identical signature
+    expect(restored.sign(canonical)).toBe(signature);
+
+    // The private half has no JS accessor: device approval goes through the
+    // session bindings, so the secret never exists as a JS string (§14).
+    expect('secretBase64' in (master as object)).toBe(false);
+
+    expect(() => EngineMasterKey.fromSealed(master.seal(KEY_A), KEY_B)).toThrow();
+    // wrong length (any 32 bytes IS a valid Ed25519 secret, so only the length
+    // can be rejected here — the caller checks publicKey() against the
+    // published master key, which is the real authenticity gate, see D6)
+    expect(() => EngineMasterKey.fromSecret(Buffer.alloc(31).toString('base64'))).toThrow();
+  });
+
+  it('computes a symmetric 60-digit account safety number', () => {
+    const alice = new EngineMasterKey();
+    const bob = new EngineMasterKey();
+
+    const fromAlice = master_safety_number(
+      'user-alice', alice.publicKey(), 'user-bob', bob.publicKey()
+    );
+    const fromBob = master_safety_number(
+      'user-bob', bob.publicKey(), 'user-alice', alice.publicKey()
+    );
+    expect(fromAlice).toBe(fromBob);
+    expect(fromAlice).toMatch(/^\d{60}$/);
+
+    // a changed master key on EITHER side changes the number (account identity change)
+    expect(
+      master_safety_number('user-alice', new EngineMasterKey().publicKey(), 'user-bob', bob.publicKey())
+    ).not.toBe(fromAlice);
+    expect(
+      master_safety_number('user-alice', alice.publicKey(), 'user-bob', new EngineMasterKey().publicKey())
+    ).not.toBe(fromAlice);
+    // ...and so does a changed user id
+    expect(
+      master_safety_number('user-carol', alice.publicKey(), 'user-bob', bob.publicKey())
+    ).not.toBe(fromAlice);
+
+    // domain-separated from the per-device number over the same key material
+    const device = new EngineAccount();
+    expect(
+      master_safety_number('user-alice', device.ed25519Key(), 'user-bob', bob.publicKey())
+    ).not.toBe(
+      safety_number(
+        'user-alice', device.ed25519Key(), device.curve25519Key(),
+        'user-bob', bob.publicKey(), device.curve25519Key()
+      )
+    );
+
+    expect(() => master_safety_number('user-alice', 'nope', 'user-bob', bob.publicKey())).toThrow();
+  });
+});
+
+describe('crypto engine (sealed-secret domain separation)', () => {
+  it('refuses to open a blob under a different context (AAD)', () => {
+    const key = new Uint8Array(32).fill(9);
+    const sealed = sealSecret('account key material', 'voxium-vault/master_secret', key);
+    expect(openSecret(sealed, 'voxium-vault/master_secret', key)).toBe('account key material');
+    // the same blob under a different vault field must fail closed, so two
+    // sealed fields can never be swapped by someone with IndexedDB write access
+    expect(() => openSecret(sealed, 'voxium-vault/something_else', key)).toThrow();
   });
 });

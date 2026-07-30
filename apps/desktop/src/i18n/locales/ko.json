@@ -977,6 +977,19 @@
     "ownDeviceBadgeTitle": "계정에 기기가 추가되었습니다 — 확인하세요",
     "ownDeviceWarning": "알 수 없는 기기가 계정에 추가되었습니다({{count}}). 암호화된 대화를 읽을 수 있습니다. 본인의 기기가 아니면 해지하세요.",
     "ownDevicesReviewed": "내 기기가 맞습니다",
-    "unrecognisedDevice": "신규"
+    "unrecognisedDevice": "신규",
+    "accountSafetyExplainer": "이 번호를 다른 방법(직접 만나거나 통화)으로 {{name}} 님과 비교하여 계정을 확인하세요. 둘 중 누구의 기기에서든 동일하며, 계정 키가 재설정될 때만 변경됩니다.",
+    "markAccountVerified": "계정을 확인됨으로 표시",
+    "advancedDevices": "고급: 기기별 세부정보",
+    "crossSignedChip": "계정 키로 확인됨",
+    "unsignedChip": "{{name}} 님의 계정 키로 서명되지 않음",
+    "unsignedChipOwn": "내 계정 키로 서명되지 않음",
+    "approveDevice": "이 기기 승인",
+    "approveDeviceSuccess": "기기가 승인되었습니다",
+    "approveDeviceFailed": "기기를 승인할 수 없습니다",
+    "cannotApproveExplainer": "이 기기는 아직 다른 기기를 승인할 수 없습니다. 이미 계정 키에 접근할 수 있는 기기에서 승인하세요.",
+    "accountSafetyNumberUnavailable": "계정 안전 번호를 사용할 수 없습니다 — 기기별 번호만 표시합니다.",
+    "unsignedDeviceBadgeTitle": "계정 키로 서명되지 않은 기기가 있습니다 — 확인하세요",
+    "unsignedDevicesWarning": "{{name}} 님의 기기 {{count}}대가 계정 키로 서명되지 않았습니다. 새 메시지는 읽을 수 있으므로, 이미 사용 중인 기기에서 승인할 때까지 미확인으로 취급하세요."
   }
 }

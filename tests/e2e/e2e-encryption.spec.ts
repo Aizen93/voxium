@@ -18,6 +18,7 @@ const TINY_PNG = Buffer.from(
 const BADGE = 'button[title="End-to-end encrypted — view safety number"]';
 const BADGE_NEW_DEVICE = 'button[title="New device added — review devices"]';
 const BADGE_OWN_DEVICE = 'button[title="A device was added to your account — review it"]';
+const BADGE_UNSIGNED = 'button[title="A device is not signed by the account key — review it"]';
 
 /** Open the DM with a user from the Friends list. */
 async function openDMWith(page: Page, username: string) {
@@ -37,7 +38,7 @@ async function sendMessage(page: Page, text: string) {
 /** The 60-digit safety number shown in the modal, as one string. */
 async function readSafetyNumber(page: Page): Promise<string> {
   await page.locator('button[title="End-to-end encrypted — view safety number"]').click();
-  const groups = page.locator('div.select-all span');
+  const groups = page.locator('div.select-all').first().locator('span');
   await expect(groups).toHaveCount(12, { timeout: 15_000 });
   const digits = (await groups.allTextContents()).join('');
   expect(digits).toMatch(/^\d{60}$/);
@@ -113,7 +114,7 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     expect(safetyA).toBe(safetyB);
 
     // mark verified on A
-    await page.getByRole('button', { name: 'Mark as verified' }).click();
+    await page.getByRole('button', { name: 'Mark account as verified' }).click();
     await expect(page.getByText('Verified', { exact: true }).first()).toBeVisible();
     await closeModal(page);
     await closeModal(pageB);
@@ -232,11 +233,12 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     // distinct identity keys per device — never a copy of the first
     expect(devices[0].curve25519Key).not.toBe(devices[1].curve25519Key);
 
-    // ── B notices A's device list grew ──
-    // (B's send path re-reads the peer list before rotating)
+    // ── B sees the new device as UNSIGNED, not merely "new" ──
+    // A's second device is not yet vouched for by A's account key, and that is
+    // a cryptographic fact rather than a judgement call (spec §14.3).
     const afterSecondB = `reply after A added a device ${Date.now()}`;
     await sendMessage(pageB, afterSecondB);
-    await expect(pageB.locator(BADGE_NEW_DEVICE)).toBeVisible({ timeout: 20_000 });
+    await expect(pageB.locator(BADGE_UNSIGNED)).toBeVisible({ timeout: 20_000 });
 
     // ── The second device decrypts BOTH directions ──
     await pageA2.getByText(userB.username, { exact: true }).first().click({ timeout: 20_000 });
@@ -257,17 +259,41 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     // history predating the device stays unreadable there (no key backup, spec §11)
     await expect(pageA2.getByText(beforeSecond)).toHaveCount(0);
 
-    // ── A's OWN badge warns about the device it did not add (spec §12.5) ──
-    // This is the mirror of the peer-injection warning: a device registered
-    // under your own account receives every session key you fan out.
-    await expect(page.locator(BADGE_OWN_DEVICE)).toBeVisible({ timeout: 20_000 });
-
-    // ── Revoke device 2 from device 1 ──
-    await page.locator(BADGE_OWN_DEVICE).click();
+    // ── Approving the device makes the peer's warning disappear on its own ──
+    // THE cross-signing payoff: once A's account key vouches for the device,
+    // B's client verifies the chain and stops prompting — no second safety
+    // number to compare, no dialog to dismiss.
+    // A's own badge names the precise problem: a device its account key has
+    // not signed yet.
+    await expect(page.locator(BADGE_UNSIGNED)).toBeVisible({ timeout: 20_000 });
+    await page.locator(BADGE_UNSIGNED).click();
     await page.locator('button[title="Manage devices"]').click();
     await expect(page.getByText('Your devices')).toBeVisible({ timeout: 10_000 });
-    // the unrecognised device is called out in the manager itself
-    await expect(page.getByText('A device you may not recognise', { exact: false })).toBeVisible({ timeout: 10_000 });
+    await page.getByRole('button', { name: 'Approve this device' }).first().click();
+    await expect(page.getByRole('button', { name: 'Approve this device' })).toHaveCount(0, { timeout: 20_000 });
+    await page.getByRole('button', { name: 'Close' }).last().click();
+    await closeModal(page);
+
+    const afterApproval = `sent after approving device two ${Date.now()}`;
+    await sendMessage(page, afterApproval);
+    await expect(pageB.getByText(afterApproval).first()).toBeVisible({ timeout: 20_000 });
+
+    // B re-reads A's device list on its next send (the rotation decision), sees
+    // the account key's signature, and drops the warning by itself — the user
+    // is never asked to compare a second number.
+    const bAfterApproval = `B replies once the device is approved ${Date.now()}`;
+    await sendMessage(pageB, bAfterApproval);
+    await expect(page.getByText(bAfterApproval).first()).toBeVisible({ timeout: 20_000 });
+    await expect(pageB.locator(BADGE_UNSIGNED)).toHaveCount(0, { timeout: 20_000 });
+    await expect(pageB.locator(BADGE)).toBeVisible({ timeout: 20_000 });
+
+    // A's own badge settles too — an approved device is no longer a warning
+    await expect(page.locator(BADGE)).toBeVisible({ timeout: 20_000 });
+
+    // ── Revoke device 2 from device 1 ──
+    await page.locator(BADGE).click();
+    await page.locator('button[title="Manage devices"]').click();
+    await expect(page.getByText('Your devices')).toBeVisible({ timeout: 10_000 });
     await page.locator('button[title="Revoke"]').first().click();
     await page.getByRole('button', { name: 'Confirm', exact: true }).click();
     await expect

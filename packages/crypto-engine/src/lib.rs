@@ -20,7 +20,10 @@ use vodozemac::megolm::{
 use vodozemac::olm::{
     Account, AccountPickle, OlmMessage, Session, SessionConfig, SessionPickle,
 };
-use vodozemac::{base64_decode, base64_encode, Curve25519PublicKey, Ed25519PublicKey, Ed25519Signature};
+use vodozemac::{
+    base64_decode, base64_encode, Curve25519PublicKey, Ed25519PublicKey, Ed25519SecretKey,
+    Ed25519Signature,
+};
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroize;
 
@@ -146,6 +149,129 @@ pub fn decrypt_attachment(ciphertext: &[u8], key_b64: &str, iv_b64: &str) -> Res
     plaintext
 }
 
+// ─── Generic secret sealing (spec §7: no raw key material at rest) ───────────
+// Used for secrets that are NOT vodozemac pickles (which carry their own
+// encryption), e.g. the cross-signing master private key. AES-256-GCM with a
+// random 12-byte nonce PREPENDED to the ciphertext; the whole blob is unpadded
+// base64. The key is the vault's 32-byte pickle key (OS keychain backed).
+
+/// Domain string for the device-approval payload carried inside an Olm
+/// ciphertext. Deliberately not JSON: parsing it in Rust keeps the private key
+/// out of the JS heap entirely (base64 never contains the separator).
+const MASTER_TRANSFER_PREFIX: &str = "voxium-master-v1|";
+
+/// AAD for the sealed master secret: binds the blob to the vault field it
+/// belongs to, so two sealed fields under the same key are not interchangeable.
+const MASTER_SECRET_CONTEXT: &str = "voxium-vault/master_secret";
+
+/// Parse a device-approval payload and prove it is the account's key. Kept in
+/// Rust so neither the raw secret nor the check can be bypassed from JS.
+fn parse_master_transfer(mut plaintext: String, expected_master_key: &str) -> Result<EngineMasterKey, JsError> {
+    let parsed = (|| {
+        let rest = plaintext.strip_prefix(MASTER_TRANSFER_PREFIX)?;
+        let (secret_b64, public_b64) = rest.split_once('|')?;
+        Some((secret_b64.to_string(), public_b64.to_string()))
+    })();
+    plaintext.zeroize();
+
+    let (mut secret_b64, public_b64) =
+        parsed.ok_or_else(|| JsError::new("malformed master transfer payload"))?;
+    let key = Ed25519SecretKey::from_base64(&secret_b64)
+        .map_err(|_| JsError::new("invalid master key material"));
+    secret_b64.zeroize();
+    let key = key?;
+
+    if key.public_key().to_base64() != public_b64 || public_b64 != expected_master_key {
+        return Err(JsError::new("master transfer does not match the published account key"));
+    }
+    Ok(EngineMasterKey { inner: key })
+}
+
+/// An inbound Olm session established BY a device-approval pre-key message,
+/// plus the master key it carried.
+#[wasm_bindgen]
+pub struct MasterInboundResult {
+    session: Option<EngineSession>,
+    master: Option<EngineMasterKey>,
+}
+
+#[wasm_bindgen]
+impl MasterInboundResult {
+    #[wasm_bindgen(js_name = takeSession)]
+    pub fn take_session(&mut self) -> Result<EngineSession, JsError> {
+        self.session.take().ok_or_else(|| JsError::new("session already taken"))
+    }
+
+    #[wasm_bindgen(js_name = takeMasterKey)]
+    pub fn take_master_key(&mut self) -> Result<EngineMasterKey, JsError> {
+        self.master.take().ok_or_else(|| JsError::new("master key already taken"))
+    }
+}
+
+const SEAL_NONCE_LEN: usize = 12;
+const SEAL_TAG_LEN: usize = 16;
+
+/// Seal a UTF-8 secret under a 32-byte key. Output: base64(nonce || ciphertext).
+#[wasm_bindgen(js_name = sealSecret)]
+pub fn seal_secret(plaintext: &str, context: &str, pickle_key: &[u8]) -> Result<String, JsError> {
+    use aes_gcm::aead::rand_core::RngCore;
+    use aes_gcm::aead::{Aead, KeyInit, OsRng};
+    use aes_gcm::{Aes256Gcm, Nonce};
+
+    let mut key = pickle_key_from_js(pickle_key)?;
+    let mut nonce_bytes = [0u8; SEAL_NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| JsError::new("cipher init failed"));
+    let result = cipher.and_then(|cipher| {
+        cipher
+            .encrypt(
+                Nonce::from_slice(&nonce_bytes),
+                aes_gcm::aead::Payload { msg: plaintext.as_bytes(), aad: context.as_bytes() },
+            )
+            .map_err(|_| JsError::new("secret sealing failed"))
+    });
+    key.zeroize();
+
+    let ciphertext = result?;
+    let mut blob = Vec::with_capacity(SEAL_NONCE_LEN + ciphertext.len());
+    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(&ciphertext);
+    Ok(base64_encode(blob))
+}
+
+/// Open a blob produced by `sealSecret`. Fails on a wrong key or any tampering
+/// (GCM auth tag). Error messages never carry key or plaintext material.
+#[wasm_bindgen(js_name = openSecret)]
+pub fn open_secret(sealed_b64: &str, context: &str, pickle_key: &[u8]) -> Result<String, JsError> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+
+    let blob = base64_decode(sealed_b64).map_err(|_| JsError::new("invalid sealed secret"))?;
+    if blob.len() < SEAL_NONCE_LEN + SEAL_TAG_LEN {
+        return Err(JsError::new("invalid sealed secret length"));
+    }
+    let (nonce_bytes, ciphertext) = blob.split_at(SEAL_NONCE_LEN);
+
+    let mut key = pickle_key_from_js(pickle_key)?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| JsError::new("cipher init failed"));
+    let result = cipher.and_then(|cipher| {
+        cipher
+            .decrypt(
+                Nonce::from_slice(nonce_bytes),
+                aes_gcm::aead::Payload { msg: ciphertext, aad: context.as_bytes() },
+            )
+            .map_err(|_| JsError::new("secret unsealing failed"))
+    });
+    key.zeroize();
+
+    String::from_utf8(result?).map_err(|err| {
+        let mut bytes = err.into_bytes();
+        bytes.zeroize();
+        JsError::new("sealed secret is not valid UTF-8")
+    })
+}
+
 /// Verify an Ed25519 signature over a UTF-8 message. Strict verification
 /// (vodozemac 0.10 default). Returns an error when invalid.
 #[wasm_bindgen]
@@ -187,16 +313,46 @@ pub fn safety_number(
     Ok(format!("{}{}", halves[0], halves[1]))
 }
 
+/// Account-level safety number over the PUBLIC cross-signing master keys
+/// (spec §14 / decision D3). Same construction and shape as `safety_number`
+/// — 30 digits per party, halves sorted, 60 digits total — but seeded from the
+/// account master key instead of a single device's identity keys, so one
+/// comparison covers every cross-signed device of that account.
+#[wasm_bindgen]
+pub fn master_safety_number(
+    user_a: &str,
+    master_a_b64: &str,
+    user_b: &str,
+    master_b_b64: &str,
+) -> Result<String, JsError> {
+    let half_a = master_fingerprint_half(user_a, &ed_key(master_a_b64)?);
+    let half_b = master_fingerprint_half(user_b, &ed_key(master_b_b64)?);
+    let mut halves = [half_a, half_b];
+    halves.sort();
+    Ok(format!("{}{}", halves[0], halves[1]))
+}
+
 fn fingerprint_half(user_id: &str, ed: &Ed25519PublicKey, curve: &Curve25519PublicKey) -> String {
+    let mut seed = Vec::new();
+    seed.extend_from_slice(b"voxium-sn-v1");
+    seed.extend_from_slice(ed.as_bytes());
+    seed.extend_from_slice(&curve.to_bytes());
+    seed.extend_from_slice(user_id.as_bytes());
+    fingerprint_digits(seed)
+}
+
+/// Distinct domain string from the per-device half so an account number can
+/// never collide with (or be replayed as) a device number.
+fn master_fingerprint_half(user_id: &str, master: &Ed25519PublicKey) -> String {
+    let mut seed = Vec::new();
+    seed.extend_from_slice(b"voxium-sn-master-v1");
+    seed.extend_from_slice(master.as_bytes());
+    seed.extend_from_slice(user_id.as_bytes());
+    fingerprint_digits(seed)
+}
+
+fn fingerprint_digits(seed: Vec<u8>) -> String {
     const ITERATIONS: usize = 5200;
-    let seed = {
-        let mut s = Vec::new();
-        s.extend_from_slice(b"voxium-sn-v1");
-        s.extend_from_slice(ed.as_bytes());
-        s.extend_from_slice(&curve.to_bytes());
-        s.extend_from_slice(user_id.as_bytes());
-        s
-    };
     let mut digest: Vec<u8> = seed.clone();
     for _ in 0..ITERATIONS {
         let mut hasher = Sha512::new();
@@ -214,6 +370,91 @@ fn fingerprint_half(user_id: &str, ed: &Ed25519PublicKey, curve: &Curve25519Publ
         out.push_str(&format!("{:05}", n % 100_000));
     }
     out
+}
+
+// ─── Cross-signing master key (spec §14, decision D1/D2/D4) ──────────────────
+// One Ed25519 keypair per ACCOUNT. It self-signs its own publication and signs
+// every device of the account; peers verify that chain instead of pinning each
+// device individually. There is no separate self-signing key (deviation from
+// Matrix, decision D1): the master secret lives in the same vault as everything
+// else, so the extra hop would buy no isolation.
+//
+// The private half NEVER leaves the device unsealed: at rest it is a `sealSecret`
+// blob, in transit (device approval, D6) it is base64 inside an Olm ciphertext.
+
+/// Account cross-signing master key. Wraps a vodozemac `Ed25519SecretKey`.
+#[wasm_bindgen]
+pub struct EngineMasterKey {
+    inner: Ed25519SecretKey,
+}
+
+#[wasm_bindgen]
+impl EngineMasterKey {
+    /// Generate a fresh master key.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> EngineMasterKey {
+        EngineMasterKey { inner: Ed25519SecretKey::new() }
+    }
+
+    /// Restore a master key from a `sealSecret` blob (the vault's at-rest form).
+    #[wasm_bindgen(js_name = fromSealed)]
+    pub fn from_sealed(sealed_b64: &str, pickle_key: &[u8]) -> Result<EngineMasterKey, JsError> {
+        let mut secret_b64 = open_secret(sealed_b64, MASTER_SECRET_CONTEXT, pickle_key)?;
+        let result = Ed25519SecretKey::from_base64(&secret_b64)
+            .map(|inner| EngineMasterKey { inner })
+            .map_err(|_| JsError::new("invalid master key material"));
+        secret_b64.zeroize();
+        result
+    }
+
+    /// Restore a master key from its raw base64 secret — the form transferred
+    /// to another of the account's own devices over the pairwise Olm channel
+    /// (D6). Callers MUST check `publicKey()` against the published master key
+    /// before storing.
+    #[wasm_bindgen(js_name = fromSecret)]
+    pub fn from_secret(secret_b64: &str) -> Result<EngineMasterKey, JsError> {
+        Ed25519SecretKey::from_base64(secret_b64)
+            .map(|inner| EngineMasterKey { inner })
+            .map_err(|_| JsError::new("invalid master key material"))
+    }
+
+    /// Internal: the private half, for building a device-approval payload
+    /// inside this crate. Deliberately NOT exposed to JS — see
+    /// EngineSession::encryptMasterSecret.
+    fn secret_b64_internal(&self) -> String {
+        self.inner.to_base64()
+    }
+
+    /// Seal the private half for storage (AES-256-GCM under the vault key).
+    pub fn seal(&self, pickle_key: &[u8]) -> Result<String, JsError> {
+        let mut secret_b64 = self.inner.to_base64();
+        let result = seal_secret(&secret_b64, MASTER_SECRET_CONTEXT, pickle_key);
+        secret_b64.zeroize();
+        result
+    }
+
+    // The private half has no JS-facing accessor by design (spec §7/§14):
+    // device approval goes through EngineSession::encryptMasterSecret so the
+    // secret never exists as a JS string.
+
+    /// Base64 of the public master key (the account identity that is published
+    /// and compared out of band as the account safety number).
+    #[wasm_bindgen(js_name = publicKey)]
+    pub fn public_key(&self) -> String {
+        self.inner.public_key().to_base64()
+    }
+
+    /// Sign a canonical UTF-8 string (master self-signature, device
+    /// cross-signature). Verified with the existing `verify_ed25519`.
+    pub fn sign(&self, message: &str) -> String {
+        self.inner.sign(message.as_bytes()).to_base64()
+    }
+}
+
+impl Default for EngineMasterKey {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Result of creating an inbound session from a pre-key message: the new
@@ -348,6 +589,37 @@ impl EngineAccount {
         Ok(EngineSession { inner: session })
     }
 
+    /// Device approval arriving as a PRE-KEY message (the usual case for a
+    /// device that has never talked to its sibling): establishes the session and
+    /// returns the master key without the secret ever reaching JS.
+    #[wasm_bindgen(js_name = createInboundSessionForMasterSecret)]
+    pub fn create_inbound_session_for_master_secret(
+        &mut self,
+        their_identity_key_b64: &str,
+        prekey_body_b64: &str,
+        expected_master_key: &str,
+    ) -> Result<MasterInboundResult, JsError> {
+        let identity = curve_key(their_identity_key_b64)?;
+        let bytes = base64_decode(prekey_body_b64).map_err(|_| JsError::new("invalid base64 body"))?;
+        let message = match OlmMessage::from_parts(0, &bytes)
+            .map_err(|_| JsError::new("invalid pre-key message"))?
+        {
+            OlmMessage::PreKey(m) => m,
+            OlmMessage::Normal(_) => return Err(JsError::new("not a pre-key message")),
+        };
+        let result = self
+            .inner
+            .create_inbound_session(SessionConfig::version_1(), identity, &message)
+            .map_err(|e| JsError::new(&format!("inbound session creation failed: {e}")))?;
+        let plaintext = String::from_utf8(result.plaintext)
+            .map_err(|_| JsError::new("plaintext is not valid UTF-8"))?;
+        let master = parse_master_transfer(plaintext, expected_master_key)?;
+        Ok(MasterInboundResult {
+            session: Some(EngineSession { inner: result.session }),
+            master: Some(master),
+        })
+    }
+
     /// Establish an inbound session from a pre-key message. The expected
     /// identity key MUST be the peer's pinned/server-published key — vodozemac
     /// rejects the message if it was not created by that identity.
@@ -431,6 +703,44 @@ impl EngineSession {
             body: base64_encode(ciphertext),
         })
         .map_err(|_| JsError::new("serialization failed"))
+    }
+
+    /// Encrypt this account's master secret to another of OUR devices (spec
+    /// §14, device approval). The payload is assembled here so the private key
+    /// never becomes a JS string; the caller only ever sees Olm ciphertext.
+    #[wasm_bindgen(js_name = encryptMasterSecret)]
+    pub fn encrypt_master_secret(&mut self, master: &EngineMasterKey) -> Result<JsValue, JsError> {
+        let mut payload = format!(
+            "{}{}|{}",
+            MASTER_TRANSFER_PREFIX,
+            master.secret_b64_internal(),
+            master.public_key()
+        );
+        let encrypted = self
+            .inner
+            .encrypt(payload.as_bytes())
+            .map_err(|e| JsError::new(&format!("encryption failed: {e}")));
+        payload.zeroize();
+        let (message_type, ciphertext) = encrypted?.to_parts();
+        serde_wasm_bindgen::to_value(&JsEncrypted {
+            message_type,
+            body: base64_encode(ciphertext),
+        })
+        .map_err(|_| JsError::new("serialization failed"))
+    }
+
+    /// Decrypt a device-approval payload into a usable master key. The expected
+    /// public key is checked HERE, so JS cannot skip the check, and the private
+    /// half is never exposed to it.
+    #[wasm_bindgen(js_name = decryptMasterSecret)]
+    pub fn decrypt_master_secret(
+        &mut self,
+        message_type: usize,
+        body_b64: &str,
+        expected_master_key: &str,
+    ) -> Result<EngineMasterKey, JsError> {
+        let plaintext = self.decrypt(message_type, body_b64)?;
+        parse_master_transfer(plaintext, expected_master_key)
     }
 
     /// Decrypt a message previously produced by the peer's session.

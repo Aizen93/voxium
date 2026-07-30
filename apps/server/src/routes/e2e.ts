@@ -6,6 +6,7 @@ import {
   rateLimitE2EBundle,
   rateLimitE2EStatus,
   rateLimitE2EShares,
+  rateLimitE2EApprove,
 } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
@@ -18,7 +19,9 @@ import {
   E2E_ENGINE_OLM1,
   E2E_LIMITS,
   e2eDeviceCanonical,
+  e2eDeviceCrossCanonical,
   e2eKeyCanonical,
+  e2eMasterCanonical,
   parseE2EEnvelope,
   type E2EPreKey,
 } from '@voxium/shared';
@@ -35,6 +38,12 @@ import { verifyEd25519Signature } from '../utils/e2eVerify';
 // own identity, own one-time-key pool and own inbox of pending key shares.
 // Every add/revoke bumps E2EDeviceRegistry.version so peers notice membership
 // changes and rotate their outbound group session.
+//
+// Cross-signing (spec §14): each account also publishes ONE Ed25519 master key
+// (self-signed, proving possession) which signs each of its devices. Peers then
+// verify one account-level safety number instead of one per device. The server
+// verifies every signature it stores — hygiene only, exactly like §4.2 — and
+// relays opaque master-secret handoffs between a user's OWN devices.
 
 export const e2eRouter = Router();
 
@@ -131,6 +140,8 @@ interface DeviceRow {
   curve25519Key: string;
   ed25519Key: string;
   deviceSignature: string;
+  /** Cross-signature by the account master key; null for un-approved devices. */
+  masterSignature?: string | null;
   createdAt: Date;
 }
 
@@ -140,8 +151,30 @@ function serializeDevice(d: DeviceRow) {
     curve25519Key: d.curve25519Key,
     ed25519Key: d.ed25519Key,
     deviceSignature: d.deviceSignature,
+    // Devices registered before cross-signing carry no signature at all — they
+    // must serialize as an explicit null, not vanish from the payload.
+    masterSignature: d.masterSignature ?? null,
     createdAt: d.createdAt.toISOString(),
   };
+}
+
+/** Device columns every list endpoint returns (cross-signature included). */
+const DEVICE_LIST_SELECT = {
+  deviceId: true,
+  curve25519Key: true,
+  ed25519Key: true,
+  deviceSignature: true,
+  masterSignature: true,
+  createdAt: true,
+} as const;
+
+/** The account-level master key pair, or nulls when cross-signing is unused. */
+async function getMasterKeyInfo(userId: string): Promise<{ masterKey: string | null; masterSignature: string | null }> {
+  const row = await prisma.e2EMasterKey.findUnique({
+    where: { userId },
+    select: { publicKey: true, signature: true },
+  });
+  return { masterKey: row?.publicKey ?? null, masterSignature: row?.signature ?? null };
 }
 
 // ─── Register / replace one of your devices ──────────────────────────────────
@@ -215,6 +248,11 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
           curve25519Key,
           ed25519Key,
           deviceSignature,
+          // Re-registering mints new identity keys, so any existing master
+          // signature covers keys that no longer exist. Clients already reject
+          // it (the canonical binds both public keys); drop it server-side too
+          // rather than keep serving material we know is dead.
+          masterSignature: null,
           fallbackKeyId: fallbackKey.keyId,
           fallbackKey: fallbackKey.key,
           fallbackKeySignature: fallbackKey.signature,
@@ -259,11 +297,7 @@ e2eRouter.get('/devices/me', rateLimitE2EStatus, async (req: Request, res: Respo
     const devices = await prisma.e2EDevice.findMany({
       where: { userId },
       select: {
-        deviceId: true,
-        curve25519Key: true,
-        ed25519Key: true,
-        deviceSignature: true,
-        createdAt: true,
+        ...DEVICE_LIST_SELECT,
         id: true,
         fallbackKeyId: true,
         updatedAt: true,
@@ -271,10 +305,12 @@ e2eRouter.get('/devices/me', rateLimitE2EStatus, async (req: Request, res: Respo
       orderBy: { createdAt: 'asc' },
     });
     const listVersion = await getDeviceListVersion(userId);
+    const master = await getMasterKeyInfo(userId);
 
     const base = {
       devices: devices.map(serializeDevice),
       listVersion,
+      ...master,
     };
 
     if (!deviceId) {
@@ -328,6 +364,9 @@ e2eRouter.delete(
         // left to rot in the recipient inbox.
         await tx.e2EDevice.delete({ where: { id: device.id } });
         await tx.e2EKeyShare.deleteMany({ where: { recipientUserId: userId, recipientDeviceId: deviceId } });
+        // Same reasoning for a pending master-secret handoff addressed to it:
+        // the Olm session it was encrypted to is gone with the device.
+        await tx.e2EMasterTransfer.deleteMany({ where: { userId, recipientDeviceId: deviceId } });
         return bumpDeviceListVersion(tx, userId);
       });
 
@@ -350,25 +389,180 @@ e2eRouter.get('/devices/:userId', rateLimitE2EStatus, async (req: Request<{ user
 
     const devices = await prisma.e2EDevice.findMany({
       where: { userId: targetUserId },
-      select: {
-        deviceId: true,
-        curve25519Key: true,
-        ed25519Key: true,
-        deviceSignature: true,
-        createdAt: true,
-      },
+      select: DEVICE_LIST_SELECT,
       orderBy: { createdAt: 'asc' },
     });
     const listVersion = await getDeviceListVersion(targetUserId);
+    // The account master key travels with the list: the client verifies its
+    // self-signature, pins it (TOFU), then checks each device's cross-signature
+    // against it — one account-level trust decision instead of one per device.
+    const master = await getMasterKeyInfo(targetUserId);
 
     res.json({
       success: true,
-      data: { devices: devices.map(serializeDevice), listVersion },
+      data: { devices: devices.map(serializeDevice), listVersion, ...master },
     });
   } catch (err) {
     next(err);
   }
 });
+
+// ─── Cross-signing: publish the account master key (spec §14) ────────────────
+// Upsert of the caller's own master key plus, optionally, cross-signatures for
+// devices the caller just approved — one transaction, one registry bump, so a
+// peer can never observe a master key without the signatures minted under it.
+
+interface RawDeviceSignature {
+  deviceId?: unknown;
+  signature?: unknown;
+}
+
+function validateSignatureB64(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !E2E_SIGNATURE_B64_RE.test(value)) {
+    throw new BadRequestError(`Invalid ${label}`);
+  }
+  return value;
+}
+
+e2eRouter.put('/master-key', rateLimitE2EApprove, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const { masterKey, masterSignature, deviceSignatures } = req.body ?? {};
+
+    if (typeof masterKey !== 'string' || !E2E_KEY_B64_RE.test(masterKey)) {
+      throw new BadRequestError('Invalid masterKey');
+    }
+    validateSignatureB64(masterSignature, 'masterSignature');
+    // Self-signature: proves the publisher holds the private half, so the
+    // server never stores a master key nobody can sign with.
+    if (!verifyEd25519Signature(masterKey, e2eMasterCanonical(userId, masterKey), masterSignature)) {
+      throw new BadRequestError('Master key signature verification failed');
+    }
+
+    let pending: Array<{ deviceId: string; signature: string }> = [];
+    if (deviceSignatures !== undefined) {
+      if (!Array.isArray(deviceSignatures) || deviceSignatures.length > E2E_LIMITS.MAX_DEVICES) {
+        throw new BadRequestError(`deviceSignatures must contain at most ${E2E_LIMITS.MAX_DEVICES} entries`);
+      }
+      pending = (deviceSignatures as RawDeviceSignature[]).map((entry, i) => {
+        if (!entry || typeof entry !== 'object') throw new BadRequestError(`deviceSignatures[${i}]: invalid entry`);
+        return {
+          deviceId: validateDeviceId(entry.deviceId, `deviceSignatures[${i}].deviceId`),
+          signature: validateSignatureB64(entry.signature, `deviceSignatures[${i}].signature`),
+        };
+      });
+      const unique = new Set(pending.map((p) => p.deviceId));
+      if (unique.size !== pending.length) throw new BadRequestError('Duplicate deviceSignatures entries');
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const existing = await tx.e2EMasterKey.findUnique({ where: { userId }, select: { publicKey: true } });
+      const replacing = existing !== null && existing !== undefined && existing.publicKey !== masterKey;
+
+      const saved = await tx.e2EMasterKey.upsert({
+        where: { userId },
+        create: { userId, publicKey: masterKey, signature: masterSignature },
+        update: { publicKey: masterKey, signature: masterSignature },
+      });
+
+      // Replacing the master key is an account identity change: every stored
+      // cross-signature was made by the OLD key and would fail verification on
+      // every client anyway. Clear them rather than serve known-dead data.
+      if (replacing) {
+        await tx.e2EDevice.updateMany({ where: { userId }, data: { masterSignature: null } });
+      }
+
+      let signed = 0;
+      if (pending.length > 0) {
+        // Read the identities INSIDE the transaction: a device re-registered
+        // concurrently must not end up with a signature over its old keys.
+        const devices = await tx.e2EDevice.findMany({
+          where: { userId, deviceId: { in: pending.map((p) => p.deviceId) } },
+          select: { id: true, deviceId: true, curve25519Key: true, ed25519Key: true },
+        });
+        const byDeviceId = new Map(devices.map((d) => [d.deviceId, d]));
+        for (const entry of pending) {
+          const device = byDeviceId.get(entry.deviceId);
+          if (!device) throw new BadRequestError(`Unknown device in deviceSignatures: ${entry.deviceId}`);
+          if (
+            !verifyEd25519Signature(
+              masterKey,
+              e2eDeviceCrossCanonical(userId, device.deviceId, device.curve25519Key, device.ed25519Key),
+              entry.signature
+            )
+          ) {
+            // One bad signature rejects the whole request — a partially applied
+            // batch would publish a device as "approved" without proof.
+            throw new BadRequestError(`Device cross-signature verification failed: ${entry.deviceId}`);
+          }
+          await tx.e2EDevice.update({ where: { id: device.id }, data: { masterSignature: entry.signature } });
+          signed++;
+        }
+      }
+
+      const listVersion = await bumpDeviceListVersion(tx, userId);
+      return { listVersion, signed, updatedAt: saved.updatedAt };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        masterKey,
+        masterSignature,
+        signedDevices: result.signed,
+        listVersion: result.listVersion,
+        updatedAt: result.updatedAt.toISOString(),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Cross-signing: approve one of your own devices ──────────────────────────
+
+e2eRouter.post(
+  '/devices/:deviceId/signature',
+  rateLimitE2EApprove,
+  async (req: Request<{ deviceId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const userId = req.user!.userId;
+      const deviceId = validateDeviceId(req.params.deviceId);
+      const signature = validateSignatureB64((req.body ?? {}).signature, 'signature');
+
+      const listVersion = await prisma.$transaction(async (tx) => {
+        // Composite lookup: you can only sign your OWN devices.
+        const device = await tx.e2EDevice.findUnique({
+          where: { userId_deviceId: { userId, deviceId } },
+          select: { id: true, curve25519Key: true, ed25519Key: true },
+        });
+        if (!device) throw new NotFoundError('E2E device');
+
+        const master = await tx.e2EMasterKey.findUnique({ where: { userId }, select: { publicKey: true } });
+        if (!master) throw new ConflictError('No master key published');
+
+        if (
+          !verifyEd25519Signature(
+            master.publicKey,
+            e2eDeviceCrossCanonical(userId, deviceId, device.curve25519Key, device.ed25519Key),
+            signature
+          )
+        ) {
+          throw new BadRequestError('Device cross-signature verification failed');
+        }
+
+        await tx.e2EDevice.update({ where: { id: device.id }, data: { masterSignature: signature } });
+        // Peers must re-fetch: a device that just became trusted changes the
+        // warning state of the list even though membership did not change.
+        return bumpDeviceListVersion(tx, userId);
+      });
+
+      res.json({ success: true, data: { deviceId, signed: true, listVersion } });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 // ─── Replenish one-time keys / rotate fallback key (per device) ──────────────
 
@@ -729,6 +923,151 @@ e2eRouter.get('/keyshares', rateLimitE2EShares, async (req: Request, res: Respon
           senderDeviceId: r.sender_device_id,
           conversationId: r.conversation_id,
           sessionId: r.session_id,
+          body: r.body,
+          createdAt: new Date(r.created_at).toISOString(),
+        })),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Master-secret transfers (device approval, spec §14) ─────────────────────
+// SELF ONLY: the recipient user is always the caller, so there is no
+// recipientUserId in the payload and no cross-user form of this route at all.
+// A dedicated mailbox rather than the key-share one — those rows are
+// conversation/session scoped and their eviction policy is sender-scoped.
+
+interface RawTransfer {
+  recipientDeviceId?: unknown;
+  body?: unknown;
+}
+
+function validateTransfer(raw: RawTransfer, index: number): { recipientDeviceId: string; body: string } {
+  const at = `transfers[${index}]`;
+  if (!raw || typeof raw !== 'object') throw new BadRequestError(`${at}: invalid transfer`);
+  const recipientDeviceId = validateDeviceId(raw.recipientDeviceId, `${at}.recipientDeviceId`);
+  if (typeof raw.body !== 'string' || raw.body.length > E2E_LIMITS.KEYSHARE_BODY_MAX) {
+    throw new BadRequestError(`${at}: transfer body too large`);
+  }
+  // Opaque pairwise-Olm ciphertext: never sanitized, only structurally checked.
+  const envelope = parseE2EEnvelope(raw.body);
+  if (!envelope || envelope.e !== E2E_ENGINE_OLM1) {
+    throw new BadRequestError(`${at}: invalid body envelope`);
+  }
+  return { recipientDeviceId, body: raw.body };
+}
+
+e2eRouter.post('/master-transfers', rateLimitE2EShares, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const { deviceId, transfers } = req.body ?? {};
+    const senderDeviceId = validateDeviceId(deviceId);
+
+    if (!Array.isArray(transfers) || transfers.length === 0 || transfers.length > E2E_LIMITS.MASTER_TRANSFER_BATCH_MAX) {
+      throw new BadRequestError(`transfers must contain 1–${E2E_LIMITS.MASTER_TRANSFER_BATCH_MAX} entries`);
+    }
+    const valid = (transfers as RawTransfer[]).map(validateTransfer);
+
+    // Attribution must be truthful: the sending device has to be one of ours.
+    const senderDevice = await prisma.e2EDevice.findUnique({
+      where: { userId_deviceId: { userId, deviceId: senderDeviceId } },
+      select: { id: true },
+    });
+    if (!senderDevice) throw new ForbiddenError('Unknown sender device');
+
+    const targets = new Map<string, number>();
+    for (const t of valid) {
+      if (t.recipientDeviceId === senderDeviceId) {
+        throw new BadRequestError('Cannot transfer the master secret to the sending device');
+      }
+      targets.set(t.recipientDeviceId, (targets.get(t.recipientDeviceId) ?? 0) + 1);
+    }
+
+    const evicted = await prisma.$transaction(async (tx) => {
+      // Recipient devices must exist AND belong to the caller — this is the
+      // only ownership boundary the mailbox has, so it runs inside the
+      // transaction (a device revoked concurrently leaves no orphan rows).
+      const known = await tx.e2EDevice.findMany({
+        where: { userId, deviceId: { in: [...targets.keys()] } },
+        select: { deviceId: true },
+      });
+      const knownSet = new Set(known.map((d) => d.deviceId));
+      for (const recipientDeviceId of targets.keys()) {
+        if (!knownSet.has(recipientDeviceId)) throw new BadRequestError('Unknown recipient device');
+      }
+
+      let evictedCount = 0;
+      for (const [recipientDeviceId, incoming] of targets) {
+        const scope = { userId, recipientDeviceId };
+        const existing = await tx.e2EMasterTransfer.count({ where: scope });
+        const overflow = existing + incoming - E2E_LIMITS.MASTER_TRANSFER_STORE_CAP;
+        if (overflow > 0) {
+          const stale = await tx.e2EMasterTransfer.findMany({
+            where: scope,
+            select: { id: true },
+            orderBy: { createdAt: 'asc' },
+            take: overflow,
+          });
+          if (stale.length > 0) {
+            await tx.e2EMasterTransfer.deleteMany({ where: { id: { in: stale.map((r) => r.id) } } });
+            evictedCount += stale.length;
+          }
+        }
+      }
+
+      await tx.e2EMasterTransfer.createMany({
+        data: valid.map((t) => ({
+          userId,
+          recipientDeviceId: t.recipientDeviceId,
+          senderDeviceId,
+          body: t.body,
+        })),
+      });
+      return evictedCount;
+    });
+
+    res.status(201).json({ success: true, data: { stored: valid.length, evicted } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+e2eRouter.get('/master-transfers', rateLimitE2EShares, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const deviceId = validateDeviceId(req.query.deviceId);
+
+    // A device inbox may only be drained by the account that owns the device.
+    const device = await prisma.e2EDevice.findUnique({
+      where: { userId_deviceId: { userId, deviceId } },
+      select: { id: true },
+    });
+    if (!device) throw new ForbiddenError('Unknown device');
+
+    // Claim-and-delete in one statement — the body is an Olm pre-key message,
+    // decryptable exactly once, so it must never be handed to two pollers.
+    const rows = await prisma.$queryRaw<
+      Array<{ id: string; sender_device_id: string; body: string; created_at: Date }>
+    >`
+      DELETE FROM e2e_master_transfers
+      WHERE id IN (
+        SELECT id FROM e2e_master_transfers
+        WHERE user_id = ${userId} AND recipient_device_id = ${deviceId}
+        ORDER BY created_at, id
+        LIMIT ${E2E_LIMITS.MASTER_TRANSFER_STORE_CAP}
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING id, sender_device_id, body, created_at
+    `;
+
+    res.json({
+      success: true,
+      data: {
+        transfers: rows.map((r) => ({
+          id: r.id,
+          senderDeviceId: r.sender_device_id,
           body: r.body,
           createdAt: new Date(r.created_at).toISOString(),
         })),

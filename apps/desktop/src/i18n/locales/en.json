@@ -984,6 +984,19 @@
     "ownDeviceBadgeTitle": "A device was added to your account — review it",
     "ownDeviceWarning": "A device you may not recognise was added to your account ({{count}}). It can read your encrypted conversations. Revoke it if it is not yours.",
     "ownDevicesReviewed": "These are my devices",
-    "unrecognisedDevice": "new"
+    "unrecognisedDevice": "new",
+    "accountSafetyExplainer": "Compare this number with {{name}} over another channel (in person, a call) to verify your account. It's the same on every device either of you uses, and only changes if an account key is reset.",
+    "markAccountVerified": "Mark account as verified",
+    "advancedDevices": "Advanced: per-device details",
+    "crossSignedChip": "Verified by account key",
+    "unsignedChip": "Not signed by {{name}}'s account key",
+    "unsignedChipOwn": "Not signed by your account key",
+    "approveDevice": "Approve this device",
+    "approveDeviceSuccess": "Device approved",
+    "approveDeviceFailed": "Could not approve device",
+    "cannotApproveExplainer": "This device can't approve others yet. Approve it from a device that already has access to your account key.",
+    "accountSafetyNumberUnavailable": "Account safety number unavailable — showing per-device numbers only.",
+    "unsignedDeviceBadgeTitle": "A device is not signed by the account key — review it",
+    "unsignedDevicesWarning": "{{count}} of {{name}}'s devices is not signed by their account key. It can still read new messages, so treat it as unverified until they approve it from a device they already use."
   }
 }
