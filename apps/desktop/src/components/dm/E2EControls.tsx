@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
-import { Lock, ShieldCheck, ShieldAlert, X, Laptop2, Trash2 } from 'lucide-react';
+import { Lock, ShieldCheck, ShieldAlert, X, Laptop2, Trash2, KeyRound, Copy, Check } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useDMStore } from '../../stores/dmStore';
 import { useE2EStore } from '../../stores/e2eStore';
@@ -9,6 +9,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import {
   getE2EService,
+  E2ERecoveryKeyFormatError,
   type E2EAccountSafetyNumber,
   type E2EDeviceSafetyNumber,
   type E2EOwnDevices,
@@ -501,7 +502,362 @@ export function shouldOfferIdentityReset({
   );
 }
 
-function DeviceManagerModal({ onClose }: { onClose: () => void }) {
+/**
+ * Should the device manager offer to RESTORE from a key backup (spec §15.4)?
+ *
+ * Only when this device cannot approve — a device that already holds the
+ * account key has nothing to recover — and only when a backup is KNOWN to
+ * exist. `null` is "not read yet", not "no backup": rendering the box on that
+ * guess sends a user hunting for a recovery key that was never created, on the
+ * one screen they reached precisely because they had lost access to everything
+ * else.
+ */
+export function shouldOfferKeyBackupRestore({
+  keyBackup,
+  canApprove,
+}: {
+  keyBackup: { exists: boolean } | null;
+  canApprove: boolean;
+}): boolean {
+  return !canApprove && keyBackup?.exists === true;
+}
+
+/**
+ * The recovery key, shown ONCE (spec §15.2).
+ *
+ * No close button, and the backdrop is inert on purpose: every exit other than
+ * the acknowledgement is one stray click away from losing a key that cannot be
+ * shown again and cannot be re-derived — not by us, not by the server, not by
+ * the engine that minted it. A dialog dismissed by accident leaves the user
+ * believing they have a recovery key, which is worse than having none.
+ */
+function RecoveryKeyDialog({
+  recoveryKey,
+  onAcknowledge,
+}: {
+  recoveryKey: string;
+  onAcknowledge: () => void;
+}) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(recoveryKey);
+      } else {
+        // Tauri and http://localhost both reach here; the key is unrecoverable,
+        // so "copy quietly did nothing" is not an acceptable outcome.
+        const field = document.createElement('textarea');
+        field.value = recoveryKey;
+        field.style.position = 'fixed';
+        field.style.left = '-9999px';
+        document.body.appendChild(field);
+        field.focus();
+        field.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(field);
+        if (!ok) throw new Error('copy rejected');
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.warn('e2e: copying the recovery key failed:', err instanceof Error ? err.message : err);
+      toast.error(t('e2e.backupCopyFailed'));
+    }
+  };
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70"
+      onClick={(e) => e.stopPropagation()}
+      data-testid="e2e-recovery-key-dialog"
+    >
+      <div className="w-full max-w-md rounded-lg bg-vox-bg-primary p-5 shadow-xl">
+        <h3 className="mb-3 flex items-center gap-2 text-base font-semibold text-vox-text-primary">
+          <KeyRound size={16} className="text-vox-accent-primary" />
+          {t('e2e.backupKeyTitle')}
+        </h3>
+
+        <div className="mb-3 rounded-md border border-vox-accent-warning/20 bg-vox-accent-warning/10 px-3 py-2">
+          <p className="text-xs font-medium text-vox-accent-warning">{t('e2e.backupKeyWarning')}</p>
+          <p className="mt-1 text-[11px] text-vox-accent-warning/80">{t('e2e.backupKeyLoss')}</p>
+        </div>
+
+        {/* select-all so a triple-click or ⌘A grabs the whole key and nothing
+            else — a half-selected recovery key restores nothing. */}
+        <code
+          className="mb-3 block rounded-md border border-vox-border bg-vox-bg-secondary px-3 py-3 text-center font-mono text-sm leading-relaxed break-all text-vox-text-primary select-all"
+          data-testid="e2e-recovery-key"
+        >
+          {recoveryKey}
+        </code>
+
+        <button
+          onClick={handleCopy}
+          className="mb-4 flex w-full items-center justify-center gap-2 rounded-md border border-vox-border px-3 py-2 text-xs text-vox-text-secondary hover:bg-vox-bg-hover"
+        >
+          {copied ? <Check size={14} className="text-vox-accent-success" /> : <Copy size={14} />}
+          {copied ? t('common.copied') : t('common.copy')}
+        </button>
+
+        <label className="mb-3 flex cursor-pointer items-start gap-2 text-xs text-vox-text-secondary">
+          <input
+            type="checkbox"
+            checked={saved}
+            onChange={(e) => setSaved(e.target.checked)}
+            className="mt-0.5 accent-vox-accent-primary"
+          />
+          <span>{t('e2e.backupKeyAcknowledge')}</span>
+        </label>
+
+        <button
+          onClick={onAcknowledge}
+          disabled={!saved}
+          className="w-full rounded-md bg-vox-accent-primary px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {t('e2e.backupKeyDone')}
+        </button>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+/**
+ * Account recovery (spec §15): the only thing standing between "lost every
+ * device" and the identity reset below, which costs every contact a
+ * re-verification. Restoring keeps the account key, so nobody is prompted —
+ * which is why this section is rendered ABOVE the reset affordance and the
+ * reset is framed as the last resort it is.
+ */
+function KeyBackupSection({
+  userId,
+  noBackupNotice,
+}: {
+  userId: string;
+  /** Is the identity reset on screen? Then "there is no backup" is the reason for it. */
+  noBackupNotice: boolean;
+}) {
+  const { t } = useTranslation();
+  const keyBackup = useE2EStore((s) => s.keyBackup);
+  const canApprove = useE2EStore((s) => s.canApprove);
+  const [confirming, setConfirming] = useState<'replace' | 'delete' | null>(null);
+  const [busy, setBusy] = useState(false);
+  /**
+   * The recovery key lives HERE and nowhere else: component state dies with the
+   * dialog, whereas the store survives the modal, the route and any state dump
+   * a devtools extension or a bug report might take with it (§15.2).
+   */
+  const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
+  const [restoreInput, setRestoreInput] = useState('');
+  const [restoreError, setRestoreError] = useState<'malformed' | 'failed' | null>(null);
+
+  const handleCreate = async () => {
+    setBusy(true);
+    try {
+      setRecoveryKey(await useE2EStore.getState().createKeyBackup(userId));
+      setConfirming(null);
+    } catch (err) {
+      console.warn('e2e: creating the key backup failed:', err instanceof Error ? err.message : err);
+      toast.error(t('e2e.backupCreateFailed'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    setBusy(true);
+    try {
+      await useE2EStore.getState().deleteKeyBackup(userId);
+      toast.success(t('e2e.backupDeleted'));
+      setConfirming(null);
+    } catch (err) {
+      console.warn('e2e: deleting the key backup failed:', err instanceof Error ? err.message : err);
+      toast.error(t('e2e.backupDeleteFailed'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRestore = async () => {
+    setBusy(true);
+    setRestoreError(null);
+    try {
+      await useE2EStore.getState().restoreKeyBackup(userId, restoreInput);
+      // Only now: the store has re-read this device's status, so the panel
+      // below is already showing that it can approve others again.
+      setRestoreInput('');
+      setRestoreError(null);
+      toast.success(t('e2e.backupRestoreSuccess'));
+    } catch (err) {
+      // A mistyped key and an unreachable server both land here. The message
+      // says "try again" rather than guessing which, and the detail goes to the
+      // log — a restore that failed must never read as one that worked.
+      // A key that fails its own checksum never left the device, and saying
+      // "check it for typos" is only honest for that case: everything else
+      // means this key does not open what the account actually has.
+      console.warn('e2e: restoring from the key backup failed:', err instanceof Error ? err.message : err);
+      setRestoreError(err instanceof E2ERecoveryKeyFormatError ? 'malformed' : 'failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Unknown state: say nothing rather than offer an action that is wrong in one
+  // direction or the other (see shouldOfferKeyBackupRestore).
+  if (!keyBackup) return null;
+  const canRestore = shouldOfferKeyBackupRestore({ keyBackup, canApprove });
+  // Nothing to offer and nothing worth saying: a second device waiting for an
+  // ordinary approval — the most common state in the whole flow — does not need
+  // to be told about a backup that does not exist. That line earns its place
+  // only next to the reset, where it is the reason the reset is the way out.
+  if (!canApprove && !canRestore && !noBackupNotice) return null;
+
+  const body = () => {
+    if (!canApprove) {
+      if (!canRestore) {
+        // Named explicitly: it is the reason the reset below is the only way
+        // out, and a user who thinks they might have a key deserves the answer.
+        return <p>{t('e2e.backupNone')}</p>;
+      }
+      return (
+        <>
+          <p className="mb-2">{t('e2e.backupRestoreExplainer')}</p>
+          <input
+            type="text"
+            value={restoreInput}
+            onChange={(e) => {
+              setRestoreInput(e.target.value);
+              setRestoreError(null);
+            }}
+            placeholder={t('e2e.backupRestorePlaceholder')}
+            aria-label={t('e2e.backupRestoreTitle')}
+            spellCheck={false}
+            autoComplete="off"
+            className="mb-2 w-full rounded-md border border-vox-border bg-vox-bg-primary px-2 py-1.5 font-mono text-xs tracking-wide text-vox-text-primary focus:border-vox-accent-primary focus:outline-none"
+          />
+          {restoreError && (
+            <p className="mb-2 text-vox-accent-danger" role="alert">
+              {t(restoreError === 'malformed' ? 'e2e.backupRestoreMalformed' : 'e2e.backupRestoreFailed')}
+            </p>
+          )}
+          <button
+            onClick={handleRestore}
+            disabled={busy || restoreInput.trim().length === 0}
+            className="rounded bg-vox-accent-primary px-2 py-1 font-medium text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {busy ? t('common.loading') : t('e2e.backupRestoreAction')}
+          </button>
+        </>
+      );
+    }
+
+    if (confirming === 'replace') {
+      return (
+        <>
+          <p className="mb-2 text-vox-accent-warning">{t('e2e.backupReplaceConfirm')}</p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleCreate}
+              disabled={busy}
+              className="rounded bg-vox-accent-warning px-2 py-1 font-medium text-black hover:opacity-90 disabled:opacity-50"
+            >
+              {busy ? t('common.loading') : t('e2e.backupReplaceAction')}
+            </button>
+            <button onClick={() => setConfirming(null)} className="rounded px-2 py-1 hover:text-vox-text-primary">
+              {t('common.cancel')}
+            </button>
+          </div>
+        </>
+      );
+    }
+
+    if (confirming === 'delete') {
+      return (
+        <>
+          <p className="mb-2 text-vox-accent-danger">{t('e2e.backupDeleteConfirm')}</p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleDelete}
+              disabled={busy}
+              className="rounded bg-vox-accent-danger px-2 py-1 font-medium text-white hover:opacity-90 disabled:opacity-50"
+            >
+              {busy ? t('common.loading') : t('common.confirm')}
+            </button>
+            <button onClick={() => setConfirming(null)} className="rounded px-2 py-1 hover:text-vox-text-primary">
+              {t('common.cancel')}
+            </button>
+          </div>
+        </>
+      );
+    }
+
+    if (keyBackup.exists) {
+      return (
+        <>
+          <p className="mb-1 flex items-center gap-1.5 font-medium text-vox-accent-success">
+            <ShieldCheck size={14} />
+            {t('e2e.backupSetUp')}
+          </p>
+          {keyBackup.updatedAt && (
+            <p className="mb-2">
+              {t('e2e.backupUpdatedAt', { date: new Date(keyBackup.updatedAt).toLocaleDateString() })}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <button
+              onClick={() => setConfirming('replace')}
+              className="rounded border border-vox-border px-2 py-1 font-medium text-vox-text-secondary hover:bg-vox-bg-hover"
+            >
+              {t('e2e.backupReplaceAction')}
+            </button>
+            <button
+              onClick={() => setConfirming('delete')}
+              className="rounded px-2 py-1 font-medium text-vox-accent-danger hover:bg-vox-accent-danger/10"
+            >
+              {t('e2e.backupDeleteAction')}
+            </button>
+          </div>
+        </>
+      );
+    }
+
+    return (
+      <>
+        <p className="mb-2">{t('e2e.backupExplainer')}</p>
+        <button
+          onClick={handleCreate}
+          disabled={busy}
+          className="rounded bg-vox-accent-primary px-2 py-1 font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {busy ? t('common.loading') : t('e2e.backupCreateAction')}
+        </button>
+      </>
+    );
+  };
+
+  return (
+    <div
+      className="mb-3 rounded-md bg-vox-bg-secondary p-2 text-xs text-vox-text-muted"
+      data-testid="e2e-key-backup"
+    >
+      <p className="mb-1.5 font-medium text-vox-text-secondary">
+        {canRestore ? t('e2e.backupRestoreTitle') : t('e2e.backupTitle')}
+      </p>
+      {body()}
+      {recoveryKey && (
+        <RecoveryKeyDialog recoveryKey={recoveryKey} onAcknowledge={() => setRecoveryKey(null)} />
+      )}
+    </div>
+  );
+}
+
+// Exported for tests: the account-recovery flows below it are reachable in the
+// app only through two nested modals, and driving them from the badge would
+// pull the real crypto service (and its IndexedDB vault) into a render test.
+export function DeviceManagerModal({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const user = useAuthStore((s) => s.user);
   const ownDevices = useE2EStore((s) => s.ownDevices);
@@ -509,13 +865,20 @@ function DeviceManagerModal({ onClose }: { onClose: () => void }) {
   const ownDeviceWarnings = useE2EStore((s) => s.ownDeviceWarnings);
   const canApprove = useE2EStore((s) => s.canApprove);
   const masterKeyConflict = useE2EStore((s) => s.masterKeyConflict);
+  const keyBackup = useE2EStore((s) => s.keyBackup);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
-    if (user?.id) void useE2EStore.getState().loadOwnDevices(user.id);
+    if (!user?.id) return;
+    void useE2EStore.getState().loadOwnDevices(user.id);
+    // Read once per open rather than folded into loadOwnDevices: that runs
+    // again after every approve/revoke, and GET /e2e/backup shares the 30/hour
+    // approval bucket — spending it on a row that device actions cannot change
+    // is how a multi-device setup ends in a 429 mid-approval.
+    void useE2EStore.getState().loadKeyBackup(user.id);
   }, [user?.id]);
 
   const handleAcknowledge = async () => {
@@ -606,8 +969,17 @@ function DeviceManagerModal({ onClose }: { onClose: () => void }) {
           </p>
         )}
 
+        {/* Above the reset, always: recovery restores the SAME account key, so
+            no peer sees a safety-number change and nobody re-verifies. Offering
+            the destructive exit first would have users take it while a backup
+            they own sits unused. */}
+        {user?.id && <KeyBackupSection userId={user.id} noBackupNotice={canReset} />}
+
         {canReset && (
-          <div className="mb-3 rounded-md bg-vox-bg-secondary p-2 text-xs text-vox-text-muted">
+          <div
+            className="mb-3 rounded-md bg-vox-bg-secondary p-2 text-xs text-vox-text-muted"
+            data-testid="e2e-reset-identity"
+          >
             {confirmingReset ? (
               <>
                 <p className="mb-2 text-vox-accent-warning">{t('e2e.resetIdentityConfirm')}</p>
@@ -629,6 +1001,9 @@ function DeviceManagerModal({ onClose }: { onClose: () => void }) {
               </>
             ) : (
               <>
+                {keyBackup?.exists && (
+                  <p className="mb-2 text-vox-text-secondary">{t('e2e.backupPreferRestore')}</p>
+                )}
                 <p className="mb-2">{t('e2e.resetIdentityExplainer')}</p>
                 <button
                   onClick={() => setConfirmingReset(true)}

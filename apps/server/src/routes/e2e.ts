@@ -1129,3 +1129,100 @@ e2eRouter.post('/master-transfers/ack', rateLimitE2EShares, async (req: Request,
     next(err);
   }
 });
+
+// ─── Encrypted key backup (spec §15) ─────────────────────────────────────────
+// SELF ONLY, and opaque end to end: `blob` is a ciphertext sealed client-side
+// under a 32-byte recovery key that never reaches us. It exists so an account
+// that loses every device can restore its cross-signing master secret instead
+// of minting a new identity (which would reset trust for every peer).
+//
+// This is NOT key escrow. There is no passphrase, no hint, no reset flow and no
+// server-side recovery: without the recovery key the row is noise, to us and to
+// anyone who takes the database. Nothing here may ever grow a code path that
+// makes the blob more usable to the server than the raw bytes.
+//
+// Deliberately NOT wired into the device lifecycle. Revoking a device — even
+// the last one — must leave the backup untouched: "all devices are gone" is
+// precisely the case it was written for.
+
+/**
+ * The blob is checked for size and nothing else: it is ciphertext, so it is
+ * never sanitized (sanitizing would corrupt it) and never parsed. The cap is
+ * the only thing standing between one row per account and a free text store.
+ */
+function validateBackupBlob(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new BadRequestError('blob is required');
+  }
+  if (value.length > E2E_LIMITS.KEY_BACKUP_MAX) {
+    throw new BadRequestError(`blob must be at most ${E2E_LIMITS.KEY_BACKUP_MAX} characters`);
+  }
+  return value;
+}
+
+e2eRouter.put('/backup', rateLimitE2EApprove, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const blob = validateBackupBlob((req.body ?? {}).blob);
+
+    // Replacing is the expected case, not a conflict: minting a new recovery
+    // key invalidates the old blob, and there is exactly one backup per
+    // account. A 409 here would leave a client holding a fresh recovery key it
+    // could not store.
+    const saved = await prisma.e2EKeyBackup.upsert({
+      where: { userId },
+      create: { userId, blob },
+      update: { blob },
+      select: { createdAt: true, updatedAt: true },
+    });
+
+    res.json({
+      success: true,
+      data: { createdAt: saved.createdAt.toISOString(), updatedAt: saved.updatedAt.toISOString() },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+e2eRouter.get('/backup', rateLimitE2EStatus, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+
+    const row = await prisma.e2EKeyBackup.findUnique({
+      where: { userId },
+      select: { blob: true, createdAt: true, updatedAt: true },
+    });
+
+    // "No backup" is a state, not an error. A restoring client reads this to
+    // choose between asking for a recovery key and starting a fresh identity —
+    // and a 404 is indistinguishable from a routing or deploy failure, which
+    // would push it into resetting account trust for the wrong reason.
+    res.json({
+      success: true,
+      data: {
+        exists: row !== null,
+        blob: row?.blob ?? null,
+        createdAt: row?.createdAt.toISOString() ?? null,
+        updatedAt: row?.updatedAt.toISOString() ?? null,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+e2eRouter.delete('/backup', rateLimitE2EApprove, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+
+    // deleteMany, not delete: idempotent by construction (a missing row is
+    // `deleted: false`, never a P2025), and the userId comes from the session
+    // so the clause can only ever reach the caller's own row.
+    const { count } = await prisma.e2EKeyBackup.deleteMany({ where: { userId } });
+
+    res.json({ success: true, data: { deleted: count > 0 } });
+  } catch (err) {
+    next(err);
+  }
+});

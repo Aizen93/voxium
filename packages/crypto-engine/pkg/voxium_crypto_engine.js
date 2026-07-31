@@ -683,6 +683,33 @@ export class EngineMasterKey {
         }
     }
     /**
+     * Seal this key into a backup blob under a recovery key (spec §15). The
+     * payload carries the public half too, so restoring can prove the blob
+     * belongs to the account before anything is stored.
+     * @param {string} recovery_key
+     * @returns {string}
+     */
+    sealForBackup(recovery_key) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(recovery_key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.enginemasterkey_sealForBackup(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * Sign a canonical UTF-8 string (master self-signature, device
      * cross-signature). Verified with the existing `verify_ed25519`.
      * @param {string} message
@@ -1063,6 +1090,37 @@ export function engine_version() {
 }
 
 /**
+ * Mint a recovery key: 32 random bytes plus a checksum byte, base32, grouped
+ * in fours so it can be read aloud and written down without losing your place.
+ * @returns {string}
+ */
+export function generateRecoveryKey() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.generateRecoveryKey();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Does this look like a recovery key at all (checksum included)? Lets the UI
+ * reject a typo without touching the network or the blob.
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isRecoveryKeyWellFormed(text) {
+    const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.isRecoveryKeyWellFormed(ptr0, len0);
+    return ret !== 0;
+}
+
+/**
  * Account-level safety number over the PUBLIC cross-signing master keys
  * (spec §14 / decision D3). Same construction and shape as `safety_number`
  * — 30 digits per party, halves sorted, 60 digits total — but seeded from the
@@ -1099,6 +1157,31 @@ export function master_safety_number(user_a, master_a_b64, user_b, master_b_b64)
     } finally {
         wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
     }
+}
+
+/**
+ * Open a backup blob and prove it holds the account's key.
+ *
+ * The expected key is what the account PUBLISHES. A blob that decrypts to
+ * anything else is refused rather than adopted: otherwise a server could hand
+ * back a blob of its own making and the "recovery" would install its key.
+ * @param {string} blob_b64
+ * @param {string} recovery_key
+ * @param {string} expected_master_key
+ * @returns {EngineMasterKey}
+ */
+export function openMasterKeyBackup(blob_b64, recovery_key, expected_master_key) {
+    const ptr0 = passStringToWasm0(blob_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(recovery_key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(expected_master_key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.openMasterKeyBackup(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return EngineMasterKey.__wrap(ret[0]);
 }
 
 /**

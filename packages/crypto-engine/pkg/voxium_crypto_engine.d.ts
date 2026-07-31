@@ -173,6 +173,12 @@ export class EngineMasterKey {
      */
     seal(pickle_key: Uint8Array): string;
     /**
+     * Seal this key into a backup blob under a recovery key (spec §15). The
+     * payload carries the public half too, so restoring can prove the blob
+     * belongs to the account before anything is stored.
+     */
+    sealForBackup(recovery_key: string): string;
+    /**
      * Sign a canonical UTF-8 string (master self-signature, device
      * cross-signature). Verified with the existing `verify_ed25519`.
      */
@@ -265,6 +271,18 @@ export function encryptAttachment(bytes: Uint8Array): EncryptedAttachment;
 export function engine_version(): string;
 
 /**
+ * Mint a recovery key: 32 random bytes plus a checksum byte, base32, grouped
+ * in fours so it can be read aloud and written down without losing your place.
+ */
+export function generateRecoveryKey(): string;
+
+/**
+ * Does this look like a recovery key at all (checksum included)? Lets the UI
+ * reject a typo without touching the network or the blob.
+ */
+export function isRecoveryKeyWellFormed(text: string): boolean;
+
+/**
  * Account-level safety number over the PUBLIC cross-signing master keys
  * (spec §14 / decision D3). Same construction and shape as `safety_number`
  * — 30 digits per party, halves sorted, 60 digits total — but seeded from the
@@ -272,6 +290,15 @@ export function engine_version(): string;
  * comparison covers every cross-signed device of that account.
  */
 export function master_safety_number(user_a: string, master_a_b64: string, user_b: string, master_b_b64: string): string;
+
+/**
+ * Open a backup blob and prove it holds the account's key.
+ *
+ * The expected key is what the account PUBLISHES. A blob that decrypts to
+ * anything else is refused rather than adopted: otherwise a server could hand
+ * back a blob of its own making and the "recovery" would install its key.
+ */
+export function openMasterKeyBackup(blob_b64: string, recovery_key: string, expected_master_key: string): EngineMasterKey;
 
 /**
  * Open a blob produced by `sealSecret`. Fails on a wrong key or any tampering
@@ -357,6 +384,7 @@ export interface InitOutput {
     readonly enginemasterkey_new: () => number;
     readonly enginemasterkey_publicKey: (a: number) => [number, number];
     readonly enginemasterkey_seal: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly enginemasterkey_sealForBackup: (a: number, b: number, c: number) => [number, number, number, number];
     readonly enginemasterkey_sign: (a: number, b: number, c: number) => [number, number];
     readonly enginesession_decrypt: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly enginesession_decryptMasterSecret: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
@@ -366,13 +394,16 @@ export interface InitOutput {
     readonly enginesession_hasReceivedMessage: (a: number) => number;
     readonly enginesession_pickle: (a: number, b: number, c: number) => [number, number, number, number];
     readonly enginesession_sessionId: (a: number) => [number, number];
+    readonly generateRecoveryKey: () => [number, number];
     readonly groupdecryptresult_messageIndex: (a: number) => number;
     readonly groupdecryptresult_plaintext: (a: number) => [number, number];
     readonly inboundresult_plaintext: (a: number) => [number, number];
     readonly inboundresult_takeSession: (a: number) => [number, number, number];
+    readonly isRecoveryKeyWellFormed: (a: number, b: number) => number;
     readonly master_safety_number: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly masterinboundresult_takeMasterKey: (a: number) => [number, number, number];
     readonly masterinboundresult_takeSession: (a: number) => [number, number, number];
+    readonly openMasterKeyBackup: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly openSecret: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly prekey_message_session_id: (a: number, b: number) => [number, number, number, number];
     readonly safety_number: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];

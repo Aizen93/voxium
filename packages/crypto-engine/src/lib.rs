@@ -164,6 +164,184 @@ const MASTER_TRANSFER_PREFIX: &str = "voxium-master-v1|";
 /// belongs to, so two sealed fields under the same key are not interchangeable.
 const MASTER_SECRET_CONTEXT: &str = "voxium-vault/master_secret";
 
+// ─── Encrypted key backup (spec §15) ─────────────────────────────────────────
+// Losing every device currently means losing the account identity. A backup
+// lets the user recover it instead — but only the user: the blob is sealed
+// under a 32-byte RECOVERY KEY that is generated here, shown once, and never
+// sent anywhere. The server stores ciphertext it cannot open.
+//
+// Deliberately a random key rather than a passphrase. A passphrase would need a
+// slow KDF (key derivation this crate is not allowed to implement, §1) and,
+// worse, would make a server-held blob guessable offline at whatever entropy a
+// human chose. A 256-bit random key has no such attack.
+
+/// AAD for a backup blob. Reserved from JS for the same reason as the vault
+/// context: the blob and (once typed) the recovery key both pass through JS, so
+/// a generic opener would hand back the account's private half as a string.
+const BACKUP_CONTEXT: &str = "voxium-backup/master_secret";
+
+/// Versioned payload marker. Parsed in Rust so the secret never becomes a JS
+/// string, and so a later version can add message keys without a new recovery
+/// key or a second blob.
+const BACKUP_PREFIX: &str = "voxium-backup-v1|";
+
+/// RFC 4648 base32. Chosen over base64 because a recovery key gets written down
+/// and typed back in: no case distinction, and none of 0/1/8 to confuse with
+/// O/I/B.
+const B32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+const RECOVERY_KEY_LEN: usize = 32;
+
+fn base32_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 8 / 5 + 1);
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    for &byte in bytes {
+        buffer = (buffer << 8) | byte as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(B32[((buffer >> bits) & 31) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(B32[((buffer << (5 - bits)) & 31) as usize] as char);
+    }
+    out
+}
+
+fn base32_decode(text: &str) -> Option<Vec<u8>> {
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    let mut out = Vec::with_capacity(text.len() * 5 / 8);
+    for ch in text.chars() {
+        let value = B32.iter().position(|&c| c as char == ch)? as u32;
+        buffer = (buffer << 5) | value;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// One byte of SHA-256 over the secret. GCM already fails closed on a wrong
+/// key, so this exists purely so the UI can say "that is not a recovery key"
+/// before a network round trip instead of "decryption failed" after one.
+fn recovery_checksum(secret: &[u8]) -> u8 {
+    let mut hasher = Sha512::new();
+    hasher.update(b"voxium-recovery-key-v1");
+    hasher.update(secret);
+    hasher.finalize()[0]
+}
+
+/// Accept what a human actually types: any case, and grouped however they
+/// copied it. The three characters absent from the alphabet are mapped to the
+/// ones they are mistaken for rather than rejected.
+fn normalize_recovery_key(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
+        .map(|c| match c.to_ascii_uppercase() {
+            '0' => 'O',
+            '1' => 'I',
+            '8' => 'B',
+            other => other,
+        })
+        .collect()
+}
+
+fn parse_recovery_key(text: &str) -> Result<[u8; RECOVERY_KEY_LEN], JsError> {
+    let normalized = normalize_recovery_key(text);
+    let mut decoded =
+        base32_decode(&normalized).ok_or_else(|| JsError::new("recovery key is not valid"))?;
+    if decoded.len() < RECOVERY_KEY_LEN + 1 {
+        decoded.zeroize();
+        return Err(JsError::new("recovery key is not valid"));
+    }
+    let mut key = [0u8; RECOVERY_KEY_LEN];
+    key.copy_from_slice(&decoded[..RECOVERY_KEY_LEN]);
+    let checksum = decoded[RECOVERY_KEY_LEN];
+    decoded.zeroize();
+    if recovery_checksum(&key) != checksum {
+        key.zeroize();
+        return Err(JsError::new("recovery key is not valid"));
+    }
+    Ok(key)
+}
+
+/// Mint a recovery key: 32 random bytes plus a checksum byte, base32, grouped
+/// in fours so it can be read aloud and written down without losing your place.
+#[wasm_bindgen(js_name = generateRecoveryKey)]
+pub fn generate_recovery_key() -> String {
+    use aes_gcm::aead::rand_core::RngCore;
+    use aes_gcm::aead::OsRng;
+
+    let mut secret = [0u8; RECOVERY_KEY_LEN];
+    OsRng.fill_bytes(&mut secret);
+    let mut payload = Vec::with_capacity(RECOVERY_KEY_LEN + 1);
+    payload.extend_from_slice(&secret);
+    payload.push(recovery_checksum(&secret));
+    secret.zeroize();
+
+    let mut encoded = base32_encode(&payload);
+    payload.zeroize();
+    let grouped = encoded
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect::<Vec<_>>()
+        .join("-");
+    encoded.zeroize();
+    grouped
+}
+
+/// Does this look like a recovery key at all (checksum included)? Lets the UI
+/// reject a typo without touching the network or the blob.
+#[wasm_bindgen(js_name = isRecoveryKeyWellFormed)]
+pub fn is_recovery_key_well_formed(text: &str) -> bool {
+    match parse_recovery_key(text) {
+        Ok(mut key) => {
+            key.zeroize();
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Open a backup blob and prove it holds the account's key.
+///
+/// The expected key is what the account PUBLISHES. A blob that decrypts to
+/// anything else is refused rather than adopted: otherwise a server could hand
+/// back a blob of its own making and the "recovery" would install its key.
+#[wasm_bindgen(js_name = openMasterKeyBackup)]
+pub fn open_master_key_backup(
+    blob_b64: &str,
+    recovery_key: &str,
+    expected_master_key: &str,
+) -> Result<EngineMasterKey, JsError> {
+    let mut key = parse_recovery_key(recovery_key)?;
+    let opened = open_secret_internal(blob_b64, BACKUP_CONTEXT, &key);
+    key.zeroize();
+
+    let mut plaintext = opened.map_err(|_| JsError::new("recovery key does not open this backup"))?;
+    let parsed = (|| {
+        let rest = plaintext.strip_prefix(BACKUP_PREFIX)?;
+        let (secret_b64, public_b64) = rest.split_once('|')?;
+        Some((secret_b64.to_string(), public_b64.to_string()))
+    })();
+    plaintext.zeroize();
+
+    let (mut secret_b64, public_b64) =
+        parsed.ok_or_else(|| JsError::new("backup payload is malformed"))?;
+    let recovered = Ed25519SecretKey::from_base64(&secret_b64)
+        .map_err(|_| JsError::new("backup contains invalid key material"));
+    secret_b64.zeroize();
+    let recovered = recovered?;
+
+    if recovered.public_key().to_base64() != public_b64 || public_b64 != expected_master_key {
+        return Err(JsError::new("this backup is for a different account key"));
+    }
+    Ok(EngineMasterKey { inner: recovered })
+}
+
 /// Parse a device-approval payload and prove it is the account's key. Kept in
 /// Rust so neither the raw secret nor the check can be bypassed from JS.
 fn parse_master_transfer(mut plaintext: String, expected_master_key: &str) -> Result<EngineMasterKey, JsError> {
@@ -218,7 +396,7 @@ const SEAL_TAG_LEN: usize = 16;
 /// blob and the pickle key are both readable from JS, so one `openSecret` call
 /// with the (published, constant) context would return the raw secret.
 fn reject_reserved_context(context: &str) -> Result<(), JsError> {
-    if context == MASTER_SECRET_CONTEXT {
+    if context == MASTER_SECRET_CONTEXT || context == BACKUP_CONTEXT {
         return Err(JsError::new("this context is reserved for the engine"));
     }
     Ok(())
@@ -459,6 +637,28 @@ impl EngineMasterKey {
     // The private half has no JS-facing accessor by design (spec §7/§14):
     // device approval goes through EngineSession::encryptMasterSecret so the
     // secret never exists as a JS string.
+
+    /// Seal this key into a backup blob under a recovery key (spec §15). The
+    /// payload carries the public half too, so restoring can prove the blob
+    /// belongs to the account before anything is stored.
+    #[wasm_bindgen(js_name = sealForBackup)]
+    pub fn seal_for_backup(&self, recovery_key: &str) -> Result<String, JsError> {
+        let mut key = parse_recovery_key(recovery_key)?;
+        let mut secret_b64 = self.inner.to_base64();
+        let public_b64 = self.public_key();
+        let mut payload =
+            String::with_capacity(BACKUP_PREFIX.len() + secret_b64.len() + 1 + public_b64.len());
+        payload.push_str(BACKUP_PREFIX);
+        payload.push_str(&secret_b64);
+        payload.push('|');
+        payload.push_str(&public_b64);
+        secret_b64.zeroize();
+
+        let sealed = seal_secret_internal(&payload, BACKUP_CONTEXT, &key);
+        payload.zeroize();
+        key.zeroize();
+        sealed
+    }
 
     /// Base64 of the public master key (the account identity that is published
     /// and compared out of band as the account safety number).

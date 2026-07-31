@@ -59,6 +59,7 @@ model User {
   supportMessages       SupportMessage[] @relation("SupportMessageAuthor")
   communityThemes       CommunityTheme[]
   e2eDevices            E2EDevice[]
+  e2eKeyBackup          E2EKeyBackup?
 
   @@map("users")
 }
@@ -606,6 +607,29 @@ model E2EDeviceRegistry {
   version Int    @default(0)
 
   @@map("e2e_device_registry")
+}
+
+/// An account's encrypted key backup (spec §15): the cross-signing master
+/// secret sealed client-side under a 32-byte recovery key the user alone holds.
+/// `blob` is opaque AES-256-GCM ciphertext — the server stores and returns
+/// bytes, it can never decrypt them. Not escrow: no passphrase, no hint, no
+/// server-side recovery. One row per account (replacing is the normal case —
+/// a new recovery key invalidates the old blob).
+model E2EKeyBackup {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+  blob   String // opaque AES-256-GCM ciphertext, base64 — server never decrypts
+  // The one E2E table with a real FK, because it is the one row that is MEANT
+  // to outlive every device: no age sweep can ever reclaim it, so without a
+  // cascade a deleted account leaves its sealed master secret in the database
+  // forever. The other E2E tables are purged explicitly on delete (see
+  // utils/e2ePurge) — they predate this and adding FKs to them needs an
+  // orphan-cleanup migration on a live database.
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("e2e_key_backups")
 }
 
 /// A pending Megolm group-session key, encrypted pairwise with Olm for exactly

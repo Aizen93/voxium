@@ -57,6 +57,14 @@ export const E2E_LIMITS = {
    * acks never arrive — until the retention sweep clears it.
    */
   MASTER_TRANSFER_STORE_CAP: 10,
+  /**
+   * Max length of the encrypted key-backup blob (spec §15). Generous on
+   * purpose and still tiny: the plaintext is a single sealed 32-byte secret
+   * plus framing, so a few hundred bytes is the real shape — the headroom is
+   * for a future payload revision, not for bulk storage. One row per account,
+   * so this is also the whole per-account storage cost of the feature.
+   */
+  KEY_BACKUP_MAX: 4096,
 } as const;
 
 /** 32-byte key, unpadded standard base64 (vodozemac canonical encoding). */
