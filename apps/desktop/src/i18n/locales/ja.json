@@ -1033,6 +1033,7 @@
     "resetIdentityAction": "アカウントIDをリセット",
     "resetIdentityConfirm": "アカウントキーが置き換わります。やり取りしている全員の安全番号が変わり、あなたを再度確認する必要があります。他のデバイスの承認も無効になります。",
     "resetIdentitySuccess": "アカウントIDをリセットしました",
-    "resetIdentityFailed": "アカウントIDをリセットできませんでした"
+    "resetIdentityFailed": "アカウントIDをリセットできませんでした",
+    "identityChangedBadgeTitle": "この連絡先のセキュリティキーが変わりました — 信頼する前に確認してください"
   }
 }

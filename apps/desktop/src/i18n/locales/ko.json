@@ -1033,6 +1033,7 @@
     "resetIdentityAction": "계정 ID 재설정",
     "resetIdentityConfirm": "계정 키가 교체됩니다. 대화 상대 모두의 보안 번호가 바뀜 다시 확인해야 합니다. 다른 기기의 승인도 해제됩니다.",
     "resetIdentitySuccess": "계정 ID가 재설정되었습니다",
-    "resetIdentityFailed": "계정 ID를 재설정할 수 없습니다"
+    "resetIdentityFailed": "계정 ID를 재설정할 수 없습니다",
+    "identityChangedBadgeTitle": "이 연락처의 보안 키가 변경되었습니다 — 신뢰하기 전에 확인하세요"
   }
 }

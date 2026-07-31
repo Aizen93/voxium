@@ -1040,6 +1040,7 @@
     "resetIdentityAction": "Reset account identity",
     "resetIdentityConfirm": "This replaces your account key. Everyone you message will see your safety number change and will have to verify you again. Other devices lose their approval.",
     "resetIdentitySuccess": "Account identity reset",
-    "resetIdentityFailed": "Could not reset the account identity"
+    "resetIdentityFailed": "Could not reset the account identity",
+    "identityChangedBadgeTitle": "This contact's security keys changed — verify before trusting"
   }
 }
