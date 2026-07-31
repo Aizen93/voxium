@@ -744,6 +744,13 @@ same single recovery key. History still does not follow a new device (§11).
 grouped in fours. Shown once. Never stored, never transmitted, not derivable
 from anything.
 
+The checksum byte is `SHA-512("voxium-recovery-key-v1" || secret)[0]`, and the
+canonical spelling is exactly 53 base32 characters. Both are part of the format,
+not implementation detail: a key minted here has to validate in any other
+implementation of it, and accepting a non-canonical length would let several
+different strings stand for the same key — so a key with a character appended
+would still verify, which is the typo the checksum exists to catch.
+
 **Deliberately not a passphrase.** A passphrase needs a slow KDF, which is key
 derivation this crate is not allowed to implement (§1) — and worse, it would
 make a server-held blob guessable offline at whatever entropy the user chose.
@@ -791,8 +798,17 @@ with the whole database learns only that a backup exists.
 
 A reset that mints a NEW identity deletes the blob, because it could then only
 ever fail to open. A reset that merely re-publishes a key this device already
-holds (§14.4) leaves it alone — the identity did not change, so the backup still
-works.
+holds (§14.4) leaves it alone.
+
+That second rule is deliberately conservative rather than exact. Re-publishing
+changes what the account publishes if the server had published something else,
+so the stored blob MAY be orphaned — but it may equally be the backup of the
+very key being re-published, and the client cannot tell which without the
+recovery key. Deleting would destroy a working recovery to tidy up a possibly
+dead one, so the blob stays and a restore that cannot open it says so plainly
+("that key may belong to a previous account identity") instead of blaming a
+typo. Creating a backup carries the mirror of the restore rule: a key this
+device holds is only backed up if the account actually publishes it.
 
 ### 15.6 Retention
 
@@ -814,4 +830,9 @@ orphan-cleanup migration on a live database and is left as a follow-up.
   This is a deliberate floor: any mechanism that could rescue them could also
   rescue an attacker who compromises the account.
 - The blob is one row per account; there is no versioning or rollback, so a
-  replaced backup invalidates the previous recovery key immediately.
+  replaced backup invalidates the previous recovery key immediately. If the
+  replacing request commits but its response is lost, the new recovery key is
+  gone with the failed call while the old one no longer opens what is stored —
+  the user has to create another backup. Fixing that properly needs either a
+  two-phase write or showing the key before the write is confirmed, and both
+  trade a worse failure for this one.

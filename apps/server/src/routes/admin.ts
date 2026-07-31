@@ -556,10 +556,24 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
       await forceLogoutUser(targetId, 'Your account has been deleted');
 
       // E2E key material has no FK to User (except the key backup), so it would
-      // otherwise outlive the account it belongs to.
-      await purgeE2EMaterial(targetId);
-      // Delete user — cascade only removes ServerMember records for transferred servers
-      await prisma.user.delete({ where: { id: targetId } });
+      // otherwise outlive the account it belongs to. One transaction with the
+      // delete: purging a user who then survives strands every device they own.
+      await prisma.$transaction(async (tx) => {
+        await purgeE2EMaterial(targetId, tx);
+        // cascade only removes ServerMember records for transferred servers
+        await tx.user.delete({ where: { id: targetId } });
+      },
+        {
+          // Deleting a user cascades across ~36 relations (messages,
+          // reactions, reads, conversations, reports, tickets, themes…) plus
+          // six E2E deletes. Prisma's default 5s interactive budget is a
+          // deadline these statements never had before they shared a
+          // transaction, and blowing it on a heavy account would roll the
+          // whole deletion back — after the account's servers were already
+          // gone, since those are not part of this transaction.
+          timeout: 60_000,
+          maxWait: 10_000,
+        });
 
       logAuditEvent({
         actorId: req.user!.userId,
@@ -583,8 +597,21 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
       // Force logout then disconnect active socket (works across all nodes)
       await forceLogoutUser(targetId, 'Your account has been deleted');
 
-      await purgeE2EMaterial(targetId);
-      await prisma.user.delete({ where: { id: targetId } });
+      await prisma.$transaction(async (tx) => {
+        await purgeE2EMaterial(targetId, tx);
+        await tx.user.delete({ where: { id: targetId } });
+      },
+        {
+          // Deleting a user cascades across ~36 relations (messages,
+          // reactions, reads, conversations, reports, tickets, themes…) plus
+          // six E2E deletes. Prisma's default 5s interactive budget is a
+          // deadline these statements never had before they shared a
+          // transaction, and blowing it on a heavy account would roll the
+          // whole deletion back — after the account's servers were already
+          // gone, since those are not part of this transaction.
+          timeout: 60_000,
+          maxWait: 10_000,
+        });
 
       logAuditEvent({
         actorId: req.user!.userId,

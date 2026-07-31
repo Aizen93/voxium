@@ -2418,6 +2418,28 @@ describe('E2EService (cross-signing)', () => {
     expect(server.backups.has(aliceId)).toBe(false);
   });
 
+  it('will not back up a key the account does not publish (B8)', async () => {
+    // Holding a key is not the same as the account publishing it. A bootstrap
+    // that minted one and then failed to publish would otherwise have the user
+    // write down a recovery key for an identity that never existed — and only
+    // find out at the moment they needed it.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+
+    // the server publishes someone else's key
+    const impostor = new EngineMasterKey();
+    const user = server.userOf(aliceId);
+    user.masterKey = impostor.publicKey();
+    user.masterSignature = impostor.sign(e2eMasterCanonical(aliceId, impostor.publicKey()));
+
+    await expect(phone.service.createKeyBackup()).rejects.toThrow(/publishes a different key/);
+    expect(server.backups.has(aliceId)).toBe(false);
+  });
+
   it('drops a backup that a new identity has made useless (B5)', async () => {
     // After a reset the old blob decrypts to a key the account no longer
     // publishes, so keeping it would leave the user holding a recovery key

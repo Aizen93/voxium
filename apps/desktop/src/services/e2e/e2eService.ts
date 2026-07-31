@@ -941,6 +941,16 @@ export class E2EService {
     return this.enqueue(async () => {
       const master = this.masterKey;
       if (!master) throw new Error('This device does not hold the account key');
+      // Mirror of the restore-side rule (§15.4): back up only a key the account
+      // actually publishes. Holding one is not the same as it being live — a
+      // bootstrap that minted a key and then failed to publish it would
+      // otherwise have the user write down a recovery key for an identity that
+      // never existed, and only find out when they came to use it.
+      const list = await this.fetchDeviceList(this.userId, true);
+      const published = this.servedOwnMasterKey ?? list.masterKey;
+      if (published && published !== master.publicKey()) {
+        throw new Error('This account publishes a different key — resolve that before backing up');
+      }
       const recoveryKey = generateRecoveryKey();
       // Sealed in the engine: the private half never becomes a JS string, and
       // neither does the recovery key beyond the one we hand back to be shown.

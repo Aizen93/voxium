@@ -190,6 +190,8 @@ const BACKUP_PREFIX: &str = "voxium-backup-v1|";
 /// O/I/B.
 const B32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const RECOVERY_KEY_LEN: usize = 32;
+/// Base32 characters in a canonical key: ceil((32 secret + 1 checksum) * 8 / 5).
+const RECOVERY_KEY_B32_LEN: usize = 53;
 
 fn base32_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 8 / 5 + 1);
@@ -223,9 +225,13 @@ fn base32_decode(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// One byte of SHA-256 over the secret. GCM already fails closed on a wrong
-/// key, so this exists purely so the UI can say "that is not a recovery key"
-/// before a network round trip instead of "decryption failed" after one.
+/// One byte of `SHA-512("voxium-recovery-key-v1" || secret)`. GCM already fails
+/// closed on a wrong key, so this exists purely so the UI can say "that is not
+/// a recovery key" before a network round trip instead of "decryption failed"
+/// after one.
+///
+/// The exact construction is part of the on-paper format (spec §15.2): a key
+/// minted here has to validate in any other implementation of it.
 fn recovery_checksum(secret: &[u8]) -> u8 {
     let mut hasher = Sha512::new();
     hasher.update(b"voxium-recovery-key-v1");
@@ -249,10 +255,23 @@ fn normalize_recovery_key(text: &str) -> String {
 }
 
 fn parse_recovery_key(text: &str) -> Result<[u8; RECOVERY_KEY_LEN], JsError> {
-    let normalized = normalize_recovery_key(text);
-    let mut decoded =
-        base32_decode(&normalized).ok_or_else(|| JsError::new("recovery key is not valid"))?;
-    if decoded.len() < RECOVERY_KEY_LEN + 1 {
+    let mut normalized = normalize_recovery_key(text);
+    // Length first: 53 characters is the only canonical spelling. Without this
+    // a 54th character still decodes to the same 33 bytes — the trailing bits
+    // fall off the end — so a key with something appended would verify, which
+    // is precisely the typo the checksum is here to catch.
+    if normalized.len() != RECOVERY_KEY_B32_LEN {
+        normalized.zeroize();
+        return Err(JsError::new("recovery key is not valid"));
+    }
+    let decoded = base32_decode(&normalized);
+    normalized.zeroize();
+    let mut decoded = decoded.ok_or_else(|| JsError::new("recovery key is not valid"))?;
+    // Exactly the secret plus its checksum byte. Accepting anything longer
+    // would let several different strings stand for the same key, so a key
+    // with characters appended would still "verify" — which is precisely the
+    // typo the checksum is supposed to catch.
+    if decoded.len() != RECOVERY_KEY_LEN + 1 {
         decoded.zeroize();
         return Err(JsError::new("recovery key is not valid"));
     }
@@ -283,12 +302,18 @@ pub fn generate_recovery_key() -> String {
 
     let mut encoded = base32_encode(&payload);
     payload.zeroize();
-    let grouped = encoded
-        .as_bytes()
-        .chunks(4)
-        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-        .collect::<Vec<_>>()
-        .join("-");
+    // Grouped in place: collecting the chunks into owned Strings would scatter
+    // fourteen un-scrubbable copies of the key across the heap, and WASM linear
+    // memory is readable from JS and never returned to the OS.
+    let mut grouped = String::with_capacity(encoded.len() + encoded.len() / 4);
+    for (index, chunk) in encoded.as_bytes().chunks(4).enumerate() {
+        if index > 0 {
+            grouped.push('-');
+        }
+        for &byte in chunk {
+            grouped.push(byte as char);
+        }
+    }
     encoded.zeroize();
     grouped
 }

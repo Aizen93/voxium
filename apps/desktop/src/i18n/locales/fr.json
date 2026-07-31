@@ -1058,7 +1058,7 @@
     "backupRestorePlaceholder": "ABCD-EFGH-JKLM-...",
     "backupRestoreAction": "Restaurer",
     "backupRestoreSuccess": "Clé du compte restaurée — cet appareil peut désormais approuver vos autres appareils",
-    "backupRestoreFailed": "Impossible de restaurer avec cette clé de récupération. Vérifiez qu'il n'y a pas de faute de frappe et réessayez.",
+    "backupRestoreFailed": "Cette clé de récupération n'a pas ouvert la sauvegarde de ce compte. Elle appartient peut-être à une identité précédente.",
     "backupNone": "Aucune clé de récupération n'a été configurée sur ce compte, il n'y a donc rien à restaurer.",
     "backupPreferRestore": "Vous avez une clé de récupération : la restaurer ci-dessus conserve votre identité et personne n'aura à vous vérifier à nouveau. Essayez d'abord cela.",
     "backupRestoreMalformed": "Cela ne ressemble pas à une clé de récupération. Vérifiez la saisie et réessayez."

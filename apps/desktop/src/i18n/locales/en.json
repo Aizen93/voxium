@@ -1065,7 +1065,7 @@
     "backupRestorePlaceholder": "ABCD-EFGH-JKLM-...",
     "backupRestoreAction": "Restore",
     "backupRestoreSuccess": "Account key restored — this device can approve your other devices now",
-    "backupRestoreFailed": "Could not restore with that recovery key. Check it for typos and try again.",
+    "backupRestoreFailed": "That recovery key did not open this account's backup. It may belong to a previous account identity.",
     "backupNone": "No recovery key was set up on this account, so there is nothing to restore from.",
     "backupPreferRestore": "You have a recovery key: restoring it above keeps your identity, and nobody has to verify you again. Try that first.",
     "backupRestoreMalformed": "That does not look like a recovery key. Check it for typos and try again."
