@@ -1,0 +1,296 @@
+# Always-on E2E: plan, migration and cutover
+
+**Status:** proposed, not started. Companion to `docs/e2e-dm-spec.md` (the design
+of record). This document covers the change from *opt-in per conversation* to
+*always on*, the device-linking flow that replaces manual approval as the
+primary path, and the production cutover.
+
+## 1. What is actually changing
+
+Encryption stops being a feature a user turns on and becomes how DMs work.
+
+The data model barely moves — identity, devices, cross-signing and key backup are
+already account-scoped (§12, §14, §15). What changes is:
+
+| Today | After |
+|---|---|
+| `Conversation.encryptedAt` is null until someone clicks "Enable encryption" | set at conversation creation; no user-facing toggle exists |
+| DMs can carry plaintext | there is no plaintext path for DMs |
+| E2E keys are registered on first app load | registered as part of account setup, so a recipient always has keys |
+| A second device is approved by finding it in a list inside a DM modal | linked with a code shown on the new device |
+| Devices, recovery key and safety numbers live inside a per-conversation modal | Settings → Security, with a per-contact shortcut from the DM badge |
+| A new device has no history and an empty search | history follows the account (§4.4) |
+
+**The single most valuable part of this work is subtraction.** Most of the
+friction users hit is not cryptography, it is the existence of a choice.
+
+## 2. Decisions already taken
+
+1. **Always on.** No per-conversation toggle, no per-user preference, no
+   fallback. A fallback is what quietly recreates today's problem.
+2. **Wipe DM message history in production** rather than carry a compatibility
+   path. Voxium is pre-scale and the alternative — two classes of conversation
+   forever — is the thing being removed.
+3. **Device linking is the primary path** for getting a second device working.
+   The recovery key becomes the fallback for "I lost everything", not the
+   routine flow.
+
+## 3. Decisions still open
+
+- **D1. Scope of the wipe.** Only DM messages need to go; channel messages are
+  not encrypted and are unaffected by this change. Recommendation: wipe DM
+  messages and their attachments only, keep conversations and friendships so
+  people do not lose their contact lists.
+- **D2. Minimum client version.** Once DMs are always encrypted, a client that
+  predates this cannot send. Recommendation: gate the API on a minimum client
+  version and let the Tauri updater carry everyone forward before cutover.
+- **D3. Accounts that registered but never opened the app.** They have no keys,
+  so nobody can DM them. Recommendation: register keys at the end of the signup
+  flow, and treat the residual case as "invite pending — they'll be reachable
+  once they open the app" rather than a send error.
+- **D4. Report handling.** Every report becomes reporter-attested. This already
+  works (`contentSource: "reporter"`, flagged unverifiable), but it becomes the
+  only mode and should be an explicit moderation-policy decision, not a
+  discovery.
+
+## 4. Design
+
+### 4.1 Keys at account setup
+
+`ensureRegistered()` already publishes a device identity and prekeys; today it
+runs when `MainLayout` mounts. Move the first run into the signup completion
+step so an account is DM-able the moment it exists.
+
+Nothing about the key material changes. This is purely about *when*, and it is
+what removes the "recipient isn't set up" state that would otherwise need a
+user-facing error under always-on.
+
+### 4.2 Conversations are born encrypted
+
+`Conversation.encryptedAt` becomes non-nullable, defaulted at creation. The
+enable route, the store action, the modal and its copy are deleted. The lock
+badge stops being a button that means "turn this on" and becomes status only.
+
+**Make the badge quiet.** A green lock on every conversation is noise that
+trains people to ignore the badge — the opposite of what it is for. Render
+nothing in the healthy case; reserve the badge for the two states that need a
+human: this contact's identity changed, or a device is not signed by their
+account key.
+
+### 4.3 Device linking
+
+The goal is to replace "find the new device in a list and press Approve" with
+"type the code your new device is showing". It is a safer *trigger* for the
+approval flow that already exists (§14.4) — not new cryptography.
+
+**Flow**
+
+1. New device `D2` starts and registers as it does today. It is unsigned: peers
+   warn about it, and it can decrypt nothing.
+2. `D2` displays a **linking code** — a short code for typing, and (once a
+   camera-bearing client exists) a QR carrying the same value:
+
+   ```
+   fingerprint = base32(SHA-512("voxium-link-v1" || userId || deviceId
+                                || curve25519Key || ed25519Key))
+   short code  = first 8 characters, grouped 4-4
+   ```
+
+3. On an approved device `D1`, the user opens Settings → Security → Link a
+   device and enters the code.
+4. `D1` fetches `/e2e/devices/me` and recomputes the fingerprint **from the keys
+   the server served** for each unsigned device. A match identifies the target.
+5. `D1` shows what it is about to approve (short device id, when it registered)
+   and asks for confirmation.
+6. `D1` runs the existing `approveDevice(deviceId)`: cross-sign, then hand over
+   the account key over the pairwise Olm channel.
+7. `D2` claims the transfer (already implemented) and becomes fully functional.
+
+**Why this is safe**
+
+- *The code is not a capability.* Knowing it grants nothing: approval still
+  requires `D1`'s user to act and `D1` to hold the account key. A leaked or
+  screenshotted code cannot approve anything.
+- *It binds approval to published keys.* Because `D1` recomputes the
+  fingerprint from what the server served, a server that injects a device of its
+  own cannot be approved by a user following this flow — the injected device's
+  fingerprint will not match the code the user is reading off their new device.
+  This is strictly better than today's flow, where the user picks from a list
+  and has nothing to compare against.
+- *Possession is implicit.* The account key is transferred inside an Olm
+  message encrypted to `D2`'s identity key, so only `D2` can read it.
+
+**Residual risk: phishing.** A user can be socially engineered into typing an
+attacker's code. Mitigations: `D1` shows what it is approving and requires
+confirmation; approvals are visible afterwards on every device (the own-device
+warning already exists); rate-limit approvals; refuse to "link" a device that is
+already cross-signed.
+
+**Short code entropy.** 8 base32 characters is 40 bits, and an attacker would
+need a device whose fingerprint *matches a given code* — a preimage problem, not
+a birthday one — while under the 5-device cap and the approval rate limiter.
+The QR carries the full fingerprint, so the truncation only applies to the typed
+path.
+
+**Order of work:** the short code first. Voxium is desktop-first and neither end
+has a camera today; QR becomes useful when a mobile client exists, and it is the
+same value in a different wrapper.
+
+### 4.4 History follows the account
+
+This is the blocker for cutover, not a follow-up. Under always-on there is no
+plaintext history to fall back on, so a newly linked device that cannot read
+anything is a much sharper edge than it is today.
+
+Design, staying inside primitives the engine already has:
+
+- The account mints a 32-byte **message backup key** alongside its master key.
+- It travels with the master key in the approval payload (`voxium-master-v2`),
+  so every linked device can *write* backups.
+- It is sealed into the §15 backup blob under the same recovery key (payload
+  `voxium-backup-v2`), so recovery yields both. **No second secret for the user
+  to keep** — this is why §15's payload was versioned.
+- Each device uploads inbound Megolm session keys, AES-256-GCM under the backup
+  key, AAD binding `conversationId || sessionId`, to a new `E2EMessageKeyBackup`
+  table (one row per session, opaque to the server).
+- A freshly linked device downloads and decrypts them, and history plus
+  client-side search work immediately.
+
+Trade-off worth stating: any approved device can read all backed-up history.
+That is not a downgrade — an approved device already holds the account key and
+can approve further devices.
+
+### 4.5 Move the UI to where accounts live
+
+Device list, approve/revoke, linking, recovery key and identity reset move to
+**Settings → Security** (the tab already exists). Safety numbers stay reachable
+from the DM badge, because verifying a contact genuinely is per contact.
+
+Administering account-level state from a per-conversation modal is a large part
+of why the current design *reads* as per-conversation even though the data model
+is not.
+
+## 5. What gets deleted
+
+Code and concepts to remove, not deprecate:
+
+- `POST /dm/:conversationId/encryption`, `dmStore.enableEncryption`, and
+  `EnableEncryptionModal` with its copy (`enableExplainer`,
+  `enablePointIrreversible`, `enablePointServer`, `enableConfirm`, …).
+- The plaintext-vs-encrypted branching in the DM list, reply previews and
+  notifications that exists only because a conversation could be either.
+- The `encrypted: false` send path for DMs, server-side.
+- Whatever i18n keys the above orphan, across all 11 locales.
+
+## 6. Migration
+
+### 6.1 Server
+
+One migration, additive except for the wipe:
+
+```sql
+-- 1. DM history goes (D1: DM messages only; channel history is untouched).
+--    Reactions cascade from messages (MessageReaction.message onDelete:
+--    Cascade) and replyToId is SetNull, so this one statement is enough.
+DELETE FROM messages WHERE conversation_id IS NOT NULL;
+
+-- 1b. read markers point at messages that no longer exist; without this every
+--     DM shows a stale unread state on first load after cutover
+DELETE FROM conversation_reads;
+
+-- 2. every conversation is encrypted from now on
+UPDATE conversations SET encrypted_at = NOW() WHERE encrypted_at IS NULL;
+ALTER TABLE conversations ALTER COLUMN encrypted_at SET NOT NULL;
+ALTER TABLE conversations ALTER COLUMN encrypted_at SET DEFAULT NOW();
+
+-- 3. every account re-registers cleanly (the §12.7 pattern)
+TRUNCATE e2e_key_shares, e2e_master_transfers, e2e_key_backups,
+         e2e_master_keys, e2e_device_registries, e2e_devices;
+```
+
+Attachment blobs for deleted DM messages are orphaned in S3; the existing
+attachment cleanup job (`utils/attachmentCleanup.ts`) reclaims them, or they can
+be swept directly during the window.
+
+`TRUNCATE e2e_key_backups` deserves a moment: it destroys recovery keys people
+may have written down. That is correct here — those blobs seal master keys that
+no longer exist after the truncate — but it must be in the user-facing notice.
+
+### 6.2 Client vaults
+
+Every installed client holds pickled sessions, pinned identities and a plaintext
+cache for keys that will not exist after the wipe. Stale state must not survive.
+
+The vault database is named `voxium-e2e-{userId}[-{namespace}]`. Bump it to
+`voxium-e2e-v2-{userId}`: old databases become unreachable, and the client
+bootstraps clean. Add a one-time sweep that deletes the `voxium-e2e-*` databases
+that do not match the current version, so the data is gone rather than merely
+orphaned.
+
+### 6.3 Clients in the wild
+
+Gate the API on a minimum client version (D2) before the wipe, so nobody is left
+on a build that cannot send. The Tauri updater should carry everyone forward in
+the days before cutover.
+
+## 7. Cutover runbook
+
+Ordered so that nobody is stranded mid-flight. Steps 1–5 ship normally and are
+individually revertible; step 7 is the point of no return.
+
+1. **Keys at signup** (§4.1). Ships alone, changes nothing user-visible.
+2. **Message-key backup** (§4.4). Ships behind the existing backup feature;
+   devices start populating it immediately, which is what makes step 7 survivable.
+3. **Device linking** (§4.3). Ships alongside the existing approve-from-list
+   flow, which stays until linking has been exercised in production.
+4. **Move the UI to Settings** (§4.5), leaving the DM badge shortcut.
+5. **Minimum client version enforced** (D2). Watch adoption until the tail is
+   acceptable.
+6. **Announce.** Users need to know: DM history will be deleted on a date, and
+   existing recovery keys stop working. This is a product communication, not a
+   changelog line.
+7. **Maintenance window:**
+   1. put the API in maintenance mode
+   2. take a database snapshot (this is the only rollback for steps 7.3–7.4)
+   3. run the migration in §6.1
+   4. deploy the server build with the toggle removed and DM plaintext rejected
+   5. deploy the client build with the bumped vault version
+   6. verify (below), then lift maintenance
+8. **Remove the dead code** (§5) in the release after cutover, once there is no
+   chance of needing to serve an old client.
+
+**Verification before lifting maintenance**
+
+- two fresh accounts can DM each other with no setup step and no toggle
+- the server stores only ciphertext for those messages (the existing live
+  Playwright spec asserts exactly this)
+- a second device links by code, receives the account key, and reads history
+- restoring from a *new* recovery key on a third install yields the same
+  account identity and the same history
+- `GET /e2e/devices/me` still advertises `crossSigning: true` from every node
+
+**Rollback.** Up to 7.3 the snapshot restores everything. After 7.3 the message
+data is gone by design — rollback means reverting the code, not the data. Say
+this out loud before starting.
+
+## 8. Consequences to accept deliberately
+
+- **Server-side DM search is gone permanently.** Client-side search covers what
+  the device has decrypted, which §4.4 makes equal to "everything" for a linked
+  device.
+- **Reports are reporter-attested** (D4).
+- **A user who loses every device and the recovery key starts a new account
+  identity** (§14.4). Linking makes this rarer; it cannot make it impossible,
+  and any mechanism that could rescue that user could also rescue an attacker.
+
+## 9. Sequencing summary
+
+| Phase | Work | Done when |
+|---|---|---|
+| 1 | Keys at signup | a new account is DM-able before first app open |
+| 2 | Message-key backup | a linked device reads history it was never sent |
+| 3 | Device linking by code | a second device works without touching a device list |
+| 4 | UI to Settings → Security | nothing account-level is administered from a DM |
+| 5 | Min client version | tail of old clients is acceptable |
+| 6 | Cutover | §7 verification passes |
+| 7 | Delete the opt-in code | no reference to `encryptedAt` as a choice remains |
