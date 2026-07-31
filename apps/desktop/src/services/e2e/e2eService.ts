@@ -141,6 +141,20 @@ export class E2EIdentityChangedError extends Error {
   }
 }
 
+/**
+ * A master-secret transfer that can never succeed, however often it is retried
+ * — malformed, or already spent on a ratchet that has moved on. Only these may
+ * be dropped from the mailbox: anything else (a device we cannot look up yet, a
+ * failed request) has to survive, because the device it was meant for is
+ * already cross-signed and has no other way to ever receive the key (§14.4).
+ */
+class E2EUnusableTransferError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'E2EUnusableTransferError';
+  }
+}
+
 export interface E2EServiceOptions {
   api?: typeof defaultApi;
   keyProvider?: PickleKeyProvider;
@@ -210,6 +224,12 @@ export class E2EService {
   private masterKey: EngineMasterKey | null = null;
   /** Set when the server serves a master key we can neither prove nor match. */
   private masterKeyConflict = false;
+  /**
+   * Has any response from this server advertised cross-signing? Once true, an
+   * answer that omits the flag can no longer be excused as a pre-cross-signing
+   * node, so it stops earning the rollout grace above.
+   */
+  private crossSigningSeen = false;
   private myDeviceId: string | null = null;
   /** pairwise Olm sessions, keyed `${userId}|${deviceId}` */
   private olmSessions = new Map<string, EngineSession>();
@@ -517,6 +537,7 @@ export class E2EService {
       console.warn('e2e: server does not advertise cross-signing — deferring account key setup');
       return;
     }
+    this.crossSigningSeen = true;
     // Sign OUR OWN keys, never the server's copy of them. We hold this device's
     // private halves, so there is no reason to take the server's word for the
     // public ones — and doing so would let a server collect a valid account
@@ -605,10 +626,13 @@ export class E2EService {
     return this.enqueue(async () => {
       const account = this.requireAccount();
       const master = new EngineMasterKey();
-      // Sealed before publishing, same as case D: a crash in between must not
-      // leave a published key nobody holds.
-      await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
-      this.masterKey = master;
+      // Publish BEFORE overwriting what this device holds. The mint path seals
+      // first (there is nothing to lose and an unpublished key self-heals on
+      // the next launch); a reset can be replacing a WORKING key, so a failed
+      // publish must leave the device exactly as it was rather than destroying
+      // the key it still had. If the publish lands and the seal below fails,
+      // the account is in the "published key we do not hold" state — which is
+      // visible, and which this very action can clear.
       await this.publishMasterKey(master, [
         {
           deviceId: this.deviceId,
@@ -616,6 +640,9 @@ export class E2EService {
           ed25519Key: account.ed25519Key(),
         },
       ]);
+      await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
+      this.masterKey?.free();
+      this.masterKey = master;
       await this.vault.putMasterIdentity(this.userId, { masterKey: master.publicKey(), verified: true });
       this.masterKeyConflict = false;
       this.deviceListCache.delete(this.userId);
@@ -743,9 +770,15 @@ export class E2EService {
           break;
         }
       } catch (err) {
-        // Unusable rather than undelivered: keeping it would retry forever.
-        if (typeof id === 'string') done.push(id);
-        console.warn('e2e: discarding an unusable master-secret transfer:', errText(err));
+        // Only drop a row we can be sure will never work. Dropping on ANY
+        // failure would put the stranding back exactly where it was, with the
+        // client doing the deleting instead of the server: the device is
+        // already cross-signed by this point, so a row discarded over a lookup
+        // or network hiccup leaves it trusted by every peer, holding no key,
+        // and no longer offered for approval. A kept row costs nothing — the
+        // mailbox is capped per device and swept.
+        if (typeof id === 'string' && err instanceof E2EUnusableTransferError) done.push(id);
+        console.warn('e2e: master-secret transfer not imported:', errText(err));
       }
     }
     if (done.length > 0) {
@@ -770,12 +803,14 @@ export class E2EService {
       !E2E_DEVICE_ID_RE.test(senderDeviceId) ||
       typeof transfer.body !== 'string'
     ) {
-      throw new Error('malformed master-secret transfer');
+      throw new E2EUnusableTransferError('malformed master-secret transfer');
     }
-    if (senderDeviceId === this.deviceId) throw new Error('master-secret transfer attributed to this device');
+    if (senderDeviceId === this.deviceId) {
+      throw new E2EUnusableTransferError('master-secret transfer attributed to this device');
+    }
     const envelope = parseE2EEnvelope(transfer.body);
     if (!envelope || envelope.e !== E2E_ENGINE_OLM1) {
-      throw new Error('master-secret transfer body is not an olm1 envelope');
+      throw new E2EUnusableTransferError('master-secret transfer body is not an olm1 envelope');
     }
 
     // Authenticated by the sending device's pinned identity, exactly like a key
@@ -790,10 +825,25 @@ export class E2EService {
     // Decrypted inside the engine, which also enforces that the secret derives
     // to the published account key — JS never sees the private half and cannot
     // skip the check.
-    const master = await this.olmDecryptMasterSecret(senderDeviceId, envelope, publishedMasterKey);
+    //
+    // Everything from here on is past the point of no return: decrypting
+    // advances the Olm ratchet, so this row can never be read again whether we
+    // succeed or not. That — not "an error happened" — is what makes it safe
+    // to drop.
+    let master: EngineMasterKey | null;
+    try {
+      master = await this.olmDecryptMasterSecret(senderDeviceId, envelope, publishedMasterKey);
+    } catch (err) {
+      throw new E2EUnusableTransferError(errText(err));
+    }
     if (!master) throw new Error('no Olm session for this master-secret transfer');
 
-    await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
+    try {
+      await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
+    } catch (err) {
+      master.free();
+      throw new E2EUnusableTransferError(errText(err));
+    }
     this.masterKey?.free();
     this.masterKey = master;
     return true;
@@ -894,8 +944,17 @@ export class E2EService {
     // literally that says "every device just lost its signature", so instead we
     // carry the last known state forward and change nothing until a node that
     // supports cross-signing answers.
+    //
+    // Carrying forward is only ever right while this client has NEVER been
+    // answered by a capable node. Once one has answered, an omission is not an
+    // old node any more — it is a server withholding signatures, and carrying
+    // forward would turn the "these devices are not signed" warning into
+    // silence at exactly the moment it matters. After that point the response
+    // is read literally and the user is warned.
     const crossSigningServed = data.crossSigning === true;
-    const priorState = crossSigningServed ? null : await this.vault.getDeviceListState(userId);
+    if (crossSigningServed) this.crossSigningSeen = true;
+    const rolloutGrace = !crossSigningServed && !this.crossSigningSeen;
+    const priorState = rolloutGrace ? await this.vault.getDeviceListState(userId) : null;
     const priorCrossSigned = new Set(priorState?.crossSignedDeviceIds ?? []);
     const served = crossSigningServed
       ? this.verifiedMasterKey(userId, data.masterKey, data.masterSignature)
@@ -912,6 +971,11 @@ export class E2EService {
       } else {
         throw new E2EIdentityChangedError(userId);
       }
+    } else if (userId === this.userId && served && pinnedMaster?.masterKey === served) {
+      // Resolved: the account publishes the key we pinned after all. Latching
+      // the flag would leave a warning badge — and the destructive reset
+      // affordance behind it — on an account that is perfectly healthy.
+      this.masterKeyConflict = false;
     }
     if (!pinnedMaster && served) {
       await this.vault.putMasterIdentity(userId, { masterKey: served, verified: false });
@@ -944,9 +1008,9 @@ export class E2EService {
         continue;
       }
       // D7 step 3: does the account's master key vouch for this device?
-      const crossSigned = crossSigningServed
-        ? this.hasValidCrossSignature(userId, entry, masterKey)
-        : priorCrossSigned.has(entry.deviceId);
+      const crossSigned = rolloutGrace
+        ? priorCrossSigned.has(entry.deviceId)
+        : this.hasValidCrossSignature(userId, entry, masterKey);
 
       // Our own current device needs no pin: we hold its private keys.
       if (userId === this.userId && entry.deviceId === this.myDeviceId) {
@@ -976,7 +1040,7 @@ export class E2EService {
       listVersion: data.listVersion ?? 0,
       // Without a cross-signing-capable node we do not know the account key is
       // absent, only that this answer cannot tell us — keep what we had.
-      masterKey: (crossSigningServed ? masterKey : (priorState?.masterKey ?? masterKey)) ?? null,
+      masterKey: (rolloutGrace ? (priorState?.masterKey ?? masterKey) : masterKey) ?? null,
     };
     await this.recordDeviceListState(userId, list);
     this.deviceListCache.set(userId, { at: Date.now(), list });
@@ -1035,6 +1099,11 @@ export class E2EService {
       sameDeviceSet(state.deviceIds, deviceIds) &&
       sameDeviceSet(acknowledgedDeviceIds, state.acknowledgedDeviceIds) &&
       sameDeviceSet([...unacknowledged], state.unacknowledgedDeviceIds ?? []) &&
+      // A device LOSING its cross-signature is a change, and one that matters:
+      // leaving it out here meant a server could withdraw a signature and have
+      // the stored state keep calling the device signed, so the warning never
+      // fired no matter how often the list was re-read.
+      sameDeviceSet([...crossSigned], state.crossSignedDeviceIds ?? []) &&
       (state.masterKey ?? null) === list.masterKey;
     if (unchanged) return;
 
@@ -1175,7 +1244,9 @@ export class E2EService {
         listVersion?: number;
         masterKey?: string | null;
         masterSignature?: string | null;
+        crossSigning?: boolean;
       };
+      if (data.crossSigning === true) this.crossSigningSeen = true;
       const entries = data.devices ?? [];
       if (entries.length === 0) throw new Error('peer has no E2E device');
 
@@ -2017,7 +2088,9 @@ export class E2EService {
       listVersion?: number;
       masterKey?: string | null;
       masterSignature?: string | null;
+      crossSigning?: boolean;
     };
+    if (data.crossSigning === true) this.crossSigningSeen = true;
     // Verified locally, never taken on the server's word: an "approved" badge
     // must mean a signature this client checked (§14).
     // Judge against the pinned account key, never one served in this response:
@@ -2025,11 +2098,21 @@ export class E2EService {
     const served = this.verifiedMasterKey(this.userId, data.masterKey, data.masterSignature);
     const pinnedMaster = await this.vault.getMasterIdentity(this.userId);
     const masterKey = pinnedMaster?.masterKey ?? served;
+    // Same rollout grace as fetchDeviceList, and for the same reason: if these
+    // two disagreed about what "cross-signed" means, the device manager would
+    // show every device as unsigned while the badge stayed green — and that
+    // disagreement lands on the reset-identity affordance.
+    const rolloutGrace = data.crossSigning !== true && !this.crossSigningSeen;
+    const priorCrossSigned = new Set(
+      rolloutGrace ? ((await this.vault.getDeviceListState(this.userId))?.crossSignedDeviceIds ?? []) : []
+    );
     return {
       currentDeviceId: this.deviceId,
       devices: (data.devices ?? []).map((entry) => ({
         ...entry,
-        crossSigned: this.hasValidCrossSignature(this.userId, entry, masterKey),
+        crossSigned: rolloutGrace
+          ? priorCrossSigned.has(entry.deviceId)
+          : this.hasValidCrossSignature(this.userId, entry, masterKey),
       })),
       listVersion: data.listVersion ?? 0,
       masterKey,
