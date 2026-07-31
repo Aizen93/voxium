@@ -28,6 +28,44 @@ interface Props {
 }
 
 /**
+ * What the header lock is trying to say, as ONE decision.
+ *
+ * The tooltip and the alert icon used to be two independent expressions over
+ * the same seven flags, in different orders — which is how an identity change,
+ * the strongest MITM signal in the design, ended up showing the amber icon
+ * above the tooltip "End-to-end encrypted", i.e. an alarm captioned with
+ * reassurance. Deriving both from one ordered list makes that class of bug
+ * impossible: a state that raises the icon necessarily names itself.
+ *
+ * Account-wide states are reported only on an ENCRYPTED conversation. On a
+ * plaintext one this control is the "turn encryption on" button, so warning
+ * about a device you have not approved would caption a button that does
+ * something else entirely.
+ */
+export function badgeState(flags: {
+  encrypted: boolean;
+  identityWarning: boolean;
+  masterKeyConflict: boolean;
+  thisDeviceUnsigned: boolean;
+  unsignedWarning: boolean;
+  ownDeviceWarning: boolean;
+  newDeviceWarning: boolean;
+}): { titleKey: string; warning: boolean } {
+  if (!flags.encrypted) return { titleKey: 'e2e.enableTitle', warning: false };
+  // Most alarming first, and every entry names the problem it stands for.
+  const states: Array<[boolean, string]> = [
+    [flags.identityWarning, 'e2e.identityChangedBadgeTitle'],
+    [flags.masterKeyConflict, 'e2e.masterConflictBadgeTitle'],
+    [flags.thisDeviceUnsigned, 'e2e.thisDeviceUnsignedBadgeTitle'],
+    [flags.unsignedWarning, 'e2e.unsignedDeviceBadgeTitle'],
+    [flags.ownDeviceWarning, 'e2e.ownDeviceBadgeTitle'],
+    [flags.newDeviceWarning, 'e2e.newDeviceBadgeTitle'],
+  ];
+  const hit = states.find(([on]) => on);
+  return hit ? { titleKey: hit[1], warning: true } : { titleKey: 'e2e.badgeTitle', warning: false };
+}
+
+/**
  * Header control for DM encryption: an enable button for plaintext
  * conversations, a lock badge (→ safety-number modal) for encrypted ones.
  */
@@ -62,14 +100,16 @@ export function E2EControls({ conversation }: Props) {
 
   if (!e2eReady) return null;
 
-  const warning =
-    identityWarning ||
-    newDeviceWarning ||
-    ownDeviceWarning ||
-    unsignedPeerWarning ||
-    ownUnsignedWarning ||
-    thisDeviceUnsigned ||
-    masterKeyConflict;
+  const { titleKey, warning } = badgeState({
+    encrypted,
+    identityWarning,
+    masterKeyConflict,
+    thisDeviceUnsigned,
+    unsignedWarning: ownUnsignedWarning || unsignedPeerWarning,
+    ownDeviceWarning,
+    newDeviceWarning,
+  });
+  const title = t(titleKey);
 
   return (
     <>
@@ -83,22 +123,9 @@ export function E2EControls({ conversation }: Props) {
               ? 'text-vox-accent-success hover:bg-vox-accent-success/10'
               : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary'
         )}
-        title={
-          masterKeyConflict
-            ? t('e2e.masterConflictBadgeTitle')
-            : thisDeviceUnsigned
-            ? t('e2e.thisDeviceUnsignedBadgeTitle')
-            : ownUnsignedWarning || unsignedPeerWarning
-            ? t('e2e.unsignedDeviceBadgeTitle')
-            : ownDeviceWarning
-            ? t('e2e.ownDeviceBadgeTitle')
-            : newDeviceWarning && !identityWarning
-              ? t('e2e.newDeviceBadgeTitle')
-              : encrypted
-                ? t('e2e.badgeTitle')
-                : t('e2e.enableTitle')
-        }
-        aria-label={encrypted ? t('e2e.badgeTitle') : t('e2e.enableTitle')}
+        title={title}
+        // Same string as the tooltip: an alert nobody can hover is not an alert.
+        aria-label={title}
       >
         {warning ? <ShieldAlert size={18} /> : <Lock size={18} />}
       </button>

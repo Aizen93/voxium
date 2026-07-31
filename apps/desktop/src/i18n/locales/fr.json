@@ -1033,6 +1033,7 @@
     "resetIdentityAction": "Réinitialiser l'identité du compte",
     "resetIdentityConfirm": "Cela remplace la clé de votre compte. Toutes vos conversations verront votre numéro de sécurité changer et devront vous vérifier à nouveau. Les autres appareils perdent leur approbation.",
     "resetIdentitySuccess": "Identité du compte réinitialisée",
-    "resetIdentityFailed": "Impossible de réinitialiser l'identité du compte"
+    "resetIdentityFailed": "Impossible de réinitialiser l'identité du compte",
+    "identityChangedBadgeTitle": "Les clés de sécurité de ce contact ont changé — vérifiez avant de faire confiance"
   }
 }

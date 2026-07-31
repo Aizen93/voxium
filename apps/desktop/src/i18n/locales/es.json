@@ -1033,6 +1033,7 @@
     "resetIdentityAction": "Restablecer identidad de la cuenta",
     "resetIdentityConfirm": "Esto reemplaza la clave de tu cuenta. Todas tus conversaciones verán cambiar tu número de seguridad y tendrán que verificarte otra vez. Los demás dispositivos pierden su aprobación.",
     "resetIdentitySuccess": "Identidad de la cuenta restablecida",
-    "resetIdentityFailed": "No se pudo restablecer la identidad de la cuenta"
+    "resetIdentityFailed": "No se pudo restablecer la identidad de la cuenta",
+    "identityChangedBadgeTitle": "Las claves de seguridad de este contacto cambiaron: verifícalas antes de confiar"
   }
 }

@@ -1033,6 +1033,7 @@
     "resetIdentityAction": "重置账户身份",
     "resetIdentityConfirm": "这会替换你的账户密钥。所有与你聊天的人都会看到安全号码变化，并需要重新验证你。其他设备也会失去批准状态。",
     "resetIdentitySuccess": "账户身份已重置",
-    "resetIdentityFailed": "无法重置账户身份"
+    "resetIdentityFailed": "无法重置账户身份",
+    "identityChangedBadgeTitle": "此联系人的安全密钥已变更 — 请先验证再信任"
   }
 }

@@ -1033,6 +1033,7 @@
     "resetIdentityAction": "Redefinir identidade da conta",
     "resetIdentityConfirm": "Isso substitui a chave da sua conta. Todas as suas conversas verão seu número de segurança mudar e precisarão verificar você de novo. Os outros dispositivos perdem a aprovação.",
     "resetIdentitySuccess": "Identidade da conta redefinida",
-    "resetIdentityFailed": "Não foi possível redefinir a identidade da conta"
+    "resetIdentityFailed": "Não foi possível redefinir a identidade da conta",
+    "identityChangedBadgeTitle": "As chaves de segurança deste contato mudaram — verifique antes de confiar"
   }
 }

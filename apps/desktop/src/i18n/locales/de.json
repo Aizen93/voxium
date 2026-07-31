@@ -1033,6 +1033,7 @@
     "resetIdentityAction": "Kontoidentität zurücksetzen",
     "resetIdentityConfirm": "Das ersetzt deinen Kontoschlüssel. Alle deine Kontakte sehen eine geänderte Sicherheitsnummer und müssen dich erneut verifizieren. Andere Geräte verlieren ihre Freigabe.",
     "resetIdentitySuccess": "Kontoidentität zurückgesetzt",
-    "resetIdentityFailed": "Kontoidentität konnte nicht zurückgesetzt werden"
+    "resetIdentityFailed": "Kontoidentität konnte nicht zurückgesetzt werden",
+    "identityChangedBadgeTitle": "Die Sicherheitsschlüssel dieses Kontakts haben sich geändert — vor dem Vertrauen prüfen"
   }
 }
