@@ -88,6 +88,15 @@ export interface E2EPinnedDeviceList {
   listVersion: number;
   /** The account master key this list was verified against (§14), if any. */
   masterKey: string | null;
+  /**
+   * How many device entries the server returned BEFORE signature verification.
+   * The difference between this and `devices.length` is the difference between
+   * "this person has never opened the app" and "every device they publish
+   * failed verification" — the first is routine, the second means the
+   * directory is serving something wrong and must not be described as the
+   * person simply not being set up yet.
+   */
+  servedDeviceCount: number;
 }
 
 /** UI signal: this peer's device list changed since the user acknowledged it. */
@@ -161,6 +170,23 @@ class E2EUnusableTransferError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'E2EUnusableTransferError';
+  }
+}
+
+/**
+ * The recipient has no device that can receive encrypted messages yet.
+ *
+ * Not an error in the usual sense — it is a normal state for an account that
+ * exists but has never opened the app on a device. Under always-on encryption
+ * (docs/e2e-always-on-plan.md) it is also the ONLY reason a DM cannot be sent,
+ * so it has to reach the UI as something a person can act on rather than as a
+ * failure they will read as the app being broken. Registering keys needs a
+ * verified email, so this window cannot be closed from the sender's side.
+ */
+export class E2EPeerNotReadyError extends Error {
+  constructor(public readonly peerUserId: string) {
+    super('Recipient has no device set up for encrypted messages');
+    this.name = 'E2EPeerNotReadyError';
   }
 }
 
@@ -1199,6 +1225,7 @@ export class E2EService {
 
     const list: E2EPinnedDeviceList = {
       devices,
+      servedDeviceCount: (data.devices ?? []).length,
       listVersion: data.listVersion ?? 0,
       // Without a cross-signing-capable node we do not know the account key is
       // absent, only that this answer cannot tell us — keep what we had.
@@ -1957,6 +1984,11 @@ export class E2EService {
     // them all): encrypting anyway would produce ciphertext nobody can read,
     // while the UI reported the message as sent.
     if (peer.devices.length === 0) {
+      // Nothing published at all: a normal state for an account that has not
+      // opened the app yet. If they DID publish devices and none survived
+      // verification, that is a different and much less reassuring story, and
+      // it keeps its own error rather than being reported as "not set up".
+      if (peer.servedDeviceCount === 0) throw new E2EPeerNotReadyError(peerUserId);
       throw new Error(`no usable E2E device for ${peerUserId}`);
     }
 

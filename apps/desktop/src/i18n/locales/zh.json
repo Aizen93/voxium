@@ -1061,6 +1061,8 @@
     "backupRestoreFailed": "该恢复密钥无法打开此账户的备份。它可能属于之前的账户身份。",
     "backupNone": "此账户未设置恢复密钥，因此无法恢复。",
     "backupPreferRestore": "你有恢复密钥：在上方恢复可以保留你的身份，也无需任何人重新验证你。请先尝试这个方式。",
-    "backupRestoreMalformed": "这不像是恢复密钥。请检查是否输错并重试。"
+    "backupRestoreMalformed": "这不像是恢复密钥。请检查是否输错并重试。",
+    "peerNotReady": "{{name}} 尚未在任何设备上设置 Voxium，因此无处发送加密消息。对方打开应用后即可联系。",
+    "peerNotReadyFallbackName": "此人"
   }
 }

@@ -1061,6 +1061,8 @@
     "backupRestoreFailed": "Essa chave de recuperação não abriu o backup desta conta. Ela pode pertencer a uma identidade anterior.",
     "backupNone": "Nenhuma chave de recuperação foi configurada nesta conta, portanto não há nada para restaurar.",
     "backupPreferRestore": "Você tem uma chave de recuperação: restaurá-la acima preserva sua identidade e ninguém precisará verificá-lo de novo. Tente isso primeiro.",
-    "backupRestoreMalformed": "Isso não parece uma chave de recuperação. Verifique se há erros de digitação."
+    "backupRestoreMalformed": "Isso não parece uma chave de recuperação. Verifique se há erros de digitação.",
+    "peerNotReady": "{{name}} ainda não configurou o Voxium em nenhum dispositivo, então não há para onde enviar uma mensagem criptografada. Será possível falar assim que abrir o app.",
+    "peerNotReadyFallbackName": "Esta pessoa"
   }
 }

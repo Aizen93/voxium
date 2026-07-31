@@ -1061,6 +1061,8 @@
     "backupRestoreFailed": "Cette clé de récupération n'a pas ouvert la sauvegarde de ce compte. Elle appartient peut-être à une identité précédente.",
     "backupNone": "Aucune clé de récupération n'a été configurée sur ce compte, il n'y a donc rien à restaurer.",
     "backupPreferRestore": "Vous avez une clé de récupération : la restaurer ci-dessus conserve votre identité et personne n'aura à vous vérifier à nouveau. Essayez d'abord cela.",
-    "backupRestoreMalformed": "Cela ne ressemble pas à une clé de récupération. Vérifiez la saisie et réessayez."
+    "backupRestoreMalformed": "Cela ne ressemble pas à une clé de récupération. Vérifiez la saisie et réessayez.",
+    "peerNotReady": "{{name}} n'a pas encore configuré Voxium sur un appareil : il n'y a nulle part où envoyer un message chiffré. Vous pourrez lui écrire dès qu'il ouvrira l'application.",
+    "peerNotReadyFallbackName": "Cette personne"
   }
 }
