@@ -37,6 +37,9 @@ import type {
 } from '@voxium/shared';
 import { api as defaultApi } from '../api';
 import {
+  generateRecoveryKey,
+  isRecoveryKeyWellFormed,
+  openMasterKeyBackup,
   initEngine,
   EngineAccount,
   EngineMasterKey,
@@ -217,6 +220,20 @@ function deviceSetFingerprint(devices: Array<{ deviceId: string; curve25519Key: 
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The typed reason a restore never left the device: the key failed its own
+ * checksum (§15.2). Distinguishing this from "the key did not open the blob"
+ * is the entire point of putting a checksum on a recovery key — one is a typo
+ * to correct, the other means this key is for a different account identity.
+ * A class rather than a message so the UI never has to string-match.
+ */
+export class E2ERecoveryKeyFormatError extends Error {
+  constructor() {
+    super('That does not look like a recovery key');
+    this.name = 'E2ERecoveryKeyFormatError';
+  }
 }
 
 export class E2EService {
@@ -673,6 +690,14 @@ export class E2EService {
       }
       await this.vault.putMasterIdentity(this.userId, { masterKey: master.publicKey(), verified: true });
       this.masterKeyConflict = false;
+      if (!held) {
+        // The old backup decrypts to a key this account no longer publishes,
+        // so restoring from it could only ever fail. Leaving it would hand the
+        // user a recovery key that looks like a way back and is not.
+        await this.api.delete('/e2e/backup').catch((err) => {
+          console.warn('e2e: could not drop the superseded key backup:', errText(err));
+        });
+      }
       this.deviceListCache.delete(this.userId);
       await this.fetchDeviceList(this.userId, true);
     });
@@ -893,6 +918,86 @@ export class E2EService {
     this.masterKeyConflict = false;
     this.deviceListCache.delete(this.userId);
     return true;
+  }
+
+  // ─── Encrypted key backup (spec §15) ──────────────────────────────────────
+
+  /** Does this account have a backup, and when was it last written? */
+  async keyBackupInfo(): Promise<{ exists: boolean; updatedAt: string | null }> {
+    const res = await this.api.get('/e2e/backup');
+    const data = res.data.data as { exists?: boolean; updatedAt?: string | null };
+    return { exists: data.exists === true, updatedAt: data.updatedAt ?? null };
+  }
+
+  /**
+   * Back the account key up under a fresh recovery key, and return that key —
+   * ONCE. It is never stored, never sent, and cannot be re-derived: the whole
+   * point is that the server holds a blob it has no way to open.
+   *
+   * Only a device that holds the account key can do this, which is what stops
+   * an attacker with a session token from minting a backup of a key nobody has.
+   */
+  async createKeyBackup(): Promise<string> {
+    return this.enqueue(async () => {
+      const master = this.masterKey;
+      if (!master) throw new Error('This device does not hold the account key');
+      const recoveryKey = generateRecoveryKey();
+      // Sealed in the engine: the private half never becomes a JS string, and
+      // neither does the recovery key beyond the one we hand back to be shown.
+      const blob = master.sealForBackup(recoveryKey);
+      await this.api.put('/e2e/backup', { blob });
+      return recoveryKey;
+    });
+  }
+
+  /** Forget the backup. The recovery key that opened it becomes useless. */
+  async deleteKeyBackup(): Promise<void> {
+    await this.api.delete('/e2e/backup');
+  }
+
+  /**
+   * Recover the account key from backup instead of starting a new identity
+   * (§14.4's other exit). On success this device holds the account key, is
+   * cross-signed by it, and can approve the user's other devices — no peer
+   * sees a safety-number change, because the identity never changed.
+   */
+  async restoreKeyBackup(recoveryKey: string): Promise<void> {
+    // Checked before the request: a typo should say "that is not your recovery
+    // key", not "decryption failed" after a round trip.
+    if (!isRecoveryKeyWellFormed(recoveryKey)) throw new E2ERecoveryKeyFormatError();
+    return this.enqueue(async () => {
+      const account = this.requireAccount();
+      const res = await this.api.get('/e2e/backup');
+      const data = res.data.data as { exists?: boolean; blob?: string | null };
+      if (data.exists !== true || typeof data.blob !== 'string') {
+        throw new Error('This account has no key backup');
+      }
+
+      // Judge the blob against what the account PUBLISHES, exactly as an
+      // incoming device approval is judged: a server that substituted a blob of
+      // its own making must not be able to have us install the key inside it.
+      const list = await this.fetchDeviceList(this.userId, true);
+      const published = this.servedOwnMasterKey ?? list.masterKey;
+      if (!published) throw new Error('This account publishes no master key to restore');
+
+      const master = openMasterKeyBackup(data.blob, recoveryKey, published);
+      await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
+      this.masterKey?.free();
+      this.masterKey = master;
+      // Holding the secret proves the key, so the pin becomes verified.
+      await this.vault.putMasterIdentity(this.userId, { masterKey: master.publicKey(), verified: true });
+      this.masterKeyConflict = false;
+
+      // This device is almost certainly unsigned — that is why it needed
+      // recovering — so sign it now rather than leaving every peer warning.
+      await this.crossSignOwnDevice(master, {
+        deviceId: this.deviceId,
+        curve25519Key: account.curve25519Key(),
+        ed25519Key: account.ed25519Key(),
+      });
+      this.deviceListCache.delete(this.userId);
+      await this.fetchDeviceList(this.userId, true);
+    });
   }
 
   /** Our own account master key (held or pinned), for safety numbers. */

@@ -719,3 +719,99 @@ approval.
   could live in the repository and in no user's hands: every other check reads
   `pkg/`, not `src/`.
 
+
+## 15. Encrypted key backup (Phase C, shipped)
+
+Until now, losing every device meant losing the account identity: §14.4's reset
+was the only way back, and it cost every contact a re-verification. Backup makes
+that recoverable — for the user, and only the user.
+
+### 15.1 What is backed up, and what is not
+
+The **account master secret** (§14.1). That is what a reset destroys and what
+peers pin, so restoring it means the safety number never changes and nobody is
+prompted.
+
+Message history is **not** backed up. That is a separate mechanism (Megolm
+session keys, one per conversation per rotation) with a different retention
+question, and conflating the two would put megabytes of key material behind the
+same single recovery key. History still does not follow a new device (§11).
+
+### 15.2 The recovery key
+
+32 random bytes from the engine's CSPRNG, plus one checksum byte, base32
+(RFC 4648 — no case distinction, and none of `0/1/8` to confuse with `O/I/B`),
+grouped in fours. Shown once. Never stored, never transmitted, not derivable
+from anything.
+
+**Deliberately not a passphrase.** A passphrase needs a slow KDF, which is key
+derivation this crate is not allowed to implement (§1) — and worse, it would
+make a server-held blob guessable offline at whatever entropy the user chose.
+A 256-bit random key has no such attack. The cost is that the user must keep it;
+that is the honest trade, and it is the same one Matrix's "security key" makes.
+
+The checksum buys nothing cryptographically — GCM already fails closed. It
+exists so a typo is reported as "that is not your recovery key" before any
+request, instead of "decryption failed" after one, which reads like data loss.
+
+### 15.3 The blob
+
+`voxium-backup-v1|<secret_b64>|<public_b64>`, sealed with AES-256-GCM under the
+recovery key, AAD `voxium-backup/master_secret`. Assembled, sealed, opened and
+parsed **inside the engine**: the private half never becomes a JS string, and
+the context is reserved from the generic `sealSecret`/`openSecret` for the same
+reason as the vault's (§14.4) — the blob and the typed recovery key both pass
+through JS, so a generic opener would be a complete bypass.
+
+The payload carries the public half so a restore can prove what it recovered.
+Versioned so message keys could be added later under the same recovery key
+rather than a second one.
+
+### 15.4 Restoring
+
+The recovered secret must derive to the key the account **publishes**, verified
+self-signature and all — not to whatever the blob happens to contain. The server
+hands back the blob, so without that check it could substitute one of its own
+making and the "recovery" would install a key it holds. Failing closed here
+costs a user nothing: the honest answer is that this backup is for a different
+account identity.
+
+On success the device seals the secret, pins the account key **verified**
+(holding it is the proof), clears any conflict, and cross-signs itself — a
+recovering device is unsigned by definition, and leaving it that way would have
+every peer warning about the device that just recovered.
+
+### 15.5 Server surface
+
+`PUT /e2e/backup` (store or replace), `GET /e2e/backup`, `DELETE /e2e/backup` —
+own-account only, one row per account, size-capped (`KEY_BACKUP_MAX`), rate
+limited with the approve limiter. The server stores ciphertext and a timestamp.
+There is no server-side recovery, no passphrase hint, and no escrow: an operator
+with the whole database learns only that a backup exists.
+
+A reset that mints a NEW identity deletes the blob, because it could then only
+ever fail to open. A reset that merely re-publishes a key this device already
+holds (§14.4) leaves it alone — the identity did not change, so the backup still
+works.
+
+### 15.6 Retention
+
+A backup is the one piece of E2E material designed to outlive every device, so
+no age sweep can ever reclaim it — which makes it the worst row to leave behind.
+It is therefore the only E2E table with a real foreign key to `User`, cascading
+on delete.
+
+The others (devices, registry, master key, key shares, transfers) have no FK,
+which predates this and meant a deleted account kept publishing its device
+identities forever. Account deletion now calls `purgeE2EMaterial()` before
+removing the user, covering all of them; adding FKs retroactively needs an
+orphan-cleanup migration on a live database and is left as a follow-up.
+
+### 15.7 Known gaps
+
+- No history backup, as above.
+- A user who loses the recovery key AND every device is back to §14.4's reset.
+  This is a deliberate floor: any mechanism that could rescue them could also
+  rescue an attacker who compromises the account.
+- The blob is one row per account; there is no versioning or rollback, so a
+  replaced backup invalidates the previous recovery key immediately.

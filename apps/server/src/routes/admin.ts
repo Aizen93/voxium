@@ -4,6 +4,7 @@ import { authenticate } from '../middleware/auth';
 import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin';
 import { rateLimitAdmin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
+import { purgeE2EMaterial } from '../utils/e2ePurge';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
@@ -554,6 +555,9 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
       // Force logout then disconnect active socket (works across all nodes)
       await forceLogoutUser(targetId, 'Your account has been deleted');
 
+      // E2E key material has no FK to User (except the key backup), so it would
+      // otherwise outlive the account it belongs to.
+      await purgeE2EMaterial(targetId);
       // Delete user — cascade only removes ServerMember records for transferred servers
       await prisma.user.delete({ where: { id: targetId } });
 
@@ -579,6 +583,7 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
       // Force logout then disconnect active socket (works across all nodes)
       await forceLogoutUser(targetId, 'Your account has been deleted');
 
+      await purgeE2EMaterial(targetId);
       await prisma.user.delete({ where: { id: targetId } });
 
       logAuditEvent({

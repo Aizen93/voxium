@@ -25,6 +25,7 @@ import {
 vi.mock('../../services/api', () => ({ api: {} }));
 
 import { E2EService, E2EIdentityChangedError } from '../../services/e2e/e2eService';
+import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey } from '../../services/e2e/engine';
 import type { PickleKeyProvider } from '../../services/e2e/vault';
 
@@ -111,6 +112,7 @@ function createFakeServer() {
   let failSignaturePublish = false;
   let failDeviceListReads = false;
   const hiddenDevices = new Set<string>();
+  const backups = new Map<string, { blob: string; updatedAt: string }>();
   let failMasterKeyPublish = false;
   let crossSigningSupported = true;
   /** Keys the server LIES about for a device, to test what we sign (C1). */
@@ -157,6 +159,16 @@ function createFakeServer() {
           const claimed = mine.slice(0, E2E_LIMITS.MASTER_TRANSFER_STORE_CAP);
           return ok({
             transfers: claimed.map(({ userId: _u, recipientDeviceId: _r, ...rest }) => rest),
+          });
+        }
+
+        if (path === '/e2e/backup') {
+          const row = backups.get(userId);
+          return ok({
+            exists: !!row,
+            blob: row?.blob ?? null,
+            createdAt: row?.updatedAt ?? null,
+            updatedAt: row?.updatedAt ?? null,
           });
         }
 
@@ -245,6 +257,14 @@ function createFakeServer() {
             oneTimeKeyCount: body.oneTimeKeys.length,
             listVersion: user.listVersion,
           });
+        }
+
+        if (url === '/e2e/backup') {
+          if (typeof body?.blob !== 'string' || body.blob.length === 0) throw new Error('400: bad blob');
+          if (body.blob.length > E2E_LIMITS.KEY_BACKUP_MAX) throw new Error('400: blob too large');
+          const updatedAt = new Date().toISOString();
+          backups.set(userId, { blob: body.blob, updatedAt });
+          return ok({ createdAt: updatedAt, updatedAt });
         }
 
         if (url === '/e2e/master-key') {
@@ -420,6 +440,9 @@ function createFakeServer() {
       },
 
       async delete(url: string) {
+        if (url === '/e2e/backup') {
+          return ok({ deleted: backups.delete(userId) });
+        }
         const revokeMatch = url.match(/^\/e2e\/devices\/me\/([^/]+)$/);
         if (revokeMatch) {
           const user = userOf(userId);
@@ -451,6 +474,7 @@ function createFakeServer() {
     deviceOf: (u: string, d: string) => userOf(u).devices.get(d)!,
     userOf,
     setKeyshareUploadFailure: (fail: boolean) => { failKeyshareUploads = fail; },
+    backups,
     setSignaturePublishFailure: (fail: boolean) => { failSignaturePublish = fail; },
     setMasterKeyPublishFailure: (fail: boolean) => { failMasterKeyPublish = fail; },
     /** Rate limit / network blip on device-list reads. */
@@ -2294,6 +2318,177 @@ describe('E2EService (cross-signing)', () => {
 
     const status = await restarted.service.deviceListStatus(aliceId);
     expect(status.unsignedDeviceIds).toContain(laptopId);
+  });
+
+  it('recovers the account key from backup instead of starting a new identity (B1)', async () => {
+    // The point of the whole feature: losing every device used to mean every
+    // contact seeing a changed safety number and having to verify again.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const bob = makeParty(server, 'bob');
+    await phone.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const accountKey = server.userOf(aliceId).masterKey;
+
+    const recoveryKey = await phone.service.createKeyBackup();
+    expect(recoveryKey).toMatch(/^[A-Z2-7]{4}(-[A-Z2-7]{1,4})+$/);
+    expect(server.backups.get(aliceId)).toBeTruthy();
+    // the server holds the blob and nothing it can read
+    expect(server.backups.get(aliceId)!.blob).not.toContain(accountKey!);
+
+    // every device is gone; the user reinstalls
+    const reinstall = makeDevice(server, aliceId);
+    await reinstall.service.initialize();
+    await flushQueue();
+    expect(reinstall.service.hasMasterSecret()).toBe(false);
+
+    await reinstall.service.restoreKeyBackup(recoveryKey);
+
+    // same account identity — nobody has to re-verify anything
+    expect(server.userOf(aliceId).masterKey).toBe(accountKey);
+    expect(reinstall.service.hasMasterSecret()).toBe(true);
+    expect(reinstall.service.hasMasterKeyConflict()).toBe(false);
+    // …and the recovered device is signed by the account key, so peers see no
+    // unsigned-device warning either
+    const own = await reinstall.service.listOwnDevices();
+    expect(own.devices.find((d) => d.deviceId === reinstall.service.deviceId)?.crossSigned).toBe(true);
+    expect(own.canApprove).toBe(true);
+  });
+
+  it('refuses a blob the server swapped for one of its own (B2)', async () => {
+    // The server hands back the blob. If restore trusted whatever decrypted,
+    // a server could mint a key, back it up under a recovery key it knows, and
+    // wait for the user to "recover" into an identity it controls.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+    await phone.service.createKeyBackup();
+
+    const impostor = new EngineMasterKey();
+    const impostorRecovery = generateRecoveryKey();
+    server.backups.set(aliceId, {
+      blob: impostor.sealForBackup(impostorRecovery),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const reinstall = makeDevice(server, aliceId);
+    await reinstall.service.initialize();
+    await flushQueue();
+    await expect(reinstall.service.restoreKeyBackup(impostorRecovery)).rejects.toThrow(
+      /different account key/
+    );
+    expect(reinstall.service.hasMasterSecret()).toBe(false);
+  });
+
+  it('rejects a mistyped recovery key without asking the server for anything (B3)', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+    await phone.service.createKeyBackup();
+
+    await expect(phone.service.restoreKeyBackup('NOPE-NOPE-NOPE')).rejects.toThrow(
+      /does not look like a recovery key/
+    );
+  });
+
+  it('will not back up a key this device does not hold (B4)', async () => {
+    // Otherwise a device that was never approved could publish a backup blob
+    // for a key it cannot produce — at best useless, at worst confusing the
+    // real recovery path.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    expect(laptop.service.hasMasterSecret()).toBe(false);
+    await expect(laptop.service.createKeyBackup()).rejects.toThrow(/does not hold the account key/);
+    expect(server.backups.has(aliceId)).toBe(false);
+  });
+
+  it('drops a backup that a new identity has made useless (B5)', async () => {
+    // After a reset the old blob decrypts to a key the account no longer
+    // publishes, so keeping it would leave the user holding a recovery key
+    // that looks like a way back and is not.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+    const stale = await phone.service.createKeyBackup();
+    expect(server.backups.has(aliceId)).toBe(true);
+
+    // the laptop holds no key, so resetting really does mint a new identity
+    await laptop.service.resetAccountIdentity();
+    expect(server.backups.has(aliceId)).toBe(false);
+
+    const reinstall = makeDevice(server, aliceId);
+    await reinstall.service.initialize();
+    await flushQueue();
+    await expect(reinstall.service.restoreKeyBackup(stale)).rejects.toThrow(/no key backup/);
+  });
+
+  it('keeps a backup that is still valid when the held key is merely re-published (B6)', async () => {
+    // Re-publishing does not change the account key, so the backup still opens
+    // it. Deleting it there would destroy a working recovery for no reason.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+    const recoveryKey = await phone.service.createKeyBackup();
+
+    const impostor = new EngineMasterKey();
+    const user = server.userOf(aliceId);
+    user.masterKey = impostor.publicKey();
+    user.masterSignature = impostor.sign(e2eMasterCanonical(aliceId, impostor.publicKey()));
+    await phone.service.fetchDeviceList(aliceId, true);
+    await phone.service.resetAccountIdentity(); // re-publishes the held key
+
+    expect(server.backups.has(aliceId)).toBe(true);
+    const reinstall = makeDevice(server, aliceId);
+    await reinstall.service.initialize();
+    await flushQueue();
+    await reinstall.service.restoreKeyBackup(recoveryKey);
+    expect(reinstall.service.hasMasterSecret()).toBe(true);
+  });
+
+  it('replaces the blob when a new recovery key is minted (B7)', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+
+    const first = await phone.service.createKeyBackup();
+    const second = await phone.service.createKeyBackup();
+    expect(first).not.toBe(second);
+    expect((await phone.service.keyBackupInfo()).exists).toBe(true);
+
+    const reinstall = makeDevice(server, aliceId);
+    await reinstall.service.initialize();
+    await flushQueue();
+    // the superseded key no longer opens what is stored
+    await expect(reinstall.service.restoreKeyBackup(first)).rejects.toThrow(/does not open this backup/);
+    await reinstall.service.restoreKeyBackup(second);
+    expect(reinstall.service.hasMasterSecret()).toBe(true);
   });
 
   it('hands over the secret before publishing the signature (P11)', async () => {

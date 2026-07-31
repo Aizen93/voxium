@@ -7,6 +7,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const listeners = new Set<(userId: string) => void>();
 
+/** Shaped like the real thing (spec §15.2) so a leak is recognisable in a dump. */
+const RECOVERY_KEY = 'ABCD-EFGH-JKLM-NPQR-STUV-WXYZ-2345-6723';
+
 /** A stand-in for E2EService: every flag is settable, every call recorded. */
 interface DeviceListStatus {
   version: number;
@@ -65,6 +68,10 @@ function makeService(userId: string) {
     revokeDevice: vi.fn(async () => {}),
     approveDevice: vi.fn(async () => {}),
     resetAccountIdentity: vi.fn(async () => {}),
+    keyBackupInfo: vi.fn(async () => ({ exists: false, updatedAt: null as string | null })),
+    createKeyBackup: vi.fn(async () => RECOVERY_KEY),
+    deleteKeyBackup: vi.fn(async () => {}),
+    restoreKeyBackup: vi.fn(async (_recoveryKey: string) => {}),
   };
 }
 
@@ -357,6 +364,130 @@ describe('e2eStore own-device actions', () => {
   });
 });
 
+describe('e2eStore key backup (spec §15)', () => {
+  it('starts out not knowing whether a backup exists', () => {
+    // `null` is load-bearing: the UI must not offer to create (which replaces an
+    // existing blob and voids its recovery key) or to restore (from a blob that
+    // may not exist) on a guess.
+    expect(useE2EStore.getState().keyBackup).toBeNull();
+  });
+
+  it('records what the server says', async () => {
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+    await useE2EStore.getState().loadKeyBackup(USER);
+    expect(useE2EStore.getState().keyBackup).toEqual({
+      exists: true,
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    });
+  });
+
+  it('keeps the last known answer when the read fails', async () => {
+    // Overwriting with "no backup" would put a "Set up recovery" button in front
+    // of a user who already has one — and taking it invalidates the recovery key
+    // they wrote down.
+    useE2EStore.setState({ keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } });
+    service.keyBackupInfo.mockRejectedValueOnce(new Error('offline'));
+
+    await useE2EStore.getState().loadKeyBackup(USER);
+
+    expect(useE2EStore.getState().keyBackup).toEqual({
+      exists: true,
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    });
+  });
+
+  it('hands the recovery key to the caller and NEVER keeps a copy', async () => {
+    // The key is the entire security of the backup: the server holds the blob.
+    // Store state outlives the dialog, survives in devtools and rides along in
+    // any state dump, so it has to leave here and go nowhere else.
+    const key = await useE2EStore.getState().createKeyBackup(USER);
+
+    expect(key).toBe(RECOVERY_KEY);
+    expect(JSON.stringify(useE2EStore.getState())).not.toContain(RECOVERY_KEY);
+    expect(JSON.stringify(useE2EStore.getState())).not.toContain('ABCD');
+  });
+
+  it('shows the backup as existing even if the confirming read fails', async () => {
+    // The blob IS on the server once create resolves. Reporting "no recovery
+    // set up" in the same breath as showing a recovery key reads as failure and
+    // invites a second create.
+    service.keyBackupInfo.mockRejectedValueOnce(new Error('offline'));
+    await useE2EStore.getState().createKeyBackup(USER);
+    expect(useE2EStore.getState().keyBackup?.exists).toBe(true);
+  });
+
+  it('does not swallow a failed create — no key, no success', async () => {
+    service.createKeyBackup.mockRejectedValueOnce(new Error('device does not hold the account key'));
+    await expect(useE2EStore.getState().createKeyBackup(USER)).rejects.toThrow(
+      'device does not hold the account key'
+    );
+    expect(useE2EStore.getState().keyBackup).toBeNull();
+  });
+
+  it('clears the backup state when the backup is deleted', async () => {
+    useE2EStore.setState({ keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } });
+    await useE2EStore.getState().deleteKeyBackup(USER);
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: false, updatedAt: null });
+  });
+
+  it('does not swallow a failed delete — the blob may still be there', async () => {
+    useE2EStore.setState({ keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } });
+    service.deleteKeyBackup.mockRejectedValueOnce(new Error('offline'));
+
+    await expect(useE2EStore.getState().deleteKeyBackup(USER)).rejects.toThrow('offline');
+    expect(useE2EStore.getState().keyBackup?.exists).toBe(true);
+  });
+
+  it('recomputes own-device state after a restore, so the device stops looking unapproved', async () => {
+    service.setStatus({
+      version: 9,
+      deviceIds: ['this-device'],
+      newDeviceIds: [],
+      unsignedDeviceIds: [],
+      changed: false,
+    });
+    useE2EStore.setState({ thisDeviceUnsigned: true });
+    service.restoreKeyBackup.mockImplementationOnce(async () => {
+      service._masterSecret = true;
+      service._canApprove = true;
+      service._conflict = false;
+    });
+
+    await useE2EStore.getState().restoreKeyBackup(USER, RECOVERY_KEY);
+
+    expect(service.restoreKeyBackup).toHaveBeenCalledWith(RECOVERY_KEY);
+    const state = useE2EStore.getState();
+    expect(state.canApprove).toBe(true);
+    expect(state.masterReady).toBe(true);
+    expect(state.thisDeviceUnsigned).toBe(false);
+  });
+
+  it('does not swallow a wrong recovery key', async () => {
+    // A restore that failed must reach the caller as a failure: the panel says
+    // "restored — this device can approve others now", and saying that about a
+    // device that recovered nothing is the worst outcome in this whole flow.
+    service.restoreKeyBackup.mockRejectedValueOnce(new Error('does not open this backup'));
+
+    await expect(useE2EStore.getState().restoreKeyBackup(USER, 'AAAA-BBBB')).rejects.toThrow(
+      'does not open this backup'
+    );
+    expect(useE2EStore.getState().canApprove).toBe(false);
+  });
+
+  it('re-reads the backup after an identity reset that dropped it', async () => {
+    // A reset that MINTS a new key deletes the blob server-side (§15.5) — it
+    // could only ever fail to open now. Left stale, the panel would keep
+    // promising a recovery key that is noise.
+    useE2EStore.setState({ keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } });
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: false, updatedAt: null });
+
+    await useE2EStore.getState().resetAccountIdentity(USER);
+
+    expect(service.keyBackupInfo).toHaveBeenCalled();
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: false, updatedAt: null });
+  });
+});
+
 describe('e2eStore logout hygiene', () => {
   it('wipes every security signal on logout', async () => {
     // These fields are the UI's memory of who is trusted. Left behind on a
@@ -384,6 +515,7 @@ describe('e2eStore logout hygiene', () => {
         canApprove: true,
         capabilityServed: true,
       },
+      keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' },
     });
 
     resetAccountStores();
@@ -401,5 +533,8 @@ describe('e2eStore logout hygiene', () => {
     expect(state.newDeviceWarnings).toEqual({});
     expect(state.unsignedDeviceWarnings).toEqual({});
     expect(state.ownDevices).toBeNull();
+    // Whether the PREVIOUS account had a recovery key is that account's
+    // business, and offering the next user a "restore" box for it is worse.
+    expect(state.keyBackup).toBeNull();
   });
 });

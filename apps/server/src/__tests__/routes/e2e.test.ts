@@ -70,6 +70,11 @@ vi.mock('../../utils/prisma', () => ({
       createMany: vi.fn(),
       deleteMany: vi.fn(),
     },
+    e2EKeyBackup: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+      deleteMany: vi.fn(),
+    },
     conversation: { findUnique: vi.fn(), findMany: vi.fn() },
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
@@ -1814,5 +1819,321 @@ describe('E2E routes — POST /master-transfers/ack', () => {
     }
     expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
     expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Encrypted key backup (spec §15) ────────────────────────────────────────
+// One opaque blob per account, sealed under a recovery key the server never
+// sees. Every route is scoped to the authenticated caller and takes no userId
+// anywhere, so the tests below back the mock with a real two-account table:
+// a route that dropped or widened its scope reads, replaces or deletes the
+// OTHER account's row here — a visible leak, not merely a different argument.
+
+/** Opaque ciphertext as far as the server is concerned — never parsed. */
+const BACKUP_BLOB = 'v1.YmFja3VwLWNpcGhlcnRleHQtZm9yLXVzZXItMQ';
+const OTHER_BLOB = 'v1.YmFja3VwLWNpcGhlcnRleHQtZm9yLXVzZXItOQ';
+
+interface BackupRow {
+  userId: string;
+  blob: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const CREATED_AT = new Date('2026-07-25T09:00:00Z');
+const UPDATED_AT = new Date('2026-07-31T12:00:00Z');
+
+function backupRow(userId: string, blob: string): BackupRow {
+  return { userId, blob, createdAt: CREATED_AT, updatedAt: CREATED_AT };
+}
+
+/**
+ * Stands in for `e2e_key_backups`: every mock resolves `where` against the real
+ * rows, and an absent scope key reads as "no filter" exactly as postgres would
+ * treat a missing WHERE clause. So a handler that stopped pinning the session's
+ * userId does not just assert differently here — it reaches another account.
+ */
+function seedBackups(rows: BackupRow[]) {
+  const match = (r: BackupRow, where: { userId?: string } = {}) =>
+    where.userId === undefined || r.userId === where.userId;
+
+  vi.mocked(prisma.e2EKeyBackup.findUnique).mockImplementation((async (args: any) =>
+    rows.find((r) => match(r, args?.where ?? {})) ?? null) as any);
+
+  vi.mocked(prisma.e2EKeyBackup.upsert).mockImplementation((async (args: any) => {
+    const existing = rows.find((r) => match(r, args?.where ?? {}));
+    if (existing) {
+      existing.blob = args.update.blob;
+      existing.updatedAt = UPDATED_AT;
+      return existing;
+    }
+    const created: BackupRow = {
+      userId: args.create.userId,
+      blob: args.create.blob,
+      createdAt: UPDATED_AT,
+      updatedAt: UPDATED_AT,
+    };
+    rows.push(created);
+    return created;
+  }) as any);
+
+  vi.mocked(prisma.e2EKeyBackup.deleteMany).mockImplementation((async (args: any) => {
+    const matched = rows.filter((r) => match(r, args?.where ?? {}));
+    for (const m of matched) rows.splice(rows.indexOf(m), 1);
+    return { count: matched.length };
+  }) as any);
+
+  return rows;
+}
+
+describe('E2E routes — PUT /backup', () => {
+  it('stores a blob for the caller', async () => {
+    const store = seedBackups([]);
+
+    const res = await request(createApp()).put('/api/v1/e2e/backup').send({ blob: BACKUP_BLOB });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({
+      createdAt: UPDATED_AT.toISOString(),
+      updatedAt: UPDATED_AT.toISOString(),
+    });
+    // the row is keyed by the session's userId, which is also all that is stored
+    expect(prisma.e2EKeyBackup.upsert).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+      create: { userId: 'user-1', blob: BACKUP_BLOB },
+      update: { blob: BACKUP_BLOB },
+      select: { createdAt: true, updatedAt: true },
+    });
+    expect(store).toEqual([expect.objectContaining({ userId: 'user-1', blob: BACKUP_BLOB })]);
+  });
+
+  it('replaces an existing blob instead of conflicting', async () => {
+    // A new recovery key invalidates the old blob, so replacing is the normal
+    // case: a 409 would leave the client holding a key it cannot store against.
+    const store = seedBackups([backupRow('user-1', 'v1.b2xkLWNpcGhlcnRleHQ')]);
+
+    const res = await request(createApp()).put('/api/v1/e2e/backup').send({ blob: BACKUP_BLOB });
+
+    expect(res.status).toBe(200);
+    expect(store).toHaveLength(1);
+    expect(store[0].blob).toBe(BACKUP_BLOB);
+    // createdAt is the row's, updatedAt moved — the client can show backup age
+    expect(res.body.data).toEqual({
+      createdAt: CREATED_AT.toISOString(),
+      updatedAt: UPDATED_AT.toISOString(),
+    });
+  });
+
+  it("cannot overwrite another account's backup", async () => {
+    const store = seedBackups([backupRow('user-9', OTHER_BLOB)]);
+
+    const res = await request(createApp()).put('/api/v1/e2e/backup').send({ blob: BACKUP_BLOB });
+
+    expect(res.status).toBe(200);
+    // user-9's row survives untouched; the caller got a row of their own
+    expect(store).toHaveLength(2);
+    expect(store.find((r) => r.userId === 'user-9')!.blob).toBe(OTHER_BLOB);
+    expect(store.find((r) => r.userId === 'user-1')!.blob).toBe(BACKUP_BLOB);
+  });
+
+  it('ignores a userId smuggled into the payload', async () => {
+    const store = seedBackups([backupRow('user-9', OTHER_BLOB)]);
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/backup')
+      .send({ blob: BACKUP_BLOB, userId: 'user-9', id: 'row-9' });
+
+    expect(res.status).toBe(200);
+    expect(prisma.e2EKeyBackup.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: 'user-1' }, create: { userId: 'user-1', blob: BACKUP_BLOB } })
+    );
+    expect(store.find((r) => r.userId === 'user-9')!.blob).toBe(OTHER_BLOB);
+  });
+
+  it('accepts a blob exactly at the cap and rejects one character more', async () => {
+    seedBackups([]);
+    const app = createApp();
+
+    const atCap = 'A'.repeat(E2E_LIMITS.KEY_BACKUP_MAX);
+    const ok = await request(app).put('/api/v1/e2e/backup').send({ blob: atCap });
+    expect(ok.status).toBe(200);
+
+    vi.mocked(prisma.e2EKeyBackup.upsert).mockClear();
+    const tooBig = await request(app)
+      .put('/api/v1/e2e/backup')
+      .send({ blob: 'A'.repeat(E2E_LIMITS.KEY_BACKUP_MAX + 1) });
+    expect(tooBig.status).toBe(400);
+    expect(tooBig.body.error).toMatch(/blob/i);
+    expect(prisma.e2EKeyBackup.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing, empty or non-string blob', async () => {
+    seedBackups([]);
+    const app = createApp();
+
+    for (const blob of [undefined, '', 123, null, true, {}, [], { blob: BACKUP_BLOB }]) {
+      const res = await request(app).put('/api/v1/e2e/backup').send({ blob });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/blob/i);
+    }
+    // an empty body is the same failure, not a crash
+    expect((await request(app).put('/api/v1/e2e/backup').send()).status).toBe(400);
+    expect(prisma.e2EKeyBackup.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('E2E routes — GET /backup', () => {
+  it("returns the caller's blob with its timestamps", async () => {
+    seedBackups([backupRow('user-1', BACKUP_BLOB)]);
+
+    const res = await request(createApp()).get('/api/v1/e2e/backup');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({
+      exists: true,
+      blob: BACKUP_BLOB,
+      createdAt: CREATED_AT.toISOString(),
+      updatedAt: CREATED_AT.toISOString(),
+    });
+    expect(prisma.e2EKeyBackup.findUnique).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+      select: { blob: true, createdAt: true, updatedAt: true },
+    });
+  });
+
+  it('reports absence as a state, not a 404', async () => {
+    // A restoring client reads this to choose between "ask for the recovery
+    // key" and "start a fresh identity"; a 404 is indistinguishable from a
+    // deploy/routing failure and would push it into resetting account trust.
+    seedBackups([]);
+
+    const res = await request(createApp()).get('/api/v1/e2e/backup');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ exists: false, blob: null, createdAt: null, updatedAt: null });
+  });
+
+  it("never returns another account's blob", async () => {
+    seedBackups([backupRow('user-9', OTHER_BLOB)]);
+
+    const res = await request(createApp()).get('/api/v1/e2e/backup');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.exists).toBe(false);
+    expect(JSON.stringify(res.body)).not.toContain(OTHER_BLOB);
+  });
+
+  it('ignores a userId supplied in the query string', async () => {
+    seedBackups([backupRow('user-9', OTHER_BLOB), backupRow('user-1', BACKUP_BLOB)]);
+
+    const res = await request(createApp()).get('/api/v1/e2e/backup?userId=user-9');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.blob).toBe(BACKUP_BLOB);
+    expect(prisma.e2EKeyBackup.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: 'user-1' } })
+    );
+  });
+});
+
+describe('E2E routes — DELETE /backup', () => {
+  it("deletes the caller's backup", async () => {
+    const store = seedBackups([backupRow('user-1', BACKUP_BLOB)]);
+
+    const res = await request(createApp()).delete('/api/v1/e2e/backup');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ deleted: true });
+    expect(prisma.e2EKeyBackup.deleteMany).toHaveBeenCalledWith({ where: { userId: 'user-1' } });
+    expect(store).toEqual([]);
+  });
+
+  it('is idempotent when there is nothing to delete', async () => {
+    seedBackups([]);
+    const app = createApp();
+
+    const first = await request(app).delete('/api/v1/e2e/backup');
+    const second = await request(app).delete('/api/v1/e2e/backup');
+
+    expect(first.status).toBe(200);
+    expect(first.body.data).toEqual({ deleted: false });
+    expect(second.status).toBe(200);
+    expect(second.body.data).toEqual({ deleted: false });
+  });
+
+  it("cannot delete another account's backup", async () => {
+    const store = seedBackups([backupRow('user-9', OTHER_BLOB)]);
+
+    const res = await request(createApp()).delete('/api/v1/e2e/backup?userId=user-9');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ deleted: false });
+    // the scope pins the session, so the other account's row is out of reach
+    expect(store).toEqual([expect.objectContaining({ userId: 'user-9', blob: OTHER_BLOB })]);
+  });
+
+  it("deletes only the caller's row when both accounts have one", async () => {
+    const store = seedBackups([backupRow('user-9', OTHER_BLOB), backupRow('user-1', BACKUP_BLOB)]);
+
+    const res = await request(createApp()).delete('/api/v1/e2e/backup');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ deleted: true });
+    expect(store).toEqual([expect.objectContaining({ userId: 'user-9', blob: OTHER_BLOB })]);
+  });
+});
+
+describe('E2E routes — key backup is outside the device lifecycle', () => {
+  it('survives revoking a device', async () => {
+    // The backup exists FOR the "every device is gone" case: any code path that
+    // dropped it on revocation would destroy the only recovery route at exactly
+    // the moment it is needed.
+    const store = seedBackups([backupRow('user-1', BACKUP_BLOB)]);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'row-a' } as any);
+
+    const res = await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`);
+
+    expect(res.status).toBe(200);
+    expect(prisma.e2EKeyBackup.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.e2EKeyBackup.upsert).not.toHaveBeenCalled();
+    expect(store).toHaveLength(1);
+  });
+
+  it('survives re-registering a device', async () => {
+    const store = seedBackups([backupRow('user-1', BACKUP_BLOB)]);
+    const device = makeTestDevice('user-1', DEVICE_A);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    vi.mocked(prisma.e2EDevice.upsert).mockResolvedValue({ id: 'dev-1', updatedAt: new Date() } as any);
+
+    const res = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+    expect(res.status).toBe(201);
+    expect(prisma.e2EKeyBackup.deleteMany).not.toHaveBeenCalled();
+    expect(store).toHaveLength(1);
+  });
+
+  it('survives replacing the account master key', async () => {
+    // Rotating the master key does strand the stored blob (it seals the OLD
+    // secret), but only the client can tell — it may have uploaded the new blob
+    // first. So the server keeps its hands off and the client re-uploads; an
+    // unconditional server-side delete here could destroy a fresh backup.
+    const store = seedBackups([backupRow('user-1', BACKUP_BLOB)]);
+    const master = makeTestMasterKey('user-1');
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: 'an-older-master-key' } as any);
+    vi.mocked(prisma.e2EMasterKey.upsert).mockResolvedValue({ updatedAt: new Date('2026-07-31') } as any);
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({ masterKey: master.masterKey, masterSignature: master.masterSignature });
+
+    expect(res.status).toBe(200);
+    // device cross-signatures ARE cleared (they were made by the old key)…
+    expect(prisma.e2EDevice.updateMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+      data: { masterSignature: null },
+    });
+    // …but the blob is the user's to replace, never the server's to destroy
+    expect(prisma.e2EKeyBackup.deleteMany).not.toHaveBeenCalled();
+    expect(store).toEqual([expect.objectContaining({ blob: BACKUP_BLOB })]);
   });
 });

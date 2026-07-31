@@ -16,6 +16,9 @@ import init, {
   master_safety_number,
   sealSecret,
   openSecret,
+  generateRecoveryKey,
+  isRecoveryKeyWellFormed,
+  openMasterKeyBackup,
   encryptAttachment,
   decryptAttachment,
 } from '@voxium/crypto-engine';
@@ -56,6 +59,9 @@ export {
   master_safety_number,
   sealSecret,
   openSecret,
+  generateRecoveryKey,
+  isRecoveryKeyWellFormed,
+  openMasterKeyBackup,
   encryptAttachment,
   decryptAttachment,
 };

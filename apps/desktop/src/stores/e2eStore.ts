@@ -81,6 +81,17 @@ interface E2EState {
   /** this account's own registered devices, as last loaded from the server */
   ownDevices: E2EOwnDevices | null;
   ownDevicesLoading: boolean;
+  /**
+   * Whether the account has an encrypted key backup on the server, and when it
+   * was last written (spec §15). `null` means "not read yet" — NOT "no backup":
+   * both answers drive an action, and each is destructive in the wrong state
+   * (creating over an existing blob invalidates a recovery key the user already
+   * wrote down; offering a restore box for a blob that does not exist sends
+   * them hunting for a key that was never created).
+   *
+   * The recovery key itself is never held here — see createKeyBackup.
+   */
+  keyBackup: { exists: boolean; updatedAt: string | null } | null;
 
   initialize: (userId: string) => Promise<void>;
   flagIdentityChanged: (peerUserId: string) => void;
@@ -93,6 +104,10 @@ interface E2EState {
   acknowledgeOwnDevices: (userId: string, seenDeviceIds: string[]) => Promise<void>;
   markAccountVerified: (userId: string, peerUserId: string) => Promise<void>;
   resetAccountIdentity: (userId: string) => Promise<void>;
+  loadKeyBackup: (userId: string) => Promise<void>;
+  createKeyBackup: (userId: string) => Promise<string>;
+  deleteKeyBackup: (userId: string) => Promise<void>;
+  restoreKeyBackup: (userId: string, recoveryKey: string) => Promise<void>;
 }
 
 export const useE2EStore = create<E2EState>((set, get) => ({
@@ -111,6 +126,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   ownDeviceWarnings: [],
   ownDevices: null,
   ownDevicesLoading: false,
+  keyBackup: null,
 
   initialize: async (userId: string) => {
     if (get().ready || get().initializing) return;
@@ -307,6 +323,69 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   resetAccountIdentity: async (userId: string) => {
     const service = getE2EService(userId);
     await service.resetAccountIdentity();
+    await get().loadOwnDevices(userId);
+    const status = await service.deviceListStatus(userId);
+    set(ownStatusPatch(service, status));
+    // A reset that MINTED a new key drops the backup server-side (spec §15.5) —
+    // the blob decrypts to a key this account no longer publishes. Re-read it
+    // rather than leave the panel promising a recovery key that is now noise.
+    await get().loadKeyBackup(userId);
+  },
+
+  /**
+   * Device-manager UI: does this account have a key backup, and how old is it?
+   *
+   * Swallows its errors like loadOwnDevices, and for the same reason: it is
+   * fired from a mount effect with nobody to report to. A failed read leaves
+   * the previous answer (or `null`) in place instead of inventing "no backup" —
+   * which the UI would render as an offer to create one, replacing the blob and
+   * silently invalidating the recovery key the user already saved.
+   */
+  loadKeyBackup: async (userId: string) => {
+    try {
+      const keyBackup = await getE2EService(userId).keyBackupInfo();
+      set({ keyBackup });
+    } catch (err) {
+      console.warn('e2e: reading key backup state failed:', err instanceof Error ? err.message : err);
+    }
+  },
+
+  /**
+   * Seal the account key under a fresh recovery key (spec §15.2) and hand that
+   * key back to the CALLER — once.
+   *
+   * It is deliberately not stored: store state outlives the dialog that shows
+   * it, survives in devtools and in any state dump, and this string is the
+   * whole security of the backup. It lives in the dialog's own state and dies
+   * with it. Errors propagate — a dialog that showed no key must not close as
+   * if it had.
+   */
+  createKeyBackup: async (userId: string) => {
+    const recoveryKey = await getE2EService(userId).createKeyBackup();
+    // Optimistic before the re-read: the blob IS on the server now, so a failed
+    // refresh must not leave the panel saying "no recovery set up" in the same
+    // breath as we show the user their recovery key.
+    set({ keyBackup: { exists: true, updatedAt: new Date().toISOString() } });
+    await get().loadKeyBackup(userId);
+    return recoveryKey;
+  },
+
+  /** Forget the backup. The recovery key that opened it is useless from here. */
+  deleteKeyBackup: async (userId: string) => {
+    await getE2EService(userId).deleteKeyBackup();
+    set({ keyBackup: { exists: false, updatedAt: null } });
+  },
+
+  /**
+   * Recover the account key from backup (spec §15.4) — the other exit from
+   * "no device holds the account key", and the one to try FIRST: it restores
+   * the same identity, so no peer sees a safety-number change and nobody has to
+   * re-verify. Errors propagate: a key that did not open the blob has to be
+   * reported as such, never absorbed into a UI that then looks restored.
+   */
+  restoreKeyBackup: async (userId: string, recoveryKey: string) => {
+    const service = getE2EService(userId);
+    await service.restoreKeyBackup(recoveryKey);
     await get().loadOwnDevices(userId);
     const status = await service.deviceListStatus(userId);
     set(ownStatusPatch(service, status));
