@@ -344,6 +344,32 @@ export class E2EVault {
    * changes: whoever holds the old keys could otherwise keep publishing into
    * sessions we already trust, and it would render as authentic.
    */
+  /**
+   * Session ids this device has already uploaded to the message-key backup.
+   * Local-only bookkeeping: losing it re-uploads, which the server upserts, so
+   * it is an optimisation rather than state anything depends on.
+   */
+  async getBackedUpSessionIds(): Promise<string[]> {
+    return (await this.get<string[]>('bku:sessions')) ?? [];
+  }
+
+  async addBackedUpSessionIds(sessionIds: string[]): Promise<void> {
+    const known = new Set(await this.getBackedUpSessionIds());
+    for (const id of sessionIds) known.add(id);
+    await this.put('bku:sessions', [...known]);
+  }
+
+  /** Every inbound group session this device holds (spec §16 backup). */
+  async listInboundGroupSessions(): Promise<InboundGroupSessionRecord[]> {
+    const keys = await this.keysWithPrefix('igs:');
+    const records: InboundGroupSessionRecord[] = [];
+    for (const key of keys) {
+      const record = await this.get<InboundGroupSessionRecord>(key);
+      if (record) records.push(record);
+    }
+    return records;
+  }
+
   async deleteInboundGroupSessionsFrom(userId: string): Promise<string[]> {
     const keys = await this.keysWithPrefix('igs:');
     const removed: string[] = [];

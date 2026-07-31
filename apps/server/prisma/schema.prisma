@@ -60,6 +60,7 @@ model User {
   communityThemes       CommunityTheme[]
   e2eDevices            E2EDevice[]
   e2eKeyBackup          E2EKeyBackup?
+  e2eMessageKeyBackups  E2EMessageKeyBackup[]
 
   @@map("users")
 }
@@ -630,6 +631,44 @@ model E2EKeyBackup {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("e2e_key_backups")
+}
+
+/// An account's backed-up Megolm message keys (plan §4.4): one row per inbound
+/// session, sealed client-side under an account-level message-backup key that
+/// travels with the master secret. It exists so history follows the ACCOUNT — a
+/// newly linked device downloads these and can read messages it was never sent.
+///
+/// `blob` is opaque AES-256-GCM ciphertext with AAD binding conversationId ||
+/// sessionId; the server stores and returns bytes and can never decrypt them.
+/// `conversationId` is stored in the clear only because the server already
+/// knows which conversations the owner is in — it buys the client per-
+/// conversation restore without telling us anything new.
+model E2EMessageKeyBackup {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  conversationId String   @map("conversation_id")
+  sessionId      String   @map("session_id")
+  blob           String // opaque AES-256-GCM ciphertext, base64 — server never decrypts
+  /**
+   * Megolm ratchet index the stored key starts at. A device that joined a
+   * session late exports from a LATER index, so without comparing them a
+   * last-writer-wins upsert would let it overwrite an earlier device's key and
+   * permanently destroy the messages in between.
+   */
+  firstKnownIndex Int     @default(0) @map("first_known_index")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  // Same reasoning as E2EKeyBackup: these rows are MEANT to outlive every
+  // device, so no age sweep can reclaim them and purgeE2EMaterial has nothing
+  // to do here — without a cascade a deleted account would leave its whole
+  // sealed history-key set behind forever.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // One backup per session: re-uploading a session updates it in place rather
+  // than accumulating a row per device that ever held the key.
+  @@unique([userId, sessionId])
+  @@index([userId, conversationId])
+  @@map("e2e_message_key_backups")
 }
 
 /// A pending Megolm group-session key, encrypted pairwise with Olm for exactly

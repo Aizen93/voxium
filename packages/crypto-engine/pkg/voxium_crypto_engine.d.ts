@@ -164,6 +164,11 @@ export class EngineMasterKey {
      */
     constructor();
     /**
+     * Open a backed-up session key. Fails closed on a wrong account key, a
+     * tampered blob, or a blob restored into the wrong conversation/session.
+     */
+    openSessionKey(sealed_b64: string, context: string): string;
+    /**
      * Base64 of the public master key (the account identity that is published
      * and compared out of band as the account safety number).
      */
@@ -178,6 +183,12 @@ export class EngineMasterKey {
      * belongs to the account before anything is stored.
      */
     sealForBackup(recovery_key: string): string;
+    /**
+     * Seal one Megolm session key for backup (spec §16). `context` is the
+     * conversation and session it belongs to, so a blob cannot be replayed
+     * into a different conversation.
+     */
+    sealSessionKey(session_key_b64: string, context: string): string;
     /**
      * Sign a canonical UTF-8 string (master self-signature, device
      * cross-signature). Verified with the existing `verify_ed25519`.
@@ -382,9 +393,11 @@ export interface InitOutput {
     readonly enginemasterkey_fromSealed: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly enginemasterkey_fromSecret: (a: number, b: number) => [number, number, number];
     readonly enginemasterkey_new: () => number;
+    readonly enginemasterkey_openSessionKey: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly enginemasterkey_publicKey: (a: number) => [number, number];
     readonly enginemasterkey_seal: (a: number, b: number, c: number) => [number, number, number, number];
     readonly enginemasterkey_sealForBackup: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly enginemasterkey_sealSessionKey: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly enginemasterkey_sign: (a: number, b: number, c: number) => [number, number];
     readonly enginesession_decrypt: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly enginesession_decryptMasterSecret: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];

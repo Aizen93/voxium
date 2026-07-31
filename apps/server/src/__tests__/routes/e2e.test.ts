@@ -75,6 +75,13 @@ vi.mock('../../utils/prisma', () => ({
       upsert: vi.fn(),
       deleteMany: vi.fn(),
     },
+    e2EMessageKeyBackup: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
+      createMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
     conversation: { findUnique: vi.fn(), findMany: vi.fn() },
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
@@ -2135,5 +2142,983 @@ describe('E2E routes — key backup is outside the device lifecycle', () => {
     // …but the blob is the user's to replace, never the server's to destroy
     expect(prisma.e2EKeyBackup.deleteMany).not.toHaveBeenCalled();
     expect(store).toEqual([expect.objectContaining({ blob: BACKUP_BLOB })]);
+  });
+});
+
+// ─── Message-key backup (plan §4.4) ─────────────────────────────────────────
+// One opaque row per backed-up Megolm session, sealed under an account-level
+// key the server never sees. Every route is scoped to the authenticated caller
+// and takes no userId anywhere, so — as with §15 — the mock is backed by a real
+// two-account table whose `where` matching treats an absent scope key as "no
+// filter", exactly as postgres treats a missing WHERE clause. A handler that
+// dropped or widened its scope therefore reads, overwrites or deletes user-9's
+// rows here: a leak visible in the response body and the store, not merely a
+// differently-shaped assertion.
+
+interface MessageKeyRow {
+  id: string;
+  userId: string;
+  conversationId: string;
+  sessionId: string;
+  blob: string;
+  /** Megolm ratchet index the stored key starts at — LOWER covers more. */
+  firstKnownIndex: number;
+  createdAt: Date;
+}
+
+const MK_CREATED_AT = new Date('2026-08-01T08:00:00Z');
+
+/**
+ * Ids are `mkrow-<seq>-<userId>`: long enough to satisfy the route's cursor
+ * guard, and lexically ordered by the global sequence so the two accounts'
+ * rows INTERLEAVE. Scope failures then surface inside a page rather than being
+ * hidden at the far end of the table.
+ */
+function mkRow(seq: number, userId: string, over: Partial<MessageKeyRow> = {}): MessageKeyRow {
+  const n = String(seq).padStart(4, '0');
+  return {
+    id: `mkrow-${n}-${userId}`,
+    userId,
+    conversationId: 'conv-1',
+    sessionId: `sess${n}`,
+    // carries the owner, so any cross-account row is greppable in the response
+    blob: `mk.${userId}.${n}`,
+    firstKnownIndex: 0,
+    createdAt: MK_CREATED_AT,
+    ...over,
+  };
+}
+
+let mkCreatedSeq = 0;
+
+/**
+ * An in-memory stand-in for `e2e_message_key_backups`.
+ *
+ * The write path is no longer a single upsert: it is count → findMany →
+ * per-entry updateMany (gated on the ratchet index) → one createMany with
+ * `skipDuplicates`. Only a real table can show what that combination actually
+ * does, because the interesting outcomes — a key REFUSED because it would move
+ * the session forwards, a re-upload that costs nothing against the cap — are
+ * both "a statement ran and changed nothing", indistinguishable from each other
+ * and from success if you only assert call arguments.
+ *
+ * `where` matching treats an absent key as "no filter", exactly as postgres
+ * treats a missing WHERE clause, so a handler that dropped or widened its scope
+ * reaches user-9's rows here instead of merely asserting differently. The
+ * unique constraint is enforced too: a `createMany` that lost `skipDuplicates`
+ * throws, as the database would.
+ */
+function seedMessageKeys(rows: MessageKeyRow[]) {
+  const match = (r: MessageKeyRow, where: Record<string, any> = {}) => {
+    if (where.userId !== undefined && r.userId !== where.userId) return false;
+    if (where.sessionId !== undefined) {
+      const s = where.sessionId;
+      if (typeof s === 'string') {
+        if (r.sessionId !== s) return false;
+      } else if (s && Array.isArray(s.in)) {
+        if (!s.in.includes(r.sessionId)) return false;
+      } else {
+        throw new Error(`unmodelled sessionId filter: ${JSON.stringify(s)}`);
+      }
+    }
+    if (where.firstKnownIndex !== undefined) {
+      const f = where.firstKnownIndex;
+      // `gt` is the whole ratchet guard: it matches only rows whose stored key
+      // starts LATER than the incoming one, i.e. the ones worth replacing.
+      if (typeof f === 'number') {
+        if (r.firstKnownIndex !== f) return false;
+      } else if (f && typeof f.gt === 'number') {
+        if (!(r.firstKnownIndex > f.gt)) return false;
+      } else if (f && typeof f.lt === 'number') {
+        if (!(r.firstKnownIndex < f.lt)) return false;
+      } else {
+        throw new Error(`unmodelled firstKnownIndex filter: ${JSON.stringify(f)}`);
+      }
+    }
+    return true;
+  };
+
+  vi.mocked(prisma.e2EMessageKeyBackup.count).mockImplementation((async (args: any) =>
+    rows.filter((r) => match(r, args?.where ?? {})).length) as any);
+
+  vi.mocked(prisma.e2EMessageKeyBackup.findMany).mockImplementation((async (args: any) => {
+    let list = rows
+      .filter((r) => match(r, args?.where ?? {}))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    // Prisma's cursor is INCLUSIVE and positions within the filtered, ordered
+    // set; `skip` then steps past it. Modelling both separately means a handler
+    // that forgot `skip: 1` re-serves the cursor row on the next page — which
+    // the pagination walk below sees as a duplicate.
+    const cursorId = args?.cursor?.id;
+    if (cursorId !== undefined) list = list.filter((r) => r.id >= cursorId);
+    if (typeof args?.skip === 'number') list = list.slice(args.skip);
+    if (typeof args?.take === 'number') list = list.slice(0, args.take);
+    return list.map((r) => ({ ...r }));
+  }) as any);
+
+  vi.mocked(prisma.e2EMessageKeyBackup.updateMany).mockImplementation((async (args: any) => {
+    const matched = rows.filter((r) => match(r, args?.where ?? {}));
+    for (const r of matched) Object.assign(r, args.data);
+    return { count: matched.length };
+  }) as any);
+
+  vi.mocked(prisma.e2EMessageKeyBackup.createMany).mockImplementation((async (args: any) => {
+    const data: Array<Partial<MessageKeyRow>> = args?.data ?? [];
+    let count = 0;
+    for (const d of data) {
+      const clash = rows.some((r) => r.userId === d.userId && r.sessionId === d.sessionId);
+      if (clash) {
+        // The real unique index is [userId, sessionId]. Without skipDuplicates
+        // postgres raises P2002 and the whole transaction dies — a re-upload of
+        // an already-backed-up session is the STEADY STATE here, so losing the
+        // flag would break every catch-up pass, not an edge case.
+        if (!args?.skipDuplicates) throw new Error('Unique constraint failed on [userId, sessionId]');
+        continue;
+      }
+      rows.push({
+        id: `mkrow-created-${String(++mkCreatedSeq).padStart(4, '0')}`,
+        firstKnownIndex: 0,
+        createdAt: MK_CREATED_AT,
+        ...(d as MessageKeyRow),
+      });
+      count++;
+    }
+    return { count };
+  }) as any);
+
+  vi.mocked(prisma.e2EMessageKeyBackup.deleteMany).mockImplementation((async (args: any) => {
+    const matched = rows.filter((r) => match(r, args?.where ?? {}));
+    for (const m of matched) rows.splice(rows.indexOf(m), 1);
+    return { count: matched.length };
+  }) as any);
+
+  return rows;
+}
+
+/** Every statement that could change the table — nothing may have run. */
+function expectNothingWritten() {
+  expect(prisma.e2EMessageKeyBackup.createMany).not.toHaveBeenCalled();
+  expect(prisma.e2EMessageKeyBackup.updateMany).not.toHaveBeenCalled();
+  expect(prisma.e2EMessageKeyBackup.deleteMany).not.toHaveBeenCalled();
+}
+
+/**
+ * One upload entry: a conversation id, a session id, opaque ciphertext and the
+ * ratchet index the key starts at. Index 0 = "from the beginning of the
+ * session", the most complete key there is, so it is the default here.
+ */
+function messageKey(over: Record<string, unknown> = {}) {
+  return {
+    conversationId: 'conv-1',
+    sessionId: 'c2Vzc2lvbklk',
+    blob: 'bWstY2lwaGVydGV4dA',
+    firstKnownIndex: 0,
+    ...over,
+  };
+}
+
+describe('E2E routes — POST /message-keys', () => {
+  it('stores a batch of sealed session keys for the caller', async () => {
+    const store = seedMessageKeys([]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({
+        keys: [
+          messageKey(),
+          messageKey({ conversationId: 'conv-2', sessionId: 'b3RoZXJTZXNzaW9u', blob: 'c2Vjb25kLWJsb2I' }),
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toEqual({ stored: 2 });
+    // New sessions arrive through the single createMany, tagged with the userId
+    // from the SESSION — never one from the body — and with the ratchet index.
+    expect(prisma.e2EMessageKeyBackup.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          userId: 'user-1',
+          conversationId: 'conv-1',
+          sessionId: 'c2Vzc2lvbklk',
+          blob: 'bWstY2lwaGVydGV4dA',
+          firstKnownIndex: 0,
+        },
+        expect.objectContaining({ userId: 'user-1', sessionId: 'b3RoZXJTZXNzaW9u', conversationId: 'conv-2' }),
+      ],
+      // a re-upload of an already-stored session is the steady state, so the
+      // insert must tolerate the collision rather than abort the transaction
+      skipDuplicates: true,
+    });
+    expect(store).toEqual([
+      expect.objectContaining({ userId: 'user-1', sessionId: 'c2Vzc2lvbklk', blob: 'bWstY2lwaGVydGV4dA' }),
+      expect.objectContaining({ userId: 'user-1', sessionId: 'b3RoZXJTZXNzaW9u', conversationId: 'conv-2' }),
+    ]);
+  });
+
+  it('is idempotent: re-uploading the same session neither errors nor duplicates', async () => {
+    // Every catch-up pass re-seals what the device already holds, so a repeat
+    // upload is the NORMAL case. A 409 or a duplicate row would make the steady
+    // state an error. At an equal ratchet index the stored key already covers
+    // everything the incoming one does, so the row is left exactly as it was.
+    const store = seedMessageKeys([]);
+    const app = createApp();
+
+    const first = await request(app).post('/api/v1/e2e/message-keys').send({ keys: [messageKey()] });
+    const again = await request(app)
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ blob: 'cmVzZWFsZWQtYmxvYg' })] });
+
+    expect(first.status).toBe(201);
+    expect(again.status).toBe(201);
+    expect(again.body.data).toEqual({ stored: 1 });
+    expect(store).toHaveLength(1);
+    expect(store[0].blob).toBe('bWstY2lwaGVydGV4dA');
+    expect(store[0].firstKnownIndex).toBe(0);
+  });
+
+  it('accepts a batch exactly at the cap and rejects one entry more', async () => {
+    seedMessageKeys([]);
+    const app = createApp();
+    const batch = (n: number) =>
+      Array.from({ length: n }, (_, i) => messageKey({ sessionId: `c2Vzc2lvbg${i}` }));
+
+    const ok = await request(app)
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: batch(E2E_LIMITS.MESSAGE_KEY_BATCH_MAX) });
+    expect(ok.status).toBe(201);
+    expect(ok.body.data).toEqual({ stored: E2E_LIMITS.MESSAGE_KEY_BATCH_MAX });
+
+    vi.clearAllMocks();
+    seedMessageKeys([]);
+    const tooMany = await request(app)
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: batch(E2E_LIMITS.MESSAGE_KEY_BATCH_MAX + 1) });
+    expect(tooMany.status).toBe(400);
+    expect(tooMany.body.error).toMatch(/keys/i);
+    expectNothingWritten();
+  });
+
+  it('accepts a blob exactly at the cap and rejects one character more', async () => {
+    seedMessageKeys([]);
+    const app = createApp();
+
+    const ok = await request(app)
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ blob: 'A'.repeat(E2E_LIMITS.KEYSHARE_BODY_MAX) })] });
+    expect(ok.status).toBe(201);
+
+    vi.clearAllMocks();
+    seedMessageKeys([]);
+    const tooBig = await request(app)
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ blob: 'A'.repeat(E2E_LIMITS.KEYSHARE_BODY_MAX + 1) })] });
+    expect(tooBig.status).toBe(400);
+    expect(tooBig.body.error).toMatch(/blob/i);
+    expectNothingWritten();
+  });
+
+  it('rejects a missing, empty or non-string blob', async () => {
+    seedMessageKeys([]);
+    const app = createApp();
+
+    for (const blob of [undefined, '', 123, null, true, {}, []]) {
+      const res = await request(app).post('/api/v1/e2e/message-keys').send({ keys: [messageKey({ blob })] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/blob/i);
+    }
+    expectNothingWritten();
+  });
+
+  it('rejects a missing, negative, fractional or non-numeric firstKnownIndex', async () => {
+    // The index is what the ratchet guard compares, so a malformed one is not a
+    // cosmetic failure: absent or coerced, it would read as 0 ("covers the whole
+    // session") and let any upload displace a key that really does.
+    seedMessageKeys([]);
+    const app = createApp();
+
+    for (const firstKnownIndex of [undefined, -1, -0.5, 1.5, '0', '', null, true, {}, [], Number.NaN, Infinity]) {
+      const res = await request(app)
+        .post('/api/v1/e2e/message-keys')
+        .send({ keys: [messageKey({ firstKnownIndex })] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/firstKnownIndex/i);
+    }
+    expectNothingWritten();
+  });
+
+  it('accepts index 0 and any positive integer index', async () => {
+    const store = seedMessageKeys([]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({
+        keys: [
+          messageKey({ sessionId: 'YXQtemVybw', firstKnownIndex: 0 }),
+          messageKey({ sessionId: 'bGF0ZS1qb2lu', firstKnownIndex: 4_242 }),
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(store.map((r) => r.firstKnownIndex)).toEqual([0, 4_242]);
+  });
+
+  it('rejects a malformed sessionId', async () => {
+    seedMessageKeys([]);
+    const app = createApp();
+
+    for (const sessionId of [
+      undefined,
+      '',
+      'not base64!',      // '!' and ' ' are outside the alphabet
+      'has-dash',         // '-' is url-safe base64, not the standard alphabet
+      'padded==',
+      'A'.repeat(65),     // past the 64-char ceiling
+      123,
+      null,
+      { sid: 'x' },
+      ['c2Vzc2lvbklk'],
+    ]) {
+      const res = await request(app).post('/api/v1/e2e/message-keys').send({ keys: [messageKey({ sessionId })] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/sessionId/i);
+    }
+    expectNothingWritten();
+  });
+
+  it('rejects a missing, empty or oversized conversationId', async () => {
+    seedMessageKeys([]);
+    const app = createApp();
+
+    for (const conversationId of [undefined, '', 'c'.repeat(65), 42, null, {}]) {
+      const res = await request(app)
+        .post('/api/v1/e2e/message-keys')
+        .send({ keys: [messageKey({ conversationId })] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/conversationId/i);
+    }
+    expectNothingWritten();
+  });
+
+  it('rejects a missing, empty or non-array keys field', async () => {
+    seedMessageKeys([]);
+    const app = createApp();
+
+    for (const keys of [undefined, [], null, 'nope', 7, { 0: messageKey() }]) {
+      const res = await request(app).post('/api/v1/e2e/message-keys').send({ keys });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/keys/i);
+    }
+    // an empty body is the same failure, not a crash
+    expect((await request(app).post('/api/v1/e2e/message-keys').send()).status).toBe(400);
+    expectNothingWritten();
+  });
+
+  it('rejects entries that are not objects', async () => {
+    seedMessageKeys([]);
+    const app = createApp();
+
+    for (const entry of [null, 'blob', 42, true]) {
+      const res = await request(app).post('/api/v1/e2e/message-keys').send({ keys: [entry] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/keys\[0\]/);
+    }
+    expectNothingWritten();
+  });
+
+  it('rejects duplicate sessionIds inside one batch', async () => {
+    // Two ciphertexts for one row: the server would silently pick a winner and
+    // report `stored: 2` for the one row it wrote.
+    seedMessageKeys([]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey(), messageKey({ conversationId: 'conv-2', blob: 'ZGlmZmVyZW50' })] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/duplicate/i);
+    expectNothingWritten();
+  });
+
+  it('stores the blob byte-for-byte — ciphertext is never sanitized', async () => {
+    // Sanitizing would corrupt it. The route must treat the field as bytes.
+    const store = seedMessageKeys([]);
+    const raw = '<script>&"\'</script>+/=';
+
+    const res = await request(createApp()).post('/api/v1/e2e/message-keys').send({ keys: [messageKey({ blob: raw })] });
+
+    expect(res.status).toBe(201);
+    expect(store[0].blob).toBe(raw);
+  });
+
+  it("cannot overwrite another account's row for the same sessionId", async () => {
+    // Sessions are global ids: a peer knows the session id from every envelope
+    // it received. If the write were keyed by the sessionId alone, uploading it
+    // would replace the victim's sealed key with the attacker's ciphertext —
+    // permanently destroying that slice of their history. The victim's row is
+    // given a LATER index on purpose, so it is exactly the row the ratchet
+    // guard would agree to replace if the scope were the only thing stopping it.
+    const store = seedMessageKeys([
+      mkRow(1, 'user-9', { sessionId: 'c2Vzc2lvbklk', firstKnownIndex: 500 }),
+    ]);
+
+    const res = await request(createApp()).post('/api/v1/e2e/message-keys').send({ keys: [messageKey()] });
+
+    expect(res.status).toBe(201);
+    expect(store).toHaveLength(2);
+    expect(store.find((r) => r.userId === 'user-9')!.blob).toBe('mk.user-9.0001');
+    expect(store.find((r) => r.userId === 'user-9')!.firstKnownIndex).toBe(500);
+    expect(store.find((r) => r.userId === 'user-1')!.blob).toBe('bWstY2lwaGVydGV4dA');
+  });
+
+  it('ignores a userId smuggled into the payload or an entry', async () => {
+    const store = seedMessageKeys([
+      mkRow(1, 'user-9', { sessionId: 'c2Vzc2lvbklk', firstKnownIndex: 500 }),
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ userId: 'user-9', keys: [messageKey({ userId: 'user-9', id: 'mkrow-0001-user-9' })] });
+
+    expect(res.status).toBe(201);
+    // both statements pin the session's userId, and the row that lands carries
+    // it too — a body field can neither redirect the write nor be stored
+    expect(prisma.e2EMessageKeyBackup.updateMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1', sessionId: 'c2Vzc2lvbklk', firstKnownIndex: { gt: 0 } },
+      data: { conversationId: 'conv-1', blob: 'bWstY2lwaGVydGV4dA', firstKnownIndex: 0 },
+    });
+    expect(prisma.e2EMessageKeyBackup.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: [expect.objectContaining({ userId: 'user-1' })] })
+    );
+    expect(store.find((r) => r.userId === 'user-9')!.blob).toBe('mk.user-9.0001');
+    expect(store).toHaveLength(2);
+  });
+});
+
+// ─── The ratchet guard: a key may only ever move EARLIER ────────────────────
+// A device that joined a Megolm session late exports its key from a later
+// ratchet index — it can decrypt from there on, but nothing before. Letting it
+// replace a key that starts earlier permanently destroys the messages in
+// between, and nothing on the server can tell afterwards that it happened.
+//
+// These are behaviour-level on purpose: "refused" and "applied" are both a
+// statement that ran, so only the surviving row distinguishes them.
+
+/** The stored row for a session, whatever happened to it. */
+function storedSession(store: MessageKeyRow[], sessionId: string) {
+  return store.find((r) => r.userId === 'user-1' && r.sessionId === sessionId);
+}
+
+describe('E2E routes — POST /message-keys ratchet ordering', () => {
+  const SESSION = 'c2Vzc2lvbklk';
+
+  it('refuses a key that starts LATER in the session', async () => {
+    const store = seedMessageKeys([
+      mkRow(1, 'user-1', { sessionId: SESSION, blob: 'covers-from-2', firstKnownIndex: 2 }),
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ sessionId: SESSION, blob: 'covers-from-7', firstKnownIndex: 7 })] });
+
+    expect(res.status).toBe(201);
+    expect(store).toHaveLength(1);
+    // the earlier key survives — this is the data loss the guard exists for
+    expect(storedSession(store, SESSION)).toMatchObject({ blob: 'covers-from-2', firstKnownIndex: 2 });
+  });
+
+  it('accepts a key that starts EARLIER and replaces the stored one', async () => {
+    const store = seedMessageKeys([
+      mkRow(1, 'user-1', { sessionId: SESSION, blob: 'covers-from-7', firstKnownIndex: 7 }),
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({
+        keys: [messageKey({ sessionId: SESSION, conversationId: 'conv-2', blob: 'covers-from-2', firstKnownIndex: 2 })],
+      });
+
+    expect(res.status).toBe(201);
+    expect(store).toHaveLength(1);
+    // the whole row moves: a better key brings its own conversation binding
+    expect(storedSession(store, SESSION)).toMatchObject({
+      blob: 'covers-from-2',
+      firstKnownIndex: 2,
+      conversationId: 'conv-2',
+    });
+  });
+
+  it('treats an equal index as a no-op rather than a rewrite', async () => {
+    // Same index = the stored key already covers everything the incoming one
+    // does. Rewriting would churn the row for nothing and, if the two devices
+    // disagreed about the ciphertext, make the winner depend on arrival order.
+    const store = seedMessageKeys([
+      mkRow(1, 'user-1', { sessionId: SESSION, blob: 'first-writer', firstKnownIndex: 3 }),
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ sessionId: SESSION, blob: 'second-writer', firstKnownIndex: 3 })] });
+
+    expect(res.status).toBe(201);
+    expect(store).toHaveLength(1);
+    expect(storedSession(store, SESSION)).toMatchObject({ blob: 'first-writer', firstKnownIndex: 3 });
+  });
+
+  it('decides per entry, not per batch', async () => {
+    // One request routinely carries a mix: sessions this device has more of,
+    // sessions it has less of, and ones the account has never seen. A batch
+    // that resolved as a unit would either lose history or reject good keys.
+    const store = seedMessageKeys([
+      mkRow(1, 'user-1', { sessionId: 'YWFh', blob: 'aaa-from-9', firstKnownIndex: 9 }),
+      mkRow(2, 'user-1', { sessionId: 'YmJi', blob: 'bbb-from-1', firstKnownIndex: 1 }),
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({
+        keys: [
+          messageKey({ sessionId: 'YWFh', blob: 'aaa-from-4', firstKnownIndex: 4 }), // earlier → wins
+          messageKey({ sessionId: 'YmJi', blob: 'bbb-from-6', firstKnownIndex: 6 }), // later   → refused
+          messageKey({ sessionId: 'Y2Nj', blob: 'ccc-from-0', firstKnownIndex: 0 }), // new     → inserted
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(store).toHaveLength(3);
+    expect(storedSession(store, 'YWFh')).toMatchObject({ blob: 'aaa-from-4', firstKnownIndex: 4 });
+    expect(storedSession(store, 'YmJi')).toMatchObject({ blob: 'bbb-from-1', firstKnownIndex: 1 });
+    expect(storedSession(store, 'Y2Nj')).toMatchObject({ blob: 'ccc-from-0', firstKnownIndex: 0 });
+  });
+
+  it('never inserts a second row for a session it refused to replace', async () => {
+    // The guard and the insert are separate statements. If the insert did not
+    // skip duplicates, a refused key would either abort the batch on the unique
+    // index or — worse, without one — sit alongside the key it lost to.
+    const store = seedMessageKeys([
+      mkRow(1, 'user-1', { sessionId: SESSION, blob: 'covers-from-0', firstKnownIndex: 0 }),
+    ]);
+
+    await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ sessionId: SESSION, blob: 'covers-from-99', firstKnownIndex: 99 })] });
+
+    expect(store.filter((r) => r.sessionId === SESSION)).toHaveLength(1);
+  });
+
+  it('reports `stored` as entries accepted, not rows changed', async () => {
+    // Documenting the contract rather than endorsing it: a client cannot tell
+    // from the response whether its key won the comparison. That is tolerable
+    // only because the outcome converges — the better key is already stored.
+    const store = seedMessageKeys([
+      mkRow(1, 'user-1', { sessionId: SESSION, blob: 'covers-from-0', firstKnownIndex: 0 }),
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ sessionId: SESSION, firstKnownIndex: 50 })] });
+
+    expect(res.body.data).toEqual({ stored: 1 });
+    expect(storedSession(store, SESSION)!.blob).toBe('covers-from-0');
+  });
+});
+
+// ─── The per-account cap: refuse, never evict ───────────────────────────────
+// Nothing sweeps this table — that is the point of the feature — so the cap is
+// the only bound on an account's storage. Reaching it must REFUSE new uploads:
+// evicting the oldest rows would silently destroy the oldest history, which is
+// the exact loss the feature exists to prevent, and the client still holds the
+// keys it was trying to upload.
+
+/** A stored row that is cheap to make thousands of, with its own id space. */
+function capRow(i: number): MessageKeyRow {
+  const n = String(i).padStart(6, '0');
+  return {
+    id: `mkcap-${n}-user-1`,
+    userId: 'user-1',
+    conversationId: 'conv-1',
+    sessionId: `cap${n}`,
+    blob: `mk.user-1.${n}`,
+    firstKnownIndex: 5,
+    createdAt: MK_CREATED_AT,
+  };
+}
+
+const capRows = (n: number) => Array.from({ length: n }, (_, i) => capRow(i + 1));
+/** An upload entry for a session `capRows` already holds, at an earlier index. */
+const knownKey = (i: number) =>
+  messageKey({ sessionId: `cap${String(i).padStart(6, '0')}`, blob: `re-uploaded-${i}`, firstKnownIndex: 1 });
+
+describe('E2E routes — POST /message-keys storage cap', () => {
+  it('rejects a batch that would cross the cap, and writes nothing', async () => {
+    const store = seedMessageKeys(capRows(E2E_LIMITS.MESSAGE_KEY_STORE_CAP));
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ sessionId: 'b25lVG9vTWFueQ' })] });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/full/i);
+    // the check runs before any write, so the refusal is all-or-nothing
+    expect(store).toHaveLength(E2E_LIMITS.MESSAGE_KEY_STORE_CAP);
+    expect(prisma.e2EMessageKeyBackup.createMany).not.toHaveBeenCalled();
+    expect(prisma.e2EMessageKeyBackup.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses rather than evicting — the oldest rows survive intact', async () => {
+    // The distinction that matters: a full backup that drops its oldest rows to
+    // make room loses the oldest history, which is what the feature is FOR.
+    const store = seedMessageKeys(capRows(E2E_LIMITS.MESSAGE_KEY_STORE_CAP));
+    const oldest = { ...store[0] };
+
+    await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ sessionId: 'b25lVG9vTWFueQ' })] });
+
+    expect(store[0]).toEqual(oldest);
+    expect(prisma.e2EMessageKeyBackup.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('accepts a batch that lands exactly ON the cap', async () => {
+    const store = seedMessageKeys(capRows(E2E_LIMITS.MESSAGE_KEY_STORE_CAP - 2));
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ sessionId: 'bGFzdE9uZQ' }), messageKey({ sessionId: 'bGFzdFR3bw' })] });
+
+    expect(res.status).toBe(201);
+    expect(store).toHaveLength(E2E_LIMITS.MESSAGE_KEY_STORE_CAP);
+  });
+
+  it('rejects the batch that would land one past the cap', async () => {
+    const store = seedMessageKeys(capRows(E2E_LIMITS.MESSAGE_KEY_STORE_CAP - 2));
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({
+        keys: [
+          messageKey({ sessionId: 'b25l' }),
+          messageKey({ sessionId: 'dHdv' }),
+          messageKey({ sessionId: 'dGhyZWU' }),
+        ],
+      });
+
+    expect(res.status).toBe(409);
+    expect(store).toHaveLength(E2E_LIMITS.MESSAGE_KEY_STORE_CAP - 2);
+  });
+
+  it('does not charge re-uploads of sessions it already holds', async () => {
+    // The `held - alreadyKnown` term. Without it a FULL backup could never
+    // accept another upload at all — including the routine re-upload of keys
+    // already stored, which is the steady state — so an account that reached
+    // the cap could also never improve a key it already has.
+    const store = seedMessageKeys(capRows(E2E_LIMITS.MESSAGE_KEY_STORE_CAP));
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [knownKey(1), knownKey(2)] });
+
+    expect(res.status).toBe(201);
+    expect(store).toHaveLength(E2E_LIMITS.MESSAGE_KEY_STORE_CAP);
+    // and the improvement actually landed: index 1 beats the stored 5
+    expect(storedSession(store, 'cap000001')).toMatchObject({ blob: 're-uploaded-1', firstKnownIndex: 1 });
+    expect(storedSession(store, 'cap000002')).toMatchObject({ blob: 're-uploaded-2', firstKnownIndex: 1 });
+  });
+
+  it('counts only the NEW sessions in a mixed batch at the boundary', async () => {
+    // One known + one new against a full table: the known one is free, the new
+    // one is not, so the batch crosses the cap by exactly one and is refused.
+    const store = seedMessageKeys(capRows(E2E_LIMITS.MESSAGE_KEY_STORE_CAP));
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [knownKey(1), messageKey({ sessionId: 'YnJhbmROZXc' })] });
+
+    expect(res.status).toBe(409);
+    expect(store).toHaveLength(E2E_LIMITS.MESSAGE_KEY_STORE_CAP);
+    // the free re-upload did not sneak through either — nothing was written
+    expect(storedSession(store, 'cap000001')!.blob).toBe('mk.user-1.000001');
+  });
+
+  it("does not count another account's rows against the caller's cap", async () => {
+    // `count` is scoped to the caller. Were it not, a busy neighbour could
+    // exhaust everyone's backup — and the same missing scope would leak on read.
+    const store = seedMessageKeys([
+      ...capRows(3),
+      ...Array.from({ length: E2E_LIMITS.MESSAGE_KEY_STORE_CAP }, (_, i) => ({
+        ...capRow(i + 1),
+        id: `mkcap-${String(i + 1).padStart(6, '0')}-user-9`,
+        userId: 'user-9',
+      })),
+    ]);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/message-keys')
+      .send({ keys: [messageKey({ sessionId: 'bWluZQ' })] });
+
+    expect(res.status).toBe(201);
+    expect(store.filter((r) => r.userId === 'user-1')).toHaveLength(4);
+  });
+});
+
+// ─── GET /message-keys ──────────────────────────────────────────────────────
+
+/**
+ * `mineCount` rows for the caller with one of user-9's interleaved every
+ * `othersEvery` rows, ids ascending in creation order. Any page that leaked
+ * scope would carry user-9 blobs in the middle of the caller's own.
+ */
+function interleavedMessageKeys(mineCount: number, othersEvery = 5): MessageKeyRow[] {
+  const rows: MessageKeyRow[] = [];
+  let seq = 0;
+  for (let mine = 1; mine <= mineCount; mine++) {
+    rows.push(mkRow(++seq, 'user-1'));
+    if (mine % othersEvery === 0) rows.push(mkRow(++seq, 'user-9'));
+  }
+  return rows;
+}
+
+/** Walk every page the way a restoring device would, and record the requests. */
+async function drainMessageKeys(app: ReturnType<typeof createApp>) {
+  const keys: Array<{ id: string; sessionId: string; blob: string }> = [];
+  let cursor: string | null = null;
+  let requests = 0;
+
+  for (;;) {
+    const url: string = cursor ? `/api/v1/e2e/message-keys?cursor=${cursor}` : '/api/v1/e2e/message-keys';
+    const res = await request(app).get(url);
+    requests++;
+    expect(res.status).toBe(200);
+    keys.push(...res.body.data.keys);
+    cursor = res.body.data.nextCursor;
+    if (cursor === null) break;
+    // A handler that always returned a cursor would spin forever; fail loudly.
+    expect(requests).toBeLessThan(20);
+  }
+  return { keys, requests };
+}
+
+describe('E2E routes — GET /message-keys', () => {
+  it("returns the caller's rows and terminates with a null cursor", async () => {
+    seedMessageKeys([mkRow(1, 'user-1'), mkRow(2, 'user-1', { conversationId: 'conv-2' })]);
+
+    const res = await request(createApp()).get('/api/v1/e2e/message-keys');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.nextCursor).toBeNull();
+    expect(res.body.data.keys).toEqual([
+      {
+        id: 'mkrow-0001-user-1',
+        conversationId: 'conv-1',
+        sessionId: 'sess0001',
+        blob: 'mk.user-1.0001',
+        createdAt: MK_CREATED_AT.toISOString(),
+      },
+      expect.objectContaining({ id: 'mkrow-0002-user-1', conversationId: 'conv-2' }),
+    ]);
+  });
+
+  it('reports an empty backup as a state, not a 404', async () => {
+    seedMessageKeys([]);
+
+    const res = await request(createApp()).get('/api/v1/e2e/message-keys');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ keys: [], nextCursor: null });
+  });
+
+  it('caps a page at the page limit and hands back a cursor', async () => {
+    seedMessageKeys(interleavedMessageKeys(E2E_LIMITS.MESSAGE_KEY_PAGE_MAX + 1));
+
+    const res = await request(createApp()).get('/api/v1/e2e/message-keys');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.keys).toHaveLength(E2E_LIMITS.MESSAGE_KEY_PAGE_MAX);
+    // the cursor is the last row of the page the client actually received
+    expect(res.body.data.nextCursor).toBe(res.body.data.keys[E2E_LIMITS.MESSAGE_KEY_PAGE_MAX - 1].id);
+    // the lookahead row is never leaked into the page itself
+    expect(res.body.data.keys.map((k: { id: string }) => k.id)).not.toContain(
+      (await request(createApp()).get(`/api/v1/e2e/message-keys?cursor=${res.body.data.nextCursor}`)).body.data.keys[0].id
+    );
+  });
+
+  it('pages through thousands of rows without repeating or dropping one', async () => {
+    const mine = E2E_LIMITS.MESSAGE_KEY_PAGE_MAX * 2 + 5;
+    seedMessageKeys(interleavedMessageKeys(mine));
+
+    const { keys, requests } = await drainMessageKeys(createApp());
+
+    expect(keys).toHaveLength(mine);
+    expect(new Set(keys.map((k) => k.id)).size).toBe(mine);
+    // 200 + 200 + 5 — the short final page ends the walk, no empty extra request
+    expect(requests).toBe(3);
+    // and the rows arrive in a stable total order, which is what makes the
+    // cursor safe to resume from
+    expect(keys.map((k) => k.id)).toEqual([...keys.map((k) => k.id)].sort());
+  });
+
+  it("never returns another account's rows, on any page", async () => {
+    const mine = E2E_LIMITS.MESSAGE_KEY_PAGE_MAX + 3;
+    seedMessageKeys(interleavedMessageKeys(mine));
+
+    const { keys } = await drainMessageKeys(createApp());
+
+    expect(keys).toHaveLength(mine);
+    expect(keys.every((k) => k.blob.includes('user-1'))).toBe(true);
+    expect(keys.some((k) => k.blob.includes('user-9'))).toBe(false);
+  });
+
+  it('returns nothing when only another account has rows', async () => {
+    seedMessageKeys([mkRow(1, 'user-9'), mkRow(2, 'user-9')]);
+
+    const res = await request(createApp()).get('/api/v1/e2e/message-keys');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ keys: [], nextCursor: null });
+    expect(JSON.stringify(res.body)).not.toContain('user-9');
+  });
+
+  it("scopes by session even when the cursor names another account's row", async () => {
+    // The cursor positions a page; it must never be what scopes it. Handing in
+    // a foreign row id is the cheapest way to try to walk someone else's table,
+    // and it has to come back with nothing of theirs. (Positioning from a row
+    // you do not own also just costs you one of your own — harmless, and not
+    // something the server should paper over: the client only ever echoes back
+    // a cursor we handed it.)
+    seedMessageKeys([mkRow(1, 'user-9'), mkRow(2, 'user-1'), mkRow(3, 'user-1'), mkRow(4, 'user-9')]);
+
+    const res = await request(createApp()).get('/api/v1/e2e/message-keys?cursor=mkrow-0001-user-9');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.keys).toEqual([expect.objectContaining({ id: 'mkrow-0003-user-1' })]);
+    expect(JSON.stringify(res.body)).not.toContain('user-9');
+  });
+
+  it('rejects a malformed cursor', async () => {
+    seedMessageKeys([mkRow(1, 'user-1')]);
+    const app = createApp();
+
+    for (const cursor of ['short', 'a'.repeat(65), 'has spaces here!!', "row'; DROP TABLE--", '']) {
+      const res = await request(app).get(`/api/v1/e2e/message-keys?cursor=${encodeURIComponent(cursor)}`);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/cursor/i);
+    }
+    // a repeated param arrives as an array — a type, not just a shape, failure
+    const asArray = await request(app).get('/api/v1/e2e/message-keys?cursor=mkrow-0001-user-1&cursor=x');
+    expect(asArray.status).toBe(400);
+    expect(prisma.e2EMessageKeyBackup.findMany).not.toHaveBeenCalled();
+  });
+
+  it('bounds the query itself, not just the response', async () => {
+    // Two properties the response cannot show:
+    //
+    // `take` — slicing the rows after the fact would return the same page while
+    // the STATEMENT still read the account's entire table, which is the cost
+    // pagination exists to avoid. It must be the page cap plus the one
+    // lookahead row used to decide `nextCursor`.
+    //
+    // `orderBy` — the mock sorts by id itself, so a non-total order (createdAt
+    // alone, say, which repeats across rows written in one batch) looks fine
+    // here and silently skips or repeats rows against a real database.
+    seedMessageKeys([mkRow(1, 'user-1')]);
+
+    await request(createApp()).get('/api/v1/e2e/message-keys?cursor=mkrow-0001-user-1');
+
+    expect(prisma.e2EMessageKeyBackup.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: 'user-1' },
+        orderBy: { id: 'asc' },
+        take: E2E_LIMITS.MESSAGE_KEY_PAGE_MAX + 1,
+        cursor: { id: 'mkrow-0001-user-1' },
+        skip: 1,
+      })
+    );
+  });
+});
+
+describe('E2E routes — DELETE /message-keys', () => {
+  it("drops every one of the caller's rows", async () => {
+    // An identity reset re-derives the message-backup key, so every stored row
+    // becomes permanently unopenable — including by its owner.
+    const store = seedMessageKeys([mkRow(1, 'user-1'), mkRow(2, 'user-1'), mkRow(3, 'user-1')]);
+
+    const res = await request(createApp()).delete('/api/v1/e2e/message-keys');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ deleted: 3 });
+    expect(prisma.e2EMessageKeyBackup.deleteMany).toHaveBeenCalledWith({ where: { userId: 'user-1' } });
+    expect(store).toEqual([]);
+  });
+
+  it('is idempotent when there is nothing to delete', async () => {
+    seedMessageKeys([]);
+    const app = createApp();
+
+    const first = await request(app).delete('/api/v1/e2e/message-keys');
+    const second = await request(app).delete('/api/v1/e2e/message-keys');
+
+    expect(first.status).toBe(200);
+    expect(first.body.data).toEqual({ deleted: 0 });
+    expect(second.body.data).toEqual({ deleted: 0 });
+  });
+
+  it("deletes only the caller's rows when both accounts have some", async () => {
+    const store = seedMessageKeys([
+      mkRow(1, 'user-9'),
+      mkRow(2, 'user-1'),
+      mkRow(3, 'user-9'),
+      mkRow(4, 'user-1'),
+    ]);
+
+    const res = await request(createApp()).delete('/api/v1/e2e/message-keys');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ deleted: 2 });
+    expect(store).toEqual([
+      expect.objectContaining({ id: 'mkrow-0001-user-9' }),
+      expect.objectContaining({ id: 'mkrow-0003-user-9' }),
+    ]);
+  });
+
+  it("cannot delete another account's rows via the query string", async () => {
+    const store = seedMessageKeys([mkRow(1, 'user-9'), mkRow(2, 'user-9')]);
+
+    const res = await request(createApp()).delete('/api/v1/e2e/message-keys?userId=user-9');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ deleted: 0 });
+    expect(store).toHaveLength(2);
+  });
+});
+
+describe('E2E routes — message-key backup is outside the device lifecycle', () => {
+  it('survives revoking a device', async () => {
+    // History follows the ACCOUNT. Dropping the rows when a device goes away
+    // would delete exactly the history the next linked device needs.
+    const store = seedMessageKeys([mkRow(1, 'user-1')]);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'row-a' } as any);
+
+    const res = await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`);
+
+    expect(res.status).toBe(200);
+    expect(prisma.e2EMessageKeyBackup.deleteMany).not.toHaveBeenCalled();
+    expect(store).toHaveLength(1);
+  });
+
+  it('survives replacing the account master key — the client decides', async () => {
+    // Rotating the master key does strand these rows, but only the client can
+    // tell a genuine identity reset from a re-publish of a key it already
+    // holds. So DELETE /message-keys exists and the server never guesses.
+    const store = seedMessageKeys([mkRow(1, 'user-1')]);
+    const master = makeTestMasterKey('user-1');
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: 'an-older-master-key' } as any);
+    vi.mocked(prisma.e2EMasterKey.upsert).mockResolvedValue({ updatedAt: new Date('2026-08-01') } as any);
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({ masterKey: master.masterKey, masterSignature: master.masterSignature });
+
+    expect(res.status).toBe(200);
+    expect(prisma.e2EMessageKeyBackup.deleteMany).not.toHaveBeenCalled();
+    expect(store).toHaveLength(1);
   });
 });

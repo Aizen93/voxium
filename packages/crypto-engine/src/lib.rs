@@ -4,8 +4,11 @@
 //! layer. It converts between JS types (strings, byte arrays) and vodozemac
 //! types. It must never implement crypto logic of its own — no key derivation,
 //! no ratcheting, no MAC/signature construction. The only computation allowed
-//! here is encoding (base64/UTF-8) and the safety-number fingerprint digest,
-//! which operates exclusively on PUBLIC key material.
+//! here is encoding (base64/UTF-8) and three narrow, documented digests: the
+//! safety-number fingerprint (PUBLIC material only), the recovery-key checksum
+//! (§15.2), and the message-backup subkey (§16) — a single domain-separated
+//! SHA-512 over the already-uniform master seed. Anything beyond those belongs
+//! in vodozemac or in a vetted RustCrypto crate, not here.
 //!
 //! All binary values crossing the JS boundary are unpadded standard base64
 //! (vodozemac's canonical encoding). Pickle keys are 32 raw bytes and are
@@ -163,6 +166,27 @@ const MASTER_TRANSFER_PREFIX: &str = "voxium-master-v1|";
 /// AAD for the sealed master secret: binds the blob to the vault field it
 /// belongs to, so two sealed fields under the same key are not interchangeable.
 const MASTER_SECRET_CONTEXT: &str = "voxium-vault/master_secret";
+
+/// Domain separator for the message-key backup subkey (spec §16).
+///
+/// The subkey is `SHA-512("voxium-msgbackup-v1" || master_seed)[..32]`, which
+/// is the one place this crate derives a key rather than marshalling one — see
+/// the header note. It buys a large simplification: because every approved
+/// device already holds the master secret, and recovery already restores it,
+/// there is NO second secret to distribute, no payload version to bump, and no
+/// envelope to hand between devices. History becomes readable by exactly the
+/// devices that can already read new messages.
+///
+/// The consequence, which is documented rather than mitigated: replacing the
+/// master key (a §14.4 identity reset) makes existing backups unreadable. A
+/// reset already means every device was lost, and the recovery-key path
+/// preserves both.
+const MESSAGE_BACKUP_SUBKEY_DOMAIN: &[u8] = b"voxium-msgbackup-v1";
+
+/// AAD prefix for a backed-up session key. The caller supplies the conversation
+/// and session it belongs to; prefixing here means a JS caller cannot pass an
+/// AAD that collides with another sealed field's.
+const MESSAGE_BACKUP_CONTEXT: &str = "voxium-msgbackup/session_key|";
 
 // ─── Encrypted key backup (spec §15) ─────────────────────────────────────────
 // Losing every device currently means losing the account identity. A backup
@@ -683,6 +707,48 @@ impl EngineMasterKey {
         payload.zeroize();
         key.zeroize();
         sealed
+    }
+
+    /// The AES-256 subkey backups are sealed under. Never leaves the engine.
+    fn message_backup_key(&self) -> Result<[u8; 32], JsError> {
+        let mut seed_b64 = self.inner.to_base64();
+        let seed = base64_decode(&seed_b64);
+        seed_b64.zeroize();
+        let mut seed = seed.map_err(|_| JsError::new("invalid master key material"))?;
+
+        let mut hasher = Sha512::new();
+        hasher.update(MESSAGE_BACKUP_SUBKEY_DOMAIN);
+        hasher.update(&seed);
+        seed.zeroize();
+        let mut digest = hasher.finalize();
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&digest[..32]);
+        digest.zeroize();
+        Ok(key)
+    }
+
+    /// Seal one Megolm session key for backup (spec §16). `context` is the
+    /// conversation and session it belongs to, so a blob cannot be replayed
+    /// into a different conversation.
+    #[wasm_bindgen(js_name = sealSessionKey)]
+    pub fn seal_session_key(&self, session_key_b64: &str, context: &str) -> Result<String, JsError> {
+        let mut key = self.message_backup_key()?;
+        let aad = format!("{MESSAGE_BACKUP_CONTEXT}{context}");
+        let sealed = seal_secret_internal(session_key_b64, &aad, &key);
+        key.zeroize();
+        sealed
+    }
+
+    /// Open a backed-up session key. Fails closed on a wrong account key, a
+    /// tampered blob, or a blob restored into the wrong conversation/session.
+    #[wasm_bindgen(js_name = openSessionKey)]
+    pub fn open_session_key(&self, sealed_b64: &str, context: &str) -> Result<String, JsError> {
+        let mut key = self.message_backup_key()?;
+        let aad = format!("{MESSAGE_BACKUP_CONTEXT}{context}");
+        let opened = open_secret_internal(sealed_b64, &aad, &key);
+        key.zeroize();
+        opened.map_err(|_| JsError::new("this backup does not belong to this account"))
     }
 
     /// Base64 of the public master key (the account identity that is published

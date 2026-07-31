@@ -113,6 +113,14 @@ function createFakeServer() {
   let failDeviceListReads = false;
   const hiddenDevices = new Set<string>();
   const backups = new Map<string, { blob: string; updatedAt: string }>();
+  interface StoredMessageKey {
+    userId: string;
+    conversationId: string;
+    sessionId: string;
+    blob: string;
+    firstKnownIndex: number;
+  }
+  const messageKeys: StoredMessageKey[] = [];
   let failMasterKeyPublish = false;
   let crossSigningSupported = true;
   /** Keys the server LIES about for a device, to test what we sign (C1). */
@@ -159,6 +167,17 @@ function createFakeServer() {
           const claimed = mine.slice(0, E2E_LIMITS.MASTER_TRANSFER_STORE_CAP);
           return ok({
             transfers: claimed.map(({ userId: _u, recipientDeviceId: _r, ...rest }) => rest),
+          });
+        }
+
+        if (path === '/e2e/message-keys') {
+          const mine = messageKeys.filter((k) => k.userId === userId);
+          const from = Number(query.get('cursor') ?? '0');
+          const page = mine.slice(from, from + 2); // tiny page: exercise paging
+          const next = from + page.length < mine.length ? String(from + page.length) : null;
+          return ok({
+            keys: page.map(({ userId: _u, firstKnownIndex: _f, ...rest }) => rest),
+            nextCursor: next,
           });
         }
 
@@ -340,6 +359,26 @@ function createFakeServer() {
           return ok({ stored: body.shares.length, evicted: 0 });
         }
 
+        if (path === '/e2e/message-keys') {
+          if (!Array.isArray(body?.keys) || body.keys.length === 0) throw new Error('400: bad batch');
+          if (body.keys.length > E2E_LIMITS.MESSAGE_KEY_BATCH_MAX) throw new Error('400: batch too large');
+          for (const k of body.keys) {
+            if (typeof k.firstKnownIndex !== 'number' || !Number.isInteger(k.firstKnownIndex) || k.firstKnownIndex < 0) {
+              throw new Error('400: bad firstKnownIndex');
+            }
+            const existing = messageKeys.find((r) => r.userId === userId && r.sessionId === k.sessionId);
+            if (!existing) {
+              messageKeys.push({ userId, ...k });
+            } else if (k.firstKnownIndex < existing.firstKnownIndex) {
+              // only ever move a session EARLIER in the ratchet
+              existing.blob = k.blob;
+              existing.conversationId = k.conversationId;
+              existing.firstKnownIndex = k.firstKnownIndex;
+            }
+          }
+          return ok({ stored: body.keys.length });
+        }
+
         if (path === '/e2e/master-transfers') {
           const user = userOf(userId);
           if (!user.devices.has(body.deviceId)) throw new Error('403: unknown sender device');
@@ -443,6 +482,12 @@ function createFakeServer() {
         if (url === '/e2e/backup') {
           return ok({ deleted: backups.delete(userId) });
         }
+        if (url === '/e2e/message-keys') {
+          for (let i = messageKeys.length - 1; i >= 0; i--) {
+            if (messageKeys[i].userId === userId) messageKeys.splice(i, 1);
+          }
+          return ok({ deleted: true });
+        }
         const revokeMatch = url.match(/^\/e2e\/devices\/me\/([^/]+)$/);
         if (revokeMatch) {
           const user = userOf(userId);
@@ -475,6 +520,7 @@ function createFakeServer() {
     userOf,
     setKeyshareUploadFailure: (fail: boolean) => { failKeyshareUploads = fail; },
     backups,
+    messageKeys,
     setSignaturePublishFailure: (fail: boolean) => { failSignaturePublish = fail; },
     setMasterKeyPublishFailure: (fail: boolean) => { failMasterKeyPublish = fail; },
     /** Rate limit / network blip on device-list reads. */
@@ -2339,6 +2385,159 @@ describe('E2EService (cross-signing)', () => {
       name: 'E2EPeerNotReadyError',
       peerUserId: strangerId,
     });
+  });
+
+  it('carries history to a device that was never sent it (M1)', async () => {
+    // The point of the phase: after the wipe there is no plaintext history to
+    // fall back on, so a device that joins later either restores the session
+    // keys or shows the user a blank window.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const bob = makeParty(server, 'bob');
+    await phone.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    // Bob writes history that only Alice's phone can read
+    const envelope = await bob.service.encryptMessage('c1', aliceId, 'said before the laptop existed');
+    await phone.service.decryptMessage({
+      id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope,
+    });
+    const recoveryKey = await phone.service.createKeyBackup();
+    expect(await phone.service.backupMessageKeys()).toBeGreaterThan(0);
+
+    // the phone is lost; a fresh install recovers the account
+    const laptop = makeDevice(server, aliceId);
+    await laptop.service.initialize();
+    await flushQueue();
+    await laptop.service.restoreKeyBackup(recoveryKey);
+
+    // …and can read what it was never sent
+    expect(
+      await laptop.service.decryptMessage({
+        id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope,
+      })
+    ).toEqual({ text: 'said before the laptop existed' });
+  });
+
+  it('does not let a device holding less of a session overwrite one holding more (M2)', async () => {
+    // A device that joined a Megolm session late exports from a later ratchet
+    // index. Overwriting an earlier device's key would destroy the messages in
+    // between — silently, and exactly the history this feature exists to keep.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+    await phone.service.createKeyBackup();
+
+    const api = server.apiFor(aliceId);
+    const stored = () => server.messageKeys.find((k) => k.sessionId === 'sess-1')!;
+    server.messageKeys.push({
+      userId: aliceId,
+      conversationId: 'c1',
+      sessionId: 'sess-1',
+      blob: 'covers-from-10',
+      firstKnownIndex: 10,
+    });
+
+    // a device holding LESS of the session must not replace it
+    await api.post('/e2e/message-keys', {
+      keys: [{ conversationId: 'c1', sessionId: 'sess-1', blob: 'covers-from-50', firstKnownIndex: 50 }],
+    });
+    expect(stored().blob).toBe('covers-from-10');
+
+    // an equal index changes nothing either — there is nothing to gain
+    await api.post('/e2e/message-keys', {
+      keys: [{ conversationId: 'c1', sessionId: 'sess-1', blob: 'also-from-10', firstKnownIndex: 10 }],
+    });
+    expect(stored().blob).toBe('covers-from-10');
+
+    // …but a device holding MORE of it replaces it
+    await api.post('/e2e/message-keys', {
+      keys: [{ conversationId: 'c1', sessionId: 'sess-1', blob: 'covers-from-0', firstKnownIndex: 0 }],
+    });
+    expect(stored().blob).toBe('covers-from-0');
+  });
+
+  it('will not seal history without the account key (M3)', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    // the laptop is unapproved: it holds no account key, so it can neither
+    // seal history nor read what is stored
+    expect(laptop.service.hasMasterSecret()).toBe(false);
+    expect(await laptop.service.backupMessageKeys()).toBe(0);
+    await expect(laptop.service.restoreMessageKeys()).rejects.toThrow(/does not hold the account key/);
+  });
+
+  it('drops history keys a new identity can never read again (M4)', async () => {
+    // The subkey is derived from the master key, so a reset leaves every row
+    // undecryptable. Keeping them would bill storage for rows nothing can read.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+    server.messageKeys.push({
+      userId: aliceId, conversationId: 'c1', sessionId: 's1', blob: 'x', firstKnownIndex: 0,
+    });
+
+    // the laptop holds no key, so resetting really mints a new identity
+    await laptop.service.resetAccountIdentity();
+    expect(server.messageKeys.filter((k) => k.userId === aliceId)).toHaveLength(0);
+  });
+
+  it('pages through every stored key rather than reading the first page (M5)', async () => {
+    // An account accumulates thousands of sessions; stopping at page one would
+    // restore a slice of someone's history and look like it worked.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const bob = makeParty(server, 'bob');
+    await phone.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    const envelopes: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      // a fresh session per message: revoking forces the sender to rotate
+      const envelope = await bob.service.encryptMessage(`conv-${i}`, aliceId, `history ${i}`);
+      await phone.service.decryptMessage({
+        id: `m${i}`, conversationId: `conv-${i}`, authorId: bob.userId, content: envelope,
+      });
+      envelopes.push(envelope);
+    }
+    await phone.service.createKeyBackup();
+    await phone.service.backupMessageKeys();
+    expect(server.messageKeys.length).toBeGreaterThan(2); // more than one page
+
+    const restored = makeDevice(server, aliceId);
+    await restored.service.initialize();
+    await flushQueue();
+    // give it the account key without going through the backup blob
+    await restored.service.restoreKeyBackup(await phone.service.createKeyBackup());
+
+    for (let i = 0; i < envelopes.length; i++) {
+      expect(
+        await restored.service.decryptMessage({
+          id: `m${i}`, conversationId: `conv-${i}`, authorId: bob.userId, content: envelopes[i],
+        })
+      ).toEqual({ text: `history ${i}` });
+    }
   });
 
   it('recovers the account key from backup instead of starting a new identity (B1)', async () => {

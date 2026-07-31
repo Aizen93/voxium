@@ -836,3 +836,84 @@ orphan-cleanup migration on a live database and is left as a follow-up.
   the user has to create another backup. Fixing that properly needs either a
   two-phase write or showing the key before the write is confirmed, and both
   trade a worse failure for this one.
+
+## 16. Message-key backup (Phase 2 of the always-on plan)
+
+§15 backs up the account *identity*. This backs up the ability to *read history*
+— the thing that decides whether a newly linked device is useful or a blank
+window. It matters more under always-on, because once every DM is encrypted
+there is no plaintext history left to fall back on.
+
+### 16.1 The subkey
+
+Session keys are sealed under `SHA-512("voxium-msgbackup-v1" || master_seed)[..32]`,
+a domain-separated subkey of the account master key.
+
+**No second secret.** Every approved device already holds the master secret and
+recovery already restores it, so deriving from it means: nothing extra to
+distribute, no approval-payload version to bump, no envelope handed between
+devices, and no second string for the user to keep. Exactly the devices that can
+read new messages can read old ones.
+
+This is the third place the engine computes rather than marshals (with the
+safety-number digest and the recovery checksum), and the crate header says so.
+A single domain-separated hash over an already-uniform 32-byte seed is the
+smallest construction that does the job; anything more belongs in vodozemac or
+a vetted crate.
+
+**The consequence, documented rather than mitigated:** replacing the master key
+(a §14.4 identity reset) makes existing backups unreadable, so the reset drops
+them server-side. That is not a loss in practice — a reset already means every
+device was lost, so there was no local history either, and the recovery-key path
+preserves both.
+
+### 16.2 What is stored
+
+One row per Megolm session: `{ conversationId, sessionId, firstKnownIndex, blob }`.
+The blob is AES-256-GCM with the AAD bound to
+`voxium-msgbackup/session_key|<conversationId>|<sessionId>`, and it seals the
+session key **together with who sent it** — a session restored as our own cannot
+decrypt a peer's messages, and the server has no business learning the sender.
+
+`firstKnownIndex` is the one field deliberately left in the clear, because the
+SERVER is what has to compare it: a device that joined a session late exports
+from a later index and holds strictly less of it, so a last-writer-wins upsert
+would let it overwrite a key covering the whole session and destroy the messages
+in between. Writes therefore only ever move a session EARLIER in the ratchet;
+an equal or later index is a no-op. It reveals only how far into a session a key
+begins.
+
+The table is capped per account (`MESSAGE_KEY_STORE_CAP`) and reaching it
+**refuses new uploads rather than evicting old ones**. Every other capped table
+here can be refilled — a key share can be re-sent — but nothing can regenerate a
+Megolm key nobody holds, so eviction destroys history irrecoverably while
+refusing costs only keys the client still has locally.
+
+That binding is load-bearing. Without it a server could move rows between
+conversations, and a restoring client would decrypt one conversation's history
+believing it belonged to another.
+
+Keys are exported at their **first known index**, so a restoring device reads the
+whole session rather than only the part the uploading device happened to see.
+
+### 16.3 Client behaviour
+
+- `backupMessageKeys()` uploads sessions the account has not stored yet, in
+  batches. Already-uploaded ids are remembered locally — losing that record
+  re-uploads, and the server upserts, so it is an optimisation and not state
+  anything depends on.
+- `restoreMessageKeys()` pages through every stored key and imports what is
+  missing, through the same path a key share takes — so the session-id check
+  that rejects a mislabelled key applies here too. One unreadable row is skipped
+  rather than abandoning the rest of someone's history.
+- Only a device holding the master secret can seal or open, which is the same
+  condition as being able to approve devices.
+
+### 16.4 Known gaps
+
+- A device backs up what it holds. A session nobody backed up before every
+  device was lost is unrecoverable — the backup is a copy of what existed, not
+  an escrow.
+- Sessions are stored per account, so the server learns how many sessions an
+  account has and which conversation each belongs to. That is metadata it
+  already has from message routing (§11.8).
