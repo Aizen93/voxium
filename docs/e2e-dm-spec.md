@@ -571,7 +571,10 @@ withhold one boolean and "these devices are not signed by the account key"
 becomes silence. Once this client has seen cross-signing work, a later omission
 is read literally and the user is warned. Losing a cross-signature also counts
 as a device-list change in its own right — otherwise a withdrawn signature
-would leave the stored state calling the device signed forever.
+would leave the stored state calling the device signed forever. Revoking a
+device drops it from the cross-signed set as well as the device set: under the
+grace that set stands in for checking a signature, so a stale entry would let a
+device re-registering under the same id be trusted without one.
 
 ### 14.3 Peer verification and the auto-trust window
 
@@ -639,6 +642,12 @@ every transient failure permanent — the target is already cross-signed by then
 so it looks fully trusted to every peer, holds no key, and is no longer offered
 for approval.
 
+The expected key is what the account **publishes**, not what this device
+pinned. The two differ exactly when a sibling has just run the reset above —
+the sanctioned recovery — and checking against the stale pin would reject the
+approval meant to rescue this device and then discard it. Adopting the secret
+re-pins the account key, because holding it is the strongest proof there is.
+
 "Rejected" means *provably* unusable: malformed, or already spent on a ratchet
 that has moved past it. A row is never dropped for a failure that says nothing
 about the payload — a sender we cannot look up yet, a request that did not
@@ -651,9 +660,17 @@ vault, a lost keychain, an account key this device cannot prove — the honest
 outcome is a new account identity: `resetAccountIdentity` mints and publishes a
 fresh master key, and peers see the safety number change.
 
+**Holding the key changes the remedy.** If this device still holds the account
+key and the server has published something else, the fix is to publish ours
+again — same key, same safety number, nobody re-verifies. Minting there would
+throw away a working identity to undo a server-side edit.
+
 It is offered **only** when nothing else can help: not while another device of
 the account is still cross-signed, since that device may hold the key and
-"approve this one from that one" is the answer. Otherwise the single
+"approve this one from that one" is the answer; and never off a response that
+did not advertise cross-signing, because such a node cannot report signatures
+at all, so "every device looks unsigned" is absence of evidence rather than
+evidence of absence. Otherwise the single
 destructive action in the whole feature would appear during ordinary
 second-device setup, and taking it would strip the approval from the device
 that was about to help. Unlike the mint path it publishes BEFORE sealing: a

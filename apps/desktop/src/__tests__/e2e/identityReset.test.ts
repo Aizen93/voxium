@@ -11,7 +11,8 @@ import type { E2EOwnDevices } from '../../services/e2e/e2eService';
 
 const devices = (
   entries: Array<{ id: string; crossSigned: boolean }>,
-  currentDeviceId: string
+  currentDeviceId: string,
+  capabilityServed = true
 ): E2EOwnDevices => ({
   currentDeviceId,
   devices: entries.map((e) => ({
@@ -26,6 +27,7 @@ const devices = (
   listVersion: 1,
   masterKey: 'M',
   canApprove: false,
+  capabilityServed,
 });
 
 describe('shouldOfferIdentityReset', () => {
@@ -76,6 +78,21 @@ describe('shouldOfferIdentityReset', () => {
 
     const healthy = devices([{ id: 'A', crossSigned: true }], 'A');
     expect(shouldOfferIdentityReset({ ownDevices: healthy, canApprove: false, masterKeyConflict: false })).toBe(
+      false
+    );
+  });
+
+  it('is NOT offered on an answer that could not report signatures at all', () => {
+    // A node mid-rolling-deploy does not understand cross-signing, so every
+    // device comes back looking unsigned. Reading absence of evidence as "no
+    // device can approve me" would put the destructive action in front of
+    // ordinary users for the duration of every deploy.
+    const ownDevices = devices([{ id: 'B', crossSigned: false }], 'B', false);
+    expect(shouldOfferIdentityReset({ ownDevices, canApprove: false, masterKeyConflict: false })).toBe(
+      false
+    );
+    // …not even with a conflict flag, which that same answer cannot justify
+    expect(shouldOfferIdentityReset({ ownDevices, canApprove: false, masterKeyConflict: true })).toBe(
       false
     );
   });

@@ -124,6 +124,12 @@ export interface E2EOwnDevices {
   masterKey: string | null;
   /** True when THIS device holds the master secret and can approve others. */
   canApprove: boolean;
+  /**
+   * Did the node that answered actually understand cross-signing? A response
+   * that did not cannot report signatures, so "every device is unsigned" is
+   * absence of evidence — never grounds for a destructive recovery.
+   */
+  capabilityServed: boolean;
 }
 
 /** The account-level safety number of a peer (spec §14, D3). */
@@ -230,6 +236,13 @@ export class E2EService {
    * node, so it stops earning the rollout grace above.
    */
   private crossSigningSeen = false;
+  /**
+   * The account key our own list last SERVED, self-signature verified — as
+   * opposed to the one we pinned. An approval hands over the key the account
+   * publishes now, which after a §14.4 reset on a sibling is deliberately not
+   * the one this device pinned.
+   */
+  private servedOwnMasterKey: string | null = null;
   private myDeviceId: string | null = null;
   /** pairwise Olm sessions, keyed `${userId}|${deviceId}` */
   private olmSessions = new Map<string, EngineSession>();
@@ -625,7 +638,12 @@ export class E2EService {
   async resetAccountIdentity(): Promise<void> {
     return this.enqueue(async () => {
       const account = this.requireAccount();
-      const master = new EngineMasterKey();
+      // Re-publish rather than replace when this device still holds the account
+      // key: it restores the account with NO safety-number change, so nobody
+      // has to re-verify. Minting here would throw away a working identity to
+      // fix a server-side edit.
+      const held = this.masterKey;
+      const master = held ?? new EngineMasterKey();
       // Publish BEFORE overwriting what this device holds. The mint path seals
       // first (there is nothing to lose and an unpublished key self-heals on
       // the next launch); a reset can be replacing a WORKING key, so a failed
@@ -640,9 +658,19 @@ export class E2EService {
           ed25519Key: account.ed25519Key(),
         },
       ]);
-      await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
-      this.masterKey?.free();
-      this.masterKey = master;
+      if (!held) {
+        try {
+          await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
+        } catch (err) {
+          // Published but not sealed: the account now advertises a key this
+          // device cannot use. Say so rather than carrying on with the old one.
+          master.free();
+          this.masterKeyConflict = true;
+          throw err;
+        }
+        this.masterKey?.free();
+        this.masterKey = master;
+      }
       await this.vault.putMasterIdentity(this.userId, { masterKey: master.publicKey(), verified: true });
       this.masterKeyConflict = false;
       this.deviceListCache.delete(this.userId);
@@ -745,7 +773,14 @@ export class E2EService {
     // now that it no longer deletes, but a failure here would still waste the
     // round trip — and the ordering keeps the "never import a secret we cannot
     // check against the published key" rule impossible to get wrong.
-    const published = (await this.fetchDeviceList(this.userId, true)).masterKey;
+    // Check the payload against what the account PUBLISHES, not against what
+    // this device pinned. They differ exactly when a sibling has just run the
+    // §14.4 reset — the sanctioned recovery — and using the stale pin there
+    // would reject the very approval meant to rescue this device, then delete
+    // it as unusable. Holding the secret is what proves the key, and the
+    // engine still checks the payload derives to this exact key.
+    const list = await this.fetchDeviceList(this.userId, true);
+    const published = this.servedOwnMasterKey ?? list.masterKey;
     if (!published) {
       console.warn('e2e: this account publishes no master key — leaving any transfer for later');
       return false;
@@ -846,6 +881,17 @@ export class E2EService {
     }
     this.masterKey?.free();
     this.masterKey = master;
+    // We hold the secret now, which is the strongest proof there is that this
+    // is the account key — stronger than the pin it may be replacing. Without
+    // this, a device rescued by the §14.4 reset would keep the superseded pin
+    // and report a conflict against the key it is itself holding.
+    const mine = master.publicKey();
+    const pinned = await this.vault.getMasterIdentity(this.userId);
+    if (pinned?.masterKey !== mine || !pinned.verified) {
+      await this.vault.putMasterIdentity(this.userId, { masterKey: mine, verified: true });
+    }
+    this.masterKeyConflict = false;
+    this.deviceListCache.delete(this.userId);
     return true;
   }
 
@@ -960,6 +1006,7 @@ export class E2EService {
       ? this.verifiedMasterKey(userId, data.masterKey, data.masterSignature)
       : null;
     const pinnedMaster = await this.vault.getMasterIdentity(userId);
+    if (userId === this.userId) this.servedOwnMasterKey = served;
     if (pinnedMaster && served && pinnedMaster.masterKey !== served) {
       if (userId === this.userId) {
         // Our OWN account. Throwing here would be fatal rather than
@@ -2117,6 +2164,7 @@ export class E2EService {
       listVersion: data.listVersion ?? 0,
       masterKey,
       canApprove: this.canApproveDevices(),
+      capabilityServed: data.crossSigning === true,
     };
   }
 
@@ -2148,6 +2196,10 @@ export class E2EService {
           // device ids are client-chosen and reusable: leaving a revoked id in
           // the acknowledged set would silently bless a re-registration of it
           acknowledgedDeviceIds: state.acknowledgedDeviceIds.filter((id) => id !== deviceId),
+          // …and out of the cross-signed set, which the rollout grace uses IN
+          // PLACE OF checking a signature. Left behind, a re-registered device
+          // id would be reported signed without one ever being verified.
+          crossSignedDeviceIds: (state.crossSignedDeviceIds ?? []).filter((id) => id !== deviceId),
           unacknowledgedDeviceIds: (state.unacknowledgedDeviceIds ?? []).filter((id) => id !== deviceId),
         });
       }
