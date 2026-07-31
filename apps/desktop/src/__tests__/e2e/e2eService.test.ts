@@ -2184,6 +2184,118 @@ describe('E2EService (cross-signing)', () => {
     expect(server.deviceOf(aliceId, laptop.service.deviceId).masterSignature).toBeTruthy();
   });
 
+  it('rescues the other devices after a §14.4 reset, instead of stranding them (T1)', async () => {
+    // The documented recovery, end to end. The device that resets is one that
+    // never held the key (the holder is gone), so the account really does get
+    // a new identity — and the devices that pinned the OLD one have to be
+    // rescuable. Checking an incoming secret against the stale pin rather than
+    // against what the account now publishes would reject the very approval
+    // meant to rescue them, then delete the row as unusable.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId); // holds the original key, then is lost
+    const laptop = makeDevice(server, aliceId);
+    const tablet = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await tablet.service.initialize();
+    await flushQueue();
+    const originalKey = server.userOf(aliceId).masterKey;
+
+    // both survivors pinned the ORIGINAL account key
+    await laptop.service.fetchDeviceList(aliceId, true);
+    await tablet.service.fetchDeviceList(aliceId, true);
+    expect(laptop.service.hasMasterSecret()).toBe(false);
+
+    // the phone is gone for good, so the laptop starts a new identity
+    await laptop.service.resetAccountIdentity();
+    const newKey = server.userOf(aliceId).masterKey;
+    expect(newKey).not.toBe(originalKey);
+    expect(laptop.service.hasMasterSecret()).toBe(true);
+
+    // approving the tablet — which still pins the old key — must actually work
+    await laptop.service.approveDevice(tablet.service.deviceId);
+    expect(await tablet.service.claimMasterTransfers()).toBe(true);
+    expect(tablet.service.hasMasterSecret()).toBe(true);
+    expect(server.transfers).toHaveLength(0);
+
+    // and the rescued device agrees with the account rather than reporting a
+    // conflict against the key it is itself holding
+    expect(tablet.service.hasMasterKeyConflict()).toBe(false);
+    const own = await tablet.service.listOwnDevices();
+    expect(own.masterKey).toBe(newKey);
+    expect(own.canApprove).toBe(true);
+  });
+
+  it('re-publishes the key it holds instead of burning the account identity (T2)', async () => {
+    // A server that overwrites the published key must not cost every contact a
+    // re-verification: this device can prove the original key by holding it,
+    // so the fix is to publish it again — same safety number, nobody prompted.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+    const realKey = server.userOf(aliceId).masterKey;
+
+    const imposter = new EngineMasterKey();
+    const user = server.userOf(aliceId);
+    user.masterKey = imposter.publicKey();
+    user.masterSignature = imposter.sign(e2eMasterCanonical(aliceId, imposter.publicKey()));
+    for (const device of user.devices.values()) device.masterSignature = null;
+    await phone.service.fetchDeviceList(aliceId, true);
+    expect(phone.service.hasMasterKeyConflict()).toBe(true);
+
+    await phone.service.resetAccountIdentity();
+
+    expect(server.userOf(aliceId).masterKey).toBe(realKey); // unchanged identity
+    expect(phone.service.hasMasterKeyConflict()).toBe(false);
+    expect(server.deviceOf(aliceId, phone.service.deviceId).masterSignature).toBeTruthy();
+  });
+
+  it('forgets the cross-signature of a revoked device id (T3)', async () => {
+    // Under the rollout grace the stored cross-signed set stands IN PLACE OF
+    // checking a signature. A stale id left there means a device that
+    // re-registers under the same id is reported signed without any signature
+    // ever being verified.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+    await phone.service.approveDevice(laptop.service.deviceId);
+    const laptopId = laptop.service.deviceId;
+    await phone.service.revokeDevice(laptopId);
+
+    // the same device id comes back, unsigned
+    const reborn = makeDevice(server, aliceId, {
+      vaultNamespace: laptop.vaultNamespace,
+      keyProvider: laptop.keyProvider,
+    });
+    await reborn.service.initialize();
+    await flushQueue();
+    expect(reborn.service.deviceId).toBe(laptopId);
+
+    // …and the phone now only ever hears from nodes that cannot report
+    // signatures, so it falls back on what it remembered
+    server.setCrossSigningSupported(false);
+    const restarted = makeDevice(server, aliceId, {
+      vaultNamespace: phone.vaultNamespace,
+      keyProvider: phone.keyProvider,
+    });
+    await restarted.service.initialize();
+    await flushQueue();
+    await restarted.service.fetchDeviceList(aliceId, true);
+
+    const status = await restarted.service.deviceListStatus(aliceId);
+    expect(status.unsignedDeviceIds).toContain(laptopId);
+  });
+
   it('hands over the secret before publishing the signature (P11)', async () => {
     // Order is load-bearing: a device that is cross-signed but never received
     // the key looks fully trusted to every peer while being unable to approve

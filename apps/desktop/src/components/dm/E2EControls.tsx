@@ -457,9 +457,17 @@ export function shouldOfferIdentityReset({
   canApprove: boolean;
   masterKeyConflict: boolean;
 }): boolean {
+  if (!ownDevices) return false;
+  // A node that does not understand cross-signing cannot report a signature, so
+  // its answer makes every device look unsigned. Reading that as "nothing can
+  // approve me" would put the destructive action on screen during an ordinary
+  // rolling deploy — the exact window the capability flag exists to survive.
+  if (!ownDevices.capabilityServed) return false;
   // An account key this device can neither prove nor replace has no other exit.
+  // (When this device HOLDS the key, the service re-publishes it instead of
+  // minting a new one, so no safety number changes.)
   if (masterKeyConflict) return true;
-  if (!ownDevices || canApprove) return false;
+  if (canApprove) return false;
   if (!ownDevices.devices.some((d) => !d.crossSigned)) return false;
   return !ownDevices.devices.some(
     (d) => d.deviceId !== ownDevices.currentDeviceId && d.crossSigned
