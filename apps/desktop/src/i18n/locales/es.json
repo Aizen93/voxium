@@ -1058,7 +1058,7 @@
     "backupRestorePlaceholder": "ABCD-EFGH-JKLM-...",
     "backupRestoreAction": "Restaurar",
     "backupRestoreSuccess": "Clave de la cuenta restaurada: este dispositivo ya puede aprobar tus otros dispositivos",
-    "backupRestoreFailed": "No se pudo restaurar con esa clave de recuperación. Revisa si tiene errores y vuelve a intentarlo.",
+    "backupRestoreFailed": "Esa clave de recuperación no abrió la copia de seguridad de esta cuenta. Puede pertenecer a una identidad anterior.",
     "backupNone": "En esta cuenta no se configuró ninguna clave de recuperación, así que no hay nada que restaurar.",
     "backupPreferRestore": "Tienes una clave de recuperación: usarla arriba conserva tu identidad y nadie tendrá que verificarte de nuevo. Prueba eso primero.",
     "backupRestoreMalformed": "Eso no parece una clave de recuperación. Revísala y vuelve a intentarlo."

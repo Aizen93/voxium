@@ -1058,7 +1058,7 @@
     "backupRestorePlaceholder": "ABCD-EFGH-JKLM-...",
     "backupRestoreAction": "복원",
     "backupRestoreSuccess": "계정 키를 복원했습니다 — 이제 이 기기에서 다른 기기를 승인할 수 있습니다",
-    "backupRestoreFailed": "해당 복구 키로 복원하지 못했습니다. 오타가 없는지 확인한 뒤 다시 시도하세요.",
+    "backupRestoreFailed": "해당 복구 키로는 이 계정의 백업을 열 수 없습니다. 이전 계정 ID의 키일 수 있습니다.",
     "backupNone": "이 계정에는 복구 키가 설정되어 있지 않아 복원할 것이 없습니다.",
     "backupPreferRestore": "복구 키가 있습니다. 위에서 복원하면 신원이 그대로 유지되고 아무도 다시 인증할 필요가 없습니다. 이 방법을 먼저 시도하세요.",
     "backupRestoreMalformed": "복구 키 형식이 아닙니다. 오타가 있는지 확인하고 다시 시도하세요."

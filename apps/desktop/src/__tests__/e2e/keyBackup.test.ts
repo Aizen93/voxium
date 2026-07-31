@@ -55,6 +55,44 @@ describe('recovery keys', () => {
     expect(isRecoveryKeyWellFormed('')).toBe(false);
     expect(isRecoveryKeyWellFormed('not a recovery key')).toBe(false);
   });
+
+  it('treats a recovery key as having exactly one spelling', () => {
+    // Ignoring trailing characters would let several different strings stand
+    // for the same key — so a key with something appended would still verify,
+    // which is exactly the typo the checksum exists to catch.
+    const key = generateRecoveryKey();
+    const bare = key.replace(/-/g, '');
+    expect(isRecoveryKeyWellFormed(bare)).toBe(true);
+    expect(isRecoveryKeyWellFormed(`${bare}A`)).toBe(false);
+    expect(isRecoveryKeyWellFormed(`${bare}AAAAAAAA`)).toBe(false);
+    expect(isRecoveryKeyWellFormed(`A${bare}`)).toBe(false);
+  });
+
+  it('rejects every single-character substitution', () => {
+    // The checksum is one byte, so ~1 in 256 typos slips through by design;
+    // over a whole key that still has to catch the overwhelming majority, or
+    // the "check it for typos" message is not worth showing.
+    const bare = generateRecoveryKey().replace(/-/g, '');
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    let accepted = 0;
+    let tried = 0;
+    for (let i = 0; i < bare.length; i++) {
+      for (const c of alphabet) {
+        if (c === bare[i]) continue;
+        tried++;
+        if (isRecoveryKeyWellFormed(bare.slice(0, i) + c + bare.slice(i + 1))) accepted++;
+      }
+    }
+    expect(tried).toBeGreaterThan(1000);
+    expect(accepted / tried).toBeLessThan(0.02);
+  });
+
+  it('never mints the same key twice', () => {
+    // 32 bytes from the CSPRNG. A collision here would mean the generator is
+    // not seeded, which on wasm means getrandom never reached WebCrypto.
+    const keys = new Set(Array.from({ length: 64 }, () => generateRecoveryKey()));
+    expect(keys.size).toBe(64);
+  });
 });
 
 describe('master key backup', () => {

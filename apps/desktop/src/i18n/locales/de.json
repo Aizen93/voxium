@@ -1058,7 +1058,7 @@
     "backupRestorePlaceholder": "ABCD-EFGH-JKLM-...",
     "backupRestoreAction": "Wiederherstellen",
     "backupRestoreSuccess": "Kontoschlüssel wiederhergestellt — dieses Gerät kann jetzt deine anderen Geräte bestätigen",
-    "backupRestoreFailed": "Wiederherstellung mit diesem Schlüssel fehlgeschlagen. Prüfe ihn auf Tippfehler und versuche es erneut.",
+    "backupRestoreFailed": "Dieser Wiederherstellungsschlüssel hat das Backup dieses Kontos nicht geöffnet. Möglicherweise gehört er zu einer früheren Kontoidentität.",
     "backupNone": "Für dieses Konto wurde kein Wiederherstellungsschlüssel eingerichtet, es gibt also nichts wiederherzustellen.",
     "backupPreferRestore": "Du hast einen Wiederherstellungsschlüssel: ihn oben einzulösen erhält deine Identität, und niemand muss dich erneut verifizieren. Versuche das zuerst.",
     "backupRestoreMalformed": "Das sieht nicht nach einem Wiederherstellungsschlüssel aus. Bitte prüfe die Eingabe."
