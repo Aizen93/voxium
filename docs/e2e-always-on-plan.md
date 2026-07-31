@@ -44,10 +44,10 @@ friction users hit is not cryptography, it is the existence of a choice.
 - **D2. Minimum client version.** Once DMs are always encrypted, a client that
   predates this cannot send. Recommendation: gate the API on a minimum client
   version and let the Tauri updater carry everyone forward before cutover.
-- **D3. Accounts that registered but never opened the app.** They have no keys,
-  so nobody can DM them. Recommendation: register keys at the end of the signup
-  flow, and treat the residual case as "invite pending — they'll be reachable
-  once they open the app" rather than a send error.
+- **D3. ~~Accounts that registered but never opened the app.~~** *Resolved
+  during implementation (§4.1): keys cannot be published before email
+  verification, so this state is permanent and is now handled as a named
+  product state rather than an error.*
 - **D4. Report handling.** Every report becomes reporter-attested. This already
   works (`contentSource: "reporter"`, flagged unverifiable), but it becomes the
   only mode and should be an explicit moderation-policy decision, not a
@@ -55,15 +55,30 @@ friction users hit is not cryptography, it is the existence of a choice.
 
 ## 4. Design
 
-### 4.1 Keys at account setup
+### 4.1 Keys as early as the auth model allows — and the state that remains
 
-`ensureRegistered()` already publishes a device identity and prekeys; today it
-runs when `MainLayout` mounts. Move the first run into the signup completion
-step so an account is DM-able the moment it exists.
+**Correction to the original draft, found during implementation.** "Register
+keys at the end of signup" is not possible: `e2eRouter` sits behind
+`requireVerifiedEmail`, and signup ends with an *unverified* account. The
+earliest an account can publish device keys is its first authenticated session
+after email verification — which is what mounting `MainLayout` already does.
 
-Nothing about the key material changes. This is purely about *when*, and it is
-what removes the "recipient isn't set up" state that would otherwise need a
-user-facing error under always-on.
+Relaxing that gate for device registration was considered and rejected: it would
+let an unverified address claim an identity other people then pin.
+
+So the "recipient has no keys" state cannot be designed away from the sender's
+side, and under always-on it becomes the **only** reason a DM cannot be sent.
+It is therefore a product state, not an error:
+
+- `E2EPeerNotReadyError` carries the peer id, and the send path renders
+  "*<name> hasn't set up Voxium on a device yet… they'll be reachable once they
+  open the app*" rather than a generic failure.
+- It is raised **only** when the directory returned no devices at all. If the
+  peer publishes devices and none survive signature verification, that is a
+  different and much less reassuring story — it keeps its own error and must
+  never be reported as the person simply not being set up.
+
+**Status: implemented.**
 
 ### 4.2 Conversations are born encrypted
 
@@ -287,7 +302,7 @@ this out loud before starting.
 
 | Phase | Work | Done when |
 |---|---|---|
-| 1 | Keys at signup | a new account is DM-able before first app open |
+| 1 | ~~Keys at signup~~ → name the not-ready state | sending to an account with no devices explains itself (**done**) |
 | 2 | Message-key backup | a linked device reads history it was never sent |
 | 3 | Device linking by code | a second device works without touching a device list |
 | 4 | UI to Settings → Security | nothing account-level is administered from a DM |

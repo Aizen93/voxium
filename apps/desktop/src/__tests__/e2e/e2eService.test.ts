@@ -2320,6 +2320,27 @@ describe('E2EService (cross-signing)', () => {
     expect(status.unsignedDeviceIds).toContain(laptopId);
   });
 
+  it('names the recipient who has not set up a device yet (A1)', async () => {
+    // Under always-on this is the ONLY reason a DM cannot be sent, and it is a
+    // normal state — an account that exists but has never opened the app. It
+    // has to arrive as something the UI can explain, not as a generic failure
+    // the user reads as the product being broken.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const strangerId = `stranger-${uniq}`;
+    await alice.service.initialize();
+    await flushQueue();
+
+    // the account exists on the server but has registered no device
+    server.userOf(strangerId);
+
+    await expect(alice.service.encryptMessage('c1', strangerId, 'hello?')).rejects.toMatchObject({
+      name: 'E2EPeerNotReadyError',
+      peerUserId: strangerId,
+    });
+  });
+
   it('recovers the account key from backup instead of starting a new identity (B1)', async () => {
     // The point of the whole feature: losing every device used to mean every
     // contact seeing a changed safety number and having to verify again.

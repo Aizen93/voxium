@@ -3,6 +3,9 @@ import axios from 'axios';
 import { api } from '../services/api';
 import { getSocket } from '../services/socket';
 import { toast } from './toastStore';
+import i18n from '../i18n';
+import { useDMStore } from './dmStore';
+import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
 import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
 import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMeta } from '@voxium/shared';
@@ -327,6 +330,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         socket.emit('dm:typing:stop', conversationId);
       }
     } catch (err) {
+      // "They have not set up a device yet" is a state of the world, not a
+      // fault: say who and why, instead of a generic send failure the user
+      // would read as the app being broken.
+      if (err instanceof E2EPeerNotReadyError) {
+        const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
+        toast.error(
+          i18n.t('e2e.peerNotReady', {
+            name: conversation?.participant.displayName ?? i18n.t('e2e.peerNotReadyFallbackName'),
+          })
+        );
+        throw err;
+      }
       console.error('Failed to send DM:', err);
       throw err;
     }

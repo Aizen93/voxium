@@ -1061,6 +1061,8 @@
     "backupRestoreFailed": "Dieser Wiederherstellungsschlüssel hat das Backup dieses Kontos nicht geöffnet. Möglicherweise gehört er zu einer früheren Kontoidentität.",
     "backupNone": "Für dieses Konto wurde kein Wiederherstellungsschlüssel eingerichtet, es gibt also nichts wiederherzustellen.",
     "backupPreferRestore": "Du hast einen Wiederherstellungsschlüssel: ihn oben einzulösen erhält deine Identität, und niemand muss dich erneut verifizieren. Versuche das zuerst.",
-    "backupRestoreMalformed": "Das sieht nicht nach einem Wiederherstellungsschlüssel aus. Bitte prüfe die Eingabe."
+    "backupRestoreMalformed": "Das sieht nicht nach einem Wiederherstellungsschlüssel aus. Bitte prüfe die Eingabe.",
+    "peerNotReady": "{{name}} hat Voxium noch auf keinem Gerät eingerichtet, es gibt also kein Ziel für eine verschlüsselte Nachricht. Sobald die App geöffnet wird, ist die Person erreichbar.",
+    "peerNotReadyFallbackName": "Diese Person"
   }
 }
