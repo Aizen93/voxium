@@ -81,18 +81,32 @@ describe('purging E2E material when an account is deleted', () => {
   });
 });
 
-describe('key backup retention', () => {
-  it('is the one E2E table that cascades, because nothing else can reclaim it', () => {
-    // A backup is meant to outlive every device, so no age sweep will ever
-    // clear it. Without the cascade a deleted account leaves its sealed
-    // account master secret in the database indefinitely.
+describe('backup retention', () => {
+  function modelBody(name: string): string {
     const schema = readFileSync(
       join(__dirname, '..', '..', '..', 'prisma', 'schema.prisma'),
       'utf8'
     );
-    const model = schema.slice(schema.indexOf('model E2EKeyBackup'));
-    const body = model.slice(0, model.indexOf('\n}'));
+    const model = schema.slice(schema.indexOf(`model ${name} {`));
+    return model.slice(0, model.indexOf('\n}'));
+  }
 
-    expect(body).toContain('@relation(fields: [userId], references: [id], onDelete: Cascade)');
+  // Both backup tables hold rows MEANT to outlive every device, so no age sweep
+  // will ever clear them and purgeE2EMaterial deliberately leaves them alone.
+  // The cascade is therefore the only thing standing between a deleted account
+  // and its sealed key material sitting in the database indefinitely — which
+  // makes it the property to assert, not the absent delete call.
+  it.each(['E2EKeyBackup', 'E2EMessageKeyBackup'])('%s cascades on user delete', (model) => {
+    expect(modelBody(model)).toContain('@relation(fields: [userId], references: [id], onDelete: Cascade)');
+  });
+
+  it('leaves the cascading tables out of the explicit purge', async () => {
+    // Deleting them here would be dead code that reads like the cascade is not
+    // trusted — and would silently become the real mechanism if the FK were
+    // ever dropped, hiding the regression.
+    await purgeE2EMaterial(USER);
+
+    expect(prisma).not.toHaveProperty('e2EKeyBackup');
+    expect(prisma).not.toHaveProperty('e2EMessageKeyBackup');
   });
 });

@@ -373,6 +373,12 @@ export class E2EService {
     this.replenishOneTimeKeys().catch((err) => {
       console.warn('e2e: one-time key replenishment failed:', errText(err));
     });
+    // Catch up on sessions that arrived while this device was offline. Best
+    // effort by design: history backup falling behind must never stop the
+    // client working, and the next launch tries again.
+    this.backupMessageKeys().catch((err) => {
+      console.warn('e2e: message-key backup pass failed:', errText(err));
+    });
   }
 
   dispose(): void {
@@ -717,6 +723,12 @@ export class E2EService {
       await this.vault.putMasterIdentity(this.userId, { masterKey: master.publicKey(), verified: true });
       this.masterKeyConflict = false;
       if (!held) {
+        // The backup subkey is derived from the master key, so every stored
+        // session key just became undecryptable. Leaving them would bill the
+        // user storage for rows nothing can ever read.
+        await this.api.delete('/e2e/message-keys').catch((err) => {
+          console.warn('e2e: could not drop message keys the new identity orphaned:', errText(err));
+        });
         // The old backup decrypts to a key this account no longer publishes,
         // so restoring from it could only ever fail. Leaving it would hand the
         // user a recovery key that looks like a way back and is not.
@@ -1001,7 +1013,7 @@ export class E2EService {
     // Checked before the request: a typo should say "that is not your recovery
     // key", not "decryption failed" after a round trip.
     if (!isRecoveryKeyWellFormed(recoveryKey)) throw new E2ERecoveryKeyFormatError();
-    return this.enqueue(async () => {
+    await this.enqueue(async () => {
       const account = this.requireAccount();
       const res = await this.api.get('/e2e/backup');
       const data = res.data.data as { exists?: boolean; blob?: string | null };
@@ -1034,6 +1046,130 @@ export class E2EService {
       this.deviceListCache.delete(this.userId);
       await this.fetchDeviceList(this.userId, true);
     });
+
+    // Recovering the identity without the history leaves the user staring at
+    // empty conversations: the account is back and everything in it is still
+    // unreadable. Not fatal if it fails — the identity IS recovered, and the
+    // next launch retries.
+    try {
+      await this.restoreMessageKeys();
+    } catch (err) {
+      console.warn('e2e: recovered the account key but not its history yet:', errText(err));
+    }
+  }
+
+  // ─── Message-key backup (spec §16) ────────────────────────────────────────
+  //
+  // Without this, a device that joins the account later reads nothing that was
+  // sent before it existed — and once DMs are always encrypted there is no
+  // plaintext history to fall back on. Session keys are sealed under a subkey
+  // of the account master key, so exactly the devices that can read new
+  // messages can read old ones, and the recovery key already restores both.
+
+  /**
+   * Back up the session keys this device holds that the account has not stored
+   * yet. Safe to call often: what is already uploaded is remembered locally,
+   * so a steady state costs nothing.
+   */
+  async backupMessageKeys(): Promise<number> {
+    const master = this.masterKey;
+    if (!master) return 0; // only a device holding the account key can seal
+
+    const records = await this.vault.listInboundGroupSessions();
+    const uploaded = await this.vault.getBackedUpSessionIds();
+    const pending = records.filter((r) => !uploaded.includes(r.sessionId));
+    if (pending.length === 0) return 0;
+
+    let stored = 0;
+    for (let i = 0; i < pending.length; i += E2E_LIMITS.MESSAGE_KEY_BATCH_MAX) {
+      const batch = pending.slice(i, i + E2E_LIMITS.MESSAGE_KEY_BATCH_MAX);
+      const keys: Array<{ conversationId: string; sessionId: string; blob: string; firstKnownIndex: number }> = [];
+      for (const record of batch) {
+        const loaded = await this.loadInbound(record.sessionId);
+        if (!loaded) continue;
+        // Exported at the FIRST known index: a restoring device must be able to
+        // read the whole session, not just from wherever this device joined it.
+        // WHO sent the session travels inside the ciphertext, not as a column:
+        // the restoring device needs it to attribute the session correctly (a
+        // session restored as our own cannot decrypt a peer's messages), and
+        // the server has no business learning it.
+        const payload = JSON.stringify({
+          k: loaded.session.exportAtFirstKnownIndex(),
+          u: record.senderUserId,
+          d: record.senderDeviceId,
+        });
+        keys.push({
+          conversationId: record.conversationId,
+          sessionId: record.sessionId,
+          blob: master.sealSessionKey(payload, `${record.conversationId}|${record.sessionId}`),
+          // Sent in the clear so the SERVER can refuse a key that would move
+          // the session forwards: a device that joined late holds less of it,
+          // and overwriting an earlier device's key would destroy the messages
+          // in between.
+          firstKnownIndex: loaded.session.firstKnownIndex(),
+        });
+      }
+      if (keys.length === 0) continue;
+      await this.api.post('/e2e/message-keys', { keys });
+      await this.vault.addBackedUpSessionIds(keys.map((k) => k.sessionId));
+      stored += keys.length;
+    }
+    return stored;
+  }
+
+  /**
+   * Pull every backed-up session key and import what this device is missing.
+   * Run after linking or recovery — it is what turns a blank new device into
+   * one that shows the account's history.
+   */
+  async restoreMessageKeys(): Promise<number> {
+    const master = this.masterKey;
+    if (!master) throw new Error('This device does not hold the account key');
+
+    let cursor: string | null = null;
+    let imported = 0;
+    do {
+      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+      const res = await this.api.get(`/e2e/message-keys${query}`);
+      const data = res.data.data as {
+        keys?: Array<{ conversationId?: unknown; sessionId?: unknown; blob?: unknown }>;
+        nextCursor?: string | null;
+      };
+      for (const row of data.keys ?? []) {
+        const { conversationId, sessionId, blob } = row;
+        if (typeof conversationId !== 'string' || typeof sessionId !== 'string' || typeof blob !== 'string') {
+          console.warn('e2e: dropping a malformed message-key backup row');
+          continue;
+        }
+        try {
+          const opened = master.openSessionKey(blob, `${conversationId}|${sessionId}`);
+          const payload = JSON.parse(opened) as { k?: unknown; u?: unknown; d?: unknown };
+          if (
+            typeof payload.k !== 'string' ||
+            typeof payload.u !== 'string' ||
+            typeof payload.d !== 'string'
+          ) {
+            throw new Error('malformed backed-up session payload');
+          }
+          // Same import path as a key share, so the session-id check that
+          // stops a mislabelled key applies here too.
+          const added = await this.importInboundGroupSession(payload.k, {
+            sessionId,
+            conversationId,
+            senderUserId: payload.u,
+            senderDeviceId: payload.d,
+            keyType: 'exported',
+          });
+          if (added) imported += 1;
+        } catch (err) {
+          // One unreadable row must not abandon the rest of someone's history.
+          console.warn(`e2e: skipping an unusable backed-up session key:`, errText(err));
+        }
+      }
+      cursor = data.nextCursor ?? null;
+    } while (cursor);
+
+    return imported;
   }
 
   /** Our own account master key (held or pinned), for safety numbers. */

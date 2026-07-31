@@ -65,6 +65,34 @@ export const E2E_LIMITS = {
    * so this is also the whole per-account storage cost of the feature.
    */
   KEY_BACKUP_MAX: 4096,
+  /**
+   * Max backed-up session keys per account (spec §16). Unlike every other E2E
+   * table nothing can ever sweep these — that is the point of the feature — so
+   * the cap is the only bound on an account's storage.
+   *
+   * Reaching it REFUSES new uploads rather than evicting old ones. Eviction
+   * would silently destroy the ability to read the oldest history, which is
+   * precisely the loss the feature exists to prevent; refusing is visible and
+   * costs only the newest keys, which the device still holds locally. A
+   * conversation rotates its session every 100 messages or 7 days, so this is
+   * years of heavy use, and hitting it means something is wrong.
+   */
+  MESSAGE_KEY_STORE_CAP: 20_000,
+  /**
+   * Max message-key backups per POST /e2e/message-keys batch (plan §4.4). A
+   * device catching up seals every inbound Megolm session it holds, so the
+   * upload is naturally bulk — but each entry is an independent upsert, so the
+   * batch also bounds how much work one request can ask of the database.
+   */
+  MESSAGE_KEY_BATCH_MAX: 100,
+  /**
+   * Max message-key backups returned by one GET /e2e/message-keys page. An
+   * account accumulates one row per conversation per session rotation, so the
+   * collection grows without bound and the download MUST be paginated — this is
+   * what makes a page cheap enough to serve. Larger than the upload batch
+   * because a restoring device wants the whole set as fast as it can get it.
+   */
+  MESSAGE_KEY_PAGE_MAX: 200,
 } as const;
 
 /** 32-byte key, unpadded standard base64 (vodozemac canonical encoding). */

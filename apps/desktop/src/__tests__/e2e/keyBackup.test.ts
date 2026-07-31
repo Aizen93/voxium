@@ -156,6 +156,50 @@ describe('master key backup', () => {
     );
   });
 
+  it('seals a session key so exactly the account that owns it can read it back', () => {
+    // History backup rides on the master key rather than a second secret, so
+    // every device that can read new messages can read old ones, and the
+    // recovery key already restores both.
+    const master = new EngineMasterKey();
+    const other = new EngineMasterKey();
+    const sessionKey = 'AgAAAAAwMTIzNDU2Nzg5QUJERUYwMTIzNDU2Nzg5QUJDREVG';
+    const context = 'conv-1|sess-1';
+
+    const blob = master.sealSessionKey(sessionKey, context);
+    expect(blob).not.toContain(sessionKey);
+    expect(master.openSessionKey(blob, context)).toBe(sessionKey);
+
+    // another account's key is useless against it
+    expect(() => other.openSessionKey(blob, context)).toThrow(/does not belong to this account/);
+  });
+
+  it('will not let a backed-up key be restored into a different conversation', () => {
+    // The AAD binds the blob to the conversation and session it came from. A
+    // server that shuffled rows between conversations would otherwise have a
+    // client decrypt one conversation's history under another's identity.
+    const master = new EngineMasterKey();
+    const sessionKey = 'AgAAAAAwMTIzNDU2Nzg5QUJERUYwMTIzNDU2Nzg5QUJDREVG';
+    const blob = master.sealSessionKey(sessionKey, 'conv-1|sess-1');
+
+    expect(() => master.openSessionKey(blob, 'conv-2|sess-1')).toThrow(/does not belong/);
+    expect(() => master.openSessionKey(blob, 'conv-1|sess-2')).toThrow(/does not belong/);
+  });
+
+  it('derives the same backup subkey on every device holding the account key', () => {
+    // Two devices of one account must agree, or a session backed up by one is
+    // unreadable by the other — which is the whole feature.
+    const master = new EngineMasterKey();
+    const sealed = master.sealForBackup(generateRecoveryKey());
+    void sealed;
+    const sessionKey = 'AgAAAAAwMTIzNDU2Nzg5QUJERUYwMTIzNDU2Nzg5QUJDREVG';
+    const blob = master.sealSessionKey(sessionKey, 'c|s');
+
+    // the same account key restored elsewhere (as a linked device receives it)
+    const recovery = generateRecoveryKey();
+    const restored = openMasterKeyBackup(master.sealForBackup(recovery), recovery, master.publicKey());
+    expect(restored.openSessionKey(blob, 'c|s')).toBe(sessionKey);
+  });
+
   it('will not seal under a key that is not a real recovery key', () => {
     const master = new EngineMasterKey();
     expect(() => master.sealForBackup('hunter2')).toThrow(/recovery key is not valid/);

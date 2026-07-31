@@ -180,12 +180,14 @@ const DEVICE_LIST_SELECT = {
 const CROSS_SIGNING_CAPABILITY = { crossSigning: true } as const;
 
 /**
- * Bound the shape of a transfer row id before it reaches a query. Deliberately
- * wider than today's cuid: pinning it to the current generator would turn a
- * later switch to cuid2/uuid into a silent 400 on every ack. Prisma
- * parameterizes anyway — this is a length/charset guard, not the defence.
+ * Bound the shape of a row id before it reaches a query — transfer ids on the
+ * ack route, pagination cursors on the message-key download. Deliberately wider
+ * than today's cuid: pinning it to the current generator would turn a later
+ * switch to cuid2/uuid into a silent 400 on every ack. Prisma parameterizes
+ * anyway — this is a length/charset guard, not the defence, and it is never an
+ * authorization boundary either (the userId scope on the query is).
  */
-const TRANSFER_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const ROW_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
 
 async function getMasterKeyInfo(userId: string): Promise<{ masterKey: string | null; masterSignature: string | null }> {
   const row = await prisma.e2EMasterKey.findUnique({
@@ -1110,7 +1112,7 @@ e2eRouter.post('/master-transfers/ack', rateLimitE2EShares, async (req: Request,
     if (!Array.isArray(ids) || ids.length === 0 || ids.length > E2E_LIMITS.MASTER_TRANSFER_STORE_CAP) {
       throw new BadRequestError('ids must be a non-empty array within the transfer cap');
     }
-    if (!ids.every((id) => typeof id === 'string' && TRANSFER_ID_RE.test(id))) {
+    if (!ids.every((id) => typeof id === 'string' && ROW_ID_RE.test(id))) {
       throw new BadRequestError('Invalid transfer id');
     }
 
@@ -1222,6 +1224,222 @@ e2eRouter.delete('/backup', rateLimitE2EApprove, async (req: Request, res: Respo
     const { count } = await prisma.e2EKeyBackup.deleteMany({ where: { userId } });
 
     res.json({ success: true, data: { deleted: count > 0 } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Message-key backup (plan §4.4) ──────────────────────────────────────────
+// SELF ONLY, and opaque end to end. Each device seals every INBOUND Megolm
+// session key under an account-level message-backup key — which travels with
+// the master secret in the approval payload and is sealed into the §15 backup
+// blob, so there is no second secret for the user to keep — and uploads it
+// here. A device that joins the account later downloads these and can read
+// history it was never sent, which is what makes always-on encryption
+// survivable: under it there is no plaintext fallback for a new device.
+//
+// The server's view is one row per session: a userId it already authenticated,
+// a conversationId it already knows the owner is in, a session id that is
+// already on every message envelope, and ciphertext. It learns nothing it did
+// not already have, and `blob` is sealed with AAD binding conversationId ||
+// sessionId, so it cannot even move a row between conversations undetected.
+//
+// Like §15's backup, these rows are MEANT to outlive every device, so no age
+// sweep can reclaim them — hence the FK cascade to User in the schema, which is
+// also why purgeE2EMaterial() does not (and must not need to) mention them.
+
+interface RawMessageKey {
+  conversationId?: unknown;
+  sessionId?: unknown;
+  blob?: unknown;
+  firstKnownIndex?: unknown;
+}
+
+interface ValidMessageKey {
+  conversationId: string;
+  sessionId: string;
+  blob: string;
+  firstKnownIndex: number;
+}
+
+function validateMessageKey(raw: RawMessageKey, index: number): ValidMessageKey {
+  const at = `keys[${index}]`;
+  if (!raw || typeof raw !== 'object') throw new BadRequestError(`${at}: invalid key`);
+  if (typeof raw.conversationId !== 'string' || raw.conversationId.length === 0 || raw.conversationId.length > ID_MAX) {
+    throw new BadRequestError(`${at}: invalid conversationId`);
+  }
+  if (typeof raw.sessionId !== 'string' || !E2E_SESSION_ID_B64_RE.test(raw.sessionId)) {
+    throw new BadRequestError(`${at}: invalid sessionId`);
+  }
+  // Ciphertext: size-checked and nothing else — never sanitized (that would
+  // corrupt it) and never parsed. A sealed session key is the same order of
+  // size as a pairwise key share, so it reuses that cap rather than inventing
+  // a second number for the same shape of payload.
+  if (typeof raw.blob !== 'string' || raw.blob.length === 0) {
+    throw new BadRequestError(`${at}: blob is required`);
+  }
+  if (raw.blob.length > E2E_LIMITS.KEYSHARE_BODY_MAX) {
+    throw new BadRequestError(`${at}: blob must be at most ${E2E_LIMITS.KEYSHARE_BODY_MAX} characters`);
+  }
+  // Which ratchet index the stored key starts at. Plain metadata rather than
+  // part of the ciphertext, because the SERVER is what has to compare it to
+  // refuse a key that would move a session forwards and lose the messages in
+  // between. It reveals only how far into a session a key begins.
+  if (
+    typeof raw.firstKnownIndex !== 'number' ||
+    !Number.isInteger(raw.firstKnownIndex) ||
+    raw.firstKnownIndex < 0
+  ) {
+    throw new BadRequestError(`${at}: firstKnownIndex must be a non-negative integer`);
+  }
+  return {
+    conversationId: raw.conversationId,
+    sessionId: raw.sessionId,
+    blob: raw.blob,
+    firstKnownIndex: raw.firstKnownIndex,
+  };
+}
+
+e2eRouter.post('/message-keys', rateLimitE2EShares, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const { keys } = req.body ?? {};
+
+    if (!Array.isArray(keys) || keys.length === 0 || keys.length > E2E_LIMITS.MESSAGE_KEY_BATCH_MAX) {
+      throw new BadRequestError(`keys must contain 1–${E2E_LIMITS.MESSAGE_KEY_BATCH_MAX} entries`);
+    }
+    const valid = (keys as RawMessageKey[]).map(validateMessageKey);
+
+    // Two entries for the same session in one batch would carry two different
+    // ciphertexts for the same row and the server would silently pick one.
+    // That is a client bug worth surfacing, and rejecting keeps `stored`
+    // truthful (same reasoning as duplicate oneTimeKey keyIds on /devices).
+    const sessionIds = new Set(valid.map((k) => k.sessionId));
+    if (sessionIds.size !== valid.length) throw new BadRequestError('Duplicate sessionIds in batch');
+
+    // Idempotent by construction: a device re-uploading a session it already
+    // backed up must be a no-op, not a 409 and not a duplicate row. Uploads are
+    // retried on every catch-up pass, so anything else would make the normal
+    // case an error. One transaction so a partial batch cannot report `stored`
+    // for rows that were rolled back.
+    //
+    // The unique key is [userId, sessionId] and the userId comes from the
+    // session, so no `where` here can reach another account's row.
+    await prisma.$transaction(async (tx) => {
+      const held = await tx.e2EMessageKeyBackup.count({ where: { userId } });
+      const incoming = new Set(valid.map((k) => k.sessionId));
+      const known = await tx.e2EMessageKeyBackup.findMany({
+        where: { userId, sessionId: { in: [...incoming] } },
+        select: { sessionId: true },
+      });
+      if (held - known.length + incoming.size > E2E_LIMITS.MESSAGE_KEY_STORE_CAP) {
+        // Refuse rather than evict: dropping the oldest rows would silently
+        // destroy the oldest history, which is the loss this feature exists to
+        // prevent. The client still holds these keys locally.
+        throw new ConflictError('Key backup is full');
+      }
+
+      for (const k of valid) {
+        // Only ever move the stored key EARLIER in the ratchet. A device that
+        // joined the session late must not overwrite one that has more of it.
+        await tx.e2EMessageKeyBackup.updateMany({
+          where: { userId, sessionId: k.sessionId, firstKnownIndex: { gt: k.firstKnownIndex } },
+          data: { conversationId: k.conversationId, blob: k.blob, firstKnownIndex: k.firstKnownIndex },
+        });
+      }
+      await tx.e2EMessageKeyBackup.createMany({
+        data: valid.map((k) => ({
+          userId,
+          conversationId: k.conversationId,
+          sessionId: k.sessionId,
+          blob: k.blob,
+          firstKnownIndex: k.firstKnownIndex,
+        })),
+        skipDuplicates: true,
+      });
+    });
+
+    res.status(201).json({ success: true, data: { stored: valid.length } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+e2eRouter.get('/message-keys', rateLimitE2EStatus, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const rawCursor = req.query.cursor;
+
+    let cursor: string | undefined;
+    if (rawCursor !== undefined) {
+      if (typeof rawCursor !== 'string' || !ROW_ID_RE.test(rawCursor)) {
+        throw new BadRequestError('Invalid cursor');
+      }
+      cursor = rawCursor;
+    }
+
+    // An account accumulates a row per conversation per session rotation, so
+    // "return everything" is not an option — a restoring device would ask for
+    // thousands of rows in one statement. Page on the row id: it is a total
+    // order, it is stable under concurrent inserts (new sessions sort after the
+    // page a client already has), and it is opaque to the caller.
+    //
+    // The cursor positions the page; it never scopes it. `userId` does that, so
+    // a cursor naming another account's row still returns only our own.
+    const take = E2E_LIMITS.MESSAGE_KEY_PAGE_MAX;
+    const rows = await prisma.e2EMessageKeyBackup.findMany({
+      where: { userId },
+      select: { id: true, conversationId: true, sessionId: true, blob: true, createdAt: true },
+      orderBy: { id: 'asc' },
+      // One extra row is the cheapest way to know whether another page exists.
+      // Without it a full last page is indistinguishable from a full middle
+      // one, and the client has to spend a request discovering it is done.
+      take: take + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+
+    const hasMore = rows.length > take;
+    const page = hasMore ? rows.slice(0, take) : rows;
+
+    res.json({
+      success: true,
+      data: {
+        keys: page.map((r) => ({
+          id: r.id,
+          conversationId: r.conversationId,
+          sessionId: r.sessionId,
+          blob: r.blob,
+          createdAt: r.createdAt.toISOString(),
+        })),
+        nextCursor: hasMore ? page[page.length - 1].id : null,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Drop every backed-up message key for the caller's account.
+ *
+ * Needed on an identity reset (§14.4): the message-backup key is derived from
+ * the account master secret, so a new identity leaves every stored row
+ * permanently unreadable — sealed history nobody, including the owner, can ever
+ * open again. Unlike the §15 blob (which the server must never destroy on the
+ * client's behalf, because it may be the backup of the very key being
+ * re-published), these rows are worthless the moment the secret behind them
+ * changes, so clearing them is the client's call and this is how it makes it.
+ */
+e2eRouter.delete('/message-keys', rateLimitE2EShares, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+
+    // deleteMany with the session's userId: idempotent (an empty account is
+    // `deleted: 0`, never a P2025) and the clause can only ever reach the
+    // caller's own rows.
+    const { count } = await prisma.e2EMessageKeyBackup.deleteMany({ where: { userId } });
+
+    res.json({ success: true, data: { deleted: count } });
   } catch (err) {
     next(err);
   }
