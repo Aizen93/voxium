@@ -565,6 +565,14 @@ client bootstraps only when it sees that flag. Without it, it defers: no mint,
 no pin, no conflict, and previously known cross-signatures are carried forward
 rather than being read as "every device just lost its signature".
 
+That grace **expires the moment a capable node answers**. The flag is
+server-controlled and unsigned, so an unbounded grace would be a mute button:
+withhold one boolean and "these devices are not signed by the account key"
+becomes silence. Once this client has seen cross-signing work, a later omission
+is read literally and the user is warned. Losing a cross-signature also counts
+as a device-list change in its own right — otherwise a withdrawn signature
+would leave the stored state calling the device signed forever.
+
 ### 14.3 Peer verification and the auto-trust window
 
 `fetchDeviceList` verifies, in order: the master self-signature; the master key
@@ -631,10 +639,26 @@ every transient failure permanent — the target is already cross-signed by then
 so it looks fully trusted to every peer, holds no key, and is no longer offered
 for approval.
 
+"Rejected" means *provably* unusable: malformed, or already spent on a ratchet
+that has moved past it. A row is never dropped for a failure that says nothing
+about the payload — a sender we cannot look up yet, a request that did not
+land. Acking on any error at all would rebuild the same dead end with the
+client holding the delete button. Unacked rows are bounded by the per-device
+cap and the retention sweep, so keeping them is the cheap side of the trade.
+
 **Recovery.** If no approved device is available — a reinstall that lost the
 vault, a lost keychain, an account key this device cannot prove — the honest
 outcome is a new account identity: `resetAccountIdentity` mints and publishes a
-fresh master key, and peers see the safety number change. Minting is safe there
+fresh master key, and peers see the safety number change.
+
+It is offered **only** when nothing else can help: not while another device of
+the account is still cross-signed, since that device may hold the key and
+"approve this one from that one" is the answer. Otherwise the single
+destructive action in the whole feature would appear during ordinary
+second-device setup, and taking it would strip the approval from the device
+that was about to help. Unlike the mint path it publishes BEFORE sealing: a
+reset can be replacing a working key, so a failed publish has to leave the
+device exactly as it was. Minting is safe there
 precisely because the *user* asked; the danger §14.2 guards against is a
 *server* provoking it. Encrypted key backup (Matrix's SSSS) is deliberately out
 of scope.

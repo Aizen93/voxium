@@ -11,6 +11,7 @@ import {
   getE2EService,
   type E2EAccountSafetyNumber,
   type E2EDeviceSafetyNumber,
+  type E2EOwnDevices,
 } from '../../services/e2e/e2eService';
 import type { Conversation } from '@voxium/shared';
 
@@ -437,6 +438,34 @@ function SafetyNumberModal({ conversation, onClose }: Props & { onClose: () => v
   );
 }
 
+/**
+ * Should the device manager offer to start a NEW account identity (spec §14.4)?
+ *
+ * Only when nothing else can rescue this device. If any OTHER device of the
+ * account is cross-signed, it may still hold the account key, so the answer is
+ * "approve this device from that one" — not a reset. Without that condition the
+ * destructive action appears during ordinary second-device setup, the most
+ * common state in the whole flow, and taking it strips the approval from the
+ * device that was about to help.
+ */
+export function shouldOfferIdentityReset({
+  ownDevices,
+  canApprove,
+  masterKeyConflict,
+}: {
+  ownDevices: E2EOwnDevices | null;
+  canApprove: boolean;
+  masterKeyConflict: boolean;
+}): boolean {
+  // An account key this device can neither prove nor replace has no other exit.
+  if (masterKeyConflict) return true;
+  if (!ownDevices || canApprove) return false;
+  if (!ownDevices.devices.some((d) => !d.crossSigned)) return false;
+  return !ownDevices.devices.some(
+    (d) => d.deviceId !== ownDevices.currentDeviceId && d.crossSigned
+  );
+}
+
 function DeviceManagerModal({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const user = useAuthStore((s) => s.user);
@@ -511,10 +540,7 @@ function DeviceManagerModal({ onClose }: { onClose: () => void }) {
   };
 
   const hasUnsignedDevice = !!ownDevices?.devices.some((d) => !d.crossSigned);
-  // Nothing on this device can sign, so no device the user still has access to
-  // may be able to either — the only remaining move is a new account identity
-  // (spec §14.4). Also the only exit from a conflicting published key.
-  const canReset = masterKeyConflict || (hasUnsignedDevice && !canApprove);
+  const canReset = shouldOfferIdentityReset({ ownDevices, canApprove, masterKeyConflict });
 
   return createPortal(
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={onClose}>

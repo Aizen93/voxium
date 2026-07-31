@@ -1104,7 +1104,7 @@ e2eRouter.get('/master-transfers', rateLimitE2EShares, async (req: Request, res:
 e2eRouter.post('/master-transfers/ack', rateLimitE2EShares, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
-    const { deviceId: rawDeviceId, ids } = req.body as { deviceId?: unknown; ids?: unknown };
+    const { deviceId: rawDeviceId, ids } = (req.body ?? {}) as { deviceId?: unknown; ids?: unknown };
     const deviceId = validateDeviceId(rawDeviceId);
 
     if (!Array.isArray(ids) || ids.length === 0 || ids.length > E2E_LIMITS.MASTER_TRANSFER_STORE_CAP) {
