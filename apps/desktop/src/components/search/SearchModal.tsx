@@ -32,9 +32,10 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
   const abortRef = useRef<AbortController>(undefined);
 
   const textChannels = channels?.filter((c) => c.type === 'text') ?? [];
-  const isEncryptedDM = useDMStore(
-    (s) => !!conversationId && !!s.conversations.find((c) => c.id === conversationId)?.encryptedAt
-  );
+  // Every DM is encrypted (plan §4.2), so searching one is always a local
+  // search over this device's decrypted history — there is no encrypted/
+  // plaintext conversation distinction left to test for.
+  const isEncryptedDM = !!conversationId;
 
   // Auto-focus input + cleanup in-flight requests on unmount
   useEffect(() => {
@@ -64,16 +65,13 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
       return;
     }
 
-    // E2E conversations: the server only holds ciphertext, so search runs
-    // over this device's locally decrypted history instead (spec §9)
-    const conversation = conversationId
-      ? useDMStore.getState().conversations.find((c) => c.id === conversationId)
-      : undefined;
-    if (conversation?.encryptedAt) {
+    // DMs: the server only ever holds ciphertext, so search runs over this
+    // device's locally decrypted history instead (spec §9)
+    if (conversationId) {
       setIsSearching(true);
       try {
         const { searchEncryptedHistory } = await import('../../services/e2e/dmCrypto');
-        const local = await searchEncryptedHistory(conversationId!, searchQuery);
+        const local = await searchEncryptedHistory(conversationId, searchQuery);
         setResults(local);
         setHasMore(false);
         setHasSearched(true);
@@ -95,11 +93,11 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
       if (beforeCursor) params.set('before', beforeCursor);
       if (channelFilter) params.set('channelId', channelFilter);
 
-      const url = serverId
-        ? `/search/servers/${serverId}/messages?${params}`
-        : `/search/dm/${conversationId}/messages?${params}`;
-
-      const { data } = await api.get(url, { signal: controller.signal });
+      // Only server channels reach here — the DM branch above returned already
+      const { data } = await api.get(
+        `/search/servers/${serverId}/messages?${params}`,
+        { signal: controller.signal }
+      );
 
       if (controller.signal.aborted) return;
 

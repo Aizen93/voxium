@@ -31,19 +31,24 @@ test.describe('DM flow: friend request -> accept -> message', () => {
     // Wait for DM chat area — look for the textarea
     await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });
 
+    // === User B: Open in second browser context ===
+    // Before A can send, not after. Every DM is encrypted now, so a recipient
+    // who has never opened the app has published no device to encrypt to —
+    // there is nowhere for the message to go, and the client says so rather
+    // than pretending it sent. Opening B's client first is what registers it.
+    const context2 = await browser.newContext();
+    const page2 = await context2.newPage();
+    await injectAuth(page2, dataB);
+    await expect(page2.getByRole('heading', { name: 'Direct Messages' }).first()).toBeVisible({ timeout: 20_000 });
+
     // Send a message
     const msgA = `Hey from A! ${Date.now()}`;
     await page.locator('textarea').fill(msgA);
     await page.keyboard.press('Enter');
-    await expect(page.locator('.leading-relaxed', { hasText: msgA })).toBeVisible({ timeout: 10_000 });
-
-    // === User B: Open in second browser context ===
-    const context2 = await browser.newContext();
-    const page2 = await context2.newPage();
-    await injectAuth(page2, dataB);
+    await expect(page.locator('.leading-relaxed', { hasText: msgA })).toBeVisible({ timeout: 15_000 });
 
     // User B should see the DM conversation in the sidebar
-    await expect(page2.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+    await expect(page2.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
     await page2.getByText(userA.username, { exact: true }).first().click();
 
     // User B should see User A's message

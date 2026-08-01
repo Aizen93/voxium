@@ -227,8 +227,10 @@ export interface Conversation {
   user2Id: string;
   participant: MessageAuthor; // the OTHER user (populated at query time)
   lastMessage: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string } | null;
-  /** E2E DMs: set once encryption is enabled (irreversible). */
-  encryptedAt?: string | null;
+  /** E2E DMs: when this conversation started being encrypted. Always set —
+   *  conversations are born encrypted (docs/e2e-always-on-plan.md §4.2), so
+   *  this is status, never a flag to branch "is encryption on?" against. */
+  encryptedAt: string;
   createdAt: string;
 }
 

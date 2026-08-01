@@ -34,14 +34,15 @@ const OTHER_PEER_ID = 'peer-2';
 const E2E_INITIAL = useE2EStore.getState();
 const AUTH_INITIAL = useAuthStore.getState();
 
-const conversation = (encrypted: boolean, peerId = PEER_ID): Conversation =>
+const conversation = (peerId = PEER_ID): Conversation =>
   ({
     id: 'conv-1',
     user1Id: 'me',
     user2Id: peerId,
     participant: { id: peerId, username: 'peer', displayName: 'Peer', avatarUrl: null },
     lastMessage: null,
-    encryptedAt: encrypted ? '2026-01-01T00:00:00.000Z' : null,
+    // always set: conversations are born encrypted (plan §4.2)
+    encryptedAt: '2026-01-01T00:00:00.000Z',
     createdAt: '2026-01-01T00:00:00.000Z',
   }) as unknown as Conversation;
 
@@ -98,25 +99,28 @@ describe('E2EControls badge state machine', () => {
     // Before initialize() resolves there is no vault and no device list, so any
     // badge we drew would be asserting a trust state we have not checked yet.
     useE2EStore.setState({ ready: false, identityWarnings: { [PEER_ID]: true } });
-    render(conversation(true));
+    render(conversation());
     expect(container.innerHTML).toBe('');
     expect(badge()).toBeNull();
   });
 
   it('has no "unencrypted" state left to show', () => {
-    // Every DM is encrypted since the always-on cutover, so the badge does not
-    // branch on it. A conversation whose encryptedAt has not reached this
-    // client yet must still read as encrypted rather than inviting someone to
-    // turn on something that is already on.
+    // Every DM is encrypted since the always-on cutover, so the badge must not
+    // branch on encryptedAt at all — even a row that somehow arrives without
+    // the field reads as encrypted, rather than inviting someone to turn on
+    // something that is already on. Rendered from a shape the type no longer
+    // permits precisely to prove the field is never consulted.
     useE2EStore.setState({ ready: true });
-    render(conversation(false));
+    const withoutTimestamp = conversation();
+    delete (withoutTimestamp as Partial<Conversation>).encryptedAt;
+    render(withoutTimestamp);
     expect(title()).toBe('e2e.badgeTitle');
     expect(iconState()).toBe('ok');
   });
 
   it('shows the plain encrypted badge when nothing is wrong', () => {
     useE2EStore.setState({ ready: true });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.badgeTitle');
     expect(iconState()).toBe('ok');
   });
@@ -134,7 +138,7 @@ describe('E2EControls badge state machine', () => {
       ownDeviceWarnings: ['dev-y'],
       newDeviceWarnings: { [PEER_ID]: ['dev-n'] },
     });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.masterConflictBadgeTitle');
     expect(iconState()).toBe('warning');
   });
@@ -149,7 +153,7 @@ describe('E2EControls badge state machine', () => {
       masterKeyConflict: true,
       thisDeviceUnsigned: true,
     });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.identityChangedBadgeTitle');
     expect(iconState()).toBe('warning');
   });
@@ -165,7 +169,7 @@ describe('E2EControls badge state machine', () => {
       ownDeviceWarnings: ['dev-y'],
       newDeviceWarnings: { [PEER_ID]: ['dev-n'] },
     });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.thisDeviceUnsignedBadgeTitle');
     expect(iconState()).toBe('warning');
   });
@@ -179,7 +183,7 @@ describe('E2EControls badge state machine', () => {
       ownDeviceWarnings: ['dev-y'],
       newDeviceWarnings: { [PEER_ID]: ['dev-n'] },
     });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.unsignedDeviceBadgeTitle');
     expect(iconState()).toBe('warning');
   });
@@ -193,7 +197,7 @@ describe('E2EControls badge state machine', () => {
       ownDeviceWarnings: ['dev-y'],
       newDeviceWarnings: { [PEER_ID]: ['dev-n'] },
     });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.unsignedDeviceBadgeTitle');
     expect(iconState()).toBe('warning');
   });
@@ -204,14 +208,14 @@ describe('E2EControls badge state machine', () => {
       ownDeviceWarnings: ['dev-y'],
       newDeviceWarnings: { [PEER_ID]: ['dev-n'] },
     });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.ownDeviceBadgeTitle');
     expect(iconState()).toBe('warning');
   });
 
   it('reports a peer new-device notice when nothing else is flagged', () => {
     useE2EStore.setState({ ready: true, newDeviceWarnings: { [PEER_ID]: ['dev-n'] } });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.newDeviceBadgeTitle');
     expect(iconState()).toBe('warning');
   });
@@ -222,7 +226,7 @@ describe('E2EControls badge state machine', () => {
     // number", so the one state that most deserves a second look read as
     // confirmation that everything was fine.
     useE2EStore.setState({ ready: true, identityWarnings: { [PEER_ID]: true } });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.identityChangedBadgeTitle');
     expect(iconState()).toBe('warning');
   });
@@ -235,7 +239,7 @@ describe('E2EControls badge state machine', () => {
       identityWarnings: { [PEER_ID]: true },
       newDeviceWarnings: { [PEER_ID]: ['dev-n'] },
     });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.identityChangedBadgeTitle');
     expect(iconState()).toBe('warning');
   });
@@ -249,7 +253,7 @@ describe('E2EControls badge state machine', () => {
       newDeviceWarnings: { [OTHER_PEER_ID]: ['dev-n'] },
       unsignedDeviceWarnings: { [OTHER_PEER_ID]: ['dev-p'] },
     });
-    render(conversation(true));
+    render(conversation());
     expect(title()).toBe('e2e.badgeTitle');
     expect(iconState()).toBe('ok');
   });
@@ -265,7 +269,7 @@ describe('E2EControls badge state machine', () => {
       thisDeviceUnsigned: true,
       masterKeyConflict: true,
     });
-    render(conversation(false));
+    render(conversation());
     expect(title()).toBe('e2e.masterConflictBadgeTitle');
     expect(badge()?.getAttribute('aria-label')).toBe('e2e.masterConflictBadgeTitle');
     expect(iconState()).toBe('warning');
@@ -276,7 +280,7 @@ describe('E2EControls badge state machine', () => {
     // screen-reader user was told the conversation was encrypted while the
     // badge was amber over a conflict. An alert nobody can hover is not alert.
     useE2EStore.setState({ ready: true, masterKeyConflict: true });
-    render(conversation(true));
+    render(conversation());
     expect(badge()?.getAttribute('aria-label')).toBe('e2e.masterConflictBadgeTitle');
     expect(title()).toBe('e2e.masterConflictBadgeTitle');
     expect(iconState()).toBe('warning');
@@ -302,7 +306,7 @@ describe('E2EControls badge state machine', () => {
       resetStores();
       useE2EStore.setState({ ready: true });
       useE2EStore.setState(patch);
-      render(conversation(true));
+      render(conversation());
       expect(iconState(), `${label} left the badge looking safe`).toBe('warning');
     }
   });

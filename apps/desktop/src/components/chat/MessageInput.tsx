@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ChangeEvent, type DragEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
-import { useDMStore } from '../../stores/dmStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
@@ -48,10 +47,11 @@ function getFileIcon(mimeType: string) {
 export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
   const { t } = useTranslation();
   const { sendMessage, sendDMMessage, replyingTo, clearReplyingTo } = useChatStore();
-  // E2E conversations encrypt attachment bytes client-side before upload
-  const isEncryptedDM = useDMStore((s) =>
-    !!conversationId && !!s.conversations.find((c) => c.id === conversationId)?.encryptedAt
-  );
+  // Every DM is encrypted (plan §4.2), so "this is a DM" IS "encrypt this":
+  // attachment bytes are encrypted client-side before upload. Deliberately not
+  // gated on the conversation being in the store — a not-yet-loaded row must
+  // not silently downgrade a send the server would reject anyway.
+  const isEncryptedDM = !!conversationId;
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -284,7 +284,6 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         await sendDMMessage(
           conversationId,
           trimmed,
-          isEncryptedDM || !attachments.length ? undefined : attachments,
           e2eAttachments?.length ? e2eAttachments : undefined
         );
       } else if (channelId) {
