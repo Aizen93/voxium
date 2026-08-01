@@ -1076,6 +1076,7 @@
     "linkConfirmTitle": "이 기기를 승인할까요?",
     "linkConfirmDevice": "기기 {{id}} · {{date}}에 등록됨",
     "linkConfirmExplainer": "승인하면 이 기기에 계정 키가 전달됩니다. 암호화된 대화를 읽고 다른 기기를 승인할 수 있게 됩니다. 눈앞에 있는 기기일 때만 계속하세요.",
-    "linkConfirmAction": "기기 승인"
+    "linkConfirmAction": "기기 승인",
+    "devicesNotReady": "이 기기에서 암호화를 설정하는 중이라 아직 기기 목록을 보여줄 수 없습니다. 잠시 후 다시 확인하세요."
   }
 }

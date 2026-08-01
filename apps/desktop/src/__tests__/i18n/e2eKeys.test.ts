@@ -13,7 +13,15 @@ import { fileURLToPath } from 'node:url';
 // The E2E surface is the worst place for it to happen: these strings are the
 // only explanation a user ever gets for an unsigned device or a key conflict.
 
-const SOURCE = fileURLToPath(new URL('../../components/dm/E2EControls.tsx', import.meta.url));
+// BOTH halves of the E2E surface. The account-level UI (devices, linking,
+// recovery key, identity reset) moved out of the DM modal into Settings →
+// Security (plan §4.5) and took most of these strings with it — scanning only
+// the file it left behind would quietly stop covering exactly the keys that
+// relocated, which is the failure this test exists to prevent.
+const SOURCES = [
+  fileURLToPath(new URL('../../components/dm/E2EControls.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/settings/E2EDevicesSection.tsx', import.meta.url)),
+];
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
 
 /**
@@ -27,12 +35,14 @@ const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url)
  * The lookbehind rejects identifiers that merely END in `t` (`split(`,
  * `useEffect(`) and member calls (`i18n.t(`).
  */
-function extractKeys(source: string): string[] {
+function extractKeys(sources: string[]): string[] {
   const keys = new Set<string>();
-  const called = /(?<![A-Za-z0-9_$.])t\(\s*'([^']*)'/g;
-  for (let m = called.exec(source); m; m = called.exec(source)) keys.add(m[1]);
-  const bare = /'(e2e\.[A-Za-z0-9_]+)'/g;
-  for (let m = bare.exec(source); m; m = bare.exec(source)) keys.add(m[1]);
+  for (const source of sources) {
+    const called = /(?<![A-Za-z0-9_$.])t\(\s*'([^']*)'/g;
+    for (let m = called.exec(source); m; m = called.exec(source)) keys.add(m[1]);
+    const bare = /'(e2e\.[A-Za-z0-9_]+)'/g;
+    for (let m = bare.exec(source); m; m = bare.exec(source)) keys.add(m[1]);
+  }
   return [...keys].sort();
 }
 
@@ -46,8 +56,7 @@ function lookup(bundle: unknown, key: string): unknown {
     );
 }
 
-const source = readFileSync(SOURCE, 'utf8');
-const keys = extractKeys(source);
+const keys = extractKeys(SOURCES.map((file) => readFileSync(file, 'utf8')));
 // Enumerated, never hardcoded: a locale added without translations must fail
 // here rather than ship untranslated.
 const localeFiles = readdirSync(LOCALE_DIR).filter((f) => f.endsWith('.json'));
@@ -61,13 +70,17 @@ const e2eKeysOf = (bundle: Record<string, unknown>): string[] => {
   return section && typeof section === 'object' ? Object.keys(section as object) : [];
 };
 
-describe('E2EControls translation keys', () => {
+describe('E2E surface translation keys', () => {
   it('finds the translation calls it is supposed to check', () => {
     // Guard against the extraction regex silently matching nothing after a
     // refactor — a vacuous test here would hide every missing translation.
     expect(keys.length).toBeGreaterThan(30);
+    // One key from each file, so a SOURCES entry that stops resolving (renamed,
+    // moved again) fails here instead of shrinking the coverage in silence.
     expect(keys).toContain('e2e.masterConflictBadgeTitle');
     expect(keys).toContain('e2e.thisDeviceUnsignedBadgeTitle');
+    expect(keys).toContain('e2e.resetIdentityConfirm');
+    expect(keys).toContain('e2e.linkConfirmExplainer');
     expect(locales.length).toBeGreaterThan(1);
   });
 

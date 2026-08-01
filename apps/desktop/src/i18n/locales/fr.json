@@ -1076,6 +1076,7 @@
     "linkConfirmTitle": "Approuver cet appareil ?",
     "linkConfirmDevice": "Appareil {{id}} · enregistré le {{date}}",
     "linkConfirmExplainer": "L'approbation transmet la clé de votre compte à cet appareil : il pourra lire vos conversations chiffrées et approuver d'autres appareils. Ne continuez que s'il s'agit de l'appareil devant vous.",
-    "linkConfirmAction": "Approuver l'appareil"
+    "linkConfirmAction": "Approuver l'appareil",
+    "devicesNotReady": "Le chiffrement est encore en cours de configuration sur cet appareil : vos appareils ne peuvent pas encore être listés. Revenez dans un instant."
   }
 }

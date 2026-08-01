@@ -1083,6 +1083,7 @@
     "linkConfirmTitle": "Approve this device?",
     "linkConfirmDevice": "Device {{id}} · registered {{date}}",
     "linkConfirmExplainer": "Approving hands this device your account key: it will be able to read your encrypted conversations and approve further devices. Only continue if this is the device in front of you.",
-    "linkConfirmAction": "Approve device"
+    "linkConfirmAction": "Approve device",
+    "devicesNotReady": "Encryption is still setting up on this device, so your devices can't be listed yet. Check back in a moment."
   }
 }

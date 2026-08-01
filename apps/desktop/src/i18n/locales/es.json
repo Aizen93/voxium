@@ -1076,6 +1076,7 @@
     "linkConfirmTitle": "¿Aprobar este dispositivo?",
     "linkConfirmDevice": "Dispositivo {{id}} · registrado el {{date}}",
     "linkConfirmExplainer": "Al aprobarlo, este dispositivo recibe la clave de tu cuenta: podrá leer tus conversaciones cifradas y aprobar otros dispositivos. Continúa solo si es el dispositivo que tienes delante.",
-    "linkConfirmAction": "Aprobar dispositivo"
+    "linkConfirmAction": "Aprobar dispositivo",
+    "devicesNotReady": "El cifrado aún se está configurando en este dispositivo, así que todavía no se pueden mostrar tus dispositivos. Vuelve en un momento."
   }
 }

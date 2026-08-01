@@ -1076,6 +1076,7 @@
     "linkConfirmTitle": "この端末を承認しますか？",
     "linkConfirmDevice": "端末 {{id}} · 登録日: {{date}}",
     "linkConfirmExplainer": "承認すると、この端末にアカウント鍵が渡されます。暗号化された会話を読み、他の端末を承認できるようになります。目の前にある端末の場合のみ続行してください。",
-    "linkConfirmAction": "端末を承認"
+    "linkConfirmAction": "端末を承認",
+    "devicesNotReady": "このデバイスでは暗号化の設定がまだ続いているため、デバイス一覧をまだ表示できません。少ししてからご確認ください。"
   }
 }

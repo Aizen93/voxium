@@ -316,7 +316,7 @@ this out loud before starting.
 | 1 | ~~Keys at signup~~ → name the not-ready state | sending to an account with no devices explains itself (**done**) |
 | 2 | ~~Message-key backup~~ | a linked device reads history it was never sent (**done**, spec §16) |
 | 3 | ~~Device linking by code~~ | a second device works without touching a device list (**done**, spec §17) |
-| 4 | UI to Settings → Security | nothing account-level is administered from a DM |
+| 4 | ~~UI to Settings → Security~~ | nothing account-level is administered from a DM (**done**, spec §18) |
 | 5 | Min client version | tail of old clients is acceptable |
 | 6 | Cutover | §7 verification passes |
 | 7 | Delete the opt-in code | no reference to `encryptedAt` as a choice remains |

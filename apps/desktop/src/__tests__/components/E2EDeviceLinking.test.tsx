@@ -43,7 +43,7 @@ vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
   return { ...actual, getE2EService: () => ({ linkingCode }) };
 });
 
-import { DeviceManagerModal, deviceLinkingMode } from '../../components/dm/E2EControls';
+import { E2EDevicesSection, deviceLinkingMode } from '../../components/settings/E2EDevicesSection';
 import {
   useE2EStore,
   E2ELinkingCodeUnknownError,
@@ -161,11 +161,14 @@ afterEach(() => {
 
 function render() {
   act(() => {
-    root.render(<DeviceManagerModal onClose={() => {}} />);
+    root.render(<E2EDevicesSection />);
   });
 }
 
-/** The modal is portalled to document.body, so every query starts there. */
+/**
+ * The section renders inside a container attached to document.body, and the
+ * recovery-key dialog still portals straight to it, so every query starts there.
+ */
 const find = (selector: string) => document.body.querySelector(selector);
 const text = () => document.body.textContent ?? '';
 const input = () => find('[data-testid="e2e-link-code-input"]') as HTMLInputElement | null;
@@ -200,6 +203,20 @@ async function enterCode(code = CODE) {
 }
 
 describe('deviceLinkingMode', () => {
+  it('says the panel is not ready instead of showing an empty device list', () => {
+    // The DM badge used to be the only way in, and it renders nothing until
+    // the store is ready. In Settings the tab is always reachable, so without
+    // this the heading sits over an empty list — which reads as "you have no
+    // devices" rather than "ask again in a moment".
+    useE2EStore.setState({ ready: false, ownDevices: null });
+    render();
+
+    expect(text()).toContain('e2e.devicesNotReady');
+    // …and none of the account-level actions are offered in that state
+    expect(text()).not.toContain('e2e.linkTitle');
+    expect(text()).not.toContain('e2e.resetIdentityAction');
+  });
+
   it('shows a code on a device that is not approved yet', () => {
     expect(deviceLinkingMode({ thisDeviceUnsigned: true, canApprove: false })).toBe('show');
   });
@@ -221,7 +238,7 @@ describe('deviceLinkingMode', () => {
   });
 });
 
-describe('DeviceManagerModal — the device being linked', () => {
+describe('E2EDevicesSection — the device being linked', () => {
   it('shows this device its own linking code', () => {
     unapprovedDevice();
     render();
@@ -276,7 +293,7 @@ describe('DeviceManagerModal — the device being linked', () => {
   });
 });
 
-describe('DeviceManagerModal — approving by code', () => {
+describe('E2EDevicesSection — approving by code', () => {
   it('looks a code up and stops, naming the device before anything happens', async () => {
     approvedDevice();
     render();
@@ -370,7 +387,7 @@ describe('DeviceManagerModal — approving by code', () => {
   });
 });
 
-describe('DeviceManagerModal — a code that names nothing', () => {
+describe('E2EDevicesSection — a code that names nothing', () => {
   it('says so specifically, approves nothing, and leaves the code alone', async () => {
     linkDevice.mockRejectedValueOnce(new E2ELinkingCodeUnknownError(CODE));
     approvedDevice();
@@ -416,7 +433,7 @@ describe('DeviceManagerModal — a code that names nothing', () => {
   });
 });
 
-describe('DeviceManagerModal — linking comes before the recovery paths', () => {
+describe('E2EDevicesSection — linking comes before the recovery paths', () => {
   /**
    * Order is the message. On an unapproved device all three sections offer a
    * way forward, and they are not equal: linking costs nothing and needs only

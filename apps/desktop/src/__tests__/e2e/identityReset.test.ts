@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldOfferIdentityReset } from '../../components/dm/E2EControls';
+import { shouldOfferIdentityReset } from '../../components/settings/E2EDevicesSection';
 import type { E2EOwnDevices } from '../../services/e2e/e2eService';
 
 // Who is offered "start a new account identity" (spec §14.4)?

@@ -19,7 +19,7 @@ vi.mock('../../stores/toastStore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../stores/toastStore')>();
   return { ...actual, toast: { ...actual.toast, success: toastSuccess, error: toastError } };
 });
-// The modal asks the service for this device's linking code (§4.3). Stubbed
+// The section asks the service for this device's linking code (§4.3). Stubbed
 // for the same reason everything else here is: no real crypto service, and no
 // wasm engine, behind a render test. The code has its own tests.
 vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
@@ -27,7 +27,7 @@ vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
   return { ...actual, getE2EService: () => ({ linkingCode: () => 'WXYZ-2345' }) };
 });
 
-import { DeviceManagerModal, shouldOfferKeyBackupRestore } from '../../components/dm/E2EControls';
+import { E2EDevicesSection, shouldOfferKeyBackupRestore } from '../../components/settings/E2EDevicesSection';
 import { useE2EStore } from '../../stores/e2eStore';
 import { useAuthStore } from '../../stores/authStore';
 import { E2ERecoveryKeyFormatError, type E2EOwnDevices } from '../../services/e2e/e2eService';
@@ -111,11 +111,14 @@ afterEach(() => {
 
 function render() {
   act(() => {
-    root.render(<DeviceManagerModal onClose={() => {}} />);
+    root.render(<E2EDevicesSection />);
   });
 }
 
-/** The modal is portalled to document.body, so every query starts there. */
+/**
+ * The section renders inside a container attached to document.body, and the
+ * recovery-key dialog still portals straight to it, so every query starts there.
+ */
 const find = (selector: string) => document.body.querySelector(selector);
 const text = () => document.body.textContent ?? '';
 
@@ -157,7 +160,7 @@ describe('shouldOfferKeyBackupRestore', () => {
   });
 });
 
-describe('DeviceManagerModal — setting up account recovery', () => {
+describe('E2EDevicesSection — setting up account recovery', () => {
   it('says nothing about recovery until the backup state has been read', () => {
     useE2EStore.setState({ canApprove: true, ownDevices: ownDevices(), keyBackup: null });
     render();
@@ -242,7 +245,7 @@ describe('DeviceManagerModal — setting up account recovery', () => {
   });
 });
 
-describe('DeviceManagerModal — an existing backup', () => {
+describe('E2EDevicesSection — an existing backup', () => {
   const withBackup = () => {
     useE2EStore.setState({
       canApprove: true,
@@ -288,7 +291,7 @@ describe('DeviceManagerModal — an existing backup', () => {
   });
 });
 
-describe('DeviceManagerModal — restoring from a recovery key', () => {
+describe('E2EDevicesSection — restoring from a recovery key', () => {
   /** A device that cannot approve: the only one with anything to restore. */
   const stranded = (exists: boolean) => {
     useE2EStore.setState({
@@ -456,7 +459,7 @@ describe('DeviceManagerModal — restoring from a recovery key', () => {
   });
 });
 
-describe('DeviceManagerModal — recovery before the last resort', () => {
+describe('E2EDevicesSection — recovery before the last resort', () => {
   /**
    * Ordering is the whole point. Reset mints a NEW account key: every contact
    * sees the safety number change and has to verify again, and it deletes the
