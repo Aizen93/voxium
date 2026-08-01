@@ -17,7 +17,6 @@ interface DMState {
   openDM: (userId: string) => Promise<string>;
   addConversation: (conversation: Conversation) => void;
   updateLastMessage: (conversationId: string, message: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string }) => void;
-  handleEncryptionEnabled: (conversationId: string, encryptedAt: string) => void;
   incrementDMUnread: (conversationId: string) => void;
   clearDMUnread: (conversationId: string) => void;
   initDMUnreadCounts: (unreads: DMUnreadCount[]) => void;
@@ -132,13 +131,6 @@ export const useDMStore = create<DMState>((set, get) => ({
     });
   },
 
-  handleEncryptionEnabled: (conversationId: string, encryptedAt: string) => {
-    set((state) => ({
-      conversations: state.conversations.map((c) =>
-        c.id === conversationId ? { ...c, encryptedAt } : c
-      ),
-    }));
-  },
 
   updateLastMessage: (conversationId: string, message: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string }) => {
     set((state) => {

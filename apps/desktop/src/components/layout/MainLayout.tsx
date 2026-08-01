@@ -478,9 +478,6 @@ export function MainLayout() {
       dmConversationDeleted: ({ conversationId }: { conversationId: string }) => {
         useDMStore.getState().handleConversationDeleted(conversationId);
       },
-      dmEncryptionEnabled: ({ conversationId, encryptedAt }: { conversationId: string; encryptedAt: string; enabledBy: string }) => {
-        useDMStore.getState().handleEncryptionEnabled(conversationId, encryptedAt);
-      },
       friendRequestReceived: (data: { friendship: Friendship }) => {
         useFriendStore.getState().handleRequestReceived(data);
       },
@@ -680,7 +677,6 @@ export function MainLayout() {
       ['dm:voice:signal', handlers.dmVoiceSignal],
       ['dm:voice:ended', handlers.dmVoiceEnded],
       ['dm:conversation:deleted', handlers.dmConversationDeleted],
-      ['dm:encryption_enabled', handlers.dmEncryptionEnabled],
       ['friend:request_received', handlers.friendRequestReceived],
       ['friend:request_accepted', handlers.friendRequestAccepted],
       ['friend:removed', handlers.friendRemoved],
