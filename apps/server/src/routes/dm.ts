@@ -3,7 +3,7 @@ import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
@@ -273,86 +273,49 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;
-    const conversation = await getConversationOrThrow(conversationId, userId);
+    await getConversationOrThrow(conversationId, userId);
     const wantsEncrypted = req.body.encrypted === true;
-    let content: string;
 
-    // Validate attachments
+    // Every conversation is born encrypted (plan §4.2 — encrypted_at is NOT
+    // NULL), so a DM is always an opaque ciphertext envelope and there is no
+    // plaintext path left to fall back to. An un-updated client must get a
+    // hard error, not a silent downgrade (docs/e2e-dm-spec.md §6).
+    if (!wantsEncrypted) {
+      throw new BadRequestError('This conversation is end-to-end encrypted; update your client to send messages');
+    }
+
+    // E2E attachments (spec §13): the server stores opaque AES-GCM blobs. Real
+    // fileName/mimeType/size live inside the message ciphertext — only the S3
+    // key and the ciphertext size are validated here.
     const attachments = req.body.attachments as Array<{
-      s3Key: string; fileName: string; fileSize: number; mimeType: string;
+      s3Key: string; fileSize: number; mimeType: string;
     }> | undefined;
 
-    if (conversation.encryptedAt) {
-      // E2E conversation: content is an opaque ciphertext envelope. NEVER fall
-      // back to plaintext — an old client must get a hard error, not a silent
-      // downgrade (docs/e2e-dm-spec.md §6).
-      if (!wantsEncrypted) {
-        throw new BadRequestError('This conversation is end-to-end encrypted; update your client to send messages');
+    if (attachments !== undefined) {
+      if (!Array.isArray(attachments)) throw new BadRequestError('attachments must be an array');
+      if (attachments.length === 0 || attachments.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE) {
+        throw new BadRequestError(`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments`);
       }
-      if (attachments !== undefined) {
-        // E2E attachments (spec §13): the server stores opaque AES-GCM blobs.
-        // Real fileName/mimeType/size live inside the message ciphertext —
-        // only the S3 key and the ciphertext size are validated here.
-        if (!Array.isArray(attachments)) throw new BadRequestError('attachments must be an array');
-        if (attachments.length === 0 || attachments.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE) {
-          throw new BadRequestError(`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments`);
+      const expectedPrefix = `attachments/dm-${conversationId}/`;
+      const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
+      for (const a of attachments) {
+        if (!a || typeof a !== 'object') throw new BadRequestError('Invalid attachment');
+        if (typeof a.s3Key !== 'string' || typeof a.fileSize !== 'number') {
+          throw new BadRequestError('Invalid attachment fields');
         }
-        const expectedPrefix = `attachments/dm-${conversationId}/`;
-        const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
-        for (const a of attachments) {
-          if (!a || typeof a !== 'object') throw new BadRequestError('Invalid attachment');
-          if (typeof a.s3Key !== 'string' || typeof a.fileSize !== 'number') {
-            throw new BadRequestError('Invalid attachment fields');
-          }
-          if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
-          if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this conversation');
-          if (a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
-          if (a.mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be opaque');
-        }
-      }
-      if (!parseE2EEnvelope(req.body.content)) {
-        throw new BadRequestError('Invalid encrypted message envelope');
-      }
-      // Stored verbatim: sanitizeText would corrupt ciphertext, and the
-      // envelope was already strictly validated above.
-      content = req.body.content as string;
-    } else {
-      // Unreachable since the always-on cutover: encrypted_at is NOT NULL, so
-      // every conversation takes the branch above. Kept as a belt-and-braces
-      // guard for the release that still has to tolerate an old client; the
-      // plan removes the plaintext send path outright one release later
-      // (§5, §7 step 8).
-      if (wantsEncrypted) {
-        throw new BadRequestError('Conversation is not end-to-end encrypted');
-      }
-      content = sanitizeText(req.body.content ?? '');
-
-      if (attachments) {
-        if (!Array.isArray(attachments)) throw new BadRequestError('attachments must be an array');
-        if (attachments.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE) {
-          throw new BadRequestError(`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments`);
-        }
-        const expectedPrefix = `attachments/dm-${conversationId}/`;
-        for (const a of attachments) {
-          if (!a || typeof a !== 'object') throw new BadRequestError('Invalid attachment');
-          if (typeof a.s3Key !== 'string' || typeof a.fileName !== 'string' || typeof a.fileSize !== 'number' || typeof a.mimeType !== 'string') {
-            throw new BadRequestError('Invalid attachment fields');
-          }
-          if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
-          if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this conversation');
-          if (a.fileSize <= 0 || a.fileSize > getMaxAttachmentSize(a.mimeType)) throw new BadRequestError('Invalid attachment size');
-          if (!ALLOWED_ATTACHMENT_TYPES.includes(a.mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) throw new BadRequestError('Invalid file type');
-        }
-      }
-
-      // Allow empty content if attachments are present
-      if (!attachments?.length) {
-        const contentErr = validateMessageContent(content);
-        if (contentErr) throw new BadRequestError(contentErr);
-      } else if (content.length > LIMITS.MESSAGE_MAX) {
-        throw new BadRequestError(`Message must be at most ${LIMITS.MESSAGE_MAX} characters`);
+        if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
+        if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this conversation');
+        if (a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
+        if (a.mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be opaque');
       }
     }
+
+    if (!parseE2EEnvelope(req.body.content)) {
+      throw new BadRequestError('Invalid encrypted message envelope');
+    }
+    // Stored verbatim: sanitizeText would corrupt ciphertext, and the envelope
+    // was already strictly validated above.
+    const content = req.body.content as string;
 
     // Validate optional replyToId
     const replyToId = req.body.replyToId as string | undefined;
@@ -366,7 +329,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
       const msg = await tx.message.create({
         data: {
           content,
-          encrypted: wantsEncrypted,
+          encrypted: true,
           conversationId,
           authorId: userId,
           ...(replyToId && { replyToId }),
@@ -379,7 +342,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
             s3Key: a.s3Key,
             // never trust/store a client-supplied name for E2E blobs — the
             // real name lives inside the message ciphertext
-            fileName: wantsEncrypted ? E2E_ATTACHMENT_NAME : a.fileName,
+            fileName: E2E_ATTACHMENT_NAME,
             fileSize: a.fileSize,
             mimeType: a.mimeType,
           })),
@@ -428,26 +391,24 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
     const message = await prisma.message.findUnique({ where: { id: messageId } });
     if (!message || message.conversationId !== conversationId) throw new NotFoundError('Message');
     if (message.authorId !== userId) throw new ForbiddenError('You can only edit your own messages');
+    // A system row ("Voice call started") carries a real participant as its
+    // author, so the ownership check above passes for it. Without this, that
+    // row's content could be edited into arbitrary text that still renders
+    // with system styling — words the app appears to be saying itself.
+    if (message.type === 'system') throw new ForbiddenError('System messages cannot be edited');
 
-    // An edit must keep the message's encryption state: encrypted messages
-    // take a fresh ciphertext envelope (a new ratchet message — clients
-    // version their plaintext cache by editedAt); plaintext messages (incl.
-    // pre-encryption history) stay plaintext.
-    let content: string;
-    if (message.encrypted) {
-      if (!wantsEncrypted) {
-        throw new BadRequestError('This message is end-to-end encrypted; update your client to edit it');
-      }
-      if (!parseE2EEnvelope(req.body.content)) {
-        throw new BadRequestError('Invalid encrypted message envelope');
-      }
-      content = req.body.content as string; // verbatim — never sanitized
-    } else {
-      if (wantsEncrypted) throw new BadRequestError('Message is not end-to-end encrypted');
-      content = sanitizeText(req.body.content ?? '');
-      const contentErr = validateMessageContent(content);
-      if (contentErr) throw new BadRequestError(contentErr);
+    // Every editable DM is encrypted: user messages always are after the
+    // cutover, and the only plaintext DM rows are the `type: 'system'` voice
+    // notices refused above. So an edit is always a fresh ciphertext envelope
+    // — a new ratchet message, which is why clients version their plaintext
+    // cache by editedAt.
+    if (!wantsEncrypted) {
+      throw new BadRequestError('This message is end-to-end encrypted; update your client to edit it');
     }
+    if (!parseE2EEnvelope(req.body.content)) {
+      throw new BadRequestError('Invalid encrypted message envelope');
+    }
+    const content = req.body.content as string; // verbatim — never sanitized
 
     const updated = await prisma.message.update({
       where: { id: messageId },

@@ -277,6 +277,11 @@ messageRouter.patch('/:messageId', rateLimitInteract, async (req: Request<{ chan
     if (!message) throw new NotFoundError('Message');
     if (message.channelId !== channelId) throw new NotFoundError('Message');
     if (message.authorId !== req.user!.userId) throw new ForbiddenError('You can only edit your own messages');
+    // A system row ("Voice call started") carries a real participant as its
+    // author, so the ownership check above passes for it. Without this, that
+    // row's content could be edited into arbitrary text that still renders
+    // with system styling — words the app appears to be saying itself.
+    if (message.type === 'system') throw new ForbiddenError('System messages cannot be edited');
 
     // Verify server membership
     const membership = await prisma.serverMember.findUnique({

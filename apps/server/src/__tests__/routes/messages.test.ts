@@ -557,6 +557,24 @@ describe('Message Routes', () => {
       expect(res.body.error).toContain('own messages');
     });
 
+    it('refuses to edit a system message', async () => {
+      // System rows ("X joined the server") are authored by a real user, so
+      // the ownership check passes for them. Rewriting one would put arbitrary
+      // text on screen with system styling — words the app appears to be
+      // saying itself.
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeMockMessage({ type: 'system' }));
+
+      const res = await request(app)
+        .patch('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'never happened' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/system messages cannot be edited/i);
+      expect(prismaMock.message.update).not.toHaveBeenCalled();
+    });
+
     it('returns 400 with empty content', async () => {
       const token = makeToken();
 

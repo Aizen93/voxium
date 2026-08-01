@@ -87,24 +87,25 @@ export async function decryptMessagesForDisplay(messages: Message[]): Promise<Me
 }
 
 /**
- * Prepare an outgoing DM: returns the ciphertext envelope (and the exact raw
- * plaintext that was encrypted, for the sender's cache) when the conversation
- * is E2E, or null for plaintext conversations. Attachment metas — real
- * names/keys — go inside the ciphertext, never in the returned envelope's
- * surroundings. Identity changes are flagged for the UI and rethrown — the
- * message must NOT be sent.
+ * Prepare an outgoing DM: returns the ciphertext envelope and the exact raw
+ * plaintext that was encrypted (for the sender's cache). Every conversation is
+ * encrypted, so there is no "plaintext conversation" result — the only way this
+ * cannot produce ciphertext is the conversation not being loaded, which is a
+ * fault, not a fallback. Attachment metas — real names/keys — go inside the
+ * ciphertext, never in the returned envelope's surroundings. Identity changes
+ * are flagged for the UI and rethrown — the message must NOT be sent.
  */
 export async function prepareOutgoingDM(
   conversationId: string,
   text: string,
   attachments?: E2EAttachmentMeta[]
-): Promise<{ content: string; plaintext: string } | null> {
+): Promise<{ content: string; plaintext: string }> {
   const { useDMStore } = await import('../../stores/dmStore');
   const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
-  if (!conversation?.encryptedAt) {
-    if (attachments?.length) throw new Error('E2E attachments on a plaintext conversation');
-    return null;
-  }
+  // The peer id drives the session fanout, so a conversation the store has not
+  // loaded cannot be encrypted to anyone — and must not degrade to a plaintext
+  // send the server would reject anyway (plan §4.2).
+  if (!conversation) throw new Error(`Conversation ${conversationId} is not loaded`);
 
   const userId = await currentUserId();
   if (!userId) throw new Error('Not authenticated');
