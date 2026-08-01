@@ -69,6 +69,7 @@ export const groupdecryptresult_plaintext: (a: number) => [number, number];
 export const inboundresult_plaintext: (a: number) => [number, number];
 export const inboundresult_takeSession: (a: number) => [number, number, number];
 export const isRecoveryKeyWellFormed: (a: number, b: number) => number;
+export const linkingCode: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const master_safety_number: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const masterinboundresult_takeMasterKey: (a: number) => [number, number, number];
 export const masterinboundresult_takeSession: (a: number) => [number, number, number];

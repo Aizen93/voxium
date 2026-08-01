@@ -1070,6 +1070,19 @@
     "backupPreferRestore": "You have a recovery key: restoring it above keeps your identity, and nobody has to verify you again. Try that first.",
     "backupRestoreMalformed": "That does not look like a recovery key. Check it for typos and try again.",
     "peerNotReady": "{{name}} hasn't set up Voxium on a device yet, so there's nowhere to send an encrypted message. They'll be reachable once they open the app.",
-    "peerNotReadyFallbackName": "This person"
+    "peerNotReadyFallbackName": "This person",
+    "linkCodeTitle": "Add this device to your account",
+    "linkCodeExplainer": "Open Voxium on a device you already use, go to your devices, and enter this code there. Until you do, this device can't read your encrypted messages.",
+    "linkCopyFailed": "Could not copy the linking code",
+    "linkTitle": "Link a device",
+    "linkExplainer": "Enter the code shown by the device you want to add.",
+    "linkPlaceholder": "ABCD-2345",
+    "linkAction": "Continue",
+    "linkUnknownCode": "No device waiting for approval is showing that code. Check it on the other device and try again.",
+    "linkLookupFailed": "Could not check that code right now. Try again.",
+    "linkConfirmTitle": "Approve this device?",
+    "linkConfirmDevice": "Device {{id}} · registered {{date}}",
+    "linkConfirmExplainer": "Approving hands this device your account key: it will be able to read your encrypted conversations and approve further devices. Only continue if this is the device in front of you.",
+    "linkConfirmAction": "Approve device"
   }
 }

@@ -28,12 +28,34 @@ function ownStatusPatch(
   };
 }
 
+/**
+ * A linking code that names no device of this account (spec §17, plan §4.3).
+ *
+ * Typed rather than a message so the UI never string-matches: "nothing is
+ * showing that code" is the answer to a typo or to a code read off someone
+ * else's screen, and it has to be told apart from "the lookup itself failed"
+ * (offline, 429). Rendering the second as the first would send a user hunting
+ * for a code that was correct all along.
+ */
+export class E2ELinkingCodeUnknownError extends Error {
+  constructor(public readonly code: string) {
+    super('No unapproved device of this account is showing that code');
+    this.name = 'E2ELinkingCodeUnknownError';
+  }
+}
+
 /** Called by resetAccountStores on logout — the service itself is disposed there. */
 export function stopE2EDeviceListWatch(): void {
   if (unsubscribeDeviceListChanges) {
     unsubscribeDeviceListChanges();
     unsubscribeDeviceListChanges = null;
   }
+}
+
+/** The device a linking code named: everything the user gets to check before approving. */
+export interface E2ELinkableDevice {
+  deviceId: string;
+  createdAt: string;
 }
 
 interface E2EState {
@@ -101,6 +123,8 @@ interface E2EState {
   loadOwnDevices: (userId: string) => Promise<void>;
   revokeDevice: (userId: string, deviceId: string) => Promise<void>;
   approveDevice: (userId: string, deviceId: string) => Promise<void>;
+  linkDevice: (userId: string, code: string) => Promise<E2ELinkableDevice>;
+  approveLinkedDevice: (userId: string, deviceId: string) => Promise<void>;
   acknowledgeOwnDevices: (userId: string, seenDeviceIds: string[]) => Promise<void>;
   markAccountVerified: (userId: string, peerUserId: string) => Promise<void>;
   resetAccountIdentity: (userId: string) => Promise<void>;
@@ -312,6 +336,40 @@ export const useE2EStore = create<E2EState>((set, get) => ({
     await get().loadOwnDevices(userId);
     const status = await service.deviceListStatus(userId);
     set(ownStatusPatch(service, status));
+  },
+
+  /**
+   * Resolve a linking code to the device that is showing it (plan §4.3) —
+   * and STOP there. Nothing is approved, nothing is signed, no key moves.
+   *
+   * The split is the whole security story of this flow. The code itself is not
+   * a capability: it is derived from keys the server already publishes, so
+   * knowing it grants nothing — approving still requires THIS device to hold
+   * the account key and its user to act. What is left is phishing, someone
+   * talked into typing a code that is not theirs, and the only defence against
+   * that is showing the user what they are about to approve while they can
+   * still say no. An action that looked up and approved in one step would
+   * delete that moment, so the lookup deliberately returns the match instead.
+   */
+  linkDevice: async (userId: string, code: string) => {
+    const match = await getE2EService(userId).findLinkableDevice(code);
+    // Typed, so the UI can say "no device is showing that code" for this and
+    // "try again" for a lookup that never got an answer. A `null` return is a
+    // definite answer from the server; anything else propagates as itself.
+    if (!match) throw new E2ELinkingCodeUnknownError(code);
+    return match;
+  },
+
+  /**
+   * Second half of the linking flow: the user confirmed the device named by
+   * `linkDevice`, so approve exactly that one.
+   *
+   * Delegates to approveDevice rather than repeating it: a device approved by
+   * code and a device approved from the list must end in the same state, and
+   * two copies of "cross-sign, reload, recompute own status" would drift.
+   */
+  approveLinkedDevice: async (userId: string, deviceId: string) => {
+    await get().approveDevice(userId, deviceId);
   },
 
   /**

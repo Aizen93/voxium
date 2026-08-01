@@ -147,11 +147,22 @@ a birthday one — while under the 5-device cap and the approval rate limiter.
 The QR carries the full fingerprint, so the truncation only applies to the typed
 path.
 
+**Status: implemented — spec §17.** The service and its guards are done; the
+confirmation step described above is the mitigation for the one residual risk
+(phishing) and is not optional.
+
 **Order of work:** the short code first. Voxium is desktop-first and neither end
 has a camera today; QR becomes useful when a mobile client exists, and it is the
 same value in a different wrapper.
 
 ### 4.4 History follows the account
+
+**Status: implemented — spec §16.** Built without the second secret this section
+proposed: the backup subkey is derived from the master key, so there is nothing
+extra to distribute and no second string for the user to keep. Three bugs found
+on the way are recorded there: a last-writer-wins upsert that could destroy the
+messages between two ratchet indexes, restored sessions attributed to the wrong
+sender, and an unbounded table that no sweep could ever reclaim.
 
 This is the blocker for cutover, not a follow-up. Under always-on there is no
 plaintext history to fall back on, so a newly linked device that cannot read
@@ -303,8 +314,8 @@ this out loud before starting.
 | Phase | Work | Done when |
 |---|---|---|
 | 1 | ~~Keys at signup~~ → name the not-ready state | sending to an account with no devices explains itself (**done**) |
-| 2 | Message-key backup | a linked device reads history it was never sent |
-| 3 | Device linking by code | a second device works without touching a device list |
+| 2 | ~~Message-key backup~~ | a linked device reads history it was never sent (**done**, spec §16) |
+| 3 | ~~Device linking by code~~ | a second device works without touching a device list (**done**, spec §17) |
 | 4 | UI to Settings → Security | nothing account-level is administered from a DM |
 | 5 | Min client version | tail of old clients is acceptable |
 | 6 | Cutover | §7 verification passes |

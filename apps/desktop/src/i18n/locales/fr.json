@@ -1063,6 +1063,19 @@
     "backupPreferRestore": "Vous avez une clé de récupération : la restaurer ci-dessus conserve votre identité et personne n'aura à vous vérifier à nouveau. Essayez d'abord cela.",
     "backupRestoreMalformed": "Cela ne ressemble pas à une clé de récupération. Vérifiez la saisie et réessayez.",
     "peerNotReady": "{{name}} n'a pas encore configuré Voxium sur un appareil : il n'y a nulle part où envoyer un message chiffré. Vous pourrez lui écrire dès qu'il ouvrira l'application.",
-    "peerNotReadyFallbackName": "Cette personne"
+    "peerNotReadyFallbackName": "Cette personne",
+    "linkCodeTitle": "Ajouter cet appareil à votre compte",
+    "linkCodeExplainer": "Ouvrez Voxium sur un appareil que vous utilisez déjà, allez dans vos appareils et saisissez-y ce code. Tant que ce n'est pas fait, cet appareil ne peut pas lire vos messages chiffrés.",
+    "linkCopyFailed": "Impossible de copier le code de liaison",
+    "linkTitle": "Lier un appareil",
+    "linkExplainer": "Saisissez le code affiché par l'appareil que vous voulez ajouter.",
+    "linkPlaceholder": "ABCD-2345",
+    "linkAction": "Continuer",
+    "linkUnknownCode": "Aucun appareil en attente d'approbation n'affiche ce code. Vérifiez-le sur l'autre appareil et réessayez.",
+    "linkLookupFailed": "Impossible de vérifier ce code pour le moment. Réessayez.",
+    "linkConfirmTitle": "Approuver cet appareil ?",
+    "linkConfirmDevice": "Appareil {{id}} · enregistré le {{date}}",
+    "linkConfirmExplainer": "L'approbation transmet la clé de votre compte à cet appareil : il pourra lire vos conversations chiffrées et approuver d'autres appareils. Ne continuez que s'il s'agit de l'appareil devant vous.",
+    "linkConfirmAction": "Approuver l'appareil"
   }
 }

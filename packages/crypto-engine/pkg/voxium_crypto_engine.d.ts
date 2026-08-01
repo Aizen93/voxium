@@ -294,6 +294,22 @@ export function generateRecoveryKey(): string;
 export function isRecoveryKeyWellFormed(text: string): boolean;
 
 /**
+ * The code a new device shows so an approved one can find it (spec §17).
+ *
+ * A digest over PUBLIC key material only, like the safety number — it is not a
+ * secret and grants nothing on its own. Its whole job is to let the approving
+ * device confirm that the device it is about to trust is the one in front of
+ * the user, by recomputing this from the keys the SERVER served: a device the
+ * server injected has different keys, so it produces a different code and
+ * cannot be reached through this flow.
+ *
+ * Eight base32 characters, grouped for reading aloud. That is 40 bits against
+ * a PREIMAGE (an attacker must register a device whose code matches one the
+ * user is already reading), under a 5-device cap and the approval rate limit.
+ */
+export function linkingCode(user_id: string, device_id: string, curve25519_key_b64: string, ed25519_key_b64: string): string;
+
+/**
  * Account-level safety number over the PUBLIC cross-signing master keys
  * (spec §14 / decision D3). Same construction and shape as `safety_number`
  * — 30 digits per party, halves sorted, 60 digits total — but seeded from the
@@ -413,6 +429,7 @@ export interface InitOutput {
     readonly inboundresult_plaintext: (a: number) => [number, number];
     readonly inboundresult_takeSession: (a: number) => [number, number, number];
     readonly isRecoveryKeyWellFormed: (a: number, b: number) => number;
+    readonly linkingCode: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly master_safety_number: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly masterinboundresult_takeMasterKey: (a: number) => [number, number, number];
     readonly masterinboundresult_takeSession: (a: number) => [number, number, number];

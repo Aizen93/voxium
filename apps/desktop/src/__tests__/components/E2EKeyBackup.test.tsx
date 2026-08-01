@@ -19,6 +19,13 @@ vi.mock('../../stores/toastStore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../stores/toastStore')>();
   return { ...actual, toast: { ...actual.toast, success: toastSuccess, error: toastError } };
 });
+// The modal asks the service for this device's linking code (§4.3). Stubbed
+// for the same reason everything else here is: no real crypto service, and no
+// wasm engine, behind a render test. The code has its own tests.
+vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/e2e/e2eService')>();
+  return { ...actual, getE2EService: () => ({ linkingCode: () => 'WXYZ-2345' }) };
+});
 
 import { DeviceManagerModal, shouldOfferKeyBackupRestore } from '../../components/dm/E2EControls';
 import { useE2EStore } from '../../stores/e2eStore';
@@ -168,7 +175,7 @@ describe('DeviceManagerModal — setting up account recovery', () => {
     expect(button('e2e.backupCreateAction')).not.toBeNull();
     expect(text()).toContain('e2e.backupExplainer');
     // nothing to restore from, and this device could not use it anyway
-    expect(find('input[type="text"]')).toBeNull();
+    expect(find('[data-testid="e2e-restore-key-input"]')).toBeNull();
   });
 
   it('shows the recovery key and refuses to let it go until it is acknowledged', async () => {
@@ -295,14 +302,14 @@ describe('DeviceManagerModal — restoring from a recovery key', () => {
   it('offers a restore when a backup exists and this device cannot approve', () => {
     stranded(true);
     render();
-    expect(find('input[type="text"]')).not.toBeNull();
+    expect(find('[data-testid="e2e-restore-key-input"]')).not.toBeNull();
     expect(text()).toContain('e2e.backupRestoreExplainer');
   });
 
   it('says there is nothing to restore rather than showing an empty box', () => {
     stranded(false);
     render();
-    expect(find('input[type="text"]')).toBeNull();
+    expect(find('[data-testid="e2e-restore-key-input"]')).toBeNull();
     // rendered next to the reset, as the reason it is the only way out
     expect(find('[data-testid="e2e-reset-identity"]')).not.toBeNull();
     expect(text()).toContain('e2e.backupNone');
@@ -362,7 +369,7 @@ describe('DeviceManagerModal — restoring from a recovery key', () => {
     });
     render();
 
-    expect(find('input[type="text"]')).not.toBeNull();
+    expect(find('[data-testid="e2e-restore-key-input"]')).not.toBeNull();
     expect(text()).toContain('e2e.backupRestoreExplainer');
   });
 
@@ -373,7 +380,7 @@ describe('DeviceManagerModal — restoring from a recovery key', () => {
       keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' },
     });
     render();
-    expect(find('input[type="text"]')).toBeNull();
+    expect(find('[data-testid="e2e-restore-key-input"]')).toBeNull();
     expect(text()).not.toContain('e2e.backupRestoreExplainer');
   });
 
@@ -382,13 +389,13 @@ describe('DeviceManagerModal — restoring from a recovery key', () => {
     stranded(true);
     render();
 
-    await type(find('input[type="text"]') as HTMLInputElement, 'AAAA-BBBB-CCCC');
+    await type(find('[data-testid="e2e-restore-key-input"]') as HTMLInputElement, 'AAAA-BBBB-CCCC');
     await click(button('e2e.backupRestoreAction'));
 
     expect(text()).toContain('e2e.backupRestoreFailed');
     expect(toastSuccess).not.toHaveBeenCalled();
     // and the offer stays put, because nothing was recovered
-    expect(find('input[type="text"]')).not.toBeNull();
+    expect(find('[data-testid="e2e-restore-key-input"]')).not.toBeNull();
   });
 
   it('tells a typo apart from a key that simply is not yours', async () => {
@@ -400,7 +407,7 @@ describe('DeviceManagerModal — restoring from a recovery key', () => {
     stranded(true);
     render();
 
-    await type(find('input[type="text"]') as HTMLInputElement, 'AAAA-BBBB');
+    await type(find('[data-testid="e2e-restore-key-input"]') as HTMLInputElement, 'AAAA-BBBB');
     await click(button('e2e.backupRestoreAction'));
 
     expect(text()).toContain('e2e.backupRestoreMalformed');
@@ -413,7 +420,7 @@ describe('DeviceManagerModal — restoring from a recovery key', () => {
     stranded(true);
     render();
 
-    const input = find('input[type="text"]') as HTMLInputElement;
+    const input = find('[data-testid="e2e-restore-key-input"]') as HTMLInputElement;
     await type(input, 'AAAA');
     await click(button('e2e.backupRestoreAction'));
     expect(text()).toContain('e2e.backupRestoreFailed');
@@ -436,13 +443,13 @@ describe('DeviceManagerModal — restoring from a recovery key', () => {
     stranded(true);
     render();
 
-    await type(find('input[type="text"]') as HTMLInputElement, RECOVERY_KEY);
+    await type(find('[data-testid="e2e-restore-key-input"]') as HTMLInputElement, RECOVERY_KEY);
     await click(button('e2e.backupRestoreAction'));
 
     expect(restoreKeyBackup).toHaveBeenCalledWith(USER_ID, RECOVERY_KEY);
     expect(toastSuccess).toHaveBeenCalledWith('e2e.backupRestoreSuccess');
     // the panel has flipped to the "you hold the account key" side…
-    expect(find('input[type="text"]')).toBeNull();
+    expect(find('[data-testid="e2e-restore-key-input"]')).toBeNull();
     expect(text()).toContain('e2e.backupSetUp');
     // …and the "you cannot approve devices" explainer is gone
     expect(text()).not.toContain('e2e.cannotApproveExplainer');
