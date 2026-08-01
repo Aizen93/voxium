@@ -966,3 +966,27 @@ user is already reading — under a 5-device cap and the approval rate limiter.
 QR is the same value in a different wrapper and waits for a client with a
 camera; Voxium is desktop-first and neither end has one today. The typed code is
 the primary path and is complete on its own.
+
+## 18. Where the controls live
+
+An early version of this feature put everything behind the lock badge of a
+single DM: the device list, approvals, the recovery key, the identity reset.
+The data model was always account-scoped, but the *surface* was not, and users
+read the surface. That is what made a per-account feature look per-conversation.
+
+The split is now by what the control actually governs:
+
+| Control | Where | Because |
+|---|---|---|
+| Safety number, "mark verified", per-device detail | DM lock badge | it is a statement about **that contact** |
+| Device list, approve / revoke, linking | Settings → Security | it is **your account**, identical in every conversation |
+| Recovery key, backup, restore, identity reset | Settings → Security | same |
+
+The DM badge keeps a shortcut into Settings → Security, so the path from
+"something looks wrong here" to "manage my devices" stays one click — but the
+thing being managed is presented as what it is.
+
+The badge itself stays quiet: it renders nothing in the healthy case and names
+the most actionable problem when there is one (§14, `badgeState`). A lock shown
+on every conversation is noise that teaches people to ignore the one time it
+matters.

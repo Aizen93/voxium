@@ -6,11 +6,12 @@ import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
 import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio, Palette, Plus, Globe, Upload, Pencil, Trash2, Languages } from 'lucide-react';
 import { THEMES } from '../../stores/settingsStore';
-import type { VoiceQuality, ThemeId } from '../../stores/settingsStore';
+import type { VoiceQuality, ThemeId, SettingsTab } from '../../stores/settingsStore';
 import { LIMITS } from '@voxium/shared';
 import { importTheme } from '../../services/themeEngine';
 import { ThemeEditor } from './ThemeEditor';
 import { ThemeBrowser } from './ThemeBrowser';
+import { E2EDevicesSection } from './E2EDevicesSection';
 import { api } from '../../services/api';
 import { SUPPORTED_LANGUAGES } from '../../i18n';
 import { getTranslatedError } from '../../utils/serverErrors';
@@ -20,7 +21,8 @@ interface DeviceInfo {
   label: string;
 }
 
-type SettingsTab = 'account' | 'security' | 'appearance' | 'audio' | 'language';
+// `SettingsTab` now lives in settingsStore so `openSettings('security')` can
+// deep-link here without importing this module.
 
 function formatKeyCode(code: string): string {
   const map: Record<string, string> = {
@@ -601,6 +603,11 @@ function SecurityTab() {
     <div className="space-y-6">
       <ChangePasswordForm />
       <TwoFactorSection />
+      {/* Account-level encryption: devices, linking, recovery key, identity
+          reset. It is here rather than behind a DM's lock badge because all of
+          it has always been account-scoped — one device list, one account key,
+          one backup (plan §4.5). */}
+      <E2EDevicesSection />
     </div>
   );
 }
@@ -1299,7 +1306,23 @@ function LanguageTab() {
 export function SettingsModal() {
   const { t } = useTranslation();
   const { closeSettings } = useSettingsStore();
-  const [activeTab, setActiveTab] = useState<SettingsTab>('account');
+  const requestedTab = useSettingsStore((s) => s.initialSettingsTab);
+  const [activeTab, setActiveTab] = useState<SettingsTab>(requestedTab ?? 'account');
+
+  /**
+   * Honour a deep link (`openSettings('security')`) and then forget it.
+   *
+   * Consuming it matters as much as reading it: leaving the request in the
+   * store would make every later plain `openSettings()` re-open wherever the
+   * last shortcut pointed, which is not what "open settings" means. The effect
+   * covers the case where the modal is already mounted when a shortcut fires;
+   * the initial state covers the ordinary mount-on-open.
+   */
+  useEffect(() => {
+    if (!requestedTab) return;
+    setActiveTab(requestedTab);
+    useSettingsStore.getState().clearInitialSettingsTab();
+  }, [requestedTab]);
 
   const tabs: { id: SettingsTab; label: string; icon: typeof User }[] = [
     { id: 'account', label: t('settings.tabs.account'), icon: User },

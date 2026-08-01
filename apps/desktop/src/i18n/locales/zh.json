@@ -1076,6 +1076,7 @@
     "linkConfirmTitle": "批准此设备？",
     "linkConfirmDevice": "设备 {{id}} · 注册于 {{date}}",
     "linkConfirmExplainer": "批准后，此设备将获得你的账户密钥：它可以读取你的加密对话，并批准其他设备。只有在这是你面前的设备时才继续。",
-    "linkConfirmAction": "批准设备"
+    "linkConfirmAction": "批准设备",
+    "devicesNotReady": "此设备仍在设置加密，因此暂时无法列出你的设备。请稍后再看。"
   }
 }

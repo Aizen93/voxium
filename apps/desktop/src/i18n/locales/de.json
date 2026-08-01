@@ -1076,6 +1076,7 @@
     "linkConfirmTitle": "Dieses Gerät genehmigen?",
     "linkConfirmDevice": "Gerät {{id}} · registriert am {{date}}",
     "linkConfirmExplainer": "Mit der Genehmigung erhält dieses Gerät deinen Kontoschlüssel: Es kann dann deine verschlüsselten Unterhaltungen lesen und weitere Geräte genehmigen. Fahre nur fort, wenn es das Gerät vor dir ist.",
-    "linkConfirmAction": "Gerät genehmigen"
+    "linkConfirmAction": "Gerät genehmigen",
+    "devicesNotReady": "Die Verschlüsselung wird auf diesem Gerät noch eingerichtet, deine Geräte können daher noch nicht angezeigt werden. Schau gleich noch einmal vorbei."
   }
 }
