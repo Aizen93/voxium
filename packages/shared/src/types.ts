@@ -324,7 +324,6 @@ export interface ServerToClientEvents {
   'dm:voice:signal': (data: { from: string; signal: unknown }) => void;
   'dm:voice:ended': (data: { conversationId: string }) => void;
   'dm:conversation:deleted': (data: { conversationId: string }) => void;
-  'dm:encryption_enabled': (data: { conversationId: string; encryptedAt: string; enabledBy: string }) => void;
   'friend:request_received': (data: { friendship: Friendship }) => void;
   'friend:request_accepted': (data: { friendship: Friendship }) => void;
   'friend:removed': (data: { userId: string }) => void;

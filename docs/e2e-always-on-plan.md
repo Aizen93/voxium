@@ -317,8 +317,22 @@ individually revertible; step 7 is the point of no return.
    8. AFTER lifting: `VACUUM (ANALYZE) messages`, and consider reindexing its
       trigram GIN index on `content`. A bulk delete of that size leaves both
       bloated, and neither can run inside the migration transaction
-8. **Remove the dead code** (§5) in the release after cutover, once there is no
-   chance of needing to serve an old client.
+8. **Remove the dead code** (§5) in the release after cutover.
+
+   This ordering is not tidiness, it is a hard constraint. Until the migration
+   has run in production, `encrypted_at` is still nullable there and real
+   conversations are still plaintext — a server build with the plaintext path
+   removed would reject every one of them. **The build that deletes it must go
+   out after the migration, never with it.**
+
+   Already done, because it carries no such hazard: the `dm:encryption_enabled`
+   event, its listener and its store handler. The server stopped emitting it in
+   the cutover build, so removing the other end is pure dead code.
+
+   Still to remove, once production has cut over: the plaintext branches of the
+   DM send and edit routes (keeping the rejection that tells an old client what
+   to do), and `Conversation.encryptedAt` can stop being nullable in the shared
+   client type.
 
 **Verification before lifting maintenance**
 
