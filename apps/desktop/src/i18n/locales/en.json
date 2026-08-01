@@ -981,13 +981,6 @@
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",
-    "enableTitle": "Enable end-to-end encryption",
-    "enableExplainer": "Messages in this conversation will be encrypted on your device and can only be read by you and your contact. The server only ever stores ciphertext.",
-    "enablePointIrreversible": "This cannot be undone for this conversation",
-    "enablePointServer": "Message history stays on your devices — a new device cannot read older messages",
-    "enableConfirm": "Enable encryption",
-    "enabled": "End-to-end encryption enabled",
-    "enableFailed": "Could not enable encryption",
     "encryptedMessage": "Encrypted message",
     "localSearchHint": "Searching messages decrypted on this device — results depend on what this device has received",
     "decryptFailed": "Unable to decrypt this message",
@@ -1084,6 +1077,7 @@
     "linkConfirmDevice": "Device {{id}} · registered {{date}}",
     "linkConfirmExplainer": "Approving hands this device your account key: it will be able to read your encrypted conversations and approve further devices. Only continue if this is the device in front of you.",
     "linkConfirmAction": "Approve device",
-    "devicesNotReady": "Encryption is still setting up on this device, so your devices can't be listed yet. Check back in a moment."
+    "devicesNotReady": "Encryption is still setting up on this device, so your devices can't be listed yet. Check back in a moment.",
+    "identityAcceptFailed": "Could not accept the new keys"
   }
 }

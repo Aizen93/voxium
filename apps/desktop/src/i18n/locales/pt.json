@@ -974,13 +974,6 @@
   },
   "e2e": {
     "badgeTitle": "Criptografia de ponta a ponta — ver número de segurança",
-    "enableTitle": "Ativar criptografia de ponta a ponta",
-    "enableExplainer": "As mensagens desta conversa serão criptografadas no seu dispositivo e só poderão ser lidas por você e seu contato. O servidor armazena apenas texto criptografado.",
-    "enablePointIrreversible": "Isso não pode ser desfeito nesta conversa",
-    "enablePointServer": "O histórico de mensagens permanece nos seus dispositivos — um dispositivo novo não consegue ler mensagens antigas",
-    "enableConfirm": "Ativar criptografia",
-    "enabled": "Criptografia de ponta a ponta ativada",
-    "enableFailed": "Não foi possível ativar a criptografia",
     "encryptedMessage": "Mensagem criptografada",
     "localSearchHint": "Pesquisando mensagens descriptografadas neste dispositivo — os resultados dependem do que este dispositivo recebeu",
     "decryptFailed": "Não foi possível descriptografar esta mensagem",
@@ -1077,6 +1070,7 @@
     "linkConfirmDevice": "Dispositivo {{id}} · registado em {{date}}",
     "linkConfirmExplainer": "Aprovar entrega a chave da sua conta a este dispositivo: passará a poder ler as suas conversas cifradas e a aprovar outros dispositivos. Continue apenas se for o dispositivo à sua frente.",
     "linkConfirmAction": "Aprovar dispositivo",
-    "devicesNotReady": "A criptografia ainda está sendo configurada neste dispositivo, então seus dispositivos ainda não podem ser listados. Volte em instantes."
+    "devicesNotReady": "A criptografia ainda está sendo configurada neste dispositivo, então seus dispositivos ainda não podem ser listados. Volte em instantes.",
+    "identityAcceptFailed": "Não foi possível aceitar as novas chaves"
   }
 }

@@ -974,13 +974,6 @@
   },
   "e2e": {
     "badgeTitle": "Cifrado de extremo a extremo — ver número de seguridad",
-    "enableTitle": "Activar el cifrado de extremo a extremo",
-    "enableExplainer": "Los mensajes de esta conversación se cifran en tu dispositivo y solo tú y tu contacto pueden leerlos. El servidor solo almacena texto cifrado.",
-    "enablePointIrreversible": "Esto no se puede deshacer en esta conversación",
-    "enablePointServer": "El historial de mensajes permanece en tus dispositivos — un dispositivo nuevo no puede leer los mensajes anteriores",
-    "enableConfirm": "Activar cifrado",
-    "enabled": "Cifrado de extremo a extremo activado",
-    "enableFailed": "No se pudo activar el cifrado",
     "encryptedMessage": "Mensaje cifrado",
     "localSearchHint": "Buscando en los mensajes descifrados en este dispositivo — los resultados dependen de lo que este dispositivo haya recibido",
     "decryptFailed": "No se puede descifrar este mensaje",
@@ -1077,6 +1070,7 @@
     "linkConfirmDevice": "Dispositivo {{id}} · registrado el {{date}}",
     "linkConfirmExplainer": "Al aprobarlo, este dispositivo recibe la clave de tu cuenta: podrá leer tus conversaciones cifradas y aprobar otros dispositivos. Continúa solo si es el dispositivo que tienes delante.",
     "linkConfirmAction": "Aprobar dispositivo",
-    "devicesNotReady": "El cifrado aún se está configurando en este dispositivo, así que todavía no se pueden mostrar tus dispositivos. Vuelve en un momento."
+    "devicesNotReady": "El cifrado aún se está configurando en este dispositivo, así que todavía no se pueden mostrar tus dispositivos. Vuelve en un momento.",
+    "identityAcceptFailed": "No se pudieron aceptar las nuevas claves"
   }
 }

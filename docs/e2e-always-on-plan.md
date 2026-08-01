@@ -37,13 +37,17 @@ friction users hit is not cryptography, it is the existence of a choice.
 
 ## 3. Decisions still open
 
-- **D1. Scope of the wipe.** Only DM messages need to go; channel messages are
-  not encrypted and are unaffected by this change. Recommendation: wipe DM
-  messages and their attachments only, keep conversations and friendships so
-  people do not lose their contact lists.
-- **D2. Minimum client version.** Once DMs are always encrypted, a client that
-  predates this cannot send. Recommendation: gate the API on a minimum client
-  version and let the Tauri updater carry everyone forward before cutover.
+- **D1. ~~Scope of the wipe.~~ DECIDED: DM messages only.** Channel history is
+  not encrypted and is untouched; conversations and friendships stay, so nobody
+  loses their contact list.
+- **D2. ~~Minimum client version.~~ DECIDED: not required.** Voxium is
+  pre-scale and the failure mode is already humane: `POST /dm/:id/messages`
+  has rejected plaintext into an encrypted conversation since Phase B, with
+  "This conversation is end-to-end encrypted; update your client to send
+  messages". An un-updated client therefore gets a clear instruction rather
+  than a silent downgrade or a generic error — and the Tauri updater carries
+  it forward on its own. **No version gate is built.** The cost is accepted:
+  a user on an old build cannot send DMs until their app updates.
 - **D3. ~~Accounts that registered but never opened the app.~~** *Resolved
   during implementation (§4.1): keys cannot be published before email
   verification, so this state is permanent and is now handled as a named
@@ -229,14 +233,35 @@ UPDATE conversations SET encrypted_at = NOW() WHERE encrypted_at IS NULL;
 ALTER TABLE conversations ALTER COLUMN encrypted_at SET NOT NULL;
 ALTER TABLE conversations ALTER COLUMN encrypted_at SET DEFAULT NOW();
 
--- 3. every account re-registers cleanly (the §12.7 pattern)
+-- 3. every account re-registers cleanly (the §12.7 pattern).
+--    NOTE: the table is e2e_device_registry (singular), and e2e_one_time_keys
+--    must be listed explicitly — it holds the only FK into e2e_devices, and
+--    postgres refuses to truncate a referenced table otherwise. Listed rather
+--    than CASCADE so the set is auditable.
 TRUNCATE e2e_key_shares, e2e_master_transfers, e2e_key_backups,
-         e2e_master_keys, e2e_device_registries, e2e_devices;
+         e2e_message_key_backups, e2e_master_keys, e2e_device_registry,
+         e2e_one_time_keys, e2e_devices;
 ```
 
-Attachment blobs for deleted DM messages are orphaned in S3; the existing
-attachment cleanup job (`utils/attachmentCleanup.ts`) reclaims them, or they can
-be swept directly during the window.
+`ALTER COLUMN … SET NOT NULL` takes ACCESS EXCLUSIVE and scans the table. At
+today's row count that is instant; if `conversations` ever grows large, add
+`CHECK (encrypted_at IS NOT NULL) NOT VALID`, `VALIDATE CONSTRAINT` (weaker
+lock), then `SET NOT NULL`, which can then skip the scan.
+
+**The S3 claim in the first draft of this plan was wrong.** `attachmentCleanup`
+selects from `message_attachments` *rows*, and the cascade above deletes exactly
+those rows — so the job can never see the objects it was supposed to reclaim.
+DM attachment blobs leak **permanently** unless their keys are captured BEFORE
+the delete:
+
+```sql
+-- run first, keep the output; these are the objects to sweep from S3 afterwards
+SELECT a.s3_key FROM message_attachments a
+  JOIN messages m ON m.id = a.message_id
+ WHERE m.conversation_id IS NOT NULL;
+```
+
+Sweeping the `attachments/dm-*` prefix by hand is the alternative.
 
 `TRUNCATE e2e_key_backups` deserves a moment: it destroys recovery keys people
 may have written down. That is correct here — those blobs seal master keys that
@@ -270,18 +295,28 @@ individually revertible; step 7 is the point of no return.
 3. **Device linking** (§4.3). Ships alongside the existing approve-from-list
    flow, which stays until linking has been exercised in production.
 4. **Move the UI to Settings** (§4.5), leaving the DM badge shortcut.
-5. **Minimum client version enforced** (D2). Watch adoption until the tail is
-   acceptable.
+5. ~~Minimum client version enforced~~ — dropped (D2). The existing plaintext
+   rejection is the whole mitigation.
 6. **Announce.** Users need to know: DM history will be deleted on a date, and
    existing recovery keys stop working. This is a product communication, not a
    changelog line.
 7. **Maintenance window:**
    1. put the API in maintenance mode
    2. take a database snapshot (this is the only rollback for steps 7.3–7.4)
-   3. run the migration in §6.1
-   4. deploy the server build with the toggle removed and DM plaintext rejected
-   5. deploy the client build with the bumped vault version
-   6. verify (below), then lift maintenance
+   3. capture the DM attachment keys (§6.1) — after the delete they are
+      unreachable
+   4. run the migration in §6.1 **through `prisma migrate deploy`, or through
+      `psql` inside an explicit `BEGIN`/`COMMIT`**. Do NOT use
+      `prisma db execute`: it does not wrap the file in a transaction, so a
+      statement killed part-way leaves history deleted with `encrypted_at`
+      still nullable and the key tables intact — a half-cutover with no clean
+      state to resume from
+   5. deploy the server build with the toggle removed and DM plaintext rejected
+   6. deploy the client build with the bumped vault version
+   7. verify (below), then lift maintenance
+   8. AFTER lifting: `VACUUM (ANALYZE) messages`, and consider reindexing its
+      trigram GIN index on `content`. A bulk delete of that size leaves both
+      bloated, and neither can run inside the migration transaction
 8. **Remove the dead code** (§5) in the release after cutover, once there is no
    chance of needing to serve an old client.
 
@@ -317,6 +352,6 @@ this out loud before starting.
 | 2 | ~~Message-key backup~~ | a linked device reads history it was never sent (**done**, spec §16) |
 | 3 | ~~Device linking by code~~ | a second device works without touching a device list (**done**, spec §17) |
 | 4 | ~~UI to Settings → Security~~ | nothing account-level is administered from a DM (**done**, spec §18) |
-| 5 | Min client version | tail of old clients is acceptable |
+| 5 | ~~Min client version~~ | **dropped** — the plaintext rejection already tells an old client what to do (D2) |
 | 6 | Cutover | §7 verification passes |
 | 7 | Delete the opt-in code | no reference to `encryptedAt` as a choice remains |

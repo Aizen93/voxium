@@ -337,9 +337,11 @@ model Conversation {
   id        String   @id @default(cuid())
   user1Id   String   @map("user1_id")
   user2Id   String   @map("user2_id")
-  // E2E DMs: set when either participant enables encryption. Irreversible —
-  // once set, the server rejects plaintext user messages in this conversation.
-  encryptedAt DateTime? @map("encrypted_at")
+  // E2E DMs: conversations are BORN encrypted (docs/e2e-always-on-plan.md
+  // §4.2) — there is no toggle and no plaintext path. Non-nullable since the
+  // always-on cutover (migration 20260801140000_e2e_always_on); the server
+  // rejects plaintext user messages in every conversation.
+  encryptedAt DateTime @default(now()) @map("encrypted_at")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

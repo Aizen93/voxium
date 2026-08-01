@@ -79,16 +79,13 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     await page.locator('button[title="Message"]').first().click();
     await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });
 
-    // ── 1. Enable encryption (device registration must have completed) ──
-    const enableButton = page.locator('button[title="Enable end-to-end encryption"]');
-    await expect(enableButton).toBeVisible({ timeout: 20_000 }); // e2eReady + WASM init
-    await enableButton.click();
-    await page.getByRole('button', { name: 'Enable encryption', exact: true }).click();
-
-    // system notice + lock badge on A
-    await expect(page.getByText('End-to-end encryption enabled — new messages are secured').first()).toBeVisible({ timeout: 10_000 });
+    // ── 1. The conversation is already encrypted — there is nothing to turn on ──
+    // Waiting on the badge doubles as waiting for e2eReady + WASM init, which
+    // the enable button used to provide.
     const badgeA = page.locator('button[title="End-to-end encrypted — view safety number"]');
-    await expect(badgeA).toBeVisible({ timeout: 10_000 });
+    await expect(badgeA).toBeVisible({ timeout: 20_000 });
+    // and no affordance survives that offers to enable it
+    await expect(page.locator('button[title="Enable end-to-end encryption"]')).toHaveCount(0);
 
     // ── 2. Encrypted messages flow both ways ──
     const secretA = `top secret from A ${Date.now()}`;
@@ -203,18 +200,16 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     await injectAuth(pageB, dataB);
 
     await openDMWith(page, userB.username);
-    const enableButton = page.locator('button[title="Enable end-to-end encryption"]');
-    await expect(enableButton).toBeVisible({ timeout: 20_000 });
-    await enableButton.click();
-    await page.getByRole('button', { name: 'Enable encryption', exact: true }).click();
-    await expect(page.locator(BADGE)).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(BADGE)).toBeVisible({ timeout: 20_000 });
 
-    // B opens the conversation so both clients are live
-    await expect(pageB.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
-    await pageB.getByText(userA.username, { exact: true }).first().click();
-
+    // A message is what puts the conversation in B's list now. Enabling
+    // encryption used to do it, and there is nothing to enable any more.
     const beforeSecond = `sent before the second device ${Date.now()}`;
     await sendMessage(page, beforeSecond);
+
+    // B opens the conversation so both clients are live
+    await expect(pageB.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
+    await pageB.getByText(userA.username, { exact: true }).first().click();
     await expect(pageB.getByText(beforeSecond).first()).toBeVisible({ timeout: 15_000 });
 
     expect(await getE2EDevices(dataA.user.id)).toHaveLength(1);

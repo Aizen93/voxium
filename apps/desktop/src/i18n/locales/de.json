@@ -974,13 +974,6 @@
   },
   "e2e": {
     "badgeTitle": "Ende-zu-Ende-verschlüsselt — Sicherheitsnummer anzeigen",
-    "enableTitle": "Ende-zu-Ende-Verschlüsselung aktivieren",
-    "enableExplainer": "Nachrichten in dieser Unterhaltung werden auf deinem Gerät verschlüsselt und können nur von dir und deinem Kontakt gelesen werden. Der Server speichert ausschließlich verschlüsselten Text.",
-    "enablePointIrreversible": "Dies kann für diese Unterhaltung nicht rückgängig gemacht werden",
-    "enablePointServer": "Der Nachrichtenverlauf bleibt auf deinen Geräten — ein neues Gerät kann ältere Nachrichten nicht lesen",
-    "enableConfirm": "Verschlüsselung aktivieren",
-    "enabled": "Ende-zu-Ende-Verschlüsselung aktiviert",
-    "enableFailed": "Verschlüsselung konnte nicht aktiviert werden",
     "encryptedMessage": "Verschlüsselte Nachricht",
     "localSearchHint": "Durchsucht die auf diesem Gerät entschlüsselten Nachrichten — Ergebnisse hängen davon ab, was dieses Gerät empfangen hat",
     "decryptFailed": "Diese Nachricht kann nicht entschlüsselt werden",
@@ -1077,6 +1070,7 @@
     "linkConfirmDevice": "Gerät {{id}} · registriert am {{date}}",
     "linkConfirmExplainer": "Mit der Genehmigung erhält dieses Gerät deinen Kontoschlüssel: Es kann dann deine verschlüsselten Unterhaltungen lesen und weitere Geräte genehmigen. Fahre nur fort, wenn es das Gerät vor dir ist.",
     "linkConfirmAction": "Gerät genehmigen",
-    "devicesNotReady": "Die Verschlüsselung wird auf diesem Gerät noch eingerichtet, deine Geräte können daher noch nicht angezeigt werden. Schau gleich noch einmal vorbei."
+    "devicesNotReady": "Die Verschlüsselung wird auf diesem Gerät noch eingerichtet, deine Geräte können daher noch nicht angezeigt werden. Schau gleich noch einmal vorbei.",
+    "identityAcceptFailed": "Die neuen Schlüssel konnten nicht akzeptiert werden"
   }
 }

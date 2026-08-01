@@ -48,13 +48,10 @@ interface Props {
  * reassurance. Deriving both from one ordered list makes that class of bug
  * impossible: a state that raises the icon necessarily names itself.
  *
- * Account-wide states are reported only on an ENCRYPTED conversation. On a
- * plaintext one this control is the "turn encryption on" button, so warning
- * about a device you have not approved would caption a button that does
- * something else entirely.
+ * Every DM is encrypted now, so there is no "off" state to describe — the
+ * badge either says nothing or names the one thing worth acting on.
  */
 export function badgeState(flags: {
-  encrypted: boolean;
   identityWarning: boolean;
   masterKeyConflict: boolean;
   thisDeviceUnsigned: boolean;
@@ -62,7 +59,6 @@ export function badgeState(flags: {
   ownDeviceWarning: boolean;
   newDeviceWarning: boolean;
 }): { titleKey: string; warning: boolean } {
-  if (!flags.encrypted) return { titleKey: 'e2e.enableTitle', warning: false };
   // Most alarming first, and every entry names the problem it stands for.
   const states: Array<[boolean, string]> = [
     [flags.identityWarning, 'e2e.identityChangedBadgeTitle'],
@@ -76,10 +72,6 @@ export function badgeState(flags: {
   return hit ? { titleKey: hit[1], warning: true } : { titleKey: 'e2e.badgeTitle', warning: false };
 }
 
-/**
- * Header control for DM encryption: an enable button for plaintext
- * conversations, a lock badge (→ safety-number modal) for encrypted ones.
- */
 export function E2EControls({ conversation }: Props) {
   const { t } = useTranslation();
   const user = useAuthStore((s) => s.user);
@@ -98,21 +90,22 @@ export function E2EControls({ conversation }: Props) {
   // replace: both are states the user can only learn about from us.
   const thisDeviceUnsigned = useE2EStore((s) => s.thisDeviceUnsigned);
   const masterKeyConflict = useE2EStore((s) => s.masterKeyConflict);
-  const [modal, setModal] = useState<'enable' | 'safety' | null>(null);
+  const [showSafetyNumber, setShowSafetyNumber] = useState(false);
 
-  const encrypted = !!conversation.encryptedAt;
-
-  // Passively check for peer device-list changes while an encrypted
-  // conversation is open — the only trigger besides an explicit send/decrypt.
+  // Every DM is encrypted (spec §14–§18). The flag survives on the wire as the
+  // timestamp of when this conversation started being encrypted; it is no
+  // longer a state the UI branches on.
+  //
+  // Passively check for peer device-list changes while the conversation is
+  // open — the only trigger besides an explicit send/decrypt.
   useEffect(() => {
-    if (!e2eReady || !encrypted || !user?.id) return;
+    if (!e2eReady || !user?.id) return;
     void useE2EStore.getState().refreshDeviceList(user.id, peerId);
-  }, [e2eReady, encrypted, user?.id, peerId]);
+  }, [e2eReady, user?.id, peerId]);
 
   if (!e2eReady) return null;
 
   const { titleKey, warning } = badgeState({
-    encrypted,
     identityWarning,
     masterKeyConflict,
     thisDeviceUnsigned,
@@ -125,14 +118,12 @@ export function E2EControls({ conversation }: Props) {
   return (
     <>
       <button
-        onClick={() => setModal(encrypted ? 'safety' : 'enable')}
+        onClick={() => setShowSafetyNumber(true)}
         className={clsx(
           'rounded-md p-1.5 transition-colors',
           warning
             ? 'text-vox-accent-warning hover:bg-vox-accent-warning/10'
-            : encrypted
-              ? 'text-vox-accent-success hover:bg-vox-accent-success/10'
-              : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary'
+            : 'text-vox-accent-success hover:bg-vox-accent-success/10'
         )}
         title={title}
         // Same string as the tooltip: an alert nobody can hover is not an alert.
@@ -140,11 +131,8 @@ export function E2EControls({ conversation }: Props) {
       >
         {warning ? <ShieldAlert size={18} /> : <Lock size={18} />}
       </button>
-      {modal === 'enable' && (
-        <EnableEncryptionModal conversation={conversation} onClose={() => setModal(null)} />
-      )}
-      {modal === 'safety' && (
-        <SafetyNumberModal conversation={conversation} onClose={() => setModal(null)} />
+      {showSafetyNumber && (
+        <SafetyNumberModal conversation={conversation} onClose={() => setShowSafetyNumber(false)} />
       )}
     </>
   );
@@ -161,58 +149,6 @@ function ModalShell({ onClose, children }: { onClose: () => void; children: Reac
       </div>
     </div>,
     document.body
-  );
-}
-
-function EnableEncryptionModal({ conversation, onClose }: Props & { onClose: () => void }) {
-  const { t } = useTranslation();
-  const [busy, setBusy] = useState(false);
-
-  const handleEnable = async () => {
-    setBusy(true);
-    try {
-      await useDMStore.getState().enableEncryption(conversation.id);
-      toast.success(t('e2e.enabled'));
-      onClose();
-    } catch (err) {
-      const apiError = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
-      toast.error(apiError ?? t('e2e.enableFailed'));
-      setBusy(false);
-    }
-  };
-
-  return (
-    <ModalShell onClose={onClose}>
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="flex items-center gap-2 text-base font-semibold text-vox-text-primary">
-          <Lock size={16} className="text-vox-accent-success" />
-          {t('e2e.enableTitle')}
-        </h3>
-        <button onClick={onClose} className="text-vox-text-muted hover:text-vox-text-primary" aria-label={t('common.close')}>
-          <X size={18} />
-        </button>
-      </div>
-      <p className="mb-2 text-sm text-vox-text-secondary">{t('e2e.enableExplainer')}</p>
-      <ul className="mb-4 list-inside list-disc space-y-1 text-xs text-vox-text-muted">
-        <li>{t('e2e.enablePointIrreversible')}</li>
-        <li>{t('e2e.enablePointServer')}</li>
-      </ul>
-      <div className="flex justify-end gap-2">
-        <button
-          onClick={onClose}
-          className="rounded-md px-3 py-1.5 text-sm text-vox-text-secondary hover:bg-vox-bg-hover"
-        >
-          {t('common.cancel')}
-        </button>
-        <button
-          onClick={handleEnable}
-          disabled={busy}
-          className="rounded-md bg-vox-accent-success px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
-        >
-          {busy ? t('common.loading') : t('e2e.enableConfirm')}
-        </button>
-      </div>
-    </ModalShell>
   );
 }
 
@@ -288,7 +224,7 @@ function SafetyNumberModal({ conversation, onClose }: Props & { onClose: () => v
       toast.success(t('e2e.identityAccepted'));
     } catch (err) {
       console.warn('e2e: accepting new identity failed:', err instanceof Error ? err.message : err);
-      toast.error(t('e2e.enableFailed'));
+      toast.error(t('e2e.identityAcceptFailed'));
     }
   };
 

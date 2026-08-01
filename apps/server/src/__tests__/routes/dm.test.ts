@@ -56,9 +56,17 @@ const mockConversation = {
   id: 'conv-1',
   user1Id: 'user-1',
   user2Id: 'user-2',
+  // NOT NULL since the always-on cutover (migration 20260801140000_e2e_always_on):
+  // a conversation is born encrypted, so every row the routes ever read has it set.
+  encryptedAt: new Date('2026-08-01T14:00:00Z'),
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
 };
+
+/** A shape the database no longer permits (encrypted_at is NOT NULL). It exists
+ *  only to exercise the residual plaintext branch of the send/edit routes,
+ *  which the plan removes one release after cutover (§5, §7 step 8). */
+const plaintextConversation = { ...mockConversation, encryptedAt: null };
 
 const mockMessage = {
   id: 'msg-1',
@@ -256,6 +264,7 @@ describe('DM routes — GET /conversations participant status field', () => {
         id: 'conv-2',
         user1Id: 'user-0', // user-0 < user-1, so user-0 is user1
         user2Id: 'user-1', // authenticated user is user2
+        encryptedAt: new Date('2026-08-01T14:00:00Z'),
         createdAt: new Date('2024-01-01'),
         updatedAt: new Date('2024-01-01'),
         user1: {
@@ -298,6 +307,7 @@ describe('DM routes — GET /conversations participant status field', () => {
         id: 'conv-3',
         user1Id: 'user-1',
         user2Id: 'user-3',
+        encryptedAt: new Date('2026-08-01T14:00:00Z'),
         createdAt: new Date('2024-02-01'),
         updatedAt: new Date('2024-02-01'),
         user1: {
@@ -444,7 +454,7 @@ describe('DM routes — POST /:conversationId/messages', () => {
   });
 
   it('sends a message', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(plaintextConversation as any);
     vi.mocked(prisma.$transaction).mockResolvedValueOnce(mockMessage as any);
     vi.mocked(prisma.conversation.update).mockResolvedValueOnce(mockConversation as any);
 
@@ -463,7 +473,7 @@ describe('DM routes — POST /:conversationId/messages', () => {
   it('rejects empty message without attachments', async () => {
     // Authorization now runs first (the E2E enforcement branch needs the
     // conversation row), so the participant lookup must be mocked.
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(plaintextConversation as any);
     const app = createApp();
     const res = await request(app)
       .post('/api/v1/dm/conv-1/messages')
@@ -473,7 +483,7 @@ describe('DM routes — POST /:conversationId/messages', () => {
   });
 
   it('sanitizes HTML from message content', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(plaintextConversation as any);
     vi.mocked(prisma.$transaction).mockImplementationOnce(async (fn: any) => {
       // Verify the sanitized content gets passed through
       return mockMessage;
@@ -504,7 +514,7 @@ describe('DM routes — POST /:conversationId/messages', () => {
   });
 
   it('returns 400 when replyToId is not a string', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(plaintextConversation as any);
 
     const app = createApp();
     const res = await request(app)
@@ -661,71 +671,89 @@ const validEnvelope = JSON.stringify({ v: 1, e: 'olm1', t: 0, b: 'QWJjZGVmZ2hpam
 /** …and the multi-device megolm1 variant — both engines are valid on the wire. */
 const validMegolmEnvelope = JSON.stringify({ v: 1, e: 'megolm1', sid: 'c2Vzc2lvbklk', b: 'QWJjZGVmZ2hpamtsbW5vcA' });
 
-describe('DM routes — POST /:conversationId/encryption', () => {
+// The opt-in route (POST /:conversationId/encryption) was deleted in the
+// always-on cutover — conversations are born encrypted, so there is nothing to
+// enable. What used to be its behaviour is now covered by "born encrypted"
+// below plus the enforcement suite that follows.
+describe('DM routes — the opt-in encryption route is gone', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetPrismaMocks();
   });
 
-  it('enables encryption when both participants have devices', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValueOnce([{ userId: 'user-1' }, { userId: 'user-2' }] as any);
-    vi.mocked(prisma.conversation.updateMany).mockResolvedValueOnce({ count: 1 } as any);
-    vi.mocked(prisma.conversation.findUniqueOrThrow).mockResolvedValueOnce({ encryptedAt: new Date('2026-07-11T10:00:00Z') } as any);
-    vi.mocked(prisma.message.create).mockResolvedValueOnce({
-      ...mockMessage, id: 'sys-1', type: 'system', content: 'End-to-end encryption enabled — new messages are secured',
-    } as any);
-    vi.mocked(prisma.conversation.update).mockResolvedValueOnce(mockConversation as any);
-
+  it('404s POST /:conversationId/encryption and never touches the conversation', async () => {
     const app = createApp();
     const res = await request(app).post('/api/v1/dm/conv-1/encryption');
 
-    expect(res.status).toBe(200);
-    expect(res.body.data.encryptedAt).toBe('2026-07-11T10:00:00.000Z');
-    // race-safe write: only flips when still null
-    expect(prisma.conversation.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'conv-1', encryptedAt: null } })
-    );
-    // both the encryption event and the system message reach the DM room
-    expect(mockTo).toHaveBeenCalledWith('dm:conv-1');
-    expect(mockEmit).toHaveBeenCalledWith('dm:encryption_enabled', expect.objectContaining({
-      conversationId: 'conv-1', enabledBy: 'user-1',
-    }));
-    expect(mockEmit).toHaveBeenCalledWith('dm:message:new', expect.objectContaining({ type: 'system' }));
-  });
-
-  it('is idempotent when already encrypted', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(encryptedConversation as any);
-
-    const app = createApp();
-    const res = await request(app).post('/api/v1/dm/conv-1/encryption');
-
-    expect(res.status).toBe(200);
-    expect(prisma.e2EDevice.findMany).not.toHaveBeenCalled();
+    expect(res.status).toBe(404);
+    expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
     expect(prisma.conversation.updateMany).not.toHaveBeenCalled();
     expect(mockEmit).not.toHaveBeenCalled();
   });
+});
 
-  it('409s when a participant has no E2E device', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-    // one participant has two devices — still only ONE E2E-capable user
-    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValueOnce([{ userId: 'user-1' }] as any);
-
-    const app = createApp();
-    const res = await request(app).post('/api/v1/dm/conv-1/encryption');
-
-    expect(res.status).toBe(409);
-    expect(prisma.conversation.updateMany).not.toHaveBeenCalled();
+describe('DM routes — conversations are born encrypted', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetPrismaMocks();
   });
 
-  it('403s for non-participants', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
-      ...mockConversation, user1Id: 'other-1', user2Id: 'other-2',
+  it('returns encryptedAt on a newly created conversation', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null,
     } as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(null);
+    // the DB column default fills encrypted_at — the route never sets it
+    vi.mocked(prisma.conversation.create).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.conversationRead.createMany).mockResolvedValueOnce({ count: 2 } as any);
 
     const app = createApp();
-    const res = await request(app).post('/api/v1/dm/conv-1/encryption');
-    expect(res.status).toBe(403);
+    const res = await request(app).post('/api/v1/dm').send({ userId: 'user-2' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.encryptedAt).toBe('2026-08-01T14:00:00.000Z');
+    // no toggle: creation must not try to write the column itself
+    expect(prisma.conversation.create).toHaveBeenCalledWith({ data: { user1Id: 'user-1', user2Id: 'user-2' } });
+  });
+
+  it('rejects the first plaintext message into a freshly created conversation', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null,
+    } as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.conversation.create).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.conversationRead.createMany).mockResolvedValueOnce({ count: 2 } as any);
+
+    const app = createApp();
+    const created = await request(app).post('/api/v1/dm').send({ userId: 'user-2' });
+    expect(created.status).toBe(201);
+
+    // …and the very first message into it already has to be ciphertext
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    const res = await request(app)
+      .post(`/api/v1/dm/${created.body.data.id}/messages`)
+      .send({ content: 'plain old text' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('This conversation is end-to-end encrypted; update your client to send messages');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('serialises encryptedAt on every listed conversation', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([
+      {
+        ...mockConversation,
+        user1: { id: 'user-1', username: 'alice', displayName: 'Alice', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null },
+        user2: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null },
+        messages: [],
+      },
+    ] as any);
+
+    const app = createApp();
+    const res = await request(app).get('/api/v1/dm');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].encryptedAt).toBe('2026-08-01T14:00:00.000Z');
   });
 });
 
@@ -905,7 +933,7 @@ describe('DM routes — encrypted conversation message enforcement', () => {
   });
 
   it('rejects encrypted payloads in a plaintext conversation', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(plaintextConversation as any);
 
     const app = createApp();
     const res = await request(app)

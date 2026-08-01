@@ -17,7 +17,6 @@ interface DMState {
   openDM: (userId: string) => Promise<string>;
   addConversation: (conversation: Conversation) => void;
   updateLastMessage: (conversationId: string, message: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string }) => void;
-  enableEncryption: (conversationId: string) => Promise<void>;
   handleEncryptionEnabled: (conversationId: string, encryptedAt: string) => void;
   incrementDMUnread: (conversationId: string) => void;
   clearDMUnread: (conversationId: string) => void;
@@ -131,13 +130,6 @@ export const useDMStore = create<DMState>((set, get) => ({
       if (state.conversations.some((c) => c.id === conversation.id)) return state;
       return { conversations: [conversation, ...state.conversations] };
     });
-  },
-
-  enableEncryption: async (conversationId: string) => {
-    // Irreversible per conversation — the server rejects plaintext afterwards.
-    // 409 = the other participant has no E2E-capable client yet.
-    const { data } = await api.post(`/dm/${conversationId}/encryption`);
-    get().handleEncryptionEnabled(conversationId, data.data.encryptedAt);
   },
 
   handleEncryptionEnabled: (conversationId: string, encryptedAt: string) => {

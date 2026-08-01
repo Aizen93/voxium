@@ -2,8 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, parseE2EEnvelope, WS_EVENTS, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
+import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
+import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
@@ -84,7 +84,8 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
             authorId: c.messages[0].authorId,
           }
         : null,
-      encryptedAt: c.encryptedAt?.toISOString() ?? null,
+      // always set — conversations are born encrypted (plan §4.2)
+      encryptedAt: c.encryptedAt.toISOString(),
       createdAt: c.createdAt.toISOString(),
     }));
 
@@ -123,6 +124,8 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
     });
 
     const isNew = !existing;
+    // encryptedAt is filled by the column default — a conversation is born
+    // encrypted and there is no route that turns it on (plan §4.2)
     const conversation = existing ?? await prisma.conversation.create({
       data: { user1Id, user2Id },
     }).catch(async (err) => {
@@ -162,7 +165,7 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
         user2Id: conversation.user2Id,
         participant: targetUser,
         lastMessage: null,
-        encryptedAt: conversation.encryptedAt?.toISOString() ?? null,
+        encryptedAt: conversation.encryptedAt.toISOString(),
         createdAt: conversation.createdAt.toISOString(),
       },
     });
@@ -314,6 +317,11 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
       // envelope was already strictly validated above.
       content = req.body.content as string;
     } else {
+      // Unreachable since the always-on cutover: encrypted_at is NOT NULL, so
+      // every conversation takes the branch above. Kept as a belt-and-braces
+      // guard for the release that still has to tolerate an old client; the
+      // plan removes the plaintext send path outright one release later
+      // (§5, §7 step 8).
       if (wantsEncrypted) {
         throw new BadRequestError('Conversation is not end-to-end encrypted');
       }
@@ -402,68 +410,10 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
   }
 });
 
-// ─── Enable E2E encryption ───────────────────────────────────────────────────
-// Irreversible per conversation (docs/e2e-dm-spec.md §5): once set, the server
-// rejects plaintext user messages. Requires both participants to have
-// registered E2E devices so neither side ends up unable to read the DM.
-
-dmRouter.post('/:conversationId/encryption', rateLimitInteract, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
-  try {
-    const { conversationId } = req.params;
-    const userId = req.user!.userId;
-    const conversation = await getConversationOrThrow(conversationId, userId);
-
-    // Idempotent: enabling an already-encrypted conversation succeeds quietly
-    if (conversation.encryptedAt) {
-      res.json({ success: true, data: { conversationId, encryptedAt: conversation.encryptedAt.toISOString() } });
-      return;
-    }
-
-    // Count DISTINCT participants with a device — a single user owning several
-    // devices must not satisfy the "both sides are E2E-capable" check.
-    const equippedUsers = await prisma.e2EDevice.findMany({
-      where: { userId: { in: [conversation.user1Id, conversation.user2Id] } },
-      select: { userId: true },
-      distinct: ['userId'],
-    });
-    if (equippedUsers.length < 2) {
-      throw new ConflictError('Both participants need an E2E-capable client before encryption can be enabled');
-    }
-
-    // updateMany + IS NULL guard: two concurrent enables race safely — exactly
-    // one write wins and both requests read back the same timestamp.
-    await prisma.conversation.updateMany({
-      where: { id: conversationId, encryptedAt: null },
-      data: { encryptedAt: new Date() },
-    });
-    const updated = await prisma.conversation.findUniqueOrThrow({
-      where: { id: conversationId },
-      select: { encryptedAt: true },
-    });
-    const encryptedAt = updated.encryptedAt!.toISOString();
-
-    // Inline system notice for both timelines (plaintext by design — it is
-    // server-generated metadata, not user content)
-    const systemMessage = await prisma.message.create({
-      data: {
-        content: 'End-to-end encryption enabled — new messages are secured',
-        type: 'system',
-        conversationId,
-        authorId: userId,
-      },
-      include: { author: authorSelect },
-    });
-    await prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
-
-    const io = getIO();
-    io.to(`dm:${conversationId}`).emit(WS_EVENTS.DM_ENCRYPTION_ENABLED, { conversationId, encryptedAt, enabledBy: userId });
-    io.to(`dm:${conversationId}`).emit('dm:message:new', { ...systemMessage, reactions: [] } as unknown as Message);
-
-    res.json({ success: true, data: { conversationId, encryptedAt } });
-  } catch (err) {
-    next(err);
-  }
-});
+// There is deliberately no "enable encryption" route: POST
+// /:conversationId/encryption was removed in the always-on cutover (plan §4.2,
+// §5). Conversations are encrypted from the moment they are created, so there
+// is nothing to turn on and no window in which a conversation is plaintext.
 
 // ─── Edit DM ─────────────────────────────────────────────────────────────────
 

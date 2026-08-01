@@ -150,20 +150,24 @@ is a hard error surfaced in the UI (shield-alert badge + warning modal) and
 requires explicit "Accept new keys". Accepting re-pins (unverified) and drops
 the dead session.
 
-## 5. Enabling encryption on a conversation
+## 5. Conversations are born encrypted
 
-`POST /api/v1/dm/:conversationId/encryption` — participant-only.
+**There is no enable step.** `Conversation.encryptedAt` is `NOT NULL DEFAULT
+now()`, set by the database when the row is created, so a conversation is
+encrypted from its first millisecond and every DM ever sent in it is
+ciphertext.
 
-- Requires **both** participants to have registered devices (409 otherwise).
-- Sets `Conversation.encryptedAt` (race-safe: `UPDATE … WHERE encrypted_at IS
-  NULL`). **Irreversible.** From that moment the server rejects plaintext user
-  messages in the conversation — an outdated client gets a hard 400, never a
-  silent downgrade.
-- Emits `dm:encryption_enabled` to the DM room + a plaintext `type: system`
-  notice message (server-generated metadata, not user content).
-- Idempotent: enabling an encrypted conversation returns the existing timestamp.
+`POST /api/v1/dm/:conversationId/encryption` — the old opt-in route — was
+removed in the always-on cutover (migration `20260801140000_e2e_always_on`,
+`docs/e2e-always-on-plan.md` §4.2, §6.1), together with the
+`dm:encryption_enabled` event and the `type: system` notice it emitted. The
+same migration deleted all pre-cutover DM history, so there is no plaintext
+history left to reason about either.
 
-Messages sent *before* enablement remain plaintext history.
+What survives from the old behaviour is the part that mattered: the server
+rejects plaintext user messages in a conversation — an outdated client gets a
+hard 400 ("This conversation is end-to-end encrypted; update your client to
+send messages"), never a silent downgrade. It is now the only path.
 
 ## 6. Message envelope
 

@@ -974,13 +974,6 @@
   },
   "e2e": {
     "badgeTitle": "종단간 암호화됨 — 안전 번호 보기",
-    "enableTitle": "종단간 암호화 사용",
-    "enableExplainer": "이 대화의 메시지는 기기에서 암호화되며 나와 상대방만 읽을 수 있습니다. 서버에는 암호문만 저장됩니다.",
-    "enablePointIrreversible": "이 대화에서는 되돌릴 수 없습니다",
-    "enablePointServer": "메시지 기록은 기기에만 보관됩니다 — 새 기기에서는 이전 메시지를 읽을 수 없습니다",
-    "enableConfirm": "암호화 사용",
-    "enabled": "종단간 암호화가 활성화되었습니다",
-    "enableFailed": "암호화를 활성화할 수 없습니다",
     "encryptedMessage": "암호화된 메시지",
     "localSearchHint": "이 기기에서 복호화된 메시지를 검색합니다 — 결과는 이 기기가 수신한 내용에 따라 달라집니다",
     "decryptFailed": "이 메시지를 복호화할 수 없습니다",
@@ -1077,6 +1070,7 @@
     "linkConfirmDevice": "기기 {{id}} · {{date}}에 등록됨",
     "linkConfirmExplainer": "승인하면 이 기기에 계정 키가 전달됩니다. 암호화된 대화를 읽고 다른 기기를 승인할 수 있게 됩니다. 눈앞에 있는 기기일 때만 계속하세요.",
     "linkConfirmAction": "기기 승인",
-    "devicesNotReady": "이 기기에서 암호화를 설정하는 중이라 아직 기기 목록을 보여줄 수 없습니다. 잠시 후 다시 확인하세요."
+    "devicesNotReady": "이 기기에서 암호화를 설정하는 중이라 아직 기기 목록을 보여줄 수 없습니다. 잠시 후 다시 확인하세요.",
+    "identityAcceptFailed": "새 키를 수락하지 못했습니다"
   }
 }

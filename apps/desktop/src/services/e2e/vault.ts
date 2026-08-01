@@ -117,6 +117,31 @@ export interface OutboundGroupSessionRecord {
 }
 
 /** An imported Megolm session plus the attribution it was received under. */
+/**
+ * Bumped when a release invalidates every local vault. `v2` is the always-on
+ * cutover: the server truncated all E2E key material, so a v1 vault holds
+ * pickles, pinned identities and a plaintext cache for keys that no longer
+ * exist anywhere.
+ */
+const VAULT_DB_PREFIX = 'voxium-e2e-v2-';
+const SUPERSEDED_DB_PREFIXES = ['voxium-e2e-'];
+
+/** Best-effort removal of pre-cutover vaults. Never blocks opening the new one. */
+function dropSupersededVaults(userId: string, namespace?: string): void {
+  const suffix = `${userId}${namespace ? `-${namespace}` : ''}`;
+  for (const prefix of SUPERSEDED_DB_PREFIXES) {
+    const name = `${prefix}${suffix}`;
+    if (name === `${VAULT_DB_PREFIX}${suffix}`) continue;
+    try {
+      indexedDB.deleteDatabase(name);
+    } catch (err) {
+      // An open handle elsewhere blocks deletion; the data is unreachable
+      // either way because nothing reads that name any more.
+      console.warn('e2e: could not remove a superseded vault:', err instanceof Error ? err.message : err);
+    }
+  }
+}
+
 export interface InboundGroupSessionRecord {
   pickle: string;
   sessionId: string;
@@ -159,7 +184,12 @@ export class E2EVault {
 
   async open(): Promise<void> {
     if (this.db) return;
-    const name = `voxium-e2e-${this.userId}${this.namespace ? `-${this.namespace}` : ''}`;
+    const name = `${VAULT_DB_PREFIX}${this.userId}${this.namespace ? `-${this.namespace}` : ''}`;
+    // Anything under an older prefix belongs to key material the server no
+    // longer has (the always-on cutover truncated it), so it can only produce
+    // sessions that decrypt nothing. Dropped rather than left orphaned: it is
+    // pickled key material sitting on disk with no purpose.
+    void dropSupersededVaults(this.userId, this.namespace);
     const req = indexedDB.open(name, 1);
     req.onupgradeneeded = () => {
       if (!req.result.objectStoreNames.contains(KV_STORE)) {
