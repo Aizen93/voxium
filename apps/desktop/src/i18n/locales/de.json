@@ -1063,6 +1063,19 @@
     "backupPreferRestore": "Du hast einen Wiederherstellungsschlüssel: ihn oben einzulösen erhält deine Identität, und niemand muss dich erneut verifizieren. Versuche das zuerst.",
     "backupRestoreMalformed": "Das sieht nicht nach einem Wiederherstellungsschlüssel aus. Bitte prüfe die Eingabe.",
     "peerNotReady": "{{name}} hat Voxium noch auf keinem Gerät eingerichtet, es gibt also kein Ziel für eine verschlüsselte Nachricht. Sobald die App geöffnet wird, ist die Person erreichbar.",
-    "peerNotReadyFallbackName": "Diese Person"
+    "peerNotReadyFallbackName": "Diese Person",
+    "linkCodeTitle": "Dieses Gerät zu deinem Konto hinzufügen",
+    "linkCodeExplainer": "Öffne Voxium auf einem Gerät, das du bereits nutzt, gehe zu deinen Geräten und gib dort diesen Code ein. Bis dahin kann dieses Gerät deine verschlüsselten Nachrichten nicht lesen.",
+    "linkCopyFailed": "Der Verknüpfungscode konnte nicht kopiert werden",
+    "linkTitle": "Gerät verknüpfen",
+    "linkExplainer": "Gib den Code ein, den das Gerät anzeigt, das du hinzufügen möchtest.",
+    "linkPlaceholder": "ABCD-2345",
+    "linkAction": "Weiter",
+    "linkUnknownCode": "Kein Gerät, das auf Genehmigung wartet, zeigt diesen Code an. Prüfe ihn auf dem anderen Gerät und versuche es erneut.",
+    "linkLookupFailed": "Der Code konnte gerade nicht geprüft werden. Versuche es erneut.",
+    "linkConfirmTitle": "Dieses Gerät genehmigen?",
+    "linkConfirmDevice": "Gerät {{id}} · registriert am {{date}}",
+    "linkConfirmExplainer": "Mit der Genehmigung erhält dieses Gerät deinen Kontoschlüssel: Es kann dann deine verschlüsselten Unterhaltungen lesen und weitere Geräte genehmigen. Fahre nur fort, wenn es das Gerät vor dir ist.",
+    "linkConfirmAction": "Gerät genehmigen"
   }
 }

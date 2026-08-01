@@ -67,6 +67,9 @@ function makeService(userId: string) {
     })),
     revokeDevice: vi.fn(async () => {}),
     approveDevice: vi.fn(async () => {}),
+    findLinkableDevice: vi.fn(
+      async (_code: string) => null as { deviceId: string; createdAt: string } | null
+    ),
     resetAccountIdentity: vi.fn(async () => {}),
     keyBackupInfo: vi.fn(async () => ({ exists: false, updatedAt: null as string | null })),
     createKeyBackup: vi.fn(async () => RECOVERY_KEY),
@@ -88,7 +91,7 @@ vi.mock('../../services/e2e/e2eService', async () => {
   };
 });
 
-import { useE2EStore, stopE2EDeviceListWatch } from '../../stores/e2eStore';
+import { useE2EStore, stopE2EDeviceListWatch, E2ELinkingCodeUnknownError } from '../../stores/e2eStore';
 import { E2EIdentityChangedError } from '../../services/e2e/e2eService';
 
 const USER = 'alice';
@@ -361,6 +364,77 @@ describe('e2eStore own-device actions', () => {
     service.listOwnDevices.mockRejectedValueOnce(new Error('offline'));
     await useE2EStore.getState().loadOwnDevices(USER);
     expect(useE2EStore.getState().ownDevicesLoading).toBe(false);
+  });
+});
+
+describe('e2eStore device linking (plan §4.3)', () => {
+  const LINKED = { deviceId: 'laptop', createdAt: '2026-07-30T09:15:00.000Z' };
+
+  it('resolves a code to a device and stops there', async () => {
+    // The lookup and the approval are two actions on purpose. The code is not
+    // a capability — knowing it grants nothing — so what is left to defend
+    // against is a user typing an ATTACKER's code, and the only defence is
+    // that they get shown what is about to be approved while they can still
+    // say no. A lookup that approved on the way past would delete that moment.
+    service.findLinkableDevice.mockResolvedValueOnce(LINKED);
+
+    const match = await useE2EStore.getState().linkDevice(USER, 'ABCD-2345');
+
+    expect(match).toEqual(LINKED);
+    expect(service.findLinkableDevice).toHaveBeenCalledWith('ABCD-2345');
+    expect(service.approveDevice, 'the lookup approved a device by itself').not.toHaveBeenCalled();
+  });
+
+  it('reports a code nobody is showing as its own kind of failure', async () => {
+    service.findLinkableDevice.mockResolvedValueOnce(null);
+
+    await expect(useE2EStore.getState().linkDevice(USER, 'ZZZZ-9999')).rejects.toBeInstanceOf(
+      E2ELinkingCodeUnknownError
+    );
+    expect(service.approveDevice).not.toHaveBeenCalled();
+  });
+
+  it('lets a failed lookup through as itself rather than as an unknown code', async () => {
+    // "No device is showing that code" and "we could not ask" send the user to
+    // different places: retype it, versus try again. Collapsing them makes an
+    // offline client accuse the user of a typo they did not make.
+    service.findLinkableDevice.mockRejectedValueOnce(new Error('offline'));
+
+    const failure = await useE2EStore
+      .getState()
+      .linkDevice(USER, 'ABCD-2345')
+      .catch((err: unknown) => err);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(E2ELinkingCodeUnknownError);
+    expect((failure as Error).message).toBe('offline');
+  });
+
+  it('approves exactly the device it was given, and recomputes own state', async () => {
+    // Same end state as approving from the list: a device linked by code must
+    // not be left half-trusted, still flagged on every peer's badge.
+    service.setStatus({
+      version: 9,
+      deviceIds: ['this-device', 'laptop'],
+      newDeviceIds: [],
+      unsignedDeviceIds: [],
+      changed: false,
+    });
+    useE2EStore.setState({ ownUnsignedDevices: ['laptop'], ownDeviceWarnings: ['laptop'] });
+
+    await useE2EStore.getState().approveLinkedDevice(USER, LINKED.deviceId);
+
+    expect(service.approveDevice).toHaveBeenCalledWith('laptop');
+    expect(service.listOwnDevices).toHaveBeenCalled();
+    expect(useE2EStore.getState().ownUnsignedDevices).toEqual([]);
+    expect(useE2EStore.getState().ownDeviceWarnings).toEqual([]);
+  });
+
+  it('does not swallow a failed approval — nothing was linked', async () => {
+    service.approveDevice.mockRejectedValueOnce(new Error('rate limited'));
+    await expect(
+      useE2EStore.getState().approveLinkedDevice(USER, LINKED.deviceId)
+    ).rejects.toThrow('rate limited');
   });
 });
 

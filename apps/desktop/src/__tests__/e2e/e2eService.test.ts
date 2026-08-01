@@ -2387,6 +2387,91 @@ describe('E2EService (cross-signing)', () => {
     });
   });
 
+  it('links a new device by the code it displays (L1)', async () => {
+    // Replaces "find your new device in a list and press Approve" — the user
+    // reads a code off the device in front of them, which is also what makes
+    // it safe.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    const code = laptop.service.linkingCode();
+    expect(code).toMatch(/^[A-Z2-7]{4}-[A-Z2-7]{4}$/);
+
+    const found = await phone.service.findLinkableDevice(code);
+    expect(found?.deviceId).toBe(laptop.service.deviceId);
+
+    await phone.service.approveDevice(found!.deviceId);
+    expect(await laptop.service.claimMasterTransfers()).toBe(true);
+    expect(laptop.service.hasMasterSecret()).toBe(true);
+  });
+
+  it('accepts the code however the user retypes it (L2)', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    const code = laptop.service.linkingCode();
+    for (const typed of [code, code.replace('-', ''), code.toLowerCase(), ` ${code} `]) {
+      expect((await phone.service.findLinkableDevice(typed))?.deviceId).toBe(laptop.service.deviceId);
+    }
+  });
+
+  it('cannot be used to approve a device the server injected (L3)', async () => {
+    // THE security property. The approving device recomputes the code from the
+    // keys the SERVER served, so a device with keys of the server's choosing
+    // produces a different code — a user typing what their real new device
+    // shows can never land on the injected one.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    const realCode = laptop.service.linkingCode();
+    const impostor = new EngineAccount();
+    server.forgeDeviceKeys(aliceId, laptop.service.deviceId, {
+      curve25519Key: impostor.curve25519Key(),
+      ed25519Key: impostor.ed25519Key(),
+    });
+
+    // the code the user is reading no longer matches what the server serves
+    expect(await phone.service.findLinkableDevice(realCode)).toBeNull();
+  });
+
+  it('will not link a device that is already trusted, or a wrong code (L4)', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    expect(await phone.service.findLinkableDevice('AAAA-BBBB')).toBeNull();
+    // this device is not something to link to itself
+    expect(await phone.service.findLinkableDevice(phone.service.linkingCode())).toBeNull();
+
+    // once approved there is nothing left to link
+    const code = laptop.service.linkingCode();
+    await phone.service.approveDevice(laptop.service.deviceId);
+    expect(await phone.service.findLinkableDevice(code)).toBeNull();
+  });
+
   it('carries history to a device that was never sent it (M1)', async () => {
     // The point of the phase: after the wipe there is no plaintext history to
     // fall back on, so a device that joins later either restores the session

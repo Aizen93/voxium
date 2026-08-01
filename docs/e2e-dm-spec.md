@@ -917,3 +917,52 @@ whole session rather than only the part the uploading device happened to see.
 - Sessions are stored per account, so the server learns how many sessions an
   account has and which conversation each belongs to. That is metadata it
   already has from message routing (§11.8).
+
+## 17. Device linking (Phase 3 of the always-on plan)
+
+Approving a second device used to mean finding it in a list and pressing a
+button, with nothing to check it against. Linking replaces that with "type the
+code your new device is showing" — which is easier *and* strictly safer.
+
+It is not new cryptography. It is a safer trigger for the approval flow of
+§14.4.
+
+### 17.1 The code
+
+`base32(SHA-512("voxium-link-v1" || userId ⁠|| deviceId || curve25519 || ed25519))`,
+first 8 characters, grouped `XXXX-XXXX`. Public material only, like a safety
+number. Fields are separated by a NUL byte so no two different tuples can
+concatenate to the same input.
+
+### 17.2 Why it is safe
+
+- **It is not a capability.** Knowing the code grants nothing: approval still
+  requires the other device to hold the account key and its user to confirm. A
+  code read over a shoulder, screenshotted, or shouted across a room is worth
+  nothing on its own.
+- **It binds approval to published keys.** The approving device recomputes the
+  code from the keys the SERVER served for each unsigned device. A device the
+  server injected has keys of its own making, so it produces a different code —
+  a user typing what their real new device displays can never land on it. That
+  is the property the old list-and-press flow could not offer at all.
+- **Already-trusted devices are not linkable**, so a second approval of a device
+  that is already cross-signed cannot be provoked.
+
+### 17.3 Residual risk
+
+**Phishing.** Someone can be talked into typing an attacker's code. Nothing in
+the construction prevents that, so the mitigation is procedural and must not be
+skipped: the approving device shows *what it is about to approve* — the device
+id and when it registered — and requires a confirmation, and every device of the
+account sees the new device afterwards through the existing own-device warning
+(§12.5).
+
+Entropy is the smaller concern: 8 base32 characters is 40 bits against a
+**preimage** — an attacker must register a device whose code matches one the
+user is already reading — under a 5-device cap and the approval rate limiter.
+
+### 17.4 Not yet built
+
+QR is the same value in a different wrapper and waits for a client with a
+camera; Voxium is desktop-first and neither end has one today. The typed code is
+the primary path and is complete on its own.

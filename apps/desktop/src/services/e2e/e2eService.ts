@@ -38,6 +38,7 @@ import type {
 import { api as defaultApi } from '../api';
 import {
   generateRecoveryKey,
+  linkingCode,
   isRecoveryKeyWellFormed,
   openMasterKeyBackup,
   initEngine,
@@ -1056,6 +1057,50 @@ export class E2EService {
     } catch (err) {
       console.warn('e2e: recovered the account key but not its history yet:', errText(err));
     }
+  }
+
+  // ─── Device linking (spec §17) ────────────────────────────────────────────
+
+  /**
+   * The code THIS device shows so another one can approve it.
+   *
+   * Derived from this device's own published keys, so it is stable, carries no
+   * secret, and is worth nothing to anyone who reads it over the user's
+   * shoulder — approving still requires the other device to hold the account
+   * key and its user to confirm.
+   */
+  linkingCode(): string {
+    const account = this.requireAccount();
+    return linkingCode(this.userId, this.deviceId, account.curve25519Key(), account.ed25519Key());
+  }
+
+  /**
+   * Find the device a linking code names, so it can be approved.
+   *
+   * The code is recomputed from the keys the SERVER served for each device.
+   * That is what makes this safer than picking from a list: a device the server
+   * injected has keys of its own, so it produces a different code and cannot be
+   * reached by a user typing what their new device is showing.
+   */
+  async findLinkableDevice(code: string): Promise<{ deviceId: string; createdAt: string } | null> {
+    const normalized = code.replace(/[\s-]/g, '').toUpperCase();
+    const own = await this.listOwnDevices();
+    for (const device of own.devices) {
+      // Already vouched for: there is nothing to link, and offering it would
+      // invite a second approval of a device that is already trusted.
+      if (device.crossSigned) continue;
+      if (device.deviceId === this.deviceId) continue;
+      let candidate: string;
+      try {
+        candidate = linkingCode(this.userId, device.deviceId, device.curve25519Key, device.ed25519Key);
+      } catch {
+        continue; // malformed keys cannot be linked to
+      }
+      if (candidate.replace('-', '') === normalized) {
+        return { deviceId: device.deviceId, createdAt: device.createdAt };
+      }
+    }
+    return null;
   }
 
   // ─── Message-key backup (spec §16) ────────────────────────────────────────

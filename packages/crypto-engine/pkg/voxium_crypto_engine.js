@@ -1180,6 +1180,52 @@ export function isRecoveryKeyWellFormed(text) {
 }
 
 /**
+ * The code a new device shows so an approved one can find it (spec §17).
+ *
+ * A digest over PUBLIC key material only, like the safety number — it is not a
+ * secret and grants nothing on its own. Its whole job is to let the approving
+ * device confirm that the device it is about to trust is the one in front of
+ * the user, by recomputing this from the keys the SERVER served: a device the
+ * server injected has different keys, so it produces a different code and
+ * cannot be reached through this flow.
+ *
+ * Eight base32 characters, grouped for reading aloud. That is 40 bits against
+ * a PREIMAGE (an attacker must register a device whose code matches one the
+ * user is already reading), under a 5-device cap and the approval rate limit.
+ * @param {string} user_id
+ * @param {string} device_id
+ * @param {string} curve25519_key_b64
+ * @param {string} ed25519_key_b64
+ * @returns {string}
+ */
+export function linkingCode(user_id, device_id, curve25519_key_b64, ed25519_key_b64) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const ptr0 = passStringToWasm0(user_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(device_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(curve25519_key_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(ed25519_key_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.linkingCode(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var ptr5 = ret[0];
+        var len5 = ret[1];
+        if (ret[3]) {
+            ptr5 = 0; len5 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred6_0 = ptr5;
+        deferred6_1 = len5;
+        return getStringFromWasm0(ptr5, len5);
+    } finally {
+        wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
  * Account-level safety number over the PUBLIC cross-signing master keys
  * (spec §14 / decision D3). Same construction and shape as `safety_number`
  * — 30 digits per party, halves sorted, 60 digits total — but seeded from the

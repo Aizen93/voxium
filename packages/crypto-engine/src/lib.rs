@@ -563,6 +563,45 @@ pub fn safety_number(
     Ok(format!("{}{}", halves[0], halves[1]))
 }
 
+/// The code a new device shows so an approved one can find it (spec §17).
+///
+/// A digest over PUBLIC key material only, like the safety number — it is not a
+/// secret and grants nothing on its own. Its whole job is to let the approving
+/// device confirm that the device it is about to trust is the one in front of
+/// the user, by recomputing this from the keys the SERVER served: a device the
+/// server injected has different keys, so it produces a different code and
+/// cannot be reached through this flow.
+///
+/// Eight base32 characters, grouped for reading aloud. That is 40 bits against
+/// a PREIMAGE (an attacker must register a device whose code matches one the
+/// user is already reading), under a 5-device cap and the approval rate limit.
+#[wasm_bindgen(js_name = linkingCode)]
+pub fn linking_code(
+    user_id: &str,
+    device_id: &str,
+    curve25519_key_b64: &str,
+    ed25519_key_b64: &str,
+) -> Result<String, JsError> {
+    // Parsed, not trusted as strings: a malformed key must fail here rather
+    // than produce a code that happens to match something.
+    curve_key(curve25519_key_b64)?;
+    ed_key(ed25519_key_b64)?;
+
+    let mut hasher = Sha512::new();
+    hasher.update(b"voxium-link-v1");
+    hasher.update(user_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(device_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(curve25519_key_b64.as_bytes());
+    hasher.update([0]);
+    hasher.update(ed25519_key_b64.as_bytes());
+    let digest = hasher.finalize();
+
+    let encoded = base32_encode(&digest[..5]);
+    Ok(format!("{}-{}", &encoded[..4], &encoded[4..8]))
+}
+
 /// Account-level safety number over the PUBLIC cross-signing master keys
 /// (spec §14 / decision D3). Same construction and shape as `safety_number`
 /// — 30 digits per party, halves sorted, 60 digits total — but seeded from the

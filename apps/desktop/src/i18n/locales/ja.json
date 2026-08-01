@@ -1063,6 +1063,19 @@
     "backupPreferRestore": "復元キーをお持ちです。上で復元すればIDはそのままで、誰も再確認する必要がありません。まずはそちらをお試しください。",
     "backupRestoreMalformed": "リカバリーキーの形式ではありません。入力を確認してもう一度お試しください。",
     "peerNotReady": "{{name}} はまだどのデバイスでも Voxium を設定していないため、暗号化されたメッセージの送り先がありません。アプリを開けば連絡できるようになります。",
-    "peerNotReadyFallbackName": "この人"
+    "peerNotReadyFallbackName": "この人",
+    "linkCodeTitle": "この端末をアカウントに追加",
+    "linkCodeExplainer": "すでに使っている端末で Voxium を開き、端末一覧からこのコードを入力してください。それまで、この端末では暗号化されたメッセージを読めません。",
+    "linkCopyFailed": "リンクコードをコピーできませんでした",
+    "linkTitle": "端末をリンク",
+    "linkExplainer": "追加したい端末に表示されているコードを入力してください。",
+    "linkPlaceholder": "ABCD-2345",
+    "linkAction": "続ける",
+    "linkUnknownCode": "そのコードを表示している未承認の端末は見つかりませんでした。もう一方の端末で確認して、もう一度お試しください。",
+    "linkLookupFailed": "現在このコードを確認できませんでした。もう一度お試しください。",
+    "linkConfirmTitle": "この端末を承認しますか？",
+    "linkConfirmDevice": "端末 {{id}} · 登録日: {{date}}",
+    "linkConfirmExplainer": "承認すると、この端末にアカウント鍵が渡されます。暗号化された会話を読み、他の端末を承認できるようになります。目の前にある端末の場合のみ続行してください。",
+    "linkConfirmAction": "端末を承認"
   }
 }

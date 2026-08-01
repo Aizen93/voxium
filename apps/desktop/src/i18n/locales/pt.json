@@ -1063,6 +1063,19 @@
     "backupPreferRestore": "Você tem uma chave de recuperação: restaurá-la acima preserva sua identidade e ninguém precisará verificá-lo de novo. Tente isso primeiro.",
     "backupRestoreMalformed": "Isso não parece uma chave de recuperação. Verifique se há erros de digitação.",
     "peerNotReady": "{{name}} ainda não configurou o Voxium em nenhum dispositivo, então não há para onde enviar uma mensagem criptografada. Será possível falar assim que abrir o app.",
-    "peerNotReadyFallbackName": "Esta pessoa"
+    "peerNotReadyFallbackName": "Esta pessoa",
+    "linkCodeTitle": "Adicionar este dispositivo à sua conta",
+    "linkCodeExplainer": "Abra o Voxium num dispositivo que já utiliza, vá até aos seus dispositivos e introduza aí este código. Até lá, este dispositivo não consegue ler as suas mensagens cifradas.",
+    "linkCopyFailed": "Não foi possível copiar o código de ligação",
+    "linkTitle": "Ligar um dispositivo",
+    "linkExplainer": "Introduza o código apresentado pelo dispositivo que quer adicionar.",
+    "linkPlaceholder": "ABCD-2345",
+    "linkAction": "Continuar",
+    "linkUnknownCode": "Nenhum dispositivo à espera de aprovação está a mostrar esse código. Verifique-o no outro dispositivo e tente novamente.",
+    "linkLookupFailed": "Não foi possível verificar esse código agora. Tente novamente.",
+    "linkConfirmTitle": "Aprovar este dispositivo?",
+    "linkConfirmDevice": "Dispositivo {{id}} · registado em {{date}}",
+    "linkConfirmExplainer": "Aprovar entrega a chave da sua conta a este dispositivo: passará a poder ler as suas conversas cifradas e a aprovar outros dispositivos. Continue apenas se for o dispositivo à sua frente.",
+    "linkConfirmAction": "Aprovar dispositivo"
   }
 }
