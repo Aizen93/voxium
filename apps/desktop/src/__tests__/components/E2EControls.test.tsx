@@ -103,10 +103,14 @@ describe('E2EControls badge state machine', () => {
     expect(badge()).toBeNull();
   });
 
-  it('offers to enable encryption on a plaintext conversation', () => {
+  it('has no "unencrypted" state left to show', () => {
+    // Every DM is encrypted since the always-on cutover, so the badge does not
+    // branch on it. A conversation whose encryptedAt has not reached this
+    // client yet must still read as encrypted rather than inviting someone to
+    // turn on something that is already on.
     useE2EStore.setState({ ready: true });
     render(conversation(false));
-    expect(title()).toBe('e2e.enableTitle');
+    expect(title()).toBe('e2e.badgeTitle');
     expect(iconState()).toBe('ok');
   });
 
@@ -250,11 +254,11 @@ describe('E2EControls badge state machine', () => {
     expect(iconState()).toBe('ok');
   });
 
-  it('does not caption the "turn encryption on" button with an account warning', () => {
-    // Account-scoped flags are not per-conversation. On a plaintext DM this
-    // control does one thing — enable encryption — so warning about a device
-    // here would describe something the button cannot act on, and the click
-    // would open the enable dialog rather than the device manager.
+  it('reports an account-wide problem on every conversation', () => {
+    // Account-scoped flags used to be suppressed on plaintext DMs, because the
+    // badge there was a "turn encryption on" button and warning about a device
+    // would have captioned something the click could not act on. There is no
+    // such button any more, so the warning belongs everywhere it applies.
     useE2EStore.setState({
       ready: true,
       ownDeviceWarnings: ['dev-y'],
@@ -262,9 +266,9 @@ describe('E2EControls badge state machine', () => {
       masterKeyConflict: true,
     });
     render(conversation(false));
-    expect(title()).toBe('e2e.enableTitle');
-    expect(badge()?.getAttribute('aria-label')).toBe('e2e.enableTitle');
-    expect(iconState()).toBe('ok');
+    expect(title()).toBe('e2e.masterConflictBadgeTitle');
+    expect(badge()?.getAttribute('aria-label')).toBe('e2e.masterConflictBadgeTitle');
+    expect(iconState()).toBe('warning');
   });
 
   it('gives assistive tech the same warning sighted users hover for', () => {

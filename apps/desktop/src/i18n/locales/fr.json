@@ -974,13 +974,6 @@
   },
   "e2e": {
     "badgeTitle": "Chiffré de bout en bout — voir le numéro de sécurité",
-    "enableTitle": "Activer le chiffrement de bout en bout",
-    "enableExplainer": "Les messages de cette conversation seront chiffrés sur votre appareil et ne pourront être lus que par vous et votre contact. Le serveur ne stocke que du texte chiffré.",
-    "enablePointIrreversible": "Cette action est irréversible pour cette conversation",
-    "enablePointServer": "L'historique des messages reste sur vos appareils — un nouvel appareil ne peut pas lire les messages plus anciens",
-    "enableConfirm": "Activer le chiffrement",
-    "enabled": "Chiffrement de bout en bout activé",
-    "enableFailed": "Impossible d'activer le chiffrement",
     "encryptedMessage": "Message chiffré",
     "localSearchHint": "Recherche dans les messages déchiffrés sur cet appareil — les résultats dépendent de ce que cet appareil a reçu",
     "decryptFailed": "Impossible de déchiffrer ce message",
@@ -1077,6 +1070,7 @@
     "linkConfirmDevice": "Appareil {{id}} · enregistré le {{date}}",
     "linkConfirmExplainer": "L'approbation transmet la clé de votre compte à cet appareil : il pourra lire vos conversations chiffrées et approuver d'autres appareils. Ne continuez que s'il s'agit de l'appareil devant vous.",
     "linkConfirmAction": "Approuver l'appareil",
-    "devicesNotReady": "Le chiffrement est encore en cours de configuration sur cet appareil : vos appareils ne peuvent pas encore être listés. Revenez dans un instant."
+    "devicesNotReady": "Le chiffrement est encore en cours de configuration sur cet appareil : vos appareils ne peuvent pas encore être listés. Revenez dans un instant.",
+    "identityAcceptFailed": "Impossible d'accepter les nouvelles clés"
   }
 }
