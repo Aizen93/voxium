@@ -1166,6 +1166,42 @@ describe('E2E routes — PUT /master-key', () => {
     });
   });
 
+  it('drops the message-key backups the replacement just orphaned', async () => {
+    // Those rows are sealed under a subkey derived from the OLD master seed, so
+    // nothing can ever read them again. The client also asks for this, but as a
+    // separate best-effort DELETE whose branch never runs again once the device
+    // holds the new key — so one dropped connection left them forever, counting
+    // against a per-account cap that REFUSES rather than evicts, until backup
+    // stopped accepting anything at all. Atomic with the replacement is the
+    // only place this is reliable.
+    const master = makeTestMasterKey('user-1');
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: 'AAAAold' } as any);
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({ masterKey: master.masterKey, masterSignature: master.masterSignature });
+
+    expect(res.status).toBe(200);
+    expect(prisma.e2EMessageKeyBackup.deleteMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+    });
+  });
+
+  it('keeps message-key backups when the SAME master key is re-published', async () => {
+    // Re-publishing is idempotent, not an identity change: the subkey is
+    // unchanged, so those rows are still readable and dropping them would
+    // destroy the account's history for every device that joins later.
+    const master = makeTestMasterKey('user-1');
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
+
+    const res = await request(createApp())
+      .put('/api/v1/e2e/master-key')
+      .send({ masterKey: master.masterKey, masterSignature: master.masterSignature });
+
+    expect(res.status).toBe(200);
+    expect(prisma.e2EMessageKeyBackup.deleteMany).not.toHaveBeenCalled();
+  });
+
   it('does NOT clear signatures when re-publishing the same master key', async () => {
     const master = makeTestMasterKey('user-1');
     vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
@@ -3104,10 +3140,18 @@ describe('E2E routes — message-key backup is outside the device lifecycle', ()
     expect(store).toHaveLength(1);
   });
 
-  it('survives replacing the account master key — the client decides', async () => {
-    // Rotating the master key does strand these rows, but only the client can
-    // tell a genuine identity reset from a re-publish of a key it already
-    // holds. So DELETE /message-keys exists and the server never guesses.
+  it('does NOT survive replacing the account master key', async () => {
+    // This used to assert the opposite, on the grounds that "only the client
+    // can tell a genuine identity reset from a re-publish of a key it already
+    // holds". That was wrong: the server computes exactly that distinction one
+    // block earlier — `replacing` is `existing.publicKey !== masterKey` — and
+    // already acts on it to clear cross-signatures, on the identical argument
+    // that material made under the old key is dead. A re-publish of the same
+    // key is not `replacing` and is left alone (the test below).
+    //
+    // Leaving the rows to a best-effort client DELETE meant one dropped
+    // connection stranded them permanently against a cap that refuses rather
+    // than evicts, silently ending message-key backup for that account.
     const store = seedMessageKeys([mkRow(1, 'user-1')]);
     const master = makeTestMasterKey('user-1');
     vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: 'an-older-master-key' } as any);
@@ -3118,7 +3162,9 @@ describe('E2E routes — message-key backup is outside the device lifecycle', ()
       .send({ masterKey: master.masterKey, masterSignature: master.masterSignature });
 
     expect(res.status).toBe(200);
-    expect(prisma.e2EMessageKeyBackup.deleteMany).not.toHaveBeenCalled();
-    expect(store).toHaveLength(1);
+    expect(prisma.e2EMessageKeyBackup.deleteMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+    });
+    expect(store).toHaveLength(0);
   });
 });

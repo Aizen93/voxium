@@ -1066,6 +1066,7 @@
     "linkAction": "Weiter",
     "linkUnknownCode": "Kein Gerät, das auf Genehmigung wartet, zeigt diesen Code an. Prüfe ihn auf dem anderen Gerät und versuche es erneut.",
     "linkAmbiguousCode": "Mehrere Geräte zeigen diesen Code an. Genehmige keines davon — zufällig kann das nicht passieren. Entferne unbekannte Geräte und verknüpfe dann mit einem neuen Code erneut.",
+    "linkKeysChanged": "Dieses Gerät zeigt nicht mehr den Code, den du bestätigt hast. Es wurde nichts genehmigt. Hole dir einen neuen Code vom Gerät und versuche es erneut — wenn das wieder passiert, genehmige es nicht.",
     "linkLookupFailed": "Der Code konnte gerade nicht geprüft werden. Versuche es erneut.",
     "linkConfirmTitle": "Dieses Gerät genehmigen?",
     "linkConfirmDevice": "Gerät {{id}} · registriert am {{date}}",

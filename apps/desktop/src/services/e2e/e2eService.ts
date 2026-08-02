@@ -31,7 +31,6 @@ import type {
   E2EDeviceEntry,
   E2EKeyBundle,
   E2EKeySharePayload,
-  E2EMasterTransferPayload,
   E2EOlmEnvelope,
   E2EPreKey,
 } from '@voxium/shared';
@@ -262,6 +261,13 @@ function errText(err: unknown): string {
  * collide with the one the user is reading. Picking either would be picking
  * theirs half the time, so we pick neither.
  */
+export class E2ELinkingKeysChangedError extends Error {
+  constructor() {
+    super('That device is no longer showing the code you confirmed');
+    this.name = 'E2ELinkingKeysChangedError';
+  }
+}
+
 export class E2ELinkingCodeAmbiguousError extends Error {
   constructor() {
     super('That code matches more than one device');
@@ -798,7 +804,7 @@ export class E2EService {
    * it can approve future devices in turn. The secret is encrypted end-to-end
    * between our two devices — the server only ever relays an olm1 envelope.
    */
-  async approveDevice(deviceId: string): Promise<void> {
+  async approveDevice(deviceId: string, expectedLinkingCode?: string): Promise<void> {
     if (deviceId === this.deviceId) throw new Error('This device is already approved');
     if (!E2E_DEVICE_ID_RE.test(deviceId)) throw new Error('Invalid device id');
     return this.enqueue(async () => {
@@ -808,6 +814,28 @@ export class E2EService {
       const list = await this.fetchDeviceList(this.userId, true);
       const target = list.devices.find((d) => d.deviceId === deviceId);
       if (!target) throw new Error(`Unknown device ${deviceId}`);
+
+      // The typed code authenticated a device by its KEYS; everything after
+      // travels by device id. Those are two different questions to the server,
+      // and it may answer the second one differently: same id, attacker keys,
+      // valid self-signature. Then the master secret below is sealed to the
+      // attacker's curve25519 and cross-signed under the account key, and the
+      // code the user carefully compared bound nothing at all.
+      //
+      // Recomputing here is what makes the code load-bearing rather than
+      // decorative — it is checked against the very entry the secret is about
+      // to be sealed to.
+      if (expectedLinkingCode !== undefined) {
+        let actual: string;
+        try {
+          actual = linkingCode(this.userId, deviceId, target.curve25519Key, target.ed25519Key);
+        } catch {
+          throw new E2ELinkingKeysChangedError();
+        }
+        if (actual.replace(/-/g, '') !== expectedLinkingCode.replace(/[\s-]/g, '').toUpperCase()) {
+          throw new E2ELinkingKeysChangedError();
+        }
+      }
 
       // Order matters: queue the secret FIRST, publish the signature second.
       // The reverse leaves a device that everyone treats as fully trusted but
@@ -1106,10 +1134,12 @@ export class E2EService {
    * injected has keys of its own, so it produces a different code and cannot be
    * reached by a user typing what their new device is showing.
    */
-  async findLinkableDevice(code: string): Promise<{ deviceId: string; createdAt: string } | null> {
+  async findLinkableDevice(
+    code: string
+  ): Promise<{ deviceId: string; createdAt: string; linkingCode: string } | null> {
     const normalized = code.replace(/[\s-]/g, '').toUpperCase();
     const own = await this.listOwnDevices();
-    const matches: Array<{ deviceId: string; createdAt: string }> = [];
+    const matches: Array<{ deviceId: string; createdAt: string; linkingCode: string }> = [];
     for (const device of own.devices) {
       // Already vouched for: there is nothing to link, and offering it would
       // invite a second approval of a device that is already trusted.
@@ -1122,7 +1152,14 @@ export class E2EService {
         continue; // malformed keys cannot be linked to
       }
       if (candidate.replace(/-/g, '') === normalized) {
-        matches.push({ deviceId: device.deviceId, createdAt: device.createdAt });
+        // Carry the code forward, not just the id. The id is what the server
+        // will be asked about again at approval time, and it is free to answer
+        // with different keys — so the id alone binds nothing.
+        matches.push({
+          deviceId: device.deviceId,
+          createdAt: device.createdAt,
+          linkingCode: candidate,
+        });
       }
     }
     // Never take the first of several: the server chooses the order, so

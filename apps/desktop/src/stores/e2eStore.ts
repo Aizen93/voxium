@@ -56,6 +56,13 @@ export function stopE2EDeviceListWatch(): void {
 export interface E2ELinkableDevice {
   deviceId: string;
   createdAt: string;
+  /**
+   * The code this device's PUBLISHED KEYS produce — carried so approval can
+   * check it again against a fresh device list. Without it the confirmation
+   * binds only a device id, and the server is free to answer the second
+   * lookup with different keys under the same id.
+   */
+  linkingCode: string;
 }
 
 interface E2EState {
@@ -122,9 +129,9 @@ interface E2EState {
   acknowledgeDeviceList: (userId: string, peerUserId: string, seenDeviceIds?: string[]) => Promise<void>;
   loadOwnDevices: (userId: string) => Promise<void>;
   revokeDevice: (userId: string, deviceId: string) => Promise<void>;
-  approveDevice: (userId: string, deviceId: string) => Promise<void>;
+  approveDevice: (userId: string, deviceId: string, linkingCode?: string) => Promise<void>;
   linkDevice: (userId: string, code: string) => Promise<E2ELinkableDevice>;
-  approveLinkedDevice: (userId: string, deviceId: string) => Promise<void>;
+  approveLinkedDevice: (userId: string, deviceId: string, linkingCode?: string) => Promise<void>;
   acknowledgeOwnDevices: (userId: string, seenDeviceIds: string[]) => Promise<void>;
   markAccountVerified: (userId: string, peerUserId: string) => Promise<void>;
   resetAccountIdentity: (userId: string) => Promise<void>;
@@ -330,9 +337,9 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    * account key and hand that key over, so it becomes trusted everywhere and
    * can approve the next device itself.
    */
-  approveDevice: async (userId: string, deviceId: string) => {
+  approveDevice: async (userId: string, deviceId: string, linkingCode?: string) => {
     const service = getE2EService(userId);
-    await service.approveDevice(deviceId);
+    await service.approveDevice(deviceId, linkingCode);
     await get().loadOwnDevices(userId);
     const status = await service.deviceListStatus(userId);
     set(ownStatusPatch(service, status));
@@ -368,8 +375,8 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    * code and a device approved from the list must end in the same state, and
    * two copies of "cross-sign, reload, recompute own status" would drift.
    */
-  approveLinkedDevice: async (userId: string, deviceId: string) => {
-    await get().approveDevice(userId, deviceId);
+  approveLinkedDevice: async (userId: string, deviceId: string, linkingCode?: string) => {
+    await get().approveDevice(userId, deviceId, linkingCode);
   },
 
   /**

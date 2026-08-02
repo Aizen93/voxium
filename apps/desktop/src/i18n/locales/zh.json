@@ -1066,6 +1066,7 @@
     "linkAction": "继续",
     "linkUnknownCode": "没有等待批准的设备显示该代码。请在另一台设备上核对后重试。",
     "linkAmbiguousCode": "有多台设备显示该代码。不要批准其中任何一台 — 这不可能是巧合。请删除不认识的设备，再用新代码重新关联。",
+    "linkKeysChanged": "该设备已不再显示您确认的代码。未批准任何内容。请在设备上获取新代码后重试 — 如果反复出现，请不要批准。",
     "linkLookupFailed": "暂时无法校验该代码，请重试。",
     "linkConfirmTitle": "批准此设备？",
     "linkConfirmDevice": "设备 {{id}} · 注册于 {{date}}",

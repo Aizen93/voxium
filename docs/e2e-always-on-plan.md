@@ -112,7 +112,7 @@ approval flow that already exists (§14.4) — not new cryptography.
    ```
    fingerprint = base32(SHA-512("voxium-link-v1" || userId || deviceId
                                 || curve25519Key || ed25519Key))
-   short code  = first 8 characters, grouped 4-4
+   short code  = first 16 characters, grouped 4-4-4-4
    ```
 
 3. On an approved device `D1`, the user opens Settings → Security → Link a
@@ -145,9 +145,19 @@ confirmation; approvals are visible afterwards on every device (the own-device
 warning already exists); rate-limit approvals; refuse to "link" a device that is
 already cross-signed.
 
-**Short code entropy.** 8 base32 characters is 40 bits, and an attacker would
-need a device whose fingerprint *matches a given code* — a preimage problem, not
-a birthday one — while under the 5-device cap and the approval rate limiter.
+**Short code entropy.** 16 base32 characters is 80 bits. This plan originally
+specified 8 (40 bits), arguing that a preimage needs a *registered* device and
+is therefore bounded by the 5-device cap and the approval rate limiter. That
+argument was wrong and the code shipped at 80 bits instead: the attacker chooses
+`deviceId` and both keys, so the search runs offline on their own hardware and
+neither server-side control is ever reached. 40 bits falls in minutes on a GPU.
+See spec §17.3.
+
+Because 80 bits makes an accidental collision impossible, two devices answering
+one code is an attack signal, and the approving client refuses rather than
+picking one — the server orders that list, and first-match would let it seat a
+decoy ahead of the real device.
+
 The QR carries the full fingerprint, so the truncation only applies to the typed
 path.
 
@@ -305,12 +315,41 @@ individually revertible; step 7 is the point of no return.
    2. take a database snapshot (this is the only rollback for steps 7.3–7.4)
    3. capture the DM attachment keys (§6.1) — after the delete they are
       unreachable
-   4. run the migration in §6.1 **through `prisma migrate deploy`, or through
-      `psql` inside an explicit `BEGIN`/`COMMIT`**. Do NOT use
-      `prisma db execute`: it does not wrap the file in a transaction, so a
-      statement killed part-way leaves history deleted with `encrypted_at`
-      still nullable and the key tables intact — a half-cutover with no clean
-      state to resume from
+   4. **authorise the cutover**, then run it:
+
+      ```sql
+      CREATE TABLE "e2e_cutover_authorised"();     -- psql, after the snapshot
+      ```
+      ```sh
+      cd apps/server && VOXIUM_ALLOW_CUTOVER=1 npx prisma migrate deploy
+      ```
+
+      The migration refuses to destroy anything unless that table exists, and
+      drops it again on success, so the authorisation is spent by the run it
+      authorised. This is not ceremony: `prisma migrate deploy` runs on **every
+      container start** (`docker-entrypoint.sh`) and on every routine update
+      (DEPLOYMENT.md, "Application Updates" — `git pull` → `migrate deploy` →
+      build → restart). Without the gate, the first restart or routine update
+      after this branch lands would perform the cutover unattended — no window,
+      no snapshot, no captured attachment keys, and no warning to users whose
+      recovery keys stop working. A database with nothing to destroy (fresh dev
+      clone, CI, a newly provisioned node) passes the gate untouched.
+
+      `VOXIUM_ALLOW_CUTOVER=1` is the matching entrypoint switch; without it a
+      container whose database still has the cutover pending refuses to start
+      rather than applying it. Leave it unset everywhere except the one boot
+      that performs the release.
+
+      Use `prisma migrate deploy` and nothing else. NOT `prisma db execute`: it
+      does not wrap the file in a transaction, so a statement killed part-way
+      leaves history deleted with `encrypted_at` still nullable and the key
+      tables intact — a half-cutover with no clean state to resume from. NOT
+      raw `psql` either, even inside `BEGIN`/`COMMIT`: that applies the SQL
+      without writing a `_prisma_migrations` row, so the cutover stays "pending"
+      forever and the next routine update runs it a second time — deleting the
+      post-cutover history and every recovery key generated since. (The
+      authorisation gate now blocks that second run too, but the migration
+      should be recorded, not merely stopped.)
    5. deploy the server build with the toggle removed and DM plaintext rejected
    6. deploy the client build with the bumped vault version
    7. verify (below), then lift maintenance

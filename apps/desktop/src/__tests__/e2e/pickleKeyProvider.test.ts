@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createKeychainPickleKeys, localStoragePickleKeys } from '../../services/e2e/pickleKeyProvider';
+import { PickleKeyUnavailableError, createKeychainPickleKeys, localStoragePickleKeys } from '../../services/e2e/pickleKeyProvider';
 
 // node has no localStorage — a minimal in-memory stand-in
 const storage = new Map<string, string>();
@@ -80,6 +80,35 @@ describe('keychain pickle key provider', () => {
 
     await provider.save('user-2', KEY_B64); // save must not throw either
     expect(storage.get('voxium_e2e_pk_user-2')).toBe(KEY_B64);
+  });
+
+  it('throws rather than reporting "no key" when the keychain cannot be reached', async () => {
+    // The dangerous case, and the one the suite did not cover: keychain down
+    // AND no localStorage copy — which is every keychain-era install, since the
+    // migration deletes the disk copy once the keychain provably holds it.
+    //
+    // Returning null here reads as "this account has no key yet", so the vault
+    // mints a second one. The Olm account then fails to unpickle, the device
+    // regenerates its identity, all DM history goes dark and every peer's pin
+    // breaks — from one launch where gnome-keyring or D-Bus was slow to start.
+    const provider = createKeychainPickleKeys(async () => {
+      throw new Error('Secret Service not available');
+    });
+
+    await expect(provider.load('user-1')).rejects.toThrow(/unavailable/);
+    // and specifically NOT a null that the caller would act on
+    await expect(provider.load('user-1')).rejects.toBeInstanceOf(PickleKeyUnavailableError);
+  });
+
+  it('still prefers a real local answer over failing', async () => {
+    // A pre-keychain install genuinely has its key on disk. That IS an answer,
+    // so an unreachable keychain must not turn it into an error.
+    storage.set('voxium_e2e_pk_user-1', KEY_B64);
+    const provider = createKeychainPickleKeys(async () => {
+      throw new Error('keychain locked');
+    });
+
+    expect(await provider.load('user-1')).toBe(KEY_B64);
   });
 
   it('returns null for a brand-new account', async () => {

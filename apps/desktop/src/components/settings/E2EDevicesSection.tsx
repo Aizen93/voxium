@@ -4,7 +4,10 @@ import { createPortal } from 'react-dom';
 import { ShieldCheck, ShieldAlert, Laptop2, Trash2, KeyRound, Copy, Check } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useE2EStore, E2ELinkingCodeUnknownError, type E2ELinkableDevice } from '../../stores/e2eStore';
-import { E2ELinkingCodeAmbiguousError } from '../../services/e2e/e2eService';
+import {
+  E2ELinkingCodeAmbiguousError,
+  E2ELinkingKeysChangedError,
+} from '../../services/e2e/e2eService';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import {
@@ -317,13 +320,26 @@ function LinkDeviceForm({ userId }: { userId: string }) {
     if (!pending) return;
     setBusy(true);
     try {
-      await useE2EStore.getState().approveLinkedDevice(userId, pending.deviceId);
+      // Pass the code, not just the id: approveDevice recomputes it from the
+      // device list it is about to seal the account key to, so the thing the
+      // user compared is the thing that gets checked.
+      await useE2EStore.getState().approveLinkedDevice(userId, pending.deviceId, pending.linkingCode);
       toast.success(t('e2e.approveDeviceSuccess'));
       setPending(null);
       setCode('');
     } catch (err) {
       console.warn('e2e: approving a linked device failed:', err instanceof Error ? err.message : err);
-      toast.error(t('e2e.approveDeviceFailed'));
+      if (err instanceof E2ELinkingKeysChangedError) {
+        // The device answered to the code a moment ago and answers to a
+        // different one now. That is not a hiccup to retry past: it is the
+        // server having swapped the keys under the id the user confirmed.
+        // Send them back to the new device for a fresh code rather than
+        // letting them press the button again until it goes through.
+        toast.error(t('e2e.linkKeysChanged'));
+        setPending(null);
+      } else {
+        toast.error(t('e2e.approveDeviceFailed'));
+      }
     } finally {
       setBusy(false);
     }
