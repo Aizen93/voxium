@@ -311,6 +311,45 @@ describe('e2eStore own-device actions', () => {
     });
   };
 
+  it('says the device list FAILED to load instead of showing an empty one', async () => {
+    // "The read failed" and "you have no other devices" are opposite answers
+    // that used to render identically. This is the one screen where a user
+    // would notice a device they did not add, so an empty list on failure is
+    // not merely unhelpful — it is reassuring about exactly the wrong thing.
+    // Observed live: three browser contexts sharing an IP exhausted the request
+    // budget, GET /e2e/devices/me returned 429, and the panel reported no other
+    // devices.
+    service.listOwnDevices.mockRejectedValueOnce(new Error('429: too many requests'));
+
+    await useE2EStore.getState().loadOwnDevices(USER);
+
+    expect(useE2EStore.getState().ownDevicesError).toBe(true);
+    expect(useE2EStore.getState().ownDevicesLoading).toBe(false);
+  });
+
+  it('keeps a previously loaded list rather than blanking it on a failed refresh', async () => {
+    // A stale list is still true of some moment. An emptied one is a claim.
+    await useE2EStore.getState().loadOwnDevices(USER);
+    const loaded = useE2EStore.getState().ownDevices;
+    expect(loaded).not.toBeNull();
+
+    service.listOwnDevices.mockRejectedValueOnce(new Error('offline'));
+    await useE2EStore.getState().loadOwnDevices(USER);
+
+    expect(useE2EStore.getState().ownDevices).toEqual(loaded);
+    expect(useE2EStore.getState().ownDevicesError).toBe(true);
+  });
+
+  it('clears the failure once a load succeeds', async () => {
+    service.listOwnDevices.mockRejectedValueOnce(new Error('offline'));
+    await useE2EStore.getState().loadOwnDevices(USER);
+    expect(useE2EStore.getState().ownDevicesError).toBe(true);
+
+    await useE2EStore.getState().loadOwnDevices(USER);
+
+    expect(useE2EStore.getState().ownDevicesError).toBe(false);
+  });
+
   it('recomputes own state after approving, so the warning clears itself', async () => {
     withStatus([], [], false);
     await useE2EStore.getState().approveDevice(USER, 'laptop');

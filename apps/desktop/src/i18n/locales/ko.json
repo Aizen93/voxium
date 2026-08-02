@@ -1005,6 +1005,7 @@
     "ownDeviceBadgeTitle": "계정에 기기가 추가되었습니다 — 확인하세요",
     "ownDeviceWarning": "알 수 없는 기기가 계정에 추가되었습니다({{count}}). 암호화된 대화를 읽을 수 있습니다. 본인의 기기가 아니면 해지하세요.",
     "ownDevicesReviewed": "내 기기가 맞습니다",
+    "ownDevicesLoadFailed": "기기 목록을 불러오지 못했습니다. 이 목록은 불완전할 수 있으며, 다른 기기가 등록되지 않았다는 증거가 아닙니다. 패널을 다시 열어 재시도하세요.",
     "unrecognisedDevice": "신규",
     "accountSafetyExplainer": "이 번호를 다른 방법(직접 만나거나 통화)으로 {{name}} 님과 비교하여 계정을 확인하세요. 둘 중 누구의 기기에서든 동일하며, 계정 키가 재설정될 때만 변경됩니다.",
     "markAccountVerified": "계정을 확인됨으로 표시",

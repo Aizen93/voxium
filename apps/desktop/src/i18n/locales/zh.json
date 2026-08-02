@@ -1005,6 +1005,7 @@
     "ownDeviceBadgeTitle": "您的账户新增了一台设备 — 请查看",
     "ownDeviceWarning": "您的账户新增了一台可能不认识的设备（{{count}}）。它可以读取您的加密对话。如果不是您的设备，请撤销。",
     "ownDevicesReviewed": "这些是我的设备",
+    "ownDevicesLoadFailed": "无法加载您的设备列表。此列表可能不完整 — 不要将其视为没有其他设备已注册的证据。请重新打开此面板重试。",
     "unrecognisedDevice": "新",
     "accountSafetyExplainer": "请通过其他渠道（当面或通话）与 {{name}} 核对此号码，以验证你们的账户。无论使用哪台设备，该号码都相同，只有在账户密钥被重置时才会改变。",
     "markAccountVerified": "将账户标记为已验证",

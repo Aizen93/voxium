@@ -111,6 +111,17 @@ interface E2EState {
   ownDevices: E2EOwnDevices | null;
   ownDevicesLoading: boolean;
   /**
+   * The last device-list load failed (offline, 429, 5xx).
+   *
+   * Tracked separately because "the read failed" and "you have no other
+   * devices" are opposite answers that rendered identically: an empty list. On
+   * the one screen where a user would notice a device they did not add, a
+   * failure that shows nothing is worse than useless — it is reassuring. Seen
+   * live: three browser contexts sharing an IP exhausted the request budget,
+   * the list 429'd, and the panel calmly reported no other devices.
+   */
+  ownDevicesError: boolean;
+  /**
    * Whether the account has an encrypted key backup on the server, and when it
    * was last written (spec §15). `null` means "not read yet" — NOT "no backup":
    * both answers drive an action, and each is destructive in the wrong state
@@ -157,6 +168,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   ownDeviceWarnings: [],
   ownDevices: null,
   ownDevicesLoading: false,
+  ownDevicesError: false,
   keyBackup: null,
 
   initialize: async (userId: string) => {
@@ -313,13 +325,15 @@ export const useE2EStore = create<E2EState>((set, get) => ({
 
   /** Device-manager UI: (re)load this account's registered devices. */
   loadOwnDevices: async (userId: string) => {
-    set({ ownDevicesLoading: true });
+    set({ ownDevicesLoading: true, ownDevicesError: false });
     try {
       const ownDevices = await getE2EService(userId).listOwnDevices();
-      set({ ownDevices, ownDevicesLoading: false });
+      set({ ownDevices, ownDevicesLoading: false, ownDevicesError: false });
     } catch (err) {
       console.warn('e2e: loading own devices failed:', err instanceof Error ? err.message : err);
-      set({ ownDevicesLoading: false });
+      // Leave any previously loaded list in place rather than blanking it — a
+      // stale list is still true of some moment; an empty one is a claim.
+      set({ ownDevicesLoading: false, ownDevicesError: true });
     }
   },
 

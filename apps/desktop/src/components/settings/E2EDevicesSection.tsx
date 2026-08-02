@@ -703,6 +703,7 @@ export function E2EDevicesSection() {
   const e2eReady = useE2EStore((s) => s.ready);
   const ownDevices = useE2EStore((s) => s.ownDevices);
   const loading = useE2EStore((s) => s.ownDevicesLoading);
+  const ownDevicesError = useE2EStore((s) => s.ownDevicesError);
   const ownDeviceWarnings = useE2EStore((s) => s.ownDeviceWarnings);
   const canApprove = useE2EStore((s) => s.canApprove);
   const thisDeviceUnsigned = useE2EStore((s) => s.thisDeviceUnsigned);
@@ -920,6 +921,17 @@ export function E2EDevicesSection() {
               {t('e2e.ownDevicesReviewed')}
             </button>
           </div>
+        </div>
+      )}
+
+      {ownDevicesError && (
+        <div
+          className="mb-3 flex items-start gap-2 rounded-md bg-vox-accent-danger/10 p-3 text-xs text-vox-accent-danger"
+          role="alert"
+          data-testid="e2e-devices-load-failed"
+        >
+          <ShieldAlert size={16} className="mt-0.5 shrink-0" />
+          <p>{t('e2e.ownDevicesLoadFailed')}</p>
         </div>
       )}
 

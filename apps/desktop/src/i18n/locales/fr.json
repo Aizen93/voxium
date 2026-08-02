@@ -1005,6 +1005,7 @@
     "ownDeviceBadgeTitle": "Un appareil a été ajouté à votre compte — vérifiez-le",
     "ownDeviceWarning": "Un appareil que vous ne reconnaissez peut-être pas a été ajouté à votre compte ({{count}}). Il peut lire vos conversations chiffrées. Révoquez-le s'il n'est pas le vôtre.",
     "ownDevicesReviewed": "Ce sont mes appareils",
+    "ownDevicesLoadFailed": "Impossible de charger vos appareils. Cette liste peut être incomplète : ne la considérez pas comme une preuve qu'aucun autre appareil n'est enregistré. Rouvrez ce panneau pour réessayer.",
     "unrecognisedDevice": "nouveau",
     "accountSafetyExplainer": "Comparez ce numéro avec {{name}} par un autre canal (en personne ou lors d'un appel) pour vérifier votre compte. Il est identique sur chaque appareil que vous utilisez tous les deux, et ne change que si une clé de compte est réinitialisée.",
     "markAccountVerified": "Marquer le compte comme vérifié",
