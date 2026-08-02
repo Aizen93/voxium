@@ -1,24 +1,9 @@
 import * as OTPAuth from 'otpauth';
-import { createClient } from 'redis';
 import { test, expect } from './helpers/fixtures';
 import { testUser } from './helpers/auth';
 import { API_URL, registerUser } from './helpers/api';
 import { dmHeading } from './helpers/selectors';
-
-/** Clear all rate limit keys in Redis */
-async function clearRateLimits() {
-  const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
-  try {
-    await redis.connect();
-    const keys: string[] = [];
-    for await (const key of redis.scanIterator({ MATCH: 'rl:*', COUNT: 100 })) {
-      if (key !== 'rl:config') keys.push(key);
-    }
-    if (keys.length > 0) await redis.del(keys);
-  } finally {
-    await redis.quit().catch(() => {});
-  }
-}
+import { clearRateLimits } from './helpers/rateLimits';
 
 /** Generate a valid TOTP code from a base32 secret */
 function generateTOTP(secret: string): string {

@@ -3,6 +3,7 @@ import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import { registerUser, sendFriendRequest, acceptFriendRequest, API_URL } from './helpers/api';
 import { getConversationServerState, getE2EDevices, getE2EKeyShareCount } from './helpers/db';
+import { clearRateLimits } from './helpers/rateLimits';
 
 // Live two-client smoke test of the full E2E DM flow (docs/e2e-dm-spec.md):
 // enable + badge, cross-client encrypt/decrypt, matching safety numbers,
@@ -260,6 +261,13 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     // number to compare, no dialog to dismiss.
     // A's own badge names the precise problem: a device its account key has
     // not signed yet.
+    // Three browser contexts have shared one IP for this whole scenario, and
+    // the global limiter is IP-keyed at 100/60s — ample for a real user (one
+    // browser), not for this harness. Left alone, GET /e2e/devices/me starts
+    // returning 429 exactly here, the device panel renders empty, and the
+    // failure reads as "no device to approve" rather than "rate limited".
+    await clearRateLimits();
+
     await expect(page.locator(BADGE_UNSIGNED)).toBeVisible({ timeout: 20_000 });
     await page.locator(BADGE_UNSIGNED).click();
     await page.locator('button[title="Manage devices"]').click();
