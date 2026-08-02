@@ -63,6 +63,35 @@ test.describe('DM flow: friend request -> accept -> message', () => {
     // User A should see the reply in real-time
     await expect(page.locator('.leading-relaxed', { hasText: msgB })).toBeVisible({ timeout: 10_000 });
 
+    // ── Hiding the window and coming back must not report a false failure ──
+    // Reported from the running app, on both the Tauri client and the browser.
+    // Becoming visible re-fetches the DM list and hydrates each encrypted
+    // preview from the local vault; that hydration used to run under the same
+    // catch as the fetch, so any local-cache problem — routinely, an IndexedDB
+    // connection the browser closed while the page was hidden — surfaced as
+    // "Failed to load conversations" over a list that was already on screen.
+    //
+    // Asserted here rather than in a fresh-account test because it needs what
+    // this test has built: a conversation with real encrypted messages, so the
+    // preview path actually runs.
+    const consoleErrors: string[] = [];
+    page.on('console', (m) => {
+      if (m.type() === 'error') consoleErrors.push(m.text());
+    });
+
+    // Twice: the symptom recurred on every hide/restore, so once would not
+    // catch a recovery that only works the first time.
+    for (let i = 0; i < 2; i++) {
+      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+      await page.waitForTimeout(700);
+    }
+
+    await expect(page.getByText('Failed to load conversations')).toHaveCount(0);
+    expect(consoleErrors.filter((e) => /Failed to fetch conversations/.test(e))).toEqual([]);
+    // still usable, and the history is still there
+    await expect(page.locator('.leading-relaxed', { hasText: msgB })).toBeVisible();
+
     await context2.close();
   });
+
 });

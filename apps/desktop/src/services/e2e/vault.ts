@@ -171,6 +171,21 @@ function requestToPromise<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+
+/**
+ * Is this the browser having taken the IndexedDB connection away?
+ *
+ * Chrome/WebView2 raise InvalidStateError ("The database connection is
+ * closing") and Safari/WKWebView raise a plain error mentioning the same; both
+ * mean "reopen", not "the data is bad". Matched by name first and message
+ * second so a genuine fault is never mistaken for a reconnectable one.
+ */
+function isConnectionGone(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === 'InvalidStateError') return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /database connection is closing|connection is closing|InvalidStateError/i.test(message);
+}
+
 export class E2EVault {
   private db: IDBDatabase | null = null;
   private pickleKeyBytes: Uint8Array | null = null;
@@ -196,7 +211,26 @@ export class E2EVault {
         req.result.createObjectStore(KV_STORE);
       }
     };
-    this.db = await requestToPromise(req as IDBRequest<IDBDatabase>);
+    const db = await requestToPromise(req as IDBRequest<IDBDatabase>);
+    // A page that gets backgrounded can have its IndexedDB connection closed
+    // out from under it — the browser freezes or discards hidden tabs, and the
+    // Tauri webview does the same when the window is hidden. The handle stays
+    // in hand but every `transaction()` on it throws InvalidStateError from
+    // then on, so the vault was permanently dead after the first hide/restore
+    // and only a reload brought it back.
+    //
+    // Dropping the reference here means the next access reopens instead. Also
+    // on `versionchange`, where another tab upgrading the database needs this
+    // connection to let go or it blocks forever.
+    db.onclose = () => {
+      console.warn('e2e: vault connection was closed by the browser — will reopen on next use');
+      if (this.db === db) this.db = null;
+    };
+    db.onversionchange = () => {
+      db.close();
+      if (this.db === db) this.db = null;
+    };
+    this.db = db;
     // Resolve the pickle key up-front (keychain access is async) so crypto
     // paths keep a synchronous accessor after open()
     if (!this.pickleKeyBytes) {
@@ -242,21 +276,46 @@ export class E2EVault {
     return this.db.transaction(KV_STORE, mode).objectStore(KV_STORE);
   }
 
+  /**
+   * Run one store operation, reopening the vault once if the connection died.
+   *
+   * `onclose` covers the case where the browser tells us. It does not always:
+   * the handle can already be unusable by the time we look, and `transaction()`
+   * then throws InvalidStateError synchronously. Both paths land here, and both
+   * are retried exactly once — a second failure is a real fault and is raised.
+   */
+  private async withStore<T>(
+    mode: IDBTransactionMode,
+    run: (store: IDBObjectStore) => Promise<T>
+  ): Promise<T> {
+    if (!this.db) await this.open();
+    try {
+      return await run(this.store(mode));
+    } catch (err) {
+      if (!isConnectionGone(err)) throw err;
+      console.warn('e2e: vault connection was gone — reopening and retrying once');
+      this.db?.close();
+      this.db = null;
+      await this.open();
+      return run(this.store(mode));
+    }
+  }
+
   private async get<T>(key: string): Promise<T | undefined> {
-    return requestToPromise(this.store('readonly').get(key)) as Promise<T | undefined>;
+    return this.withStore('readonly', (s) => requestToPromise(s.get(key))) as Promise<T | undefined>;
   }
 
   private async put(key: string, value: unknown): Promise<void> {
-    await requestToPromise(this.store('readwrite').put(value, key));
+    await this.withStore('readwrite', (s) => requestToPromise(s.put(value, key)));
   }
 
   private async delete(key: string): Promise<void> {
-    await requestToPromise(this.store('readwrite').delete(key));
+    await this.withStore('readwrite', (s) => requestToPromise(s.delete(key)));
   }
 
   private async keysWithPrefix(prefix: string): Promise<string[]> {
     const range = IDBKeyRange.bound(prefix, prefix + KEY_MAX);
-    const keys = await requestToPromise(this.store('readonly').getAllKeys(range));
+    const keys = await this.withStore('readonly', (s) => requestToPromise(s.getAllKeys(range)));
     return keys.map(String);
   }
 
