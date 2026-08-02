@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { Lock, ShieldCheck, ShieldAlert, X, Laptop2 } from 'lucide-react';
 import { clsx } from 'clsx';
-import { useDMStore } from '../../stores/dmStore';
 import { useE2EStore } from '../../stores/e2eStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useSettingsStore } from '../../stores/settingsStore';

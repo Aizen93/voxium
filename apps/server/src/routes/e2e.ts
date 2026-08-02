@@ -491,6 +491,20 @@ e2eRouter.put('/master-key', rateLimitE2EApprove, async (req: Request, res: Resp
       // every client anyway. Clear them rather than serve known-dead data.
       if (replacing) {
         await tx.e2EDevice.updateMany({ where: { userId }, data: { masterSignature: null } });
+
+        // Same reasoning, one table over. Message-key backups are sealed under
+        // a subkey derived from the master seed, so every row this account has
+        // just became undecryptable — by anyone, forever.
+        //
+        // The client does try to drop them (resetAccountIdentity), but that is
+        // a separate best-effort request with no retry, and the branch it lives
+        // in never runs again: once this device holds the new key, `held` is
+        // true on every later launch. So a single 500 or dropped connection
+        // left the rows behind permanently, counting against the per-account
+        // cap — which REFUSES rather than evicts — until backup stopped
+        // accepting anything at all. Doing it here makes it atomic with the
+        // replacement that orphaned them, which is the only place it can be.
+        await tx.e2EMessageKeyBackup.deleteMany({ where: { userId } });
       }
 
       let signed = 0;

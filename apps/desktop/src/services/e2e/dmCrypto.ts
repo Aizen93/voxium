@@ -41,7 +41,27 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * messages are cache-only, so own messages fall back to retrying the cache.
  */
 export async function decryptMessageForDisplay(message: Message): Promise<Message> {
-  if (!message.encrypted) return message;
+  if (!message.encrypted) {
+    // After the always-on cutover there is no plaintext DM path: conversations
+    // are born encrypted, the enable route is gone, and the send side throws
+    // rather than degrade. So the ONLY unencrypted DM rows the server can
+    // legitimately produce are its own `type: 'system'` notices (call started,
+    // call ended) — which carry no attacker-chosen text.
+    //
+    // Honouring `encrypted: false` on a `type: 'user'` row would let anyone who
+    // can write the API response — a compromised server, a malicious operator,
+    // a TLS-terminating hop, all named in spec 1 — put words under a
+    // contact's name and avatar with no badge and no decrypt-failure marker,
+    // and have them read out in a desktop notification. That is a silent
+    // forgery, and it is strictly weaker than the "active key substitution is
+    // detectable" property the spec claims. The flag is the server's word, so
+    // it does not get to decide whether a message was end-to-end encrypted.
+    if (message.type === 'system') return message;
+    console.warn(
+      `e2e: refusing an unencrypted DM message (${message.id}) — every DM is encrypted`
+    );
+    return { ...message, content: DECRYPT_FAILED_CONTENT };
+  }
   const userId = await currentUserId();
   if (!userId) return { ...message, content: DECRYPT_FAILED_CONTENT };
 
@@ -76,7 +96,11 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
 
 /** Decrypt a fetched page of messages (order preserved; plaintext untouched). */
 export async function decryptMessagesForDisplay(messages: Message[]): Promise<Message[]> {
-  if (!messages.some((m) => m.encrypted)) return messages;
+  // No `some(m => m.encrypted)` short-circuit: a page of forged plaintext rows
+  // would satisfy it and bypass the per-message check entirely, which is
+  // exactly the shape an attacker controls. Every row goes through the same
+  // gate; the fast path for genuinely unencrypted system notices is inside it.
+  if (messages.length === 0) return messages;
   // Sequential on purpose: decryption mutates ratchet state through a serial
   // queue anyway, and order here matches timeline order for skipped-key bookkeeping.
   const out: Message[] = [];
@@ -188,9 +212,21 @@ export async function searchEncryptedHistory(
   });
 }
 
-/** Resolve an encrypted conversation-list preview from the local cache. */
+/**
+ * Resolve an encrypted conversation-list preview from the local cache.
+ *
+ * Parsed, never raw. The cache holds the plaintext as it was ENCRYPTED, and for
+ * a message with an attachment that is a structured payload:
+ * `{"v":1,"t":"here you go","a":[{s3Key,fileName,...,"key":"<AES-256 file key>","iv":...}]}`.
+ * Returning it verbatim put the file's decryption key and its true filename
+ * into the sidebar, the DOM, the accessibility tree and any screenshot. Every
+ * other consumer of this cache parses (applyPlaintext, resolveReplyPreview,
+ * searchDecrypted); this one did not, and nothing in the display layer is the
+ * right place to notice.
+ */
 export async function resolveEncryptedPreview(messageId: string): Promise<string | null> {
   const userId = await currentUserId();
   if (!userId) return null;
-  return getE2EService(userId).getCachedPlaintext(messageId);
+  const raw = await getE2EService(userId).getCachedPlaintext(messageId);
+  return raw === null ? null : parseE2EPlaintext(raw).text;
 }

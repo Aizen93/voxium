@@ -7,7 +7,27 @@
 // localStorage on first load. Browser dev builds keep the localStorage
 // backend — there is no OS keychain to reach from a plain web context.
 
+/**
+ * Raised when the store that HOLDS the pickle key cannot be reached.
+ *
+ * Distinct from `load` returning null, and the distinction is the whole point.
+ * `null` means "this account has no key here" — the honest answer for a first
+ * launch, and the cue to mint one. An unreachable keychain is not that answer;
+ * it is no answer. Collapsing the two meant one launch with gnome-keyring or
+ * D-Bus not yet up minted a SECOND pickle key, which cannot unpickle the Olm
+ * account, so the device silently regenerated its identity: history unreadable,
+ * every peer's pin broken, everyone re-verifying — from a transient failure
+ * that would have fixed itself on the next launch.
+ */
+export class PickleKeyUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(`pickle key store unavailable: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'PickleKeyUnavailableError';
+  }
+}
+
 export interface PickleKeyProvider {
+  /** The stored key, or null if this account provably has none yet. */
   load(userId: string): Promise<string | null>;
   save(userId: string, keyB64: string): Promise<void>;
 }
@@ -59,8 +79,25 @@ export function createKeychainPickleKeys(invokeFn?: InvokeFn): PickleKeyProvider
         }
         return null;
       } catch (err) {
-        console.warn('e2e: OS keychain unavailable, using localStorage fallback:', err instanceof Error ? err.message : err);
-        return localStorage.getItem(legacyKey(userId));
+        // A pre-keychain install still has its key on disk; that is a real
+        // answer and is safe to use.
+        const legacy = localStorage.getItem(legacyKey(userId));
+        if (legacy !== null) {
+          console.warn(
+            'e2e: OS keychain unavailable, using localStorage fallback:',
+            err instanceof Error ? err.message : err
+          );
+          return legacy;
+        }
+        // Nothing on disk either, so we do not KNOW there is no key — the
+        // keychain simply did not answer. Returning null here would be read as
+        // "no key exists" and mint a new one over the top of the real one.
+        // Failing is recoverable; minting is not.
+        console.error(
+          'e2e: OS keychain unreachable and no local copy — refusing to mint a new pickle key:',
+          err instanceof Error ? err.message : err
+        );
+        throw new PickleKeyUnavailableError(err);
       }
     },
 

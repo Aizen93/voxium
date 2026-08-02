@@ -10,6 +10,58 @@
 -- Order matters: history goes before the column is tightened, and the E2E
 -- tables are truncated last so no client can re-publish keys mid-migration.
 
+-- 0. AUTHORISATION GATE — read this before anything below.
+--
+--    `prisma migrate deploy` runs on EVERY container start (docker-entrypoint.sh)
+--    and on every routine bare-metal update (DEPLOYMENT.md "Application
+--    Updates"). Production runs 2+ nodes. So from the moment an image containing
+--    this file exists, an ordinary restart — an OOM kill, a host reboot, a
+--    `docker compose up -d`, an unrelated hotfix — would fire this cutover
+--    unattended: no maintenance window, no snapshot, no captured attachment
+--    keys, and no warning to the users whose recovery keys stop working.
+--
+--    Operator sequencing cannot prevent that, because the restart is not an
+--    operator action. So the destruction is gated here, where nothing can
+--    bypass it — not the entrypoint, not a hand-run `migrate deploy`, not psql.
+--
+--    A database with nothing to destroy (a fresh dev clone, CI, a newly
+--    provisioned node) passes straight through: the gate exists to protect data,
+--    and where there is none it must not obstruct. It closes only when this
+--    migration would actually delete something.
+--
+--    To authorise, INSIDE the window and AFTER the snapshot:
+--        CREATE TABLE "e2e_cutover_authorised"();
+--    The last statement of this migration drops it again, so the authorisation
+--    is spent by the run it authorised and cannot arm a second one.
+DO $$
+DECLARE
+  doomed bigint;
+BEGIN
+  SELECT (SELECT COUNT(*) FROM "messages" WHERE "conversation_id" IS NOT NULL)
+       + (SELECT COUNT(*) FROM "e2e_devices")
+       + (SELECT COUNT(*) FROM "e2e_master_keys")
+       + (SELECT COUNT(*) FROM "e2e_key_backups")
+       + (SELECT COUNT(*) FROM "e2e_message_key_backups")
+    INTO doomed;
+
+  IF doomed = 0 THEN
+    RAISE NOTICE 'always-on cutover: nothing to destroy, applying schema change only.';
+    RETURN;
+  END IF;
+
+  IF to_regclass('public.e2e_cutover_authorised') IS NULL THEN
+    RAISE EXCEPTION
+      'REFUSING the always-on E2E cutover: % row(s) of DM history and E2E key material would be destroyed irreversibly, and nothing authorised it.', doomed
+      USING HINT =
+        'If this is the release: put the API in maintenance mode, capture DM attachment keys '
+        '(npx tsx scripts/release-always-on.ts capture-attachments), take a snapshot, then '
+        'CREATE TABLE "e2e_cutover_authorised"(); and re-run. See docs/e2e-always-on-plan.md 7.7. '
+        'If this fired on an ordinary restart, it just saved every DM in the database: leave it '
+        'refused. Clear the failed-migration record with '
+        'npx prisma migrate resolve --rolled-back 20260801140000_e2e_always_on';
+  END IF;
+END $$;
+
 -- 1. DM history goes (D1: DM messages ONLY — channel history is untouched, so
 --    the WHERE clause is load-bearing, not an optimisation).
 --
@@ -86,3 +138,10 @@ TRUNCATE "e2e_key_shares",
          "e2e_device_registry",
          "e2e_one_time_keys",
          "e2e_devices";
+
+-- 4. Spend the authorisation. It authorised THIS run; leaving it behind would
+--    silently pre-authorise a re-run, which is precisely the accident the gate
+--    above exists to prevent (and a re-run is reachable: `rehearse` deletes the
+--    _prisma_migrations row, and a cutover applied outside Prisma never records
+--    one at all).
+DROP TABLE IF EXISTS "e2e_cutover_authorised";

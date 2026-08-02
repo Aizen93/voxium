@@ -315,7 +315,7 @@ describe('e2eStore own-device actions', () => {
     withStatus([], [], false);
     await useE2EStore.getState().approveDevice(USER, 'laptop');
 
-    expect(service.approveDevice).toHaveBeenCalledWith('laptop');
+    expect(service.approveDevice).toHaveBeenCalledWith('laptop', undefined);
     expect(useE2EStore.getState().ownUnsignedDevices).toEqual([]);
     expect(useE2EStore.getState().ownDeviceWarnings).toEqual([]);
   });
@@ -368,7 +368,11 @@ describe('e2eStore own-device actions', () => {
 });
 
 describe('e2eStore device linking (plan §4.3)', () => {
-  const LINKED = { deviceId: 'laptop', createdAt: '2026-07-30T09:15:00.000Z' };
+  const LINKED = {
+    deviceId: 'laptop',
+    createdAt: '2026-07-30T09:15:00.000Z',
+    linkingCode: 'ABCD-2345-EFGH-6789',
+  };
 
   it('resolves a code to a device and stops there', async () => {
     // The lookup and the approval are two actions on purpose. The code is not
@@ -422,9 +426,13 @@ describe('e2eStore device linking (plan §4.3)', () => {
     });
     useE2EStore.setState({ ownUnsignedDevices: ['laptop'], ownDeviceWarnings: ['laptop'] });
 
-    await useE2EStore.getState().approveLinkedDevice(USER, LINKED.deviceId);
+    await useE2EStore.getState().approveLinkedDevice(USER, LINKED.deviceId, LINKED.linkingCode);
 
-    expect(service.approveDevice).toHaveBeenCalledWith('laptop');
+    // The CODE goes through, not just the id. approveDevice re-derives it from
+    // the device list it is about to seal the account key to, so dropping it
+    // here would silently return the flow to "trust whatever the server serves
+    // under this id".
+    expect(service.approveDevice).toHaveBeenCalledWith('laptop', LINKED.linkingCode);
     expect(service.listOwnDevices).toHaveBeenCalled();
     expect(useE2EStore.getState().ownUnsignedDevices).toEqual([]);
     expect(useE2EStore.getState().ownDeviceWarnings).toEqual([]);

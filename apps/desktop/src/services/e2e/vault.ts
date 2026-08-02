@@ -211,10 +211,25 @@ export class E2EVault {
   }
 
   private async loadOrCreatePickleKey(): Promise<Uint8Array> {
+    // Deliberately NOT caught: PickleKeyUnavailableError means the store did
+    // not answer, and open() failing is the correct outcome — the caller
+    // retries, and the next launch finds the real key. Swallowing it here is
+    // how a transient keychain outage turns into a new identity.
     const stored = await this.keyProvider.load(this.userId);
     if (stored) {
-      const raw = Uint8Array.from(atob(stored), (c) => c.charCodeAt(0));
-      if (raw.length === 32) return raw;
+      let raw: Uint8Array | null = null;
+      try {
+        raw = Uint8Array.from(atob(stored), (c) => c.charCodeAt(0));
+      } catch (err) {
+        // Same failure as the wrong-length case below: a value we cannot decode
+        // is a corrupt entry, not an absent one. atob throws on non-base64, and
+        // an unhandled throw here would have escaped as an opaque vault error.
+        console.warn(
+          'e2e: stored pickle key is not valid base64:',
+          err instanceof Error ? err.message : err
+        );
+      }
+      if (raw && raw.length === 32) return raw;
       console.warn('e2e: stored pickle key is malformed — generating a new one (existing pickles become unreadable)');
     }
     const fresh = crypto.getRandomValues(new Uint8Array(32));

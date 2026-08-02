@@ -27,5 +27,6 @@ ROADMAP.md
 test-results/
 playwright-report/
 blob-report/
-# release artefact — regenerated per cutover, never committed
+# release artefacts — regenerated per cutover, never committed
 dm-attachment-keys.txt
+cutover-baseline.json

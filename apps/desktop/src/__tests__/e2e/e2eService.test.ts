@@ -2429,6 +2429,83 @@ describe('E2EService (cross-signing)', () => {
     }
   });
 
+  it('refuses to approve if the keys behind the id changed after the lookup (L6)', async () => {
+    // The typed code authenticates KEYS; everything after travels by device id.
+    // Those are two separate questions to the server, and it may answer the
+    // second one differently: same id, attacker keys, valid self-signature.
+    // Without re-checking, the account master secret gets sealed to the
+    // attacker's curve25519 and cross-signed under the account key.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    const found = await phone.service.findLinkableDevice(laptop.service.linkingCode());
+    expect(found).not.toBeNull();
+
+    // Between the user confirming and pressing approve, the server swaps the
+    // keys it serves under that id.
+    //
+    // Note what this attacker has to do, because a weaker forge is already
+    // caught: fetchDeviceList verifies each entry's self-signature over
+    // e2eDeviceCanonical(userId, deviceId, curve, ed), so simply pasting in
+    // foreign keys makes the entry fail verification and vanish from the list.
+    // But that signature is self-referential — it is checked with the very key
+    // that claims it — so an attacker signs the canonical string for SOMEONE
+    // ELSE'S device id with their own key and the entry verifies fine. That is
+    // the gap the linking code has to close, and nothing else does.
+    const evil = new EngineAccount();
+    const record = server.deviceOf(aliceId, laptop.service.deviceId);
+    record.curve25519Key = evil.curve25519Key();
+    record.ed25519Key = evil.ed25519Key();
+    record.deviceSignature = evil.sign(
+      e2eDeviceCanonical(
+        aliceId,
+        laptop.service.deviceId,
+        evil.curve25519Key(),
+        evil.ed25519Key()
+      )
+    );
+    // The swap really is invisible to every other check: the entry still
+    // verifies and is still offered for approval.
+    const relisted = await phone.service.listOwnDevices();
+    expect(
+      relisted.devices.find((d) => d.deviceId === laptop.service.deviceId)?.curve25519Key
+    ).toBe(evil.curve25519Key());
+
+    await expect(
+      phone.service.approveDevice(found!.deviceId, found!.linkingCode)
+    ).rejects.toThrow(/no longer showing the code/);
+
+    // Nothing was handed over: no master transfer queued, no signature published.
+    expect(
+      server.transfers.filter(
+        (tr) => tr.userId === aliceId && tr.recipientDeviceId === laptop.service.deviceId
+      )
+    ).toHaveLength(0);
+    expect(server.deviceOf(aliceId, laptop.service.deviceId).masterSignature ?? null).toBeNull();
+  });
+
+  it('still approves when the keys are the ones the code named (L7)', async () => {
+    // The guard must not break the flow it protects.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    const found = await phone.service.findLinkableDevice(laptop.service.linkingCode());
+    await phone.service.approveDevice(found!.deviceId, found!.linkingCode);
+    expect(await laptop.service.claimMasterTransfers()).toBe(true);
+  });
+
   it('refuses a code that matches two devices rather than picking one (L5)', async () => {
     // The server chooses the order of the device list, so "first match" would
     // let it put a device of its own ahead of the real one. A collision at 80

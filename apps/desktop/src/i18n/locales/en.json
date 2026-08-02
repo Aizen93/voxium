@@ -1073,6 +1073,7 @@
     "linkAction": "Continue",
     "linkUnknownCode": "No device waiting for approval is showing that code. Check it on the other device and try again.",
     "linkAmbiguousCode": "More than one device is showing that code. Do not approve any of them — this should never happen by chance. Remove unrecognised devices, then link again from a fresh code.",
+    "linkKeysChanged": "That device is no longer showing the code you confirmed. Nothing was approved. Get a fresh code from the device and try again — if it keeps happening, do not approve it.",
     "linkLookupFailed": "Could not check that code right now. Try again.",
     "linkConfirmTitle": "Approve this device?",
     "linkConfirmDevice": "Device {{id}} · registered {{date}}",

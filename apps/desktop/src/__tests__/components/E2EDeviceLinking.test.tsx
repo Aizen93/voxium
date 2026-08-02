@@ -67,10 +67,13 @@ import { E2ELinkingCodeAmbiguousError, type E2EOwnDevices } from '../../services
 
 const USER_ID = 'me';
 /** The code the user types: a device of theirs, in another room, is showing it. */
-const CODE = 'ABCD-2345';
+const CODE = 'ABCD-2345-EFGH-6789';
 const LINKED: E2ELinkableDevice = {
   deviceId: 'new-laptop-device-id',
   createdAt: '2026-07-30T09:15:00.000Z',
+  // Carried from the lookup so approval can re-derive it from a fresh device
+  // list: the confirmation must bind the KEYS, not just the device id.
+  linkingCode: CODE,
 };
 
 const E2E_INITIAL = useE2EStore.getState();
@@ -329,7 +332,9 @@ describe('E2EDevicesSection — approving by code', () => {
     await click(button('e2e.linkConfirmAction'));
 
     expect(approveLinkedDevice).toHaveBeenCalledTimes(1);
-    expect(approveLinkedDevice).toHaveBeenCalledWith(USER_ID, LINKED.deviceId);
+    // With the code: the confirmation the user gave was about KEYS, and the
+    // approval has to be checked against those same keys, not just the id.
+    expect(approveLinkedDevice).toHaveBeenCalledWith(USER_ID, LINKED.deviceId, LINKED.linkingCode);
     expect(toastSuccess).toHaveBeenCalledWith('e2e.approveDeviceSuccess');
     // and the flow resets rather than leaving a spent code in the box
     expect(find('[data-testid="e2e-link-confirm"]')).toBeNull();

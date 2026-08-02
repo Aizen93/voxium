@@ -1066,6 +1066,7 @@
     "linkAction": "Continuar",
     "linkUnknownCode": "Ningún dispositivo pendiente de aprobación muestra ese código. Compruébalo en el otro dispositivo e inténtalo de nuevo.",
     "linkAmbiguousCode": "Más de un dispositivo muestra ese código. No apruebes ninguno: esto no puede ocurrir por casualidad. Elimina los dispositivos que no reconozcas y vuelve a vincular con un código nuevo.",
+    "linkKeysChanged": "Ese dispositivo ya no muestra el código que confirmaste. No se aprobó nada. Consigue un código nuevo en el dispositivo e inténtalo de nuevo; si vuelve a ocurrir, no lo apruebes.",
     "linkLookupFailed": "No se pudo comprobar ese código ahora mismo. Inténtalo de nuevo.",
     "linkConfirmTitle": "¿Aprobar este dispositivo?",
     "linkConfirmDevice": "Dispositivo {{id}} · registrado el {{date}}",

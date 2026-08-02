@@ -1066,6 +1066,7 @@
     "linkAction": "Continuer",
     "linkUnknownCode": "Aucun appareil en attente d'approbation n'affiche ce code. Vérifiez-le sur l'autre appareil et réessayez.",
     "linkAmbiguousCode": "Plusieurs appareils affichent ce code. N'en approuvez aucun — cela ne peut pas arriver par hasard. Supprimez les appareils que vous ne reconnaissez pas, puis recommencez avec un nouveau code.",
+    "linkKeysChanged": "Cet appareil n'affiche plus le code que vous avez confirmé. Rien n'a été approuvé. Obtenez un nouveau code sur l'appareil et réessayez — si cela se reproduit, ne l'approuvez pas.",
     "linkLookupFailed": "Impossible de vérifier ce code pour le moment. Réessayez.",
     "linkConfirmTitle": "Approuver cet appareil ?",
     "linkConfirmDevice": "Appareil {{id}} · enregistré le {{date}}",
