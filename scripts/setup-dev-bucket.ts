@@ -15,6 +15,12 @@
  * Refuses to touch anything whose name does not start with `dev-`: this applies
  * a bucket-wide policy, and pointing it at the production bucket by accident
  * would rewrite the rules real clients depend on.
+ *
+ * NEEDS BUCKET-OWNER CREDENTIALS. Setting CORS is an owner-level operation, so
+ * an S3 user with read/write on the objects gets "Access Denied" here — that is
+ * the permission boundary working, not a broken script. Run this once with the
+ * account that owns the bucket; day-to-day development then uses the scoped
+ * user, which never needs to touch bucket configuration again.
  */
 import { S3Client, PutBucketCorsCommand, GetBucketCorsCommand } from '@aws-sdk/client-s3';
 import { config } from 'dotenv';
