@@ -50,7 +50,7 @@ import {
   type E2ELinkableDevice,
 } from '../../stores/e2eStore';
 import { useAuthStore } from '../../stores/authStore';
-import type { E2EOwnDevices } from '../../services/e2e/e2eService';
+import { E2ELinkingCodeAmbiguousError, type E2EOwnDevices } from '../../services/e2e/e2eService';
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -417,6 +417,24 @@ describe('E2EDevicesSection — a code that names nothing', () => {
 
     expect(text()).toContain('e2e.linkLookupFailed');
     expect(text()).not.toContain('e2e.linkUnknownCode');
+    expect(approveLinkedDevice).not.toHaveBeenCalled();
+  });
+
+  it('refuses a code two devices answer to, and says why (not "try again")', async () => {
+    // At 80 bits a collision is not an accident, so this is an attack shape:
+    // something registered a device to sit next to the real one in the list.
+    // Rendering it as a generic failure would invite the user to retry until
+    // one of them happened to come back alone.
+    linkDevice.mockRejectedValueOnce(new E2ELinkingCodeAmbiguousError());
+    approvedDevice();
+    render();
+
+    await enterCode();
+
+    expect(text()).toContain('e2e.linkAmbiguousCode');
+    expect(text()).not.toContain('e2e.linkLookupFailed');
+    expect(text()).not.toContain('e2e.linkUnknownCode');
+    expect(find('[data-testid="e2e-link-confirm"]')).toBeNull();
     expect(approveLinkedDevice).not.toHaveBeenCalled();
   });
 

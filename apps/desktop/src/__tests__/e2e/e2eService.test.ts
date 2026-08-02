@@ -2401,7 +2401,9 @@ describe('E2EService (cross-signing)', () => {
     await flushQueue();
 
     const code = laptop.service.linkingCode();
-    expect(code).toMatch(/^[A-Z2-7]{4}-[A-Z2-7]{4}$/);
+    // 80 bits: 40 was grindable offline, because whoever registers a device
+    // chooses its id and keys and can hunt for one that matches the code.
+    expect(code).toMatch(/^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$/);
 
     const found = await phone.service.findLinkableDevice(code);
     expect(found?.deviceId).toBe(laptop.service.deviceId);
@@ -2425,6 +2427,41 @@ describe('E2EService (cross-signing)', () => {
     for (const typed of [code, code.replace('-', ''), code.toLowerCase(), ` ${code} `]) {
       expect((await phone.service.findLinkableDevice(typed))?.deviceId).toBe(laptop.service.deviceId);
     }
+  });
+
+  it('refuses a code that matches two devices rather than picking one (L5)', async () => {
+    // The server chooses the order of the device list, so "first match" would
+    // let it put a device of its own ahead of the real one. A collision at 80
+    // bits does not happen by accident, so seeing two is itself the signal.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const laptop = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await laptop.service.initialize();
+    await flushQueue();
+
+    // a second unsigned device that produces the SAME code as the laptop
+    const twin = makeDevice(server, aliceId);
+    await twin.service.initialize();
+    await flushQueue();
+    const real = server.deviceOf(aliceId, laptop.service.deviceId);
+    const impostor = server.deviceOf(aliceId, twin.service.deviceId);
+    impostor.curve25519Key = real.curve25519Key;
+    impostor.ed25519Key = real.ed25519Key;
+    server.forgeDeviceKeys(aliceId, twin.service.deviceId, {
+      curve25519Key: real.curve25519Key,
+      ed25519Key: real.ed25519Key,
+    });
+    // same keys AND same id component would be the same device, so line the
+    // impostor up on the code itself: reuse the laptop's id in the digest by
+    // giving the fake device that id in the served list
+    impostor.deviceId = laptop.service.deviceId;
+
+    await expect(phone.service.findLinkableDevice(laptop.service.linkingCode())).rejects.toThrow(
+      /matches more than one device/
+    );
   });
 
   it('cannot be used to approve a device the server injected (L3)', async () => {
@@ -2470,6 +2507,41 @@ describe('E2EService (cross-signing)', () => {
     const code = laptop.service.linkingCode();
     await phone.service.approveDevice(laptop.service.deviceId);
     expect(await phone.service.findLinkableDevice(code)).toBeNull();
+  });
+
+  it('carries history to a device joined by LINKING, not just by recovery (M6)', async () => {
+    // Linking is the primary way a device joins an account; recovery is the
+    // rare one. History arriving only on the rare path meant the common path
+    // produced a device that could send but showed empty conversations.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const bob = makeParty(server, 'bob');
+    await phone.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    const envelope = await bob.service.encryptMessage('c1', aliceId, 'said before the laptop existed');
+    await phone.service.decryptMessage({
+      id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope,
+    });
+    await phone.service.createKeyBackup();
+    expect(await phone.service.backupMessageKeys()).toBeGreaterThan(0);
+
+    // a NEW device joins by being approved — no recovery key involved
+    const laptop = makeDevice(server, aliceId);
+    await laptop.service.initialize();
+    await flushQueue();
+    const found = await phone.service.findLinkableDevice(laptop.service.linkingCode());
+    await phone.service.approveDevice(found!.deviceId);
+    expect(await laptop.service.claimMasterTransfers()).toBe(true);
+
+    expect(
+      await laptop.service.decryptMessage({
+        id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope,
+      })
+    ).toEqual({ text: 'said before the laptop existed' });
   });
 
   it('carries history to a device that was never sent it (M1)', async () => {
