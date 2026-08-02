@@ -40,45 +40,82 @@ export const useDMStore = create<DMState>((set, get) => ({
 
   fetchConversations: async () => {
     set({ isLoading: true });
+    let conversations: Conversation[];
+    // Only the FETCH is allowed to say the fetch failed. Preview hydration used
+    // to sit inside this try, so a local cache read that threw — routinely,
+    // after the window was hidden and the browser closed the IndexedDB
+    // connection — surfaced as "Failed to load conversations" over a list that
+    // had loaded perfectly well and was already on screen.
     try {
       const { data } = await api.get('/dm');
-      const conversations = data.data;
-
-      // Initialize participant statuses from the conversation data
-      const statuses: Record<string, import('@voxium/shared').UserStatus> = {};
-      for (const conv of conversations) {
-        if (conv.participant?.status) {
-          statuses[conv.participant.id] = conv.participant.status;
-        }
-      }
-
-      set((state) => ({
-        conversations,
-        participantStatuses: { ...state.participantStatuses, ...statuses },
-        isLoading: false,
-      }));
-
-      // E2E previews arrive as ciphertext — hydrate them from the local
-      // plaintext cache (async; placeholders render until this lands)
-      const encrypted = (conversations as Conversation[]).filter((c) => c.lastMessage?.encrypted);
-      if (encrypted.length > 0) {
-        const { resolveEncryptedPreview } = await import('../services/e2e/dmCrypto');
-        for (const conv of encrypted) {
-          const text = await resolveEncryptedPreview(conv.lastMessage!.id);
-          if (text === null) continue;
-          set((state) => ({
-            conversations: state.conversations.map((c) =>
-              c.id === conv.id && c.lastMessage?.id === conv.lastMessage!.id
-                ? { ...c, lastMessage: { ...c.lastMessage, content: text } }
-                : c
-            ),
-          }));
-        }
-      }
+      conversations = data.data;
     } catch (err) {
       console.error('Failed to fetch conversations:', err);
       toast.error('Failed to load conversations');
       set({ isLoading: false });
+      return;
+    }
+
+    // Initialize participant statuses from the conversation data.
+    //
+    // GET /dm serves a presence `status` on each participant that the shared
+    // `Conversation` type does not declare — a real contract gap, surfaced here
+    // because this variable used to be implicitly `any`. Narrowed explicitly
+    // rather than re-widened, so the mismatch stays visible instead of hiding
+    // behind an untyped value.
+    const statuses: Record<string, import('@voxium/shared').UserStatus> = {};
+    for (const conv of conversations) {
+      const participant = conv.participant as
+        | (typeof conv.participant & { status?: import('@voxium/shared').UserStatus })
+        | undefined;
+      if (participant?.status) {
+        statuses[participant.id] = participant.status;
+      }
+    }
+
+    set((state) => ({
+      conversations,
+      participantStatuses: { ...state.participantStatuses, ...statuses },
+      isLoading: false,
+    }));
+
+    // E2E previews arrive as ciphertext — hydrate them from the local
+    // plaintext cache (async; placeholders render until this lands).
+    //
+    // Best-effort by design: a preview that will not resolve costs a lock icon,
+    // not a conversation. Failures are logged and the loop continues, so one
+    // unreadable entry cannot stop the rest from hydrating.
+    const encrypted = conversations.filter((c) => c.lastMessage?.encrypted);
+    if (encrypted.length === 0) return;
+    try {
+      const { resolveEncryptedPreview } = await import('../services/e2e/dmCrypto');
+      for (const conv of encrypted) {
+        let text: string | null;
+        try {
+          text = await resolveEncryptedPreview(conv.lastMessage!.id);
+        } catch (err) {
+          console.warn(
+            'dm: could not hydrate an encrypted preview:',
+            err instanceof Error ? err.message : err
+          );
+          continue;
+        }
+        if (text === null) continue;
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === conv.id && c.lastMessage?.id === conv.lastMessage!.id
+              ? { ...c, lastMessage: { ...c.lastMessage, content: text } }
+              : c
+          ),
+        }));
+      }
+    } catch (err) {
+      // The dynamic import itself failed (offline chunk fetch). Previews stay
+      // locked; the conversation list is unaffected and stays on screen.
+      console.warn(
+        'dm: preview hydration unavailable:',
+        err instanceof Error ? err.message : err
+      );
     }
   },
 
