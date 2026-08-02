@@ -1012,6 +1012,7 @@
     "ownDeviceBadgeTitle": "A device was added to your account — review it",
     "ownDeviceWarning": "A device you may not recognise was added to your account ({{count}}). It can read your encrypted conversations. Revoke it if it is not yours.",
     "ownDevicesReviewed": "These are my devices",
+    "ownDevicesLoadFailed": "Could not load your devices. This list may be incomplete — do not treat it as proof that no other device is registered. Reopen this panel to try again.",
     "unrecognisedDevice": "new",
     "accountSafetyExplainer": "Compare this number with {{name}} over another channel (in person, a call) to verify your account. It's the same on every device either of you uses, and only changes if an account key is reset.",
     "markAccountVerified": "Mark account as verified",

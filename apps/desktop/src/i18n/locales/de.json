@@ -1005,6 +1005,7 @@
     "ownDeviceBadgeTitle": "Deinem Konto wurde ein Gerät hinzugefügt — bitte prüfen",
     "ownDeviceWarning": "Deinem Konto wurde ein möglicherweise unbekanntes Gerät hinzugefügt ({{count}}). Es kann deine verschlüsselten Unterhaltungen mitlesen. Widerrufe es, wenn es nicht deins ist.",
     "ownDevicesReviewed": "Das sind meine Geräte",
+    "ownDevicesLoadFailed": "Deine Geräte konnten nicht geladen werden. Diese Liste ist möglicherweise unvollständig — sieh sie nicht als Beweis dafür, dass kein weiteres Gerät registriert ist. Öffne das Panel erneut, um es noch einmal zu versuchen.",
     "unrecognisedDevice": "neu",
     "accountSafetyExplainer": "Vergleiche diese Nummer mit {{name}} über einen anderen Kanal (persönlich oder per Anruf), um dein Konto zu überprüfen. Sie ist auf jedem Gerät gleich, das ihr beide nutzt, und ändert sich nur, wenn ein Kontoschlüssel zurückgesetzt wird.",
     "markAccountVerified": "Konto als verifiziert markieren",

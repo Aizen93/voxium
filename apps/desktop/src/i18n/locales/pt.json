@@ -1005,6 +1005,7 @@
     "ownDeviceBadgeTitle": "Um dispositivo foi adicionado à sua conta — revise",
     "ownDeviceWarning": "Um dispositivo que você talvez não reconheça foi adicionado à sua conta ({{count}}). Ele pode ler suas conversas criptografadas. Revogue-o se não for seu.",
     "ownDevicesReviewed": "Estes são os meus dispositivos",
+    "ownDevicesLoadFailed": "Não foi possível carregar os seus dispositivos. Esta lista pode estar incompleta — não a tome como prova de que não há outro dispositivo registado. Reabra este painel para tentar de novo.",
     "unrecognisedDevice": "novo",
     "accountSafetyExplainer": "Compare este número com {{name}} por outro canal (pessoalmente ou em uma chamada) para verificar sua conta. Ele é o mesmo em todos os dispositivos que qualquer um de vocês usar, e só muda se uma chave da conta for redefinida.",
     "markAccountVerified": "Marcar conta como verificada",
