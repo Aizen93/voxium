@@ -256,6 +256,19 @@ function errText(err: unknown): string {
  * to correct, the other means this key is for a different account identity.
  * A class rather than a message so the UI never has to string-match.
  */
+/**
+ * A linking code matched more than one device. Impossible by accident — the
+ * code is 80 bits — so it means someone registered a device engineered to
+ * collide with the one the user is reading. Picking either would be picking
+ * theirs half the time, so we pick neither.
+ */
+export class E2ELinkingCodeAmbiguousError extends Error {
+  constructor() {
+    super('That code matches more than one device');
+    this.name = 'E2ELinkingCodeAmbiguousError';
+  }
+}
+
 export class E2ERecoveryKeyFormatError extends Error {
   constructor() {
     super('That does not look like a recovery key');
@@ -880,6 +893,17 @@ export class E2EService {
         console.warn('e2e: master-secret transfer not imported:', errText(err));
       }
     }
+    if (imported) {
+      // Linking is the PRIMARY way a device joins an account, so it has to pull
+      // history the same way recovery does. Without this, message-key backup
+      // only ever worked for someone who had lost every device — the rarer
+      // path — and a freshly linked one showed empty conversations.
+      try {
+        await this.restoreMessageKeys();
+      } catch (err) {
+        console.warn('e2e: linked device has the account key but not its history yet:', errText(err));
+      }
+    }
     if (done.length > 0) {
       await this.api
         .post('/e2e/master-transfers/ack', { deviceId: this.deviceId, ids: done })
@@ -1085,6 +1109,7 @@ export class E2EService {
   async findLinkableDevice(code: string): Promise<{ deviceId: string; createdAt: string } | null> {
     const normalized = code.replace(/[\s-]/g, '').toUpperCase();
     const own = await this.listOwnDevices();
+    const matches: Array<{ deviceId: string; createdAt: string }> = [];
     for (const device of own.devices) {
       // Already vouched for: there is nothing to link, and offering it would
       // invite a second approval of a device that is already trusted.
@@ -1096,11 +1121,14 @@ export class E2EService {
       } catch {
         continue; // malformed keys cannot be linked to
       }
-      if (candidate.replace('-', '') === normalized) {
-        return { deviceId: device.deviceId, createdAt: device.createdAt };
+      if (candidate.replace(/-/g, '') === normalized) {
+        matches.push({ deviceId: device.deviceId, createdAt: device.createdAt });
       }
     }
-    return null;
+    // Never take the first of several: the server chooses the order, so
+    // "first match" would let it put its own device ahead of the real one.
+    if (matches.length > 1) throw new E2ELinkingCodeAmbiguousError();
+    return matches[0] ?? null;
   }
 
   // ─── Message-key backup (spec §16) ────────────────────────────────────────

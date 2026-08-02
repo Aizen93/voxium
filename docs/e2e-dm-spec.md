@@ -934,9 +934,9 @@ It is not new cryptography. It is a safer trigger for the approval flow of
 ### 17.1 The code
 
 `base32(SHA-512("voxium-link-v1" || userId ⁠|| deviceId || curve25519 || ed25519))`,
-first 8 characters, grouped `XXXX-XXXX`. Public material only, like a safety
-number. Fields are separated by a NUL byte so no two different tuples can
-concatenate to the same input.
+first 16 characters, grouped `XXXX-XXXX-XXXX-XXXX`. Public material only, like
+a safety number. Fields are separated by a NUL byte so no two different tuples
+can concatenate to the same input.
 
 ### 17.2 Why it is safe
 
@@ -961,9 +961,18 @@ id and when it registered — and requires a confirmation, and every device of t
 account sees the new device afterwards through the existing own-device warning
 (§12.5).
 
-Entropy is the smaller concern: 8 base32 characters is 40 bits against a
-**preimage** — an attacker must register a device whose code matches one the
-user is already reading — under a 5-device cap and the approval rate limiter.
+**Entropy.** 16 base32 characters is 80 bits. An earlier draft used 8 (40 bits)
+on the reasoning that a preimage needs a registered device, so the 5-device cap
+and the approval rate limiter bound the attempts. That reasoning was wrong: the
+attacker picks `deviceId` and both keys, so they grind the digest *offline* and
+register only the one device that already matches. Neither the cap nor the
+limiter is reachable from an offline search, and 40 bits falls in minutes on a
+GPU. 80 bits puts it out of reach while keeping the code typeable.
+
+Two devices matching one code therefore cannot happen by chance, so the
+approving client refuses the lookup outright rather than picking one — the
+server chooses the order of that list, and "first match" would let it seat a
+decoy ahead of the real device.
 
 ### 17.4 Not yet built
 

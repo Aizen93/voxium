@@ -572,9 +572,16 @@ pub fn safety_number(
 /// server injected has different keys, so it produces a different code and
 /// cannot be reached through this flow.
 ///
-/// Eight base32 characters, grouped for reading aloud. That is 40 bits against
-/// a PREIMAGE (an attacker must register a device whose code matches one the
-/// user is already reading), under a 5-device cap and the approval rate limit.
+/// Sixteen base32 characters — 80 bits — grouped for reading aloud.
+///
+/// The first version used 40 bits on the argument that a preimage is harder
+/// than a collision. That was wrong: `deviceId` and both keys are chosen by
+/// whoever registers the device, so an attacker grinds candidates offline
+/// until one matches the code the user is reading. 2^40 SHA-512 evaluations is
+/// minutes on a GPU, and neither the device cap nor the approval rate limiter
+/// touches offline hashing. 80 bits puts that out of reach; the client also
+/// refuses to act on a code that matches more than one device, so even a
+/// found collision is detected rather than silently preferred.
 #[wasm_bindgen(js_name = linkingCode)]
 pub fn linking_code(
     user_id: &str,
@@ -598,8 +605,14 @@ pub fn linking_code(
     hasher.update(ed25519_key_b64.as_bytes());
     let digest = hasher.finalize();
 
-    let encoded = base32_encode(&digest[..5]);
-    Ok(format!("{}-{}", &encoded[..4], &encoded[4..8]))
+    let encoded = base32_encode(&digest[..10]);
+    Ok(format!(
+        "{}-{}-{}-{}",
+        &encoded[..4],
+        &encoded[4..8],
+        &encoded[8..12],
+        &encoded[12..16]
+    ))
 }
 
 /// Account-level safety number over the PUBLIC cross-signing master keys

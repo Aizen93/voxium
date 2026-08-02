@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import { ShieldCheck, ShieldAlert, Laptop2, Trash2, KeyRound, Copy, Check } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useE2EStore, E2ELinkingCodeUnknownError, type E2ELinkableDevice } from '../../stores/e2eStore';
+import { E2ELinkingCodeAmbiguousError } from '../../services/e2e/e2eService';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import {
@@ -281,7 +282,7 @@ function LinkDeviceForm({ userId }: { userId: string }) {
   const { t } = useTranslation();
   const [code, setCode] = useState('');
   const [pending, setPending] = useState<E2ELinkableDevice | null>(null);
-  const [error, setError] = useState<'unknown' | 'failed' | null>(null);
+  const [error, setError] = useState<'unknown' | 'ambiguous' | 'failed' | null>(null);
   const [busy, setBusy] = useState(false);
 
   const handleLookup = async () => {
@@ -295,6 +296,11 @@ function LinkDeviceForm({ userId }: { userId: string }) {
       // apart here rather than collapsed into one apology.
       if (err instanceof E2ELinkingCodeUnknownError) {
         setError('unknown');
+      } else if (err instanceof E2ELinkingCodeAmbiguousError) {
+        // Two devices cannot collide on 80 bits by chance, so this is either
+        // the server offering a decoy or a device deliberately built to match.
+        // Either way the user must not be handed one of them to approve.
+        setError('ambiguous');
       } else {
         console.warn('e2e: looking up a linking code failed:', err instanceof Error ? err.message : err);
         setError('failed');
@@ -382,7 +388,13 @@ function LinkDeviceForm({ userId }: { userId: string }) {
       />
       {error && (
         <p className="mb-2 text-vox-accent-danger" role="alert">
-          {t(error === 'unknown' ? 'e2e.linkUnknownCode' : 'e2e.linkLookupFailed')}
+          {t(
+            error === 'unknown'
+              ? 'e2e.linkUnknownCode'
+              : error === 'ambiguous'
+                ? 'e2e.linkAmbiguousCode'
+                : 'e2e.linkLookupFailed'
+          )}
         </p>
       )}
       <button
