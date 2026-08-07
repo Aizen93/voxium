@@ -275,8 +275,11 @@ export interface ServerToClientEvents {
   'member:joined': (data: { serverId: string; user: PublicUser }) => void;
   'member:left': (data: { serverId: string; userId: string }) => void;
   'presence:update': (data: { userId: string; status: UserStatus }) => void;
-  'voice:channel_users': (data: { channelId: string; users: VoiceUser[] }) => void;
-  'voice:user_joined': (data: { channelId: string; user: VoiceUser }) => void;
+  // serverId lets clients keep a channel→server map for cross-server voice
+  // presence (the spaces strip's "live" indicators). Removal events don't
+  // carry it — removing by channelId alone is always sufficient.
+  'voice:channel_users': (data: { channelId: string; serverId?: string; users: VoiceUser[] }) => void;
+  'voice:user_joined': (data: { channelId: string; serverId?: string; user: VoiceUser }) => void;
   'voice:user_left': (data: { channelId: string; userId: string }) => void;
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => void;
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;

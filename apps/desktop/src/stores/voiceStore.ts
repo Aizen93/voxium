@@ -110,6 +110,10 @@ interface VoiceState {
   activeChannelId: string | null;
   activeVoiceServerId: string | null;
   channelUsers: Map<string, VoiceUser[]>;
+  /** channelId → serverId, learned from presence events. channelUsers spans
+   *  ALL servers (sockets sit in every visible channel room), so this map is
+   *  what lets the spaces strip say "server X has a live room". */
+  channelServers: Map<string, string>;
 
   // mediasoup SFU state
   msDevice: Device | null;
@@ -144,8 +148,8 @@ interface VoiceState {
   // ─── Server Voice Actions (SFU) ────────────────────────────────────
   joinChannel: (channelId: string, serverId?: string) => Promise<void>;
   leaveChannel: () => void;
-  setChannelUsers: (channelId: string, users: VoiceUser[]) => void;
-  addUserToChannel: (channelId: string, user: VoiceUser) => void;
+  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string) => void;
+  addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => void;
   removeUserFromChannel: (channelId: string, userId: string) => void;
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => void;
   handleForceMove: (targetChannelId: string) => void;
@@ -608,6 +612,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   localStream: null,
   latency: null,
   channelUsers: new Map(),
+  channelServers: new Map(),
   peers: new Map(),
   remoteAudios: new Map(),
 
@@ -1120,11 +1125,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   // ── Channel user state (unchanged) ─────────────────────────────────────
 
-  setChannelUsers: (channelId: string, users: VoiceUser[]) => {
+  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string) => {
     debugLog('[Voice] setChannelUsers:', channelId, users.length, 'users');
     set((state) => {
       const newMap = new Map(state.channelUsers);
       newMap.set(channelId, users);
+      const serverFix = serverId && state.channelServers.get(channelId) !== serverId
+        ? { channelServers: new Map(state.channelServers).set(channelId, serverId) }
+        : {};
       // If the screen sharer is no longer in the channel, clear the stale reference
       const sharerGone = state.screenSharingUserId
         && channelId === state.activeChannelId
@@ -1132,12 +1140,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const screenFix = sharerGone
         ? { screenSharingUserId: null, remoteScreenStream: null } as const
         : {};
-      return { channelUsers: newMap, ...screenFix };
+      return { channelUsers: newMap, ...serverFix, ...screenFix };
     });
     // No peer creation needed — SFU handles media routing via consumers
   },
 
-  addUserToChannel: (channelId: string, user: VoiceUser) => {
+  addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => {
     debugLog('[Voice] addUserToChannel:', channelId, user.displayName);
 
     const existing = get().channelUsers.get(channelId) || [];
@@ -1148,7 +1156,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const current = newMap.get(channelId) || [];
       if (current.some((u) => u.id === user.id)) return state;
       newMap.set(channelId, [...current, user]);
-      return { channelUsers: newMap };
+      const serverFix = serverId && state.channelServers.get(channelId) !== serverId
+        ? { channelServers: new Map(state.channelServers).set(channelId, serverId) }
+        : {};
+      return { channelUsers: newMap, ...serverFix };
     });
     // No peer creation needed — SFU creates consumers server-side
   },

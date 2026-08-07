@@ -45,9 +45,9 @@ export function DMVoicePanel() {
   };
 
   return (
-    <div data-testid="dm-voice-panel" className="border-t border-vox-border bg-vox-sidebar">
+    <div data-testid="dm-voice-panel" className="mx-1 mb-1 rounded-xl border border-vox-border bg-vox-bg-tertiary">
       {/* Call Header */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-vox-border">
+      <div className="flex items-center gap-2 px-3 py-2">
         <button
           onClick={handleNavigateToCall}
           className="flex min-w-0 flex-1 items-center gap-2 text-left hover:opacity-80 transition-opacity"
@@ -110,7 +110,7 @@ export function DMVoicePanel() {
         <button
           onClick={toggleMute}
           className={clsx(
-            'rounded-full p-2 transition-colors',
+            'rounded-lg p-2 transition-colors',
             selfMute
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
@@ -124,7 +124,7 @@ export function DMVoicePanel() {
         <button
           onClick={toggleDeaf}
           className={clsx(
-            'rounded-full p-2 transition-colors',
+            'rounded-lg p-2 transition-colors',
             selfDeaf
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'

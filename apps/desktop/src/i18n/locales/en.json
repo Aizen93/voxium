@@ -522,6 +522,14 @@
     "removeAttachment": "Remove attachment"
   },
   "server": {
+    "pinnedSection": "Pinned",
+    "pinSpace": "Pin space",
+    "unpinSpace": "Unpin space",
+    "findSpace": "Find a space",
+    "liveNow": "Live now",
+    "allSpaces": "All spaces",
+    "moreSpaces": "{{count}} more spaces",
+    "inVoiceCount": "{{count}} in voice",
     "create": {
       "createTitle": "Create a Server",
       "joinTitle": "Join a Server",
@@ -547,9 +555,15 @@
       "inviteCode": "Invite Code",
       "generatingLink": "Generating invite link...",
       "failedToCreate": "Failed to create invite"
-    }
+    },
+    "switcherTitle": "Switch server",
+    "switcherPlaceholder": "Jump to a server…",
+    "switcherEmpty": "No server matches that name.",
+    "switcherHint": "Type to filter · ↑↓ to move · Enter to open",
+    "createOrJoin": "Create or join a server"
   },
   "channel": {
+    "joinVoice": "Join voice",
     "createChannel": "Create channel",
     "deleteChannel": "Delete channel",
     "deleteCategory": "Delete category",
@@ -630,7 +644,9 @@
     "maxAttachments": "Max {{max}} attachments per message",
     "fileTypeNotAllowed": "{{name}}: file type not allowed",
     "fileTooLarge": "{{name}} is too large (max {{max}}MB)",
-    "searchMessages": "Search Messages (Ctrl+K)"
+    "searchMessages": "Search Messages (Ctrl+K)",
+    "today": "Today",
+    "yesterday": "Yesterday"
   },
   "dm": {
     "title": "Direct Messages",
@@ -785,7 +801,7 @@
     "highlights": {
       "noAds": "No ads or tracking",
       "openSource": "Open source & transparent",
-      "freeVoice": "Free voice calls forever",
+      "freeForIndividuals": "Free for individuals",
       "noiseSuppression": "AI noise suppression",
       "selfHostable": "Self-hostable",
       "sfuVoice": "Scalable SFU voice"
@@ -1082,5 +1098,21 @@
     "linkConfirmAction": "Approve device",
     "devicesNotReady": "Encryption is still setting up on this device, so your devices can't be listed yet. Check back in a moment.",
     "identityAcceptFailed": "Could not accept the new keys"
+  },
+  "people": {
+    "title": "People",
+    "inVoice": "In voice",
+    "active": "Active",
+    "away": "Away",
+    "offline": "Offline",
+    "speaking": "Speaking",
+    "mutedStatus": "Muted",
+    "inVoiceStatus": "In voice",
+    "dnd": "Do not disturb",
+    "awayStatus": "Away",
+    "offlineStatus": "Offline"
+  },
+  "search": {
+    "placeholder": "Search messages…"
   }
 }

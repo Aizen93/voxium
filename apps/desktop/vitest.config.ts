@@ -7,6 +7,7 @@ export default defineConfig({
     // .tsx so component tests can use JSX like the components they render
     include: ['src/__tests__/**/*.test.{ts,tsx}'],
     environment: 'jsdom',
+    setupFiles: ['./src/__tests__/setup.ts'],
     testTimeout: 10000,
   },
   resolve: {

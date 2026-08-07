@@ -1114,7 +1114,7 @@ function AudioTab() {
               onClick={() => setVoiceQuality(q.id)}
               className={`flex-1 px-3 py-2 transition-colors ${
                 voiceQuality === q.id
-                  ? 'bg-vox-accent-primary text-white'
+                  ? 'bg-vox-accent-primary text-vox-on-accent'
                   : 'bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary'
               }`}
             >
@@ -1139,7 +1139,7 @@ function AudioTab() {
             onClick={() => setVoiceMode('voice_activity')}
             className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
               voiceMode === 'voice_activity'
-                ? 'bg-vox-accent-primary text-white'
+                ? 'bg-vox-accent-primary text-vox-on-accent'
                 : 'bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary'
             }`}
           >
@@ -1150,7 +1150,7 @@ function AudioTab() {
             onClick={() => setVoiceMode('push_to_talk')}
             className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
               voiceMode === 'push_to_talk'
-                ? 'bg-vox-accent-primary text-white'
+                ? 'bg-vox-accent-primary text-vox-on-accent'
                 : 'bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary'
             }`}
           >

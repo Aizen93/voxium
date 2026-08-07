@@ -10,7 +10,7 @@ import { useDMStore } from '../../stores/dmStore';
 import { useE2EStore } from '../../stores/e2eStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { getSocket, getSocketGeneration, onConnectionStatusChange } from '../../services/socket';
-import { ServerSidebar } from '../server/ServerSidebar';
+import { SpacesStrip } from '../server/SpacesStrip';
 import { ChannelSidebar } from '../channel/ChannelSidebar';
 import { ChatArea } from '../chat/ChatArea';
 import { MemberSidebar } from '../server/MemberSidebar';
@@ -28,6 +28,8 @@ import { FriendsView } from '../friends/FriendsView';
 import { SupportTicketView } from '../dm/SupportTicketView';
 import { useSupportStore } from '../../stores/supportStore';
 import { SearchModal } from '../search/SearchModal';
+import { Search } from 'lucide-react';
+import { UserCard } from './UserCard';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -42,6 +44,7 @@ import type {
 } from '@voxium/shared';
 
 export function MainLayout() {
+  const { t } = useTranslation();
   const { fetchServers, activeServerId, channels } = useServerStore();
   const { user } = useAuthStore();
   const activeConversationId = useDMStore((s) => s.activeConversationId);
@@ -232,11 +235,11 @@ export function MainLayout() {
         useDMStore.getState().updateParticipantStatus(userId, status);
         useFriendStore.getState().updateFriendStatus(userId, status);
       },
-      voiceChannelUsers: ({ channelId, users: voiceUsers }: { channelId: string; users: VoiceUser[] }) => {
-        useVoiceStore.getState().setChannelUsers(channelId, voiceUsers);
+      voiceChannelUsers: ({ channelId, serverId, users: voiceUsers }: { channelId: string; serverId?: string; users: VoiceUser[] }) => {
+        useVoiceStore.getState().setChannelUsers(channelId, voiceUsers, serverId);
       },
-      voiceUserJoined: ({ channelId, user: voiceUser }: { channelId: string; user: VoiceUser }) => {
-        useVoiceStore.getState().addUserToChannel(channelId, voiceUser);
+      voiceUserJoined: ({ channelId, serverId, user: voiceUser }: { channelId: string; serverId?: string; user: VoiceUser }) => {
+        useVoiceStore.getState().addUserToChannel(channelId, voiceUser, serverId);
         const currentUser = useAuthStore.getState().user;
         if (voiceUser.id === currentUser?.id) return;
         if (useVoiceStore.getState().activeChannelId !== channelId) return;
@@ -805,11 +808,32 @@ export function MainLayout() {
     <div className="flex h-full flex-col">
       <ConnectionBanner />
       <AnnouncementBanner />
-      <div className="flex flex-1 min-h-0">
-        <ServerSidebar />
-        {activeServerId ? <ChannelSidebar /> : <DMList />}
+      {/* 2026 shell: communities are tabs in the spaces strip along the top;
+          below it, panels float on the page background with 8px gutters. The
+          sidebar column (search, channels, user card) sits directly on the
+          page; chat and People are rounded panels. */}
+      <SpacesStrip />
+      <div className="flex flex-1 min-h-0 gap-2 bg-vox-bg-primary p-2 pt-0">
+        <div className="flex w-[248px] flex-none flex-col min-h-0">
+          <div className="px-1 pb-1 pt-2">
+            <button
+              onClick={() => setShowGlobalSearch(true)}
+              className="flex h-[34px] w-full items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-tertiary px-2.5 text-vox-text-muted transition-colors hover:border-vox-border-strong hover:text-vox-text-secondary"
+            >
+              <Search size={14} className="shrink-0" />
+              <span className="truncate text-[13px]">{t('search.placeholder')}</span>
+              <kbd className="ml-auto shrink-0 rounded-sm bg-vox-bg-hover px-1.5 py-0.5 font-mono text-[10px] text-vox-text-muted/80">
+                {navigator.platform.toUpperCase().includes('MAC') ? '⌘K' : 'Ctrl K'}
+              </kbd>
+            </button>
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col">
+            {activeServerId ? <ChannelSidebar /> : <DMList />}
+          </div>
+          <UserCard />
+        </div>
         <ErrorBoundary inline>
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="panel flex flex-1 flex-col bg-vox-chat">
           {activeServerId ? (
             screenSharingUserId && voiceActiveChannelId ? (
               screenShareViewMode === 'inline' ? (

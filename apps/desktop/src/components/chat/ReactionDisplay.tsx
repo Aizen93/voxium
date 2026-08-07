@@ -45,21 +45,21 @@ export function ReactionDisplay({ reactions, messageId, channelId, conversationI
           <button
             key={r.emoji}
             onClick={() => handleToggle(r.emoji)}
-            className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs transition-colors border ${
+            className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors ${
               isOwn
-                ? 'border-vox-accent-primary/50 bg-vox-accent-primary/10 text-vox-text-primary'
-                : 'border-vox-border bg-vox-bg-secondary text-vox-text-secondary hover:bg-vox-bg-hover'
+                ? 'border-vox-accent-primary/40 bg-vox-accent-tint text-vox-text-primary'
+                : 'border-vox-border bg-vox-bg-hover text-vox-text-secondary hover:border-vox-border-strong'
             }`}
           >
             <span>{r.emoji}</span>
-            <span>{r.count}</span>
+            <span className="font-mono text-[11px]">{r.count}</span>
           </button>
         );
       })}
       <button
         ref={addBtnRef}
         onClick={() => setShowPicker(!showPicker)}
-        className="flex items-center justify-center rounded-full w-6 h-6 border border-vox-border bg-vox-bg-secondary text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+        className="flex h-[26px] w-[30px] items-center justify-center rounded-full border border-dashed border-vox-border-strong text-vox-text-muted hover:border-vox-text-muted hover:text-vox-text-primary transition-colors"
         title="Add reaction"
         aria-label="Add reaction"
       >

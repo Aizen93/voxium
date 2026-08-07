@@ -373,7 +373,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
   return (
     <div
-      className="relative border-t border-vox-border px-4 py-3"
+      className="relative px-4 pb-4 pt-1"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -389,7 +389,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       )}
 
       {replyingTo && (
-        <div className="flex items-center justify-between rounded-t-xl border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2">
+        <div className="flex items-center justify-between rounded-t-2xl border border-b-0 border-vox-border bg-vox-bg-secondary px-4 py-2">
           <div className="min-w-0 flex-1 text-xs text-vox-text-secondary">
             <span className="text-vox-text-muted">{t('messageInput.replyingTo')} </span>
             <span className="font-semibold text-vox-text-primary">{replyingTo.author.displayName}</span>
@@ -410,7 +410,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
       {/* Pending file previews */}
       {pendingFiles.length > 0 && (
-        <div className={`flex gap-2 overflow-x-auto border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2 ${replyingTo ? '' : 'rounded-t-xl'}`}>
+        <div className={`flex gap-2 overflow-x-auto border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2 ${replyingTo ? '' : 'rounded-t-2xl'}`}>
           {pendingFiles.map((pf) => {
             const FileIcon = getFileIcon(pf.mimeType);
             return (
@@ -462,17 +462,12 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         />
       )}
 
-      <div className={`flex items-end gap-2 bg-vox-bg-floating border border-vox-border px-3 py-2 ${
-        replyingTo || pendingFiles.length > 0 ? 'rounded-b-xl border-t-0' : 'rounded-xl'
+      {/* Single-row composer: attach | input | emoji | send. items-end keeps
+          the controls pinned to the bottom edge while Shift+Enter grows the
+          textarea upward. */}
+      <div className={`flex items-end gap-1 bg-vox-bg-floating border border-vox-border shadow-float px-2 py-1.5 ${
+        replyingTo || pendingFiles.length > 0 ? 'rounded-b-2xl border-t-0' : 'rounded-2xl'
       }`}>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
-          title={t('messageInput.attachFile')}
-          aria-label={t('messageInput.attachFile')}
-        >
-          <PlusCircle size={20} />
-        </button>
         <input
           ref={fileInputRef}
           type="file"
@@ -481,6 +476,15 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           onChange={handleFileSelect}
           accept={ALLOWED_ATTACHMENT_TYPES.join(',')}
         />
+
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary"
+          title={t('messageInput.attachFile')}
+          aria-label={t('messageInput.attachFile')}
+        >
+          <PlusCircle size={16} />
+        </button>
 
         <textarea
           ref={textareaRef}
@@ -502,7 +506,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           onClick={(e) => setCursorPos((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onKeyUp={(e) => setCursorPos((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           placeholder={conversationId ? `Message @${placeholderName}` : `Message #${channelName}`}
-          className="max-h-36 min-h-[24px] flex-1 resize-none bg-transparent text-sm text-vox-text-primary
+          className="max-h-36 min-w-0 flex-1 resize-none bg-transparent px-2 py-[4.5px] text-[14.5px] leading-relaxed text-vox-text-primary
                      placeholder:text-vox-text-muted focus:outline-none"
           rows={1}
           onInput={(e) => {
@@ -515,10 +519,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         <button
           ref={emojiBtnRef}
           onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-          className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
+          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary"
           aria-label={t('messageInput.emojiPicker')}
         >
-          <Smile size={20} />
+          <Smile size={16} />
         </button>
         {showEmojiPicker && (
           <EmojiPicker
@@ -530,17 +534,14 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
             onClose={() => setShowEmojiPicker(false)}
           />
         )}
-
-        {canSend && (
-          <button
-            onClick={handleSend}
-            disabled={isSending}
-            className="mb-0.5 text-vox-accent-primary hover:text-vox-accent-hover transition-colors disabled:opacity-50"
-            aria-label={t('messageInput.sendMessage')}
-          >
-            <Send size={20} />
-          </button>
-        )}
+        <button
+          onClick={handleSend}
+          disabled={isSending || !canSend}
+          className="ml-0.5 flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md bg-vox-accent-primary text-vox-on-accent transition-all hover:brightness-110 disabled:opacity-40 disabled:hover:brightness-100"
+          aria-label={t('messageInput.sendMessage')}
+        >
+          <Send size={14} />
+        </button>
       </div>
     </div>
   );

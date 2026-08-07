@@ -6,7 +6,7 @@ import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Hash, Volume2, Plus, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings } from 'lucide-react';
+import { Volume2, Plus, ChevronRight, MicOff, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings, AudioLines } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
 import { ChannelPermissionsEditor } from '../server/ChannelPermissionsEditor';
@@ -16,7 +16,6 @@ import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { toast } from '../../stores/toastStore';
-import { useSettingsStore } from '../../stores/settingsStore';
 import { clsx } from 'clsx';
 import {
   DndContext,
@@ -102,20 +101,83 @@ function SortableChannelItem({
 
   const isText = channel.type === 'text';
 
+  // An occupied voice channel is the liveliest thing in the sidebar, so it
+  // renders as an elevated card rather than a quiet row: bold header with a
+  // live count, the participants, and an explicit Join affordance. The card
+  // border picks up the accent when it is YOUR channel.
+  if (!isText && voiceUsers.length > 0) {
+    return (
+      <div ref={setNodeRef} style={style}>
+        <div
+          data-testid="voice-channel-card"
+          onContextMenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, channel); } }}
+          className={clsx(
+            'group my-1 overflow-hidden rounded-xl border bg-vox-bg-floating transition-colors',
+            isVoiceActive ? 'border-vox-accent-primary/35' : 'border-vox-border',
+          )}
+        >
+          <div className="flex h-[34px] w-full items-center gap-1 px-2">
+            {isAdmin && (
+              <button
+                {...attributes}
+                {...listeners}
+                className="shrink-0 cursor-grab opacity-0 group-hover:opacity-60 hover:!opacity-100 text-vox-text-muted touch-none"
+                tabIndex={-1}
+              >
+                <GripVertical size={12} />
+              </button>
+            )}
+            <button
+              onClick={() => onJoinVoice(channel.id)}
+              className="flex min-w-0 flex-1 items-center gap-2 text-[13.5px] font-semibold text-vox-text-primary"
+            >
+              <Volume2 size={15} className="shrink-0" />
+              <span className="truncate">{channel.name}</span>
+            </button>
+            <span className="shrink-0 text-[11px] font-medium tabular-nums text-vox-text-muted">
+              {voiceUsers.length}
+            </span>
+            {isAdmin && (
+              <button
+                onClick={() => onDelete(channel.id)}
+                className="shrink-0 opacity-0 group-hover:opacity-100 text-vox-text-muted hover:text-vox-accent-danger transition-all"
+                title={t('channel.deleteChannel')}
+                aria-label={t('channel.deleteChannel')}
+              >
+                <Trash2 size={12} />
+              </button>
+            )}
+          </div>
+          <VoiceUserList voiceUsers={voiceUsers} currentUserId={currentUserId} onContextMenu={onVoiceUserContextMenu || (() => {})} />
+          {!isVoiceActive && (
+            <div className="px-1.5 pb-1.5 pt-1">
+              <button
+                onClick={() => onJoinVoice(channel.id)}
+                className="tint flex h-[30px] w-full items-center justify-center rounded-lg text-[12.5px] font-semibold transition-colors hover:bg-vox-accent-tint-strong"
+              >
+                {t('channel.joinVoice')}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div ref={setNodeRef} style={style}>
       <div
         onContextMenu={(e) => { if (onContextMenu) { e.preventDefault(); e.stopPropagation(); onContextMenu(e, channel); } }}
         className={clsx(
-          'group flex w-full items-center gap-1 rounded-md px-1 py-1.5 text-sm transition-colors',
+          'group flex h-[31px] w-full items-center gap-1 rounded-md px-1.5 text-[13.5px] transition-colors',
           isText
             ? isActive
-              ? 'bg-vox-bg-active text-vox-text-primary font-medium'
+              ? 'bg-vox-accent-tint text-vox-text-primary font-semibold'
               : unread > 0
                 ? 'text-vox-text-primary font-semibold hover:bg-vox-bg-hover'
                 : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
             : isVoiceActive
-              ? 'bg-vox-bg-active text-vox-voice-connected font-medium'
+              ? 'bg-vox-accent-tint text-vox-text-primary font-semibold'
               : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
         )}
       >
@@ -131,16 +193,26 @@ function SortableChannelItem({
         )}
         <button
           onClick={() => isText ? onSelectText(channel.id) : onJoinVoice(channel.id)}
-          className="flex min-w-0 flex-1 items-center gap-1.5"
+          className="flex min-w-0 flex-1 items-center gap-2"
         >
           {isText
-            ? <Hash size={16} className="shrink-0 opacity-60" />
-            : <Volume2 size={16} className="shrink-0 opacity-60" />
+            ? (
+              <span
+                aria-hidden
+                className={clsx(
+                  'w-3 shrink-0 text-center font-mono text-[13px] leading-none',
+                  isActive ? 'text-vox-accent-primary' : 'text-vox-text-muted/70',
+                )}
+              >
+                #
+              </span>
+            )
+            : <Volume2 size={15} className={clsx('shrink-0', isVoiceActive ? 'text-vox-voice-connected' : 'opacity-60')} />
           }
           <span className="truncate">{channel.name}</span>
         </button>
         {isText && unread > 0 && (
-          <span className="bg-vox-accent-primary text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 shrink-0">
+          <span className="flex h-[17px] min-w-[17px] shrink-0 items-center justify-center rounded-full bg-vox-accent-primary px-[5px] text-[10.5px] font-bold text-vox-on-accent">
             {unread > 99 ? '99+' : unread}
           </span>
         )}
@@ -155,11 +227,6 @@ function SortableChannelItem({
           </button>
         )}
       </div>
-
-      {/* Voice users */}
-      {!isText && voiceUsers.length > 0 && (
-        <VoiceUserList voiceUsers={voiceUsers} currentUserId={currentUserId} onContextMenu={onVoiceUserContextMenu || (() => {})} />
-      )}
     </div>
   );
 }
@@ -177,7 +244,7 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
   const members = useServerStore((s) => s.members);
 
   return (
-    <div className="ml-4 mt-0.5 space-y-0.5">
+    <div className="space-y-0.5 px-1.5">
       {voiceUsers.map((vu) => {
         const member = members.find((m) => m.userId === vu.id);
         const name = member?.nickname || vu.displayName;
@@ -188,7 +255,7 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
         return (
           <UserHoverTarget key={vu.id} userId={vu.id}>
             <div
-              className="flex items-center gap-1.5 rounded px-2 py-1 hover:bg-vox-bg-hover/50 cursor-default"
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-vox-bg-hover cursor-default"
               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, vu.id); }}
             >
               <Avatar
@@ -201,7 +268,9 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
                 className={clsx(
                   'text-xs truncate flex-1',
                   vu.id === currentUserId ? 'font-medium' : '',
-                  !roleColor && 'text-vox-text-secondary'
+                  // The person talking right now surfaces to full brightness,
+                  // like the mock — unless a role color owns the name.
+                  !roleColor && (vu.speaking ? 'text-vox-text-primary' : 'text-vox-text-secondary')
                 )}
                 style={roleColor ? { color: roleColor } : undefined}
               >
@@ -209,6 +278,7 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
                 {vu.id === currentUserId && ` ${t('channel.you')}`}
               </span>
               <div className="flex items-center gap-0.5 shrink-0">
+                {vu.speaking && <AudioLines size={11} className="text-vox-voice-speaking" />}
                 {vu.screenSharing && <Monitor size={10} className="text-vox-voice-connected" />}
                 {vu.serverMuted && <span title={t('channel.serverMuted')}><MicOff size={10} className="text-vox-accent-danger" /></span>}
                 {vu.selfMute && !vu.serverMuted && <MicOff size={10} className="text-vox-voice-muted" />}
@@ -273,7 +343,7 @@ function SortableCategoryHeader({
         )}
         <button
           onClick={onToggle}
-          className="flex min-w-0 flex-1 items-center gap-1 text-[11px] font-bold uppercase tracking-wide text-vox-text-muted hover:text-vox-text-secondary"
+          className="section-label flex min-w-0 flex-1 items-center gap-1 hover:text-vox-text-secondary transition-colors"
         >
           <ChevronRight
             size={12}
@@ -314,7 +384,7 @@ function ChannelOverlay({ channel }: { channel: Channel }) {
   return (
     <div className="flex items-center gap-1.5 rounded-md bg-vox-bg-active px-2 py-1.5 text-sm text-vox-text-primary font-medium shadow-lg border border-vox-border w-52">
       {channel.type === 'text'
-        ? <Hash size={16} className="shrink-0 opacity-60" />
+        ? <span aria-hidden className="w-3 shrink-0 text-center font-mono text-[13px] leading-none text-vox-text-muted/70">#</span>
         : <Volume2 size={16} className="shrink-0 opacity-60" />
       }
       <span className="truncate">{channel.name}</span>
@@ -336,7 +406,7 @@ function CategoryOverlay({ category }: { category: Category }) {
 export function ChannelSidebar() {
   const { t } = useTranslation();
   const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, unreadCounts, reorderCategories, reorderChannels } = useServerStore();
-  const { joinChannel, activeChannelId: voiceChannelId, channelUsers, selfMute, selfDeaf, toggleMute, toggleDeaf } = useVoiceStore();
+  const { joinChannel, activeChannelId: voiceChannelId, channelUsers } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
   const [showInviteModal, setShowInviteModal] = useState(false);
@@ -352,8 +422,6 @@ export function ChannelSidebar() {
   const [channelContextMenu, setChannelContextMenu] = useState<{ channel: Channel; position: { x: number; y: number } } | null>(null);
   const [voiceUserCtx, setVoiceUserCtx] = useState<{ userId: string; position: { x: number; y: number } } | null>(null);
   const [permissionsEditorChannel, setPermissionsEditorChannel] = useState<{ id: string; name: string; type: 'text' | 'voice' } | null>(null);
-  const [editingNickname, setEditingNickname] = useState(false);
-  const [nicknameInput, setNicknameInput] = useState('');
   const ctxRef = useRef<HTMLDivElement>(null);
 
   const activeServer = servers.find((s) => s.id === activeServerId);
@@ -653,37 +721,42 @@ export function ChannelSidebar() {
 
   // ─── Render ───────────────────────────────────────────────────────────
 
+  const onlineCount = members.filter((m) => m.user.status && m.user.status !== 'offline').length;
+
   return (
-    <div className="flex h-full w-60 flex-col bg-vox-channel">
-      {/* Server name header */}
-      <div className="flex h-12 items-center justify-between border-b border-vox-border px-4 shadow-sm">
-        <h2 className="truncate text-sm font-semibold text-vox-text-primary">
+    <div className="flex h-full w-full flex-col bg-vox-channel">
+      {/* Server name header — open row on the page background, no border box */}
+      <div className="flex h-10 flex-none items-center gap-2 px-3 pt-1">
+        <h2 className="truncate text-[14.5px] font-semibold tracking-[-0.01em] text-vox-text-primary">
           {activeServer?.name || t('channel.server')}
         </h2>
-        <div className="flex items-center gap-1">
+        <span className="ml-auto whitespace-nowrap text-[11px] text-vox-text-muted/80">
+          {onlineCount} {t('channel.online').toLowerCase()}
+        </span>
+        <div className="flex items-center gap-0.5">
           <button
             onClick={() => setShowInviteModal(true)}
-            className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
+            className="flex h-[26px] w-[26px] items-center justify-center rounded-md text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
             title={t('channel.invitePeople')}
             aria-label={t('channel.invitePeople')}
           >
-            <UserPlus size={16} />
+            <UserPlus size={15} />
           </button>
           {isAdmin && (
             <button
               onClick={() => setShowServerSettings(true)}
-              className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
+              className="flex h-[26px] w-[26px] items-center justify-center rounded-md text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
               title={t('channel.serverSettings')}
               aria-label={t('channel.serverSettings')}
             >
-              <Settings size={16} />
+              <Settings size={15} />
             </button>
           )}
         </div>
       </div>
 
       {/* Channels list */}
-      <div className="flex-1 overflow-y-auto px-2 py-3">
+      <div className="flex-1 overflow-y-auto px-2 py-2">
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
@@ -834,84 +907,10 @@ export function ChannelSidebar() {
         )}
       </div>
 
-      {/* Voice panel (between channel list and user area) */}
+      {/* Voice panels (below the channel list; the shared UserCard rendered by
+          MainLayout sits directly beneath this component) */}
       <VoicePanel />
       <DMVoicePanel />
-
-      {/* User area at bottom */}
-      <div className="flex items-center gap-2 border-t border-vox-border bg-vox-sidebar px-2 py-2">
-        <button onClick={() => useSettingsStore.getState().openSettings()} title={t('common.settings')} aria-label={t('common.settings')} className="shrink-0 rounded-full hover:opacity-80 transition-opacity">
-          <Avatar avatarUrl={user?.avatarUrl} displayName={user?.displayName} size="sm" />
-        </button>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-xs font-medium text-vox-text-primary">{user?.displayName || t('channel.user')}</p>
-          {activeServerId && !editingNickname && (
-            <button
-              onClick={() => { setEditingNickname(true); setNicknameInput(currentMember?.nickname || ''); }}
-              className="truncate text-[10px] text-vox-text-muted hover:text-vox-text-secondary transition-colors"
-            >
-              {currentMember?.nickname ? currentMember.nickname : t('channel.setNickname')}
-            </button>
-          )}
-          {activeServerId && editingNickname && (
-            <input
-              type="text"
-              value={nicknameInput}
-              onChange={(e) => setNicknameInput(e.target.value)}
-              onKeyDown={async (e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  try {
-                    await useServerStore.getState().setNickname(activeServerId, nicknameInput.trim() || null);
-                    toast.success(nicknameInput.trim() ? t('channel.nicknameSet') : t('channel.nicknameCleared'));
-                  } catch { toast.error(t('channel.failedToSetNickname')); }
-                  setEditingNickname(false);
-                } else if (e.key === 'Escape') {
-                  setEditingNickname(false);
-                }
-              }}
-              onBlur={async () => {
-                try {
-                  await useServerStore.getState().setNickname(activeServerId, nicknameInput.trim() || null);
-                } catch { /* ignore on blur */ }
-                setEditingNickname(false);
-              }}
-              placeholder={t('channel.nickname')}
-              className="w-full rounded border border-vox-border bg-vox-bg-secondary px-1 py-0.5 text-[10px] text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
-              autoFocus
-            />
-          )}
-          {!activeServerId && (
-            <p className="truncate text-[10px] text-vox-text-muted">{t('channel.online')}</p>
-          )}
-        </div>
-        <button
-          onClick={toggleMute}
-          className={clsx(
-            'rounded p-1 transition-colors',
-            selfMute
-              ? 'text-vox-accent-danger hover:bg-vox-accent-danger/20'
-              : 'text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover'
-          )}
-          title={selfMute ? t('voice.unmute') : t('voice.mute')}
-          aria-label={selfMute ? t('voice.unmute') : t('voice.mute')}
-        >
-          {selfMute ? <MicOff size={14} /> : <Mic size={14} />}
-        </button>
-        <button
-          onClick={toggleDeaf}
-          className={clsx(
-            'rounded p-1 transition-colors',
-            selfDeaf
-              ? 'text-vox-accent-danger hover:bg-vox-accent-danger/20'
-              : 'text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover'
-          )}
-          title={selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
-          aria-label={selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
-        >
-          {selfDeaf ? <HeadphoneOff size={14} /> : <Headphones size={14} />}
-        </button>
-      </div>
 
       {showInviteModal && activeServerId && (
         <InviteModal serverId={activeServerId} onClose={() => setShowInviteModal(false)} />

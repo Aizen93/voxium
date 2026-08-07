@@ -214,19 +214,12 @@ function LandingStyles() {
 
       .lp-root { background: #0b0b1a; }
 
-      /* Section panel: floating rounded rectangle on the page canvas */
-      .lp-panel {
-        position: relative;
-        overflow: hidden;
-        border-radius: 28px;
-        border: 1px solid rgba(148, 150, 255, 0.09);
-        background:
-          radial-gradient(80% 60% at 50% 0%, rgba(91, 91, 247, 0.06), transparent 70%),
-          linear-gradient(180deg, rgba(148, 150, 255, 0.04), rgba(148, 150, 255, 0.015));
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 24px 64px -40px rgba(0, 0, 0, 0.8);
-      }
+      /* Full-bleed section: hairline separator, content constrained inside.
+         The 2026 layout is editorial (Linear/Arc), not boxed panels — sections
+         span the page and their content uses the width. */
+      .lp-section { position: relative; border-top: 1px solid rgba(255, 255, 255, 0.06); }
 
-      /* Inner card: content tile inside a panel */
+      /* Inner card: content tile inside a section */
       .lp-card {
         position: relative;
         border-radius: 20px;
@@ -348,7 +341,7 @@ function Navbar() {
 
   return (
     <nav className="fixed top-3 sm:top-4 left-0 right-0 z-50 px-3 sm:px-6">
-      <div className="lp-nav max-w-6xl mx-auto h-14 px-4 sm:px-5 flex items-center justify-between">
+      <div className="lp-nav max-w-7xl mx-auto h-14 px-4 sm:px-5 flex items-center justify-between">
         <a href="#hero" className="flex items-center gap-2.5" onClick={() => setMenuOpen(false)}>
           <img src="/logo.svg" alt="Voxium" className="h-8 w-8 rounded-lg" />
           <span className="text-lg font-bold tracking-tight text-vox-text-primary">Voxium</span>
@@ -385,7 +378,7 @@ function Navbar() {
 
       {/* Mobile menu panel */}
       {menuOpen && (
-        <div className="lp-nav sm:hidden max-w-6xl mx-auto mt-2 p-3 flex flex-col gap-2 animate-fade-in">
+        <div className="lp-nav sm:hidden max-w-7xl mx-auto mt-2 p-3 flex flex-col gap-2 animate-fade-in">
           <select
             value={i18n.language}
             onChange={(e) => changeLanguage(e.target.value)}
@@ -427,37 +420,52 @@ function Hero() {
       {/* Blend the hero into the page canvas below */}
       <div className="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-b from-transparent to-[#0b0b1a]" />
 
-      <div className="relative z-10 max-w-6xl mx-auto px-6 pt-32 pb-20 w-full flex flex-col items-center text-center">
-        {/* Text content */}
-        <div className="max-w-3xl">
-          <div className="flex items-center justify-center gap-4 mb-8 animate-fade-in">
-            <img src="/logo.svg" alt="" className="h-16 w-16 sm:h-20 sm:w-20 rounded-2xl" />
+      <div className="relative z-10 w-full max-w-7xl mx-auto px-6 lg:px-10 pt-32 pb-20">
+        <div className="grid grid-cols-1 lg:grid-cols-2 items-center gap-14 xl:gap-20">
+        {/* Copy column — left-aligned; the width belongs to the content now */}
+        <div className="max-w-xl">
+          <div className="inline-flex items-center gap-2 rounded-full border border-[#8d8df2]/25 bg-[#5b5bf7]/10 px-3.5 py-1.5 text-[13px] font-medium text-[#b9b8f5] animate-fade-in">
+            <Code2 className="h-3.5 w-3.5" />
+            {t('landing.highlights.openSource')}
           </div>
-          <h1 className="text-4xl sm:text-6xl md:text-7xl font-bold tracking-tight text-vox-text-primary leading-[1.05] animate-fade-in">
+          <h1 className="mt-6 text-4xl sm:text-5xl xl:text-[62px] font-bold tracking-tight text-vox-text-primary leading-[1.06] animate-fade-in">
             {t('landing.hero.headlinePart1')}{' '}
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#8f7bff] via-[#5b5bf7] to-[#4a8df7]">
               {t('landing.hero.headlinePart2')}
             </span>
           </h1>
           <p
-            className="mt-6 text-lg sm:text-xl text-vox-text-secondary max-w-xl mx-auto animate-slide-up"
+            className="mt-6 text-lg sm:text-xl text-vox-text-secondary animate-slide-up"
             style={{ animationDelay: '0.1s', animationFillMode: 'backwards' }}
           >
             {t('landing.hero.subtitle')}
           </p>
 
+          {/* Primary action */}
+          <div
+            className="mt-8 flex flex-wrap items-center gap-3 animate-slide-up"
+            style={{ animationDelay: '0.15s', animationFillMode: 'backwards' }}
+          >
+            <Link
+              to="/register"
+              className="btn-primary rounded-full px-7 py-3 text-base hover:scale-[1.03] active:scale-[0.98] transition-all duration-200"
+            >
+              {t('landing.nav.getStarted')} <ArrowRight className="ml-1.5 h-4 w-4" />
+            </Link>
+          </div>
+
           {/* Download buttons */}
           <div
-            className="mt-8 flex flex-wrap gap-3 justify-center animate-slide-up"
+            className="mt-4 flex flex-wrap gap-2.5 animate-slide-up"
             style={{ animationDelay: '0.2s', animationFillMode: 'backwards' }}
           >
             <a
               href={DOWNLOAD_URLS.windows}
               target="_blank"
               rel="noopener noreferrer"
-              className="group relative btn rounded-full bg-white/[0.05] backdrop-blur-sm text-vox-text-primary border border-white/10 hover:border-[#0078D4]/50 hover:bg-[#0078D4]/15 hover:shadow-[0_0_24px_rgba(0,120,212,0.25)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
+              className="group relative btn rounded-full bg-white/[0.05] backdrop-blur-sm text-vox-text-primary border border-white/10 hover:border-[#0078D4]/50 hover:bg-[#0078D4]/15 hover:shadow-[0_0_24px_rgba(0,120,212,0.25)] hover:scale-[1.03] active:scale-[0.98] px-4 py-2 text-sm transition-all duration-200"
             >
-              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <svg className="mr-2 h-4 w-4 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/>
               </svg>
               {t('landing.hero.downloadWindows')}
@@ -466,9 +474,9 @@ function Hero() {
               href={DOWNLOAD_URLS.macos}
               target="_blank"
               rel="noopener noreferrer"
-              className="group relative btn rounded-full bg-white/[0.05] backdrop-blur-sm text-vox-text-primary border border-white/10 hover:border-[#A2AAAD]/50 hover:bg-[#A2AAAD]/15 hover:shadow-[0_0_24px_rgba(162,170,173,0.2)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
+              className="group relative btn rounded-full bg-white/[0.05] backdrop-blur-sm text-vox-text-primary border border-white/10 hover:border-[#A2AAAD]/50 hover:bg-[#A2AAAD]/15 hover:shadow-[0_0_24px_rgba(162,170,173,0.2)] hover:scale-[1.03] active:scale-[0.98] px-4 py-2 text-sm transition-all duration-200"
             >
-              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <svg className="mr-2 h-4 w-4 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
               </svg>
               {t('landing.hero.downloadMac')}
@@ -477,38 +485,33 @@ function Hero() {
               href={DOWNLOAD_URLS.linux}
               target="_blank"
               rel="noopener noreferrer"
-              className="group relative btn rounded-full bg-white/[0.05] backdrop-blur-sm text-vox-text-primary border border-white/10 hover:border-[#E95420]/50 hover:bg-[#E95420]/15 hover:shadow-[0_0_24px_rgba(233,84,32,0.2)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
+              className="group relative btn rounded-full bg-white/[0.05] backdrop-blur-sm text-vox-text-primary border border-white/10 hover:border-[#E95420]/50 hover:bg-[#E95420]/15 hover:shadow-[0_0_24px_rgba(233,84,32,0.2)] hover:scale-[1.03] active:scale-[0.98] px-4 py-2 text-sm transition-all duration-200"
             >
-              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <svg className="mr-2 h-4 w-4 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M17.61.455a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zM12.92.8C8.923.777 5.137 2.941 3.148 6.451a4.5 4.5 0 0 1 .26-.007 4.92 4.92 0 0 1 2.585.737A8.316 8.316 0 0 1 12.688 3.6 4.944 4.944 0 0 1 13.723.834 11.008 11.008 0 0 0 12.92.8zm9.226 4.994a4.915 4.915 0 0 1-1.918 2.246 8.36 8.36 0 0 1-.273 8.303 4.89 4.89 0 0 1 1.632 2.54 11.156 11.156 0 0 0 .559-13.089zM3.41 7.932A3.41 3.41 0 0 0 0 11.342a3.41 3.41 0 0 0 3.41 3.409 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zm2.027 7.866a4.908 4.908 0 0 1-2.915.358 11.1 11.1 0 0 0 7.991 6.698 11.234 11.234 0 0 0 2.422.249 4.879 4.879 0 0 1-.999-2.85 8.484 8.484 0 0 1-.836-.136 8.304 8.304 0 0 1-5.663-4.32zm11.405.928a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41z"/>
               </svg>
               {t('landing.hero.downloadLinux')}
             </a>
           </div>
 
-          <p
-            className="mt-4 text-sm text-vox-text-muted animate-slide-up"
-            style={{ animationDelay: '0.3s', animationFillMode: 'backwards' }}
-          >
-            {t('landing.hero.orLaunch')}{' '}
-            <Link to="/register" className="text-vox-accent-primary hover:underline">
-              {t('landing.hero.launchBrowser')}
-            </Link>
-          </p>
-
-		  {/* Waveform decoration */}
+          {/* Trust row */}
           <div
-            className="mt-6 flex justify-center animate-slide-up"
-            style={{ animationDelay: '0.15s', animationFillMode: 'backwards' }}
+            className="mt-8 flex flex-wrap gap-x-5 gap-y-2 animate-slide-up"
+            style={{ animationDelay: '0.25s', animationFillMode: 'backwards' }}
           >
-            <WaveformSvg className="h-10 w-48 opacity-50" />
+            {[t('landing.highlights.noAds'), t('landing.highlights.selfHostable'), t('landing.highlights.freeForIndividuals')].map((h) => (
+              <span key={h} className="flex items-center gap-1.5 text-sm text-vox-text-muted">
+                <CheckCircle2 className="h-4 w-4 text-vox-accent-success shrink-0" />
+                {h}
+              </span>
+            ))}
           </div>
-
         </div>
 
-        {/* Animated Mock UI panel — framed product window floating over the waves */}
+        {/* Animated Mock UI panel — the product window anchors the right column
+            and bleeds toward the viewport edge, Arc-style (the section clips it) */}
         <div
-          className="hidden md:block w-full max-w-4xl mt-16 animate-slide-up"
+          className="hidden md:block w-full animate-slide-up lg:scale-[1.06] lg:translate-x-6 xl:translate-x-10 origin-left"
           style={{ animationDelay: '0.3s', animationFillMode: 'backwards' }}
         >
           <style>{`
@@ -667,6 +670,7 @@ function Hero() {
             </div>
           </div>
         </div>
+        </div>
       </div>
     </section>
   );
@@ -756,23 +760,27 @@ function StatsSection() {
   ];
 
   return (
-    <section ref={sectionRef} className="relative px-4 sm:px-6 py-4">
-      <div className="lp-panel max-w-6xl mx-auto px-6 py-14 sm:px-12">
-        <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight text-vox-text-primary text-center mb-3">
-          {t('landing.stats.title')}
-        </h2>
-        <p className="text-vox-text-secondary text-center mb-10 max-w-lg mx-auto text-sm">
-          {t('landing.stats.subtitle')}
-        </p>
+    <section ref={sectionRef} className="relative border-y border-white/[0.06] bg-white/[0.015]">
+      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-[minmax(280px,1fr)_2fr] items-center gap-10 px-6 lg:px-10 py-12">
+        <div>
+          <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight text-vox-text-primary">
+            {t('landing.stats.title')}
+          </h2>
+          <p className="mt-2 text-sm text-vox-text-secondary max-w-xs">
+            {t('landing.stats.subtitle')}
+          </p>
+        </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.06]">
           {cards.map((card) => (
-            <div key={card.label} className="px-6 py-6 text-center">
-              <card.icon className="h-5 w-5 text-[#8f8aff] mx-auto mb-3" />
-              <div className="text-3xl sm:text-4xl font-bold tracking-tight text-vox-text-primary mb-1 tabular-nums">
+            <div key={card.label} className="px-0 py-5 sm:px-8 sm:py-2 first:sm:pl-0">
+              <div className="text-3xl sm:text-4xl font-bold tracking-tight text-vox-text-primary mb-1.5 tabular-nums">
                 {stats ? formatNumber(card.value) : '—'}
               </div>
-              <div className="text-sm text-vox-text-secondary">{card.label}</div>
+              <div className="flex items-center gap-1.5 text-sm text-vox-text-secondary">
+                <card.icon className="h-4 w-4 text-[#8f8aff]" />
+                {card.label}
+              </div>
             </div>
           ))}
         </div>
@@ -843,16 +851,15 @@ function Features() {
   ];
 
   return (
-    <section className="relative px-4 sm:px-6 py-4">
-      <div ref={sectionRef} className="lp-panel max-w-6xl mx-auto px-6 py-16 sm:px-12">
-        {/* Particle separator at top */}
-        <ParticlesSvg className="absolute top-0 left-0 w-full h-16" />
-
+    <section className="relative">
+      {/* Particle separator at top */}
+      <ParticlesSvg className="absolute top-0 left-0 w-full h-16" />
+      <div ref={sectionRef} className="max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
         <Reveal>
-          <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary text-center mb-4">
+          <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary mb-4">
             {t('landing.features.title')}
           </h2>
-          <p className="text-vox-text-secondary text-center mb-14 max-w-2xl mx-auto">
+          <p className="text-vox-text-secondary mb-14 max-w-2xl">
             {t('landing.features.subtitle')}
           </p>
         </Reveal>
@@ -1212,21 +1219,20 @@ function Showcase() {
   }, []);
 
   return (
-    <section ref={sectionRef} className="relative px-4 sm:px-6 py-4">
-      <div className="lp-panel max-w-6xl mx-auto px-6 py-16 sm:px-12">
-        {/* Subtle radial backdrop */}
-        <div
-          className="absolute inset-0 opacity-8"
-          style={{ background: 'radial-gradient(ellipse at 30% 50%, #5b5bf720 0%, transparent 60%), radial-gradient(ellipse at 70% 50%, #3B82F615 0%, transparent 60%)' }}
-        />
-
+    <section ref={sectionRef} className="lp-section">
+      {/* Subtle radial backdrop */}
+      <div
+        className="absolute inset-0 opacity-8"
+        style={{ background: 'radial-gradient(ellipse at 30% 50%, #5b5bf720 0%, transparent 60%), radial-gradient(ellipse at 70% 50%, #3B82F615 0%, transparent 60%)' }}
+      />
+      <div className="max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
         <div className="relative z-10">
           {/* Section header */}
-          <div className={`text-center mb-14 lp-reveal ${visible ? 'lp-in' : ''}`}>
+          <div className={`mb-14 lp-reveal ${visible ? 'lp-in' : ''}`}>
             <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary mb-4">
               {t('landing.showcase.title')} <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#8f7bff] via-[#5b5bf7] to-[#4a8df7]">{t('landing.showcase.titleHighlight')}</span>
             </h2>
-            <p className="text-vox-text-secondary max-w-xl mx-auto">
+            <p className="text-vox-text-secondary max-w-xl">
               {t('landing.showcase.subtitle')}
             </p>
           </div>
@@ -1283,13 +1289,13 @@ function ComparisonTable() {
   ];
 
   return (
-    <section className="relative px-4 sm:px-6 py-4">
-      <div className="lp-panel max-w-6xl mx-auto px-4 py-16 sm:px-10">
+    <section className="lp-section">
+      <div className="max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
         <Reveal>
-          <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary text-center mb-4">
+          <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary mb-4">
             {t('landing.comparison.title')}
           </h2>
-          <p className="text-vox-text-secondary text-center mb-12 max-w-2xl mx-auto">
+          <p className="text-vox-text-secondary mb-12 max-w-2xl">
             {t('landing.comparison.subtitle')}
           </p>
         </Reveal>
@@ -1323,7 +1329,7 @@ function ComparisonTable() {
           </div>
         </Reveal>
 
-        <p className="text-xs text-vox-text-muted text-center mt-6">
+        <p className="text-xs text-vox-text-muted mt-6">
           {t('landing.comparison.footnote')}
         </p>
       </div>
@@ -1337,21 +1343,20 @@ function WhyVoxium() {
   const highlights = [
     t('landing.highlights.noAds'),
     t('landing.highlights.openSource'),
-    t('landing.highlights.freeVoice'),
+    t('landing.highlights.freeForIndividuals'),
     t('landing.highlights.noiseSuppression'),
     t('landing.highlights.selfHostable'),
     t('landing.highlights.sfuVoice'),
   ];
 
   return (
-    <section className="relative px-4 sm:px-6 py-4">
-      <div className="lp-panel max-w-6xl mx-auto px-6 py-16 sm:px-12">
-      {/* Decorative orbit rings — clipped by the panel's rounded corners */}
+    <section className="lp-section overflow-hidden">
+      {/* Decorative orbit rings — clipped by the section bounds */}
       <OrbitRingsSvg className="absolute -right-24 top-1/2 -translate-y-1/2 w-[500px] h-[500px] opacity-40 hidden lg:block" />
 
-      <div className="relative z-10">
+      <div className="relative z-10 max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
         <Reveal>
-          <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary text-center mb-14">
+          <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary mb-14">
             {t('landing.why.title')}
           </h2>
         </Reveal>
@@ -1375,23 +1380,23 @@ function WhyVoxium() {
               description: t('landing.why.communityDrivenDesc'),
             },
           ].map((v) => (
-            <div key={v.title} className="text-center">
-              <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-[#5B21B6]/20 to-[#3B82F6]/20 flex items-center justify-center mx-auto mb-4">
+            <div key={v.title}>
+              <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-[#5B21B6]/20 to-[#3B82F6]/20 flex items-center justify-center mb-4">
                 <v.icon className="h-7 w-7 text-vox-accent-primary" />
               </div>
               <h3 className="text-xl font-semibold text-vox-text-primary mb-2">{v.title}</h3>
-              <p className="text-sm text-vox-text-secondary leading-relaxed max-w-xs mx-auto">{v.description}</p>
+              <p className="text-sm text-vox-text-secondary leading-relaxed">{v.description}</p>
             </div>
           ))}
         </div>
 
         {/* Privacy shield + highlights */}
         <Reveal delay={0.1}>
-          <div className="lp-card lp-card--static flex flex-col md:flex-row items-center justify-center gap-10 max-w-3xl mx-auto px-8 py-8">
+          <div className="lp-card lp-card--static flex flex-col md:flex-row items-center gap-10 px-8 py-8 lg:px-12">
             <ShieldSvg className="w-28 h-32 shrink-0" />
-            <div>
+            <div className="flex-1">
               <h3 className="text-xl font-semibold text-vox-text-primary mb-4">{t('landing.why.builtDifferent')}</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 {highlights.map((h) => (
                   <div key={h} className="flex items-center gap-2">
                     <CheckCircle2 className="h-5 w-5 text-vox-accent-success shrink-0" />
@@ -1402,7 +1407,6 @@ function WhyVoxium() {
             </div>
           </div>
         </Reveal>
-      </div>
       </div>
     </section>
   );
@@ -1486,89 +1490,83 @@ function CommunityFunding() {
   ];
 
   return (
-    <section ref={sectionRef} className="relative px-4 sm:px-6 py-4">
-      <div className="lp-panel max-w-6xl mx-auto px-6 py-16 sm:px-12">
+    <section ref={sectionRef} className="lp-section overflow-hidden">
       {/* Radial gradient backdrop */}
       <div
         className="absolute inset-0 opacity-15"
-        style={{ background: 'radial-gradient(ellipse at center, rgba(236,72,153,0.4) 0%, transparent 70%)' }}
+        style={{ background: 'radial-gradient(ellipse at 25% 40%, rgba(236,72,153,0.4) 0%, transparent 65%)' }}
       />
 
-      <div className="relative z-10 max-w-4xl mx-auto">
-        {/* Header with heart illustration */}
-        <div className={`text-center mb-12 lp-reveal ${visible ? 'lp-in' : ''}`}>
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-pink-500/10 border border-pink-500/20 text-pink-400 text-sm font-medium mb-6">
-            <Heart size={14} className="animate-pulse" />
-            {t('landing.funding.badge')}
-            <Sparkles size={14} />
+      <div className="relative z-10 max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
+        <div className="grid grid-cols-1 lg:grid-cols-2 items-center gap-12 mb-14">
+          {/* Copy + CTAs */}
+          <div className={`lp-reveal ${visible ? 'lp-in' : ''}`}>
+            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-pink-500/10 border border-pink-500/20 text-pink-400 text-sm font-medium mb-6">
+              <Heart size={14} className="animate-pulse" />
+              {t('landing.funding.badge')}
+              <Sparkles size={14} />
+            </div>
+            <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary">
+              {t('landing.funding.title')}
+            </h2>
+            <p className="text-vox-text-secondary mt-3 text-lg max-w-xl">
+              {t('landing.funding.subtitle')}
+            </p>
+
+            <div className="mt-8 flex flex-wrap gap-4">
+              <a
+                href="https://github.com/sponsors/Aizen93"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="group relative btn-primary px-8 py-3 text-base inline-flex items-center gap-2
+                           hover:shadow-lg hover:shadow-pink-500/20 hover:scale-105 active:scale-[0.98] transition-all duration-200"
+              >
+                <Heart size={18} className="group-hover:animate-pulse" />
+                {t('landing.funding.sponsorGithub')}
+                <ArrowRight size={16} className="opacity-0 -ml-4 group-hover:opacity-100 group-hover:ml-0 transition-all duration-200" />
+              </a>
+              <a
+                href="https://opencollective.com/voxium"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-secondary px-8 py-3 text-base inline-flex items-center gap-2
+                           hover:scale-105 active:scale-[0.98] transition-all duration-200"
+              >
+                <HeartHandshake size={18} />
+                {t('landing.funding.openCollective')}
+              </a>
+            </div>
+            <p className="mt-5 text-sm text-vox-text-muted flex items-center gap-1.5">
+              <Sparkles size={14} className="text-pink-400" />
+              {t('landing.funding.supporterBadge')}
+            </p>
           </div>
 
-          <div className="flex items-center justify-center gap-4 mb-4">
-            <PulsingHeartSvg className="w-32 h-32 sm:w-40 sm:h-40 shrink-0" />
-            <div className="text-left">
-              <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary">
-                {t('landing.funding.title')}
-              </h2>
-              <p className="text-vox-text-secondary mt-2 text-lg max-w-xl">
-                {t('landing.funding.subtitle')}
-              </p>
-            </div>
+          {/* Heart illustration anchors the right column */}
+          <div className={`hidden lg:flex justify-center lp-reveal ${visible ? 'lp-in' : ''}`} style={{ transitionDelay: '0.15s' }}>
+            <PulsingHeartSvg className="w-72 h-72" />
           </div>
         </div>
 
         {/* Stat cards with staggered entrance */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-12">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {cards.map((card, i) => (
             <div
               key={card.label}
-              className={`group lp-card lp-card--rose p-6 text-center cursor-default ${visible ? 'lp-card-in' : 'lp-card-hidden'}`}
+              className={`group lp-card lp-card--rose flex items-center gap-5 p-6 cursor-default ${visible ? 'lp-card-in' : 'lp-card-hidden'}`}
               style={{ animationDelay: `${0.2 + i * 0.12}s` }}
             >
-              <div className={`h-12 w-12 rounded-lg bg-gradient-to-br ${card.color} flex items-center justify-center mx-auto mb-4
+              <div className={`h-12 w-12 shrink-0 rounded-lg bg-gradient-to-br ${card.color} flex items-center justify-center
                               group-hover:scale-110 transition-transform duration-300`}>
                 <card.icon className="h-6 w-6 text-pink-400 group-hover:scale-110 transition-transform duration-300" />
               </div>
-              <p className="text-3xl sm:text-4xl font-extrabold text-vox-text-primary mb-1">{card.value}</p>
-              <p className="text-sm text-vox-text-secondary">{card.label}</p>
+              <div>
+                <p className="text-2xl sm:text-3xl font-extrabold text-vox-text-primary">{card.value}</p>
+                <p className="text-sm text-vox-text-secondary">{card.label}</p>
+              </div>
             </div>
           ))}
         </div>
-
-        {/* CTA buttons */}
-        <div
-          className={`text-center lp-reveal ${visible ? 'lp-in' : ''}`}
-          style={{ transitionDelay: '0.5s' }}
-        >
-          <div className="flex flex-wrap gap-4 justify-center mb-6">
-            <a
-              href="https://github.com/sponsors/Aizen93"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="group relative btn-primary px-8 py-3 text-base inline-flex items-center gap-2
-                         hover:shadow-lg hover:shadow-pink-500/20 hover:scale-105 active:scale-[0.98] transition-all duration-200"
-            >
-              <Heart size={18} className="group-hover:animate-pulse" />
-              {t('landing.funding.sponsorGithub')}
-              <ArrowRight size={16} className="opacity-0 -ml-4 group-hover:opacity-100 group-hover:ml-0 transition-all duration-200" />
-            </a>
-            <a
-              href="https://opencollective.com/voxium"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-secondary px-8 py-3 text-base inline-flex items-center gap-2
-                         hover:scale-105 active:scale-[0.98] transition-all duration-200"
-            >
-              <HeartHandshake size={18} />
-              {t('landing.funding.openCollective')}
-            </a>
-          </div>
-
-          <p className="text-sm text-vox-text-muted flex items-center justify-center gap-1.5">
-            <Sparkles size={14} className="text-pink-400" />
-            {t('landing.funding.supporterBadge')}
-          </p>
-        </div>
-      </div>
       </div>
     </section>
   );
@@ -1578,9 +1576,9 @@ function FinalCTA() {
   const { t } = useTranslation();
 
   return (
-    <section className="relative px-4 sm:px-6 py-4">
+    <section className="relative px-4 sm:px-6 py-16 sm:py-20">
       <div
-        className="relative max-w-6xl mx-auto overflow-hidden rounded-[32px] border border-[#8b7bff]/20 px-6 py-20 sm:py-24"
+        className="relative max-w-7xl mx-auto overflow-hidden rounded-[32px] border border-[#8b7bff]/20 px-6 py-20 sm:py-24"
         style={{ background: 'radial-gradient(120% 140% at 50% 0%, rgba(91,91,247,0.28) 0%, rgba(27,22,80,0.9) 45%, #0e0e26 100%)' }}
       >
         {/* Decorative orbit */}
@@ -1612,22 +1610,22 @@ function Footer() {
   const { t } = useTranslation();
 
   return (
-    <footer className="mt-16 border-t border-white/[0.06]">
-      <div className="max-w-6xl mx-auto px-6 py-16">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
+    <footer className="border-t border-white/[0.06]">
+      <div className="max-w-7xl mx-auto px-6 lg:px-10 py-16">
+        <div className="grid grid-cols-2 gap-8 md:grid-cols-12">
           {/* Brand */}
-          <div className="col-span-2 md:col-span-1">
+          <div className="col-span-2 md:col-span-6">
             <div className="flex items-center gap-2.5 mb-3">
               <img src="/logo_static.svg" alt="Voxium" className="h-8 w-8 rounded-lg" />
               <span className="text-lg font-bold text-vox-text-primary">Voxium</span>
             </div>
-            <p className="text-sm text-vox-text-muted leading-relaxed">
+            <p className="text-sm text-vox-text-muted leading-relaxed max-w-xs">
               {t('landing.footer.tagline')}
             </p>
           </div>
 
           {/* Product */}
-          <div>
+          <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.product')}</h4>
             <ul className="space-y-2">
               <li><a href="#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.download')}</a></li>
@@ -1639,7 +1637,7 @@ function Footer() {
           </div>
 
           {/* Legal */}
-          <div>
+          <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.legal')}</h4>
             <ul className="space-y-2">
               <li><Link to="/privacy" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.privacyPolicy')}</Link></li>
@@ -1649,7 +1647,7 @@ function Footer() {
           </div>
 
           {/* Community */}
-          <div>
+          <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.community')}</h4>
             <ul className="space-y-2">
               <li><a href="https://github.com/Aizen93/voxium" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">GitHub</a></li>
@@ -1661,7 +1659,7 @@ function Footer() {
 
       {/* Copyright bar */}
       <div className="border-t border-white/[0.06]">
-        <div className="max-w-6xl mx-auto px-6 py-4">
+        <div className="max-w-7xl mx-auto px-6 lg:px-10 py-4">
           <p className="text-xs text-vox-text-muted text-center">
             {t('landing.footer.copyright')}
           </p>

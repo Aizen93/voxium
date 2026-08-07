@@ -516,6 +516,14 @@
     "attachFile": "Прикріпити файл"
   },
   "server": {
+    "pinnedSection": "Закріплені",
+    "pinSpace": "Закріпити",
+    "unpinSpace": "Відкріпити",
+    "findSpace": "Знайти простір",
+    "liveNow": "Зараз в ефірі",
+    "allSpaces": "Усі простори",
+    "moreSpaces": "ще {{count}}",
+    "inVoiceCount": "{{count}} у голосовому",
     "create": {
       "createTitle": "Створити сервер",
       "joinTitle": "Приєднатися до сервера",
@@ -541,9 +549,15 @@
       "inviteCode": "Код запрошення",
       "generatingLink": "Створення посилання-запрошення...",
       "failedToCreate": "Не вдалося створити запрошення"
-    }
+    },
+    "switcherTitle": "Змінити сервер",
+    "switcherPlaceholder": "Перейти до сервера…",
+    "switcherEmpty": "Жоден сервер не відповідає цій назві.",
+    "switcherHint": "Введіть для фільтра · ↑↓ для вибору · Enter щоб відкрити",
+    "createOrJoin": "Створити або приєднатися до сервера"
   },
   "channel": {
+    "joinVoice": "Приєднатися до голосового",
     "createChannel": "Створити канал",
     "deleteChannel": "Видалити канал",
     "deleteCategory": "Видалити категорію",
@@ -624,7 +638,9 @@
     "maxAttachments": "Максимум {{max}} вкладень на повідомлення",
     "fileTypeNotAllowed": "{{name}}: тип файлу не дозволений",
     "fileTooLarge": "{{name}} занадто великий (макс. {{max}} МБ)",
-    "searchMessages": "Пошук повідомлень (Ctrl+K)"
+    "searchMessages": "Пошук повідомлень (Ctrl+K)",
+    "today": "Сьогодні",
+    "yesterday": "Вчора"
   },
   "dm": {
     "title": "Особисті повідомлення",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "Без реклами та відстеження",
       "openSource": "Відкритий код та прозорість",
-      "freeVoice": "Безкоштовні дзвінки назавжди",
+      "freeForIndividuals": "Безкоштовно для приватних користувачів",
       "noiseSuppression": "ШІ-придушення шуму",
       "selfHostable": "Самостійний хостинг",
       "sfuVoice": "Масштабований SFU-зв'язок"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "Схвалити пристрій",
     "devicesNotReady": "Шифрування ще налаштовується на цьому пристрої, тому список пристроїв ще недоступний. Завітайте за хвилину.",
     "identityAcceptFailed": "Не вдалося прийняти нові ключі"
+  },
+  "people": {
+    "title": "Учасники",
+    "inVoice": "У голосовому",
+    "active": "Активні",
+    "away": "Відійшли",
+    "offline": "Не в мережі",
+    "speaking": "Говорить",
+    "mutedStatus": "Мікрофон вимкнено",
+    "inVoiceStatus": "У голосовому",
+    "dnd": "Не турбувати",
+    "awayStatus": "Відійшов",
+    "offlineStatus": "Не в мережі"
+  },
+  "search": {
+    "placeholder": "Пошук повідомлень…"
   }
 }

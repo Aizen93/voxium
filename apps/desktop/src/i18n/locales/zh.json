@@ -516,6 +516,14 @@
     "attachFile": "附加文件"
   },
   "server": {
+    "pinnedSection": "已固定",
+    "pinSpace": "固定空间",
+    "unpinSpace": "取消固定",
+    "findSpace": "查找空间",
+    "liveNow": "正在进行",
+    "allSpaces": "所有空间",
+    "moreSpaces": "还有 {{count}} 个空间",
+    "inVoiceCount": "{{count}} 人在语音中",
     "create": {
       "createTitle": "创建服务器",
       "joinTitle": "加入服务器",
@@ -541,9 +549,15 @@
       "inviteCode": "邀请码",
       "generatingLink": "正在生成邀请链接...",
       "failedToCreate": "邀请创建失败"
-    }
+    },
+    "switcherTitle": "切换服务器",
+    "switcherPlaceholder": "跳转到服务器…",
+    "switcherEmpty": "没有名称匹配的服务器。",
+    "switcherHint": "输入以筛选 · ↑↓ 移动 · Enter 打开",
+    "createOrJoin": "创建或加入服务器"
   },
   "channel": {
+    "joinVoice": "加入语音",
     "createChannel": "创建频道",
     "deleteChannel": "删除频道",
     "deleteCategory": "删除分类",
@@ -624,7 +638,9 @@
     "maxAttachments": "每条消息最多 {{max}} 个附件",
     "fileTypeNotAllowed": "{{name}}：不允许的文件类型",
     "fileTooLarge": "{{name}} 太大（最大 {{max}}MB）",
-    "searchMessages": "搜索消息 (Ctrl+K)"
+    "searchMessages": "搜索消息 (Ctrl+K)",
+    "today": "今天",
+    "yesterday": "昨天"
   },
   "dm": {
     "title": "私信",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "无广告无追踪",
       "openSource": "开源且透明",
-      "freeVoice": "永久免费语音通话",
+      "freeForIndividuals": "个人用户免费",
       "noiseSuppression": "AI 噪音抑制",
       "selfHostable": "可自托管",
       "sfuVoice": "可扩展的 SFU 语音"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "批准设备",
     "devicesNotReady": "此设备仍在设置加密，因此暂时无法列出你的设备。请稍后再看。",
     "identityAcceptFailed": "无法接受新密钥"
+  },
+  "people": {
+    "title": "成员",
+    "inVoice": "语音中",
+    "active": "活跃",
+    "away": "离开",
+    "offline": "离线",
+    "speaking": "正在说话",
+    "mutedStatus": "已静音",
+    "inVoiceStatus": "语音中",
+    "dnd": "请勿打扰",
+    "awayStatus": "离开",
+    "offlineStatus": "离线"
+  },
+  "search": {
+    "placeholder": "搜索消息…"
   }
 }

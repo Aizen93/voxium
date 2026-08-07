@@ -37,7 +37,7 @@ export function VoicePanel() {
   const otherSharing = screenSharingUserId && screenSharingUserId !== user?.id;
 
   return (
-    <div data-testid="voice-panel" className="border-t border-vox-border bg-vox-sidebar">
+    <div data-testid="voice-panel" className="mx-1 mb-1 rounded-xl border border-vox-border bg-vox-bg-tertiary">
       {/* Connection info row */}
       <div className="px-3 py-2">
         <div className="flex items-center gap-1.5">
@@ -74,19 +74,19 @@ export function VoicePanel() {
       )}
 
       {/* Controls */}
-      <div className="flex items-center justify-between px-3 py-2 border-t border-vox-border">
+      <div className="flex items-center justify-between px-2.5 pb-2.5 pt-0.5">
         <div className="flex items-center gap-1">
           {/* Mute */}
           <button
             onClick={toggleMute}
             disabled={isServerMuted}
             className={clsx(
-              'rounded-full p-2 transition-colors',
+              'rounded-md p-1.5 transition-colors',
               isServerMuted
                 ? 'bg-vox-accent-danger/20 text-vox-accent-danger cursor-not-allowed'
                 : selfMute
                   ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
-                  : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
+                  : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
             )}
             title={isServerMuted ? t('voice.mutedByModerator') : selfMute ? t('voice.unmute') : t('voice.mute')}
             aria-label={isServerMuted ? t('voice.mutedByModerator') : selfMute ? t('voice.unmute') : t('voice.mute')}
@@ -99,12 +99,12 @@ export function VoicePanel() {
             onClick={toggleDeaf}
             disabled={isServerDeafened}
             className={clsx(
-              'rounded-full p-2 transition-colors',
+              'rounded-md p-1.5 transition-colors',
               isServerDeafened
                 ? 'bg-vox-accent-danger/20 text-vox-accent-danger cursor-not-allowed'
                 : selfDeaf
                   ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
-                  : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
+                  : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
             )}
             title={isServerDeafened ? t('voice.deafenedByModerator') : selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
             aria-label={isServerDeafened ? t('voice.deafenedByModerator') : selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
@@ -117,12 +117,12 @@ export function VoicePanel() {
             onClick={() => isScreenSharing ? stopScreenShare() : startScreenShare()}
             disabled={!!otherSharing}
             className={clsx(
-              'rounded-full p-2 transition-colors',
+              'rounded-md p-1.5 transition-colors',
               isScreenSharing
                 ? 'bg-vox-voice-connected/20 text-vox-voice-connected hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger'
                 : otherSharing
                   ? 'bg-vox-bg-hover text-vox-text-muted cursor-not-allowed opacity-50'
-                  : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
+                  : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
             )}
             title={isScreenSharing ? t('voice.stopSharing') : otherSharing ? t('voice.someoneSharing') : t('voice.shareScreen')}
             aria-label={isScreenSharing ? t('voice.stopSharing') : otherSharing ? t('voice.someoneSharing') : t('voice.shareScreen')}
@@ -134,7 +134,7 @@ export function VoicePanel() {
         {/* Disconnect */}
         <button
           onClick={leaveChannel}
-          className="rounded-full p-2 bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30 transition-colors"
+          className="rounded-md p-1.5 bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30 transition-colors"
           title={t('voice.disconnect')}
           aria-label={t('voice.disconnectFromVoice')}
         >

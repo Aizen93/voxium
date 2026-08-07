@@ -207,8 +207,8 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
       <div
         data-message-id={message.id}
         className={clsx(
-          'group relative px-2 py-0.5 rounded transition-colors',
-          isMentioned ? 'bg-vox-accent-primary/10 border-l-2 border-vox-accent-primary hover:bg-vox-accent-primary/15' : 'hover:bg-vox-bg-hover/50',
+          'group relative px-2.5 py-1 rounded-xl transition-colors',
+          isMentioned ? 'bg-vox-accent-tint border-l-2 border-vox-accent-primary hover:bg-vox-accent-tint-strong' : 'hover:bg-vox-bg-hover/50',
           addTopMargin && 'mt-4'
         )}
       >
@@ -216,7 +216,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
 
         {/* Hover action buttons */}
         {!isEditing && (
-          <div className={clsx(
+          <div data-testid="message-actions" className={clsx(
             'absolute -top-3 right-2 z-10 items-center gap-0.5 rounded-md border border-vox-border bg-vox-bg-secondary px-1 py-0.5 shadow-lg',
             showReactionPicker ? 'flex' : 'hidden group-hover:flex'
           )}>
@@ -292,7 +292,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                   <UserHoverTarget userId={message.author.id} className="inline">
                     <span
                       className={clsx(
-                        'text-sm font-semibold cursor-pointer hover:underline',
+                        'text-[14px] font-semibold cursor-pointer hover:underline',
                         !authorRoleColor && (isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary')
                       )}
                       style={authorRoleColor ? { color: authorRoleColor } : undefined}
@@ -302,7 +302,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                   </UserHoverTarget>
                   {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}
                   {message.author.isSupporter && <SupporterBadge tier={message.author.supporterTier} />}
-                  <span className="text-xs text-vox-text-muted">
+                  <span className="font-mono text-[10.5px] text-vox-text-muted/80">
                     {formatMessageTime(message.createdAt, t)}
                   </span>
                   {message.editedAt && !isEditing && (
@@ -315,7 +315,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 ) : (
                   <>
                     {message.content ? (
-                      <div className="text-sm text-vox-text-primary break-words">
+                      <div className="text-[14.5px] leading-[1.65] text-vox-text-primary/85 break-words">
                         <MessageContent content={message.content} mentions={message.mentions} />
                       </div>
                     ) : message.encrypted && !message.e2eAttachments?.length ? (
@@ -350,7 +350,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
           <>
             <div className="flex items-start gap-3">
               <div className="w-10 shrink-0 text-center">
-                <span className="hidden group-hover:inline text-[10px] text-vox-text-muted">
+                <span className="hidden group-hover:inline font-mono text-[10px] text-vox-text-muted/80">
                   {format(new Date(message.createdAt), 'h:mm')}
                 </span>
               </div>
@@ -358,7 +358,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
               {isEditing ? editArea : (
                 <div className="min-w-0 flex-1">
                   {message.content ? (
-                    <div className="text-sm text-vox-text-primary break-words">
+                    <div className="text-[14.5px] leading-[1.65] text-vox-text-primary/85 break-words">
                       <MessageContent content={message.content} mentions={message.mentions} />
                       {message.editedAt && (
                         <span className="text-[10px] text-vox-text-muted">{t('messageItem.edited')}</span>

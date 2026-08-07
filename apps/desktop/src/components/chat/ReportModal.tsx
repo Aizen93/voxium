@@ -116,7 +116,7 @@ export function ReportModal({ type, reportedUserId, messageId, reportedContent, 
           <button
             onClick={handleSubmit}
             disabled={submitting || reason.trim().length < LIMITS.REPORT_REASON_MIN}
-            className="px-3 py-1.5 text-xs rounded-md bg-vox-accent-danger text-white hover:bg-vox-accent-danger/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="px-3 py-1.5 text-xs rounded-md bg-vox-accent-danger text-vox-on-accent hover:bg-vox-accent-danger/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {submitting ? t('chat.report.submitting') : t('chat.report.submitReport')}
           </button>
