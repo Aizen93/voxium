@@ -516,6 +516,14 @@
     "attachFile": "Adjuntar archivo"
   },
   "server": {
+    "pinnedSection": "Fijados",
+    "pinSpace": "Fijar espacio",
+    "unpinSpace": "Desfijar espacio",
+    "findSpace": "Buscar un espacio",
+    "liveNow": "En vivo ahora",
+    "allSpaces": "Todos los espacios",
+    "moreSpaces": "{{count}} espacios más",
+    "inVoiceCount": "{{count}} en voz",
     "create": {
       "createTitle": "Crear un servidor",
       "joinTitle": "Unirse a un servidor",
@@ -541,9 +549,15 @@
       "inviteCode": "Código de invitación",
       "generatingLink": "Generando enlace de invitación...",
       "failedToCreate": "No se pudo crear la invitación"
-    }
+    },
+    "switcherTitle": "Cambiar de servidor",
+    "switcherPlaceholder": "Ir a un servidor…",
+    "switcherEmpty": "Ningún servidor coincide con ese nombre.",
+    "switcherHint": "Escribe para filtrar · ↑↓ para moverte · Enter para abrir",
+    "createOrJoin": "Crear o unirse a un servidor"
   },
   "channel": {
+    "joinVoice": "Unirse a voz",
     "createChannel": "Crear canal",
     "deleteChannel": "Eliminar canal",
     "deleteCategory": "Eliminar categoría",
@@ -624,7 +638,9 @@
     "maxAttachments": "Máximo {{max}} archivos adjuntos por mensaje",
     "fileTypeNotAllowed": "{{name}}: tipo de archivo no permitido",
     "fileTooLarge": "{{name}} es demasiado grande (máx. {{max}} MB)",
-    "searchMessages": "Buscar mensajes (Ctrl+K)"
+    "searchMessages": "Buscar mensajes (Ctrl+K)",
+    "today": "Hoy",
+    "yesterday": "Ayer"
   },
   "dm": {
     "title": "Mensajes directos",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "Sin anuncios ni rastreo",
       "openSource": "Codigo abierto y transparente",
-      "freeVoice": "Llamadas de voz gratis para siempre",
+      "freeForIndividuals": "Gratis para particulares",
       "noiseSuppression": "Supresion de ruido con IA",
       "selfHostable": "Autoalojable",
       "sfuVoice": "Voz SFU escalable"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "Aprobar dispositivo",
     "devicesNotReady": "El cifrado aún se está configurando en este dispositivo, así que todavía no se pueden mostrar tus dispositivos. Vuelve en un momento.",
     "identityAcceptFailed": "No se pudieron aceptar las nuevas claves"
+  },
+  "people": {
+    "title": "Personas",
+    "inVoice": "En voz",
+    "active": "Activos",
+    "away": "Ausentes",
+    "offline": "Desconectados",
+    "speaking": "Hablando",
+    "mutedStatus": "Silenciado",
+    "inVoiceStatus": "En voz",
+    "dnd": "No molestar",
+    "awayStatus": "Ausente",
+    "offlineStatus": "Desconectado"
+  },
+  "search": {
+    "placeholder": "Buscar mensajes…"
   }
 }

@@ -170,3 +170,25 @@ describe('serverStore — staleness guards (MED-11)', () => {
     });
   });
 });
+
+describe('serverStore — pinned spaces', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    useServerStore.setState({ pinnedServerIds: [] });
+  });
+
+  it('toggles a pin on and off, preserving pin order', () => {
+    const { togglePinServer } = useServerStore.getState();
+    togglePinServer('s-b');
+    togglePinServer('s-a');
+    expect(useServerStore.getState().pinnedServerIds).toEqual(['s-b', 's-a']);
+
+    togglePinServer('s-b');
+    expect(useServerStore.getState().pinnedServerIds).toEqual(['s-a']);
+  });
+
+  it('persists pins to localStorage so they survive a restart', () => {
+    useServerStore.getState().togglePinServer('s-x');
+    expect(JSON.parse(localStorage.getItem('voxium_pinned_spaces')!)).toEqual(['s-x']);
+  });
+});

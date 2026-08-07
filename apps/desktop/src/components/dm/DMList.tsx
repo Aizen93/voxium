@@ -59,28 +59,27 @@ export function DMList() {
   };
 
   return (
-    <div className="flex h-full w-60 flex-col bg-vox-channel">
-      {/* Header */}
-      <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
-        <MessageSquare size={16} className="text-vox-text-muted" />
-        <h2 className="text-sm font-semibold text-vox-text-primary">{t('dm.title')}</h2>
+    <div className="flex h-full w-full flex-col bg-vox-channel">
+      {/* Header — open row, matching the server view's sidebar header */}
+      <div className="flex h-10 flex-none items-center gap-2 px-3 pt-1">
+        <h2 className="truncate text-[14.5px] font-semibold tracking-[-0.01em] text-vox-text-primary">{t('dm.title')}</h2>
       </div>
 
       {/* Friends button */}
-      <div className="px-2 pt-2">
+      <div className="px-2">
         <button
           onClick={handleOpenFriends}
           className={clsx(
-            'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
+            'flex h-[31px] w-full items-center gap-2 rounded-md px-2 text-left transition-colors',
             showFriendsView
-              ? 'bg-vox-bg-active text-vox-text-primary'
+              ? 'bg-vox-accent-tint text-vox-text-primary font-semibold'
               : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
           )}
         >
-          <Users size={16} />
-          <span className="flex-1 text-sm font-medium">{t('dm.friends')}</span>
+          <Users size={15} />
+          <span className="flex-1 text-[13.5px] font-medium">{t('dm.friends')}</span>
           {pendingIncoming.length > 0 && (
-            <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-vox-accent-danger px-1 text-[10px] font-bold text-white">
+            <span className="flex h-[17px] min-w-[17px] items-center justify-center rounded-full bg-vox-accent-primary px-[5px] text-[10.5px] font-bold text-vox-on-accent">
               {pendingIncoming.length}
             </span>
           )}
@@ -88,20 +87,19 @@ export function DMList() {
       </div>
 
       {/* Contact Support */}
-      <div className="px-2 pt-1">
+      <div className="px-2 pt-0.5">
         <button
           onClick={handleContactSupport}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary transition-colors"
+          className="flex h-[31px] w-full items-center gap-2 rounded-md px-2 text-left text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary transition-colors"
         >
-          <LifeBuoy size={16} />
-          <span className="flex-1 text-sm font-medium">{t('dm.contactSupport')}</span>
+          <LifeBuoy size={15} />
+          <span className="flex-1 text-[13.5px] font-medium">{t('dm.contactSupport')}</span>
         </button>
       </div>
 
-      {/* Separator + title */}
-      <div className="px-4 pt-3">
-        <div className="border-t border-vox-border" />
-        <h3 className="mt-3 text-[10px] font-bold uppercase tracking-wide text-vox-text-muted">{t('dm.title')}</h3>
+      {/* Section label */}
+      <div className="px-3 pt-4 pb-1">
+        <h3 className="section-label">{t('dm.title')}</h3>
       </div>
 
       {/* Conversation list */}
@@ -133,9 +131,9 @@ export function DMList() {
               onClick={() => handleOpenConversation(conv.id)}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleOpenConversation(conv.id); }}
               className={clsx(
-                'group flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
+                'group flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors',
                 isActive
-                  ? 'bg-vox-bg-active text-vox-text-primary'
+                  ? 'bg-vox-accent-tint text-vox-text-primary'
                   : unread > 0
                     ? 'text-vox-text-primary hover:bg-vox-bg-hover'
                     : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
@@ -150,8 +148,8 @@ export function DMList() {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1">
                   <span className={clsx(
-                    'truncate text-sm',
-                    isActive ? 'font-medium' : unread > 0 ? 'font-semibold' : ''
+                    'truncate text-[13px] leading-tight',
+                    isActive || unread > 0 ? 'font-semibold' : 'font-medium'
                   )}>
                     {conv.participant.displayName}
                   </span>
@@ -159,7 +157,7 @@ export function DMList() {
                 </div>
                 {conv.participant.isSupporter && <SupporterBadge tier={conv.participant.supporterTier} />}
                 {conv.lastMessage && (
-                  <p className="truncate text-[11px] text-vox-text-muted">
+                  <p className="truncate text-[11.5px] leading-tight text-vox-text-muted">
                     {/* Ciphertext we could not hydrate from the local cache
                         shows the lock rather than raw JSON. Asked of the
                         parser, not of the string's first characters: a
@@ -174,7 +172,7 @@ export function DMList() {
                 )}
               </div>
               {unread > 0 && (
-                <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-vox-accent-primary px-1 text-[10px] font-bold text-white shrink-0">
+                <span className="flex h-[17px] min-w-[17px] items-center justify-center rounded-full bg-vox-accent-primary px-[5px] text-[10.5px] font-bold text-vox-on-accent shrink-0">
                   {unread > 99 ? '99+' : unread}
                 </span>
               )}
@@ -217,7 +215,7 @@ export function DMList() {
               </button>
               <button
                 onClick={handleConfirmSupport}
-                className="px-3 py-1.5 text-sm rounded-md bg-vox-accent-primary text-white hover:bg-vox-accent-primary/90 transition-colors"
+                className="px-3 py-1.5 text-sm rounded-md bg-vox-accent-primary text-vox-on-accent hover:bg-vox-accent-primary/90 transition-colors"
               >
                 {t('common.confirm')}
               </button>

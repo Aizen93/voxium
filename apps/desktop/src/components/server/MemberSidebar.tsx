@@ -1,124 +1,133 @@
 import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { MicOff } from 'lucide-react';
 import { useServerStore } from '../../stores/serverStore';
+import { useVoiceStore } from '../../stores/voiceStore';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { MemberContextMenu } from './MemberContextMenu';
 import { clsx } from 'clsx';
-import type { ServerMember } from '@voxium/shared';
+import type { ServerMember, VoiceUser } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
+import { groupPeopleByPresence, voicePresenceKind } from '../../utils/peopleGroups';
 
 interface ContextMenuState {
   member: ServerMember;
   position: { x: number; y: number };
 }
 
-interface MemberGroup {
-  key: string;
-  title: string;
-  color: string | null;
-  members: ServerMember[];
-}
-
+/**
+ * The People panel (2026 redesign): presence-first sections — who is in voice,
+ * who is active, who is away — instead of role sections. Role identity stays
+ * on the rows themselves (name colors, badges); the section axis is what
+ * people are doing right now.
+ */
 export function MemberSidebar() {
   const { t } = useTranslation();
-  const { members, roles } = useServerStore();
+  const { members, roles, channels } = useServerStore();
+  const channelUsers = useVoiceStore((s) => s.channelUsers);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
-  // Group members by their highest custom role in a single O(M + R log R) pass.
-  // Also precomputes each member's top role color to avoid per-render sorting.
-  const { groups, topRoleColorMap } = useMemo(() => {
-    const sortedRoles = [...roles]
-      .filter((r) => !r.isDefault)
-      .sort((a, b) => b.position - a.position);
-
-    // Fast lookup: roleId → { position, color }
-    const roleInfoMap = new Map(sortedRoles.map((r) => [r.id, { position: r.position, color: r.color }]));
-
-    // Single pass: classify each member and compute top role color
-    const buckets = new Map<string, ServerMember[]>();
+  // Top-role color per member (unchanged from the role-grouped panel).
+  const topRoleColorMap = useMemo(() => {
+    const roleInfoMap = new Map(
+      roles.filter((r) => !r.isDefault).map((r) => [r.id, { position: r.position, color: r.color }]),
+    );
     const colorMap = new Map<string, string | null>();
-
     for (const m of members) {
-      // Compute top role once (used for both grouping and color)
-      let topRoleId: string | null = null;
-      let topRoleColor: string | null = null;
+      if (!m.roles?.length) continue;
+      let topColor: string | null = null;
       let topPosition = -1;
-      if (m.roles?.length) {
-        for (const r of m.roles) {
-          const info = roleInfoMap.get(r.id);
-          if (info && info.position > topPosition) {
-            topPosition = info.position;
-            topRoleId = r.id;
-            topRoleColor = info.color;
-          }
+      for (const r of m.roles) {
+        const info = roleInfoMap.get(r.id);
+        if (info && info.position > topPosition) {
+          topPosition = info.position;
+          topColor = info.color;
         }
-        colorMap.set(m.userId, topRoleColor);
       }
-
-      let groupKey: string;
-      if (m.role === 'owner') {
-        groupKey = '_owner';
-      } else if (m.role === 'admin') {
-        groupKey = '_admin';
-      } else {
-        groupKey = topRoleId ?? (m.user.status !== 'offline' ? '_online' : '_offline');
-      }
-
-      let bucket = buckets.get(groupKey);
-      if (!bucket) {
-        bucket = [];
-        buckets.set(groupKey, bucket);
-      }
-      bucket.push(m);
+      colorMap.set(m.userId, topColor);
     }
+    return colorMap;
+  }, [members, roles]);
 
-    // Build result in display order: owner, admin, custom roles (position desc), online, offline
-    const result: MemberGroup[] = [];
-    const addGroup = (key: string, title: string, color: string | null) => {
-      const groupMembers = buckets.get(key);
-      if (groupMembers?.length) {
-        result.push({ key, title, color, members: groupMembers });
-      }
-    };
-
-    addGroup('_owner', t('members.owner'), null);
-    const adminCount = buckets.get('_admin')?.length ?? 0;
-    if (adminCount > 0) addGroup('_admin', t('members.adminsCount', { count: adminCount }), null);
-
-    for (const role of sortedRoles) {
-      const count = buckets.get(role.id)?.length ?? 0;
-      if (count > 0) addGroup(role.id, t('members.roleCount', { role: role.name, count }), role.color);
-    }
-
-    const onlineCount = buckets.get('_online')?.length ?? 0;
-    if (onlineCount > 0) addGroup('_online', t('members.onlineCount', { count: onlineCount }), null);
-    const offlineCount = buckets.get('_offline')?.length ?? 0;
-    if (offlineCount > 0) addGroup('_offline', t('members.offlineCount', { count: offlineCount }), null);
-
-    return { groups: result, topRoleColorMap: colorMap };
-  }, [members, roles, t]);
+  const groups = useMemo(
+    () => groupPeopleByPresence(members, channels, channelUsers),
+    [members, channels, channelUsers],
+  );
 
   function handleContextMenu(e: React.MouseEvent, member: ServerMember) {
     e.preventDefault();
     setContextMenu({ member, position: { x: e.clientX, y: e.clientY } });
   }
 
+  const online = members.length - groups.offline.length;
+
   return (
-    <div className="flex h-full w-60 flex-col border-l border-vox-border bg-vox-bg-secondary">
-      <div className="flex-1 overflow-y-auto p-3">
-        {groups.map((group) => (
-          <MemberGroupSection
-            key={group.key}
-            title={group.title}
-            color={group.color}
-            members={group.members}
-            topRoleColorMap={topRoleColorMap}
-            onContextMenu={handleContextMenu}
-          />
-        ))}
+    <div className="panel flex h-full w-[272px] flex-none flex-col bg-vox-bg-secondary">
+      {/* Header */}
+      <div className="flex h-[54px] flex-none items-center gap-2 border-b border-vox-border px-4">
+        <span className="text-[14px] font-semibold tracking-[-0.01em] text-vox-text-primary">{t('people.title')}</span>
+        <span className="font-mono text-[11px] text-vox-text-muted">{online}</span>
       </div>
+
+      <div className="flex-1 overflow-y-auto px-2 py-3">
+        {groups.voiceSections.map((section) => (
+          <PeopleSection key={section.channelId} label={`${t('people.inVoice')} · ${section.channelName}`}>
+            {section.entries.map(({ member, voice }) => (
+              <PersonRow
+                key={member.userId}
+                member={member}
+                roleColor={topRoleColorMap.get(member.userId) || undefined}
+                voice={voice}
+                onContextMenu={handleContextMenu}
+              />
+            ))}
+          </PeopleSection>
+        ))}
+
+        {groups.active.length > 0 && (
+          <PeopleSection label={`${t('people.active')} · ${groups.active.length}`}>
+            {groups.active.map((member) => (
+              <PersonRow
+                key={member.userId}
+                member={member}
+                roleColor={topRoleColorMap.get(member.userId) || undefined}
+                onContextMenu={handleContextMenu}
+              />
+            ))}
+          </PeopleSection>
+        )}
+
+        {groups.away.length > 0 && (
+          <PeopleSection label={`${t('people.away')} · ${groups.away.length}`}>
+            {groups.away.map((member) => (
+              <PersonRow
+                key={member.userId}
+                member={member}
+                roleColor={topRoleColorMap.get(member.userId) || undefined}
+                dimmed
+                onContextMenu={handleContextMenu}
+              />
+            ))}
+          </PeopleSection>
+        )}
+
+        {groups.offline.length > 0 && (
+          <PeopleSection label={`${t('people.offline')} · ${groups.offline.length}`}>
+            {groups.offline.map((member) => (
+              <PersonRow
+                key={member.userId}
+                member={member}
+                roleColor={topRoleColorMap.get(member.userId) || undefined}
+                dimmed
+                onContextMenu={handleContextMenu}
+              />
+            ))}
+          </PeopleSection>
+        )}
+      </div>
+
       {contextMenu && (
         <MemberContextMenu
           member={contextMenu.member}
@@ -130,68 +139,89 @@ export function MemberSidebar() {
   );
 }
 
-function MemberGroupSection({
-  title,
-  color,
-  members,
-  topRoleColorMap,
+function PeopleSection({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="mb-4 last:mb-0">
+      <h3 className="section-label px-2 pb-1.5">{label}</h3>
+      {children}
+    </div>
+  );
+}
+
+function PersonRow({
+  member,
+  roleColor,
+  voice,
+  dimmed,
   onContextMenu,
 }: {
-  title: string;
-  color: string | null;
-  members: ServerMember[];
-  topRoleColorMap: Map<string, string | null>;
+  member: ServerMember;
+  roleColor?: string;
+  voice?: VoiceUser;
+  dimmed?: boolean;
   onContextMenu: (e: React.MouseEvent, member: ServerMember) => void;
 }) {
-  return (
-    <div className="mb-4">
-      <h3
-        className="mb-1 px-2 text-xs font-semibold uppercase tracking-wide"
-        style={color ? { color } : undefined}
-      >
-        <span className={color ? undefined : 'text-vox-text-muted'}>{title}</span>
-      </h3>
-      {members.map((member) => {
-        const roleColor = topRoleColorMap.get(member.userId) || undefined;
-        return (
-          <UserHoverTarget key={member.userId} userId={member.userId}>
-            <button
-              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-vox-bg-hover transition-colors"
-              onContextMenu={(e) => onContextMenu(e, member)}
-            >
-              {/* Avatar */}
-              <div className="relative">
-                <Avatar avatarUrl={member.user.avatarUrl} displayName={member.user.displayName} size="sm" />
-                <div
-                  className={clsx(
-                    'absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-vox-bg-secondary',
-                    member.user.status === 'online' ? 'bg-vox-accent-success' :
-                    member.user.status === 'idle' ? 'bg-vox-accent-warning' :
-                    member.user.status === 'dnd' ? 'bg-vox-accent-danger' :
-                    'bg-vox-text-muted'
-                  )}
-                />
-              </div>
+  const { t } = useTranslation();
+  const name = member.nickname || member.user.displayName;
+  const status = member.user.status || 'offline';
 
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1">
-                  <p
-                    className={clsx(
-                      'truncate text-sm font-medium',
-                      member.user.status === 'offline' ? 'text-vox-text-muted' : 'text-vox-text-primary'
-                    )}
-                    style={roleColor ? { color: roleColor } : undefined}
-                  >
-                    {member.nickname || member.user.displayName}
-                  </p>
-                  {(member.user.role === 'admin' || member.user.role === 'superadmin') && <StaffBadge />}
-                </div>
-                {member.user.isSupporter && <SupporterBadge tier={member.user.supporterTier} />}
-              </div>
-            </button>
-          </UserHoverTarget>
-        );
-      })}
-    </div>
+  // Rich presence line: voice state when in voice, otherwise status.
+  let secondLine: string;
+  let secondLineAccent = false;
+  if (voice) {
+    const kind = voicePresenceKind(voice);
+    secondLine = kind === 'speaking' ? t('people.speaking') : kind === 'muted' ? t('people.mutedStatus') : t('people.inVoiceStatus');
+    secondLineAccent = kind === 'speaking';
+  } else if (status === 'dnd') {
+    secondLine = t('people.dnd');
+  } else if (status === 'idle') {
+    secondLine = t('people.awayStatus');
+  } else if (status === 'online') {
+    secondLine = t('channel.online');
+  } else {
+    secondLine = t('people.offlineStatus');
+  }
+
+  return (
+    <UserHoverTarget userId={member.userId}>
+      <button
+        className={clsx(
+          'flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-all hover:bg-vox-bg-hover',
+          dimmed && 'opacity-55 hover:opacity-90',
+        )}
+        onContextMenu={(e) => onContextMenu(e, member)}
+      >
+        <Avatar
+          avatarUrl={member.user.avatarUrl}
+          displayName={member.user.displayName}
+          size="sm"
+          status={voice ? undefined : status}
+          speaking={voice?.speaking}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span
+              className={clsx('truncate text-[13px] font-semibold leading-tight', !roleColor && 'text-vox-text-primary')}
+              style={roleColor ? { color: roleColor } : undefined}
+            >
+              {name}
+            </span>
+            {(member.user.role === 'admin' || member.user.role === 'superadmin') && <StaffBadge />}
+            {member.user.isSupporter && <SupporterBadge tier={member.user.supporterTier} />}
+          </div>
+          <div
+            className={clsx(
+              'truncate text-[11.5px] leading-tight',
+              secondLineAccent ? 'text-vox-accent-primary' : 'text-vox-text-muted',
+            )}
+          >
+            {secondLine}
+          </div>
+        </div>
+        {voice && (voice.selfMute || voice.serverMuted) && (
+          <MicOff size={13} className="shrink-0 text-vox-voice-muted" />
+        )}
+      </button>
+    </UserHoverTarget>
   );
 }

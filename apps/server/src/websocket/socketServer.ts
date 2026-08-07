@@ -519,7 +519,7 @@ export function initSocketServer(httpServer: HttpServer) {
         });
         const userInfoById = new Map(userInfos.map((u) => [u.id, u]));
 
-        for (const { channelId, userIds, userStates } of voiceStates) {
+        for (const { channelId, serverId, userIds, userStates } of voiceStates) {
           const voiceUsers = userIds
             .map((uid) => userInfoById.get(uid))
             .filter((u): u is NonNullable<typeof u> => !!u)
@@ -534,7 +534,7 @@ export function initSocketServer(httpServer: HttpServer) {
                 speaking: false,
               };
             });
-          socket.emit('voice:channel_users', { channelId, users: voiceUsers });
+          socket.emit('voice:channel_users', { channelId, serverId, users: voiceUsers });
 
           // Send screen share state if someone is sharing in this channel
           const sharingUserId = await getScreenShareState(channelId);

@@ -441,7 +441,7 @@ export function createVoiceHandlers(
           };
         });
 
-        socket.emit('voice:channel_users', { channelId, users: voiceUsers });
+        socket.emit('voice:channel_users', { channelId, serverId: channel.serverId, users: voiceUsers });
       }
 
       // Send current screen share state to the joiner
@@ -457,6 +457,7 @@ export function createVoiceHandlers(
       const voiceUser = { ...user, selfMute: userMedia.selfMute, selfDeaf: userMedia.selfDeaf, serverMuted: userMedia.serverMuted, serverDeafened: userMedia.serverDeafened, speaking: false };
       io.to(`channel:${channelId}`).emit('voice:user_joined', {
         channelId,
+        serverId: channel.serverId,
         user: voiceUser,
       });
 

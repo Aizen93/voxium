@@ -516,6 +516,14 @@
     "attachFile": "Прикрепить файл"
   },
   "server": {
+    "pinnedSection": "Закреплённые",
+    "pinSpace": "Закрепить",
+    "unpinSpace": "Открепить",
+    "findSpace": "Найти пространство",
+    "liveNow": "Сейчас в эфире",
+    "allSpaces": "Все пространства",
+    "moreSpaces": "ещё {{count}}",
+    "inVoiceCount": "{{count}} в голосовом",
     "create": {
       "createTitle": "Создать сервер",
       "joinTitle": "Присоединиться к серверу",
@@ -541,9 +549,15 @@
       "inviteCode": "Код приглашения",
       "generatingLink": "Создание ссылки-приглашения...",
       "failedToCreate": "Не удалось создать приглашение"
-    }
+    },
+    "switcherTitle": "Сменить сервер",
+    "switcherPlaceholder": "Перейти к серверу…",
+    "switcherEmpty": "Нет серверов с таким именем.",
+    "switcherHint": "Ввод — фильтр · ↑↓ — выбор · Enter — открыть",
+    "createOrJoin": "Создать или присоединиться к серверу"
   },
   "channel": {
+    "joinVoice": "Присоединиться к голосовому",
     "createChannel": "Создать канал",
     "deleteChannel": "Удалить канал",
     "deleteCategory": "Удалить категорию",
@@ -624,7 +638,9 @@
     "maxAttachments": "Максимум {{max}} вложений на сообщение",
     "fileTypeNotAllowed": "{{name}}: тип файла не разрешён",
     "fileTooLarge": "{{name}} слишком большой (макс. {{max}} МБ)",
-    "searchMessages": "Поиск сообщений (Ctrl+K)"
+    "searchMessages": "Поиск сообщений (Ctrl+K)",
+    "today": "Сегодня",
+    "yesterday": "Вчера"
   },
   "dm": {
     "title": "Личные сообщения",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "Без рекламы и отслеживания",
       "openSource": "Открытый исходный код и прозрачность",
-      "freeVoice": "Бесплатные звонки навсегда",
+      "freeForIndividuals": "Бесплатно для частных пользователей",
       "noiseSuppression": "ИИ-подавление шума",
       "selfHostable": "Самостоятельный хостинг",
       "sfuVoice": "Масштабируемая SFU-связь"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "Одобрить устройство",
     "devicesNotReady": "Шифрование ещё настраивается на этом устройстве, поэтому список устройств пока недоступен. Загляните через минуту.",
     "identityAcceptFailed": "Не удалось принять новые ключи"
+  },
+  "people": {
+    "title": "Участники",
+    "inVoice": "В голосовом",
+    "active": "Активны",
+    "away": "Нет на месте",
+    "offline": "Не в сети",
+    "speaking": "Говорит",
+    "mutedStatus": "Микрофон выключен",
+    "inVoiceStatus": "В голосовом",
+    "dnd": "Не беспокоить",
+    "awayStatus": "Нет на месте",
+    "offlineStatus": "Не в сети"
+  },
+  "search": {
+    "placeholder": "Поиск сообщений…"
   }
 }

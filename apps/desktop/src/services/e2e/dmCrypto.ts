@@ -81,9 +81,16 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
   }
 
   if (own) {
-    // The socket echo can beat the POST response that writes the cache entry.
-    for (let attempt = 0; attempt < 4; attempt++) {
-      await new Promise((r) => setTimeout(r, 150));
+    // The socket echo can beat the POST response that writes the cache entry —
+    // but that race only exists for a message sent moments ago. An OLD own
+    // message with no cache entry (sent from another device) will never gain
+    // one, and a history window can hold dozens of them: retrying 4×150ms per
+    // message turns a search jump into a multi-second hang. One immediate
+    // lookup for old messages; the patient retry only for fresh ones.
+    const ageMs = Date.now() - new Date(message.createdAt).getTime();
+    const attempts = Number.isFinite(ageMs) && ageMs < 10_000 ? 4 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempts > 1) await new Promise((r) => setTimeout(r, 150));
       // version-checked: an edit echo must not serve the pre-edit cache entry
       const cached = await service.getCachedPlaintext(message.id, message.editedAt ?? null);
       if (cached !== null) {
@@ -105,7 +112,16 @@ export async function decryptMessagesForDisplay(messages: Message[]): Promise<Me
   // queue anyway, and order here matches timeline order for skipped-key bookkeeping.
   const out: Message[] = [];
   for (const m of messages) {
-    out.push(await decryptMessageForDisplay(m));
+    try {
+      out.push(await decryptMessageForDisplay(m));
+    } catch (err) {
+      // One message whose decrypt PIPELINE fails (vault IO, engine state —
+      // not mere bad ciphertext, which degrades inside) must not abort the
+      // whole page into a "Failed to load messages" toast. Show the one
+      // failure, keep the conversation.
+      console.error(`e2e: decrypt pipeline failed for message ${m.id}:`, err);
+      out.push({ ...m, content: DECRYPT_FAILED_CONTENT });
+    }
   }
   return out;
 }

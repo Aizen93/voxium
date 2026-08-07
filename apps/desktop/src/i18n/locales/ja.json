@@ -516,6 +516,14 @@
     "attachFile": "ファイルを添付"
   },
   "server": {
+    "pinnedSection": "ピン留め",
+    "pinSpace": "スペースをピン留め",
+    "unpinSpace": "ピン留めを解除",
+    "findSpace": "スペースを探す",
+    "liveNow": "ライブ中",
+    "allSpaces": "すべてのスペース",
+    "moreSpaces": "他 {{count}} 件のスペース",
+    "inVoiceCount": "ボイスに{{count}}人",
     "create": {
       "createTitle": "サーバーを作成",
       "joinTitle": "サーバーに参加",
@@ -541,9 +549,15 @@
       "inviteCode": "招待コード",
       "generatingLink": "招待リンクを生成中...",
       "failedToCreate": "招待の作成に失敗しました"
-    }
+    },
+    "switcherTitle": "サーバーを切り替え",
+    "switcherPlaceholder": "サーバーを検索…",
+    "switcherEmpty": "一致するサーバーはありません。",
+    "switcherHint": "入力で絞り込み · ↑↓ で移動 · Enter で開く",
+    "createOrJoin": "サーバーを作成または参加"
   },
   "channel": {
+    "joinVoice": "ボイスに参加",
     "createChannel": "チャンネルを作成",
     "deleteChannel": "チャンネルを削除",
     "deleteCategory": "カテゴリを削除",
@@ -624,7 +638,9 @@
     "maxAttachments": "1メッセージにつき最大 {{max}} 個の添付ファイル",
     "fileTypeNotAllowed": "{{name}}: 許可されていないファイル形式です",
     "fileTooLarge": "{{name}} が大きすぎます（最大 {{max}}MB）",
-    "searchMessages": "メッセージを検索 (Ctrl+K)"
+    "searchMessages": "メッセージを検索 (Ctrl+K)",
+    "today": "今日",
+    "yesterday": "昨日"
   },
   "dm": {
     "title": "ダイレクトメッセージ",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "広告・トラッキングなし",
       "openSource": "オープンソースで透明",
-      "freeVoice": "永久無料の音声通話",
+      "freeForIndividuals": "個人利用は無料",
       "noiseSuppression": "AI ノイズ抑制",
       "selfHostable": "セルフホスト可能",
       "sfuVoice": "スケーラブルな SFU 音声"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "端末を承認",
     "devicesNotReady": "このデバイスでは暗号化の設定がまだ続いているため、デバイス一覧をまだ表示できません。少ししてからご確認ください。",
     "identityAcceptFailed": "新しい鍵を受け入れられませんでした"
+  },
+  "people": {
+    "title": "メンバー",
+    "inVoice": "ボイス中",
+    "active": "アクティブ",
+    "away": "離席中",
+    "offline": "オフライン",
+    "speaking": "話し中",
+    "mutedStatus": "ミュート中",
+    "inVoiceStatus": "ボイス中",
+    "dnd": "取り込み中",
+    "awayStatus": "離席中",
+    "offlineStatus": "オフライン"
+  },
+  "search": {
+    "placeholder": "メッセージを検索…"
   }
 }

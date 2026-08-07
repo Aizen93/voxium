@@ -516,6 +516,14 @@
     "attachFile": "Joindre un fichier"
   },
   "server": {
+    "pinnedSection": "Épinglés",
+    "pinSpace": "Épingler l'espace",
+    "unpinSpace": "Désépingler l'espace",
+    "findSpace": "Trouver un espace",
+    "liveNow": "En direct",
+    "allSpaces": "Tous les espaces",
+    "moreSpaces": "{{count}} autres espaces",
+    "inVoiceCount": "{{count}} en vocal",
     "create": {
       "createTitle": "Créer un serveur",
       "joinTitle": "Rejoindre un serveur",
@@ -541,9 +549,15 @@
       "inviteCode": "Code d'invitation",
       "generatingLink": "Génération du lien d'invitation…",
       "failedToCreate": "Impossible de créer l'invitation"
-    }
+    },
+    "switcherTitle": "Changer de serveur",
+    "switcherPlaceholder": "Aller à un serveur…",
+    "switcherEmpty": "Aucun serveur ne correspond à ce nom.",
+    "switcherHint": "Tapez pour filtrer · ↑↓ pour naviguer · Entrée pour ouvrir",
+    "createOrJoin": "Créer ou rejoindre un serveur"
   },
   "channel": {
+    "joinVoice": "Rejoindre le vocal",
     "createChannel": "Créer un salon",
     "deleteChannel": "Supprimer le salon",
     "deleteCategory": "Supprimer la catégorie",
@@ -624,7 +638,9 @@
     "maxAttachments": "Maximum {{max}} pièces jointes par message",
     "fileTypeNotAllowed": "{{name}} : type de fichier non autorisé",
     "fileTooLarge": "{{name}} est trop volumineux (max {{max}} Mo)",
-    "searchMessages": "Rechercher des messages (Ctrl+K)"
+    "searchMessages": "Rechercher des messages (Ctrl+K)",
+    "today": "Aujourd'hui",
+    "yesterday": "Hier"
   },
   "dm": {
     "title": "Messages privés",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "Pas de publicités ni de pistage",
       "openSource": "Open source et transparent",
-      "freeVoice": "Appels vocaux gratuits pour toujours",
+      "freeForIndividuals": "Gratuit pour les particuliers",
       "noiseSuppression": "Suppression du bruit par IA",
       "selfHostable": "Auto-hébergeable",
       "sfuVoice": "Voix SFU évolutive"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "Approuver l'appareil",
     "devicesNotReady": "Le chiffrement est encore en cours de configuration sur cet appareil : vos appareils ne peuvent pas encore être listés. Revenez dans un instant.",
     "identityAcceptFailed": "Impossible d'accepter les nouvelles clés"
+  },
+  "people": {
+    "title": "Membres",
+    "inVoice": "En vocal",
+    "active": "Actifs",
+    "away": "Absents",
+    "offline": "Hors ligne",
+    "speaking": "Parle",
+    "mutedStatus": "Muet",
+    "inVoiceStatus": "En vocal",
+    "dnd": "Ne pas déranger",
+    "awayStatus": "Absent",
+    "offlineStatus": "Hors ligne"
+  },
+  "search": {
+    "placeholder": "Rechercher des messages…"
   }
 }

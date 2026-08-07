@@ -11,13 +11,15 @@ interface Props {
   conversationId: string;
 }
 
+/** Virtual index of the oldest loadable message; leaves room to page upward. */
+const FIRST_INDEX_BASE = 1000000;
+
 export function DMMessageList({ conversationId }: Props) {
   const { t } = useTranslation();
-  const { messages, hasMore, isLoading, fetchDMMessages, typingUsers, targetMessageId, clearTargetMessage } = useChatStore();
+  const { messages, hasMore, hasMoreAfter, isLoading, fetchDMMessages, typingUsers, targetMessageId, clearTargetMessage } = useChatStore();
   const { user } = useAuthStore();
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const fetchingRef = useRef(false);
-  const [atBottom, setAtBottom] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
 
   // Scroll to bottom on conversation change
@@ -29,26 +31,116 @@ export function DMMessageList({ conversationId }: Props) {
     });
   }, [conversationId]);
 
-  // Scroll to target message (from search)
+  // Scroll to target message (from search). The around-fetch sets messages
+  // and targetMessageId in one store update, so by the time this runs the
+  // target is normally IN the array; if a stale render sneaks in first, keep
+  // the target alive for the pass that has the data — clearing it early is
+  // what used to silently swallow the jump.
   useEffect(() => {
     if (!targetMessageId) return;
-    let highlightTimer: ReturnType<typeof setTimeout> | null = null;
     const idx = messages.findIndex((m) => m.id === targetMessageId);
-    if (idx !== -1) {
-      virtuosoRef.current?.scrollToIndex({ index: idx, align: 'center', behavior: 'smooth' });
-      requestAnimationFrame(() => {
-        const el = document.querySelector(`[data-message-id="${targetMessageId}"]`);
-        if (el) {
-          el.classList.add('bg-vox-accent-primary/10');
-          highlightTimer = setTimeout(() => el.classList.remove('bg-vox-accent-primary/10'), 2000);
-        }
-      });
-    }
-    clearTargetMessage();
+    if (idx === -1) return;
+    // A freshly remounted Virtuoso applies its own initial positioning
+    // asynchronously (twice under StrictMode) and can land at the bottom
+    // AFTER a single scroll call — so the target scroll repeats until the
+    // mount pipeline has settled. 'auto' is idempotent; the extra calls are
+    // no-ops once the position sticks.
+    const scrollToTarget = () =>
+      virtuosoRef.current?.scrollToIndex({ index: idx, align: 'center', behavior: 'auto' });
+    scrollToTarget();
+    // The last retry also releases the target: clearing earlier would rerun
+    // this effect and cancel the pending retries via cleanup.
+    const retries = [
+      setTimeout(scrollToTarget, 120),
+      setTimeout(() => {
+        scrollToTarget();
+        clearTargetMessage();
+      }, 350),
+    ];
+    // Highlight once the row exists — after a remount it can take a few frames.
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tryHighlight = () => {
+      const el = document.querySelector(`[data-message-id="${targetMessageId}"]`);
+      if (el) {
+        el.classList.add('bg-vox-accent-primary/10');
+        timer = setTimeout(() => el.classList.remove('bg-vox-accent-primary/10'), 2000);
+        return;
+      }
+      if (++tries < 10) timer = setTimeout(tryHighlight, 50);
+    };
+    tryHighlight();
     return () => {
-      if (highlightTimer) clearTimeout(highlightTimer);
+      retries.forEach(clearTimeout);
+      if (timer) clearTimeout(timer);
     };
   }, [targetMessageId, clearTargetMessage, messages]);
+
+  // firstItemIndex must move ONLY when older pages are PREPENDED. Deriving it
+  // from the length (BASE - length) also shifted it on every APPEND, which
+  // Virtuoso reads as "an item was prepended at the top" and compensates by
+  // nudging the scroll up one estimated row — the "sent a message and the
+  // list crept up, hiding it" bug. Refs are mutated during render on purpose:
+  // the index must be consistent with `messages` in the SAME render pass.
+  const firstIndexRef = useRef(FIRST_INDEX_BASE);
+  const prevFirstIdRef = useRef<string | null>(null);
+  const prevLastIdRef = useRef<string | null>(null);
+  const prevConversationRef = useRef<string | undefined>(undefined);
+  // Bumped whenever the loaded window is REPLACED rather than grown
+  // (conversation switch, or a search jump's around-fetch). Keys the Virtuoso
+  // instance: a replace can't be described as append/prepend, so the list
+  // remounts and initialTopMostItemIndex lands it directly on the right row.
+  const epochRef = useRef(0);
+  // True when THIS render swapped the whole window (conversation switch or
+  // search jump): the "new last message" then is not an arrival, and
+  // following output to the bottom would override the jump target.
+  let windowReplaced = false;
+  if (prevConversationRef.current !== conversationId) {
+    prevConversationRef.current = conversationId;
+    firstIndexRef.current = FIRST_INDEX_BASE;
+    prevFirstIdRef.current = messages[0]?.id ?? null;
+    epochRef.current += 1;
+    windowReplaced = true;
+  } else if (messages.length > 0 && messages[0].id !== prevFirstIdRef.current) {
+    const shifted = prevFirstIdRef.current
+      ? messages.findIndex((m) => m.id === prevFirstIdRef.current)
+      : -1;
+    // A real PREPEND keeps the tail: the previous first message moved down
+    // AND the previous last message is still here. An around-window that
+    // overlaps the old page satisfies the first check but truncates the tail
+    // — treating that as a prepend anchors the scroll to the wrong rows.
+    const tailSurvives =
+      prevLastIdRef.current != null && messages.some((m) => m.id === prevLastIdRef.current);
+    if (shifted > 0 && tailSurvives) {
+      // Older page PREPENDED — shift the window start so the reading
+      // position holds.
+      firstIndexRef.current -= shifted;
+    } else {
+      // The window was replaced.
+      epochRef.current += 1;
+      firstIndexRef.current = FIRST_INDEX_BASE;
+      windowReplaced = true;
+    }
+    prevFirstIdRef.current = messages[0].id;
+  }
+
+  const targetIndex = targetMessageId
+    ? messages.findIndex((m) => m.id === targetMessageId)
+    : -1;
+
+  // Your OWN new message always follows to the bottom — even if the view had
+  // drifted above Virtuoso's at-bottom threshold, where plain followOutput
+  // would leave what you just sent hidden below the fold. Others' messages
+  // follow only when already at the bottom, so a reading position is never
+  // yanked away. Computed at render so the followOutput callback Virtuoso
+  // invokes for THIS data change sees the matching verdict.
+  const lastMessage = messages[messages.length - 1];
+  const lastIsNewOwn =
+    !windowReplaced &&
+    !!lastMessage && lastMessage.id !== prevLastIdRef.current && lastMessage.author.id === user?.id;
+  useEffect(() => {
+    prevLastIdRef.current = lastMessage?.id ?? null;
+  });
 
   const handleStartReached = useCallback(() => {
     if (!hasMore || isLoading || fetchingRef.current || messages.length === 0) return;
@@ -60,7 +152,6 @@ export function DMMessageList({ conversationId }: Props) {
   }, [hasMore, isLoading, conversationId, messages, fetchDMMessages]);
 
   const handleAtBottomChange = useCallback((bottom: boolean) => {
-    setAtBottom(bottom);
     setShowScrollButton(!bottom);
   }, []);
 
@@ -83,6 +174,12 @@ export function DMMessageList({ conversationId }: Props) {
   })();
 
   const scrollToBottom = () => {
+    // Inside a jumped-to history window the newest messages aren't loaded —
+    // "back to bottom" must return to NOW, not to the window's edge.
+    if (hasMoreAfter) {
+      fetchDMMessages(conversationId);
+      return;
+    }
     virtuosoRef.current?.scrollToIndex({ index: 'LAST', behavior: 'smooth' });
   };
 
@@ -96,18 +193,38 @@ export function DMMessageList({ conversationId }: Props) {
 
       {messages.length > 0 && (
         <Virtuoso
+          key={epochRef.current}
           ref={virtuosoRef}
           data={messages}
-          className="h-full px-4 !overflow-x-hidden"
-          followOutput={atBottom ? 'smooth' : false}
+          // Horizontal padding must live on the rows, NOT here: Virtuoso's item
+          // list is absolutely positioned, so width:100% resolves against the
+          // scroller's padding box and scroller padding pushes every row (and
+          // the right-anchored hover toolbar) past the panel's right edge.
+          className="h-full !overflow-x-hidden"
+          followOutput={(bottom) =>
+            // A pending jump target owns the scroll position — a fresh mount's
+            // follow tick briefly reads as "at bottom" and would override it.
+            targetIndex >= 0 ? false : lastIsNewOwn ? 'auto' : bottom ? 'smooth' : false
+          }
           startReached={handleStartReached}
           atBottomStateChange={handleAtBottomChange}
           atBottomThreshold={100}
           increaseViewportBy={{ top: 200, bottom: 200 }}
-          firstItemIndex={Math.max(0, 1000000 - messages.length)}
-          initialTopMostItemIndex={messages.length - 1}
+          firstItemIndex={firstIndexRef.current}
+          initialTopMostItemIndex={
+            targetIndex >= 0
+              ? { index: targetIndex, align: 'center' }
+              : Math.max(0, messages.length - 1)
+          }
           itemContent={(index, message) => {
-            const dataIndex = index - Math.max(0, 1000000 - messages.length);
+            // During a window replace, Virtuoso's prop snapshot and our index
+            // base can disagree for one frame — recover the true index from
+            // the message itself rather than crash on stale math.
+            let dataIndex = index - firstIndexRef.current;
+            if (dataIndex < 0 || dataIndex >= messages.length || messages[dataIndex] !== message) {
+              dataIndex = messages.indexOf(message);
+            }
+            if (dataIndex === -1) return <div className="h-px" />;
 
             // System messages (call started/ended)
             if (message.type === 'system') {
@@ -120,7 +237,7 @@ export function DMMessageList({ conversationId }: Props) {
 
               const isEncryptionNotice = message.content.toLowerCase().includes('encryption');
               return (
-                <div className="my-3 flex items-center justify-center gap-2">
+                <div className="my-3 flex items-center justify-center gap-2 px-4">
                   <div className="flex items-center gap-2 rounded-full bg-vox-bg-secondary px-4 py-1.5">
                     {isEncryptionNotice ? (
                       <Lock size={14} className="text-vox-accent-success" />
@@ -138,28 +255,29 @@ export function DMMessageList({ conversationId }: Props) {
             const isOwn = message.author.id === user?.id;
 
             return (
-              <MessageItem
-                key={message.id}
-                message={message}
-                showHeader={showHeader}
-                addTopMargin={showHeader && dataIndex > 0}
-                isOwn={isOwn}
-                canDelete={isOwn}
-                channelId={undefined}
-                conversationId={conversationId}
-              />
+              <div key={message.id} className="w-full px-4">
+                <MessageItem
+                  message={message}
+                  showHeader={showHeader}
+                  addTopMargin={showHeader && dataIndex > 0}
+                  isOwn={isOwn}
+                  canDelete={isOwn}
+                  channelId={undefined}
+                  conversationId={conversationId}
+                />
+              </div>
             );
           }}
           components={{
             Header: () =>
               !hasMore && messages.length > 0 ? (
-                <div className="mb-6 border-b border-vox-border pb-4 pt-4">
+                <div className="mx-4 mb-6 border-b border-vox-border pb-4 pt-4">
                   <h4 className="text-2xl font-bold text-vox-text-primary">{t('dm.beginningOfConversation')}</h4>
                   <p className="text-sm text-vox-text-secondary">{t('dm.conversationStart')}</p>
                 </div>
               ) : null,
             Footer: () => (
-              <div className="pb-2">
+              <div className="px-4 pb-2">
                 <div className={`flex items-center gap-2 px-4 py-1 ${typingText ? 'visible' : 'invisible'}`}>
                   <div className="flex gap-0.5">
                     <span className="h-1.5 w-1.5 rounded-full bg-vox-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
