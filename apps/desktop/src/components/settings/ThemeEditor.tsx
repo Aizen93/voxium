@@ -70,6 +70,7 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
   const [tagsInput, setTagsInput] = useState(prefill?.tags.join(', ') ?? '');
   const [colors, setColors] = useState<ThemeColors>(() => {
     if (prefill) return { ...prefill.colors };
+    // New themes start from the Voxium brand theme.
     return getBuiltInThemeColors('dark');
   });
   const [patterns, setPatterns] = useState<ThemePatterns>(() => {

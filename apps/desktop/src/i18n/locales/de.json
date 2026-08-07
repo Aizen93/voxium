@@ -516,6 +516,14 @@
     "attachFile": "Datei anhängen"
   },
   "server": {
+    "pinnedSection": "Angepinnt",
+    "pinSpace": "Space anpinnen",
+    "unpinSpace": "Space lösen",
+    "findSpace": "Space finden",
+    "liveNow": "Jetzt live",
+    "allSpaces": "Alle Spaces",
+    "moreSpaces": "{{count}} weitere Spaces",
+    "inVoiceCount": "{{count}} im Sprachchat",
     "create": {
       "createTitle": "Server erstellen",
       "joinTitle": "Server beitreten",
@@ -541,9 +549,15 @@
       "inviteCode": "Einladungscode",
       "generatingLink": "Einladungslink wird generiert...",
       "failedToCreate": "Einladung konnte nicht erstellt werden"
-    }
+    },
+    "switcherTitle": "Server wechseln",
+    "switcherPlaceholder": "Zu einem Server springen…",
+    "switcherEmpty": "Kein Server passt zu diesem Namen.",
+    "switcherHint": "Tippen zum Filtern · ↑↓ zum Wechseln · Enter zum Öffnen",
+    "createOrJoin": "Server erstellen oder beitreten"
   },
   "channel": {
+    "joinVoice": "Sprachkanal beitreten",
     "createChannel": "Kanal erstellen",
     "deleteChannel": "Kanal löschen",
     "deleteCategory": "Kategorie löschen",
@@ -624,7 +638,9 @@
     "maxAttachments": "Maximal {{max}} Anhänge pro Nachricht",
     "fileTypeNotAllowed": "{{name}}: Dateityp nicht erlaubt",
     "fileTooLarge": "{{name}} ist zu groß (max. {{max}} MB)",
-    "searchMessages": "Nachrichten durchsuchen (Strg+K)"
+    "searchMessages": "Nachrichten durchsuchen (Strg+K)",
+    "today": "Heute",
+    "yesterday": "Gestern"
   },
   "dm": {
     "title": "Direktnachrichten",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "Keine Werbung oder Tracking",
       "openSource": "Open Source und transparent",
-      "freeVoice": "Kostenlose Sprachanrufe fuer immer",
+      "freeForIndividuals": "Kostenlos für Privatnutzer",
       "noiseSuppression": "KI-Rauschunterdrueckung",
       "selfHostable": "Selbst hostbar",
       "sfuVoice": "Skalierbare SFU-Sprache"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "Gerät genehmigen",
     "devicesNotReady": "Die Verschlüsselung wird auf diesem Gerät noch eingerichtet, deine Geräte können daher noch nicht angezeigt werden. Schau gleich noch einmal vorbei.",
     "identityAcceptFailed": "Die neuen Schlüssel konnten nicht akzeptiert werden"
+  },
+  "people": {
+    "title": "Personen",
+    "inVoice": "Im Sprachkanal",
+    "active": "Aktiv",
+    "away": "Abwesend",
+    "offline": "Offline",
+    "speaking": "Spricht",
+    "mutedStatus": "Stummgeschaltet",
+    "inVoiceStatus": "Im Sprachkanal",
+    "dnd": "Nicht stören",
+    "awayStatus": "Abwesend",
+    "offlineStatus": "Offline"
+  },
+  "search": {
+    "placeholder": "Nachrichten suchen…"
   }
 }

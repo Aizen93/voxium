@@ -516,6 +516,14 @@
     "attachFile": "إرفاق ملف"
   },
   "server": {
+    "pinnedSection": "مثبّتة",
+    "pinSpace": "تثبيت المساحة",
+    "unpinSpace": "إلغاء تثبيت المساحة",
+    "findSpace": "البحث عن مساحة",
+    "liveNow": "مباشر الآن",
+    "allSpaces": "كل المساحات",
+    "moreSpaces": "{{count}} مساحات أخرى",
+    "inVoiceCount": "{{count}} في الصوت",
     "create": {
       "createTitle": "إنشاء خادم",
       "joinTitle": "الانضمام إلى خادم",
@@ -541,9 +549,15 @@
       "inviteCode": "رمز الدعوة",
       "generatingLink": "جارٍ إنشاء رابط الدعوة...",
       "failedToCreate": "فشل إنشاء الدعوة"
-    }
+    },
+    "switcherTitle": "تبديل الخادم",
+    "switcherPlaceholder": "الانتقال إلى خادم…",
+    "switcherEmpty": "لا يوجد خادم بهذا الاسم.",
+    "switcherHint": "اكتب للتصفية · ↑↓ للتنقل · Enter للفتح",
+    "createOrJoin": "إنشاء خادم أو الانضمام إليه"
   },
   "channel": {
+    "joinVoice": "الانضمام إلى الصوت",
     "createChannel": "إنشاء قناة",
     "deleteChannel": "حذف القناة",
     "deleteCategory": "حذف الفئة",
@@ -624,7 +638,9 @@
     "maxAttachments": "الحد الأقصى {{max}} مرفقات لكل رسالة",
     "fileTypeNotAllowed": "{{name}}: نوع الملف غير مسموح به",
     "fileTooLarge": "{{name}} كبير جدًا (الحد الأقصى {{max}} ميجابايت)",
-    "searchMessages": "البحث في الرسائل (Ctrl+K)"
+    "searchMessages": "البحث في الرسائل (Ctrl+K)",
+    "today": "اليوم",
+    "yesterday": "أمس"
   },
   "dm": {
     "title": "الرسائل المباشرة",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "لا إعلانات ولا تتبع",
       "openSource": "مفتوح المصدر وشفاف",
-      "freeVoice": "مكالمات صوتية مجانية للأبد",
+      "freeForIndividuals": "مجاني للأفراد",
       "noiseSuppression": "كتم الضوضاء بالذكاء الاصطناعي",
       "selfHostable": "قابل للاستضافة الذاتية",
       "sfuVoice": "صوت SFU قابل للتوسع"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "الموافقة على الجهاز",
     "devicesNotReady": "ما زال التشفير قيد الإعداد على هذا الجهاز، لذا لا يمكن عرض أجهزتك بعد. عد بعد قليل.",
     "identityAcceptFailed": "تعذّر قبول المفاتيح الجديدة"
+  },
+  "people": {
+    "title": "الأعضاء",
+    "inVoice": "في القناة الصوتية",
+    "active": "نشطون",
+    "away": "بعيدون",
+    "offline": "غير متصلين",
+    "speaking": "يتحدث",
+    "mutedStatus": "مكتوم",
+    "inVoiceStatus": "في القناة الصوتية",
+    "dnd": "عدم الإزعاج",
+    "awayStatus": "بعيد",
+    "offlineStatus": "غير متصل"
+  },
+  "search": {
+    "placeholder": "البحث في الرسائل…"
   }
 }

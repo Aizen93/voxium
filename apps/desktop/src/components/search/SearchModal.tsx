@@ -183,7 +183,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-center" style={{ paddingTop: '15vh' }}>
+    <div data-testid="search-modal" className="fixed inset-0 z-50 flex justify-center" style={{ paddingTop: '15vh' }}>
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
 

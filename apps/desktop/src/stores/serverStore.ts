@@ -4,9 +4,25 @@ import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride } from '@voxium/shared';
 
+const PINNED_KEY = 'voxium_pinned_spaces';
+
+/** Pin order IS display order in the spaces strip — first pinned, first shown. */
+function loadPinnedServers(): string[] {
+  try {
+    const raw = localStorage.getItem(PINNED_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((x): x is string => typeof x === 'string');
+    }
+  } catch { /* ignore corrupt storage */ }
+  return [];
+}
+
 interface ServerState {
   servers: Server[];
   activeServerId: string | null;
+  /** Device-level preference (localStorage), like collapsed categories. */
+  pinnedServerIds: string[];
   channels: Channel[];
   categories: Category[];
   activeChannelId: string | null;
@@ -17,6 +33,7 @@ interface ServerState {
   serverUnreadCounts: Record<string, number>;
 
   fetchServers: () => Promise<void>;
+  togglePinServer: (serverId: string) => void;
   setActiveServer: (serverId: string) => Promise<void>;
   setActiveChannel: (channelId: string) => void;
   createServer: (name: string) => Promise<Server>;
@@ -93,6 +110,19 @@ let _lastMarkedAt = 0;
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   activeServerId: null,
+  pinnedServerIds: loadPinnedServers(),
+
+  togglePinServer: (serverId: string) => {
+    set((state) => {
+      const pinnedServerIds = state.pinnedServerIds.includes(serverId)
+        ? state.pinnedServerIds.filter((id) => id !== serverId)
+        : [...state.pinnedServerIds, serverId];
+      try {
+        localStorage.setItem(PINNED_KEY, JSON.stringify(pinnedServerIds));
+      } catch { /* ignore storage errors */ }
+      return { pinnedServerIds };
+    });
+  },
   channels: [],
   categories: [],
   activeChannelId: null,

@@ -516,6 +516,14 @@
     "attachFile": "파일 첨부"
   },
   "server": {
+    "pinnedSection": "고정됨",
+    "pinSpace": "스페이스 고정",
+    "unpinSpace": "고정 해제",
+    "findSpace": "스페이스 찾기",
+    "liveNow": "지금 라이브",
+    "allSpaces": "모든 스페이스",
+    "moreSpaces": "그 외 {{count}}개",
+    "inVoiceCount": "음성 채널 {{count}}명",
     "create": {
       "createTitle": "서버 만들기",
       "joinTitle": "서버 참여하기",
@@ -541,9 +549,15 @@
       "inviteCode": "초대 코드",
       "generatingLink": "초대 링크 생성 중...",
       "failedToCreate": "초대 생성에 실패했습니다"
-    }
+    },
+    "switcherTitle": "서버 전환",
+    "switcherPlaceholder": "서버로 이동…",
+    "switcherEmpty": "이름이 일치하는 서버가 없습니다.",
+    "switcherHint": "입력해 필터 · ↑↓ 이동 · Enter 열기",
+    "createOrJoin": "서버 만들기 또는 참여"
   },
   "channel": {
+    "joinVoice": "음성 참여",
     "createChannel": "채널 만들기",
     "deleteChannel": "채널 삭제",
     "deleteCategory": "카테고리 삭제",
@@ -624,7 +638,9 @@
     "maxAttachments": "메시지당 최대 {{max}}개의 첨부파일",
     "fileTypeNotAllowed": "{{name}}: 허용되지 않는 파일 형식입니다",
     "fileTooLarge": "{{name}} 파일이 너무 큽니다 (최대 {{max}}MB)",
-    "searchMessages": "메시지 검색 (Ctrl+K)"
+    "searchMessages": "메시지 검색 (Ctrl+K)",
+    "today": "오늘",
+    "yesterday": "어제"
   },
   "dm": {
     "title": "다이렉트 메시지",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "광고 및 추적 없음",
       "openSource": "오픈 소스 및 투명성",
-      "freeVoice": "영원히 무료 음성 통화",
+      "freeForIndividuals": "개인 사용자는 무료",
       "noiseSuppression": "AI 노이즈 제거",
       "selfHostable": "셀프 호스팅 가능",
       "sfuVoice": "확장 가능한 SFU 음성"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "기기 승인",
     "devicesNotReady": "이 기기에서 암호화를 설정하는 중이라 아직 기기 목록을 보여줄 수 없습니다. 잠시 후 다시 확인하세요.",
     "identityAcceptFailed": "새 키를 수락하지 못했습니다"
+  },
+  "people": {
+    "title": "사람",
+    "inVoice": "음성 채널",
+    "active": "활동 중",
+    "away": "자리 비움",
+    "offline": "오프라인",
+    "speaking": "말하는 중",
+    "mutedStatus": "음소거됨",
+    "inVoiceStatus": "음성 채널",
+    "dnd": "방해 금지",
+    "awayStatus": "자리 비움",
+    "offlineStatus": "오프라인"
+  },
+  "search": {
+    "placeholder": "메시지 검색…"
   }
 }

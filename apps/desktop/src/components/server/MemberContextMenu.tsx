@@ -317,7 +317,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
               <div className="flex gap-1 mt-1">
                 <button
                   onClick={handleSetNickname}
-                  className="flex-1 rounded px-2 py-1 text-xs font-medium bg-vox-accent-primary text-white hover:bg-vox-accent-primary/80 transition-colors"
+                  className="flex-1 rounded px-2 py-1 text-xs font-medium bg-vox-accent-primary text-vox-on-accent hover:bg-vox-accent-primary/80 transition-colors"
                 >
                   {t('common.save')}
                 </button>

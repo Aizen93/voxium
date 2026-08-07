@@ -24,7 +24,7 @@ test.describe('@mention system', () => {
 
     // User A opens the app and navigates to the server
     await injectAuth(page, dataA);
-    await page.locator(`[title="${server.name}"]`).click({ timeout: 10_000 });
+    await page.getByRole('button', { name: server.name, exact: true }).click({ timeout: 10_000 });
     await expect(page.getByText('general').first()).toBeVisible({ timeout: 10_000 });
     await page.getByText('general').first().click();
 
@@ -48,7 +48,7 @@ test.describe('@mention system', () => {
     const context2 = await browser.newContext();
     const page2 = await context2.newPage();
     await injectAuth(page2, dataB);
-    await page2.locator(`[title="${server.name}"]`).click({ timeout: 10_000 });
+    await page2.getByRole('button', { name: server.name, exact: true }).click({ timeout: 10_000 });
     await expect(page2.getByText('general').first()).toBeVisible({ timeout: 10_000 });
     await page2.getByText('general').first().click();
 
@@ -74,7 +74,7 @@ test.describe('@mention system', () => {
     await joinServerViaInvite(request, dataB.accessToken, invite);
 
     await injectAuth(page, dataA);
-    await page.locator(`[title="${server.name}"]`).click({ timeout: 10_000 });
+    await page.getByRole('button', { name: server.name, exact: true }).click({ timeout: 10_000 });
     await expect(page.getByText('general').first()).toBeVisible({ timeout: 10_000 });
     await page.getByText('general').first().click();
     await expect(page.locator('textarea')).toBeVisible({ timeout: 5_000 });

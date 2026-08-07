@@ -169,7 +169,7 @@ export function SupportTicketView() {
             <button
               onClick={handleSend}
               disabled={!input.trim() || sending}
-              className="flex h-9 w-9 items-center justify-center rounded-md bg-vox-accent-primary text-white transition-colors hover:bg-vox-accent-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex h-9 w-9 items-center justify-center rounded-md bg-vox-accent-primary text-vox-on-accent transition-colors hover:bg-vox-accent-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
               aria-label={t('support.sendMessage')}
             >
               <Send size={16} />

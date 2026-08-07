@@ -1,54 +1,70 @@
 /*
- * Voxium Theme System
+ * Voxium Theme System — v2 (2026 redesign)
  *
  * All UI colors are defined as CSS custom properties scoped to [data-theme].
  * The app reads these via Tailwind's --color-vox-* mapping in globals.css.
  *
- * To add a custom theme:
- * 1. Add a new [data-theme="your-theme"] block below with all --vox-* variables
- * 2. Register it in the THEMES array in stores/settingsStore.ts
- * 3. Users can select it from Settings > Appearance
+ * ARCHITECTURE: the 27 THEME_COLOR_KEYS (packages/shared/src/constants.ts)
+ * remain the authored surface — built-in blocks below and user custom themes
+ * define exactly those. Everything the redesign added (accent tints, strong
+ * borders, panel shadows) DERIVES from them via color-mix in the :root block
+ * at the end of this file, so pre-redesign custom themes keep working and a
+ * theme only has to pick one accent to get all its tints.
  *
- * Future: custom themes could be loaded from JSON (user-uploaded or community-shared)
- * by injecting CSS variables at runtime via document.documentElement.style.setProperty().
+ * The v2 look: panels float on the page background (--vox-bg-primary) as
+ * rounded cards; --vox-sidebar/--vox-channel equal the page color (the
+ * unified sidebar sits directly on it), --vox-chat is the main panel,
+ * --vox-bg-secondary the aux panel (People), --vox-bg-tertiary inset cards,
+ * --vox-bg-floating elevated surfaces (composer, modals, popovers).
+ * Hover/active are translucent so they read on any of those surfaces.
  */
 
 /* ─── Dark Theme (default) ─────────────────────────────────────────────────── */
 
 [data-theme="dark"] {
-  --vox-bg-primary: #1a1a2e;
-  --vox-bg-secondary: #16213e;
-  --vox-bg-tertiary: #0f3460;
-  --vox-bg-hover: #1f2b4d;
-  --vox-bg-active: #253356;
-  --vox-bg-floating: #111827;
+  /* The Voxium theme — the brand look, reworked in place.
+   *
+   * Same identity as it always had: deep indigo-navy surfaces around Electric
+   * Sapphire #5B5BF7, straight from the brand palette (#5B5BF7 / #8D8DF2 /
+   * #A08BF0 / #7D9BF5). The rework keeps that family and restructures it for
+   * the layered layout: the original signature surface (#1a1a2e) becomes the
+   * reading panel, the page behind the panels drops a step darker, and every
+   * translucent layer — hover, active, borders, scrollbars — is mixed from
+   * Soft Periwinkle instead of plain white, which is what keeps the dark UI
+   * indigo rather than grey. */
+  --vox-bg-primary: #141424;   /* the page the panels float on */
+  --vox-bg-secondary: #171729; /* aux panel — People */
+  --vox-bg-tertiary: #1f1f36;  /* inset cards, search field */
+  --vox-bg-hover: rgba(141, 141, 242, 0.08);
+  --vox-bg-active: rgba(141, 141, 242, 0.14);
+  --vox-bg-floating: #232340;  /* modals, popovers, composer */
 
-  --vox-sidebar: #12122a;
-  --vox-channel: #151530;
-  --vox-chat: #1a1a3e;
+  --vox-sidebar: #141424;
+  --vox-channel: #141424;
+  --vox-chat: #1a1a2e;         /* the reading surface — the original Voxium hex */
 
-  --vox-text-primary: #e4e6eb;
-  --vox-text-secondary: #a0a3b1;
-  --vox-text-muted: #6b7089;
-  --vox-text-link: #5b9cf4;
+  --vox-text-primary: #e4e6f2;
+  --vox-text-secondary: #a3a6c2;
+  --vox-text-muted: #6f7396;
+  --vox-text-link: #7d9bf5;    /* Wisteria Blue */
 
-  --vox-accent-primary: #5b5bf7;
-  --vox-accent-hover: #4a4ae0;
+  --vox-accent-primary: #5b5bf7; /* Electric Sapphire */
+  --vox-accent-hover: #7676f8;
   --vox-accent-success: #3eba68;
   --vox-accent-warning: #f5a623;
   --vox-accent-danger: #ed4245;
-  --vox-accent-info: #5b9cf4;
+  --vox-accent-info: #7d9bf5;
 
-  --vox-border: #2a2a4a;
+  --vox-border: rgba(141, 141, 242, 0.12);
 
   --vox-voice-connected: #3eba68;
-  --vox-voice-speaking: #3eba68;
+  --vox-voice-speaking: #5b5bf7;
   --vox-voice-muted: #ed4245;
 
-  --vox-scrollbar-thumb: #2a2a4a;
-  --vox-scrollbar-thumb-hover: #3a3a5a;
-  --vox-selection-bg: rgba(91, 91, 247, 0.3);
-  --vox-selection-text: #e4e6eb;
+  --vox-scrollbar-thumb: rgba(141, 141, 242, 0.14);
+  --vox-scrollbar-thumb-hover: rgba(141, 141, 242, 0.26);
+  --vox-selection-bg: rgba(91, 91, 247, 0.35);
+  --vox-selection-text: #e4e6f2;
 }
 
 /* ─── Light Theme ──────────────────────────────────────────────────────────── */
@@ -163,6 +179,54 @@
   --vox-scrollbar-thumb-hover: #383a36;
   --vox-selection-bg: rgba(74, 222, 80, 0.2);
   --vox-selection-text: #e0e2de;
+}
+
+/* ─── Derived tokens (v2) ──────────────────────────────────────────────────
+ * Computed from the 27 authored keys above, so they work for EVERY theme —
+ * including user custom themes saved before the redesign, which only define
+ * the authored keys (as inline style properties on <html>, same element as
+ * these, so the var() lookups resolve against them).
+ *
+ * NEVER author these per-theme; override the base key instead. */
+:root {
+  /* Accent tints — the redesign's core pattern: interactive fills are the
+   * accent mixed into transparency, never a second authored hex. */
+  --vox-accent-tint: color-mix(in oklab, var(--vox-accent-primary) 12%, transparent);
+  --vox-accent-tint-strong: color-mix(in oklab, var(--vox-accent-primary) 19%, transparent);
+
+  /* Text/icon color on accent-filled controls (send button, unread badge).
+   * White — what the app has always used on accent fills, and what every
+   * built-in accent (and pre-redesign custom theme) was chosen against. */
+  --vox-on-accent: #ffffff;
+
+  /* Emphasized hairline (focused inputs, hovered card borders) — derives from
+   * text color so it lightens on dark themes and darkens on light ones. */
+  --vox-border-strong: color-mix(in oklab, var(--vox-text-primary) 16%, transparent);
+
+  /* Elevation — exactly two shadow levels, per the redesign. */
+  --vox-shadow-panel: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --vox-shadow-float: 0 8px 24px rgba(0, 0, 0, 0.3);
+
+  /* The brand gradient, from the supplied swatches. Used sparingly — the
+   * active-server indicator and the primary call to action — so the mark and
+   * the UI read as one object rather than two palettes sharing a screen.
+   * Fixed, not theme-derived: it IS the brand, and it must not shift when
+   * someone picks a different theme. */
+  --vox-brand-from: #5b5bf7; /* Electric Sapphire */
+  --vox-brand-via: #a08bf0;  /* Soft Periwinkle  */
+  --vox-brand-to: #7d9bf5;   /* Wisteria Blue    */
+  --vox-brand-gradient: linear-gradient(
+    135deg,
+    var(--vox-brand-from),
+    var(--vox-brand-via),
+    var(--vox-brand-to)
+  );
+}
+
+/* Light surfaces need far softer shadows than the shared dark-theme default. */
+[data-theme="light"] {
+  --vox-shadow-panel: 0 8px 28px rgba(26, 26, 46, 0.10);
+  --vox-shadow-float: 0 6px 20px rgba(26, 26, 46, 0.12);
 }
 
 /* Tactical theme — decorative background patterns */

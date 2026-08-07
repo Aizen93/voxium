@@ -516,6 +516,14 @@
     "attachFile": "Anexar arquivo"
   },
   "server": {
+    "pinnedSection": "Fixados",
+    "pinSpace": "Fixar espaço",
+    "unpinSpace": "Desafixar espaço",
+    "findSpace": "Encontrar um espaço",
+    "liveNow": "Ao vivo agora",
+    "allSpaces": "Todos os espaços",
+    "moreSpaces": "mais {{count}} espaços",
+    "inVoiceCount": "{{count}} na voz",
     "create": {
       "createTitle": "Criar um servidor",
       "joinTitle": "Entrar em um servidor",
@@ -541,9 +549,15 @@
       "inviteCode": "Código de convite",
       "generatingLink": "Gerando link de convite...",
       "failedToCreate": "Não foi possível criar o convite"
-    }
+    },
+    "switcherTitle": "Mudar de servidor",
+    "switcherPlaceholder": "Ir para um servidor…",
+    "switcherEmpty": "Nenhum servidor corresponde a esse nome.",
+    "switcherHint": "Escreva para filtrar · ↑↓ para mover · Enter para abrir",
+    "createOrJoin": "Criar ou entrar num servidor"
   },
   "channel": {
+    "joinVoice": "Entrar na voz",
     "createChannel": "Criar canal",
     "deleteChannel": "Excluir canal",
     "deleteCategory": "Excluir categoria",
@@ -624,7 +638,9 @@
     "maxAttachments": "Máximo de {{max}} anexos por mensagem",
     "fileTypeNotAllowed": "{{name}}: tipo de arquivo não permitido",
     "fileTooLarge": "{{name}} é muito grande (máx. {{max}} MB)",
-    "searchMessages": "Pesquisar mensagens (Ctrl+K)"
+    "searchMessages": "Pesquisar mensagens (Ctrl+K)",
+    "today": "Hoje",
+    "yesterday": "Ontem"
   },
   "dm": {
     "title": "Mensagens diretas",
@@ -778,7 +794,7 @@
     "highlights": {
       "noAds": "Sem anuncios nem rastreamento",
       "openSource": "Codigo aberto e transparente",
-      "freeVoice": "Chamadas de voz gratis para sempre",
+      "freeForIndividuals": "Grátis para uso individual",
       "noiseSuppression": "Supressao de ruido com IA",
       "selfHostable": "Auto-hospedavel",
       "sfuVoice": "Voz SFU escalavel"
@@ -1075,5 +1091,21 @@
     "linkConfirmAction": "Aprovar dispositivo",
     "devicesNotReady": "A criptografia ainda está sendo configurada neste dispositivo, então seus dispositivos ainda não podem ser listados. Volte em instantes.",
     "identityAcceptFailed": "Não foi possível aceitar as novas chaves"
+  },
+  "people": {
+    "title": "Pessoas",
+    "inVoice": "Em voz",
+    "active": "Ativos",
+    "away": "Ausentes",
+    "offline": "Offline",
+    "speaking": "Falando",
+    "mutedStatus": "Mutado",
+    "inVoiceStatus": "Em voz",
+    "dnd": "Não perturbe",
+    "awayStatus": "Ausente",
+    "offlineStatus": "Offline"
+  },
+  "search": {
+    "placeholder": "Pesquisar mensagens…"
   }
 }
