@@ -1116,3 +1116,101 @@ plaintext (`contentSource: 'reporter'`), gated on channel membership.
   transfer (consistent with no-history-on-join).
 - Voice is out of scope: secure channels are text-only by construction
   (`type: 'text'` enforced at creation; no voice path accepts them).
+
+## 20. E2E-authenticated DM call signaling (shipped)
+
+DM calls are P2P WebRTC, so media has always been end-to-end encrypted by
+DTLS-SRTP. The gap was the *signaling*: SDP offers/answers and ICE candidates
+relayed through the server in plaintext, and the DTLS handshake trusts the
+fingerprints exchanged that way — a compromised relay could substitute
+fingerprints during setup and silently MITM a call. This section closes that
+gap: every `dm:voice:signal` payload now travels as a pairwise-Olm envelope
+sealed to the peer's one call device, so the fingerprints ride inside
+authenticated ciphertext and a substitution dies against pinned identities.
+
+### 20.1 Threat model
+
+- **In scope:** a relay (compromised server, or anything that can rewrite
+  `dm:voice:signal`) substituting or injecting SDP/candidates during call
+  setup; replay and reorder of captured signal envelopes; a server inventing a
+  device id to route signals somewhere else.
+- **Out of scope (unchanged):** call *metadata* — who calls whom, when, for
+  how long, ring/joined/left/mute/deaf/speaking events and the 'Voice call
+  started/ended' system messages stay plaintext. They are presence, not
+  content.
+
+### 20.2 Wire format
+
+The `signal` field of `dm:voice:signal` is an olm1 envelope string
+(`buildE2EEnvelope`). Inside the Olm plaintext (`buildCallSignalPlaintext` /
+`parseCallSignalPlaintext` in `packages/shared/src/e2e.ts`, strict exact-keys
+parser):
+
+```
+{ v: 1, conversationId, senderUserId, senderDeviceId,
+  epoch,   // random per signaling session — receiver resets seq tracking on change
+  seq,     // strictly increasing within an epoch
+  signal } // { type: 'offer'|'answer', sdp } | { type: 'ice-candidate', candidate }
+```
+
+The receiver verifies every binding field against its OWN pinned state (the
+`importKeyShare` pattern): conversation, sender user, sender device. The
+`epoch` exists because reconnects re-glare with fresh counters on one side
+only — a bare per-call seq would deadlock every reconnect. Exact replay is
+already impossible at the Olm layer; the epoch/seq check is ordering hygiene
+and defense-in-depth. The server relays the payload opaquely
+(`dmVoiceHandler` requires string-or-object ≤ `DM_SIGNAL_MAX` and never
+parses it).
+
+### 20.3 Device pinning
+
+Calls are device-to-device. `dm:voice:join` announces the joiner's E2E
+`deviceId` (validated against `E2E_DEVICE_ID_RE` server-side, stripped if
+malformed — it is routing metadata; the binding is cryptographic on the
+client). Every `dm:voice:joined` (broadcast, replay, reconnect rebind)
+carries it. On the joined event the client pins `{userId, deviceId}` and
+`beginCallSignaling` mints a fresh epoch. Before sealing anything, the sender
+vets the claimed device against the peer's verified device list
+(`fetchDeviceList`, signature-checked + TOFU-pinned) — a server-invented
+device id dies as `binding-mismatch` before any session is built. The ring
+(`dm:voice:offer`) deliberately does NOT carry a device id: pinning happens
+via joined events, which both sides receive before any signal can relay.
+
+If the peer rejoins from a different device the old RTCPeerConnection is torn
+down, the new device is pinned (same TOFU/cross-signing checks), and a fresh
+epoch re-glares.
+
+### 20.4 Ordering (the critical mechanism)
+
+Async crypto must not reorder signaling. voiceStore serializes both
+directions through per-call promise chains: sends append encrypt→emit in
+generation order; receives append decrypt→dispatch in socket-arrival order
+(the seq check requires it). Signals that arrive before the joined event pins
+the device (an offer CAN beat it across the relay) are buffered — capped, and
+flushed in arrival order once the pin lands — because dropping them would
+deadlock the polite side of glare.
+
+### 20.5 Hard cutover
+
+A payload that is not an olm1 envelope string is a `legacy-signal` security
+error — the call ABORTS with "peer must update", never downgrades (same
+precedent as always-on DMs). Identity changes mid-call flag the existing
+warning UX and abort; `peer-not-e2e` (no published devices) aborts.
+Transient encrypt failures get exactly one retry, then abort. There is no
+plaintext fallback path, and none may ever be added.
+
+### 20.6 UX
+
+No new verification surface: calls ride the same pinned identities as DMs,
+and the safety number already covers them. `DMVoicePanel` shows a lock
+(`data-testid="dm-call-e2e-lock"`) once the peer device is pinned. Abort
+reasons map to four toasts (`e2e.callAbort*`, all 11 locales).
+
+### 20.7 Known gaps
+
+- Group calls would need per-participant pins and per-pair sessions; DM calls
+  are 1:1 by construction, so the pin is a single device.
+- Server voice channels (SFU) are NOT covered — media terminates at
+  mediasoup. True SFU E2E is SFrame-class work, tracked separately.
+- A malicious server can still deny service (drop signals, refuse the relay);
+  E2E authenticates, it cannot force delivery.

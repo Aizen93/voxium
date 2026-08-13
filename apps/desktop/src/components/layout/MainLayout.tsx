@@ -480,8 +480,12 @@ export function MainLayout() {
         useVoiceStore.getState().setDMCallUserSpeaking(userId, speaking);
       },
       dmVoiceSignal: ({ from, signal }: { from: string; signal: unknown }) => {
-        if (!useVoiceStore.getState().dmCallConversationId) return;
-        useVoiceStore.getState().handleDMSignal(from, signal);
+        const voiceState = useVoiceStore.getState();
+        if (!voiceState.dmCallConversationId) return;
+        // Once the call peer's device is pinned, signals from anyone else are
+        // noise at best — drop before they reach the E2E decrypt path
+        if (voiceState.dmCallPeerDevice && from !== voiceState.dmCallPeerDevice.userId) return;
+        voiceState.handleDMSignal(from, signal);
       },
       dmVoiceEnded: ({ conversationId }: { conversationId: string }) => {
         const voiceState = useVoiceStore.getState();

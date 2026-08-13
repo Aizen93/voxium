@@ -1,4 +1,5 @@
 import type { Server as SocketServer, Socket } from 'socket.io';
+import { DM_SIGNAL_MAX, E2E_DEVICE_ID_RE } from '@voxium/shared';
 import type { ServerToClientEvents, ClientToServerEvents, Message } from '@voxium/shared';
 import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
@@ -72,6 +73,13 @@ interface DMVoiceUserState {
   socketId: string;
   selfMute: boolean;
   selfDeaf: boolean;
+  /**
+   * The E2E device the participant is calling from. Routing metadata only —
+   * the server validates the SHAPE and relays it so peers know which device
+   * to seal call signals to; the cryptographic binding happens client-side
+   * (a lied-about deviceId fails Olm decryption against the pinned identity).
+   */
+  deviceId?: string;
 }
 
 async function getDMVoiceUsers(conversationId: string): Promise<Map<string, DMVoiceUserState>> {
@@ -112,10 +120,13 @@ async function updateDMVoiceUserSocket(
   userId: string,
   socketId: string,
   selfMute: boolean,
-  selfDeaf: boolean
+  selfDeaf: boolean,
+  deviceId?: string
 ): Promise<boolean> {
   const redis = getRedis();
-  const state: DMVoiceUserState = { socketId, selfMute, selfDeaf };
+  // deviceId travels with every rebind — a reconnect that omitted it would
+  // silently erase the peer's routing hint for encrypted signaling
+  const state: DMVoiceUserState = { socketId, selfMute, selfDeaf, ...(deviceId && { deviceId }) };
   const updated = await redis.eval(
     `if redis.call('hexists', KEYS[1], ARGV[1]) == 0 then return 0 end
      redis.call('hset', KEYS[1], ARGV[1], ARGV[2])
@@ -344,7 +355,7 @@ export function handleDMVoiceEvents(
 ) {
   const userId = socket.data.userId as string;
 
-  socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
+  socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => {
     if (!socketRateLimit(socket, 'dm:voice:join', 10)) return;
     if (typeof conversationId !== 'string' || !conversationId) return;
     if (!isFeatureEnabled('dm_voice')) {
@@ -369,13 +380,19 @@ export function handleDMVoiceEvents(
 
     const initialMute = state?.selfMute ?? false;
     const initialDeaf = state?.selfDeaf ?? false;
+    // E2E call-signaling routing hint: shape-validated, stripped if malformed
+    // (never trusted — clients bind it cryptographically via Olm)
+    const deviceId =
+      typeof state?.deviceId === 'string' && E2E_DEVICE_ID_RE.test(state.deviceId)
+        ? state.deviceId
+        : undefined;
 
     // Handle an existing DM call for this user.
     const existingCall = await getUserDMCall(userId);
     if (existingCall === conversationId) {
       // Reconnect into the SAME call: rebind our socket in place without ending the
       // call or re-ringing the peer, then rehydrate this socket's participant view.
-      const rebound = await updateDMVoiceUserSocket(conversationId, userId, socket.id, initialMute, initialDeaf);
+      const rebound = await updateDMVoiceUserSocket(conversationId, userId, socket.id, initialMute, initialDeaf, deviceId);
       if (rebound) {
         socket.join(`dm:voice:${conversationId}`);
         socket.data.dmCallConversationId = conversationId;
@@ -393,7 +410,7 @@ export function handleDMVoiceEvents(
         }) : [];
         for (const u of infos) {
           const st = rejoinUsers.get(u.id);
-          socket.emit('dm:voice:joined', { conversationId, user: { ...u, selfMute: st?.selfMute ?? false, selfDeaf: st?.selfDeaf ?? false, serverMuted: false, serverDeafened: false, speaking: false } });
+          socket.emit('dm:voice:joined', { conversationId, user: { ...u, selfMute: st?.selfMute ?? false, selfDeaf: st?.selfDeaf ?? false, serverMuted: false, serverDeafened: false, speaking: false, ...(st?.deviceId && { deviceId: st.deviceId }) } });
         }
         console.log(`[DMVoice] User ${userId} rebound socket for existing call ${conversationId}`);
         return;
@@ -427,6 +444,7 @@ export function handleDMVoiceEvents(
         socketId: socket.id,
         selfMute: initialMute,
         selfDeaf: initialDeaf,
+        ...(deviceId && { deviceId }),
       });
     } catch (err) {
       console.error(`[DMVoice] Redis error adding user to call:`, err);
@@ -444,7 +462,7 @@ export function handleDMVoiceEvents(
 
     if (!user) return;
 
-    const voiceUser = { ...user, selfMute: initialMute, selfDeaf: initialDeaf, serverMuted: false, serverDeafened: false, speaking: false };
+    const voiceUser = { ...user, selfMute: initialMute, selfDeaf: initialDeaf, serverMuted: false, serverDeafened: false, speaking: false, ...(deviceId && { deviceId }) };
     const callUsers = await getDMVoiceUsers(conversationId);
 
     if (callUsers.size === 1) {
@@ -472,7 +490,7 @@ export function handleDMVoiceEvents(
         });
         const existingVoiceUsers = existingUserInfos.map((u) => {
           const uState = callUsers.get(u.id);
-          return { ...u, selfMute: uState?.selfMute ?? false, selfDeaf: uState?.selfDeaf ?? false, serverMuted: false, serverDeafened: false, speaking: false };
+          return { ...u, selfMute: uState?.selfMute ?? false, selfDeaf: uState?.selfDeaf ?? false, serverMuted: false, serverDeafened: false, speaking: false, ...(uState?.deviceId && { deviceId: uState.deviceId }) };
         });
         // Send as joined events to the new joiner so they know who's already there
         for (const vu of existingVoiceUsers) {
@@ -596,8 +614,15 @@ export function handleDMVoiceEvents(
   socket.on('dm:voice:signal', async (data: { to: string; signal: unknown }) => {
     if (!socketRateLimit(socket, 'dm:voice:signal', 300)) return;
     if (!data || typeof data !== 'object' || typeof data.to !== 'string' || !data.to) return;
-    // Reject excessively large signal payloads (max 64KB serialized)
-    if (JSON.stringify(data.signal).length > 65536) return;
+    // Only strings (olm1 envelopes after the E2E cutover) and plain objects
+    // (legacy signals during rollout) are relayable. This gate also fixes a
+    // latent crash: JSON.stringify(undefined | function | symbol) returns
+    // undefined, so `.length` on it threw inside this async handler — an
+    // unhandled rejection any client could trigger with a malformed frame.
+    const signalType = typeof data.signal;
+    if (data.signal == null || (signalType !== 'string' && signalType !== 'object')) return;
+    // Reject excessively large signal payloads (serialized, UTF-16 chars)
+    if (JSON.stringify(data.signal).length > DM_SIGNAL_MAX) return;
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 

@@ -1094,7 +1094,12 @@
     "linkConfirmExplainer": "Mit der Genehmigung erhält dieses Gerät deinen Kontoschlüssel: Es kann dann deine verschlüsselten Unterhaltungen lesen und weitere Geräte genehmigen. Fahre nur fort, wenn es das Gerät vor dir ist.",
     "linkConfirmAction": "Gerät genehmigen",
     "devicesNotReady": "Die Verschlüsselung wird auf diesem Gerät noch eingerichtet, deine Geräte können daher noch nicht angezeigt werden. Schau gleich noch einmal vorbei.",
-    "identityAcceptFailed": "Die neuen Schlüssel konnten nicht akzeptiert werden"
+    "identityAcceptFailed": "Die neuen Schlüssel konnten nicht akzeptiert werden",
+    "callLocked": "Ende-zu-Ende-verschlüsselter Anruf",
+    "callAbortIdentityChanged": "Anruf beendet: Die Sicherheitsschlüssel von {{name}} haben sich geändert. Überprüfe die neue Sicherheitsnummer, bevor du erneut anrufst.",
+    "callAbortPeerMustUpdate": "Anruf beendet: Die App von {{name}} unterstützt keine sicheren Anrufe. Bitte um ein Update von Voxium.",
+    "callAbortPeerNotE2E": "Anruf beendet: {{name}} hat die Verschlüsselung noch nicht eingerichtet, daher kann kein sicherer Anruf aufgebaut werden.",
+    "callAbortSignalingFailed": "Anruf beendet: Der sichere Verbindungsaufbau ist fehlgeschlagen. Versuche es erneut."
   },
   "people": {
     "title": "Personen",

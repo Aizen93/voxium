@@ -3251,3 +3251,100 @@ describe('E2EService — secure-channel group sessions', () => {
     ).toBe('both screens');
   });
 });
+
+// ─── Device-sealed payloads (call signaling, spec §20) ───────────────────────
+//
+// encryptToDevice/decryptFromDevice are the primitives under E2E-authenticated
+// call signaling: one Olm message per WebRTC signal, bound to ONE peer device.
+// These tests pin the binding properties with real crypto.
+
+describe('E2EService — device-sealed payloads', () => {
+  async function pair() {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'seal-alice');
+    const bob = makeParty(server, 'seal-bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    return { server, alice, bob };
+  }
+
+  it('round-trips both directions: prekey (t:0) first, ratchet (t:1) after', async () => {
+    const { alice, bob } = await pair();
+
+    const first = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'signal-one');
+    expect(JSON.parse(first).t).toBe(0); // no session yet → prekey message
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, first)).toBe('signal-one');
+
+    // Bob replies over the now-established session
+    const reply = await bob.service.encryptToDevice(alice.userId, alice.service.deviceId, 'signal-two');
+    expect(await alice.service.decryptFromDevice(bob.userId, bob.service.deviceId, reply)).toBe('signal-two');
+
+    // Alice's next message continues the ratchet (t:1)
+    const second = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'signal-three');
+    expect(JSON.parse(second).t).toBe(1);
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, second)).toBe('signal-three');
+  });
+
+  it('an envelope bound to the WRONG device decrypts to null', async () => {
+    const { server, alice, bob } = await pair();
+    // Bob has a second device the envelope was NOT encrypted to
+    const bobLaptop = makeDevice(server, bob.userId, { keyProvider: bob.keyProvider });
+    await bobLaptop.service.initialize();
+    await flushQueue();
+
+    const envelope = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'for the desktop only');
+
+    expect(await bobLaptop.service.decryptFromDevice(alice.userId, alice.service.deviceId, envelope)).toBeNull();
+    // …and the intended device still reads it
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, envelope)).toBe('for the desktop only');
+  });
+
+  it('a receiver expecting a DIFFERENT sender device gets null (server cannot re-attribute)', async () => {
+    const { alice, bob } = await pair();
+    const envelope = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'from alice-desktop');
+
+    // The server claims the envelope came from some other device id of alice
+    expect(await bob.service.decryptFromDevice(alice.userId, 'device-imposter1', envelope)).toBeNull();
+  });
+
+  it('tampered ciphertext and non-envelope strings decrypt to null', async () => {
+    const { alice, bob } = await pair();
+    const envelope = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'pristine');
+    const parsed = JSON.parse(envelope);
+    const tampered = JSON.stringify({ ...parsed, b: `${(parsed.b as string).slice(0, -4)}AAAA` });
+
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, tampered)).toBeNull();
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, '{"type":"offer","sdp":"x"}')).toBeNull();
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, 'not json at all')).toBeNull();
+  });
+
+  it('a REPLAYED envelope fails on the second decrypt (one-shot ratchet keys)', async () => {
+    const { alice, bob } = await pair();
+    // Establish the session, then test replay on a ratchet (t:1) message
+    const first = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'establish');
+    await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, first);
+    const ratchet = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'once only');
+
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, ratchet)).toBe('once only');
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, ratchet)).toBeNull();
+  });
+
+  it('identity change during session establishment propagates E2EIdentityChangedError', async () => {
+    const { server, alice, bob } = await pair();
+    // Pin bob's identity first
+    const est = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'pin it');
+    await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, est);
+
+    // Bob's device re-registers with brand-new keys under the SAME device id
+    // (what a server-substituted identity looks like to alice)
+    await registerRawDevice(server, bob.userId, bob.service.deviceId);
+    // Force a fresh session build against the changed identity
+    await alice.service.resetSession(bob.userId);
+
+    await expect(
+      alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'must not send')
+    ).rejects.toBeInstanceOf(E2EIdentityChangedError);
+  });
+});

@@ -1094,7 +1094,12 @@
     "linkConfirmExplainer": "Al aprobarlo, este dispositivo recibe la clave de tu cuenta: podrá leer tus conversaciones cifradas y aprobar otros dispositivos. Continúa solo si es el dispositivo que tienes delante.",
     "linkConfirmAction": "Aprobar dispositivo",
     "devicesNotReady": "El cifrado aún se está configurando en este dispositivo, así que todavía no se pueden mostrar tus dispositivos. Vuelve en un momento.",
-    "identityAcceptFailed": "No se pudieron aceptar las nuevas claves"
+    "identityAcceptFailed": "No se pudieron aceptar las nuevas claves",
+    "callLocked": "Llamada cifrada de extremo a extremo",
+    "callAbortIdentityChanged": "Llamada finalizada: las claves de seguridad de {{name}} cambiaron. Verifica su nuevo número de seguridad antes de volver a llamar.",
+    "callAbortPeerMustUpdate": "Llamada finalizada: la aplicación de {{name}} no puede hacer llamadas seguras. Pídele que actualice Voxium.",
+    "callAbortPeerNotE2E": "Llamada finalizada: {{name}} aún no ha configurado el cifrado, así que no se puede establecer una llamada segura.",
+    "callAbortSignalingFailed": "Llamada finalizada: falló el establecimiento de la llamada segura. Inténtalo de nuevo."
   },
   "people": {
     "title": "Personas",

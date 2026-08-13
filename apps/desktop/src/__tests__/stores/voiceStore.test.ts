@@ -28,6 +28,41 @@ vi.mock('../../services/sdpUtils', () => ({
   optimizeOpusSDP: vi.fn((sdp: string) => sdp),
 }));
 
+// callCrypto is dynamically imported by voiceStore's send/receive chains —
+// vi.mock intercepts dynamic imports too. Default behavior (set in beforeEach):
+// encrypt tags the signal into a fake envelope, decrypt passes payloads through
+// verbatim, so tests drive the WebRTC layer with plain signal objects.
+const cc = vi.hoisted(() => {
+  class CallSecurityError extends Error {
+    constructor(
+      readonly kind: 'legacy-signal' | 'binding-mismatch' | 'peer-not-e2e',
+      message: string,
+    ) {
+      super(message);
+      this.name = 'CallSecurityError';
+    }
+  }
+  class E2EIdentityChangedError extends Error {
+    constructor(readonly peerUserId: string) {
+      super(`identity changed for ${peerUserId}`);
+      this.name = 'E2EIdentityChangedError';
+    }
+  }
+  return {
+    CallSecurityError,
+    E2EIdentityChangedError,
+    beginCallSignaling: vi.fn(),
+    endCallSignaling: vi.fn(),
+    getCallPeerDevice: vi.fn(),
+    encryptCallSignal: vi.fn(),
+    decryptCallSignal: vi.fn(),
+  };
+});
+vi.mock('../../services/e2e/callCrypto', () => cc);
+vi.mock('../../stores/dmStore', () => ({
+  useDMStore: { getState: () => ({ conversations: [] }) },
+}));
+
 vi.mock('@timephy/rnnoise-wasm', () => ({
   NoiseSuppressorWorklet_Name: 'NoiseSuppressorWorklet',
 }));
@@ -99,6 +134,52 @@ function fakeAudioElement() {
   };
 }
 
+/** Minimal RTCPeerConnection double tracking signaling state transitions. */
+class FakeRTCPeerConnection {
+  static instances: FakeRTCPeerConnection[] = [];
+  localDescription: { type: string; sdp?: string } | null = null;
+  remoteDescription: { type: string; sdp?: string } | null = null;
+  signalingState = 'stable';
+  iceConnectionState = 'new';
+  connectionState = 'new';
+  onnegotiationneeded: (() => void) | null = null;
+  onicecandidate: (() => void) | null = null;
+  oniceconnectionstatechange: (() => void) | null = null;
+  onconnectionstatechange: (() => void) | null = null;
+  ontrack: (() => void) | null = null;
+  addTrack = vi.fn();
+  close = vi.fn();
+  addIceCandidate = vi.fn().mockResolvedValue(undefined);
+  createOffer = vi.fn().mockResolvedValue({ type: 'offer', sdp: 'x' });
+  createAnswer = vi.fn().mockResolvedValue({ type: 'answer', sdp: 'x' });
+  setLocalDescription = vi.fn().mockImplementation((desc: { type: string; sdp?: string }) => {
+    if (desc?.type === 'rollback') {
+      this.localDescription = null;
+      this.signalingState = 'stable';
+    } else {
+      this.localDescription = desc;
+      this.signalingState = desc?.type === 'offer' ? 'have-local-offer' : 'stable';
+    }
+    return Promise.resolve();
+  });
+  setRemoteDescription = vi.fn().mockImplementation((desc: { type: string; sdp?: string }) => {
+    this.remoteDescription = desc;
+    this.signalingState = desc?.type === 'offer' ? 'have-remote-offer' : 'stable';
+    return Promise.resolve();
+  });
+  constructor() {
+    FakeRTCPeerConnection.instances.push(this);
+  }
+}
+
+/** Drain the send/receive chains: dynamic imports + crypto are microtasks,
+ *  peer creation is a macrotask — a few timer rounds settle everything. */
+const flushAsync = async () => {
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+};
+
 describe('voiceStore', () => {
   beforeEach(() => {
     // Reset store to initial state
@@ -113,10 +194,22 @@ describe('voiceStore', () => {
       latency: null,
       dmCallConversationId: null,
       dmCallUsers: [],
+      dmCallPeerDevice: null,
       incomingCall: null,
       peers: new Map(),
       remoteAudios: new Map(),
     });
+    // Reset the module-level signal chains / pre-pin buffer (leaveDMCall is a
+    // no-op socket-wise here because the state was just cleared)
+    useVoiceStore.getState().leaveDMCall();
+    for (const fn of [cc.beginCallSignaling, cc.endCallSignaling, cc.getCallPeerDevice, cc.encryptCallSignal, cc.decryptCallSignal]) {
+      fn.mockReset();
+    }
+    cc.getCallPeerDevice.mockReturnValue(null);
+    cc.encryptCallSignal.mockImplementation(async (_conv: string, _peer: unknown, signal: unknown) =>
+      JSON.stringify({ env: signal }));
+    cc.decryptCallSignal.mockImplementation(async (_conv: string, _peer: unknown, payload: unknown) => payload);
+    vi.mocked(vi.mocked(getSocket)()!.emit).mockClear();
   });
 
   describe('ICE_SERVERS (STUN configuration)', () => {
@@ -189,20 +282,30 @@ describe('voiceStore', () => {
   });
 
   describe('addDMCallUser', () => {
-    it('should add a user to dmCallUsers', () => {
+    const bob = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false, deviceId: 'device-bob00001' };
+
+    it('should add a user to dmCallUsers and pin their E2E call device', () => {
       useVoiceStore.setState({ dmCallConversationId: 'conv-1', localUserId: 'user-1' });
-      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false };
-      useVoiceStore.getState().addDMCallUser(user);
+      useVoiceStore.getState().addDMCallUser(bob);
       expect(useVoiceStore.getState().dmCallUsers).toHaveLength(1);
       expect(useVoiceStore.getState().dmCallUsers[0].id).toBe('user-2');
+      expect(useVoiceStore.getState().dmCallPeerDevice).toEqual({ userId: 'user-2', deviceId: 'device-bob00001' });
     });
 
     it('should not add duplicate users', () => {
       useVoiceStore.setState({ dmCallConversationId: 'conv-1', localUserId: 'user-1' });
-      const user = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false };
-      useVoiceStore.getState().addDMCallUser(user);
-      useVoiceStore.getState().addDMCallUser(user);
+      useVoiceStore.getState().addDMCallUser(bob);
+      useVoiceStore.getState().addDMCallUser(bob);
       expect(useVoiceStore.getState().dmCallUsers).toHaveLength(1);
+    });
+
+    it('does NOT demand a deviceId for the local user echo', () => {
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', localUserId: 'user-1' });
+      const self = { ...bob, id: 'user-1', deviceId: undefined };
+      useVoiceStore.getState().addDMCallUser(self);
+      expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1');
+      expect(useVoiceStore.getState().dmCallUsers).toHaveLength(1);
+      expect(useVoiceStore.getState().dmCallPeerDevice).toBeNull();
     });
   });
 
@@ -535,48 +638,7 @@ describe('voiceStore', () => {
   // ─── P3: ICE candidate queueing in handleDMSignal ─────────────────────────
 
   describe('handleDMSignal — ICE candidate queue (P3)', () => {
-    /** Minimal RTCPeerConnection double tracking signaling state transitions. */
-    class FakeRTCPeerConnection {
-      static instances: FakeRTCPeerConnection[] = [];
-      localDescription: { type: string; sdp?: string } | null = null;
-      remoteDescription: { type: string; sdp?: string } | null = null;
-      signalingState = 'stable';
-      iceConnectionState = 'new';
-      connectionState = 'new';
-      onnegotiationneeded: (() => void) | null = null;
-      onicecandidate: (() => void) | null = null;
-      oniceconnectionstatechange: (() => void) | null = null;
-      onconnectionstatechange: (() => void) | null = null;
-      ontrack: (() => void) | null = null;
-      addTrack = vi.fn();
-      close = vi.fn();
-      addIceCandidate = vi.fn().mockResolvedValue(undefined);
-      createOffer = vi.fn().mockResolvedValue({ type: 'offer', sdp: 'x' });
-      createAnswer = vi.fn().mockResolvedValue({ type: 'answer', sdp: 'x' });
-      setLocalDescription = vi.fn().mockImplementation((desc: { type: string; sdp?: string }) => {
-        if (desc?.type === 'rollback') {
-          this.localDescription = null;
-          this.signalingState = 'stable';
-        } else {
-          this.localDescription = desc;
-          this.signalingState = desc?.type === 'offer' ? 'have-local-offer' : 'stable';
-        }
-        return Promise.resolve();
-      });
-      setRemoteDescription = vi.fn().mockImplementation((desc: { type: string; sdp?: string }) => {
-        this.remoteDescription = desc;
-        this.signalingState = desc?.type === 'offer' ? 'have-remote-offer' : 'stable';
-        return Promise.resolve();
-      });
-      constructor() {
-        FakeRTCPeerConnection.instances.push(this);
-      }
-    }
-
-    const flushAsync = async () => {
-      await new Promise((r) => setTimeout(r, 0));
-      await new Promise((r) => setTimeout(r, 0));
-    };
+    const PEER = { userId: 'peer-x', deviceId: 'device-peerx001' };
 
     beforeEach(() => {
       FakeRTCPeerConnection.instances = [];
@@ -584,6 +646,9 @@ describe('voiceStore', () => {
       // Identity constructors: `new RTCSessionDescription(init)` → init
       vi.stubGlobal('RTCSessionDescription', function (this: unknown, init: unknown) { return init; });
       vi.stubGlobal('RTCIceCandidate', function (this: unknown, init: unknown) { return init; });
+      // Signals only flow once the call peer's device is pinned (spec §20);
+      // the mocked decrypt passes payloads through verbatim
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallPeerDevice: PEER });
     });
 
     afterEach(() => {
@@ -605,6 +670,7 @@ describe('voiceStore', () => {
         type: 'ice-candidate',
         candidate: { candidate: 'c1' },
       });
+      await flushAsync(); // decrypt chain
       expect(pc.addIceCandidate).not.toHaveBeenCalled();
       expect(useVoiceStore.getState().peers.get('peer-x')!.pendingCandidates).toHaveLength(1);
 
@@ -631,10 +697,160 @@ describe('voiceStore', () => {
         type: 'ice-candidate',
         candidate: { candidate: 'c2' },
       });
+      await flushAsync();
 
       expect(pc.addIceCandidate).toHaveBeenCalledTimes(1);
       expect(pc.addIceCandidate).toHaveBeenCalledWith({ candidate: 'c2' });
       expect(useVoiceStore.getState().peers.get('peer-x')!.pendingCandidates).toHaveLength(0);
+    });
+  });
+
+  describe('DM call signaling — E2E cutover (spec §20)', () => {
+    const PEER = { userId: 'peer-x', deviceId: 'device-peerx001' };
+    const peerUser = { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false };
+    const socketEmit = () => vi.mocked(vi.mocked(getSocket)()!.emit);
+
+    beforeEach(() => {
+      FakeRTCPeerConnection.instances = [];
+      vi.stubGlobal('RTCPeerConnection', FakeRTCPeerConnection);
+      vi.stubGlobal('RTCSessionDescription', function (this: unknown, init: unknown) { return init; });
+      vi.stubGlobal('RTCIceCandidate', function (this: unknown, init: unknown) { return init; });
+    });
+
+    afterEach(() => {
+      useVoiceStore.getState().destroyAllPeers();
+      vi.unstubAllGlobals();
+    });
+
+    it('seals every outbound signal to the pinned device and emits ONLY envelopes', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallPeerDevice: PEER });
+
+      useVoiceStore.getState().createDMPeer('peer-x', true); // initiator → offer
+      await flushAsync();
+
+      expect(cc.encryptCallSignal).toHaveBeenCalledWith('conv-1', PEER, { type: 'offer', sdp: 'x' });
+      const signalEmits = socketEmit().mock.calls.filter((c) => c[0] === 'dm:voice:signal');
+      expect(signalEmits).toHaveLength(1);
+      // The wire payload is the fake envelope from the encrypt mock — the
+      // plaintext signal object must never be emitted
+      expect(signalEmits[0][1]).toEqual({
+        to: 'peer-x',
+        signal: JSON.stringify({ env: { type: 'offer', sdp: 'x' } }),
+      });
+    });
+
+    it('drops outbound signals once the call has ended (no plaintext, no ghost envelope)', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallPeerDevice: PEER });
+      // Slow encrypt: hang up while the offer is being sealed
+      cc.encryptCallSignal.mockImplementation(async (_c: string, _p: unknown, signal: unknown) => {
+        await new Promise((r) => setTimeout(r, 0));
+        return JSON.stringify({ env: signal });
+      });
+
+      useVoiceStore.getState().createDMPeer('peer-x', true);
+      useVoiceStore.getState().leaveDMCall();
+      await flushAsync();
+
+      const signalEmits = socketEmit().mock.calls.filter((c) => c[0] === 'dm:voice:signal');
+      expect(signalEmits).toHaveLength(0);
+    });
+
+    it('aborts the call when an inbound signal is legacy plaintext (hard cutover)', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallPeerDevice: PEER, dmCallUsers: [peerUser] });
+      cc.decryptCallSignal.mockRejectedValue(new cc.CallSecurityError('legacy-signal', 'not an envelope'));
+
+      useVoiceStore.getState().handleDMSignal('peer-x', { type: 'offer', sdp: 'plaintext' });
+      await flushAsync();
+
+      expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+      expect(useVoiceStore.getState().dmCallUsers).toHaveLength(0);
+      expect(socketEmit()).toHaveBeenCalledWith('dm:voice:leave', 'conv-1');
+    });
+
+    it('aborts the call when the peer identity changes mid-call — never degrades', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallPeerDevice: PEER });
+      cc.decryptCallSignal.mockRejectedValue(new cc.E2EIdentityChangedError('peer-x'));
+
+      useVoiceStore.getState().handleDMSignal('peer-x', '{"v":1,"e":"olm1","t":1,"b":"x"}');
+      await flushAsync();
+
+      expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+    });
+
+    it('aborts when the peer joins without an E2E call device (un-updated client)', () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1' });
+
+      useVoiceStore.getState().addDMCallUser(peerUser); // no deviceId
+
+      expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+      expect(useVoiceStore.getState().dmCallUsers).toHaveLength(0);
+    });
+
+    it('buffers signals arriving before the pin and flushes them once the joined event lands', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1' });
+
+      // The peer's offer beats their dm:voice:joined event — must buffer
+      useVoiceStore.getState().handleDMSignal('peer-x', { type: 'offer', sdp: 'early' });
+      await flushAsync();
+      expect(cc.decryptCallSignal).not.toHaveBeenCalled();
+
+      // joined event pins the device → session begins → buffer flushes in order
+      useVoiceStore.getState().addDMCallUser({ ...peerUser, deviceId: PEER.deviceId });
+      await flushAsync();
+
+      expect(cc.beginCallSignaling).toHaveBeenCalledWith('conv-1', PEER);
+      expect(cc.decryptCallSignal).toHaveBeenCalledWith('conv-1', PEER, { type: 'offer', sdp: 'early' });
+      // The buffered offer drove responder-peer creation
+      const pc = FakeRTCPeerConnection.instances[0];
+      expect(pc).toBeDefined();
+      expect(pc.setRemoteDescription).toHaveBeenCalledWith({ type: 'offer', sdp: 'early' });
+    });
+
+    it('re-pins and tears down the old peer when the call peer rejoins from another device', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      const mockPc = { close: vi.fn() };
+      useVoiceStore.setState({
+        dmCallConversationId: 'conv-1',
+        dmCallPeerDevice: PEER,
+        dmCallUsers: [peerUser],
+        peers: new Map([['peer-x', { pc: mockPc as unknown as RTCPeerConnection, makingOffer: false, pendingCandidates: [] }]]),
+      });
+
+      useVoiceStore.getState().addDMCallUser({ ...peerUser, deviceId: 'device-peerx002' });
+      await flushAsync();
+
+      expect(useVoiceStore.getState().dmCallPeerDevice).toEqual({ userId: 'peer-x', deviceId: 'device-peerx002' });
+      expect(mockPc.close).toHaveBeenCalled(); // old DTLS session is dead
+      expect(cc.beginCallSignaling).toHaveBeenCalledWith('conv-1', { userId: 'peer-x', deviceId: 'device-peerx002' });
+      expect(useVoiceStore.getState().dmCallUsers).toHaveLength(1); // no duplicate entry
+    });
+
+    it('drops signals from anyone who is not the pinned call peer', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallPeerDevice: PEER });
+
+      useVoiceStore.getState().handleDMSignal('mallory', { type: 'offer', sdp: 'evil' });
+      await flushAsync();
+
+      expect(cc.decryptCallSignal).not.toHaveBeenCalled();
+      expect(useVoiceStore.getState().peers.size).toBe(0);
+      expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1'); // call unharmed
+    });
+
+    it('leaveDMCall clears the pin and the callCrypto session state', async () => {
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallPeerDevice: PEER });
+
+      useVoiceStore.getState().leaveDMCall();
+      await flushAsync();
+
+      expect(useVoiceStore.getState().dmCallPeerDevice).toBeNull();
+      expect(cc.endCallSignaling).toHaveBeenCalledWith('conv-1');
     });
   });
 });

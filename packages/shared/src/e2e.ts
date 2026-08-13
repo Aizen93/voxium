@@ -452,3 +452,81 @@ export interface E2EKeySharePayload {
   senderUserId: string;
   senderDeviceId: string;
 }
+
+// ─── E2E-authenticated call signaling (spec §20) ─────────────────────────────
+//
+// DM call media is P2P DTLS-SRTP (already end-to-end), but the DTLS handshake
+// trusts fingerprints exchanged through the server's dm:voice:signal relay. So
+// every signal payload (offer/answer/ICE candidate) travels as a pairwise-Olm
+// olm1 envelope: fingerprints ride inside authenticated ciphertext, and a
+// server substituting them fails against the pinned device identity. The
+// structures below are the PLAINTEXT inside that envelope.
+
+/** The WebRTC signal being carried. */
+export type E2ECallSignal =
+  | { type: 'offer' | 'answer'; sdp: string }
+  | { type: 'ice-candidate'; candidate: Record<string, unknown> };
+
+/**
+ * Olm plaintext of one call signal. The binding fields are re-verified by the
+ * receiver AGAINST ITS OWN state (active call + pinned peer device) — never
+ * trusted from the envelope alone (importKeyShare-style).
+ *
+ * `epoch` is a random per-signaling-session id: a reconnecting peer resets its
+ * send counter, and the stationary side has no other reset signal, so the
+ * receiver restarts its seq expectation whenever the epoch changes. Exact
+ * replay is already impossible at the Olm layer (one-shot ratchet keys);
+ * epoch+seq is ordering/replay defense-in-depth.
+ */
+export interface E2ECallSignalPlaintext {
+  v: 1;
+  conversationId: string;
+  senderUserId: string;
+  senderDeviceId: string;
+  epoch: string;
+  /** Strictly increasing within an epoch, starting at 0. */
+  seq: number;
+  signal: E2ECallSignal;
+}
+
+/** Random epoch id: URL-safe, matches E2E_CALL_EPOCH_RE. */
+export const E2E_CALL_EPOCH_RE = /^[A-Za-z0-9_-]{8,32}$/;
+
+/** Serialized-plaintext ceiling (an audio SDP is ~3-6 KB; candidates are tiny). */
+export const E2E_CALL_SIGNAL_PLAINTEXT_MAX = 24_576;
+
+export function buildCallSignalPlaintext(p: E2ECallSignalPlaintext): string {
+  return JSON.stringify(p);
+}
+
+/** Strict parse of a decrypted call-signal plaintext. Null on any deviation. */
+export function parseCallSignalPlaintext(raw: string): E2ECallSignalPlaintext | null {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > E2E_CALL_SIGNAL_PLAINTEXT_MAX) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const p = obj as Record<string, unknown>;
+  if (p.v !== 1) return null;
+  if (typeof p.conversationId !== 'string' || p.conversationId.length === 0 || p.conversationId.length > 64) return null;
+  if (typeof p.senderUserId !== 'string' || p.senderUserId.length === 0 || p.senderUserId.length > 64) return null;
+  if (typeof p.senderDeviceId !== 'string' || !E2E_DEVICE_ID_RE.test(p.senderDeviceId)) return null;
+  if (typeof p.epoch !== 'string' || !E2E_CALL_EPOCH_RE.test(p.epoch)) return null;
+  if (typeof p.seq !== 'number' || !Number.isInteger(p.seq) || p.seq < 0) return null;
+  const signal = p.signal as Record<string, unknown> | null | undefined;
+  if (!signal || typeof signal !== 'object' || Array.isArray(signal)) return null;
+  if (signal.type === 'offer' || signal.type === 'answer') {
+    if (typeof signal.sdp !== 'string' || signal.sdp.length === 0) return null;
+  } else if (signal.type === 'ice-candidate') {
+    if (!signal.candidate || typeof signal.candidate !== 'object' || Array.isArray(signal.candidate)) return null;
+  } else {
+    return null;
+  }
+  // Exactly the declared keys — extra fields are a smuggling channel
+  const keys = Object.keys(p).sort();
+  if (keys.length !== 7 || keys.join(',') !== 'conversationId,epoch,senderDeviceId,senderUserId,seq,signal,v') return null;
+  return obj as E2ECallSignalPlaintext;
+}

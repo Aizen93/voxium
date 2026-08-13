@@ -1094,7 +1094,12 @@
     "linkConfirmExplainer": "L'approbation transmet la clé de votre compte à cet appareil : il pourra lire vos conversations chiffrées et approuver d'autres appareils. Ne continuez que s'il s'agit de l'appareil devant vous.",
     "linkConfirmAction": "Approuver l'appareil",
     "devicesNotReady": "Le chiffrement est encore en cours de configuration sur cet appareil : vos appareils ne peuvent pas encore être listés. Revenez dans un instant.",
-    "identityAcceptFailed": "Impossible d'accepter les nouvelles clés"
+    "identityAcceptFailed": "Impossible d'accepter les nouvelles clés",
+    "callLocked": "Appel chiffré de bout en bout",
+    "callAbortIdentityChanged": "Appel terminé : les clés de sécurité de {{name}} ont changé. Vérifiez le nouveau numéro de sécurité avant de rappeler.",
+    "callAbortPeerMustUpdate": "Appel terminé : l'application de {{name}} ne peut pas passer d'appels sécurisés. Demandez-lui de mettre à jour Voxium.",
+    "callAbortPeerNotE2E": "Appel terminé : {{name}} n'a pas encore configuré le chiffrement, impossible d'établir un appel sécurisé.",
+    "callAbortSignalingFailed": "Appel terminé : l'établissement de l'appel sécurisé a échoué. Réessayez."
   },
   "people": {
     "title": "Membres",

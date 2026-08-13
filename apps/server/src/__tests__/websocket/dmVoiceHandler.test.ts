@@ -352,6 +352,68 @@ describe('dmVoiceHandler — dm:voice:join', () => {
     );
   });
 
+  it('stores a valid deviceId (E2E call-signal routing) and echoes it on joined events', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({});
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' }),
+    });
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' });
+
+    expect(mockRedis._multiChain.hSet).toHaveBeenCalledWith(
+      'dm:voice:users:conv-1',
+      'user-1',
+      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' })
+    );
+    // The caller's own joined event carries the deviceId the peer will seal to
+    expect(socket.emit).toHaveBeenCalledWith('dm:voice:joined', expect.objectContaining({
+      user: expect.objectContaining({ id: 'user-1', deviceId: 'device-aaaa1111' }),
+    }));
+  });
+
+  it('STRIPS a malformed deviceId — shape-validated routing metadata, never trusted', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({});
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+    });
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false, deviceId: 'not a device id!!' });
+
+    expect(mockRedis._multiChain.hSet).toHaveBeenCalledWith(
+      'dm:voice:users:conv-1',
+      'user-1',
+      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false })
+    );
+  });
+
+  it('reconnect rebind preserves the deviceId in the Lua-updated state', async () => {
+    // User already in this call → the rebind path runs
+    mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall
+    mockRedis.eval.mockResolvedValueOnce(1); // rebind succeeds
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' }),
+    });
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser] as any);
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' });
+
+    const evalCall = mockRedis.eval.mock.calls[0];
+    const stateJson = (evalCall[1] as { arguments: string[] }).arguments[1];
+    expect(JSON.parse(stateJson)).toMatchObject({ socketId: 'socket-1', deviceId: 'device-aaaa1111' });
+    // The rejoin replay to this socket carries the peer's stored deviceId
+    expect(socket.emit).toHaveBeenCalledWith('dm:voice:joined', expect.objectContaining({
+      user: expect.objectContaining({ deviceId: 'device-aaaa1111' }),
+    }));
+  });
+
   it('emits dm:voice:joined to room when second user joins', async () => {
     // Set up as user-2 joining a call where user-1 already is
     const { socket: socket2, handlers: handlers2 } = createMockSocket('user-2', 'socket-2');
@@ -1205,6 +1267,32 @@ describe('dmVoiceHandler — dm:voice:signal', () => {
     const handler = handlers.get('dm:voice:signal')!;
     await handler({ to: '', signal: {} });
     expect(mockRedis.hGet).not.toHaveBeenCalled();
+  });
+
+  it('rejects undefined/null/function signals WITHOUT throwing (latent stringify crash)', async () => {
+    // JSON.stringify(undefined | function) returns undefined — `.length` on it
+    // used to throw inside the async handler, an unhandled rejection any
+    // client could trigger with one malformed frame.
+    socket.data.dmCallConversationId = 'conv-1';
+    const handler = handlers.get('dm:voice:signal')!;
+    await expect(handler({ to: 'user-2', signal: undefined })).resolves.toBeUndefined();
+    await expect(handler({ to: 'user-2' })).resolves.toBeUndefined();
+    await expect(handler({ to: 'user-2', signal: null })).resolves.toBeUndefined();
+    await expect(handler({ to: 'user-2', signal: () => 'nope' })).resolves.toBeUndefined();
+    await expect(handler({ to: 'user-2', signal: 42 })).resolves.toBeUndefined();
+    expect(mockRedis.hGet).not.toHaveBeenCalled();
+  });
+
+  it('relays STRING signals (olm1 envelopes after the E2E cutover)', async () => {
+    socket.data.dmCallConversationId = 'conv-1';
+    mockRedis.hGet.mockResolvedValueOnce(JSON.stringify({ socketId: 'sock-2', selfMute: false, selfDeaf: false }));
+    const handler = handlers.get('dm:voice:signal')!;
+    const envelope = '{"v":1,"e":"olm1","t":0,"b":"Y2lwaGVydGV4dA"}';
+
+    await handler({ to: 'user-2', signal: envelope });
+
+    expect(io.to).toHaveBeenCalledWith('sock-2');
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:signal', { from: 'user-1', signal: envelope });
   });
 
   it('rejects signal payload exceeding 64KB', async () => {

@@ -6,7 +6,9 @@ import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, g
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
 import { optimizeOpusSDP } from '../services/sdpUtils';
-import type { VoiceUser, TransportOptions } from '@voxium/shared';
+import i18n from '../i18n';
+import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared';
+import type { CallPeerDevice } from '../services/e2e/callCrypto';
 
 /** Debug log — stripped in production builds by Vite tree-shaking */
 const debugLog = import.meta.env.DEV
@@ -65,6 +67,24 @@ const ICE_SERVERS: RTCIceServer[] = [
 
 const ICE_RESTART_DELAY_MS = 3000;
 const MAX_TRANSPORT_REJOIN_ATTEMPTS = 3;
+
+/**
+ * The E2E device id this client would call from — announced on dm:voice:join
+ * so the peer seals call signals to exactly this device (spec §20). Dynamic
+ * imports per the resetStores eval-cycle rule.
+ */
+async function resolveOwnCallDeviceId(): Promise<string | undefined> {
+  try {
+    const { getE2EService } = await import('../services/e2e/e2eService');
+    const { useAuthStore } = await import('./authStore');
+    const me = useAuthStore.getState().user;
+    if (!me) return undefined;
+    return getE2EService(me.id).deviceId || undefined;
+  } catch (err) {
+    console.warn('[DMVoice] Could not resolve E2E device id:', err);
+    return undefined;
+  }
+}
 
 // Screen-share video target bitrate. High enough for readable 1080p desktop
 // content; the server raises the viewer-side recv cap while a video consumer
@@ -135,6 +155,8 @@ interface VoiceState {
   dmCallConversationId: string | null;
   dmCallUsers: VoiceUser[];
   incomingCall: { conversationId: string; from: VoiceUser } | null;
+  /** The peer's E2E call device — every dm:voice:signal seals to exactly it. */
+  dmCallPeerDevice: CallPeerDevice | null;
 
   // ─── Shared Actions ────────────────────────────────────────────────
   setLocalUserId: (userId: string) => void;
@@ -186,10 +208,12 @@ interface VoiceState {
   // ─── DM Call Actions ───────────────────────────────────────────────
   joinDMCall: (conversationId: string) => Promise<void>;
   leaveDMCall: () => void;
+  /** Leave the call because of an E2E security condition, telling the user why. */
+  abortDMCall: (reason: DMCallAbortReason) => void;
   acceptCall: () => Promise<void>;
   declineCall: () => void;
   setIncomingCall: (data: { conversationId: string; from: VoiceUser } | null) => void;
-  addDMCallUser: (user: VoiceUser) => void;
+  addDMCallUser: (user: VoiceUser & { deviceId?: string }) => void;
   removeDMCallUser: (userId: string) => void;
   updateDMCallUserState: (userId: string, selfMute: boolean, selfDeaf: boolean) => void;
   setDMCallUserSpeaking: (userId: string, speaking: boolean) => void;
@@ -234,18 +258,146 @@ function applyOutputDevice(audio: HTMLAudioElement, deviceId: string) {
 
 type SignalEvent = 'voice:signal' | 'dm:voice:signal';
 
+export type DMCallAbortReason = 'identity-changed' | 'peer-must-update' | 'peer-not-e2e' | 'signaling-failed';
+
 /** Emit a signaling event on the socket with proper typing per event name. */
 function emitSignal(
   socket: ReturnType<typeof getSocket>,
   event: SignalEvent,
   data: { to: string; signal: unknown },
 ) {
-  if (!socket) return;
   if (event === 'dm:voice:signal') {
-    socket.emit('dm:voice:signal', data);
-  } else {
-    socket.emit('voice:signal', data);
+    // E2E cutover (spec §20): DM signals NEVER leave in plaintext. Sealed on
+    // the send chain to the pinned peer device; socket resolved at emit time.
+    sendDMSignalEncrypted(data.to, data.signal as E2ECallSignal);
+    return;
   }
+  if (!socket) return;
+  socket.emit('voice:signal', data);
+}
+
+// ─── E2E-authenticated DM call signaling (docs/e2e-dm-spec.md §20) ──────────
+// Every dm:voice:signal payload travels as a pairwise-Olm envelope sealed to
+// the ONE pinned peer device. The chains serialize the async crypto: wire
+// order must match signal generation order (sends) and socket arrival order
+// (receives — the strictly-increasing seq check depends on it).
+
+let dmSendChain: Promise<void> = Promise.resolve();
+let dmRecvChain: Promise<void> = Promise.resolve();
+// Inbound signals that arrive before dm:voice:joined pins the peer device (an
+// offer can beat the joined event across the relay) — buffered, flushed in
+// arrival order once the pin lands. Dropping them would deadlock the polite
+// side of glare.
+let prePinSignalQueue: Array<{ from: string; signal: unknown }> = [];
+// While true the pin is set but its begin/flush hasn't run yet — inbound
+// signals keep buffering so a live signal can't jump ahead of buffered ones.
+let dmPinFlushPending = false;
+const PRE_PIN_QUEUE_CAP = 32;
+
+function resetDMSignalChains() {
+  dmSendChain = Promise.resolve();
+  dmRecvChain = Promise.resolve();
+  prePinSignalQueue = [];
+  dmPinFlushPending = false;
+}
+
+function classifyCallCryptoError(
+  crypto: typeof import('../services/e2e/callCrypto'),
+  err: unknown,
+): DMCallAbortReason {
+  if (err instanceof crypto.E2EIdentityChangedError) return 'identity-changed';
+  if (err instanceof crypto.CallSecurityError) {
+    return err.kind === 'peer-not-e2e' ? 'peer-not-e2e' : 'peer-must-update';
+  }
+  return 'signaling-failed';
+}
+
+/** Seal one outbound DM call signal and emit it, preserving generation order. */
+function sendDMSignalEncrypted(to: string, signal: E2ECallSignal) {
+  dmSendChain = dmSendChain.then(async () => {
+    const state = useVoiceStore.getState();
+    const conversationId = state.dmCallConversationId;
+    const peer = state.dmCallPeerDevice;
+    if (!conversationId || !peer || peer.userId !== to) return; // call ended or stale target
+    const crypto = await import('../services/e2e/callCrypto');
+    let envelope: string;
+    try {
+      try {
+        envelope = await crypto.encryptCallSignal(conversationId, peer, signal);
+      } catch (err) {
+        // Security conditions abort immediately; transient failures (bundle
+        // claim hiccup, network) get exactly one retry
+        if (err instanceof crypto.CallSecurityError || err instanceof crypto.E2EIdentityChangedError) throw err;
+        debugLog('[DMVoice] Signal encrypt failed, retrying once:', err);
+        envelope = await crypto.encryptCallSignal(conversationId, peer, signal);
+      }
+    } catch (err) {
+      console.error('[DMVoice] Could not encrypt call signal — aborting call:', err);
+      useVoiceStore.getState().abortDMCall(classifyCallCryptoError(crypto, err));
+      return;
+    }
+    const now = useVoiceStore.getState();
+    // Re-pin swaps the peer object — stale sends for the old device are dropped
+    if (now.dmCallConversationId !== conversationId || now.dmCallPeerDevice !== peer) return;
+    getSocket()?.emit('dm:voice:signal', { to, signal: envelope });
+  }).catch((err) => {
+    console.error('[DMVoice] Call signal send chain error:', err);
+  });
+}
+
+/** Open one inbound envelope and drive the normal WebRTC signal handling. */
+function receiveDMSignalEncrypted(from: string, payload: unknown) {
+  dmRecvChain = dmRecvChain.then(async () => {
+    const state = useVoiceStore.getState();
+    const conversationId = state.dmCallConversationId;
+    const peer = state.dmCallPeerDevice;
+    if (!conversationId || !peer || peer.userId !== from) return;
+    const crypto = await import('../services/e2e/callCrypto');
+    let plain: E2ECallSignal | null;
+    try {
+      plain = await crypto.decryptCallSignal(conversationId, peer, payload);
+    } catch (err) {
+      console.error('[DMVoice] Inbound call signal failed security checks — aborting call:', err);
+      useVoiceStore.getState().abortDMCall(classifyCallCryptoError(crypto, err));
+      return;
+    }
+    if (plain === null) return; // droppable: replay, stale epoch, binding mismatch
+    const now = useVoiceStore.getState();
+    if (now.dmCallConversationId !== conversationId || now.dmCallPeerDevice !== peer) return;
+    handleSignalInternal('dm:voice:signal', '[DMVoice]', now.createDMPeer, from, plain, {
+      get: () => useVoiceStore.getState(),
+    });
+  }).catch((err) => {
+    console.error('[DMVoice] Call signal receive chain error:', err);
+  });
+}
+
+/**
+ * Pin the peer's call device and start a signaling session for it. The begin
+ * runs on the send chain (so it cannot race the first encrypt's auto-begin),
+ * then the pre-pin buffer flushes in arrival order.
+ */
+function pinDMCallPeer(conversationId: string, peer: CallPeerDevice) {
+  useVoiceStore.setState({ dmCallPeerDevice: peer });
+  dmPinFlushPending = true;
+  dmSendChain = dmSendChain.then(async () => {
+    const { beginCallSignaling, getCallPeerDevice } = await import('../services/e2e/callCrypto');
+    const current = getCallPeerDevice(conversationId);
+    // encryptCallSignal auto-begins on pin mismatch — don't reset an epoch a
+    // queued encrypt already started for this exact device
+    if (!current || current.userId !== peer.userId || current.deviceId !== peer.deviceId) {
+      beginCallSignaling(conversationId, peer);
+    }
+  }).catch((err) => {
+    console.error('[DMVoice] Failed to pin call peer device:', err);
+  }).finally(() => {
+    dmPinFlushPending = false;
+    const buffered = prePinSignalQueue.splice(0);
+    for (const b of buffered) {
+      if (b.from === peer.userId) receiveDMSignalEncrypted(b.from, b.signal);
+      else debugLog('[DMVoice] Discarding buffered signal from non-call-peer', b.from);
+    }
+  });
 }
 
 /** Acquire a mic audio stream using the user's preferred input device. */
@@ -633,6 +785,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   // DM call state
   dmCallConversationId: null,
   dmCallUsers: [],
+  dmCallPeerDevice: null,
   incomingCall: null,
 
   setLocalUserId: (userId: string) => set({ localUserId: userId }),
@@ -1667,6 +1820,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     const generation = ++voiceSessionGeneration;
+    resetDMSignalChains();
 
     const settings = useSettingsStore.getState();
     setNoiseGateThreshold(settings.noiseGateThreshold);
@@ -1704,12 +1858,34 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({
       dmCallConversationId: conversationId,
       dmCallUsers: [],
+      dmCallPeerDevice: null,
       localStream: stream,
       selfMute: effectiveMute,
       incomingCall: null,
     });
 
-    socket.emit('dm:voice:join', conversationId, { selfMute: serverMute, selfDeaf });
+    // Announce which E2E device this call runs on, so the peer seals signals
+    // to exactly it (spec §20), and pre-warm the peer's device list so the
+    // first signal's vetting/bundle claim don't stack onto offer glare.
+    const deviceId = await resolveOwnCallDeviceId();
+    try {
+      const { getE2EService } = await import('../services/e2e/e2eService');
+      const { useAuthStore } = await import('./authStore');
+      const { useDMStore } = await import('./dmStore');
+      const me = useAuthStore.getState().user;
+      const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
+      if (me && conversation) {
+        void getE2EService(me.id).fetchDeviceList(conversation.participant.id, true).catch((err) => {
+          console.warn('[DMVoice] Device-list pre-warm failed (will retry at first signal):', err);
+        });
+      }
+    } catch (err) {
+      console.warn('[DMVoice] Device-list pre-warm setup failed:', err);
+    }
+
+    if (generation !== voiceSessionGeneration) return; // superseded during the async imports
+
+    socket.emit('dm:voice:join', conversationId, { selfMute: serverMute, selfDeaf, deviceId });
     get().startLatencyMeasurement();
   },
 
@@ -1736,10 +1912,41 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({
       dmCallConversationId: null,
       dmCallUsers: [],
+      dmCallPeerDevice: null,
       localStream: null,
       latency: null,
       pttActive: false,
     });
+
+    resetDMSignalChains();
+    if (dmCallConversationId) {
+      void import('../services/e2e/callCrypto')
+        .then(({ endCallSignaling }) => endCallSignaling(dmCallConversationId))
+        .catch((err) => console.warn('[DMVoice] Failed to clear call signaling state:', err));
+    }
+  },
+
+  abortDMCall: (reason: DMCallAbortReason) => {
+    const conversationId = get().dmCallConversationId;
+    if (!conversationId) return;
+    console.warn('[DMVoice] Call aborted:', reason);
+    get().leaveDMCall();
+    void (async () => {
+      let name: string | null = null;
+      try {
+        const { useDMStore } = await import('./dmStore');
+        name = useDMStore.getState().conversations.find((c) => c.id === conversationId)?.participant.displayName ?? null;
+      } catch (err) {
+        console.warn('[DMVoice] Could not resolve peer name for abort toast:', err);
+      }
+      const key: Record<DMCallAbortReason, string> = {
+        'identity-changed': 'e2e.callAbortIdentityChanged',
+        'peer-must-update': 'e2e.callAbortPeerMustUpdate',
+        'peer-not-e2e': 'e2e.callAbortPeerNotE2E',
+        'signaling-failed': 'e2e.callAbortSignalingFailed',
+      };
+      toast.error(i18n.t(key[reason], { name: name ?? i18n.t('e2e.peerNotReadyFallbackName') }));
+    })();
   },
 
   acceptCall: async () => {
@@ -1757,8 +1964,31 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({ incomingCall: null });
   },
 
-  addDMCallUser: (user: VoiceUser) => {
-    const { dmCallUsers } = get();
+  addDMCallUser: (user: VoiceUser & { deviceId?: string }) => {
+    const { dmCallUsers, dmCallConversationId, localUserId } = get();
+
+    // Pin (or re-pin) the peer's E2E call device BEFORE any peer creation can
+    // emit a signal — every signal seals to exactly this device (spec §20).
+    // Runs even for already-listed users: a rejoin replay may carry a NEW
+    // device (peer reinstalled / switched devices mid-call).
+    if (dmCallConversationId && user.id !== localUserId) {
+      if (!user.deviceId) {
+        console.warn('[DMVoice] Peer joined without an E2E call device — aborting call');
+        get().abortDMCall('peer-must-update');
+        return;
+      }
+      const pinned = get().dmCallPeerDevice;
+      if (!pinned || pinned.userId !== user.id || pinned.deviceId !== user.deviceId) {
+        if (pinned) {
+          // Device changed mid-call: tear down the old peer and let the
+          // rejoiner's fresh offer re-glare against the new pin
+          debugLog('[DMVoice] Call peer device changed — re-pinning');
+          get().destroyPeer(user.id);
+        }
+        pinDMCallPeer(dmCallConversationId, { userId: user.id, deviceId: user.deviceId });
+      }
+    }
+
     if (dmCallUsers.some((u) => u.id === user.id)) return;
 
     set({ dmCallUsers: [...dmCallUsers, user] });
@@ -1807,7 +2037,23 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   handleDMSignal: (from: string, signal: unknown) => {
-    handleSignalInternal('dm:voice:signal', '[DMVoice]', get().createDMPeer, from, signal, { get });
+    const { dmCallConversationId, dmCallPeerDevice } = get();
+    if (!dmCallConversationId) return;
+    if (!dmCallPeerDevice || dmPinFlushPending) {
+      // Peer device not pinned yet (their signal beat the joined event) —
+      // buffer; pinDMCallPeer flushes in arrival order
+      if (prePinSignalQueue.length < PRE_PIN_QUEUE_CAP) {
+        prePinSignalQueue.push({ from, signal });
+      } else {
+        console.warn('[DMVoice] Pre-pin signal buffer full — dropping signal from', from);
+      }
+      return;
+    }
+    if (from !== dmCallPeerDevice.userId) {
+      debugLog('[DMVoice] Dropping DM signal from non-call-peer', from);
+      return;
+    }
+    receiveDMSignalEncrypted(from, signal);
   },
 }));
 
@@ -2132,7 +2378,9 @@ onSocketReconnect(async () => {
     socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
   } else if (dmCallConversationId) {
     debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
-    socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+    // deviceId must survive the rebind or the peer loses its sealing target
+    const deviceId = await resolveOwnCallDeviceId();
+    socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf, deviceId });
   }
 
   // Re-start latency measurement with new socket

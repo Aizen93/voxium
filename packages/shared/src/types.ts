@@ -340,7 +340,9 @@ export interface ServerToClientEvents {
   }) => void;
   'dm:unread:init': (data: { unreads: DMUnreadCount[] }) => void;
   'dm:voice:offer': (data: { conversationId: string; from: VoiceUser }) => void;
-  'dm:voice:joined': (data: { conversationId: string; user: VoiceUser }) => void;
+  // deviceId = the E2E device the participant answered from — peers seal call
+  // signals to exactly that device (docs/e2e-dm-spec.md §20)
+  'dm:voice:joined': (data: { conversationId: string; user: VoiceUser & { deviceId?: string } }) => void;
   'dm:voice:left': (data: { conversationId: string; userId: string }) => void;
   'dm:voice:state_update': (data: { conversationId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => void;
   'dm:voice:speaking': (data: { conversationId: string; userId: string; speaking: boolean }) => void;
@@ -400,7 +402,7 @@ export interface ClientToServerEvents {
   'dm:join': (conversationId: string) => void;
   'dm:typing:start': (conversationId: string) => void;
   'dm:typing:stop': (conversationId: string) => void;
-  'dm:voice:join': (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => void;
+  'dm:voice:join': (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => void;
   'dm:voice:leave': (conversationId: string) => void;
   'dm:voice:mute': (muted: boolean) => void;
   'dm:voice:deaf': (deafened: boolean) => void;

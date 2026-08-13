@@ -2600,6 +2600,54 @@ export class E2EService {
     });
   }
 
+  // ─── Device-sealed payloads (call signaling, spec §20) ─────────────────────
+
+  /**
+   * Olm-encrypt an arbitrary payload to ONE specific device and return the
+   * olm1 envelope string. The session establishment path verifies the
+   * device's binding signature and TOFU-pins its identity, so this throws
+   * E2EIdentityChangedError on a pin mismatch and E2EPeerNotReadyError when
+   * the peer has published nothing — callers abort, never degrade.
+   */
+  async encryptToDevice(userId: string, deviceId: string, plaintext: string): Promise<string> {
+    return this.enqueue(async () => {
+      const olm = await this.ensureOlmSession(userId, deviceId);
+      const { messageType, body } = olm.encrypt(plaintext) as { messageType: 0 | 1; body: string };
+      await this.persistOlmSession(userId, deviceId, olm);
+      return buildE2EEnvelope(messageType, body);
+    });
+  }
+
+  /**
+   * Decrypt an olm1 envelope that MUST come from one specific device. Returns
+   * null on any failure (bad envelope, wrong device, tampered ciphertext,
+   * replay) — the sender-device binding is what makes a server-substituted
+   * payload fail instead of silently succeeding.
+   *
+   * The one exception to null: an unknown sender device whose fetch reveals a
+   * PIN MISMATCH throws E2EIdentityChangedError — that is "the person you are
+   * talking to changed", which callers must surface, never swallow as a
+   * dropped packet.
+   */
+  async decryptFromDevice(userId: string, deviceId: string, envelopeStr: string): Promise<string | null> {
+    const envelope = parseE2EEnvelope(envelopeStr);
+    if (!envelope || envelope.e !== E2E_ENGINE_OLM1) return null;
+    // First contact with this sender device: verify + TOFU-pin its identity
+    // via the device list (importKeyShare pattern) — inbound pre-key sessions
+    // bind to the PINNED curve25519 key, so an unpinned device cannot decrypt.
+    if (!(await this.vault.getIdentity(userId, deviceId))) {
+      await this.fetchDeviceList(userId, true);
+    }
+    return this.enqueue(async () => {
+      try {
+        return await this.olmDecryptFromDevice(userId, deviceId, envelope as E2EOlmEnvelope);
+      } catch (err) {
+        console.warn(`e2e: device-sealed decrypt from ${userId}/${deviceId} failed:`, errText(err));
+        return null;
+      }
+    });
+  }
+
   /** Cache plaintext under the server-assigned message id (spec §7.2). */
   async cachePlaintext(
     messageId: string,

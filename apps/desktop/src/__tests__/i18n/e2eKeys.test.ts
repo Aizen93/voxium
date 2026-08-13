@@ -21,6 +21,10 @@ import { fileURLToPath } from 'node:url';
 const SOURCES = [
   fileURLToPath(new URL('../../components/dm/E2EControls.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/settings/E2EDevicesSection.tsx', import.meta.url)),
+  // DM call E2E surface: the lock indicator and the abort-reason toasts
+  // (voiceStore keeps its keys in a bare-literal lookup table, pattern 2)
+  fileURLToPath(new URL('../../components/voice/DMVoicePanel.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../stores/voiceStore.ts', import.meta.url)),
 ];
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
 
@@ -81,6 +85,8 @@ describe('E2E surface translation keys', () => {
     expect(keys).toContain('e2e.thisDeviceUnsignedBadgeTitle');
     expect(keys).toContain('e2e.resetIdentityConfirm');
     expect(keys).toContain('e2e.linkConfirmExplainer');
+    expect(keys).toContain('e2e.callLocked');
+    expect(keys).toContain('e2e.callAbortIdentityChanged');
     expect(locales.length).toBeGreaterThan(1);
   });
 

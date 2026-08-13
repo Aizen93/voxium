@@ -58,6 +58,14 @@ export const LIMITS = {
   THEME_SVG_MAX_SIZE: 10_000, // 10KB max for custom SVG patterns
 } as const;
 
+/**
+ * Max serialized dm:voice:signal payload the server will relay (UTF-16 chars,
+ * matching the JSON.stringify length check). Signals are opaque olm1 envelopes
+ * after the E2E cutover — the cap must fit a base64-inflated audio SDP with
+ * envelope framing, with generous headroom.
+ */
+export const DM_SIGNAL_MAX = 65_536;
+
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
 export type ThemePatternType = (typeof THEME_PATTERN_TYPES)[number];
 

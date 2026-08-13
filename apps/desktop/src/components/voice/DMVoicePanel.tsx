@@ -5,7 +5,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useLocalAudioLevel } from '../../hooks/useLocalAudioLevel';
 import { UserHoverTarget } from '../common/UserHoverTarget';
-import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Phone } from 'lucide-react';
+import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Phone, Lock } from 'lucide-react';
 import { clsx } from 'clsx';
 
 /**
@@ -23,6 +23,7 @@ export function DMVoicePanel() {
   const toggleMute = useVoiceStore((s) => s.toggleMute);
   const toggleDeaf = useVoiceStore((s) => s.toggleDeaf);
   const leaveDMCall = useVoiceStore((s) => s.leaveDMCall);
+  const dmCallPeerDevice = useVoiceStore((s) => s.dmCallPeerDevice);
   const { user } = useAuthStore();
   const localAudioLevel = useLocalAudioLevel();
 
@@ -54,8 +55,18 @@ export function DMVoicePanel() {
         >
           <Phone size={14} className="shrink-0 text-vox-voice-connected" />
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-semibold text-vox-voice-connected">
+            <p className="flex items-center gap-1 text-xs font-semibold text-vox-voice-connected">
               {waiting ? t('dm.calling') : t('dm.inACall')}
+              {dmCallPeerDevice && (
+                <span
+                  className="shrink-0"
+                  data-testid="dm-call-e2e-lock"
+                  title={t('e2e.callLocked')}
+                  aria-label={t('e2e.callLocked')}
+                >
+                  <Lock size={10} className="text-vox-voice-connected" />
+                </span>
+              )}
             </p>
             <p className="truncate text-[10px] text-vox-text-muted">
               {participantName}

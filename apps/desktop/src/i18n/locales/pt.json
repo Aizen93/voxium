@@ -1094,7 +1094,12 @@
     "linkConfirmExplainer": "Aprovar entrega a chave da sua conta a este dispositivo: passará a poder ler as suas conversas cifradas e a aprovar outros dispositivos. Continue apenas se for o dispositivo à sua frente.",
     "linkConfirmAction": "Aprovar dispositivo",
     "devicesNotReady": "A criptografia ainda está sendo configurada neste dispositivo, então seus dispositivos ainda não podem ser listados. Volte em instantes.",
-    "identityAcceptFailed": "Não foi possível aceitar as novas chaves"
+    "identityAcceptFailed": "Não foi possível aceitar as novas chaves",
+    "callLocked": "Chamada criptografada de ponta a ponta",
+    "callAbortIdentityChanged": "Chamada encerrada: as chaves de segurança de {{name}} mudaram. Verifique o novo número de segurança antes de ligar novamente.",
+    "callAbortPeerMustUpdate": "Chamada encerrada: o aplicativo de {{name}} não consegue fazer chamadas seguras. Peça para atualizar o Voxium.",
+    "callAbortPeerNotE2E": "Chamada encerrada: {{name}} ainda não configurou a criptografia, então não é possível estabelecer uma chamada segura.",
+    "callAbortSignalingFailed": "Chamada encerrada: falha ao estabelecer a chamada segura. Tente novamente."
   },
   "people": {
     "title": "Pessoas",

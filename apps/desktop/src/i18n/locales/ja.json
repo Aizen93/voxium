@@ -1094,7 +1094,12 @@
     "linkConfirmExplainer": "承認すると、この端末にアカウント鍵が渡されます。暗号化された会話を読み、他の端末を承認できるようになります。目の前にある端末の場合のみ続行してください。",
     "linkConfirmAction": "端末を承認",
     "devicesNotReady": "このデバイスでは暗号化の設定がまだ続いているため、デバイス一覧をまだ表示できません。少ししてからご確認ください。",
-    "identityAcceptFailed": "新しい鍵を受け入れられませんでした"
+    "identityAcceptFailed": "新しい鍵を受け入れられませんでした",
+    "callLocked": "エンドツーエンド暗号化された通話",
+    "callAbortIdentityChanged": "通話終了:{{name}}のセキュリティ鍵が変更されました。再度通話する前に新しい安全番号を確認してください。",
+    "callAbortPeerMustUpdate": "通話終了:{{name}}のアプリは安全な通話に対応していません。Voxiumの更新を依頼してください。",
+    "callAbortPeerNotE2E": "通話終了:{{name}}はまだ暗号化を設定していないため、安全な通話を確立できません。",
+    "callAbortSignalingFailed": "通話終了:安全な通話の確立に失敗しました。もう一度お試しください。"
   },
   "people": {
     "title": "メンバー",

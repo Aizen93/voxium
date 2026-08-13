@@ -1101,7 +1101,12 @@
     "linkConfirmExplainer": "Approving hands this device your account key: it will be able to read your encrypted conversations and approve further devices. Only continue if this is the device in front of you.",
     "linkConfirmAction": "Approve device",
     "devicesNotReady": "Encryption is still setting up on this device, so your devices can't be listed yet. Check back in a moment.",
-    "identityAcceptFailed": "Could not accept the new keys"
+    "identityAcceptFailed": "Could not accept the new keys",
+    "callLocked": "End-to-end encrypted call",
+    "callAbortIdentityChanged": "Call ended: {{name}}'s security keys changed. Verify their new safety number before calling again.",
+    "callAbortPeerMustUpdate": "Call ended: {{name}}'s app can't make secure calls. Ask them to update Voxium.",
+    "callAbortPeerNotE2E": "Call ended: {{name}} hasn't set up encryption yet, so a secure call can't be established.",
+    "callAbortSignalingFailed": "Call ended: secure call setup failed. Try again."
   },
   "people": {
     "title": "People",
