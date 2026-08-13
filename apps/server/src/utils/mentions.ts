@@ -39,11 +39,12 @@ export async function resolveMentionsForServer(
  * Returns a Map of userId -> user profile for efficient per-message lookup.
  */
 export async function batchResolveMentions(
-  messages: Array<{ content: string }>,
+  messages: Array<{ content: string; encrypted?: boolean }>,
   serverId: string,
 ): Promise<Map<string, { id: string; username: string; displayName: string; avatarUrl: string | null }>> {
   const allIds = new Set<string>();
   for (const m of messages) {
+    if (m.encrypted) continue; // ciphertext is never mention-parsed
     for (const id of extractMentionIds(m.content)) {
       allIds.add(id);
     }
@@ -64,9 +65,10 @@ export async function batchResolveMentions(
 
 /** Attach resolved mentions to a single message based on its content. */
 export function attachMentions(
-  message: { content: string },
+  message: { content: string; encrypted?: boolean },
   mentionMap: Map<string, { id: string; username: string; displayName: string; avatarUrl: string | null }>,
 ) {
+  if (message.encrypted) return [];
   const ids = extractMentionIds(message.content);
   return ids.map((id) => mentionMap.get(id)).filter(Boolean);
 }

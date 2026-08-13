@@ -21,9 +21,14 @@ vi.mock('../../utils/prisma', () => ({
   prisma: {
     conversation: { findUnique: vi.fn() },
     serverMember: { findUnique: vi.fn(), findMany: vi.fn() },
-    channel: { findMany: vi.fn() },
+    channel: { findMany: vi.fn(), findUnique: vi.fn() },
     message: { findMany: vi.fn() },
   },
+}));
+
+const mockFilterVisibleChannels = vi.fn();
+vi.mock('../../utils/permissionCalculator', () => ({
+  filterVisibleChannels: (...args: any[]) => mockFilterVisibleChannels(...args),
 }));
 
 import { prisma } from '../../utils/prisma';
@@ -66,6 +71,84 @@ describe('Search routes — DM search excludes E2E messages', () => {
 
     const res = await request(createApp()).get('/api/v1/search/dm/conv-1/messages?q=secret');
     expect(res.status).toBe(403);
+    expect(prisma.message.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('Search routes — server search respects visibility and encryption', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({
+      userId: 'user-1', serverId: 'srv-1',
+    } as any);
+  });
+
+  it('searches only channels the member can VIEW, never secure ones, never ciphertext', async () => {
+    vi.mocked(prisma.channel.findMany).mockResolvedValueOnce([
+      { id: 'ch-visible', secure: false },
+      { id: 'ch-hidden', secure: false },
+    ] as any);
+    // Visibility filter drops ch-hidden
+    mockFilterVisibleChannels.mockResolvedValueOnce([{ id: 'ch-visible', secure: false }]);
+    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([]);
+
+    const res = await request(createApp()).get('/api/v1/search/servers/srv-1/messages?q=hello');
+
+    expect(res.status).toBe(200);
+    // Secure channels are excluded at the SQL level, before visibility math
+    expect(prisma.channel.findMany).toHaveBeenCalledWith({
+      where: { serverId: 'srv-1', type: 'text', secure: false },
+      select: { id: true, secure: true },
+    });
+    expect(prisma.message.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          channelId: { in: ['ch-visible'] },
+          encrypted: false,
+        }),
+      }),
+    );
+  });
+
+  it('returns empty (not everything) when the member can see no channels', async () => {
+    vi.mocked(prisma.channel.findMany).mockResolvedValueOnce([
+      { id: 'ch-hidden', secure: false },
+    ] as any);
+    mockFilterVisibleChannels.mockResolvedValueOnce([]);
+
+    const res = await request(createApp()).get('/api/v1/search/servers/srv-1/messages?q=hello');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([]);
+    expect(prisma.message.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a SECURE channelId with the same error as an invalid one (no oracle)', async () => {
+    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({
+      id: 'ch-sec', serverId: 'srv-1', type: 'text', secure: true,
+    } as any);
+
+    const res = await request(createApp()).get(
+      '/api/v1/search/servers/srv-1/messages?q=hello&channelId=ch-sec',
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid channel');
+    expect(prisma.message.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a channelId the member cannot VIEW with the same generic error', async () => {
+    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({
+      id: 'ch-hidden', serverId: 'srv-1', type: 'text', secure: false,
+    } as any);
+    mockFilterVisibleChannels.mockResolvedValueOnce([]);
+
+    const res = await request(createApp()).get(
+      '/api/v1/search/servers/srv-1/messages?q=hello&channelId=ch-hidden',
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid channel');
     expect(prisma.message.findMany).not.toHaveBeenCalled();
   });
 });

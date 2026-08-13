@@ -427,6 +427,12 @@ describe('Invite Routes', () => {
           skipDuplicates: true,
         }),
       );
+      // SECURE channels are excluded from seeding — a joiner is not a member
+      // of any, and seeding would leak their ids into the joiner's read rows
+      expect(prismaMock.channel.findMany).toHaveBeenCalledWith({
+        where: { serverId: 'srv-1', type: 'text', secure: false },
+        select: { id: true },
+      });
     });
   });
 

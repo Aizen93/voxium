@@ -5,6 +5,7 @@ import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin
 import { rateLimitAdmin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { purgeE2EMaterial } from '../utils/e2ePurge';
+import { purgeSecureChannelStateForAccount } from '../utils/secureChannelLifecycle';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
@@ -476,9 +477,10 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           });
 
           if (!existingMembership) {
-            // Add them as a member first, seed ChannelRead records
+            // Add them as a member first, seed ChannelRead records (secure
+            // channels excluded — ownership grants no secure-channel access)
             const textChannels = await prisma.channel.findMany({
-              where: { serverId: action.serverId, type: 'text' },
+              where: { serverId: action.serverId, type: 'text', secure: false },
               select: { id: true },
             });
 
@@ -555,6 +557,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
       // Force logout then disconnect active socket (works across all nodes)
       await forceLogoutUser(targetId, 'Your account has been deleted');
 
+      // Secure channels: the DB cascade would silently reap the rows, but the
+      // members deserve events (created channels vanish from their sidebars,
+      // membership lists refresh). Best-effort, before the delete.
+      await purgeSecureChannelStateForAccount(targetId);
+
       // E2E key material has no FK to User (except the key backup), so it would
       // otherwise outlive the account it belongs to. One transaction with the
       // delete: purging a user who then survives strands every device they own.
@@ -596,6 +603,9 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
       // Force logout then disconnect active socket (works across all nodes)
       await forceLogoutUser(targetId, 'Your account has been deleted');
+
+      // Secure-channel cleanup (events for surviving members), before delete
+      await purgeSecureChannelStateForAccount(targetId);
 
       await prisma.$transaction(async (tx) => {
         await purgeE2EMaterial(targetId, tx);

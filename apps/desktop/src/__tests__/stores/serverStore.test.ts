@@ -192,3 +192,84 @@ describe('serverStore — pinned spaces', () => {
     expect(JSON.parse(localStorage.getItem('voxium_pinned_spaces')!)).toEqual(['s-x']);
   });
 });
+
+// ─── Secure channels ────────────────────────────────────────────────────────
+
+describe('secure channels', () => {
+  const mockDelete = api.delete as unknown as Mock;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useServerStore.setState({ secureChannelMembers: {} });
+  });
+
+  it('createSecureChannel POSTs name + memberIds and does NOT touch local channel state', async () => {
+    mockPost.mockResolvedValue({ data: { data: { id: 'sec-1', name: 'covert', secure: true } } });
+    const before = useServerStore.getState().channels;
+
+    const channel = await useServerStore.getState().createSecureChannel('srv-1', 'covert', ['u2', 'u3']);
+
+    expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/secure-channels', {
+      name: 'covert',
+      memberIds: ['u2', 'u3'],
+    });
+    expect(channel.id).toBe('sec-1');
+    // Socket event is the sole source of truth for the sidebar
+    expect(useServerStore.getState().channels).toBe(before);
+  });
+
+  it('member management hits the secure-channels endpoints', async () => {
+    mockPost.mockResolvedValue({ data: { data: {} } });
+    mockDelete.mockResolvedValue({ data: { data: {} } });
+
+    await useServerStore.getState().inviteSecureChannelMember('srv-1', 'sec-1', 'u9');
+    expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/secure-channels/sec-1/members', { userId: 'u9' });
+
+    await useServerStore.getState().removeSecureChannelMember('srv-1', 'sec-1', 'u9');
+    expect(mockDelete).toHaveBeenCalledWith('/servers/srv-1/secure-channels/sec-1/members/u9');
+  });
+
+  it('leaveSecureChannel removes self and drops the cached member list', async () => {
+    mockDelete.mockResolvedValue({ data: { data: {} } });
+    useServerStore.setState({
+      secureChannelMembers: { 'sec-1': [{ userId: 'me', isCreator: false, addedAt: '', user: { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null } }] },
+    });
+
+    await useServerStore.getState().leaveSecureChannel('srv-1', 'sec-1', 'me');
+
+    expect(mockDelete).toHaveBeenCalledWith('/servers/srv-1/secure-channels/sec-1/members/me');
+    expect(useServerStore.getState().secureChannelMembers['sec-1']).toBeUndefined();
+  });
+
+  it('fetchSecureChannelCount reads the opaque moderation count', async () => {
+    mockGet.mockResolvedValue({ data: { data: { count: 3 } } });
+
+    const count = await useServerStore.getState().fetchSecureChannelCount('srv-1');
+
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/secure-channels/count');
+    expect(count).toBe(3);
+  });
+
+  it('handleChannelMembersUpdated validates the payload shape at runtime', () => {
+    const { handleChannelMembersUpdated } = useServerStore.getState();
+
+    // Garbage payloads change nothing
+    handleChannelMembersUpdated({ channelId: 42, serverId: 'srv-1', members: [] });
+    handleChannelMembersUpdated({ channelId: 'sec-1', serverId: 'srv-1', members: 'not-an-array' });
+    expect(useServerStore.getState().secureChannelMembers).toEqual({});
+
+    // Valid rows land; malformed rows inside the array are dropped
+    handleChannelMembersUpdated({
+      channelId: 'sec-1',
+      serverId: 'srv-1',
+      members: [
+        { userId: 'u1', isCreator: true, addedAt: '2026-08-12', user: { id: 'u1', username: 'a', displayName: 'A', avatarUrl: null } },
+        { bogus: true },
+        null,
+      ],
+    });
+    const list = useServerStore.getState().secureChannelMembers['sec-1'];
+    expect(list).toHaveLength(1);
+    expect(list[0].userId).toBe('u1');
+  });
+});

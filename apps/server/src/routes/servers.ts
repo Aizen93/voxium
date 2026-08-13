@@ -17,6 +17,7 @@ import { leaveCurrentVoiceChannel } from '../websocket/voiceHandler';
 import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
+import { purgeSecureChannelState } from '../utils/secureChannelLifecycle';
 
 export const serverRouter = Router();
 
@@ -285,6 +286,11 @@ serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>,
     if (!membership) throw new NotFoundError('Server membership');
     if (membership.role === 'owner') throw new ForbiddenError('Server owner cannot leave. Transfer ownership first.');
 
+    // Secure channels first: channels they created die with them (with events
+    // to their members), other memberships are removed so remaining members
+    // rotate keys. Must run BEFORE the ServerMember delete.
+    await purgeSecureChannelState(req.user!.userId, serverId);
+
     // Clean up ChannelRead records for this server's channels
     const textChannelIds = await prisma.channel.findMany({
       where: { serverId, type: 'text' },
@@ -529,6 +535,11 @@ serverRouter.post(
           }
         }
       }
+
+      // Secure channels: kicked creator's channels are deleted, other secure
+      // memberships removed (remaining members rotate keys). BEFORE the
+      // ServerMember delete.
+      await purgeSecureChannelState(memberId, serverId);
 
       // Clean up ChannelRead records for this server's channels
       const textChannelIds = await prisma.channel.findMany({

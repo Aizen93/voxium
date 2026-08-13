@@ -125,6 +125,8 @@ function createFakeServer() {
   let crossSigningSupported = true;
   /** Keys the server LIES about for a device, to test what we sign (C1). */
   const forgedOwnKeys = new Map<string, { curve25519Key: string; ed25519Key: string }>();
+  /** Secure-channel membership: channelId → member user ids (first = creator). */
+  const channels = new Map<string, Set<string>>();
 
   const ok = (data: unknown) => ({ data: { success: true, data } });
   const userOf = (userId: string): StoredUser => {
@@ -222,6 +224,33 @@ function createFakeServer() {
           // claim-and-delete: Olm pre-key bodies are one-shot
           for (const s of claimed) shares.splice(shares.indexOf(s), 1);
           return ok({ shares: claimed.map(({ recipientUserId: _r, recipientDeviceId: _d, ...rest }) => rest) });
+        }
+
+        const channelMatch = path.match(/^\/e2e\/channels\/([^/]+)\/devices$/);
+        if (channelMatch) {
+          // Mirrors routes/e2e.ts: caller must be a member; non-members (owner
+          // and admin included) get the same 404 as for no channel at all.
+          const memberSet = channels.get(channelMatch[1]);
+          if (!memberSet || !memberSet.has(userId)) throw new Error('404: Channel not found');
+          const memberIds = [...memberSet];
+          return ok({
+            members: memberIds.map((id, i) => ({ userId: id, isCreator: i === 0 })),
+            deviceLists: memberIds.map((id) => {
+              const user = userOf(id);
+              return {
+                userId: id,
+                devices: [...user.devices.values()]
+                  .filter((d) => !hiddenDevices.has(`${id}/${d.deviceId}`))
+                  .map((d) => {
+                    const forged = forgedOwnKeys.get(`${id}/${d.deviceId}`);
+                    return forged ? { ...d, ...forged } : d;
+                  })
+                  .map(serialize),
+                listVersion: user.listVersion,
+                ...masterOf(user),
+              };
+            }),
+          });
         }
 
         const deviceMatch = path.match(/^\/e2e\/devices\/(.+)$/);
@@ -341,9 +370,21 @@ function createFakeServer() {
           if (!Array.isArray(body.shares) || body.shares.length > E2E_LIMITS.KEYSHARE_BATCH_MAX) {
             throw new Error('400: bad batch');
           }
+          const skipped: Array<{ recipientUserId: string; recipientDeviceId: string; sessionId: string }> = [];
           for (const s of body.shares) {
             const envelope = parseE2EEnvelope(s.body);
             if (!envelope || envelope.e !== 'olm1') throw new Error('400: invalid body envelope');
+            // Channel-scope gate, as the real route enforces in-tx: sender must
+            // be a member (hard error); a stale RECIPIENT is skipped, never a
+            // batch failure — removal is an expected race
+            if (typeof s.conversationId === 'string' && s.conversationId.startsWith('ch:')) {
+              const memberSet = channels.get(s.conversationId.slice(3));
+              if (!memberSet || !memberSet.has(userId)) throw new Error('403: not a channel member');
+              if (s.recipientUserId !== userId && !memberSet.has(s.recipientUserId)) {
+                skipped.push({ recipientUserId: s.recipientUserId, recipientDeviceId: s.recipientDeviceId, sessionId: s.sessionId });
+                continue;
+              }
+            }
             shares.push({
               id: `share-${++shareSeq}`,
               recipientUserId: s.recipientUserId,
@@ -356,7 +397,7 @@ function createFakeServer() {
               createdAt: new Date().toISOString(),
             });
           }
-          return ok({ stored: body.shares.length, evicted: 0 });
+          return ok({ stored: body.shares.length - skipped.length, evicted: 0, skipped });
         }
 
         if (path === '/e2e/message-keys') {
@@ -535,6 +576,10 @@ function createFakeServer() {
     /** Answer device-list reads with keys the server chose for someone's device. */
     forgeDeviceKeys: (u: string, d: string, keys: { curve25519Key: string; ed25519Key: string }) => {
       forgedOwnKeys.set(`${u}/${d}`, keys);
+    },
+    /** Set a secure channel's member list (first member = creator). */
+    setChannelMembers: (channelId: string, userIds: string[]) => {
+      channels.set(channelId, new Set(userIds));
     },
     /** Simulate an account registered before cross-signing shipped (D11). */
     clearCrossSigning: (u: string) => {
@@ -2993,5 +3038,216 @@ describe('E2EService (cross-signing)', () => {
     await phone.service.approveDevice(laptop.service.deviceId);
     expect(server.deviceOf(aliceId, laptop.service.deviceId).masterSignature).toBeTruthy();
     expect(await laptop.service.claimMasterTransfers()).toBe(true);
+  });
+});
+
+// ─── Secure-channel group sessions (scope `ch:{channelId}`) ──────────────────
+//
+// The channel variant of the Megolm machinery: one outbound session per
+// channel scope, fanned out to EVERY member's devices, with rotation driven by
+// the authoritative member list the batch endpoint returns. These tests pin
+// the two product guarantees at the crypto level: a removed member stops
+// reading at the rotation, and a late joiner cannot read backwards.
+
+describe('E2EService — secure-channel group sessions', () => {
+  const scope = (id: string) => `ch:${id}`;
+
+  async function threeMemberChannel() {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'chan-alice');
+    const bob = makeParty(server, 'chan-bob');
+    const charlie = makeParty(server, 'chan-charlie');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await charlie.service.initialize();
+    await flushQueue();
+    const channelId = `chan-${uniq}`;
+    server.setChannelMembers(channelId, [alice.userId, bob.userId, charlie.userId]);
+    return { server, alice, bob, charlie, channelId };
+  }
+
+  it('one envelope decrypts for every member, bound to the channel scope', async () => {
+    const { alice, bob, charlie, channelId } = await threeMemberChannel();
+
+    const { envelope, notReadyUserIds } = await alice.service.encryptChannelMessage(
+      channelId,
+      'covert hello'
+    );
+    expect(notReadyUserIds).toEqual([]);
+
+    for (const member of [bob, charlie]) {
+      const result = await member.service.decryptMessage({
+        id: 'cm1',
+        conversationId: scope(channelId),
+        authorId: alice.userId,
+        content: envelope,
+      });
+      expect(result).toEqual({ text: 'covert hello' });
+    }
+    // The sender's own copy decrypts too (decrypt-to-self import)
+    const own = await alice.service.decryptMessage({
+      id: 'cm1',
+      conversationId: scope(channelId),
+      authorId: alice.userId,
+      content: envelope,
+    });
+    expect(own.text).toBe('covert hello');
+  });
+
+  it('a session is bound to its channel: the same envelope refuses a different scope', async () => {
+    const { alice, bob, channelId } = await threeMemberChannel();
+
+    const { envelope } = await alice.service.encryptChannelMessage(channelId, 'stay in your lane');
+
+    // Correct scope works
+    const good = await bob.service.decryptMessage({
+      id: 'cs1',
+      conversationId: scope(channelId),
+      authorId: alice.userId,
+      content: envelope,
+    });
+    expect(good.text).toBe('stay in your lane');
+
+    // The same ciphertext presented as another channel's (or a DM's) message
+    // must fail: the inbound session is recorded under one scope.
+    const wrongChannel = await bob.service.decryptMessage({
+      id: 'cs2',
+      conversationId: scope('some-other-channel'),
+      authorId: alice.userId,
+      content: envelope,
+    });
+    expect(wrongChannel.failed).toBe(true);
+    const asDM = await bob.service.decryptMessage({
+      id: 'cs3',
+      conversationId: 'plain-conversation-id',
+      authorId: alice.userId,
+      content: envelope,
+    });
+    expect(asDM.failed).toBe(true);
+  });
+
+  it('an envelope claiming a different author than the session owner is refused', async () => {
+    const { alice, bob, charlie, channelId } = await threeMemberChannel();
+
+    const { envelope } = await alice.service.encryptChannelMessage(channelId, 'from alice');
+
+    // Bob presents Alice's ciphertext as Charlie's message — the inbound
+    // session belongs to Alice, so attribution must not transfer.
+    const forged = await bob.service.decryptMessage({
+      id: 'cf1',
+      conversationId: scope(channelId),
+      authorId: charlie.userId,
+      content: envelope,
+    });
+    expect(forged.failed).toBe(true);
+  });
+
+  it('REMOVAL rotates: the removed member cannot read anything sent after', async () => {
+    const { server, alice, bob, charlie, channelId } = await threeMemberChannel();
+
+    const before = await alice.service.encryptChannelMessage(channelId, 'while charlie is here');
+    expect(
+      (await charlie.service.decryptMessage({
+        id: 'r1', conversationId: scope(channelId), authorId: alice.userId, content: before.envelope,
+      })).text
+    ).toBe('while charlie is here');
+
+    // Charlie is removed. The next send fetches the authoritative member list,
+    // sees the set changed, and rotates — no socket event involved.
+    server.setChannelMembers(channelId, [alice.userId, bob.userId]);
+    const after = await alice.service.encryptChannelMessage(channelId, 'after the removal');
+    expect(sidOf(after.envelope)).not.toBe(sidOf(before.envelope));
+
+    // Bob keeps reading, Charlie does not: the new key was never shared with him.
+    expect(
+      (await bob.service.decryptMessage({
+        id: 'r2', conversationId: scope(channelId), authorId: alice.userId, content: after.envelope,
+      })).text
+    ).toBe('after the removal');
+    expect(
+      (await charlie.service.decryptMessage({
+        id: 'r3', conversationId: scope(channelId), authorId: alice.userId, content: after.envelope,
+      })).failed
+    ).toBe(true);
+  });
+
+  it('LATE JOIN rotates: the invitee reads forward only, never the backscroll', async () => {
+    const { server, alice, bob, channelId } = await threeMemberChannel();
+
+    const history = await alice.service.encryptChannelMessage(channelId, 'before dave existed');
+
+    const dave = makeParty(server, 'chan-dave');
+    await dave.service.initialize();
+    await flushQueue();
+    server.setChannelMembers(channelId, [alice.userId, bob.userId, dave.userId]);
+
+    const fresh = await alice.service.encryptChannelMessage(channelId, 'welcome dave');
+    expect(sidOf(fresh.envelope)).not.toBe(sidOf(history.envelope));
+
+    // Dave reads the new message, but the pre-join history stays sealed: that
+    // session key was fanned out before he was a member, and no rotation ever
+    // re-shares an old session.
+    expect(
+      (await dave.service.decryptMessage({
+        id: 'j1', conversationId: scope(channelId), authorId: alice.userId, content: fresh.envelope,
+      })).text
+    ).toBe('welcome dave');
+    expect(
+      (await dave.service.decryptMessage({
+        id: 'j2', conversationId: scope(channelId), authorId: alice.userId, content: history.envelope,
+      })).failed
+    ).toBe(true);
+  });
+
+  it('a member with no published device does not block the room — they are reported instead', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'nr-alice');
+    const bob = makeParty(server, 'nr-bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    // Mallory is a member who has never opened the app: no devices at all.
+    const malloryId = `nr-mallory-${uniq}`;
+    const channelId = `chan-nr-${uniq}`;
+    server.setChannelMembers(channelId, [alice.userId, bob.userId, malloryId]);
+
+    const { envelope, notReadyUserIds } = await alice.service.encryptChannelMessage(
+      channelId,
+      'room still works'
+    );
+    expect(notReadyUserIds).toEqual([malloryId]);
+    expect(
+      (await bob.service.decryptMessage({
+        id: 'nr1', conversationId: scope(channelId), authorId: alice.userId, content: envelope,
+      })).text
+    ).toBe('room still works');
+  });
+
+  it('a non-member cannot even fetch the channel device lists (404, same as nonexistent)', async () => {
+    const { server, channelId } = await threeMemberChannel();
+    const outsider = makeParty(server, 'chan-outsider');
+    await outsider.service.initialize();
+    await flushQueue();
+
+    await expect(outsider.service.fetchChannelDeviceLists(channelId)).rejects.toThrow('404');
+    await expect(outsider.service.fetchChannelDeviceLists('ghost-channel')).rejects.toThrow('404');
+  });
+
+  it('multi-device: a member reading from their SECOND device gets the session too', async () => {
+    const { server, alice, bob, channelId } = await threeMemberChannel();
+
+    // Bob adds a second device (same account key provider = approvable set)
+    const bobLaptop = makeDevice(server, bob.userId, { keyProvider: bob.keyProvider });
+    await bobLaptop.service.initialize();
+    await flushQueue();
+
+    const { envelope } = await alice.service.encryptChannelMessage(channelId, 'both screens');
+    expect(
+      (await bobLaptop.service.decryptMessage({
+        id: 'md1', conversationId: scope(channelId), authorId: alice.userId, content: envelope,
+      })).text
+    ).toBe('both screens');
   });
 });

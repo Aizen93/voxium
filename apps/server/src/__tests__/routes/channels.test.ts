@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { Permissions } from '@voxium/shared';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -24,12 +25,14 @@ const mockGetHighestRolePosition = vi.fn().mockResolvedValue(Infinity);
 const mockGetEffectivePermissions = vi.fn().mockResolvedValue({ permissions: '1048575', source: 'owner' });
 const mockFilterVisibleChannels = vi.fn().mockImplementation((_uid: unknown, _sid: unknown, channels: unknown[]) => Promise.resolve(channels));
 
+const mockComputeServerPermissions = vi.fn().mockResolvedValue(0n);
 vi.mock('../../utils/permissionCalculator', () => ({
   hasServerPermission: (...args: unknown[]) => mockHasServerPermission(...args),
   hasChannelPermission: (...args: unknown[]) => mockHasChannelPermission(...args),
   getHighestRolePosition: (...args: unknown[]) => mockGetHighestRolePosition(...args),
   getEffectivePermissions: (...args: unknown[]) => mockGetEffectivePermissions(...args),
   filterVisibleChannels: (...args: unknown[]) => mockFilterVisibleChannels(...args),
+  computeServerPermissions: (...args: unknown[]) => mockComputeServerPermissions(...args),
   Permissions: {
     MANAGE_CHANNELS: 1n << 4n,
     MANAGE_SERVER: 1n << 5n,
@@ -37,6 +40,12 @@ vi.mock('../../utils/permissionCalculator', () => ({
     MANAGE_MESSAGES: 1n << 13n,
   },
   hasPermission: vi.fn().mockReturnValue(true),
+}));
+
+// Secure-channel lifecycle (the DELETE route hands secure channels to it)
+const mockDeleteSecureChannel = vi.fn().mockResolvedValue(true);
+vi.mock('../../utils/secureChannelLifecycle', () => ({
+  deleteSecureChannel: (...args: unknown[]) => mockDeleteSecureChannel(...args),
 }));
 
 const prismaMock: Record<string, any> = {
@@ -644,6 +653,138 @@ describe('Channel Routes', () => {
         .set('Authorization', `Bearer ${token}`);
 
       expect(res.status).toBe(403);
+    });
+
+    it('returns 403 without VIEW_CHANNEL — mark-read must not be a channel oracle', async () => {
+      const token = makeToken();
+      prismaMock.channel.findFirst.mockResolvedValue({ id: 'ch-1' });
+      mockHasChannelPermission.mockResolvedValue(false);
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels/ch-1/read')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(403);
+      expect(prismaMock.channelRead.upsert).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── SECURE channels — hardening of the plaintext-channel routes ────────
+
+  describe('secure channels — hardening', () => {
+    const secureCh = {
+      id: 'sec-1',
+      name: 'covert',
+      type: 'text',
+      serverId: 'srv-1',
+      secure: true,
+      createdById: 'creator-9',
+      server: { ownerId: 'owner-7' },
+    };
+
+    it('DELETE: the creator can delete their secure channel (via the lifecycle helper)', async () => {
+      const token = makeToken({ userId: 'creator-9' });
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: 'creator-9', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true,
+      });
+      prismaMock.channel.findFirst.mockResolvedValue(secureCh);
+
+      const res = await request(app)
+        .delete('/api/v1/servers/srv-1/channels/sec-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1');
+      // The plaintext delete path (raw prisma delete + server-room event) must not run
+      expect(prismaMock.channel.delete).not.toHaveBeenCalled();
+    });
+
+    it('DELETE: the server owner can delete-by-id (opaque moderation lever)', async () => {
+      const token = makeToken({ userId: 'owner-7' });
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: 'owner-7', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true,
+      });
+      prismaMock.channel.findFirst.mockResolvedValue(secureCh);
+
+      const res = await request(app)
+        .delete('/api/v1/servers/srv-1/channels/sec-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1');
+    });
+
+    it('DELETE: an ADMINISTRATOR can delete-by-id; a mere MANAGE_CHANNELS holder gets 404', async () => {
+      const token = makeToken(); // user-1: neither creator nor owner
+      prismaMock.channel.findFirst.mockResolvedValue(secureCh);
+
+      // ADMINISTRATOR → allowed
+      mockComputeServerPermissions.mockResolvedValue(Permissions.ADMINISTRATOR);
+      let res = await request(app)
+        .delete('/api/v1/servers/srv-1/channels/sec-1')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(200);
+      expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1');
+
+      // MANAGE_CHANNELS alone → indistinguishable from nonexistent
+      mockDeleteSecureChannel.mockClear();
+      mockComputeServerPermissions.mockResolvedValue(Permissions.MANAGE_CHANNELS);
+      res = await request(app)
+        .delete('/api/v1/servers/srv-1/channels/sec-1')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(404);
+      expect(mockDeleteSecureChannel).not.toHaveBeenCalled();
+    });
+
+    it('PUT /reorder: a secure channel id fails like a foreign id', async () => {
+      const token = makeToken();
+      // The validation query excludes secure rows, so only 1 of 2 ids comes back
+      prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+
+      const res = await request(app)
+        .put('/api/v1/servers/srv-1/channels/reorder')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ order: [{ id: 'ch-1', position: 0 }, { id: 'sec-1', position: 1 }] });
+
+      expect(res.status).toBe(400);
+      expect(prismaMock.channel.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ['ch-1', 'sec-1'] }, serverId: 'srv-1', secure: false },
+        select: { id: true },
+      });
+    });
+
+    it('PATCH (category move): a secure channel reads as not-found', async () => {
+      const token = makeToken();
+      prismaMock.channel.findFirst.mockResolvedValue(null); // secure:false filter excludes it
+
+      const res = await request(app)
+        .patch('/api/v1/servers/srv-1/channels/sec-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ categoryId: null });
+
+      expect(res.status).toBe(404);
+      expect(prismaMock.channel.findFirst).toHaveBeenCalledWith({
+        where: { id: 'sec-1', serverId: 'srv-1', secure: false },
+      });
+    });
+
+    it('POST (create): a smuggled `secure: true` body field is ignored', async () => {
+      const token = makeToken();
+      prismaMock.category.findFirst.mockResolvedValue(null);
+      prismaMock.channel.count.mockResolvedValue(1);
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-new', name: 'general2', type: 'text', serverId: 'srv-1',
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'general2', type: 'text', secure: true });
+
+      expect(res.status).toBe(201);
+      const createArg = prismaMock.channel.create.mock.calls[0][0];
+      expect(createArg.data.secure).toBeUndefined();
+      expect(createArg.data.createdById).toBeUndefined();
     });
   });
 });

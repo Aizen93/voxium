@@ -30,6 +30,7 @@ vi.mock('../../utils/prisma', () => ({
     user: { findUnique: vi.fn() },
     report: { findFirst: vi.fn(), create: vi.fn(), count: vi.fn().mockResolvedValue(0) },
     serverMember: { findUnique: vi.fn() },
+    channelMember: { findUnique: vi.fn() },
     message: { findUnique: vi.fn() },
     conversation: { findFirst: vi.fn() },
   },
@@ -196,6 +197,63 @@ describe('Report Routes — E2E message reports', () => {
       });
 
     expect(res.status).toBe(400);
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+
+  // ── SECURE channel messages ────────────────────────────────────────────
+
+  const baseSecureMessage = {
+    id: 'msg-9',
+    content: '{"v":1,"e":"megolm1","sid":"c2Vzcw","b":"QWJj"}',
+    encrypted: true,
+    channelId: 'sec-1',
+    conversationId: null,
+    authorId: 'user-2',
+    channel: { serverId: 'srv-1', secure: true },
+  };
+
+  it('a secure-channel MEMBER can report with their decrypted plaintext', async () => {
+    mockHappyPath(baseSecureMessage);
+    vi.mocked(prisma.channelMember.findUnique).mockResolvedValue({ userId: 'user-1' } as any);
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/reports')
+      .send({
+        type: 'message',
+        reportedUserId: 'user-2',
+        messageId: 'msg-9',
+        reason: 'Harassment in this channel',
+        reportedContent: 'the decrypted offending text',
+      });
+
+    expect(res.status).toBe(201);
+    expect(prisma.report.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          messageContent: 'the decrypted offending text',
+          contentSource: 'reporter',
+        }),
+      }),
+    );
+  });
+
+  it('a server member who is NOT a channel member gets 404 — not an oracle', async () => {
+    mockHappyPath(baseSecureMessage);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({ userId: 'user-1' } as any);
+    vi.mocked(prisma.channelMember.findUnique).mockResolvedValue(null);
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/reports')
+      .send({
+        type: 'message',
+        reportedUserId: 'user-2',
+        messageId: 'msg-9',
+        reason: 'Fishing for secure channels',
+      });
+
+    expect(res.status).toBe(404);
     expect(prisma.report.create).not.toHaveBeenCalled();
   });
 });

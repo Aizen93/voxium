@@ -328,6 +328,10 @@
       "name": "Gerenciar cargos",
       "description": "Permite que os membros criem, editem e excluam cargos abaixo do seu"
     },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "Criar canais seguros",
+      "description": "Permite que os membros criem canais criptografados de ponta a ponta apenas por convite"
+    },
     "CREATE_INVITES": {
       "name": "Criar convites",
       "description": "Permite que os membros criem links de convite para o servidor"
@@ -1107,5 +1111,46 @@
   },
   "search": {
     "placeholder": "Pesquisar mensagens…"
+  },
+  "secureChannel": {
+    "sectionTitle": "Canais seguros",
+    "createTitle": "Criar canal seguro",
+    "createDescription": "Um canal criptografado de ponta a ponta, apenas por convite. Somente os membros convidados podem vê-lo — nem os administradores do servidor podem lê-lo.",
+    "namePlaceholder": "nome-do-canal",
+    "inviteMembers": "Convidar membros ({{count}}/{{max}})",
+    "searchMembers": "Buscar membros…",
+    "noMembersFound": "Nenhum membro encontrado",
+    "create": "Criar",
+    "creating": "Criando…",
+    "created": "Canal seguro criado",
+    "failedToCreate": "Falha ao criar o canal seguro",
+    "memberCapReached": "Um canal seguro pode ter no máximo {{max}} membros",
+    "members": "Membros",
+    "membersCount": "Membros ({{count}}/{{max}})",
+    "inviteMember": "Convidar um membro",
+    "memberInvited": "Membro convidado",
+    "failedToInvite": "Falha ao convidar o membro",
+    "memberRemoved": "Membro removido",
+    "failedToRemove": "Falha ao remover o membro",
+    "removeMember": "Remover membro",
+    "failedToLoadMembers": "Falha ao carregar os membros",
+    "leave": "Sair do canal",
+    "left": "Você saiu do canal",
+    "failedToLeave": "Falha ao sair do canal",
+    "membersNotReady": "{{names}} ainda não pode(m) ler mensagens — a criptografia não foi configurada",
+    "moderationTitle": "Canais seguros",
+    "moderationLoading": "Carregando…",
+    "moderationCount": "Este servidor tem {{count}} canal(is) seguro(s). Seus nomes e conteúdos são visíveis apenas para seus membros.",
+    "moderationHint": "Para agir contra abuso, exclua um canal seguro usando o id do canal de uma denúncia.",
+    "moderationDeletePlaceholder": "Id do canal de uma denúncia",
+    "moderationDelete": "Excluir",
+    "moderationDeleted": "Canal seguro excluído",
+    "moderationDeleteFailed": "Falha ao excluir — verifique o id do canal",
+    "renameLabel": "Nome do canal",
+    "rename": "Renomear",
+    "renaming": "Renomeando…",
+    "renamed": "Canal renomeado",
+    "failedToRename": "Falha ao renomear o canal",
+    "moderationNotSecure": "\"{{name}}\" é um canal comum — exclua-o pela barra lateral"
   }
 }

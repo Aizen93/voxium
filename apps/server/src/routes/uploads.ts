@@ -78,7 +78,8 @@ uploadRouter.post(
         // mime/size are inside the message ciphertext, so only the outer cap
         // (largest allowed plaintext + GCM tag) is enforceable here — clients
         // enforce the per-type plaintext caps before encrypting (spec §13).
-        if (!conversationId) throw new BadRequestError('Encrypted attachments are only supported in direct messages');
+        // Context rule (DMs always; channels only when secure) is enforced in
+        // the authorization block below, where the channel row is available.
         if (mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be uploaded as application/octet-stream');
         const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
         if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxCipherSize) {
@@ -98,15 +99,30 @@ uploadRouter.post(
       if (channelId) {
         const channel = await prisma.channel.findUnique({
           where: { id: channelId },
-          select: { serverId: true },
+          select: { serverId: true, secure: true },
         });
         if (!channel) throw new NotFoundError('Channel');
         const membership = await prisma.serverMember.findUnique({
           where: { userId_serverId: { userId: req.user!.userId, serverId: channel.serverId } },
         });
-        if (!membership) throw new ForbiddenError('Not a member of this server');
+        if (!membership) {
+          // Opacity: a secure-channel denial must be byte-identical to the
+          // nonexistent-channel response (a 403 would confirm existence)
+          throw channel.secure ? new NotFoundError('Channel') : new ForbiddenError('Not a member of this server');
+        }
         const canAttach = await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.ATTACH_FILES);
-        if (!canAttach) throw new ForbiddenError('You do not have permission to attach files in this channel');
+        // Also the secrecy gate: non-members of a secure channel have 0n
+        if (!canAttach) {
+          throw channel.secure ? new NotFoundError('Channel') : new ForbiddenError('You do not have permission to attach files in this channel');
+        }
+        // Secure channels store ONLY opaque blobs; plaintext channels never
+        // accept them (the DM-only rule, widened to secure channels)
+        if (channel.secure && encrypted !== true) {
+          throw new BadRequestError('This channel is end-to-end encrypted; update your client to upload files');
+        }
+        if (!channel.secure && encrypted === true) {
+          throw new BadRequestError('Encrypted attachments are only supported in direct messages and secure channels');
+        }
       } else {
         const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
         if (!conv) throw new NotFoundError('Conversation');
@@ -153,7 +169,7 @@ uploadRouter.get(
             select: {
               channelId: true,
               conversationId: true,
-              channel: { select: { serverId: true } },
+              channel: { select: { serverId: true, secure: true } },
             },
           },
         },
@@ -163,6 +179,8 @@ uploadRouter.get(
 
       // Authorize: server member with VIEW_CHANNEL, or DM participant
       if (attachment.message.channelId && attachment.message.channel) {
+        // Opacity: secure-channel denials read exactly like a missing key
+        const secure = attachment.message.channel.secure;
         const membership = await prisma.serverMember.findUnique({
           where: {
             userId_serverId: {
@@ -171,7 +189,7 @@ uploadRouter.get(
             },
           },
         });
-        if (!membership) throw new ForbiddenError('Not a member');
+        if (!membership) throw secure ? new NotFoundError('Attachment') : new ForbiddenError('Not a member');
         // Check VIEW_CHANNEL permission — prevents downloading attachments from restricted channels
         const canView = await hasChannelPermission(
           req.user!.userId,
@@ -179,7 +197,7 @@ uploadRouter.get(
           attachment.message.channel.serverId,
           Permissions.VIEW_CHANNEL,
         );
-        if (!canView) throw new ForbiddenError('Not authorized');
+        if (!canView) throw secure ? new NotFoundError('Attachment') : new ForbiddenError('Not authorized');
       } else if (attachment.message.conversationId) {
         const conv = await prisma.conversation.findUnique({
           where: { id: attachment.message.conversationId },

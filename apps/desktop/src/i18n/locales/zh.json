@@ -328,6 +328,10 @@
       "name": "管理角色",
       "description": "允许成员创建、编辑和删除低于自己的角色"
     },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "创建安全频道",
+      "description": "允许成员创建仅限邀请的端到端加密频道"
+    },
     "CREATE_INVITES": {
       "name": "创建邀请",
       "description": "允许成员创建服务器邀请链接"
@@ -1107,5 +1111,46 @@
   },
   "search": {
     "placeholder": "搜索消息…"
+  },
+  "secureChannel": {
+    "sectionTitle": "安全频道",
+    "createTitle": "创建安全频道",
+    "createDescription": "仅限邀请的端到端加密频道。只有受邀成员可以看到它——即使服务器管理员也无法读取。",
+    "namePlaceholder": "频道名称",
+    "inviteMembers": "邀请成员 ({{count}}/{{max}})",
+    "searchMembers": "搜索成员…",
+    "noMembersFound": "未找到成员",
+    "create": "创建",
+    "creating": "创建中…",
+    "created": "安全频道已创建",
+    "failedToCreate": "创建安全频道失败",
+    "memberCapReached": "安全频道最多可有 {{max}} 名成员",
+    "members": "成员",
+    "membersCount": "成员 ({{count}}/{{max}})",
+    "inviteMember": "邀请成员",
+    "memberInvited": "已邀请成员",
+    "failedToInvite": "邀请成员失败",
+    "memberRemoved": "已移除成员",
+    "failedToRemove": "移除成员失败",
+    "removeMember": "移除成员",
+    "failedToLoadMembers": "加载成员失败",
+    "leave": "退出频道",
+    "left": "已退出频道",
+    "failedToLeave": "退出频道失败",
+    "membersNotReady": "{{names}} 还无法读取消息——尚未设置加密",
+    "moderationTitle": "安全频道",
+    "moderationLoading": "加载中…",
+    "moderationCount": "此服务器有 {{count}} 个安全频道。其名称和内容仅对其成员可见。",
+    "moderationHint": "如需处理滥用行为，请使用举报中的频道 ID 删除安全频道。",
+    "moderationDeletePlaceholder": "举报中的频道 ID",
+    "moderationDelete": "删除",
+    "moderationDeleted": "安全频道已删除",
+    "moderationDeleteFailed": "删除失败——请检查频道 ID",
+    "renameLabel": "频道名称",
+    "rename": "重命名",
+    "renaming": "重命名中…",
+    "renamed": "频道已重命名",
+    "failedToRename": "重命名频道失败",
+    "moderationNotSecure": "\"{{name}}\"是普通频道——请从侧边栏删除它"
   }
 }

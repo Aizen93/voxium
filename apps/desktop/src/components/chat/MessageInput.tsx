@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ChangeEvent, type DragEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
+import { useServerStore } from '../../stores/serverStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
@@ -52,6 +53,11 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   // gated on the conversation being in the store — a not-yet-loaded row must
   // not silently downgrade a send the server would reject anyway.
   const isEncryptedDM = !!conversationId;
+  // Secure channels get the same treatment, decided by the loaded channel list
+  const isSecureChannel = useServerStore(
+    (s) => !!channelId && s.channels.some((c) => c.id === channelId && c.secure === true)
+  );
+  const isEncrypted = isEncryptedDM || isSecureChannel;
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -148,7 +154,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       let presignMeta = { fileName: file.name, fileSize: file.size, mimeType: file.type };
       let e2e: { key: string; iv: string } | undefined;
 
-      if (isEncryptedDM) {
+      if (isEncrypted) {
         const { initEngine, encryptAttachment } = await import('../../services/e2e/engine');
         await initEngine();
         const encryptedFile = encryptAttachment(new Uint8Array(await file.arrayBuffer()));
@@ -162,7 +168,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       const { data } = await api.post('/uploads/presign/attachment', {
         ...presignMeta,
         ...(channelId ? { channelId } : { conversationId }),
-        ...(isEncryptedDM && { encrypted: true }),
+        ...(isEncrypted && { encrypted: true }),
       });
 
       const { uploadUrl, key } = data.data;
@@ -265,7 +271,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     }));
 
     // E2E: real metadata + file keys are sealed inside the message ciphertext
-    const e2eAttachments = isEncryptedDM
+    const e2eAttachments = isEncrypted
       ? uploadedFiles
           .filter((pf) => pf.e2e)
           .map((pf) => ({
@@ -287,7 +293,12 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           e2eAttachments?.length ? e2eAttachments : undefined
         );
       } else if (channelId) {
-        await sendMessage(channelId, trimmed, attachments.length ? attachments : undefined);
+        await sendMessage(
+          channelId,
+          trimmed,
+          isSecureChannel ? undefined : (attachments.length ? attachments : undefined),
+          isSecureChannel && e2eAttachments?.length ? e2eAttachments : undefined,
+        );
       }
       setContent('');
       // Reset textarea height to single row

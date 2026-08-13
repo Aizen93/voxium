@@ -43,14 +43,18 @@ vi.mock('../../stores/serverStore', () => {
     createCategory: vi.fn(),
     deleteCategory: vi.fn(),
     members: [],
+    roles: [],
     unreadCounts: {},
     reorderCategories: vi.fn(),
     reorderChannels: vi.fn(),
+    fetchEffectivePermissions: vi.fn().mockResolvedValue('0'),
+    leaveSecureChannel: vi.fn(),
+    secureChannelMembers: {},
   });
   const useServerStore = <T,>(sel?: (s: ReturnType<typeof state>) => T) =>
     sel ? sel(state()) : state();
   useServerStore.getState = state;
-  return { useServerStore };
+  return { useServerStore, NO_SECURE_MEMBERS: [] };
 });
 
 vi.mock('../../stores/voiceStore', () => {

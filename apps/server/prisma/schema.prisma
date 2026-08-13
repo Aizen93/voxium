@@ -61,6 +61,8 @@ model User {
   e2eDevices            E2EDevice[]
   e2eKeyBackup          E2EKeyBackup?
   e2eMessageKeyBackups  E2EMessageKeyBackup[]
+  secureChannelsCreated Channel[]       @relation("SecureChannelCreator")
+  channelMemberships    ChannelMember[]
 
   @@map("users")
 }
@@ -228,18 +230,44 @@ model Channel {
   serverId   String   @map("server_id")
   categoryId String?  @map("category_id")
   position   Int      @default(0)
+  // Secure channels: invite-only E2E-encrypted text channels. Visibility and
+  // permissions are membership-derived (ChannelMember rows), NOT role-derived —
+  // non-members (including the server owner and ADMINISTRATOR holders) get 0n.
+  secure      Boolean  @default(false)
+  createdById String?  @map("created_by_id")
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   server   Server       @relation(fields: [serverId], references: [id], onDelete: Cascade)
   category Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  // Cascade is the DB backstop only: app code deletes a creator's secure
+  // channels explicitly (events + S3 cleanup) before removing the user.
+  createdBy User?       @relation("SecureChannelCreator", fields: [createdById], references: [id], onDelete: Cascade)
   messages Message[]
   reads    ChannelRead[]
   permissionOverrides ChannelPermissionOverride[]
+  members  ChannelMember[]
 
   @@index([serverId])
   @@index([categoryId])
+  @@index([createdById])
   @@map("channels")
+}
+
+// Per-user membership of secure channels. Rows exist ONLY for channels with
+// secure = true; plaintext channels stay role/override-governed.
+model ChannelMember {
+  channelId String   @map("channel_id")
+  userId    String   @map("user_id")
+  isCreator Boolean  @default(false) @map("is_creator")
+  addedAt   DateTime @default(now()) @map("added_at")
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([channelId, userId])
+  @@index([userId])
+  @@map("channel_members")
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────

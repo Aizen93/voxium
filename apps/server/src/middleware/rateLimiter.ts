@@ -38,6 +38,9 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   resendVerification: { keyPrefix: 'rl:verify', points: 3, duration: 300, blockDuration: 300, keyType: 'userId', label: 'Resend Verification' },
   markRead:       { keyPrefix: 'rl:markread',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Mark Read' },
   roleManage:     { keyPrefix: 'rl:role',      points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Role Manage' },
+  // Secure-channel create/rename/delete. Deliberately tight: every create can
+  // fan out key shares from all members' clients, so churn is expensive.
+  secureChannelManage: { keyPrefix: 'rl:secchan', points: 10, duration: 300, blockDuration: 0, keyType: 'userId', label: 'Secure Channel Manage' },
   general:        { keyPrefix: 'rl:general',   points: 100, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'General' },
   interact:       { keyPrefix: 'rl:interact',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Interact' },
   themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
@@ -47,7 +50,15 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // tighter budget than plain reads to slow deliberate prekey draining.
   e2eDevice:      { keyPrefix: 'rl:e2edev',    points: 5,   duration: 3600, blockDuration: 0,  keyType: 'userId', label: 'E2E Device Register' },
   e2eKeys:        { keyPrefix: 'rl:e2ekeys',   points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Key Upload' },
-  e2eBundle:      { keyPrefix: 'rl:e2ebundle', points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Bundle Claim' },
+  // Sized for the worst LEGITIMATE burst: a secure channel's first rotation
+  // claims one bundle per member device it has no Olm session with —
+  // SECURE_CHANNEL_MEMBER_CAP (25) x MAX_DEVICES (5) ≈ 125 — plus DM headroom.
+  // The old 15/min starved first rotations at the advertised cap, permanently
+  // (retry budget exhausted before the tail devices ever got a key). Bundle
+  // claims remain gated by assertSharesE2EContext, and the fallback key means
+  // OTK depletion is never a hard DoS (spec §4.3), so the anti-harvest role of
+  // this limiter tolerates the larger budget.
+  e2eBundle:      { keyPrefix: 'rl:e2ebundle', points: 150, duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Bundle Claim' },
   // Device-list reads sit on the message send path (every encrypted send
   // re-checks the peer's devices before rotating), so this budget has to cover
   // a fast typist, not just UI refreshes.
@@ -232,6 +243,7 @@ export const rateLimitVerifyEmail = createMiddleware('verifyEmail', byIp);
 export const rateLimitResendVerification = createMiddleware('resendVerification', byUserId);
 export const rateLimitMarkRead = createMiddleware('markRead', byUserId);
 export const rateLimitRoleManage = createMiddleware('roleManage', byUserId);
+export const rateLimitSecureChannelManage = createMiddleware('secureChannelManage', byUserId);
 export const rateLimitGeneral = createMiddleware('general', byIp);
 // Authenticated message interactions (edit/delete/react). Keyed by userId — the
 // old per-route rateLimitGeneral shared ONE IP bucket with the global api-level

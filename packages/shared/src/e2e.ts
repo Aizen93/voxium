@@ -93,7 +93,43 @@ export const E2E_LIMITS = {
    * because a restoring device wants the whole set as fast as it can get it.
    */
   MESSAGE_KEY_PAGE_MAX: 200,
+  /**
+   * Max members of a secure channel (creator included). Bounds key-share
+   * fanout: a rotation delivers one pairwise-Olm share per member device, so
+   * the worst case is CAP × MAX_DEVICES = 125 shares (3 KEYSHARE_BATCH_MAX
+   * posts) — comfortably inside KEYSHARE_SENDER_TOTAL_CAP even with several
+   * channels rotating while their recipients are offline.
+   */
+  SECURE_CHANNEL_MEMBER_CAP: 25,
 } as const;
+
+// ─── E2E scopes ──────────────────────────────────────────────────────────────
+//
+// Group-session state (vault records, key-share payloads, message-key backups)
+// is keyed by a SCOPE string. For DMs the scope is the bare conversation id;
+// for secure channels it is `ch:{channelId}`. Cuids never contain `:`, so the
+// two namespaces cannot collide, and everywhere a scope is embedded in an
+// AEAD's AAD (message-key backup) the separation is cryptographic, not just
+// lexical. Server-side, the scope decides which authorization gate a key share
+// passes through (DM participant check vs. secure-channel membership check).
+
+/** Prefix marking a group-session scope as a secure channel. */
+export const E2E_CHANNEL_SCOPE_PREFIX = 'ch:';
+
+/** Build the group-session scope id for a secure channel. */
+export function e2eChannelScope(channelId: string): string {
+  return `${E2E_CHANNEL_SCOPE_PREFIX}${channelId}`;
+}
+
+/** Split a scope string into its kind and raw id. */
+export function parseE2EScope(
+  scope: string,
+): { kind: 'channel'; channelId: string } | { kind: 'dm'; conversationId: string } {
+  if (scope.startsWith(E2E_CHANNEL_SCOPE_PREFIX)) {
+    return { kind: 'channel', channelId: scope.slice(E2E_CHANNEL_SCOPE_PREFIX.length) };
+  }
+  return { kind: 'dm', conversationId: scope };
+}
 
 /** 32-byte key, unpadded standard base64 (vodozemac canonical encoding). */
 export const E2E_KEY_B64_RE = /^[A-Za-z0-9+/]{43}$/;
@@ -399,6 +435,11 @@ export interface E2EKeyBundle {
  */
 export interface E2EKeySharePayload {
   v: 2;
+  /**
+   * Group-session SCOPE, not always a literal conversation id: bare cuid for
+   * a DM, `ch:{channelId}` for a secure channel (see parseE2EScope). The field
+   * name predates secure channels and is kept for wire compatibility.
+   */
   conversationId: string;
   sessionId: string;
   sessionKey: string;

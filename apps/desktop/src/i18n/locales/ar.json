@@ -328,6 +328,10 @@
       "name": "إدارة الأدوار",
       "description": "يسمح للأعضاء بإنشاء وتعديل وحذف الأدوار الأقل من دورهم"
     },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "إنشاء قنوات آمنة",
+      "description": "يسمح للأعضاء بإنشاء قنوات مشفّرة من طرف إلى طرف بالدعوة فقط"
+    },
     "CREATE_INVITES": {
       "name": "إنشاء دعوات",
       "description": "يسمح للأعضاء بإنشاء روابط دعوة للخادم"
@@ -1107,5 +1111,46 @@
   },
   "search": {
     "placeholder": "البحث في الرسائل…"
+  },
+  "secureChannel": {
+    "sectionTitle": "القنوات الآمنة",
+    "createTitle": "إنشاء قناة آمنة",
+    "createDescription": "قناة مشفّرة من طرف إلى طرف بالدعوة فقط. لا يراها إلا الأعضاء المدعوون — ولا يستطيع حتى مشرفو الخادم قراءتها.",
+    "namePlaceholder": "اسم-القناة",
+    "inviteMembers": "دعوة الأعضاء ({{count}}/{{max}})",
+    "searchMembers": "البحث عن الأعضاء…",
+    "noMembersFound": "لم يتم العثور على أعضاء",
+    "create": "إنشاء",
+    "creating": "جارٍ الإنشاء…",
+    "created": "تم إنشاء القناة الآمنة",
+    "failedToCreate": "فشل إنشاء القناة الآمنة",
+    "memberCapReached": "يمكن أن تضم القناة الآمنة {{max}} عضوًا كحد أقصى",
+    "members": "الأعضاء",
+    "membersCount": "الأعضاء ({{count}}/{{max}})",
+    "inviteMember": "دعوة عضو",
+    "memberInvited": "تمت دعوة العضو",
+    "failedToInvite": "فشلت دعوة العضو",
+    "memberRemoved": "تمت إزالة العضو",
+    "failedToRemove": "فشلت إزالة العضو",
+    "removeMember": "إزالة العضو",
+    "failedToLoadMembers": "فشل تحميل الأعضاء",
+    "leave": "مغادرة القناة",
+    "left": "غادرت القناة",
+    "failedToLeave": "فشلت مغادرة القناة",
+    "membersNotReady": "{{names}} لا يمكنه/يمكنهم قراءة الرسائل بعد — لم يتم إعداد التشفير",
+    "moderationTitle": "القنوات الآمنة",
+    "moderationLoading": "جارٍ التحميل…",
+    "moderationCount": "يحتوي هذا الخادم على {{count}} قناة/قنوات آمنة. أسماؤها ومحتوياتها مرئية لأعضائها فقط.",
+    "moderationHint": "للتعامل مع إساءة الاستخدام، احذف القناة الآمنة باستخدام معرّف القناة من البلاغ.",
+    "moderationDeletePlaceholder": "معرّف القناة من البلاغ",
+    "moderationDelete": "حذف",
+    "moderationDeleted": "تم حذف القناة الآمنة",
+    "moderationDeleteFailed": "فشل الحذف — تحقق من معرّف القناة",
+    "renameLabel": "اسم القناة",
+    "rename": "إعادة التسمية",
+    "renaming": "جارٍ إعادة التسمية…",
+    "renamed": "تمت إعادة تسمية القناة",
+    "failedToRename": "فشلت إعادة تسمية القناة",
+    "moderationNotSecure": "\"{{name}}\" قناة عادية — احذفها من الشريط الجانبي"
   }
 }

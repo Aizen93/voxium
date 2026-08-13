@@ -328,6 +328,10 @@
       "name": "Gérer les rôles",
       "description": "Permet aux membres de créer, modifier et supprimer des rôles inférieurs au leur"
     },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "Créer des salons sécurisés",
+      "description": "Permet aux membres de créer des salons chiffrés de bout en bout accessibles uniquement sur invitation"
+    },
     "CREATE_INVITES": {
       "name": "Créer des invitations",
       "description": "Permet aux membres de créer des liens d'invitation au serveur"
@@ -1107,5 +1111,46 @@
   },
   "search": {
     "placeholder": "Rechercher des messages…"
+  },
+  "secureChannel": {
+    "sectionTitle": "Salons sécurisés",
+    "createTitle": "Créer un salon sécurisé",
+    "createDescription": "Un salon chiffré de bout en bout, accessible uniquement sur invitation. Seuls les membres invités peuvent le voir — même les administrateurs du serveur ne peuvent pas le lire.",
+    "namePlaceholder": "nom-du-salon",
+    "inviteMembers": "Inviter des membres ({{count}}/{{max}})",
+    "searchMembers": "Rechercher des membres…",
+    "noMembersFound": "Aucun membre trouvé",
+    "create": "Créer",
+    "creating": "Création…",
+    "created": "Salon sécurisé créé",
+    "failedToCreate": "Échec de la création du salon sécurisé",
+    "memberCapReached": "Un salon sécurisé peut compter au plus {{max}} membres",
+    "members": "Membres",
+    "membersCount": "Membres ({{count}}/{{max}})",
+    "inviteMember": "Inviter un membre",
+    "memberInvited": "Membre invité",
+    "failedToInvite": "Échec de l'invitation du membre",
+    "memberRemoved": "Membre retiré",
+    "failedToRemove": "Échec du retrait du membre",
+    "removeMember": "Retirer le membre",
+    "failedToLoadMembers": "Échec du chargement des membres",
+    "leave": "Quitter le salon",
+    "left": "Salon quitté",
+    "failedToLeave": "Impossible de quitter le salon",
+    "membersNotReady": "{{names}} ne peut/peuvent pas encore lire les messages — le chiffrement n'est pas configuré",
+    "moderationTitle": "Salons sécurisés",
+    "moderationLoading": "Chargement…",
+    "moderationCount": "Ce serveur compte {{count}} salon(s) sécurisé(s). Leurs noms et contenus ne sont visibles que par leurs membres.",
+    "moderationHint": "En cas d'abus, supprimez un salon sécurisé avec l'id de salon fourni dans un signalement.",
+    "moderationDeletePlaceholder": "Id du salon issu d'un signalement",
+    "moderationDelete": "Supprimer",
+    "moderationDeleted": "Salon sécurisé supprimé",
+    "moderationDeleteFailed": "Échec de la suppression — vérifiez l'id du salon",
+    "renameLabel": "Nom du salon",
+    "rename": "Renommer",
+    "renaming": "Renommage…",
+    "renamed": "Salon renommé",
+    "failedToRename": "Échec du renommage du salon",
+    "moderationNotSecure": "« {{name}} » est un salon ordinaire — supprimez-le depuis la barre latérale"
   }
 }

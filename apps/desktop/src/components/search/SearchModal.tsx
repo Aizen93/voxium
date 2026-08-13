@@ -83,6 +83,31 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
       return;
     }
 
+    // Secure channels: same rule as DMs — the server is blind to ciphertext,
+    // so a secure-channel filter searches this device's decrypted history
+    const secureChannelFilter = channelFilter && channels?.some((c) => c.id === channelFilter && c.secure === true)
+      ? channelFilter
+      : null;
+    if (secureChannelFilter) {
+      // A server-wide search may still be in flight from before the filter was
+      // selected — abort it, or its late response would overwrite these local
+      // results with server-wide plaintext hits
+      if (abortRef.current) abortRef.current.abort();
+      setIsSearching(true);
+      try {
+        const { searchEncryptedChannelHistory } = await import('../../services/e2e/channelCrypto');
+        const local = await searchEncryptedChannelHistory(secureChannelFilter, searchQuery);
+        setResults(local);
+        setHasMore(false);
+        setHasSearched(true);
+      } catch (err) {
+        console.error('Local E2E channel search failed:', err);
+      } finally {
+        setIsSearching(false);
+      }
+      return;
+    }
+
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -114,7 +139,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
     } finally {
       setIsSearching(false);
     }
-  }, [serverId, conversationId, channelFilter]);
+  }, [serverId, conversationId, channelFilter, channels]);
 
   // Debounced search on query change
   useEffect(() => {

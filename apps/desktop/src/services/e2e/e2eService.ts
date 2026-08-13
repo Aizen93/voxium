@@ -26,6 +26,7 @@ import {
   buildE2EEnvelope,
   buildMegolmEnvelope,
   parseE2EPlaintext,
+  e2eChannelScope,
 } from '@voxium/shared';
 import type {
   E2EDeviceEntry,
@@ -97,6 +98,26 @@ export interface E2EPinnedDeviceList {
    * person simply not being set up yet.
    */
   servedDeviceCount: number;
+}
+
+/** Wire shape of one user's device-list payload (per-user GET and channel batch). */
+interface E2EDeviceListPayload {
+  devices?: E2EDeviceEntry[];
+  listVersion?: number;
+  masterKey?: string | null;
+  masterSignature?: string | null;
+  crossSigning?: boolean;
+}
+
+/**
+ * A secure channel's member set with every member's VERIFIED device list —
+ * the authoritative input for channel-session rotation decisions.
+ */
+export interface E2EChannelDeviceLists {
+  members: Array<{ userId: string; isCreator: boolean }>;
+  lists: Map<string, E2EPinnedDeviceList>;
+  /** Members whose published devices all failed verification (not "no devices"). */
+  unverifiableUserIds: string[];
 }
 
 /** UI signal: this peer's device list changed since the user acknowledged it. */
@@ -1360,13 +1381,19 @@ export class E2EService {
 
   private async fetchDeviceListUncached(userId: string): Promise<E2EPinnedDeviceList> {
     const res = await this.api.get(`/e2e/devices/${userId}`);
-    const data = res.data.data as {
-      devices?: E2EDeviceEntry[];
-      listVersion?: number;
-      masterKey?: string | null;
-      masterSignature?: string | null;
-      crossSigning?: boolean;
-    };
+    return this.processDeviceListPayload(userId, res.data.data as E2EDeviceListPayload);
+  }
+
+  /**
+   * Verify, pin and cache ONE user's device-list payload. Single source of
+   * truth for device trust: the per-user GET and the secure-channel batch
+   * endpoint both feed their responses through here, so a channel member's
+   * devices get exactly the verification a DM peer's would.
+   */
+  private async processDeviceListPayload(
+    userId: string,
+    data: E2EDeviceListPayload
+  ): Promise<E2EPinnedDeviceList> {
     const devices: E2EDeviceIdentity[] = [];
 
     // ── D7 step 1+2: authenticate and TOFU-pin the ACCOUNT master key ──
@@ -1480,6 +1507,46 @@ export class E2EService {
     await this.recordDeviceListState(userId, list);
     this.deviceListCache.set(userId, { at: Date.now(), list });
     return list;
+  }
+
+  /**
+   * Fetch a secure channel's member set + every member's device list in ONE
+   * request, then run each payload through the exact per-user verification
+   * path (processDeviceListPayload). The response is the AUTHORITATIVE member
+   * list for rotation — socket events are UI hints, never the trigger.
+   *
+   * An E2EIdentityChangedError for any member propagates and blocks the send,
+   * exactly like the DM path: sending anyway would either leak to keys the
+   * user has not accepted or silently exclude a member.
+   */
+  async fetchChannelDeviceLists(channelId: string): Promise<E2EChannelDeviceLists> {
+    const res = await this.api.get(`/e2e/channels/${encodeURIComponent(channelId)}/devices`);
+    const data = res.data.data as {
+      members?: Array<{ userId?: unknown; isCreator?: unknown }>;
+      deviceLists?: Array<E2EDeviceListPayload & { userId?: unknown }>;
+    };
+    const members = (data.members ?? [])
+      .filter((m): m is { userId: string; isCreator: boolean } => typeof m?.userId === 'string')
+      .map((m) => ({ userId: m.userId, isCreator: m.isCreator === true }));
+
+    const payloadByUser = new Map<string, E2EDeviceListPayload>();
+    for (const entry of data.deviceLists ?? []) {
+      if (typeof entry?.userId === 'string') payloadByUser.set(entry.userId, entry);
+    }
+
+    const lists = new Map<string, E2EPinnedDeviceList>();
+    const unverifiableUserIds: string[] = [];
+    for (const member of members) {
+      const payload = payloadByUser.get(member.userId) ?? { devices: [], listVersion: 0 };
+      const list = await this.processDeviceListPayload(member.userId, payload);
+      lists.set(member.userId, list);
+      if (list.devices.length === 0 && list.servedDeviceCount > 0) {
+        // Published devices exist but none survived verification — a directory
+        // problem, not an un-onboarded member (see servedDeviceCount docs)
+        unverifiableUserIds.push(member.userId);
+      }
+    }
+    return { members, lists, unverifiableUserIds };
   }
 
   private async recordDeviceListState(userId: string, list: E2EPinnedDeviceList): Promise<void> {
@@ -2058,13 +2125,24 @@ export class E2EService {
     return false;
   }
 
-  /** Olm-encrypt one session key to each target device and upload the batch. */
+  /**
+   * Olm-encrypt one session key to each target device and upload the batch.
+   * Returns the targets that must be retried, plus whether EVERY failure this
+   * round was a rate limit (429) — a large first fanout can legitimately
+   * overrun per-minute budgets, and those attempts say nothing about the
+   * payload, so they must not consume the bounded retry budget.
+   */
   private async deliverShares(
     targets: Array<{ userId: string; deviceId: string }>,
     payload: E2EKeySharePayload
-  ): Promise<string[]> {
+  ): Promise<{ pending: string[]; onlyRateLimited: boolean }> {
+    const isRateLimited = (err: unknown): boolean =>
+      !!err && typeof err === 'object' &&
+      (err as { response?: { status?: number } }).response?.status === 429;
+
     const body = JSON.stringify(payload);
     const pending: string[] = [];
+    let hardFailures = 0;
     const shares: Array<{
       recipientUserId: string;
       recipientDeviceId: string;
@@ -2088,6 +2166,7 @@ export class E2EService {
       } catch (err) {
         console.warn(`e2e: could not build a key share for ${target.userId}/${target.deviceId}:`, errText(err));
         pending.push(shareKey(target.userId, target.deviceId));
+        if (!isRateLimited(err)) hardFailures++;
       }
     }
 
@@ -2095,12 +2174,17 @@ export class E2EService {
       const chunk = shares.slice(i, i + E2E_LIMITS.KEYSHARE_BATCH_MAX);
       try {
         await this.api.post('/e2e/keyshares', { deviceId: this.deviceId, shares: chunk });
+        // Shares the server SKIPPED (a channel recipient removed between our
+        // member fetch and the server's in-tx gate) are deliberately NOT
+        // pending: the removal is authoritative, retrying can never succeed,
+        // and a re-added member is covered by the member-set rotation.
       } catch (err) {
         console.warn('e2e: key-share upload failed — will retry on the next send:', errText(err));
         for (const s of chunk) pending.push(shareKey(s.recipientUserId, s.recipientDeviceId));
+        if (!isRateLimited(err)) hardFailures++;
       }
     }
-    return pending;
+    return { pending, onlyRateLimited: pending.length > 0 && hardFailures === 0 };
   }
 
   /**
@@ -2135,7 +2219,7 @@ export class E2EService {
       })
       .filter((t) => t.userId && t.deviceId);
 
-    const stillPending = await this.deliverShares(targets, {
+    const { pending: stillPending, onlyRateLimited } = await this.deliverShares(targets, {
       v: 2,
       conversationId,
       sessionId: record.sessionId,
@@ -2146,7 +2230,13 @@ export class E2EService {
     });
 
     record.pendingShareFailures = stillPending;
-    record.shareRetryCount = stillPending.length > 0 ? (record.shareRetryCount ?? 0) + 1 : 0;
+    // Rate-limited rounds do not consume the bounded budget: a 429 says
+    // nothing about the target, and a large first fanout can take several
+    // backoff windows to drain within per-minute limits.
+    record.shareRetryCount =
+      stillPending.length === 0 ? 0
+      : onlyRateLimited ? (record.shareRetryCount ?? 0)
+      : (record.shareRetryCount ?? 0) + 1;
     record.lastShareAttemptAt = Date.now();
     await this.vault.putOutboundGroupSession(conversationId, record);
   }
@@ -2181,7 +2271,7 @@ export class E2EService {
       ...own.devices.filter((d) => d.deviceId !== this.deviceId).map((d) => ({ userId: this.userId, deviceId: d.deviceId })),
     ];
 
-    const pending = await this.deliverShares(targets, {
+    const { pending } = await this.deliverShares(targets, {
       v: 2,
       conversationId,
       sessionId,
@@ -2244,6 +2334,138 @@ export class E2EService {
       return current;
     }
     return this.rotateGroupSession(conversationId, peerUserId, peer, own, current);
+  }
+
+  // ─── Secure-channel group sessions (scope `ch:{channelId}`) ────────────────
+  //
+  // Same Megolm machinery as DMs, generalized from one peer to a member set.
+  // The one NEW rotation trigger is a member-set change, and it is what makes
+  // the product guarantees structural:
+  //  - member REMOVED → the next send creates a session the removed member
+  //    never receives (they keep at most the old session = messages they were
+  //    already entitled to read);
+  //  - member ADDED → the next send creates a fresh session, and the invitee
+  //    never receives any earlier session key → no history, by construction.
+
+  private needsChannelRotation(
+    record: OutboundGroupSessionRecord,
+    lists: Map<string, E2EPinnedDeviceList>
+  ): boolean {
+    const fingerprints = record.deviceListFingerprints ?? {};
+    // Member-set compare: the fingerprint map's keys ARE the member set the
+    // session was keyed for (every member gets an entry at rotation, even
+    // device-less ones). Extra key or missing key → membership changed.
+    const recordedMembers = Object.keys(fingerprints).sort();
+    const currentMembers = [...lists.keys()].sort();
+    if (
+      recordedMembers.length !== currentMembers.length ||
+      recordedMembers.some((id, i) => id !== currentMembers[i])
+    ) {
+      return true;
+    }
+    for (const [userId, list] of lists) {
+      if (fingerprints[userId] !== deviceSetFingerprint(list.devices)) return true;
+    }
+    if (record.messageCount >= E2E_LIMITS.GROUP_SESSION_MAX_MESSAGES) return true;
+    if (Date.now() - record.createdAt >= E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS) return true;
+    return false;
+  }
+
+  private async rotateChannelGroupSession(
+    scope: string,
+    lists: Map<string, E2EPinnedDeviceList>,
+    previous: { session: EngineGroupSession; record: OutboundGroupSessionRecord } | null
+  ): Promise<{ session: EngineGroupSession; record: OutboundGroupSessionRecord }> {
+    const session = new EngineGroupSession();
+    const sessionId = session.sessionId();
+    // MUST be exported before the first encrypt so importers start at index 0
+    const sessionKey = session.sessionKey();
+
+    // Decrypt-to-self: this device never receives its own share.
+    await this.importInboundGroupSession(sessionKey, {
+      sessionId,
+      conversationId: scope,
+      senderUserId: this.userId,
+      senderDeviceId: this.deviceId,
+    });
+
+    const targets: Array<{ userId: string; deviceId: string }> = [];
+    const deviceListVersions: Record<string, number> = {};
+    const deviceListFingerprints: Record<string, string> = {};
+    for (const [userId, list] of lists) {
+      deviceListVersions[userId] = list.listVersion;
+      deviceListFingerprints[userId] = deviceSetFingerprint(list.devices);
+      for (const d of list.devices) {
+        if (userId === this.userId && d.deviceId === this.deviceId) continue;
+        targets.push({ userId, deviceId: d.deviceId });
+      }
+    }
+
+    const { pending } = await this.deliverShares(targets, {
+      v: 2,
+      conversationId: scope,
+      sessionId,
+      sessionKey,
+      senderUserId: this.userId,
+      senderDeviceId: this.deviceId,
+    });
+
+    const record: OutboundGroupSessionRecord = {
+      pickle: session.pickle(this.vault.pickleKey()),
+      sessionId,
+      createdAt: Date.now(),
+      messageCount: 0,
+      deviceListVersions,
+      deviceListFingerprints,
+      pendingShareFailures: pending,
+      shareRetryCount: 0,
+      lastShareAttemptAt: Date.now(),
+    };
+
+    previous?.session.free();
+    const entry = { session, record };
+    this.outbound.set(scope, entry);
+    await this.vault.putOutboundGroupSession(scope, record);
+    return entry;
+  }
+
+  private async ensureChannelGroupSession(
+    channelId: string
+  ): Promise<{
+    session: EngineGroupSession;
+    record: OutboundGroupSessionRecord;
+    notReadyUserIds: string[];
+  }> {
+    const scope = e2eChannelScope(channelId);
+    // Authoritative, per-send: rotation-on-removal must never depend on a
+    // socket event having been delivered.
+    const { members, lists, unverifiableUserIds } = await this.fetchChannelDeviceLists(channelId);
+    if (members.length === 0) throw new Error(`not a member of channel ${channelId}`);
+    if (members.length > E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP) {
+      throw new Error('channel exceeds the secure member cap');
+    }
+    if (unverifiableUserIds.length > 0) {
+      // Same stance as the DM path's "no usable E2E device": a directory that
+      // serves only unverifiable devices for a member is not a member who
+      // hasn't onboarded, and quietly excluding them would hide it.
+      throw new Error(`no usable E2E device for ${unverifiableUserIds.join(', ')}`);
+    }
+
+    // Members with NO published devices (never opened the app since E2E): the
+    // room keeps working — they simply cannot read until they onboard, and the
+    // UI surfaces who. (Blocking the whole channel on one dormant account
+    // would let any invitee accidentally freeze the room.)
+    const notReadyUserIds = members
+      .map((m) => m.userId)
+      .filter((id) => id !== this.userId && (lists.get(id)?.devices.length ?? 0) === 0);
+
+    const current = await this.loadOutbound(scope);
+    if (current && !this.needsChannelRotation(current.record, lists)) {
+      await this.retryPendingShares(scope, current);
+      return { ...current, notReadyUserIds };
+    }
+    const rotated = await this.rotateChannelGroupSession(scope, lists, current);
+    return { ...rotated, notReadyUserIds };
   }
 
   private async clearOutboundGroupSessions(): Promise<void> {
@@ -2358,6 +2580,26 @@ export class E2EService {
     });
   }
 
+  /**
+   * Encrypt one secure-channel message. `notReadyUserIds` lists members with
+   * no published E2E device (they cannot read until they onboard) so the UI
+   * can say who, instead of the room failing or lying.
+   */
+  async encryptChannelMessage(
+    channelId: string,
+    plaintext: string
+  ): Promise<{ envelope: string; notReadyUserIds: string[] }> {
+    return this.enqueue(async () => {
+      const scope = e2eChannelScope(channelId);
+      const { session, record, notReadyUserIds } = await this.ensureChannelGroupSession(channelId);
+      const body = session.encrypt(plaintext);
+      record.messageCount += 1;
+      record.pickle = session.pickle(this.vault.pickleKey());
+      await this.vault.putOutboundGroupSession(scope, record);
+      return { envelope: buildMegolmEnvelope(record.sessionId, body), notReadyUserIds };
+    });
+  }
+
   /** Cache plaintext under the server-assigned message id (spec §7.2). */
   async cachePlaintext(
     messageId: string,
@@ -2403,7 +2645,12 @@ export class E2EService {
   }): Promise<DecryptResult> {
     const version = message.editedAt ?? null;
     const cached = await this.vault.getPlaintext(message.id);
-    if (cached && (cached.editedAt ?? null) === version) {
+    // Scope-checked: a cache entry only answers for the scope it was decrypted
+    // under. Without this, a server that relabels a DM message id as a
+    // secure-channel message (or vice versa) would have the cache serve the
+    // plaintext into the wrong container — the ratchet's scope binding
+    // (decryptGroupMessage) would refuse, but the cache must not bypass it.
+    if (cached && cached.conversationId === message.conversationId && (cached.editedAt ?? null) === version) {
       return { text: cached.text, failed: cached.failed };
     }
     // cache miss OR a stale pre-edit entry: the edit is a fresh ciphertext, so

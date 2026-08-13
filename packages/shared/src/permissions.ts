@@ -32,6 +32,11 @@ export const Permissions = {
 
   // Special
   ADMINISTRATOR:      1n << 19n,
+
+  // Secure channels (invite-only E2E-encrypted). Server-level only: stripped
+  // from channel overrides like ADMINISTRATOR, and it grants nothing inside a
+  // secure channel — access there is membership-derived, never role-derived.
+  CREATE_SECURE_CHANNELS: 1n << 20n,
 } as const;
 
 export type PermissionFlag = (typeof Permissions)[keyof typeof Permissions];
@@ -64,7 +69,8 @@ export const DEFAULT_ADMIN_PERMISSIONS =
   Permissions.MENTION_EVERYONE |
   Permissions.MUTE_MEMBERS |
   Permissions.DEAFEN_MEMBERS |
-  Permissions.MOVE_MEMBERS;
+  Permissions.MOVE_MEMBERS |
+  Permissions.CREATE_SECURE_CHANNELS;
 
 // ─── Permission Utility Functions ────────────────────────────────────────────
 
@@ -181,6 +187,7 @@ export const PERMISSION_LIST: PermissionInfo[] = [
   { flag: Permissions.MANAGE_CATEGORIES, key: 'MANAGE_CATEGORIES', name: 'Manage Categories', description: 'Allows members to create, edit, and delete categories', category: 'general' },
   { flag: Permissions.MANAGE_SERVER, key: 'MANAGE_SERVER', name: 'Manage Server', description: 'Allows members to edit server name, icon, and settings', category: 'general' },
   { flag: Permissions.MANAGE_ROLES, key: 'MANAGE_ROLES', name: 'Manage Roles', description: 'Allows members to create, edit, and delete roles below their own', category: 'general' },
+  { flag: Permissions.CREATE_SECURE_CHANNELS, key: 'CREATE_SECURE_CHANNELS', name: 'Create Secure Channels', description: 'Allows members to create invite-only end-to-end encrypted channels', category: 'general' },
   // Membership
   { flag: Permissions.CREATE_INVITES, key: 'CREATE_INVITES', name: 'Create Invites', description: 'Allows members to create server invite links', category: 'membership' },
   { flag: Permissions.KICK_MEMBERS, key: 'KICK_MEMBERS', name: 'Kick Members', description: 'Allows members to kick other members with lower roles', category: 'membership' },

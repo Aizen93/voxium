@@ -6,10 +6,12 @@ import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Volume2, Plus, ChevronRight, MicOff, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings, AudioLines } from 'lucide-react';
+import { Volume2, Plus, ChevronRight, MicOff, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings, AudioLines, Lock, Users, LogOut } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
 import { ChannelPermissionsEditor } from '../server/ChannelPermissionsEditor';
+import { SecureChannelCreateModal } from '../server/SecureChannelCreateModal';
+import { SecureChannelMembersModal } from '../server/SecureChannelMembersModal';
 import { VoicePanel } from '../voice/VoicePanel';
 import { MemberContextMenu } from '../server/MemberContextMenu';
 import { DMVoicePanel } from '../voice/DMVoicePanel';
@@ -34,6 +36,7 @@ import {
   useSortable,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { Permissions, hasPermission, permissionsFromString } from '@voxium/shared';
 import type { Channel, Category } from '@voxium/shared';
 
 const COLLAPSED_KEY = 'voxium_collapsed_categories';
@@ -405,7 +408,7 @@ function CategoryOverlay({ category }: { category: Category }) {
 
 export function ChannelSidebar() {
   const { t } = useTranslation();
-  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, unreadCounts, reorderCategories, reorderChannels } = useServerStore();
+  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, unreadCounts, reorderCategories, reorderChannels, fetchEffectivePermissions, leaveSecureChannel } = useServerStore();
   const { joinChannel, activeChannelId: voiceChannelId, channelUsers } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
@@ -422,11 +425,46 @@ export function ChannelSidebar() {
   const [channelContextMenu, setChannelContextMenu] = useState<{ channel: Channel; position: { x: number; y: number } } | null>(null);
   const [voiceUserCtx, setVoiceUserCtx] = useState<{ userId: string; position: { x: number; y: number } } | null>(null);
   const [permissionsEditorChannel, setPermissionsEditorChannel] = useState<{ id: string; name: string; type: 'text' | 'voice' } | null>(null);
+  const [showSecureCreate, setShowSecureCreate] = useState(false);
+  const [secureMembersChannel, setSecureMembersChannel] = useState<{ id: string; name: string } | null>(null);
+  const [canCreateSecure, setCanCreateSecure] = useState(false);
   const ctxRef = useRef<HTMLDivElement>(null);
 
   const activeServer = servers.find((s) => s.id === activeServerId);
   const currentMember = members.find((m) => m.userId === user?.id);
   const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
+
+  // Fingerprint of everything that can change THIS user's effective server
+  // permissions: legacy role, assigned role ids, and those roles' bitmasks.
+  // Live role edits update the store, which re-runs the permission fetch below
+  // — without it, a freshly granted CREATE_SECURE_CHANNELS would not show the
+  // create control until the next server switch.
+  const roles = useServerStore((s) => s.roles);
+  const myPermsKey = useMemo(() => {
+    const assigned = new Set((currentMember?.roles ?? []).map((r) => r.id));
+    const bits = roles
+      .filter((r) => r.isDefault || assigned.has(r.id))
+      .map((r) => `${r.id}:${r.permissions}`)
+      .sort()
+      .join('|');
+    return `${currentMember?.role ?? ''}|${bits}`;
+  }, [currentMember, roles]);
+
+  // Secure-channel creation is gated on the PERMISSION BIT, not the legacy
+  // member.role field — a custom role can carry CREATE_SECURE_CHANNELS.
+  useEffect(() => {
+    setCanCreateSecure(false);
+    if (!activeServerId) return;
+    let cancelled = false;
+    fetchEffectivePermissions(activeServerId)
+      .then((bits) => {
+        if (!cancelled) {
+          setCanCreateSecure(hasPermission(permissionsFromString(bits), Permissions.CREATE_SECURE_CHANNELS));
+        }
+      })
+      .catch((err) => console.warn('[SecureChannel] Failed to fetch effective permissions:', err));
+    return () => { cancelled = true; };
+  }, [activeServerId, myPermsKey, fetchEffectivePermissions]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -488,14 +526,24 @@ export function ChannelSidebar() {
   }, []);
 
   const handleChannelContextMenu = useCallback((e: React.MouseEvent, channel: Channel) => {
-    if (!isAdmin) return;
+    // Secure channels: every member gets a menu (members/leave; the creator
+    // manage items). Plaintext channels keep the admin-only menu.
+    if (!channel.secure && !isAdmin) return;
     setChannelContextMenu({ channel, position: { x: e.clientX, y: e.clientY } });
   }, [isAdmin]);
 
-  // Sort channels within each group by position
+  // Secure channels render in their own section — visible at all only because
+  // the server listed them for us (membership); never draggable/categorized
+  const secureChannels = useMemo(
+    () => channels.filter((c) => c.secure === true).sort((a, b) => a.name.localeCompare(b.name)),
+    [channels]
+  );
+
+  // Sort channels within each group by position (secure ones excluded)
   const channelsByCategory = useMemo(() => {
     const map = new Map<string | null, Channel[]>();
     for (const ch of channels) {
+      if (ch.secure) continue;
       const key = ch.categoryId ?? null;
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(ch);
@@ -556,6 +604,16 @@ export function ChannelSidebar() {
       toast.success(t('channel.channelDeleted'));
     } catch {
       toast.error(t('channel.failedToDeleteChannel'));
+    }
+  };
+
+  const handleLeaveSecureChannel = async (channelId: string) => {
+    if (!activeServerId || !user?.id) return;
+    try {
+      await leaveSecureChannel(activeServerId, channelId, user.id);
+      toast.success(t('secureChannel.left'));
+    } catch (err) {
+      toast.error(getTranslatedError(err, t, 'secureChannel.failedToLeave'));
     }
   };
 
@@ -835,6 +893,56 @@ export function ChannelSidebar() {
           </DragOverlay>
         </DndContext>
 
+        {/* Secure channels — invite-only, E2E-encrypted. Only ever present in
+            the list because this user is a member. Not draggable, not
+            categorizable, no permission overrides. */}
+        {(secureChannels.length > 0 || canCreateSecure) && (
+          <div className="mt-2" data-testid="secure-channels-section">
+            <div className="group mb-0.5 flex items-center gap-1 px-1.5">
+              <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-vox-text-muted">
+                <Lock size={10} />
+                {t('secureChannel.sectionTitle')}
+              </span>
+              {canCreateSecure && (
+                <button
+                  onClick={() => setShowSecureCreate(true)}
+                  className="ml-auto flex h-5 w-5 items-center justify-center rounded text-vox-text-muted opacity-0 transition-opacity hover:text-vox-text-primary group-hover:opacity-100"
+                  title={t('secureChannel.createTitle')}
+                  aria-label={t('secureChannel.createTitle')}
+                  data-testid="secure-channel-create-open"
+                >
+                  <Plus size={13} />
+                </button>
+              )}
+            </div>
+            {secureChannels.map((ch) => {
+              const unread = activeChannelId !== ch.id ? (unreadCounts[ch.id] || 0) : 0;
+              return (
+                <button
+                  key={ch.id}
+                  onClick={() => handleSelectTextChannel(ch.id)}
+                  onContextMenu={(e) => { e.preventDefault(); handleChannelContextMenu(e, ch); }}
+                  className={clsx(
+                    'group flex w-full items-center gap-1.5 rounded-md px-1.5 py-[5px] text-left text-[14px] transition-colors',
+                    activeChannelId === ch.id
+                      ? 'bg-vox-bg-active text-vox-text-primary'
+                      : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
+                  )}
+                  data-testid={`secure-channel-${ch.name}`}
+                >
+                  <Lock size={13} className="shrink-0 text-vox-accent-primary/80" />
+                  <span className="truncate">{ch.name}</span>
+                  {unread > 0 && (
+                    <span className="ml-auto rounded-full bg-vox-accent-danger px-1.5 text-[11px] font-semibold text-white">
+                      {unread > 99 ? '99+' : unread}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* Create Channel Inline */}
         {showCreateChannel && (
           <div className="mt-2 rounded-lg border border-vox-border bg-vox-bg-floating p-3">
@@ -920,7 +1028,53 @@ export function ChannelSidebar() {
       )}
 
       {/* Channel right-click context menu */}
-      {channelContextMenu && isAdmin && createPortal(
+      {channelContextMenu && channelContextMenu.channel.secure && createPortal(
+        <div
+          ref={ctxRef}
+          className="fixed z-[9999] min-w-44 rounded-lg border border-vox-border bg-vox-bg-floating p-1.5 shadow-xl animate-fade-in"
+          style={{ left: channelContextMenu.position.x, top: channelContextMenu.position.y }}
+        >
+          {/* Members: every channel member can view; the creator manages */}
+          <button
+            onClick={() => {
+              setSecureMembersChannel({ id: channelContextMenu.channel.id, name: channelContextMenu.channel.name });
+              setChannelContextMenu(null);
+            }}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+            data-testid="secure-channel-members"
+          >
+            <Users size={16} className="text-vox-accent-primary" />
+            {t('secureChannel.members')}
+          </button>
+          {channelContextMenu.channel.createdById === user?.id ? (
+            <button
+              onClick={() => {
+                handleDeleteChannel(channelContextMenu.channel.id);
+                setChannelContextMenu(null);
+              }}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
+              data-testid="secure-channel-delete"
+            >
+              <Trash2 size={16} />
+              {t('channel.deleteChannel')}
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                handleLeaveSecureChannel(channelContextMenu.channel.id);
+                setChannelContextMenu(null);
+              }}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
+              data-testid="secure-channel-leave"
+            >
+              <LogOut size={16} />
+              {t('secureChannel.leave')}
+            </button>
+          )}
+        </div>,
+        document.body
+      )}
+      {channelContextMenu && !channelContextMenu.channel.secure && isAdmin && createPortal(
         <div
           ref={ctxRef}
           className="fixed z-[9999] min-w-44 rounded-lg border border-vox-border bg-vox-bg-floating p-1.5 shadow-xl animate-fade-in"
@@ -948,6 +1102,19 @@ export function ChannelSidebar() {
           </button>
         </div>,
         document.body
+      )}
+
+      {/* Secure channel modals */}
+      {showSecureCreate && activeServerId && (
+        <SecureChannelCreateModal serverId={activeServerId} onClose={() => setShowSecureCreate(false)} />
+      )}
+      {secureMembersChannel && activeServerId && (
+        <SecureChannelMembersModal
+          serverId={activeServerId}
+          channelId={secureMembersChannel.id}
+          channelName={secureMembersChannel.name}
+          onClose={() => setSecureMembersChannel(null)}
+        />
       )}
 
       {/* Channel permissions editor */}

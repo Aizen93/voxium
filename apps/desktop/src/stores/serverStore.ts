@@ -2,7 +2,10 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
-import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride } from '@voxium/shared';
+import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember } from '@voxium/shared';
+
+/** Module-level constant so selectors can default without a fresh reference. */
+export const NO_SECURE_MEMBERS: SecureChannelMember[] = [];
 
 const PINNED_KEY = 'voxium_pinned_spaces';
 
@@ -100,6 +103,19 @@ interface ServerState {
   setNickname: (serverId: string, nickname: string | null) => Promise<void>;
   setMemberNickname: (serverId: string, memberId: string, nickname: string | null) => Promise<void>;
   handleNicknameUpdated: (serverId: string, userId: string, nickname: string | null) => void;
+
+  // Secure channels (invite-only E2E-encrypted). All mutating actions rely on
+  // socket events for state — POST/DELETE responses never touch local state.
+  /** Member lists per secure channel, filled by fetch + members_updated events. */
+  secureChannelMembers: Record<string, SecureChannelMember[]>;
+  createSecureChannel: (serverId: string, name: string, memberIds: string[]) => Promise<Channel>;
+  renameSecureChannel: (serverId: string, channelId: string, name: string) => Promise<void>;
+  inviteSecureChannelMember: (serverId: string, channelId: string, userId: string) => Promise<void>;
+  removeSecureChannelMember: (serverId: string, channelId: string, userId: string) => Promise<void>;
+  leaveSecureChannel: (serverId: string, channelId: string, selfUserId: string) => Promise<void>;
+  fetchSecureChannelMembers: (serverId: string, channelId: string) => Promise<SecureChannelMember[]>;
+  fetchSecureChannelCount: (serverId: string) => Promise<number>;
+  handleChannelMembersUpdated: (payload: { channelId?: unknown; serverId?: unknown; members?: unknown }) => void;
 }
 
 // Dedup: prevent redundant mark-as-read API calls when multiple code paths
@@ -688,6 +704,70 @@ export const useServerStore = create<ServerState>((set, get) => ({
       members: state.members.map((m) =>
         m.userId === userId ? { ...m, nickname } : m
       ),
+    }));
+  },
+
+  // ─── Secure channels ────────────────────────────────────────────────────────
+
+  secureChannelMembers: {},
+
+  createSecureChannel: async (serverId: string, name: string, memberIds: string[]) => {
+    const { data } = await api.post(`/servers/${serverId}/secure-channels`, { name, memberIds });
+    // Sidebar entry arrives via the member-scoped channel:created event
+    return data.data;
+  },
+
+  renameSecureChannel: async (serverId: string, channelId: string, name: string) => {
+    await api.patch(`/servers/${serverId}/secure-channels/${channelId}`, { name });
+  },
+
+  inviteSecureChannelMember: async (serverId: string, channelId: string, userId: string) => {
+    await api.post(`/servers/${serverId}/secure-channels/${channelId}/members`, { userId });
+  },
+
+  removeSecureChannelMember: async (serverId: string, channelId: string, userId: string) => {
+    await api.delete(`/servers/${serverId}/secure-channels/${channelId}/members/${userId}`);
+  },
+
+  leaveSecureChannel: async (serverId: string, channelId: string, selfUserId: string) => {
+    await api.delete(`/servers/${serverId}/secure-channels/${channelId}/members/${selfUserId}`);
+    // Our own channel:deleted event removes the sidebar entry; drop the cached
+    // member list now so a re-invite starts fresh
+    set((state) => {
+      const next = { ...state.secureChannelMembers };
+      delete next[channelId];
+      return { secureChannelMembers: next };
+    });
+  },
+
+  fetchSecureChannelMembers: async (serverId: string, channelId: string) => {
+    const { data } = await api.get(`/servers/${serverId}/secure-channels/${channelId}/members`);
+    const members = data.data as SecureChannelMember[];
+    set((state) => ({
+      secureChannelMembers: { ...state.secureChannelMembers, [channelId]: members },
+    }));
+    return members;
+  },
+
+  fetchSecureChannelCount: async (serverId: string) => {
+    const { data } = await api.get(`/servers/${serverId}/secure-channels/count`);
+    return data.data.count as number;
+  },
+
+  handleChannelMembersUpdated: (payload) => {
+    // Socket payloads are unauthenticated JSON as far as this client knows —
+    // validate shape before it can reach any component
+    if (typeof payload?.channelId !== 'string' || typeof payload?.serverId !== 'string') return;
+    if (!Array.isArray(payload.members)) return;
+    const members = (payload.members as unknown[]).filter(
+      (m): m is SecureChannelMember =>
+        !!m && typeof m === 'object' &&
+        typeof (m as SecureChannelMember).userId === 'string' &&
+        typeof (m as SecureChannelMember).isCreator === 'boolean',
+    );
+    const channelId = payload.channelId;
+    set((state) => ({
+      secureChannelMembers: { ...state.secureChannelMembers, [channelId]: members },
     }));
   },
 }));

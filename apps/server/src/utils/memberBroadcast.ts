@@ -13,7 +13,9 @@ async function joinVisibleChannelRooms(userId: string, serverId: string): Promis
   const io = getIO();
   const channels = await prisma.channel.findMany({
     where: { serverId },
-    select: { id: true },
+    // `secure` is load-bearing: filterVisibleChannels can only apply the
+    // membership-only rule to channels it can recognize as secure
+    select: { id: true, secure: true },
   });
   const visible = await filterVisibleChannels(userId, serverId, channels);
   const sockets = await io.in(`user:${userId}`).fetchSockets();

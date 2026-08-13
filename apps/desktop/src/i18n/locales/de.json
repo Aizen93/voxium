@@ -328,6 +328,10 @@
       "name": "Rollen verwalten",
       "description": "Erlaubt Mitgliedern, Rollen unterhalb ihrer eigenen zu erstellen, zu bearbeiten und zu löschen"
     },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "Sichere Kanäle erstellen",
+      "description": "Erlaubt Mitgliedern, Ende-zu-Ende-verschlüsselte Kanäle nur auf Einladung zu erstellen"
+    },
     "CREATE_INVITES": {
       "name": "Einladungen erstellen",
       "description": "Erlaubt Mitgliedern, Server-Einladungslinks zu erstellen"
@@ -1107,5 +1111,46 @@
   },
   "search": {
     "placeholder": "Nachrichten suchen…"
+  },
+  "secureChannel": {
+    "sectionTitle": "Sichere Kanäle",
+    "createTitle": "Sicheren Kanal erstellen",
+    "createDescription": "Ein Ende-zu-Ende-verschlüsselter Kanal nur auf Einladung. Nur eingeladene Mitglieder können ihn sehen — nicht einmal Server-Admins können mitlesen.",
+    "namePlaceholder": "kanal-name",
+    "inviteMembers": "Mitglieder einladen ({{count}}/{{max}})",
+    "searchMembers": "Mitglieder suchen…",
+    "noMembersFound": "Keine Mitglieder gefunden",
+    "create": "Erstellen",
+    "creating": "Wird erstellt…",
+    "created": "Sicherer Kanal erstellt",
+    "failedToCreate": "Sicherer Kanal konnte nicht erstellt werden",
+    "memberCapReached": "Ein sicherer Kanal kann höchstens {{max}} Mitglieder haben",
+    "members": "Mitglieder",
+    "membersCount": "Mitglieder ({{count}}/{{max}})",
+    "inviteMember": "Mitglied einladen",
+    "memberInvited": "Mitglied eingeladen",
+    "failedToInvite": "Mitglied konnte nicht eingeladen werden",
+    "memberRemoved": "Mitglied entfernt",
+    "failedToRemove": "Mitglied konnte nicht entfernt werden",
+    "removeMember": "Mitglied entfernen",
+    "failedToLoadMembers": "Mitglieder konnten nicht geladen werden",
+    "leave": "Kanal verlassen",
+    "left": "Kanal verlassen",
+    "failedToLeave": "Kanal konnte nicht verlassen werden",
+    "membersNotReady": "{{names}} kann/können noch keine Nachrichten lesen — Verschlüsselung ist nicht eingerichtet",
+    "moderationTitle": "Sichere Kanäle",
+    "moderationLoading": "Wird geladen…",
+    "moderationCount": "Dieser Server hat {{count}} sichere(n) Kanal/Kanäle. Namen und Inhalte sind nur für deren Mitglieder sichtbar.",
+    "moderationHint": "Bei Missbrauch kann ein sicherer Kanal über die Kanal-ID aus einer Meldung gelöscht werden.",
+    "moderationDeletePlaceholder": "Kanal-ID aus einer Meldung",
+    "moderationDelete": "Löschen",
+    "moderationDeleted": "Sicherer Kanal gelöscht",
+    "moderationDeleteFailed": "Löschen fehlgeschlagen — Kanal-ID prüfen",
+    "renameLabel": "Kanalname",
+    "rename": "Umbenennen",
+    "renaming": "Wird umbenannt…",
+    "renamed": "Kanal umbenannt",
+    "failedToRename": "Kanal konnte nicht umbenannt werden",
+    "moderationNotSecure": "„{{name}}“ ist ein regulärer Kanal — lösche ihn stattdessen über die Seitenleiste"
   }
 }

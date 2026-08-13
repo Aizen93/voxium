@@ -331,6 +331,10 @@
       "name": "Manage Roles",
       "description": "Allows members to create, edit, and delete roles below their own"
     },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "Create Secure Channels",
+      "description": "Allows members to create invite-only end-to-end encrypted channels"
+    },
     "CREATE_INVITES": {
       "name": "Create Invites",
       "description": "Allows members to create server invite links"
@@ -1114,5 +1118,46 @@
   },
   "search": {
     "placeholder": "Search messages…"
+  },
+  "secureChannel": {
+    "sectionTitle": "Secure channels",
+    "createTitle": "Create Secure Channel",
+    "createDescription": "An invite-only, end-to-end encrypted channel. Only the members you invite can see it — not even server admins can read it.",
+    "namePlaceholder": "channel-name",
+    "inviteMembers": "Invite members ({{count}}/{{max}})",
+    "searchMembers": "Search members…",
+    "noMembersFound": "No members found",
+    "create": "Create",
+    "creating": "Creating…",
+    "created": "Secure channel created",
+    "failedToCreate": "Failed to create secure channel",
+    "memberCapReached": "A secure channel can have at most {{max}} members",
+    "members": "Members",
+    "membersCount": "Members ({{count}}/{{max}})",
+    "inviteMember": "Invite a member",
+    "memberInvited": "Member invited",
+    "failedToInvite": "Failed to invite member",
+    "memberRemoved": "Member removed",
+    "failedToRemove": "Failed to remove member",
+    "removeMember": "Remove member",
+    "failedToLoadMembers": "Failed to load members",
+    "leave": "Leave channel",
+    "left": "Left the channel",
+    "failedToLeave": "Failed to leave channel",
+    "membersNotReady": "{{names}} can't read messages yet — they haven't set up encryption",
+    "moderationTitle": "Secure channels",
+    "moderationLoading": "Loading…",
+    "moderationCount": "This server has {{count}} secure channel(s). Their names and contents are visible only to their members.",
+    "moderationHint": "To act on abuse, delete a secure channel using the channel id from a report.",
+    "moderationDeletePlaceholder": "Channel id from a report",
+    "moderationDelete": "Delete",
+    "moderationDeleted": "Secure channel deleted",
+    "moderationDeleteFailed": "Failed to delete — check the channel id",
+    "renameLabel": "Channel name",
+    "rename": "Rename",
+    "renaming": "Renaming…",
+    "renamed": "Channel renamed",
+    "failedToRename": "Failed to rename channel",
+    "moderationNotSecure": "\"{{name}}\" is a regular channel — delete it from the sidebar instead"
   }
 }

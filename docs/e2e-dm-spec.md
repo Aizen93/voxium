@@ -1003,3 +1003,116 @@ The badge itself stays quiet: it renders nothing in the healthy case and names
 the most actionable problem when there is one (§14, `badgeState`). A lock shown
 on every conversation is noise that teaches people to ignore the one time it
 matters.
+
+## 19. Secure channels (group E2E)
+
+Invite-only, end-to-end encrypted text channels inside a server. This is the
+"many-member E2E" that §1 and §11.7 deferred — built as a generalization of the
+machinery above, not a second protocol. The crypto engine is unchanged.
+
+### 19.1 Model
+
+- `Channel.secure` marks the channel; `Channel.createdById` names its sole
+  manager. `ChannelMember` rows (composite PK `[channelId, userId]`,
+  `isCreator`) are the ONLY source of access: visibility and permissions are
+  membership-derived, and the owner/ADMINISTRATOR fast paths in the permission
+  calculator are pierced — a non-member owner computes to `0n` like anyone
+  else. Role overrides do not apply and cannot be created.
+- Creation is gated by a new permission bit, `CREATE_SECURE_CHANNELS` (bit 20,
+  server-level only — stripped from channel overrides like ADMINISTRATOR).
+- **Opacity rule**: every surface a non-member could probe (member list,
+  rename, role overrides, reorder, mark-read, search, key-share posting, the
+  batch device endpoint) answers exactly as it would for a channel that does
+  not exist. The single non-member surface is moderation: a COUNT in server
+  settings (MANAGE_SERVER), and delete-by-id (owner/ADMINISTRATOR, the id
+  learned from an abuse report). Content is never readable; deletion is the
+  only lever.
+- Members can leave; only the creator invites/removes/renames/deletes. A
+  creator leaving the server (kick, leave, account deletion) deletes their
+  channels, with member-scoped events and S3 blob cleanup.
+
+### 19.2 Scopes
+
+Group-session state is keyed by a SCOPE string wherever a `conversationId`
+used to flow: a bare cuid is a DM, `ch:{channelId}` is a secure channel
+(`e2eChannelScope` / `parseE2EScope`, shared). Cuids never contain `:`, so the
+namespaces cannot collide — and the message-key-backup AAD embeds the scope,
+making the separation cryptographic where it is at rest. `E2EKeySharePayload`
+stays `v: 2`; the field name is kept for wire compatibility.
+
+### 19.3 Key distribution
+
+One outbound Megolm session per channel per sender, fanned out pairwise over
+Olm to every member device (`E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP` = 25
+members × `MAX_DEVICES` = 125 shares worst case — inside the key-share caps).
+
+- `GET /e2e/channels/:channelId/devices` returns every member's device list in
+  one response (member-only, opacity rule). Each per-user payload feeds the
+  SAME verification path as the per-user GET (`processDeviceListPayload`):
+  signature checks, TOFU pinning, cross-signing, warnings.
+- That response is the AUTHORITATIVE member list. Rotation decisions never
+  depend on socket events — a missed event fails closed at the next send.
+- The key-share write gate is scope-aware: DM scopes keep the pre-transaction
+  participant check; channel scopes are verified INSIDE the write transaction
+  (sender ∈ members; recipient ∈ members or the sender's own device), so a
+  concurrently removed member cannot receive a share that commits after their
+  membership row is gone.
+- `assertSharesE2EContext` extends the bundle-claim/device-list guard: sharing
+  a secure channel is an E2E context, so co-members can build Olm sessions
+  without ever opening a DM.
+
+### 19.4 Rotation and the product guarantees
+
+`needsChannelRotation` adds ONE trigger to the DM set (device-set fingerprints,
+100 messages, 7 days): the member set itself, read from the fingerprint map's
+keys. That makes both product guarantees structural rather than policed:
+
+- **Removal**: the next send creates a session the removed member never
+  receives. They keep at most the old session — messages they were already
+  entitled to read.
+- **No history for invitees**: joining changes the member set, so the next
+  send rotates; the invitee never receives any earlier session key, and no
+  code path re-shares an old session to a new member.
+
+A member with NO published device does not block the room (any invitee could
+otherwise freeze a channel by never onboarding); sends report
+`notReadyUserIds` and the UI names who cannot read yet. A member whose
+published devices all fail verification DOES block the send — that is a
+directory problem, not an onboarding state.
+
+### 19.5 Message + attachment enforcement
+
+Secure channels are born encrypted, mirroring §5/§6 exactly: `encrypted: true`
+required (400 otherwise, no downgrade), envelope validated, content stored
+verbatim (never sanitized), mentions never resolved, excluded from server
+search (`encrypted: false` filter + secure channels dropped from the channel
+enumeration), edits are fresh ciphertexts under the same id, attachments
+presign only as opaque `application/octet-stream` blobs with server-forced
+names. The client refuses `encrypted: false` user rows in a secure channel —
+the same forgery rule as §9's DM table.
+
+Client search over a secure channel runs on this device's plaintext cache,
+like encrypted DMs. Reports from channel members carry reporter-decrypted
+plaintext (`contentSource: 'reporter'`), gated on channel membership.
+
+### 19.6 Known gaps
+
+- Metadata: the server sees membership, message timing/sizes and the channel
+  NAME (needed for the members' own UI) — same class of leak as §11.8.
+- Secure channels count against the server-wide channel cap (they consume real
+  resources, so exempting them would let the cap be bypassed invisibly). A
+  MANAGE_CHANNELS holder who hits the cap can therefore infer how MANY secure
+  channels exist — the same number MANAGE_SERVER already reads from the count
+  endpoint, never which or whose.
+- The client's `message:new`/`message:update` handlers decrypt asynchronously
+  before touching the store — the same shape the DM handlers have always had.
+  The known consequences are inherited unchanged: two near-simultaneous
+  messages can momentarily render out of order when one resolves from the
+  plaintext cache and the other decrypts, and a delete racing a still-
+  decrypting insert can leave the row until the next fetch. Serializing per
+  channel would add a queue for a cosmetic, refetch-corrected artifact.
+- Message-key backup accepts channel scopes transparently, so a device that
+  backed up can restore its own history; there is no cross-member history
+  transfer (consistent with no-history-on-join).
+- Voice is out of scope: secure channels are text-only by construction
+  (`type: 'text'` enforced at creation; no voice path accepts them).

@@ -52,10 +52,12 @@ vi.mock('../../utils/prisma', () => ({
     },
     e2EDeviceRegistry: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
       upsert: vi.fn(),
     },
     e2EMasterKey: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
       upsert: vi.fn(),
     },
     e2EMasterTransfer: {
@@ -83,6 +85,9 @@ vi.mock('../../utils/prisma', () => ({
       deleteMany: vi.fn(),
     },
     conversation: { findUnique: vi.fn(), findMany: vi.fn() },
+    channel: { findUnique: vi.fn(), findMany: vi.fn() },
+    channelMember: { findUnique: vi.fn(), findFirst: vi.fn(), findMany: vi.fn() },
+    serverMember: { findUnique: vi.fn(), findMany: vi.fn() },
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
   },
@@ -737,7 +742,7 @@ describe('E2E routes — POST /keyshares', () => {
       .send({ deviceId: DEVICE_A, shares: [share(), share({ recipientDeviceId: 'device-cccc3333' })] });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ stored: 2, evicted: 0 });
+    expect(res.body.data).toEqual({ stored: 2, evicted: 0, skipped: [] });
     expect(prisma.e2EKeyShare.createMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
@@ -846,7 +851,7 @@ describe('E2E routes — POST /keyshares', () => {
       .send({ deviceId: DEVICE_A, shares: [share(), share()] });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ stored: 2, evicted: 2 });
+    expect(res.body.data).toEqual({ stored: 2, evicted: 2, skipped: [] });
     expect(prisma.e2EKeyShare.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ orderBy: { createdAt: 'asc' }, take: 2 })
     );
@@ -3166,5 +3171,247 @@ describe('E2E routes — message-key backup is outside the device lifecycle', ()
       where: { userId: 'user-1' },
     });
     expect(store).toHaveLength(0);
+  });
+});
+
+// ─── Secure channels: keyshare scope gate + batch device endpoint ────────────
+//
+// The `conversationId` field of a share is a SCOPE: bare cuid = DM,
+// `ch:{channelId}` = secure channel. The channel gate runs INSIDE the write
+// transaction (membership is mutable — a concurrently removed member must not
+// receive a share that commits after their row is gone), so these tests mock
+// tx.channelMember.findMany.
+
+describe('E2E routes — secure-channel keyshare gate', () => {
+  const CHANNEL_SCOPE = 'ch:sec-1';
+
+  beforeEach(() => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
+      { id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2' },
+    ] as any);
+    vi.mocked(prisma.e2EDevice.findMany).mockImplementation(((args: any) =>
+      Promise.resolve(
+        (args?.where?.OR ?? []).map((o: any) => ({ userId: o.userId, deviceId: o.deviceId }))
+      )) as any);
+    vi.mocked(prisma.e2EKeyShare.count).mockResolvedValue(0);
+    // Default channel membership: sender (user-1) and user-2 are members —
+    // of the channel AND of its server (the gate cross-checks both)
+    vi.mocked(prisma.channelMember.findMany).mockResolvedValue([
+      { channelId: 'sec-1', userId: 'user-1' },
+      { channelId: 'sec-1', userId: 'user-2' },
+    ] as any);
+    vi.mocked(prisma.channel.findMany).mockResolvedValue([
+      { id: 'sec-1', serverId: 'srv-1' },
+    ] as any);
+    vi.mocked(prisma.serverMember.findMany).mockResolvedValue([
+      { serverId: 'srv-1', userId: 'user-1' },
+      { serverId: 'srv-1', userId: 'user-2' },
+    ] as any);
+  });
+
+  it('stores channel-scoped shares for members (and own devices), checked in-tx', async () => {
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({
+        deviceId: DEVICE_A,
+        shares: [
+          share({ conversationId: CHANNEL_SCOPE }), // member-to-member
+          share({ conversationId: CHANNEL_SCOPE, recipientUserId: 'user-1', recipientDeviceId: 'device-cccc3333' }), // own other device
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(prisma.channelMember.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          channelId: { in: ['sec-1'] },
+          channel: { secure: true },
+        }),
+      }),
+    );
+    expect(prisma.e2EKeyShare.createMany).toHaveBeenCalled();
+  });
+
+  it('rejects channel shares when the SENDER is not a member', async () => {
+    vi.mocked(prisma.channelMember.findMany).mockResolvedValue([
+      { channelId: 'sec-1', userId: 'user-2' }, // sender user-1 missing
+    ] as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({ deviceId: DEVICE_A, shares: [share({ conversationId: CHANNEL_SCOPE })] });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('member of this channel');
+    expect(prisma.e2EKeyShare.createMany).not.toHaveBeenCalled();
+  });
+
+  it('SKIPS (not rejects) channel shares addressed to a NON-member recipient — removal is an expected race', async () => {
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({
+        deviceId: DEVICE_A,
+        shares: [share({ conversationId: CHANNEL_SCOPE, recipientUserId: 'user-9' })],
+      });
+
+    // One stale recipient must not void the batch (or, via the client's
+    // bounded retries, permanently starve every innocent device chunked with
+    // it). The share is dropped — the removed member gets nothing, and a
+    // re-added member is covered by the member-set rotation.
+    expect(res.status).toBe(201);
+    expect(res.body.data.stored).toBe(0);
+    expect(res.body.data.skipped).toEqual([
+      { recipientUserId: 'user-9', recipientDeviceId: DEVICE_B, sessionId: 'c2Vzc2lvbklk' },
+    ]);
+    expect(prisma.e2EKeyShare.createMany).not.toHaveBeenCalled();
+  });
+
+  it('SKIPS channel shares whose recipient left the SERVER (stale ChannelMember row)', async () => {
+    // user-2 still has a ChannelMember row but no ServerMember row
+    vi.mocked(prisma.serverMember.findMany).mockResolvedValue([
+      { serverId: 'srv-1', userId: 'user-1' },
+    ] as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({ deviceId: DEVICE_A, shares: [share({ conversationId: CHANNEL_SCOPE })] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.stored).toBe(0);
+    expect(res.body.data.skipped).toHaveLength(1);
+    expect(prisma.e2EKeyShare.createMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects shares labelled with a channel that is not secure (or does not exist)', async () => {
+    // The membership query filters on channel.secure, so a plaintext channel
+    // yields no rows — same failure as a nonexistent one.
+    vi.mocked(prisma.channelMember.findMany).mockResolvedValue([] as any);
+    vi.mocked(prisma.channel.findMany).mockResolvedValue([] as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({ deviceId: DEVICE_A, shares: [share({ conversationId: 'ch:plain-1' })] });
+
+    expect(res.status).toBe(403);
+    expect(prisma.e2EKeyShare.createMany).not.toHaveBeenCalled();
+  });
+
+  it('a mixed batch applies each gate to its own scope', async () => {
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({
+        deviceId: DEVICE_A,
+        shares: [
+          share(), // DM share, conv-1 gate
+          share({ conversationId: CHANNEL_SCOPE }), // channel share, membership gate
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.stored).toBe(2);
+    expect(res.body.data.skipped).toEqual([]);
+  });
+});
+
+describe('E2E routes — GET /e2e/channels/:channelId/devices', () => {
+  beforeEach(() => {
+    vi.mocked(prisma.channel.findUnique).mockResolvedValue({ id: 'sec-1', secure: true, serverId: 'srv-1' } as any);
+    vi.mocked(prisma.channelMember.findUnique).mockResolvedValue({ userId: 'user-1' } as any);
+    vi.mocked(prisma.channelMember.findMany).mockResolvedValue([
+      { userId: 'user-1', isCreator: true },
+      { userId: 'user-2', isCreator: false },
+    ] as any);
+    // Members are cross-checked against ServerMember (stale-row defense)
+    vi.mocked(prisma.serverMember.findMany).mockResolvedValue([
+      { userId: 'user-1' },
+      { userId: 'user-2' },
+    ] as any);
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([
+      {
+        userId: 'user-1', deviceId: DEVICE_A, curve25519Key: 'c'.repeat(43), ed25519Key: 'e'.repeat(43),
+        deviceSignature: 's'.repeat(86), masterSignature: null, createdAt: new Date(),
+      },
+      {
+        userId: 'user-2', deviceId: DEVICE_B, curve25519Key: 'c'.repeat(43), ed25519Key: 'e'.repeat(43),
+        deviceSignature: 's'.repeat(86), masterSignature: null, createdAt: new Date(),
+      },
+    ] as any);
+    vi.mocked(prisma.e2EDeviceRegistry.findMany).mockResolvedValue([
+      { userId: 'user-1', version: 3 },
+    ] as any);
+    vi.mocked(prisma.e2EMasterKey.findMany).mockResolvedValue([] as any);
+  });
+
+  it('returns every member\'s device list in one response for a member', async () => {
+    const res = await request(createApp()).get('/api/v1/e2e/channels/sec-1/devices');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.members).toEqual([
+      { userId: 'user-1', isCreator: true },
+      { userId: 'user-2', isCreator: false },
+    ]);
+    const byUser = Object.fromEntries(
+      res.body.data.deviceLists.map((l: any) => [l.userId, l]),
+    );
+    expect(byUser['user-1'].devices).toHaveLength(1);
+    expect(byUser['user-1'].listVersion).toBe(3);
+    expect(byUser['user-2'].listVersion).toBe(0); // no registry row yet
+    expect(byUser['user-1'].crossSigning).toBe(true);
+  });
+
+  it('404 for a non-member — indistinguishable from a nonexistent channel', async () => {
+    vi.mocked(prisma.channelMember.findUnique).mockResolvedValue(null);
+    const nonMember = await request(createApp()).get('/api/v1/e2e/channels/sec-1/devices');
+
+    vi.mocked(prisma.channel.findUnique).mockResolvedValue(null);
+    const ghost = await request(createApp()).get('/api/v1/e2e/channels/ghost/devices');
+
+    expect(nonMember.status).toBe(404);
+    expect(ghost.status).toBe(404);
+    expect(nonMember.body.error).toBe(ghost.body.error);
+  });
+
+  it('404 for a plaintext channel — the endpoint only exists for secure ones', async () => {
+    vi.mocked(prisma.channel.findUnique).mockResolvedValue({ id: 'ch-1', secure: false } as any);
+
+    const res = await request(createApp()).get('/api/v1/e2e/channels/ch-1/devices');
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('E2E routes — shared secure channel as an E2E context', () => {
+  beforeEach(() => {
+    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([] as any);
+    vi.mocked(prisma.e2EDeviceRegistry.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+  });
+
+  it('channel co-members can read each other\'s device lists without a DM', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(null); // no DM
+    vi.mocked(prisma.channelMember.findFirst).mockResolvedValue({ channelId: 'sec-1' } as any);
+
+    const res = await request(createApp()).get('/api/v1/e2e/devices/user-2');
+
+    expect(res.status).toBe(200);
+    expect(prisma.channelMember.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          userId: 'user-1',
+          channel: { secure: true, members: { some: { userId: 'user-2' } } },
+        },
+        select: { channelId: true },
+      }),
+    );
+  });
+
+  it('still 403 with neither a DM nor a shared secure channel', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.channelMember.findFirst).mockResolvedValue(null);
+
+    const res = await request(createApp()).get('/api/v1/e2e/devices/user-2');
+
+    expect(res.status).toBe(403);
   });
 });

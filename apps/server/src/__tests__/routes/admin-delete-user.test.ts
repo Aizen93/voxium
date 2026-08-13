@@ -173,6 +173,14 @@ vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberLeft: (...args: any[]) => mockBroadcastMemberLeft(...args),
 }));
 
+// Secure-channel lifecycle (account deletion purges secure state for events)
+const mockPurgeSecureForAccount = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/secureChannelLifecycle', () => ({
+  purgeSecureChannelState: vi.fn().mockResolvedValue(undefined),
+  purgeSecureChannelStateForAccount: (...args: any[]) => mockPurgeSecureForAccount(...args),
+  deleteSecureChannel: vi.fn().mockResolvedValue(true),
+}));
+
 // S3
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,

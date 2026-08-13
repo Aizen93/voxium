@@ -108,7 +108,7 @@ describe('memberBroadcast — joinServerRoom', () => {
 
     expect(mockPrisma.channel.findMany).toHaveBeenCalledWith({
       where: { serverId: 'server-1' },
-      select: { id: true },
+      select: { id: true, secure: true },
     });
     expect(socket.join).toHaveBeenCalledWith('server:server-1');
     expect(socket.join).toHaveBeenCalledWith('channel:ch-1');
@@ -180,7 +180,7 @@ describe('memberBroadcast — joinServerRoom', () => {
 
     expect(mockPrisma.channel.findMany).toHaveBeenCalledWith({
       where: { serverId: 'server-1' },
-      select: { id: true },
+      select: { id: true, secure: true },
     });
   });
 

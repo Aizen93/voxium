@@ -80,7 +80,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
           channelId: true,
           conversationId: true,
           authorId: true,
-          channel: { select: { serverId: true } },
+          channel: { select: { serverId: true, secure: true } },
         },
       });
       if (!message) throw new NotFoundError('Message');
@@ -91,7 +91,15 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       }
 
       // Verify the reporter has access to this message
-      if (message.channel?.serverId) {
+      if (message.channel?.secure) {
+        // Secure channels: only channel members can see (and thus report)
+        // messages — server membership alone must not act as an oracle
+        const channelMembership = await prisma.channelMember.findUnique({
+          where: { channelId_userId: { channelId: message.channelId!, userId } },
+          select: { userId: true },
+        });
+        if (!channelMembership) throw new NotFoundError('Message');
+      } else if (message.channel?.serverId) {
         const membership = await prisma.serverMember.findUnique({
           where: { userId_serverId: { userId, serverId: message.channel.serverId } },
           select: { userId: true },

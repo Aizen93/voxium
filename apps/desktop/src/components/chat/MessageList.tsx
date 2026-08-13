@@ -29,7 +29,7 @@ function DaySeparatorRow({ iso }: { iso: string }) {
 export function MessageList() {
   const { t } = useTranslation();
   const { messages, hasMore, hasMoreAfter, isLoading, fetchMessages, typingUsers, targetMessageId, clearTargetMessage } = useChatStore();
-  const { activeChannelId, members } = useServerStore();
+  const { activeChannelId, members, channels } = useServerStore();
   const { user } = useAuthStore();
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const fetchingRef = useRef(false);
@@ -37,6 +37,14 @@ export function MessageList() {
 
   const currentMember = members.find((m) => m.userId === user?.id);
   const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
+  // SECURE channels: moderation is membership-derived, never role-derived —
+  // the channel CREATOR moderates (MANAGE_MESSAGES in the fixed creator set),
+  // and a server admin/owner who is a plain member (or no member at all) does
+  // not. Showing them the admin delete button would only produce a 403.
+  const activeChannel = channels.find((c) => c.id === activeChannelId);
+  const canModerate = activeChannel?.secure
+    ? activeChannel.createdById === user?.id
+    : isAdmin;
 
   // Scroll to bottom on channel change
   useEffect(() => {
@@ -262,7 +270,7 @@ export function MessageList() {
                   showHeader={showHeader}
                   addTopMargin={showHeader && dataIndex > 0 && !startsDay}
                   isOwn={isOwn}
-                  canDelete={isOwn || isAdmin}
+                  canDelete={isOwn || canModerate}
                   channelId={activeChannelId!}
                 />
               </div>

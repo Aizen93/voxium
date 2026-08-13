@@ -154,9 +154,27 @@ export function MainLayout() {
       return !!serverState.activeServerId && !!channelId && channelId === serverState.activeChannelId;
     };
 
+    // Secure channels by the loaded channel list (the trustworthy signal), OR
+    // the message's own encrypted flag — the flag alone must never DOWNGRADE
+    // (that's channelCrypto's refusal rule) but it is always safe as a reason
+    // to decrypt-or-suppress, e.g. for servers whose channel list isn't loaded.
+    const isSecureChannelMessage = (message: Message): boolean => {
+      if (message.encrypted === true) return true;
+      return useServerStore
+        .getState()
+        .channels.some((c) => c.id === message.channelId && c.secure === true);
+    };
+
     // Store function references so cleanup actually works
     const handlers = {
-      messageNew: (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
+      messageNew: async (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
+        if (message.channelId && isSecureChannelMessage(message)) {
+          // Decrypt BEFORE the store and BEFORE any notification — ciphertext
+          // must never reach the DOM, and a desktop notification showing an
+          // envelope (or worse, trusting a forged plaintext row) is a leak.
+          const { decryptChannelMessageForDisplay } = await import('../../services/e2e/channelCrypto');
+          message = { ...(await decryptChannelMessageForDisplay(message)), serverId: message.serverId, serverName: message.serverName, channelName: message.channelName };
+        }
         if (isViewingChannel(message.channelId)) {
           useChatStore.getState().addMessage(message);
           // Debounced mark-as-read so lastReadAt stays current while viewing
@@ -209,7 +227,12 @@ export function MainLayout() {
           void notify(title, `${authorName}: ${body}`, message.author?.avatarUrl);
         }
       },
-      messageUpdate: (message: Message) => {
+      messageUpdate: async (message: Message) => {
+        if (message.channelId && isSecureChannelMessage(message)) {
+          // A secure edit is a fresh ciphertext under the same id
+          const { decryptChannelMessageForDisplay } = await import('../../services/e2e/channelCrypto');
+          message = await decryptChannelMessageForDisplay(message);
+        }
         if (isViewingChannel(message.channelId)) {
           useChatStore.getState().updateMessage(message);
         }
@@ -289,6 +312,11 @@ export function MainLayout() {
       },
       channelDeleted: ({ channelId, serverId }: { channelId: string; serverId: string }) => {
         useServerStore.getState().removeChannel(channelId, serverId);
+      },
+      channelMembersUpdated: (payload: { channelId: string; serverId: string; members: unknown }) => {
+        // Secure channels only. Runtime-validated inside the store; rotation
+        // itself never depends on this event (per-send authoritative fetch).
+        useServerStore.getState().handleChannelMembersUpdated(payload);
       },
       categoryCreated: (category: Category) => {
         useServerStore.getState().addCategory(category);
@@ -658,6 +686,7 @@ export function MainLayout() {
       ['channel:created', handlers.channelCreated],
       ['channel:updated', handlers.channelUpdated],
       ['channel:deleted', handlers.channelDeleted],
+      ['channel:members_updated', handlers.channelMembersUpdated],
       ['category:created', handlers.categoryCreated],
       ['category:updated', handlers.categoryUpdated],
       ['category:deleted', handlers.categoryDeleted],

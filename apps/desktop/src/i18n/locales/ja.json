@@ -328,6 +328,10 @@
       "name": "ロールの管理",
       "description": "メンバーが自分より下位のロールを作成、編集、削除できるようにします"
     },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "セキュアチャンネルの作成",
+      "description": "メンバーが招待制のエンドツーエンド暗号化チャンネルを作成できるようにします"
+    },
     "CREATE_INVITES": {
       "name": "招待を作成",
       "description": "メンバーがサーバーの招待リンクを作成できるようにします"
@@ -1107,5 +1111,46 @@
   },
   "search": {
     "placeholder": "メッセージを検索…"
+  },
+  "secureChannel": {
+    "sectionTitle": "セキュアチャンネル",
+    "createTitle": "セキュアチャンネルを作成",
+    "createDescription": "招待制のエンドツーエンド暗号化チャンネルです。招待されたメンバーだけが見ることができ、サーバー管理者でも読むことはできません。",
+    "namePlaceholder": "チャンネル名",
+    "inviteMembers": "メンバーを招待 ({{count}}/{{max}})",
+    "searchMembers": "メンバーを検索…",
+    "noMembersFound": "メンバーが見つかりません",
+    "create": "作成",
+    "creating": "作成中…",
+    "created": "セキュアチャンネルを作成しました",
+    "failedToCreate": "セキュアチャンネルの作成に失敗しました",
+    "memberCapReached": "セキュアチャンネルのメンバーは最大{{max}}人です",
+    "members": "メンバー",
+    "membersCount": "メンバー ({{count}}/{{max}})",
+    "inviteMember": "メンバーを招待",
+    "memberInvited": "メンバーを招待しました",
+    "failedToInvite": "メンバーの招待に失敗しました",
+    "memberRemoved": "メンバーを削除しました",
+    "failedToRemove": "メンバーの削除に失敗しました",
+    "removeMember": "メンバーを削除",
+    "failedToLoadMembers": "メンバーの読み込みに失敗しました",
+    "leave": "チャンネルを退出",
+    "left": "チャンネルを退出しました",
+    "failedToLeave": "チャンネルの退出に失敗しました",
+    "membersNotReady": "{{names}} はまだメッセージを読めません — 暗号化が設定されていません",
+    "moderationTitle": "セキュアチャンネル",
+    "moderationLoading": "読み込み中…",
+    "moderationCount": "このサーバーには{{count}}個のセキュアチャンネルがあります。名前と内容はメンバーにのみ表示されます。",
+    "moderationHint": "不正利用に対処するには、通報に記載されたチャンネルIDでセキュアチャンネルを削除してください。",
+    "moderationDeletePlaceholder": "通報に記載されたチャンネルID",
+    "moderationDelete": "削除",
+    "moderationDeleted": "セキュアチャンネルを削除しました",
+    "moderationDeleteFailed": "削除に失敗しました — チャンネルIDを確認してください",
+    "renameLabel": "チャンネル名",
+    "rename": "名前を変更",
+    "renaming": "変更中…",
+    "renamed": "チャンネル名を変更しました",
+    "failedToRename": "チャンネル名の変更に失敗しました",
+    "moderationNotSecure": "「{{name}}」は通常のチャンネルです — サイドバーから削除してください"
   }
 }

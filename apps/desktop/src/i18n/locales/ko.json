@@ -328,6 +328,10 @@
       "name": "역할 관리",
       "description": "멤버가 자신보다 낮은 역할을 생성, 편집 및 삭제할 수 있도록 허용합니다"
     },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "보안 채널 만들기",
+      "description": "멤버가 초대 전용 종단간 암호화 채널을 만들 수 있도록 허용합니다"
+    },
     "CREATE_INVITES": {
       "name": "초대 만들기",
       "description": "멤버가 서버 초대 링크를 만들 수 있도록 허용합니다"
@@ -1107,5 +1111,46 @@
   },
   "search": {
     "placeholder": "메시지 검색…"
+  },
+  "secureChannel": {
+    "sectionTitle": "보안 채널",
+    "createTitle": "보안 채널 만들기",
+    "createDescription": "초대 전용 종단간 암호화 채널입니다. 초대된 멤버만 볼 수 있으며, 서버 관리자도 읽을 수 없습니다.",
+    "namePlaceholder": "채널-이름",
+    "inviteMembers": "멤버 초대 ({{count}}/{{max}})",
+    "searchMembers": "멤버 검색…",
+    "noMembersFound": "멤버를 찾을 수 없습니다",
+    "create": "만들기",
+    "creating": "만드는 중…",
+    "created": "보안 채널이 생성되었습니다",
+    "failedToCreate": "보안 채널 생성에 실패했습니다",
+    "memberCapReached": "보안 채널의 멤버는 최대 {{max}}명입니다",
+    "members": "멤버",
+    "membersCount": "멤버 ({{count}}/{{max}})",
+    "inviteMember": "멤버 초대",
+    "memberInvited": "멤버를 초대했습니다",
+    "failedToInvite": "멤버 초대에 실패했습니다",
+    "memberRemoved": "멤버를 제거했습니다",
+    "failedToRemove": "멤버 제거에 실패했습니다",
+    "removeMember": "멤버 제거",
+    "failedToLoadMembers": "멤버를 불러오지 못했습니다",
+    "leave": "채널 나가기",
+    "left": "채널에서 나갔습니다",
+    "failedToLeave": "채널 나가기에 실패했습니다",
+    "membersNotReady": "{{names}} 님은 아직 메시지를 읽을 수 없습니다 — 암호화가 설정되지 않았습니다",
+    "moderationTitle": "보안 채널",
+    "moderationLoading": "불러오는 중…",
+    "moderationCount": "이 서버에는 {{count}}개의 보안 채널이 있습니다. 이름과 내용은 해당 멤버에게만 표시됩니다.",
+    "moderationHint": "악용에 대처하려면 신고에 포함된 채널 ID로 보안 채널을 삭제하세요.",
+    "moderationDeletePlaceholder": "신고에 포함된 채널 ID",
+    "moderationDelete": "삭제",
+    "moderationDeleted": "보안 채널이 삭제되었습니다",
+    "moderationDeleteFailed": "삭제에 실패했습니다 — 채널 ID를 확인하세요",
+    "renameLabel": "채널 이름",
+    "rename": "이름 변경",
+    "renaming": "변경 중…",
+    "renamed": "채널 이름이 변경되었습니다",
+    "failedToRename": "채널 이름 변경에 실패했습니다",
+    "moderationNotSecure": "\"{{name}}\"은(는) 일반 채널입니다 — 사이드바에서 삭제하세요"
   }
 }

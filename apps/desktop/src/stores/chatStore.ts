@@ -5,13 +5,24 @@ import { getSocket } from '../services/socket';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { useDMStore } from './dmStore';
+import { useServerStore } from './serverStore';
 import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
+import {
+  decryptChannelMessagesForDisplay,
+  prepareOutgoingChannelMessage,
+  cacheSentChannelPlaintext,
+} from '../services/e2e/channelCrypto';
 import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
 import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMeta } from '@voxium/shared';
 
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Secure channels are decided by the channel list the server already gave us. */
+function isSecureChannel(channelId: string): boolean {
+  return useServerStore.getState().channels.some((c) => c.id === channelId && c.secure === true);
+}
 
 // Track current fetch to prevent duplicate requests
 let activeFetchController: AbortController | null = null;
@@ -30,7 +41,7 @@ interface ChatState {
   clearReplyingTo: () => void;
   fetchMessages: (channelId: string, before?: string) => Promise<void>;
   fetchMessagesAround: (channelId: string, messageId: string) => Promise<void>;
-  sendMessage: (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => Promise<void>;
+  sendMessage: (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[], e2eAttachments?: E2EAttachmentMeta[]) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   toggleReaction: (channelId: string, messageId: string, emoji: string) => Promise<void>;
@@ -88,7 +99,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/channels/${channelId}/messages?${params}`, {
         signal: controller.signal,
       });
-      const newMessages = data.data;
+      // Secure channels: ciphertext never reaches the store or the DOM
+      const newMessages = isSecureChannel(channelId)
+        ? await decryptChannelMessagesForDisplay(data.data)
+        : data.data;
 
       // Check if this fetch is still relevant (channel may have changed)
       if (controller.signal.aborted) return;
@@ -133,11 +147,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/channels/${channelId}/messages?around=${messageId}`, {
         signal: controller.signal,
       });
+      const around = isSecureChannel(channelId)
+        ? await decryptChannelMessagesForDisplay(data.data)
+        : data.data;
 
       if (controller.signal.aborted) return;
 
       set({
-        messages: data.data,
+        messages: around,
         hasMore: data.hasMore,
         hasMoreAfter: data.hasMoreAfter ?? false,
         targetMessageId: data.targetMessageId ?? messageId,
@@ -155,18 +172,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => {
+  sendMessage: async (
+    channelId: string,
+    content: string,
+    attachments?: Omit<Attachment, 'id' | 'expired'>[],
+    e2eAttachments?: E2EAttachmentMeta[],
+  ) => {
     try {
       const replyingTo = get().replyingTo;
-      const body: Record<string, unknown> = { content };
-      if (replyingTo) body.replyToId = replyingTo.id;
-      if (attachments?.length) body.attachments = attachments;
 
-      const { data } = await api.post(`/channels/${channelId}/messages`, body);
-      // The message will be added via WebSocket, but we also handle it here as fallback
-      const exists = get().messages.some((m) => m.id === data.data.id);
-      if (!exists) {
-        set((state) => ({ messages: [...state.messages, data.data] }));
+      if (isSecureChannel(channelId)) {
+        // Secure channels mirror the DM send: encrypt before anything leaves
+        // the client; real attachment metadata travels inside the ciphertext.
+        const prepared = await prepareOutgoingChannelMessage(channelId, content, e2eAttachments);
+        if (prepared.notReadyUserIds.length > 0) {
+          const members = useServerStore.getState().members;
+          const names = prepared.notReadyUserIds
+            .map((id) => members.find((m) => m.userId === id)?.user.displayName ?? id)
+            .join(', ');
+          toast.error(i18n.t('secureChannel.membersNotReady', { names }));
+        }
+
+        const body: Record<string, unknown> = { content: prepared.content, encrypted: true };
+        if (replyingTo) body.replyToId = replyingTo.id;
+        if (e2eAttachments?.length) {
+          body.attachments = e2eAttachments.map((meta) => ({
+            s3Key: meta.s3Key,
+            fileName: E2E_ATTACHMENT_NAME,
+            fileSize: meta.fileSize + E2E_GCM_TAG_BYTES, // ciphertext size
+            mimeType: E2E_ATTACHMENT_MIME,
+          }));
+        }
+
+        const { data } = await api.post(`/channels/${channelId}/messages`, body);
+        const raw: Message = data.data;
+        await cacheSentChannelPlaintext(raw.id, channelId, prepared.plaintext, null, raw.createdAt);
+        const sent: Message = {
+          ...raw,
+          content,
+          ...(e2eAttachments?.length && { e2eAttachments }),
+        };
+        const exists = get().messages.some((m) => m.id === sent.id);
+        if (!exists) {
+          set((state) => ({ messages: [...state.messages, sent] }));
+        }
+      } else {
+        const body: Record<string, unknown> = { content };
+        if (replyingTo) body.replyToId = replyingTo.id;
+        if (attachments?.length) body.attachments = attachments;
+
+        const { data } = await api.post(`/channels/${channelId}/messages`, body);
+        // The message will be added via WebSocket, but we also handle it here as fallback
+        const exists = get().messages.some((m) => m.id === data.data.id);
+        if (!exists) {
+          set((state) => ({ messages: [...state.messages, data.data] }));
+        }
       }
 
       if (replyingTo) set({ replyingTo: null });
@@ -182,6 +242,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   editMessage: async (channelId: string, messageId: string, content: string) => {
+    if (isSecureChannel(channelId)) {
+      // An edit is a fresh ciphertext for the same id (mirrors editDMMessage)
+      const prepared = await prepareOutgoingChannelMessage(channelId, content);
+      const { data } = await api.patch(`/channels/${channelId}/messages/${messageId}`, {
+        content: prepared.content,
+        encrypted: true,
+      });
+      // cache under the new editedAt version BEFORE the socket echo decrypts it
+      await cacheSentChannelPlaintext(
+        messageId, channelId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt,
+      );
+      return;
+    }
     await api.patch(`/channels/${channelId}/messages/${messageId}`, { content });
   },
 

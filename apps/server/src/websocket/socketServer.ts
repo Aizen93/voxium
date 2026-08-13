@@ -341,7 +341,9 @@ export function initSocketServer(httpServer: HttpServer) {
       // self-inflicted DB stampede).
       const allChannels = await prisma.channel.findMany({
         where: { serverId: { in: memberships.map((m) => m.serverId) } },
-        select: { id: true, serverId: true, type: true },
+        // `secure` is load-bearing: without it filterVisibleChannelsMulti
+        // treats secure channels as plaintext and joins every member's socket
+        select: { id: true, serverId: true, type: true, secure: true },
       });
       const { filterVisibleChannelsMulti } = await import('../utils/permissionCalculator');
       const visibleChannels = await filterVisibleChannelsMulti(userId, allChannels);

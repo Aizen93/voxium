@@ -81,7 +81,7 @@ describe('syncChannelVisibilityRooms', () => {
 
     expect(mockPrisma.channel.findMany).toHaveBeenCalledWith({
       where: { serverId: 'server-1', id: 'ch-1' },
-      select: { id: true },
+      select: { id: true, secure: true },
     });
   });
 

@@ -58,10 +58,12 @@ vi.mock('../../websocket/socketServer', () => ({
 
 // Permission calculator
 const mockHasServerPermission = vi.fn();
+const mockHasChannelPermission = vi.fn();
 const mockGetHighestRolePosition = vi.fn();
 const mockGetEffectivePermissions = vi.fn();
 vi.mock('../../utils/permissionCalculator', () => ({
   hasServerPermission: (...args: any[]) => mockHasServerPermission(...args),
+  hasChannelPermission: (...args: any[]) => mockHasChannelPermission(...args),
   getHighestRolePosition: (...args: any[]) => mockGetHighestRolePosition(...args),
   getEffectivePermissions: (...args: any[]) => mockGetEffectivePermissions(...args),
 }));
@@ -902,7 +904,9 @@ describe('Role Routes', () => {
         id: 'ch1',
         serverId: 'srv1',
         name: 'general',
+        secure: false,
       });
+      mockHasChannelPermission.mockResolvedValue(true);
       prismaMock.channelPermissionOverride.findMany.mockResolvedValue([
         {
           channelId: 'ch1',
@@ -920,6 +924,9 @@ describe('Role Routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data).toHaveLength(1);
+      expect(mockHasChannelPermission).toHaveBeenCalledWith(
+        'user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL,
+      );
     });
 
     it('returns 404 when not a server member', async () => {
@@ -944,6 +951,48 @@ describe('Role Routes', () => {
       );
 
       expect(res.status).toBe(404);
+    });
+
+    it('returns 404 for a SECURE channel — indistinguishable from not-found', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user1',
+        serverId: 'srv1',
+      });
+      prismaMock.channel.findFirst.mockResolvedValue({
+        id: 'ch-sec',
+        serverId: 'srv1',
+        name: 'covert',
+        secure: true,
+      });
+
+      const res = await request(app).get(
+        '/api/v1/servers/srv1/roles/channels/ch-sec/permissions',
+      );
+
+      expect(res.status).toBe(404);
+      // Never reaches the override query (and never leaks via timing of it)
+      expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the member lacks VIEW_CHANNEL on the channel', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user1',
+        serverId: 'srv1',
+      });
+      prismaMock.channel.findFirst.mockResolvedValue({
+        id: 'ch1',
+        serverId: 'srv1',
+        name: 'hidden',
+        secure: false,
+      });
+      mockHasChannelPermission.mockResolvedValue(false);
+
+      const res = await request(app).get(
+        '/api/v1/servers/srv1/roles/channels/ch1/permissions',
+      );
+
+      expect(res.status).toBe(404);
+      expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
     });
   });
 
@@ -1045,6 +1094,61 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('overlapping');
+    });
+
+    it('returns 404 for a SECURE channel — role overrides never apply there', async () => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      prismaMock.channel.findFirst.mockResolvedValue({
+        id: 'ch-sec',
+        serverId: 'srv1',
+        secure: true,
+      });
+
+      const res = await request(app)
+        .put('/api/v1/servers/srv1/roles/channels/ch-sec/permissions/r2')
+        .send({ allow: permissionsToString(Permissions.VIEW_CHANNEL), deny: '0' });
+
+      expect(res.status).toBe(404);
+      expect(prismaMock.channelPermissionOverride.upsert).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('strips CREATE_SECURE_CHANNELS (like ADMINISTRATOR) from override masks', async () => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      prismaMock.channel.findFirst.mockResolvedValue({
+        id: 'ch1',
+        serverId: 'srv1',
+        secure: false,
+      });
+      prismaMock.role.findFirst.mockResolvedValue({
+        id: 'r2',
+        serverId: 'srv1',
+        position: 2,
+        isDefault: false,
+      });
+      prismaMock.channelPermissionOverride.upsert.mockResolvedValue({});
+      prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .put('/api/v1/servers/srv1/roles/channels/ch1/permissions/r2')
+        .send({
+          allow: permissionsToString(
+            Permissions.SEND_MESSAGES | Permissions.CREATE_SECURE_CHANNELS,
+          ),
+          deny: '0',
+        });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.channelPermissionOverride.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: {
+            allow: permissionsToString(Permissions.SEND_MESSAGES),
+            deny: '0',
+          },
+        }),
+      );
     });
 
     it('returns 400 when allow/deny are not strings', async () => {
@@ -1202,6 +1306,23 @@ describe('Role Routes', () => {
   // ── DELETE /channels/:channelId/permissions/:roleId ────────────────────
 
   describe('DELETE /roles/channels/:channelId/permissions/:roleId', () => {
+    it('returns 404 for a SECURE channel — same opacity as the PUT', async () => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      prismaMock.channel.findFirst.mockResolvedValue({
+        id: 'ch-sec',
+        serverId: 'srv1',
+        secure: true,
+      });
+
+      const res = await request(app).delete(
+        '/api/v1/servers/srv1/roles/channels/ch-sec/permissions/r2',
+      );
+
+      expect(res.status).toBe(404);
+      expect(prismaMock.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+    });
+
     it('removes a channel permission override', async () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity);

@@ -132,6 +132,14 @@ vi.mock('../../utils/memberBroadcast', () => ({
   joinServerRoom: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Secure-channel lifecycle (leave/kick purge their secure state first)
+const mockPurgeSecureChannelState = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/secureChannelLifecycle', () => ({
+  purgeSecureChannelState: (...args: any[]) => mockPurgeSecureChannelState(...args),
+  purgeSecureChannelStateForAccount: vi.fn().mockResolvedValue(undefined),
+  deleteSecureChannel: vi.fn().mockResolvedValue(true),
+}));
+
 // S3
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,

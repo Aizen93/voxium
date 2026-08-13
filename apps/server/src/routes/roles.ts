@@ -16,7 +16,7 @@ import type { Role, ChannelPermissionOverride, MemberRole } from '@voxium/shared
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitRoleManage } from '../middleware/rateLimiter';
-import { hasServerPermission, getHighestRolePosition, getEffectivePermissions } from '../utils/permissionCalculator';
+import { hasServerPermission, hasChannelPermission, getHighestRolePosition, getEffectivePermissions } from '../utils/permissionCalculator';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 
 export const roleRouter = Router({ mergeParams: true });
@@ -446,7 +446,15 @@ roleRouter.get(
       if (!membership) throw new NotFoundError('Server');
 
       const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      if (!channel) throw new NotFoundError('Channel');
+      // Secure channels have no role overrides and must not be enumerable —
+      // same NotFound as a channel that does not exist. Regular channels
+      // additionally require VIEW_CHANNEL (a member who cannot see a channel
+      // must not read its override list either).
+      if (!channel || channel.secure) throw new NotFoundError('Channel');
+      const canView = await hasChannelPermission(
+        req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL,
+      );
+      if (!canView) throw new NotFoundError('Channel');
 
       const overrides = await prisma.channelPermissionOverride.findMany({
         where: { channelId },
@@ -472,7 +480,9 @@ roleRouter.put(
       if (!canManage) throw new ForbiddenError('You do not have permission to manage permissions');
 
       const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      if (!channel) throw new NotFoundError('Channel');
+      // Secure channels are membership-governed: role overrides do not apply
+      // and their existence must not leak — indistinguishable from not-found
+      if (!channel || channel.secure) throw new NotFoundError('Channel');
 
       const role = await prisma.role.findFirst({ where: { id: roleId, serverId } });
       if (!role) throw new NotFoundError('Role');
@@ -488,8 +498,13 @@ roleRouter.put(
         throw new BadRequestError('allow and deny must be strings (decimal bigint)');
       }
 
-      // Validate that allow and deny don't overlap, and strip ADMINISTRATOR (cannot be granted via channel overrides)
-      const CHANNEL_OVERRIDE_MASK = ALL_PERMISSIONS & ~Permissions.ADMINISTRATOR;
+      // Validate that allow and deny don't overlap, and strip the flags that
+      // cannot be granted via channel overrides: ADMINISTRATOR, and
+      // CREATE_SECURE_CHANNELS (server-level only — a channel-scoped grant of
+      // "may create secure channels" is meaningless and would just confuse
+      // effective-permission displays)
+      const CHANNEL_OVERRIDE_MASK =
+        ALL_PERMISSIONS & ~Permissions.ADMINISTRATOR & ~Permissions.CREATE_SECURE_CHANNELS;
       const allowBits = permissionsFromString(allow) & CHANNEL_OVERRIDE_MASK;
       const denyBits = permissionsFromString(deny) & CHANNEL_OVERRIDE_MASK;
       if ((allowBits & denyBits) !== 0n) {
@@ -556,7 +571,8 @@ roleRouter.delete(
       if (!canManage) throw new ForbiddenError('You do not have permission to manage permissions');
 
       const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      if (!channel) throw new NotFoundError('Channel');
+      // Same opacity rule as the PUT: secure channels read as not-found
+      if (!channel || channel.secure) throw new NotFoundError('Channel');
 
       const role = await prisma.role.findFirst({ where: { id: roleId, serverId } });
       if (!role) throw new NotFoundError('Role');

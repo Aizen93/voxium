@@ -99,12 +99,29 @@ export interface Channel {
   categoryId: string | null;
   position: number;
   createdAt: string;
+  /** Invite-only E2E-encrypted channel. Only ever true on `type: 'text'`. */
+  secure?: boolean;
+  /** Creator (secure channels only) — the sole membership manager. */
+  createdById?: string | null;
 }
 
 export interface CreateChannelRequest {
   name: string;
   type: ChannelType;
   categoryId?: string;
+}
+
+/** One row of a secure channel's member list. */
+export interface SecureChannelMember {
+  userId: string;
+  isCreator: boolean;
+  addedAt: string;
+  user: {
+    id: string;
+    username: string;
+    displayName: string;
+    avatarUrl: string | null;
+  };
 }
 
 // ─── Message ─────────────────────────────────────────────────────────────────
@@ -269,6 +286,7 @@ export interface ServerToClientEvents {
   'channel:created': (channel: Channel) => void;
   'channel:updated': (channel: Channel) => void;
   'channel:deleted': (data: { channelId: string; serverId: string }) => void;
+  'channel:members_updated': (data: { channelId: string; serverId: string; members: SecureChannelMember[] }) => void;
   'category:created': (category: Category) => void;
   'category:updated': (category: Category) => void;
   'category:deleted': (data: { categoryId: string; serverId: string }) => void;

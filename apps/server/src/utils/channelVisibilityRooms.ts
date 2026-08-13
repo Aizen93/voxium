@@ -34,7 +34,9 @@ export async function syncChannelVisibilityRooms(
 
     const channels = await prisma.channel.findMany({
       where: { serverId, ...(opts?.channelId ? { id: opts.channelId } : {}) },
-      select: { id: true },
+      // `secure` is load-bearing: filterVisibleChannels can only apply the
+      // membership-only rule to channels it can recognize as secure
+      select: { id: true, secure: true },
     });
     if (channels.length === 0) return;
 

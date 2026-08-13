@@ -7,7 +7,8 @@ import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { hasServerPermission, filterVisibleChannels } from '../utils/permissionCalculator';
+import { hasServerPermission, hasChannelPermission, filterVisibleChannels, computeServerPermissions } from '../utils/permissionCalculator';
+import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -26,10 +27,12 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
       throw new BadRequestError('order must be a non-empty array');
     }
 
-    // Validate all channel IDs belong to this server
+    // Validate all channel IDs belong to this server. Secure channels are
+    // excluded: they cannot be reordered/categorized by MANAGE_CHANNELS
+    // holders, and a secure id must fail exactly like a foreign id (no oracle)
     const channelIds = order.map((o: { id: string }) => o.id);
     const channels = await prisma.channel.findMany({
-      where: { id: { in: channelIds }, serverId },
+      where: { id: { in: channelIds }, serverId, secure: false },
       select: { id: true },
     });
     if (channels.length !== channelIds.length) {
@@ -170,6 +173,14 @@ channelRouter.post('/:channelId/read', rateLimitMarkRead, async (req: Request<{ 
     });
     if (!channel) throw new ForbiddenError('Not authorized');
 
+    // VIEW gate: without it, mark-read is a channel-existence oracle (and for
+    // secure channels an enumeration hole — non-members must see the same
+    // error as for a channel that does not exist)
+    const canView = await hasChannelPermission(
+      req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL,
+    );
+    if (!canView) throw new ForbiddenError('Not authorized');
+
     await prisma.channelRead.upsert({
       where: { userId_channelId: { userId: req.user!.userId, channelId } },
       update: { lastReadAt: new Date() },
@@ -190,8 +201,10 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
     const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
     if (!canManage) throw new ForbiddenError('You do not have permission to update channels');
 
+    // Secure channels read as not-found: they are uncategorized by design and
+    // a CHANNEL_UPDATED broadcast to server:{id} would leak their name
     const channel = await prisma.channel.findFirst({
-      where: { id: channelId, serverId },
+      where: { id: channelId, serverId, secure: false },
     });
     if (!channel) throw new NotFoundError('Channel');
 
@@ -223,13 +236,45 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
 channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId, channelId } = req.params;
+    const userId = req.user!.userId;
 
-    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
+    const [channel, canManage] = await Promise.all([
+      prisma.channel.findFirst({
+        where: { id: channelId, serverId },
+        select: { id: true, secure: true, createdById: true, server: { select: { ownerId: true } } },
+      }),
+      hasServerPermission(userId, serverId, Permissions.MANAGE_CHANNELS),
+    ]);
+
+    if (channel?.secure) {
+      // Secure channels: MANAGE_CHANNELS is NOT sufficient. Deletable by the
+      // creator, or — the single opaque-moderation lever — the server owner /
+      // an ADMINISTRATOR acting on a channel id learned from an abuse report.
+      // Content stays unreadable either way; deletion is the only power.
+      const isCreator = channel.createdById === userId;
+      const isOwner = channel.server.ownerId === userId;
+      let allowed = isCreator || isOwner;
+      if (!allowed) {
+        const perms = await computeServerPermissions(userId, serverId);
+        allowed = (perms & Permissions.ADMINISTRATOR) === Permissions.ADMINISTRATOR;
+      }
+      if (!allowed) {
+        // Opacity, matched to what THIS caller would see for a nonexistent id:
+        // without MANAGE_CHANNELS a nonexistent id gets the permission 403
+        // below, so a secure id must too — a 404 here would be an INVERTED
+        // oracle (404 ⇒ "a secure channel exists there").
+        throw canManage
+          ? new NotFoundError('Channel')
+          : new ForbiddenError('You do not have permission to delete channels');
+      }
+
+      await deleteSecureChannel(channelId);
+      res.json({ success: true, message: 'Channel deleted' });
+      return;
+    }
+
     if (!canManage) throw new ForbiddenError('You do not have permission to delete channels');
 
-    const channel = await prisma.channel.findFirst({
-      where: { id: channelId, serverId },
-    });
     if (!channel) throw new NotFoundError('Channel');
 
     await prisma.channel.delete({ where: { id: channelId } });

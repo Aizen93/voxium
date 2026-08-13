@@ -23,6 +23,7 @@ import {
   e2eKeyCanonical,
   e2eMasterCanonical,
   parseE2EEnvelope,
+  parseE2EScope,
   type E2EPreKey,
 } from '@voxium/shared';
 import { verifyEd25519Signature } from '../utils/e2eVerify';
@@ -100,14 +101,28 @@ function verifyPreKeySignature(
   }
 }
 
-/** Participants may only fetch key material of users they share a DM with. */
-async function assertSharesConversation(requesterId: string, targetUserId: string): Promise<void> {
+/**
+ * Key material may only be fetched for users the requester shares an E2E
+ * context with: a DM conversation, or membership of the same secure channel.
+ * (Without the channel arm, two secure-channel members who never opened a DM
+ * could not claim each other's prekey bundles to deliver session keys.)
+ */
+async function assertSharesE2EContext(requesterId: string, targetUserId: string): Promise<void> {
   const [user1Id, user2Id] = requesterId < targetUserId ? [requesterId, targetUserId] : [targetUserId, requesterId];
   const conversation = await prisma.conversation.findUnique({
     where: { user1Id_user2Id: { user1Id, user2Id } },
     select: { id: true },
   });
-  if (!conversation) {
+  if (conversation) return;
+
+  const sharedChannel = await prisma.channelMember.findFirst({
+    where: {
+      userId: requesterId,
+      channel: { secure: true, members: { some: { userId: targetUserId } } },
+    },
+    select: { channelId: true },
+  });
+  if (!sharedChannel) {
     throw new ForbiddenError('No conversation with this user');
   }
 }
@@ -405,7 +420,7 @@ e2eRouter.get('/devices/:userId', rateLimitE2EStatus, async (req: Request<{ user
     const requesterId = req.user!.userId;
     const targetUserId = req.params.userId;
     if (targetUserId !== requesterId) {
-      await assertSharesConversation(requesterId, targetUserId);
+      await assertSharesE2EContext(requesterId, targetUserId);
     }
 
     const devices = await prisma.e2EDevice.findMany({
@@ -422,6 +437,97 @@ e2eRouter.get('/devices/:userId', rateLimitE2EStatus, async (req: Request<{ user
     res.json({
       success: true,
       data: { devices: devices.map(serializeDevice), listVersion, ...master, ...CROSS_SIGNING_CAPABILITY },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Batch device lists for a secure channel ─────────────────────────────────
+// One request instead of N: a channel send needs every member's device list to
+// decide rotation and fan out key shares, and N sequential GETs would put an
+// O(members) round-trip tax on the message-send path. The response is also the
+// AUTHORITATIVE member list for rotation — clients must never trust socket
+// events for that decision (a missed event must fail closed, not leak).
+
+e2eRouter.get('/channels/:channelId/devices', rateLimitE2EStatus, async (req: Request<{ channelId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const requesterId = req.user!.userId;
+    const { channelId } = req.params;
+
+    // Membership gate with the standard opacity rule: a non-member (owner and
+    // ADMINISTRATOR included) sees exactly what they would for no channel.
+    const [channel, callerMembership] = await Promise.all([
+      prisma.channel.findUnique({
+        where: { id: channelId },
+        select: { id: true, secure: true, serverId: true },
+      }),
+      prisma.channelMember.findUnique({
+        where: { channelId_userId: { channelId, userId: requesterId } },
+        select: { userId: true },
+      }),
+    ]);
+    if (!channel || !channel.secure || !callerMembership) throw new NotFoundError('Channel');
+
+    const rawMembers = await prisma.channelMember.findMany({
+      where: { channelId },
+      orderBy: { addedAt: 'asc' },
+      select: { userId: true, isCreator: true },
+    });
+    // Cross-check against ServerMember: a stale ChannelMember row (a purge
+    // that failed mid-leave/kick) must not keep receiving session keys, and
+    // must not keep READING this list either — the response is what senders
+    // fan keys out to. This also covers the caller themselves.
+    const serverMemberships = await prisma.serverMember.findMany({
+      where: { serverId: channel.serverId, userId: { in: rawMembers.map((m) => m.userId) } },
+      select: { userId: true },
+    });
+    const serverMemberSet = new Set(serverMemberships.map((m) => m.userId));
+    if (!serverMemberSet.has(requesterId)) throw new NotFoundError('Channel');
+    const members = rawMembers.filter((m) => serverMemberSet.has(m.userId));
+    const memberIds = members.map((m) => m.userId);
+
+    const [devices, registries, masterKeys] = await Promise.all([
+      prisma.e2EDevice.findMany({
+        where: { userId: { in: memberIds } },
+        select: { userId: true, ...DEVICE_LIST_SELECT },
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.e2EDeviceRegistry.findMany({
+        where: { userId: { in: memberIds } },
+        select: { userId: true, version: true },
+      }),
+      prisma.e2EMasterKey.findMany({
+        where: { userId: { in: memberIds } },
+        select: { userId: true, publicKey: true, signature: true },
+      }),
+    ]);
+
+    const devicesByUser = new Map<string, typeof devices>();
+    for (const d of devices) {
+      const list = devicesByUser.get(d.userId) || [];
+      list.push(d);
+      devicesByUser.set(d.userId, list);
+    }
+    const versionByUser = new Map(registries.map((r) => [r.userId, r.version]));
+    const masterByUser = new Map(masterKeys.map((m) => [m.userId, m]));
+
+    res.json({
+      success: true,
+      data: {
+        members: members.map((m) => ({ userId: m.userId, isCreator: m.isCreator })),
+        deviceLists: members.map((m) => {
+          const master = masterByUser.get(m.userId);
+          return {
+            userId: m.userId,
+            devices: (devicesByUser.get(m.userId) || []).map(serializeDevice),
+            listVersion: versionByUser.get(m.userId) ?? 0,
+            masterKey: master?.publicKey ?? null,
+            masterSignature: master?.signature ?? null,
+            ...CROSS_SIGNING_CAPABILITY,
+          };
+        }),
+      },
     });
   } catch (err) {
     next(err);
@@ -681,7 +787,7 @@ e2eRouter.post(
           throw new BadRequestError('Cannot claim a bundle for your own current device');
         }
       } else {
-        await assertSharesConversation(requesterId, targetUserId);
+        await assertSharesE2EContext(requesterId, targetUserId);
       }
 
       const device = await prisma.e2EDevice.findUnique({
@@ -814,17 +920,27 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
     });
     if (!senderDevice) throw new ForbiddenError('Unknown sender device');
 
-    // Gate every share on the conversation it claims to belong to: the sender
-    // must be a participant, and the recipient must be the sender (their own
-    // other device) or the other participant. This also stops a DM peer from
-    // planting session records labelled with a conversation they are not in.
-    const conversationIds = [...new Set(valid.map((s) => s.conversationId))];
+    // Gate every share on the E2E scope it claims to belong to. The field is
+    // named conversationId for wire compatibility, but it is a SCOPE: a bare
+    // cuid is a DM conversation, `ch:{channelId}` a secure channel
+    // (parseE2EScope). This stops anyone from planting inbound-session records
+    // labelled with a scope they are not in.
+    //
+    // DM scopes are checked here, pre-transaction (participant sets are
+    // immutable, so there is nothing to race). CHANNEL scopes are checked
+    // INSIDE the write transaction below: channel membership is mutable, and a
+    // member removed concurrently must not be handed a share that commits
+    // after their membership row is gone.
+    const dmShares = valid.filter((s) => parseE2EScope(s.conversationId).kind === 'dm');
+    const channelShares = valid.filter((s) => parseE2EScope(s.conversationId).kind === 'channel');
+
+    const conversationIds = [...new Set(dmShares.map((s) => s.conversationId))];
     const conversations = await prisma.conversation.findMany({
       where: { id: { in: conversationIds } },
       select: { id: true, user1Id: true, user2Id: true },
     });
     const convById = new Map(conversations.map((c) => [c.id, c]));
-    for (const share of valid) {
+    for (const share of dmShares) {
       const conv = convById.get(share.conversationId);
       if (!conv || (conv.user1Id !== senderUserId && conv.user2Id !== senderUserId)) {
         throw new ForbiddenError('Not a participant of this conversation');
@@ -853,7 +969,7 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
     // another sender's still-needed session keys out of a victim's inbox.
     // With the recipient-device existence check above, total storage is
     // bounded by (conversations x recipient devices x cap).
-    const evicted = await prisma.$transaction(async (tx) => {
+    const { evicted, skipped } = await prisma.$transaction(async (tx) => {
       // Inside the transaction: a device revoked concurrently must not leave
       // orphaned rows behind (revocation deletes that device's shares).
       const knownDevices = await tx.e2EDevice.findMany({
@@ -863,20 +979,112 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
         select: { userId: true, deviceId: true },
       });
       const knownSet = new Set(knownDevices.map((d) => recipientKey(d.userId, d.deviceId)));
-      for (const key of targets.keys()) {
-        if (!knownSet.has(key)) throw new BadRequestError('Unknown recipient device');
+
+      // CHANNEL scopes get skip-not-reject semantics for per-recipient
+      // problems: channel membership (and device sets) are legitimately
+      // mutable, so a recipient removed between the sender's member fetch and
+      // this transaction is an EXPECTED race — and rejecting the whole batch
+      // for one stale recipient would starve every innocent device in the
+      // chunk (the client's retry budget would burn out re-sending a batch
+      // that can never succeed). Dropping the share is also the CORRECT
+      // outcome: the removed member must not get the key, and if they are
+      // re-added the member-set rotation hands them the next session.
+      // DM scopes keep the hard errors — participant sets are immutable, so a
+      // bad recipient there is a broken or hostile client, not a race.
+      const skippedShares = new Set<(typeof valid)[number]>();
+
+      for (const share of dmShares) {
+        if (!knownSet.has(recipientKey(share.recipientUserId, share.recipientDeviceId))) {
+          throw new BadRequestError('Unknown recipient device');
+        }
       }
+      for (const share of channelShares) {
+        if (!knownSet.has(recipientKey(share.recipientUserId, share.recipientDeviceId))) {
+          skippedShares.add(share);
+        }
+      }
+
+      // Channel-scope gate (see the DM gate above for why this one is in-tx):
+      // the channel must exist and be secure, the SENDER must be a member of
+      // both the channel and its server (hard error — a non-member sender is
+      // never a race), and every recipient must be a current channel+server
+      // member or the sender's own other device (skip otherwise).
+      if (channelShares.length > 0) {
+        const channelIds = [...new Set(
+          channelShares.map((s) => (parseE2EScope(s.conversationId) as { channelId: string }).channelId),
+        )];
+        const involvedUserIds = [...new Set([
+          senderUserId,
+          ...channelShares.map((s) => s.recipientUserId),
+        ])];
+        const [membershipRows, channelRows] = await Promise.all([
+          tx.channelMember.findMany({
+            where: {
+              channelId: { in: channelIds },
+              userId: { in: involvedUserIds },
+              channel: { secure: true },
+            },
+            select: { channelId: true, userId: true },
+          }),
+          tx.channel.findMany({
+            where: { id: { in: channelIds }, secure: true },
+            select: { id: true, serverId: true },
+          }),
+        ]);
+        const membershipSet = new Set(membershipRows.map((m) => `${m.channelId} ${m.userId}`));
+        // Stale-ChannelMember defense: membership only counts while the user
+        // is still a member of the channel's SERVER
+        const serverIdByChannel = new Map(channelRows.map((c) => [c.id, c.serverId]));
+        const serverMemberRows = await tx.serverMember.findMany({
+          where: {
+            OR: [...new Set(channelRows.map((c) => c.serverId))].map((serverId) => ({
+              serverId,
+              userId: { in: involvedUserIds },
+            })),
+          },
+          select: { serverId: true, userId: true },
+        });
+        const serverMemberSet = new Set(serverMemberRows.map((m) => `${m.serverId} ${m.userId}`));
+        const isMember = (channelId: string, userId: string) => {
+          const serverId = serverIdByChannel.get(channelId);
+          return (
+            !!serverId &&
+            serverMemberSet.has(`${serverId} ${userId}`) &&
+            membershipSet.has(`${channelId} ${userId}`)
+          );
+        };
+        for (const share of channelShares) {
+          const { channelId } = parseE2EScope(share.conversationId) as { channelId: string };
+          if (!isMember(channelId, senderUserId)) {
+            throw new ForbiddenError('Not a member of this channel');
+          }
+          if (share.recipientUserId !== senderUserId && !isMember(channelId, share.recipientUserId)) {
+            skippedShares.add(share);
+          }
+        }
+      }
+
+      const stored = valid.filter((s) => !skippedShares.has(s));
 
       // Global per-sender ceiling. The per-recipient cap alone is not a bound:
       // any account can open a DM with any user (no friendship required), so
       // "conversations" is attacker-chosen.
       const senderTotal = await tx.e2EKeyShare.count({ where: { senderUserId } });
-      if (senderTotal + valid.length > E2E_LIMITS.KEYSHARE_SENDER_TOTAL_CAP) {
+      if (senderTotal + stored.length > E2E_LIMITS.KEYSHARE_SENDER_TOTAL_CAP) {
         throw new ConflictError('Too many undelivered key shares — retry once recipients come online');
       }
 
+      // Recompute per-recipient pressure from the shares actually stored
+      const storedTargets = new Map<string, { recipientUserId: string; recipientDeviceId: string; incoming: number }>();
+      for (const s of stored) {
+        const key = recipientKey(s.recipientUserId, s.recipientDeviceId);
+        const entry = storedTargets.get(key);
+        if (entry) entry.incoming++;
+        else storedTargets.set(key, { recipientUserId: s.recipientUserId, recipientDeviceId: s.recipientDeviceId, incoming: 1 });
+      }
+
       let evictedCount = 0;
-      for (const { recipientUserId, recipientDeviceId, incoming } of targets.values()) {
+      for (const { recipientUserId, recipientDeviceId, incoming } of storedTargets.values()) {
         const scope = { recipientUserId, recipientDeviceId, senderUserId };
         const existing = await tx.e2EKeyShare.count({ where: scope });
         const overflow = existing + incoming - E2E_LIMITS.KEYSHARE_STORE_CAP_PER_SENDER;
@@ -893,21 +1101,33 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
           }
         }
       }
-      await tx.e2EKeyShare.createMany({
-        data: valid.map((s) => ({
+      if (stored.length > 0) {
+        await tx.e2EKeyShare.createMany({
+          data: stored.map((s) => ({
+            recipientUserId: s.recipientUserId,
+            recipientDeviceId: s.recipientDeviceId,
+            senderUserId,
+            senderDeviceId,
+            conversationId: s.conversationId,
+            sessionId: s.sessionId,
+            body: s.body,
+          })),
+        });
+      }
+      return {
+        evicted: evictedCount,
+        skipped: [...skippedShares].map((s) => ({
           recipientUserId: s.recipientUserId,
           recipientDeviceId: s.recipientDeviceId,
-          senderUserId,
-          senderDeviceId,
-          conversationId: s.conversationId,
           sessionId: s.sessionId,
-          body: s.body,
         })),
-      });
-      return evictedCount;
+      };
     });
 
-    res.status(201).json({ success: true, data: { stored: valid.length, evicted } });
+    res.status(201).json({
+      success: true,
+      data: { stored: valid.length - skipped.length, evicted, skipped },
+    });
   } catch (err) {
     next(err);
   }

@@ -88,6 +88,10 @@ export const WS_EVENTS = {
   CHANNEL_CREATED: 'channel:created',
   CHANNEL_UPDATED: 'channel:updated',
   CHANNEL_DELETED: 'channel:deleted',
+  // Secure channels only — emitted to the channel:{id} room on invite/remove/
+  // leave so member lists refresh and clients re-key on next send. Secure
+  // channel events NEVER go to server:{id} (non-members must learn nothing).
+  CHANNEL_MEMBERS_UPDATED: 'channel:members_updated',
   CATEGORY_CREATED: 'category:created',
   CATEGORY_UPDATED: 'category:updated',
   CATEGORY_DELETED: 'category:deleted',
