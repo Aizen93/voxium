@@ -6,7 +6,7 @@ import type { VoiceUser } from '@voxium/shared';
 /**
  * The spaces strip: communities as tabs along the top.
  *
- * The contract that makes it NOT the Discord rail: it never lists every
+ * The contract that keeps it a strip, not a rail: it never lists every
  * server. At most MAX_TABS are visible in stable store order, the active
  * space is an expanded named tab, the long tail collapses into "+N" (with
  * aggregated unread), and a space with people in voice carries a live mark

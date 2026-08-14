@@ -347,7 +347,7 @@ export function openSecret(sealed_b64: string, context: string, pickle_key: Uint
 export function prekey_message_session_id(prekey_body_b64: string): string;
 
 /**
- * Safety-number fingerprint over PUBLIC identity keys only (Signal-style:
+ * Safety-number fingerprint over PUBLIC identity keys only (iterated-hash scheme:
  * iterated SHA-512, 30 digits per party, halves sorted for a canonical
  * 60-digit number both sides can compare). Spec: docs/e2e-dm-spec.md §8.
  */

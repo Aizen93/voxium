@@ -13,7 +13,7 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 ## Why Voxium?
 
 - **Zero personal data required** — No phone number, no ID verification, no tracking
-- **End-to-end encrypted** — Always-on E2E DMs, invite-only encrypted channels, and E2E-authenticated calls (Signal-style Olm/Megolm via vodozemac); not even the server can read them
+- **End-to-end encrypted** — Always-on E2E DMs, invite-only encrypted channels, and E2E-authenticated calls (Olm/Megolm double-ratchet via vodozemac); not even the server can read them
 - **Fully auditable, source-available** — Read every line, self-host on your own infrastructure
 - **Production-ready voice** — mediasoup SFU for servers (multi-node with crash takeover), direct P2P for DM calls (private STUN), AI noise suppression (RNNoise ML)
 - **11 languages** — English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL)
@@ -30,7 +30,7 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 <td width="50%">
 
 ### Advanced Permission System
-Discord-style role-based access control with 20 granular permission flags, per-channel overrides (allow/deny/inherit), role hierarchy enforcement, and a permission calculator that resolves @everyone → role permissions → channel overrides. Admins manage roles, assign them to members, and configure channel-specific restrictions — all through the UI.
+Role-based access control with 20 granular permission flags, per-channel overrides (allow/deny/inherit), role hierarchy enforcement, and a permission calculator that resolves @everyone → role permissions → channel overrides. Admins manage roles, assign them to members, and configure channel-specific restrictions — all through the UI.
 
 </td>
 <td width="50%">
@@ -72,7 +72,7 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 <td width="50%">
 
 ### End-to-End Encryption
-All DMs are end-to-end encrypted by default — Signal-style Olm/Megolm (vodozemac WASM), always on, with no plaintext fallback. Up to 5 devices per account with cross-signing, one safety number per account, device linking by short code, and instant revocation with re-keying. Invite-only **secure channels** bring E2E to servers: not even the server owner or admins can read them. Encrypted attachments, encrypted key backup with a recovery key, and DM call signaling sealed in Olm envelopes so not even the relay can tamper with a call.
+All DMs are end-to-end encrypted by default — Olm/Megolm double-ratchet (vodozemac WASM), always on, with no plaintext fallback. Up to 5 devices per account with cross-signing, one safety number per account, device linking by short code, and instant revocation with re-keying. Invite-only **secure channels** bring E2E to servers: not even the server owner or admins can read them. Encrypted attachments, encrypted key backup with a recovery key, and DM call signaling sealed in Olm envelopes so not even the relay can tamper with a call.
 
 </td>
 <td width="50%">
@@ -116,7 +116,7 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | **Permissions** | Custom Roles | Create unlimited custom roles with names, colors, and granular permissions; role hierarchy enforcement prevents privilege escalation |
 | | 20 Permission Flags | VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, and 12 more |
 | | Channel Overrides | Per-channel permission overrides with allow/deny/inherit tri-state per role — restrict #announcements to read-only, hide #staff channels |
-| | Permission Calculator | Discord-style resolution: @everyone base → OR all role permissions → channel overrides; ADMINISTRATOR bypasses everything |
+| | Permission Calculator | Layered resolution: @everyone base → OR all role permissions → channel overrides; ADMINISTRATOR bypasses everything |
 | | Voice Moderation | Server mute/deafen (persists across reconnect via Redis), cross-channel force-move, role hierarchy enforcement |
 | | Per-Server Nicknames | Members can set server-specific display names; admins can manage others' nicknames |
 | **Social** | Friend System | Send, accept, decline, and remove friend requests with real-time notifications |
@@ -138,7 +138,7 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | | Auto-Detection | Language auto-detected from browser locale; switchable in settings; RTL layout for Arabic |
 | **Platform** | File Uploads | S3-compatible storage for avatars, server icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
 | | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
-| | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with Discord-inspired dark UI |
+| | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with polished dark UI |
 | | Multi-Node Clustering | Socket.IO Redis adapter, Redis-backed presence/voice state, channel-affinity voice relay with automatic crash takeover, cross-node DM calls — validated live across nodes |
 | | Self-Hosted STUN | Private coturn STUN server for P2P WebRTC — STUN URL derived from your server hostname, zero reliance on Google or third-party STUN/TURN services |
 | | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |

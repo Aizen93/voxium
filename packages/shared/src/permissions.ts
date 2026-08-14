@@ -127,7 +127,7 @@ export function computeBasePermissions(
 /**
  * Apply channel-level permission overrides.
  *
- * Resolution (Discord-style):
+ * Resolution (layered):
  * 1. Start with base permissions
  * 2. Apply @everyone channel override (deny removes, allow adds)
  * 3. For all user's roles, aggregate their channel overrides (OR all allows, OR all denies)

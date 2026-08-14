@@ -1357,7 +1357,7 @@ export function prekey_message_session_id(prekey_body_b64) {
 }
 
 /**
- * Safety-number fingerprint over PUBLIC identity keys only (Signal-style:
+ * Safety-number fingerprint over PUBLIC identity keys only (iterated-hash scheme:
  * iterated SHA-512, 30 digits per party, halves sorted for a canonical
  * 60-digit number both sides can compare). Spec: docs/e2e-dm-spec.md §8.
  * @param {string} user_a

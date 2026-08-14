@@ -14,7 +14,7 @@ import { ServerIcon } from './ServerIcon';
 /**
  * The spaces strip: communities as tabs along the top of the app.
  *
- * This deliberately is NOT a library of every server (the Discord rail).
+ * This deliberately is NOT a library of every server the user is in.
  * The strip holds as many tabs as the width allows — pinned spaces first,
  * then the rest in store order, the active space as an expanded named tab —
  * and the long tail collapses into a "+N" count. Positions are STABLE

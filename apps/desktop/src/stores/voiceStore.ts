@@ -1873,7 +1873,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      // Apply RNNoise noise suppression (Jitsi/Matrix pattern: clean isolated pipeline)
+      // Apply RNNoise noise suppression (clean isolated pipeline)
       const suppressedStream = await applyNoiseSuppression(stream);
       // Speaking detection taps into the suppressed stream (read-only side-chain)
       startSpeakingDetection(suppressedStream, 'dm');

@@ -2,7 +2,7 @@ import { getSocket } from './socket';
 import { NoiseSuppressorWorklet_Name } from '@timephy/rnnoise-wasm';
 import NoiseSuppressorWorkletUrl from '@timephy/rnnoise-wasm/NoiseSuppressorWorklet?worker&url';
 
-// ─── Noise Suppression Effect (Jitsi/Matrix pattern) ─────────────────────────
+// ─── Noise Suppression Effect (isolated-pipeline pattern) ─────────────────────────
 //
 // Clean, isolated pipeline: source → RNNoise AudioWorklet → destination
 // No analyser, no gain gate — just noise suppression.
@@ -25,7 +25,7 @@ export function setNoiseSuppression(enabled: boolean) {
  * Returns the processed stream, or the original stream if suppression is
  * disabled or the worklet fails to load.
  *
- * This follows the Jitsi/Matrix pattern: a dedicated AudioContext with
+ * This follows the isolated-pipeline pattern: a dedicated AudioContext with
  * source → NoiseSuppressorWorklet → destination. Nothing else in the path.
  *
  * The worklet compiles RNNoise WASM synchronously in its constructor. If
