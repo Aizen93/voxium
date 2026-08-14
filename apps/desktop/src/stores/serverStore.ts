@@ -108,7 +108,7 @@ interface ServerState {
   // socket events for state — POST/DELETE responses never touch local state.
   /** Member lists per secure channel, filled by fetch + members_updated events. */
   secureChannelMembers: Record<string, SecureChannelMember[]>;
-  createSecureChannel: (serverId: string, name: string, memberIds: string[]) => Promise<Channel>;
+  createSecureChannel: (serverId: string, name: string, memberIds: string[], type?: 'text' | 'voice') => Promise<Channel>;
   renameSecureChannel: (serverId: string, channelId: string, name: string) => Promise<void>;
   inviteSecureChannelMember: (serverId: string, channelId: string, userId: string) => Promise<void>;
   removeSecureChannelMember: (serverId: string, channelId: string, userId: string) => Promise<void>;
@@ -711,8 +711,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   secureChannelMembers: {},
 
-  createSecureChannel: async (serverId: string, name: string, memberIds: string[]) => {
-    const { data } = await api.post(`/servers/${serverId}/secure-channels`, { name, memberIds });
+  createSecureChannel: async (serverId: string, name: string, memberIds: string[], type: 'text' | 'voice' = 'text') => {
+    const { data } = await api.post(`/servers/${serverId}/secure-channels`, { name, memberIds, type });
     // Sidebar entry arrives via the member-scoped channel:created event
     return data.data;
   },

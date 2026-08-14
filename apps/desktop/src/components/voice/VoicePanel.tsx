@@ -3,7 +3,7 @@ import { useVoiceStore } from '../../stores/voiceStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { ConnectionQuality } from './ConnectionQuality';
-import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff } from 'lucide-react';
+import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff, Lock, ShieldAlert } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export function VoicePanel() {
@@ -13,6 +13,7 @@ export function VoicePanel() {
     toggleMute, toggleDeaf, leaveChannel, latency,
     isScreenSharing, screenSharingUserId, startScreenShare, stopScreenShare,
   } = useVoiceStore();
+  const secureVoicePeerIssues = useVoiceStore((s) => s.secureVoicePeerIssues);
   const { channels } = useServerStore();
   const { user } = useAuthStore();
   const servers = useServerStore((s) => s.servers);
@@ -35,6 +36,7 @@ export function VoicePanel() {
   const isServerDeafened = localVoiceUser?.serverDeafened ?? false;
 
   const otherSharing = screenSharingUserId && screenSharingUserId !== user?.id;
+  const isSecureVoice = channel?.secure === true;
 
   return (
     <div data-testid="voice-panel" className="mx-1 mb-1 rounded-xl border border-vox-border bg-vox-bg-tertiary">
@@ -45,6 +47,16 @@ export function VoicePanel() {
           <p className="text-xs font-semibold text-vox-voice-connected">
             {t('voice.connected')}
           </p>
+          {isSecureVoice && (
+            <span
+              className="shrink-0"
+              data-testid="secure-voice-e2e-lock"
+              title={t('secureVoice.locked')}
+              aria-label={t('secureVoice.locked')}
+            >
+              <Lock size={10} className="text-vox-voice-connected" />
+            </span>
+          )}
           {latency !== null && (
             <span className={clsx('text-[10px] font-medium', latencyColor)}>
               {latency}ms
@@ -70,6 +82,16 @@ export function VoicePanel() {
             {isServerDeafened ? t('voice.serverDeafenedAndMuted') : t('voice.serverMuted')}
           </p>
           <p className="text-[10px] text-vox-text-muted">{t('voice.moderatorRestricted')}</p>
+        </div>
+      )}
+
+      {/* Secure voice: members we could not exchange keys with (spec §21) */}
+      {isSecureVoice && Object.keys(secureVoicePeerIssues).length > 0 && (
+        <div className="mx-3 mb-2 rounded-md bg-vox-accent-warning/10 border border-vox-accent-warning/20 px-2.5 py-1.5" data-testid="secure-voice-issues">
+          <p className="flex items-center gap-1 text-[11px] font-medium text-vox-accent-warning">
+            <ShieldAlert size={11} className="shrink-0" />
+            {t('secureVoice.peerIssues', { count: Object.keys(secureVoicePeerIssues).length })}
+          </p>
         </div>
       )}
 
@@ -112,7 +134,9 @@ export function VoicePanel() {
             {selfDeaf || isServerDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}
           </button>
 
-          {/* Screen Share */}
+          {/* Screen Share — hidden in secure voice channels (audio-only v1,
+              spec §21; the server rejects screen producers there anyway) */}
+          {!isSecureVoice && (
           <button
             onClick={() => isScreenSharing ? stopScreenShare() : startScreenShare()}
             disabled={!!otherSharing}
@@ -129,6 +153,7 @@ export function VoicePanel() {
           >
             {isScreenSharing ? <MonitorOff size={16} /> : <Monitor size={16} />}
           </button>
+          )}
         </div>
 
         {/* Disconnect */}

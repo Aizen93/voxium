@@ -299,13 +299,29 @@ describe('inbound keys', () => {
     expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'legacy-key');
   });
 
-  it('drops keys from unknown or unvetted senders without touching Olm', async () => {
+  it('BUFFERS keys from not-yet-vetted senders without touching Olm', async () => {
     await begunSession();
     handleInboundKey(CH, 'nobody', PEER_DEVICE, ENV);
     await flush();
 
     expect(decryptFromDevice).not.toHaveBeenCalled();
     expect(frameSession.setRemoteKey).not.toHaveBeenCalled();
+  });
+
+  it('a key that BEATS the participant event installs after the vet completes (delivery race)', async () => {
+    await begunSession();
+    decryptFromDevice.mockResolvedValueOnce(peerKeyPlaintext({ seq: 0 }));
+
+    // The sealed key arrives FIRST — the joined event is still in flight
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+    expect(frameSession.setRemoteKey).not.toHaveBeenCalled();
+
+    // The participant event lands, the vet passes, the buffer drains
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
+    await flush();
+
+    expect(frameSession.setRemoteKey).toHaveBeenCalledWith('peer', 0, expect.any(Uint8Array));
   });
 
   it('key_request re-seals the current key to the requester', async () => {

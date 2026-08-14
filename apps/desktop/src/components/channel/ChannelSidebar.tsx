@@ -38,6 +38,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { Permissions, hasPermission, permissionsFromString } from '@voxium/shared';
 import type { Channel, Category } from '@voxium/shared';
+import { isSecureVoiceSupported } from '../../services/e2e/voiceFrameTransform';
 
 const COLLAPSED_KEY = 'voxium_collapsed_categories';
 const CH_PREFIX = 'ch-';
@@ -433,6 +434,9 @@ export function ChannelSidebar() {
   const activeServer = servers.find((s) => s.id === activeServerId);
   const currentMember = members.find((m) => m.userId === user?.id);
   const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
+  // Encoded-transform support decides whether secure VOICE channels are
+  // joinable on this runtime at all (spec §21) — stable per session
+  const secureVoiceSupported = useMemo(() => isSecureVoiceSupported(), []);
 
   // Fingerprint of everything that can change THIS user's effective server
   // permissions: legacy role, assigned role ids, and those roles' bitmasks.
@@ -916,6 +920,41 @@ export function ChannelSidebar() {
               )}
             </div>
             {secureChannels.map((ch) => {
+              // Secure VOICE channel: joins E2E voice instead of opening chat.
+              // Hard-gated on encoded-transform support — no plaintext fallback.
+              if (ch.type === 'voice') {
+                const occupants = channelUsers.get(ch.id) || [];
+                const voiceSupported = secureVoiceSupported;
+                return (
+                  <div key={ch.id} className="mb-0.5">
+                    <button
+                      onClick={() => voiceSupported && handleJoinVoice(ch.id)}
+                      onContextMenu={(e) => { e.preventDefault(); handleChannelContextMenu(e, ch); }}
+                      disabled={!voiceSupported}
+                      className={clsx(
+                        'group flex w-full items-center gap-1.5 rounded-md px-1.5 py-[5px] text-left text-[14px] transition-colors',
+                        !voiceSupported
+                          ? 'cursor-not-allowed text-vox-text-muted/50'
+                          : voiceChannelId === ch.id
+                            ? 'bg-vox-bg-active text-vox-voice-connected'
+                            : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
+                      )}
+                      title={voiceSupported ? undefined : t('secureVoice.unsupported')}
+                      data-testid={`secure-voice-channel-${ch.name}`}
+                    >
+                      <Lock size={13} className="shrink-0 text-vox-accent-primary/80" />
+                      <Volume2 size={15} className={clsx('shrink-0', voiceChannelId === ch.id ? 'text-vox-voice-connected' : 'opacity-60')} />
+                      <span className="truncate">{ch.name}</span>
+                      {occupants.length > 0 && (
+                        <span className="ml-auto text-[11px] text-vox-text-muted">{occupants.length}</span>
+                      )}
+                    </button>
+                    {occupants.length > 0 && (
+                      <VoiceUserList voiceUsers={occupants} currentUserId={user?.id} onContextMenu={handleVoiceUserContextMenu} />
+                    )}
+                  </div>
+                );
+              }
               const unread = activeChannelId !== ch.id ? (unreadCounts[ch.id] || 0) : 0;
               return (
                 <button

@@ -1120,6 +1120,15 @@
   "search": {
     "placeholder": "Buscar mensajes…"
   },
+  "secureVoice": {
+    "locked": "Canal de voz cifrado de extremo a extremo",
+    "unsupported": "La voz segura no está disponible en este dispositivo: requiere compatibilidad con medios cifrados.",
+    "cantJoin": "No se pudo iniciar la sesión de voz cifrada. Inténtalo de nuevo.",
+    "sessionFailed": "La voz cifrada falló: se te desconectó para evitar una llamada sin protección.",
+    "createHint": "Un canal de voz solo por invitación con audio cifrado de extremo a extremo: el servidor solo transmite sonido que no puede escuchar. El uso compartido de pantalla no está disponible.",
+    "peerIssues_one": "{{count}} miembro no puede recibir claves — no lo oirás hasta que se resuelva.",
+    "peerIssues_other": "{{count}} miembros no pueden recibir claves — no los oirás hasta que se resuelva."
+  },
   "secureChannel": {
     "sectionTitle": "Canales seguros",
     "createTitle": "Crear canal seguro",

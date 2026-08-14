@@ -6,6 +6,9 @@ import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
 import { X, Lock, Check, Search } from 'lucide-react';
 import { E2E_LIMITS } from '@voxium/shared';
+import { isSecureVoiceSupported } from '../../services/e2e/voiceFrameTransform';
+
+const secureVoiceSupported = isSecureVoiceSupported();
 import { getTranslatedError } from '../../utils/serverErrors';
 
 interface Props {
@@ -23,6 +26,7 @@ export function SecureChannelCreateModal({ serverId, onClose }: Props) {
   const { members, createSecureChannel, setActiveChannel } = useServerStore();
   const { user } = useAuthStore();
   const [name, setName] = useState('');
+  const [channelType, setChannelType] = useState<'text' | 'voice'>('text');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState(false);
@@ -62,11 +66,12 @@ export function SecureChannelCreateModal({ serverId, onClose }: Props) {
     if (!name.trim() || creating) return;
     setCreating(true);
     try {
-      const channel = await createSecureChannel(serverId, name.trim(), [...selected]);
+      const channel = await createSecureChannel(serverId, name.trim(), [...selected], channelType);
       toast.success(t('secureChannel.created'));
       // The sidebar entry arrives via the member-scoped socket event; jumping
-      // to the channel immediately still works because the id is known.
-      setActiveChannel(channel.id);
+      // to a TEXT channel immediately still works because the id is known.
+      // Voice channels are joined explicitly from the sidebar instead.
+      if (channelType === 'text') setActiveChannel(channel.id);
       onClose();
     } catch (err) {
       toast.error(getTranslatedError(err, t, 'secureChannel.failedToCreate'));
@@ -90,6 +95,28 @@ export function SecureChannelCreateModal({ serverId, onClose }: Props) {
         </div>
 
         <p className="mb-4 text-sm text-vox-text-secondary">{t('secureChannel.createDescription')}</p>
+
+        <div className="mb-3 flex gap-2" data-testid="secure-channel-type-choice">
+          <button
+            onClick={() => setChannelType('text')}
+            className={channelType === 'text' ? 'btn-primary flex-1 py-1 text-xs' : 'btn-ghost flex-1 py-1 text-xs'}
+            data-testid="secure-type-text"
+          >
+            {t('channel.text')}
+          </button>
+          <button
+            onClick={() => setChannelType('voice')}
+            disabled={!secureVoiceSupported}
+            title={secureVoiceSupported ? undefined : t('secureVoice.unsupported')}
+            className={channelType === 'voice' ? 'btn-primary flex-1 py-1 text-xs' : 'btn-ghost flex-1 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50'}
+            data-testid="secure-type-voice"
+          >
+            {t('channel.voiceType')}
+          </button>
+        </div>
+        {channelType === 'voice' && (
+          <p className="mb-3 text-xs text-vox-text-muted">{t('secureVoice.createHint')}</p>
+        )}
 
         <input
           type="text"

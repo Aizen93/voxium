@@ -1114,8 +1114,8 @@ plaintext (`contentSource: 'reporter'`), gated on channel membership.
 - Message-key backup accepts channel scopes transparently, so a device that
   backed up can restore its own history; there is no cross-member history
   transfer (consistent with no-history-on-join).
-- Voice is out of scope: secure channels are text-only by construction
-  (`type: 'text'` enforced at creation; no voice path accepts them).
+- ~~Voice is out of scope~~ — shipped as secure VOICE channels (§21):
+  encoded-frame E2E audio through the SFU, audio-only in v1.
 
 ## 20. E2E-authenticated DM call signaling (shipped)
 
@@ -1234,7 +1234,91 @@ reasons map to four toasts (`e2e.callAbort*`, all 11 locales).
 
 - Group calls would need per-participant pins and per-pair sessions; DM calls
   are 1:1 by construction, so the pin is a single device.
-- Server voice channels (SFU) are NOT covered — media terminates at
-  mediasoup. True SFU E2E is SFrame-class work, tracked separately.
+- Plaintext server voice channels are NOT covered — media terminates at
+  mediasoup. SECURE voice channels close this with encoded-frame E2E (§21).
 - A malicious server can still deny service (drop signals, refuse the relay);
   E2E authenticates, it cannot force delivery.
+
+## 21. Secure voice channels (E2E audio through the SFU)
+
+Secure channels gain a `voice` type whose audio is **end-to-end encrypted at
+the encoded-frame level**: every Opus frame is AES-256-GCM-encrypted
+client-side (WebRTC encoded transforms) before packetization, so mediasoup
+forwards payloads it cannot decrypt. Membership, opacity, and lifecycle are
+§19's rules verbatim — ChannelMember-derived access piercing owner/ADMIN,
+non-member probes indistinguishable from nonexistent channels, creator-managed
+membership. v1 is **audio-only**: screen producers and the share slot are
+rejected server-side and hidden client-side.
+
+### 21.1 Threat model
+
+- **In scope:** the SFU (or anything holding its keys) reading, injecting, or
+  splicing voice audio; replay of captured frames; a server-invented device id
+  routing media keys to an attacker.
+- **Out of scope (unchanged):** presence/timing metadata (who is in the
+  channel, when, speaking booleans — the speaking indicator is a
+  client-reported bit), and the `ssrc-audio-level` RTP header extension,
+  which rides OUTSIDE the encrypted payload and lets the SFU see per-packet
+  volume hints (mediasoup-client offers no knob to drop it; fix needs router
+  capability changes — a documented §11.8-class gap).
+
+### 21.2 Frame format (`voxv1`)
+
+`[1B header: version nibble | keyId mod 16][4B BE seq][AES-256-GCM ct][16B tag]`
+— IV = `seq(4) || keyId(1) || 0×7` (unique per generation; fresh key ⇒ seq 0);
+AAD = `"voxv1|chv:{channelId}|{senderUserId}"` ‖ header, binding channel,
+sender, generation, and sequence into the tag. Per-(sender, keyId) SRTP-style
+128-frame replay window. DTX-empty frames encrypt like any other; nothing
+passes through unencrypted in either direction, ever. Sender counters force a
+fresh rotation long before the u32 ceiling (IV-reuse firewall).
+
+### 21.3 Sender keys and distribution
+
+Each participant has its own AES-256 sender key, generation-counted by
+`keyId`. Keys travel sealed in pairwise-Olm envelopes (`chv:{channelId}`
+scope — cryptographically distinct from `ch:` message key-shares; the strict
+parsers refuse cross-scope material) over the opaque `voice:e2e:key` socket
+relay: the server checks co-presence and envelope shape, never the contents,
+and no key material is ever stored server-side. Keys go only to voice
+PARTICIPANTS' one announced device (`voice:join` carries the E2E `deviceId`,
+the §20 precedent) after vetting against BOTH the authoritative member
+endpoint (`GET /e2e/channels/:id/devices` — socket events are hints, §19.3)
+and the signature-checked verified device list.
+
+### 21.4 Rotation
+
+- **Arrival:** every sender hash-ratchets its key forward (HKDF-SHA256,
+  keyId+1) and seals the POST-ratchet key to the joiner — no past audio.
+  Existing receivers perform **tag-verified trial-ratchet** on keyId+1
+  frames: GCM success proves an arrival ratchet (installed gaplessly, no
+  wire flag an attacker could flip); failure means a fresh rotation whose
+  sealed key is still in flight.
+- **Departure / kick / device revocation / identity change:** fresh random
+  keys sealed to everyone remaining — no future audio for the leaver.
+  Server-side, secure-member removal force-evicts live voice cluster-wide.
+- Receivers hold a 3-generation key ring per sender (rotation races), and
+  sealed key messages carry §20-style epoch/seq replay state (superseded
+  epochs never return). A lost key heals via one `voice:e2e:key_request` +
+  a decrypt watchdog surfacing "can't be keyed" members in the UI.
+
+### 21.5 Hard requirements
+
+No plaintext fallback exists at any layer: no encoded-transform support ⇒
+the channel is unjoinable (WebKitGTK/Linux is hard-blocked in v1); a
+transform/worker failure mid-call closes the producer and leaves; a
+non-envelope key payload excludes its sender (`legacy-key`); reconnects and
+transport restarts re-begin the session with a fresh key and epoch — a
+sender key never survives a session restart and seq is never persisted.
+Server moderation inside secure voice is impossible BY DESIGN: members get
+CONNECT+SPEAK only (no mute/deafen/move bits exist for anyone), force-move
+in or out is rejected opacity-preservingly, and voice diagnostics are blind
+to secure channels.
+
+### 21.6 Known gaps
+
+- `ssrc-audio-level` header-extension leak (see 21.1).
+- Screen share (video payload descriptors must stay SFU-readable — needs
+  partial-frame encryption, deferred).
+- WebKitGTK/Linux support; post-quantum; cross-session key continuity.
+- An un-updated client in a secure voice channel is EXCLUDED (never keyed,
+  hears nothing) rather than blocking the room.

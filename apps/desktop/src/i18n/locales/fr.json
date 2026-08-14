@@ -1120,6 +1120,15 @@
   "search": {
     "placeholder": "Rechercher des messages…"
   },
+  "secureVoice": {
+    "locked": "Salon vocal chiffré de bout en bout",
+    "unsupported": "La voix sécurisée n'est pas disponible sur cet appareil — elle requiert la prise en charge des médias chiffrés.",
+    "cantJoin": "Impossible de démarrer la session vocale chiffrée. Réessayez.",
+    "sessionFailed": "Échec du chiffrement vocal — vous avez été déconnecté pour éviter un appel non protégé.",
+    "createHint": "Un salon vocal sur invitation où l'audio est chiffré de bout en bout — le serveur ne relaie que du son qu'il ne peut pas écouter. Le partage d'écran n'est pas disponible.",
+    "peerIssues_one": "{{count}} membre ne peut pas recevoir de clés — vous ne l'entendrez pas tant que ce n'est pas résolu.",
+    "peerIssues_other": "{{count}} membres ne peuvent pas recevoir de clés — vous ne les entendrez pas tant que ce n'est pas résolu."
+  },
   "secureChannel": {
     "sectionTitle": "Salons sécurisés",
     "createTitle": "Créer un salon sécurisé",

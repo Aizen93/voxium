@@ -212,6 +212,7 @@ describe('secure channels', () => {
     expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/secure-channels', {
       name: 'covert',
       memberIds: ['u2', 'u3'],
+      type: 'text',
     });
     expect(channel.id).toBe('sec-1');
     // Socket event is the sole source of truth for the sidebar

@@ -1120,6 +1120,14 @@
   "search": {
     "placeholder": "搜索消息…"
   },
+  "secureVoice": {
+    "locked": "端到端加密语音频道",
+    "unsupported": "此设备无法使用安全语音——需要支持加密媒体的运行环境。",
+    "cantJoin": "无法启动加密语音会话。请重试。",
+    "sessionFailed": "加密语音失败——为避免未受保护的通话,你已被断开连接。",
+    "createHint": "仅限邀请的语音频道,音频经端到端加密——服务器只转发它无法收听的声音。不支持屏幕共享。",
+    "peerIssues_other": "{{count}} 位成员无法接收密钥——在解决之前你将听不到他们的声音。"
+  },
   "secureChannel": {
     "sectionTitle": "安全频道",
     "createTitle": "创建安全频道",

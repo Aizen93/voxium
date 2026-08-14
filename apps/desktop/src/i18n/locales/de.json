@@ -1120,6 +1120,15 @@
   "search": {
     "placeholder": "Nachrichten suchen…"
   },
+  "secureVoice": {
+    "locked": "Ende-zu-Ende-verschlüsselter Sprachkanal",
+    "unsupported": "Sicherer Sprachchat ist auf diesem Gerät nicht verfügbar — er benötigt Unterstützung für verschlüsselte Medien.",
+    "cantJoin": "Die verschlüsselte Sprachsitzung konnte nicht gestartet werden. Versuche es erneut.",
+    "sessionFailed": "Verschlüsselter Sprachchat fehlgeschlagen — du wurdest getrennt, um einen ungeschützten Anruf zu verhindern.",
+    "createHint": "Ein Sprachkanal nur auf Einladung, dessen Audio Ende-zu-Ende-verschlüsselt ist — der Server leitet nur Ton weiter, den er nicht mithören kann. Bildschirmfreigabe ist nicht verfügbar.",
+    "peerIssues_one": "{{count}} Mitglied kann keine Schlüssel erhalten — du hörst es nicht, bis das behoben ist.",
+    "peerIssues_other": "{{count}} Mitglieder können keine Schlüssel erhalten — du hörst sie nicht, bis das behoben ist."
+  },
   "secureChannel": {
     "sectionTitle": "Sichere Kanäle",
     "createTitle": "Sicheren Kanal erstellen",

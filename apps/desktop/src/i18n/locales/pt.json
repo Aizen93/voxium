@@ -1120,6 +1120,15 @@
   "search": {
     "placeholder": "Pesquisar mensagens…"
   },
+  "secureVoice": {
+    "locked": "Canal de voz criptografado de ponta a ponta",
+    "unsupported": "A voz segura não está disponível neste dispositivo — requer suporte a mídia criptografada.",
+    "cantJoin": "Não foi possível iniciar a sessão de voz criptografada. Tente novamente.",
+    "sessionFailed": "A voz criptografada falhou — você foi desconectado para evitar uma chamada desprotegida.",
+    "createHint": "Um canal de voz somente por convite com áudio criptografado de ponta a ponta — o servidor só encaminha som que não consegue ouvir. Compartilhamento de tela não disponível.",
+    "peerIssues_one": "{{count}} membro não pode receber chaves — você não vai ouvi-lo até resolver.",
+    "peerIssues_other": "{{count}} membros não podem receber chaves — você não vai ouvi-los até resolver."
+  },
   "secureChannel": {
     "sectionTitle": "Canais seguros",
     "createTitle": "Criar canal seguro",

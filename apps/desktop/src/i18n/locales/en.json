@@ -1127,6 +1127,15 @@
   "search": {
     "placeholder": "Search messages…"
   },
+  "secureVoice": {
+    "locked": "End-to-end encrypted voice channel",
+    "unsupported": "Secure voice isn't available on this device — it needs encrypted-media support in the app runtime.",
+    "cantJoin": "Couldn't start the encrypted voice session. Try again.",
+    "sessionFailed": "Encrypted voice failed — you were disconnected to prevent an unprotected call.",
+    "createHint": "An invite-only voice channel where audio is end-to-end encrypted — the server only ever relays sound it cannot listen to. Screen sharing is not available.",
+    "peerIssues_one": "{{count}} member can't be keyed — you won't hear them until it's resolved.",
+    "peerIssues_other": "{{count}} members can't be keyed — you won't hear them until it's resolved."
+  },
   "secureChannel": {
     "sectionTitle": "Secure channels",
     "createTitle": "Create Secure Channel",

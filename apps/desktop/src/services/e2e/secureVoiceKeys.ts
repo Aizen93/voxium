@@ -69,10 +69,19 @@ interface SecureVoiceSessionState {
   peers: Map<string, PeerState>;
   /** Authoritative member ids, refreshed from the endpoint. */
   members: Set<string>;
+  /**
+   * Inbound sealed keys that arrived before their sender was vetted — a key
+   * can beat the participant event onto the chain (the DM pre-pin-buffer
+   * problem). Drained after each successful vet; dropping instead would
+   * silently deafen us to that sender until their next rotation.
+   */
+  pendingKeys: Array<{ from: string; fromDeviceId: string; envelope: unknown }>;
   /** Serializes ALL key mutations + seals so wire order matches state order. */
   chain: Promise<void>;
   ended: boolean;
 }
+
+const PENDING_KEYS_CAP = 16;
 
 // Per-channel module state — crypto bookkeeping that must survive store
 // snapshots/resets untouched (the callCrypto rule).
@@ -228,12 +237,17 @@ export async function beginSecureVoiceSession(channelId: string): Promise<{ fram
     frames,
     peers: new Map(),
     members: new Set(members.map((m) => m.userId)),
+    pendingKeys: [],
     chain: Promise.resolve(),
     ended: false,
   };
   frames.setLocalKey(state.keyId, state.currentKey);
   frames.onCounterLow(() => rotateFresh(channelId, 'counter'));
   sessions.set(channelId, state);
+  if (import.meta.env.DEV) {
+    // Diagnostics surface for the Playwright ciphertext proof — DEV builds only
+    (globalThis as { __voxSecureVoiceDiag?: () => Promise<unknown> }).__voxSecureVoiceDiag = () => frames.getDiagnostics();
+  }
   return { frames, deviceId: service.deviceId };
 }
 
@@ -287,6 +301,13 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
       state.keyId += 1;
       state.frames.setLocalKey(state.keyId, state.currentKey);
       await sealKeyTo(state, user.id, 'ratchet');
+    }
+
+    // Drain any of THEIR keys that arrived before the vet completed
+    const buffered = state.pendingKeys.filter((k) => k.from === user.id);
+    state.pendingKeys = state.pendingKeys.filter((k) => k.from !== user.id);
+    for (const k of buffered) {
+      await processInboundKeyLocked(state, peer, k.from, k.fromDeviceId, k.envelope);
     }
   });
 }
@@ -363,11 +384,42 @@ export function confirmMembership(channelId: string): void {
  * them simply stops, which the UI surfaces via the decrypt watchdog.
  */
 export function handleInboundKey(channelId: string, from: string, fromDeviceId: string, envelope: unknown): void {
+  // DEV-only Playwright hook (secure-voice.spec.ts ciphertext proof): a
+  // member that drops every inbound key MUST hear nothing — proving the SFU
+  // forwards frames that are undecodable without keys. import.meta.env.DEV
+  // is compile-time false in production builds, so this branch is
+  // dead-code-eliminated and has no production surface.
+  if (import.meta.env.DEV && (globalThis as { __VOX_SECURE_VOICE_TEST__?: { dropInboundKeys?: boolean } }).__VOX_SECURE_VOICE_TEST__?.dropInboundKeys) {
+    return;
+  }
   const state = sessions.get(channelId);
   if (!state) return;
   enqueue(state, async () => {
     const peer = state.peers.get(from);
-    if (!peer || !peer.vetted) return; // unknown/unvetted sender — drop
+    if (!peer || !peer.vetted) {
+      // The key beat the participant event onto the chain — buffer it; the
+      // vet path drains this once the sender is confirmed. Dropping would
+      // deafen us to them until their next rotation.
+      if (state.pendingKeys.length < PENDING_KEYS_CAP) {
+        state.pendingKeys.push({ from, fromDeviceId, envelope });
+      } else {
+        console.warn('[SecureVoice] Pending-key buffer full — dropping key from', from);
+      }
+      return;
+    }
+    await processInboundKeyLocked(state, peer, from, fromDeviceId, envelope);
+  });
+}
+
+async function processInboundKeyLocked(
+  state: SecureVoiceSessionState,
+  peer: PeerState,
+  from: string,
+  fromDeviceId: string,
+  envelope: unknown,
+): Promise<void> {
+  const channelId = state.channelId;
+  {
     if (fromDeviceId && fromDeviceId !== peer.deviceId) return; // routing hint mismatch
 
     // Hard cutover: a non-envelope payload is an un-updated or downgrading
@@ -417,7 +469,7 @@ export function handleInboundKey(channelId: string, from: string, fromDeviceId: 
     }
 
     state.frames.setRemoteKey(from, p.keyId, fromB64(p.keyB64));
-  });
+  }
 }
 
 /** A peer asked for our current key (their watchdog / a lost message). */
