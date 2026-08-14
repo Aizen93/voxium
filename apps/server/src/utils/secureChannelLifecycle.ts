@@ -2,6 +2,7 @@ import { getIO } from '../websocket/socketServer';
 import { prisma } from './prisma';
 import { deleteMultipleFromS3 } from './s3';
 import { WS_EVENTS, e2eChannelScope } from '@voxium/shared';
+import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
 
 /**
  * Lifecycle helpers for SECURE channels (invite-only, E2E-encrypted).
@@ -92,6 +93,10 @@ export async function deleteSecureChannel(channelId: string): Promise<boolean> {
   }
   io.in(`channel:${channelId}`).socketsLeave(`channel:${channelId}`);
 
+  // Live voice in a deleted secure VOICE channel must die with it, on every
+  // node (spec §21) — mediasoup handles are node-local, hence the fan-out.
+  await broadcastChannelVoiceCleanup(io, channelId);
+
   if (s3Keys.length > 0) {
     // Fire-and-forget: a failed blob delete must not fail the channel delete;
     // the attachment rows are already gone so the sweep can't find them, hence
@@ -149,6 +154,11 @@ export async function removeSecureMember(channelId: string, serverId: string, us
   const io = getIO();
   io.to(`user:${userId}`).emit(WS_EVENTS.CHANNEL_DELETED, { channelId, serverId });
   io.in(`user:${userId}`).socketsLeave(`channel:${channelId}`);
+
+  // A removed member's live voice session must end NOW — remaining
+  // participants rotate their media keys on the membership change, and the
+  // removed member must not keep receiving even ciphertext (spec §21).
+  await broadcastVoiceEvictUser(io, channelId, userId);
 
   await broadcastSecureMembersUpdated(channelId, serverId);
 }

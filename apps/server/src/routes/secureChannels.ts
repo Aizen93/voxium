@@ -83,6 +83,13 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
     const nameErr = validateChannelName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
+    // Secure channels come in two types: text (E2E messages) and voice (E2E
+    // media frames, spec §21). Anything else is rejected.
+    const type = req.body.type ?? 'text';
+    if (type !== 'text' && type !== 'voice') {
+      throw new BadRequestError('Channel type must be text or voice');
+    }
+
     // Invitees: optional, deduped, never the creator, capped, all server members
     const rawMemberIds = req.body.memberIds ?? [];
     if (!Array.isArray(rawMemberIds) || rawMemberIds.some((id) => typeof id !== 'string')) {
@@ -118,7 +125,7 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
       const ch = await tx.channel.create({
         data: {
           name,
-          type: 'text',
+          type,
           secure: true,
           createdById: userId,
           serverId,
@@ -133,11 +140,14 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
           isCreator: uid === userId,
         })),
       });
-      // Unread tracking starts at creation for everyone present from the start
-      await tx.channelRead.createMany({
-        data: allMemberIds.map((uid) => ({ userId: uid, channelId: ch.id, lastReadAt: now })),
-        skipDuplicates: true,
-      });
+      // Unread tracking starts at creation for everyone present from the
+      // start. Voice channels carry no messages — nothing to track.
+      if (type === 'text') {
+        await tx.channelRead.createMany({
+          data: allMemberIds.map((uid) => ({ userId: uid, channelId: ch.id, lastReadAt: now })),
+          skipDuplicates: true,
+        });
+      }
       return ch;
     });
 
@@ -215,14 +225,18 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
       await tx.channelMember.create({
         data: { channelId, userId: targetUserId, isCreator: false },
       });
+      const ch = await tx.channel.findUniqueOrThrow({ where: { id: channelId } });
       // Unread starts at the join point: the invitee cannot decrypt pre-join
-      // history (no-history rotation), so it must not count as unread either
-      await tx.channelRead.upsert({
-        where: { userId_channelId: { userId: targetUserId, channelId } },
-        update: { lastReadAt: new Date() },
-        create: { userId: targetUserId, channelId, lastReadAt: new Date() },
-      });
-      return tx.channel.findUniqueOrThrow({ where: { id: channelId } });
+      // history (no-history rotation), so it must not count as unread either.
+      // Voice channels carry no messages — nothing to track.
+      if (ch.type === 'text') {
+        await tx.channelRead.upsert({
+          where: { userId_channelId: { userId: targetUserId, channelId } },
+          update: { lastReadAt: new Date() },
+          create: { userId: targetUserId, channelId, lastReadAt: new Date() },
+        });
+      }
+      return ch;
     });
 
     // The invitee's sidebar gains the channel; their sockets join the room

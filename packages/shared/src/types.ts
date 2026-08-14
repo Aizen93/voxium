@@ -202,6 +202,9 @@ export interface VoiceUser {
   serverDeafened: boolean;
   speaking: boolean;
   screenSharing?: boolean;
+  /** E2E device this participant joined SECURE voice from — peers seal media
+   *  keys to exactly it (spec §21). Absent for plaintext channels. */
+  deviceId?: string;
 }
 
 // ─── mediasoup SFU ──────────────────────────────────────────────────────────
@@ -302,6 +305,12 @@ export interface ServerToClientEvents {
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => void;
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;
   'voice:signal': (data: { from: string; signal: unknown }) => void;
+  // Secure voice channels (spec §21): an Olm-sealed media sender key relayed
+  // between two participants. The server never parses `envelope`;
+  // `fromDeviceId` is the sender's announced device (routing hint — the
+  // binding inside the envelope is what the receiver trusts).
+  'voice:e2e:key': (data: { channelId: string; from: string; fromDeviceId: string; envelope: string }) => void;
+  'voice:e2e:key_request': (data: { channelId: string; from: string }) => void;
   'voice:force_moved': (data: { channelId: string; userId: string; targetChannelId: string }) => void;
   'voice:error': (data: { message: string }) => void;
   'voice:transport_created': (data: {
@@ -382,12 +391,17 @@ export interface ServerToClientEvents {
 export interface ClientToServerEvents {
   'channel:join': (channelId: string) => void;
   'channel:leave': (channelId: string) => void;
-  'voice:join': (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => void;
+  // deviceId: the E2E device the client will seal/open media keys on — only
+  // honored for SECURE voice channels, shape-validated server-side (spec §21)
+  'voice:join': (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => void;
   'voice:leave': () => void;
   'voice:mute': (muted: boolean) => void;
   'voice:deaf': (deafened: boolean) => void;
   'voice:speaking': (speaking: boolean) => void;
   'voice:signal': (data: { to: string; signal: unknown }) => void;
+  // Secure voice channels: relay an Olm-sealed media key to one co-participant
+  'voice:e2e:key': (data: { to: string; envelope: string }) => void;
+  'voice:e2e:key_request': (data: { to: string }) => void;
   'voice:transport:connect': (data: { transportId: string; dtlsParameters: unknown }, callback: (response: { error?: string }) => void) => void;
   'voice:produce': (
     data: { kind: 'audio' | 'video'; rtpParameters: unknown; appData?: Record<string, unknown> },

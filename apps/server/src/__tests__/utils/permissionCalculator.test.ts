@@ -38,6 +38,7 @@ import {
   filterVisibleChannels,
   filterVisibleChannelsMulti,
   SECURE_MEMBER_PERMISSIONS,
+  SECURE_VOICE_MEMBER_PERMISSIONS,
   SECURE_CREATOR_PERMISSIONS,
 } from '../../utils/permissionCalculator';
 
@@ -380,6 +381,37 @@ describe('permissionCalculator', () => {
         expect(result & Permissions.ADMINISTRATOR).toBe(0n);
         expect(result & Permissions.MANAGE_CHANNELS).toBe(0n);
         expect(result & Permissions.CREATE_SECURE_CHANNELS).toBe(0n);
+      });
+
+      it('secure VOICE members get CONNECT+SPEAK but no moderation bits (spec §21)', async () => {
+        prismaMock.channel.findUnique.mockResolvedValue({ ...secureChannel('someone-else'), type: 'voice' });
+        prismaMock.channelMember.findUnique.mockResolvedValue({ isCreator: false });
+
+        const result = await computeUserChannelPermissions('user1', 'ch1', 'srv1');
+
+        expect(result).toBe(SECURE_VOICE_MEMBER_PERMISSIONS);
+        expect(result & Permissions.CONNECT).toBe(Permissions.CONNECT);
+        expect(result & Permissions.SPEAK).toBe(Permissions.SPEAK);
+        // Server-side voice moderation is impossible by design — creator too
+        expect(result & Permissions.MUTE_MEMBERS).toBe(0n);
+        expect(result & Permissions.DEAFEN_MEMBERS).toBe(0n);
+        expect(result & Permissions.MOVE_MEMBERS).toBe(0n);
+      });
+
+      it('the secure-voice CREATOR gets the same set — no extra moderation', async () => {
+        prismaMock.channel.findUnique.mockResolvedValue({ ...secureChannel('someone-else'), type: 'voice' });
+        prismaMock.channelMember.findUnique.mockResolvedValue({ isCreator: true });
+
+        const result = await computeUserChannelPermissions('user1', 'ch1', 'srv1');
+
+        expect(result).toBe(SECURE_VOICE_MEMBER_PERMISSIONS);
+      });
+
+      it('a non-member (owner or admin) still gets 0n on a secure voice channel', async () => {
+        prismaMock.channel.findUnique.mockResolvedValue({ ...secureChannel('owner1'), type: 'voice' });
+        prismaMock.channelMember.findUnique.mockResolvedValue(null);
+
+        expect(await computeUserChannelPermissions('owner1', 'ch1', 'srv1')).toBe(0n);
       });
     });
   });

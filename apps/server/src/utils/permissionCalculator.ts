@@ -30,6 +30,14 @@ export const SECURE_CREATOR_PERMISSIONS =
   SECURE_MEMBER_PERMISSIONS | Permissions.MANAGE_MESSAGES;
 
 /**
+ * What every secure VOICE channel member may do (spec §21). Deliberately no
+ * MUTE_MEMBERS / DEAFEN_MEMBERS / MOVE_MEMBERS — server-side moderation of an
+ * E2E voice room is impossible by design, for the creator too.
+ */
+export const SECURE_VOICE_MEMBER_PERMISSIONS =
+  Permissions.VIEW_CHANNEL | Permissions.CONNECT | Permissions.SPEAK;
+
+/**
  * Compute effective base permissions for a user in a server (no channel overrides).
  * Owner always gets ALL_PERMISSIONS.
  */
@@ -88,7 +96,7 @@ export async function computeUserChannelPermissions(
   // owner bypass (replaces the old bare server fetch — no extra query).
   const channel = await prisma.channel.findUnique({
     where: { id: channelId },
-    select: { secure: true, serverId: true, server: { select: { ownerId: true } } },
+    select: { secure: true, type: true, serverId: true, server: { select: { ownerId: true } } },
   });
   if (!channel || channel.serverId !== serverId) return 0n;
 
@@ -108,6 +116,7 @@ export async function computeUserChannelPermissions(
       }),
     ]);
     if (!member || !serverMember) return 0n;
+    if (channel.type === 'voice') return SECURE_VOICE_MEMBER_PERMISSIONS;
     return member.isCreator ? SECURE_CREATOR_PERMISSIONS : SECURE_MEMBER_PERMISSIONS;
   }
 

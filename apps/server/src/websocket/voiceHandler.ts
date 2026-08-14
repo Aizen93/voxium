@@ -15,7 +15,7 @@ import {
   relayVoiceEvent, resolveOrClaimChannelOwner, dropShim,
 } from './voiceRelay';
 import { hasChannelPermission, hasServerPermission, getHighestRolePosition } from '../utils/permissionCalculator';
-import { Permissions } from '@voxium/shared';
+import { Permissions, E2E_DEVICE_ID_RE, VOICE_KEY_ENVELOPE_MAX } from '@voxium/shared';
 
 // Re-exported for existing consumers (voiceCluster, tests)
 export { reapVoiceChannelMirror };
@@ -42,12 +42,19 @@ interface UserMediaState {
   producers: Map<string, Producer>;   // producerId → Producer
   consumers: Map<string, Consumer>;   // consumerId → Consumer
   rtpCapabilities: RtpCapabilities | null;
+  /** E2E device announced on join — SECURE voice channels only (spec §21).
+   *  Shape-validated routing metadata: peers seal media keys to it, and the
+   *  cryptographic binding happens client-side. */
+  e2eDeviceId?: string;
 }
 
 // channelId → Map<userId, UserMediaState>
 const voiceChannelUsers = new Map<string, Map<string, UserMediaState>>();
 // channelId → serverId
 const channelServerMap = new Map<string, string>();
+// Channels this node knows to be secure voice channels (E2E media). Drives
+// producer/screen-share/force-move/diagnostics branching without re-querying.
+const secureVoiceChannels = new Set<string>();
 // channelId → userId (one screen sharer per channel)
 const screenSharers = new Map<string, string>();
 
@@ -68,9 +75,9 @@ function findUserVoiceChannel(userId: string): string | undefined {
 // voice:screen:{channelId}         — String: userId (screen sharer)
 // voice:active                     — Set of channelIds with active voice users
 
-function mirrorVoiceJoin(channelId: string, serverId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false): void {
+function mirrorVoiceJoin(channelId: string, serverId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false, e2eDeviceId?: string): void {
   getRedis().multi()
-    .hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID() }))
+    .hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID(), ...(e2eDeviceId && { e2eDeviceId }) }))
     .set(`voice:channel:server:${channelId}`, serverId)
     .set(`voice:channel:node:${channelId}`, NODE_ID())
     .set(`voice:user:${userId}`, channelId)
@@ -94,8 +101,11 @@ function mirrorVoiceLeave(channelId: string, userId: string, channelEmpty: boole
   pipeline.exec().catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
 
-function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false): void {
-  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID() })).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false, e2eDeviceId?: string): void {
+  // e2eDeviceId must travel with every rewrite — this hSet replaces the whole
+  // JSON, and erasing the announced device would strip the routing hint peers
+  // use to seal media keys (the DM-call rebind bug class).
+  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID(), ...(e2eDeviceId && { e2eDeviceId }) })).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
 
 // ─── Persistent server-mute/deafen (survives reconnect) ─────────────────────
@@ -250,7 +260,7 @@ export function createVoiceHandlers(
   };
 
   // ── voice:join ────────────────────────────────────────────────────────
-  on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
+  on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => {
     if (!socketRateLimit(socket, 'voice:join', 10)) return;
     if (!isString(channelId)) return;
     if (!isFeatureEnabled('voice')) {
@@ -261,7 +271,7 @@ export function createVoiceHandlers(
 
     const channel = await prisma.channel.findUnique({
       where: { id: channelId },
-      select: { serverId: true, type: true },
+      select: { serverId: true, type: true, secure: true },
     });
 
     if (!channel || channel.type !== 'voice') {
@@ -269,6 +279,14 @@ export function createVoiceHandlers(
       socket.emit('voice:error', { message: 'Voice channel not found.' });
       return;
     }
+
+    // E2E media-key routing hint (spec §21): honored only for SECURE voice
+    // channels, shape-validated and stripped if malformed — the binding is
+    // cryptographic client-side.
+    const e2eDeviceId =
+      channel.secure && typeof state?.deviceId === 'string' && E2E_DEVICE_ID_RE.test(state.deviceId)
+        ? state.deviceId
+        : undefined;
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId, serverId: channel.serverId } },
@@ -310,6 +328,7 @@ export function createVoiceHandlers(
     socket.join(`channel:${channelId}`);
     socket.data.voiceChannelId = channelId;
     channelServerMap.set(channelId, channel.serverId);
+    if (channel.secure) secureVoiceChannels.add(channelId);
 
     if (!voiceChannelUsers.has(channelId)) {
       voiceChannelUsers.set(channelId, new Map());
@@ -366,6 +385,7 @@ export function createVoiceHandlers(
       producers: new Map(),
       consumers: new Map(),
       rtpCapabilities: null,
+      ...(e2eDeviceId && { e2eDeviceId }),
     };
 
     // Defensive: the channel Map was created before the awaits above; re-ensure it exists
@@ -404,7 +424,7 @@ export function createVoiceHandlers(
     }
 
     // Mirror to Redis for cross-node visibility
-    mirrorVoiceJoin(channelId, channel.serverId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened);
+    mirrorVoiceJoin(channelId, channel.serverId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened, userMedia.e2eDeviceId);
 
     // Fetch user info
     const user = await prisma.user.findUnique({
@@ -438,6 +458,7 @@ export function createVoiceHandlers(
             serverMuted: uState?.serverMuted ?? false,
             serverDeafened: uState?.serverDeafened ?? false,
             speaking: false,
+            ...(uState?.e2eDeviceId && { deviceId: uState.e2eDeviceId }),
           };
         });
 
@@ -454,7 +475,7 @@ export function createVoiceHandlers(
       // can VIEW this channel is subscribed to it (see socketServer connect +
       // syncChannelVisibilityRooms). Broadcasting server-wide leaked private
       // voice channel occupancy to members without VIEW_CHANNEL (HIGH-8).
-      const voiceUser = { ...user, selfMute: userMedia.selfMute, selfDeaf: userMedia.selfDeaf, serverMuted: userMedia.serverMuted, serverDeafened: userMedia.serverDeafened, speaking: false };
+      const voiceUser = { ...user, selfMute: userMedia.selfMute, selfDeaf: userMedia.selfDeaf, serverMuted: userMedia.serverMuted, serverDeafened: userMedia.serverDeafened, speaking: false, ...(userMedia.e2eDeviceId && { deviceId: userMedia.e2eDeviceId }) };
       io.to(`channel:${channelId}`).emit('voice:user_joined', {
         channelId,
         serverId: channel.serverId,
@@ -572,6 +593,14 @@ export function createVoiceHandlers(
     // Screen types are only granted to the channel's active screen sharer.
     const isSharer = screenSharers.get(channelId) === userId;
     let producerType: 'audio' | 'screen-audio' | 'screen-video';
+    // Secure voice channels are audio-only in v1 (spec §21): the SFU can
+    // forward encrypted Opus opaquely, but video forwarding needs readable
+    // payload descriptors — no screen producers of either kind.
+    if (secureVoiceChannels.has(channelId) && (data.kind === 'video' || data.appData?.type === 'screen-audio')) {
+      ack({ error: 'Screen sharing is not available in secure voice channels' });
+      return;
+    }
+
     if (data.kind === 'video') {
       if (!isSharer) { ack({ error: 'Not the active screen sharer' }); return; }
       producerType = 'screen-video';
@@ -785,7 +814,7 @@ export function createVoiceHandlers(
       resumeUserAudioIfAllowed(userMedia);
     }
 
-    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened);
+    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened, userMedia.e2eDeviceId);
     emitStateUpdate(channelId, userId, userMedia);
   });
 
@@ -810,7 +839,7 @@ export function createVoiceHandlers(
       pauseUserAudio(userMedia);
     }
 
-    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened);
+    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened, userMedia.e2eDeviceId);
     emitStateUpdate(channelId, userId, userMedia);
   });
 
@@ -877,7 +906,7 @@ export function createVoiceHandlers(
       resumeUserAudioIfAllowed(targetMedia);
     }
 
-    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened);
+    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened, targetMedia.e2eDeviceId);
     emitStateUpdate(channelId, targetId, targetMedia);
   });
 
@@ -929,7 +958,7 @@ export function createVoiceHandlers(
       pauseUserAudio(targetMedia);
     }
 
-    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened);
+    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened, targetMedia.e2eDeviceId);
     emitStateUpdate(channelId, targetId, targetMedia);
   });
 
@@ -957,6 +986,15 @@ export function createVoiceHandlers(
       return;
     }
 
+    // Secure voice channels are opaque to moderators (spec §21): moving a
+    // member OUT would confirm their presence in one, and no one can be
+    // moved INTO one without an invite. Same error as "not in voice" so the
+    // response is opacity-indistinguishable.
+    if (secureVoiceChannels.has(sourceChannelId)) {
+      socket.emit('voice:error', { message: 'User is not in a voice channel.' });
+      return;
+    }
+
     const serverId = channelServerMap.get(sourceChannelId);
     if (!serverId) return;
 
@@ -974,12 +1012,15 @@ export function createVoiceHandlers(
       return;
     }
 
-    // Validate target channel exists, is voice, is in the same server
+    // Validate target channel exists, is voice, is in the same server.
+    // Secure targets are rejected with the same error as nonexistent ones —
+    // force-moving someone INTO an invite-only E2E room is never allowed, and
+    // the response must not reveal that the channel exists.
     const targetChannel = await prisma.channel.findUnique({
       where: { id: targetChannelId },
-      select: { serverId: true, type: true },
+      select: { serverId: true, type: true, secure: true },
     });
-    if (!targetChannel || targetChannel.type !== 'voice' || targetChannel.serverId !== serverId) {
+    if (!targetChannel || targetChannel.type !== 'voice' || targetChannel.serverId !== serverId || targetChannel.secure) {
       socket.emit('voice:error', { message: 'Invalid target voice channel.' });
       return;
     }
@@ -1015,6 +1056,46 @@ export function createVoiceHandlers(
     if (!socketRateLimit(socket, 'voice:signal', 10)) return;
   });
 
+  // ── voice:e2e:key / voice:e2e:key_request (spec §21) ──────────────────
+  // Sealed media sender keys for secure voice channels, relayed between two
+  // participants of the SAME channel. The server verifies co-presence and
+  // shape only — the envelope is NEVER parsed (olm1 opaque relay, the
+  // dm:voice:signal precedent). Runs on the Router-owning node, where
+  // voiceChannelUsers is authoritative for every participant.
+  on('voice:e2e:key', (data: unknown) => {
+    if (!socketRateLimit(socket, 'voice:e2e:key', 120)) return;
+    const channelId = socket.data.voiceChannelId as string | undefined;
+    if (!channelId || !secureVoiceChannels.has(channelId)) return;
+    if (!data || typeof data !== 'object') return;
+    const { to, envelope } = data as { to?: unknown; envelope?: unknown };
+    if (typeof to !== 'string' || !to || to === userId) return;
+    if (typeof envelope !== 'string' || envelope.length === 0 || envelope.length > VOICE_KEY_ENVELOPE_MAX) return;
+    if (!envelope.startsWith('{"v":1,"e":"olm1"')) return;
+    const channelUsers = voiceChannelUsers.get(channelId);
+    const sender = channelUsers?.get(userId);
+    const target = channelUsers?.get(to);
+    if (!sender || !target) return;
+    // io.to(socketId) works across nodes via the Redis adapter
+    io.to(target.socketId).emit('voice:e2e:key', {
+      channelId,
+      from: userId,
+      fromDeviceId: sender.e2eDeviceId ?? '',
+      envelope,
+    });
+  });
+
+  on('voice:e2e:key_request', (data: unknown) => {
+    if (!socketRateLimit(socket, 'voice:e2e:key_request', 20)) return;
+    const channelId = socket.data.voiceChannelId as string | undefined;
+    if (!channelId || !secureVoiceChannels.has(channelId)) return;
+    if (!data || typeof data !== 'object') return;
+    const { to } = data as { to?: unknown };
+    if (typeof to !== 'string' || !to || to === userId) return;
+    const target = voiceChannelUsers.get(channelId)?.get(to);
+    if (!target) return;
+    io.to(target.socketId).emit('voice:e2e:key_request', { channelId, from: userId });
+  });
+
   // ── Screen sharing ────────────────────────────────────────────────────
   // The client claims the sharer slot BEFORE producing (the server derives
   // screen producer authorization from the active sharer), so start must ACK —
@@ -1026,6 +1107,11 @@ export function createVoiceHandlers(
     if (!socketRateLimit(socket, 'voice:screen_share', 10)) { ack({ ok: false, error: 'Rate limited' }); return; }
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) { ack({ ok: false, error: 'Not in a voice channel' }); return; }
+    // Audio-only v1 (spec §21) — the produce path also rejects screen kinds
+    if (secureVoiceChannels.has(channelId)) {
+      ack({ ok: false, error: 'Screen sharing is not available in secure voice channels' });
+      return;
+    }
 
     // Only one sharer per channel (re-claim by the same user is idempotent —
     // covers a retry after a failed produce that never reached stop)
@@ -1092,6 +1178,7 @@ const ROUTED_VOICE_EVENTS = [
   'voice:rtp_capabilities', 'voice:consumer:resume', 'voice:mute', 'voice:deaf',
   'voice:speaking', 'voice:server_mute', 'voice:server_deafen', 'voice:signal',
   'voice:screen_share:start', 'voice:screen_share:stop',
+  'voice:e2e:key', 'voice:e2e:key_request',
 ] as const;
 
 /** Events whose LAST argument is a client ACK callback (forwarded cross-node). */
@@ -1287,6 +1374,61 @@ export function handleWorkerDeath(
       dropShim(media.socketId);
     }
   }
+}
+
+/**
+ * Tear down every live voice session in ONE channel (the channel was deleted).
+ * Runs on whichever node receives the cluster broadcast; only the
+ * Router-owning node holds sessions for the channel, others no-op. Same shim
+ * pattern as worker death, but here the C++ handles are alive and
+ * leaveCurrentVoiceChannel closes them properly.
+ */
+export function cleanupChannelVoice(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  channelId: string,
+): void {
+  const users = voiceChannelUsers.get(channelId);
+  if (!users || users.size === 0) return;
+  console.log(`[Voice] Channel ${channelId} deleted — evicting ${users.size} participant(s)`);
+  for (const [uid, media] of [...users.entries()]) {
+    io.to(media.socketId).emit('voice:error', { message: 'This voice channel no longer exists.' });
+    const shim: VoiceSocket = {
+      id: media.socketId,
+      data: { userId: uid, voiceChannelId: channelId },
+      emit: (() => true) as VoiceSocket['emit'],
+      join: (room) => { io.in(media.socketId).socketsJoin(room); },
+      leave: (room) => { io.in(media.socketId).socketsLeave(room); },
+    };
+    leaveCurrentVoiceChannel(io, shim, uid);
+    shimHandlerTables.delete(media.socketId);
+    dropShim(media.socketId);
+  }
+}
+
+/**
+ * Force ONE user out of ONE channel's live voice — secure-channel membership
+ * removal must end their media access immediately, not at their next action
+ * (spec §21). No-op on nodes where they hold no session.
+ */
+export function evictUserFromChannelVoice(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  channelId: string,
+  userId: string,
+): void {
+  const media = voiceChannelUsers.get(channelId)?.get(userId);
+  if (!media) return;
+  console.log(`[Voice] Evicting ${userId} from voice channel ${channelId}`);
+  io.to(media.socketId).emit('voice:error', { message: 'You have been disconnected from this voice channel.' });
+  const shim: VoiceSocket = {
+    id: media.socketId,
+    data: { userId, voiceChannelId: channelId },
+    emit: (() => true) as VoiceSocket['emit'],
+    join: (room) => { io.in(media.socketId).socketsJoin(room); },
+    leave: (room) => { io.in(media.socketId).socketsLeave(room); },
+  };
+  leaveCurrentVoiceChannel(io, shim, userId);
+  shimHandlerTables.delete(media.socketId);
+  dropShim(media.socketId);
 }
 
 /**
@@ -1497,6 +1639,7 @@ export function leaveCurrentVoiceChannel(
       channelEmpty = true;
       voiceChannelUsers.delete(channelId);
       channelServerMap.delete(channelId);
+      secureVoiceChannels.delete(channelId);
       screenSharers.delete(channelId);
       // Release the Router when the last user leaves
       releaseRouter(channelId);
@@ -1574,6 +1717,7 @@ export function cleanupServerVoice(
     }
     screenSharers.delete(channelId);
     channelServerMap.delete(channelId);
+    secureVoiceChannels.delete(channelId);
     // Clean up Redis mirror for the entire channel
     const redis = getRedis();
     redis.del(`voice:channel:users:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
@@ -1663,6 +1807,9 @@ export function getVoiceDiagnostics(): {
 }[] {
   const result = [];
   for (const [channelId, users] of voiceChannelUsers) {
+    // Secure voice channels are opaque to admins (spec §21): their id,
+    // occupants, and producer topology never appear in diagnostics.
+    if (secureVoiceChannels.has(channelId)) continue;
     const userStates = [];
     for (const [uid, state] of users) {
       const producers = [];
@@ -1736,42 +1883,7 @@ export async function getVoiceStateForServers(serverIds: string[]): Promise<{ ch
   return result;
 }
 
-/** Returns all channelIds that belong to a given server and have active voice users (cross-node via Redis) */
-export async function getVoiceStateForServer(serverId: string): Promise<{ channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }> }[]> {
-  const redis = getRedis();
-  const activeChannels = await redis.sMembers('voice:active');
-  if (activeChannels.length === 0) return [];
-
-  // Pipeline: fetch server ID for all active channels in one round-trip
-  const serverPipeline = redis.multi();
-  for (const channelId of activeChannels) {
-    serverPipeline.get(`voice:channel:server:${channelId}`);
-  }
-  const serverIdsRaw = await serverPipeline.exec();
-
-  // Filter to channels belonging to this server, then fetch user data
-  const matchingChannels = activeChannels.filter((_, i) => String(serverIdsRaw[i]) === serverId);
-  if (matchingChannels.length === 0) return [];
-
-  const usersPipeline = redis.multi();
-  for (const channelId of matchingChannels) {
-    usersPipeline.hGetAll(`voice:channel:users:${channelId}`);
-  }
-  const usersResultsRaw = await usersPipeline.exec();
-
-  const result: { channelId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }> }[] = [];
-  for (let i = 0; i < matchingChannels.length; i++) {
-    const usersData = usersResultsRaw[i] as unknown as Record<string, string>;
-    if (!usersData || typeof usersData !== 'object') continue;
-    const userIds = Object.keys(usersData);
-    if (userIds.length === 0) continue;
-
-    const userStates = new Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }>();
-    for (const [uid, json] of Object.entries(usersData)) {
-      const { selfMute, selfDeaf, serverMuted, serverDeafened } = JSON.parse(json);
-      userStates.set(uid, { selfMute, selfDeaf, serverMuted: serverMuted ?? false, serverDeafened: serverDeafened ?? false });
-    }
-    result.push({ channelId: matchingChannels[i], userIds, userStates });
-  }
-  return result;
-}
+// (getVoiceStateForServer was removed: dead code with NO visibility filtering —
+// wiring it up anywhere would have leaked secure voice channel occupancy. The
+// batched getVoiceStateForServers above is the live path, and its callers
+// intersect with filterVisibleChannelsMulti results.)

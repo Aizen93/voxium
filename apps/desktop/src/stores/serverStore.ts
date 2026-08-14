@@ -769,5 +769,13 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set((state) => ({
       secureChannelMembers: { ...state.secureChannelMembers, [channelId]: members },
     }));
+
+    // Secure VOICE channels: a membership change is the rotation HINT — the
+    // decision is confirmed against the authoritative endpoint inside
+    // confirmMembership, never trusted from this socket event (spec §21).
+    // No-op for channels without an active secure voice session.
+    void import('../services/e2e/secureVoiceKeys')
+      .then((m) => m.confirmMembership(channelId))
+      .catch((err) => console.warn('[SecureVoice] Membership confirmation failed:', err));
   },
 }));

@@ -14,6 +14,8 @@ import {
   E2E_LIMITS,
   buildE2EEnvelope,
   parseE2EEnvelope,
+  buildVoiceKeyPlaintext,
+  parseVoiceKeyPlaintext,
   e2eDeviceCanonical,
   e2eDeviceCrossCanonical,
   e2eKeyCanonical,
@@ -3326,6 +3328,31 @@ describe('E2EService — device-sealed payloads', () => {
 
     const a2 = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'post-restart');
     expect(await bob2.service.decryptFromDevice(alice.userId, alice.service.deviceId, a2)).toBe('post-restart');
+  });
+
+  it('round-trips a secure-voice KEY message; ch:-scoped plaintext never parses as one (spec §21)', async () => {
+    const { alice, bob } = await pair();
+    const plaintext = buildVoiceKeyPlaintext({
+      v: 1,
+      scope: 'chv:chan-1',
+      senderUserId: alice.userId,
+      senderDeviceId: alice.service.deviceId,
+      epoch: 'epochAAAA0001',
+      seq: 0,
+      keyId: 0,
+      keyB64: 'A'.repeat(43),
+      reason: 'initial',
+    });
+
+    const env = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, plaintext);
+    const raw = await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, env);
+    expect(raw).toBe(plaintext);
+    expect(parseVoiceKeyPlaintext(raw!)).toMatchObject({ scope: 'chv:chan-1', keyId: 0, reason: 'initial' });
+
+    // The same fields under the MESSAGE scope are refused by the voice parser —
+    // a keyshare can never smuggle itself in as a media key
+    const confused = raw!.replace('"chv:chan-1"', '"ch:chan-1"');
+    expect(parseVoiceKeyPlaintext(confused)).toBeNull();
   });
 
   it('an envelope bound to the WRONG device decrypts to null', async () => {

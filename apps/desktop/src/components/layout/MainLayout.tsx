@@ -23,6 +23,7 @@ import { usePushToTalk } from '../../hooks/usePushToTalk';
 import { playJoinSound, playLeaveSound, playMessageSound, playMentionSound } from '../../services/notificationSounds';
 import { toast } from '../../stores/toastStore';
 import { stopSpeakingDetection } from '../../services/audioAnalyser';
+import { handleInboundKey, handleKeyRequest } from '../../services/e2e/secureVoiceKeys';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
 import { SupportTicketView } from '../dm/SupportTicketView';
@@ -288,6 +289,15 @@ export function MainLayout() {
       },
       voiceSignal: ({ from, signal }: { from: string; signal: unknown }) => {
         useVoiceStore.getState().handleSignal(from, signal);
+      },
+      // Secure voice channels (spec §21): Olm-sealed media keys relayed
+      // between participants. secureVoiceKeys drops anything for a channel
+      // without an active session — no guard needed here.
+      voiceE2EKey: ({ channelId, from, fromDeviceId, envelope }: { channelId: string; from: string; fromDeviceId: string; envelope: string }) => {
+        handleInboundKey(channelId, from, fromDeviceId, envelope);
+      },
+      voiceE2EKeyRequest: ({ channelId, from }: { channelId: string; from: string }) => {
+        handleKeyRequest(channelId, from);
       },
       voiceTransportCreated: (data: { routerRtpCapabilities: unknown; sendTransport: TransportOptions; recvTransport: TransportOptions }) => {
         useVoiceStore.getState().handleTransportCreated(data);
@@ -667,6 +677,8 @@ export function MainLayout() {
       ['voice:state_update', handlers.voiceStateUpdate],
       ['voice:force_moved', handlers.voiceForceMove],
       ['voice:speaking', handlers.voiceSpeaking],
+      ['voice:e2e:key', handlers.voiceE2EKey],
+      ['voice:e2e:key_request', handlers.voiceE2EKeyRequest],
       ['voice:signal', handlers.voiceSignal],
       ['voice:transport_created', handlers.voiceTransportCreated],
       ['voice:new_consumer', handlers.voiceNewConsumer],

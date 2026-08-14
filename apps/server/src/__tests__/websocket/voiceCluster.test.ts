@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
-const { mockRedis, mockPublish, mockSubscribe, mockIsNodeAlive, mockCleanupServerVoice, mockGuardedReap } = vi.hoisted(() => ({
+const { mockRedis, mockPublish, mockSubscribe, mockIsNodeAlive, mockCleanupServerVoice, mockCleanupChannelVoice, mockEvictUser, mockGuardedReap } = vi.hoisted(() => ({
   mockRedis: {
     sMembers: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),
@@ -11,6 +11,8 @@ const { mockRedis, mockPublish, mockSubscribe, mockIsNodeAlive, mockCleanupServe
   mockSubscribe: vi.fn().mockResolvedValue(undefined),
   mockIsNodeAlive: vi.fn().mockResolvedValue(false),
   mockCleanupServerVoice: vi.fn(),
+  mockCleanupChannelVoice: vi.fn(),
+  mockEvictUser: vi.fn(),
   mockGuardedReap: vi.fn().mockResolvedValue([]),
 }));
 
@@ -29,10 +31,12 @@ vi.mock('../../utils/voiceMirror', () => ({
 
 vi.mock('../../websocket/voiceHandler', () => ({
   cleanupServerVoice: mockCleanupServerVoice,
+  cleanupChannelVoice: mockCleanupChannelVoice,
+  evictUserFromChannelVoice: mockEvictUser,
   reapOrphanedRemoteParticipants: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { initVoiceCluster, stopVoiceCluster, broadcastServerVoiceCleanup, reapDeadNodeVoiceState } from '../../websocket/voiceCluster';
+import { initVoiceCluster, stopVoiceCluster, broadcastServerVoiceCleanup, broadcastChannelVoiceCleanup, broadcastVoiceEvictUser, reapDeadNodeVoiceState } from '../../websocket/voiceCluster';
 
 function createMockIO() {
   const emitFn = vi.fn();
@@ -110,6 +114,57 @@ describe('voiceCluster — cluster message handling', () => {
 
     expect(() => handler('not-json{{{')).not.toThrow();
     expect(mockCleanupServerVoice).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('handles channel_cleanup and voice_evict_user from peers (secure voice, spec §21)', async () => {
+    const io = createMockIO();
+    const handler = await initAndGetHandler(io);
+
+    handler(JSON.stringify({ type: 'channel_cleanup', channelId: 'ch-9', fromNode: 'peer-node' }));
+    expect(mockCleanupChannelVoice).toHaveBeenCalledWith(io, 'ch-9');
+
+    handler(JSON.stringify({ type: 'voice_evict_user', channelId: 'ch-9', userId: 'u-2', fromNode: 'peer-node' }));
+    expect(mockEvictUser).toHaveBeenCalledWith(io, 'ch-9', 'u-2');
+
+    // Own broadcasts are ignored (originator already ran locally)
+    mockCleanupChannelVoice.mockClear();
+    mockEvictUser.mockClear();
+    handler(JSON.stringify({ type: 'channel_cleanup', channelId: 'ch-9', fromNode: 'test-node-1' }));
+    handler(JSON.stringify({ type: 'voice_evict_user', channelId: 'ch-9', userId: 'u-2', fromNode: 'test-node-1' }));
+    expect(mockCleanupChannelVoice).not.toHaveBeenCalled();
+    expect(mockEvictUser).not.toHaveBeenCalled();
+  });
+});
+
+describe('voiceCluster — channel cleanup / eviction broadcasts (spec §21)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('broadcastChannelVoiceCleanup runs locally AND publishes', async () => {
+    const io = createMockIO();
+    await broadcastChannelVoiceCleanup(io as never, 'ch-7');
+    expect(mockCleanupChannelVoice).toHaveBeenCalledWith(io, 'ch-7');
+    expect(mockPublish).toHaveBeenCalledWith(
+      'voice:cluster',
+      JSON.stringify({ type: 'channel_cleanup', channelId: 'ch-7', fromNode: 'test-node-1' }),
+    );
+  });
+
+  it('broadcastVoiceEvictUser runs locally AND publishes, surviving publish failure', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const io = createMockIO();
+    await broadcastVoiceEvictUser(io as never, 'ch-7', 'u-9');
+    expect(mockEvictUser).toHaveBeenCalledWith(io, 'ch-7', 'u-9');
+    expect(mockPublish).toHaveBeenCalledWith(
+      'voice:cluster',
+      JSON.stringify({ type: 'voice_evict_user', channelId: 'ch-7', userId: 'u-9', fromNode: 'test-node-1' }),
+    );
+
+    mockPublish.mockRejectedValueOnce(new Error('redis down'));
+    await expect(broadcastVoiceEvictUser(io as never, 'ch-8', 'u-9')).resolves.toBeUndefined();
+    expect(mockEvictUser).toHaveBeenCalledWith(io, 'ch-8', 'u-9');
     warnSpy.mockRestore();
   });
 });

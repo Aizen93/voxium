@@ -2,7 +2,7 @@ import type { Server as SocketServer } from 'socket.io';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { getRedis, getRedisPubSub, getRedisConfigSub, NODE_ID, isNodeAlive } from '../utils/redis';
 import { reapDeadOwnerChannelMirror } from '../utils/voiceMirror';
-import { cleanupServerVoice, reapOrphanedRemoteParticipants } from './voiceHandler';
+import { cleanupServerVoice, cleanupChannelVoice, evictUserFromChannelVoice, reapOrphanedRemoteParticipants } from './voiceHandler';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -14,11 +14,10 @@ const CLUSTER_CHANNEL = 'voice:cluster';
 const REAPER_INTERVAL_MS = 60_000;
 let reaperTimer: ReturnType<typeof setInterval> | null = null;
 
-interface ServerCleanupMessage {
-  type: 'server_cleanup';
-  serverId: string;
-  fromNode: string;
-}
+type ClusterMessage =
+  | { type: 'server_cleanup'; serverId: string; fromNode: string }
+  | { type: 'channel_cleanup'; channelId: string; fromNode: string }
+  | { type: 'voice_evict_user'; channelId: string; userId: string; fromNode: string };
 
 /**
  * Subscribe to cross-node voice coordination and start the dead-node reaper.
@@ -28,10 +27,14 @@ export async function initVoiceCluster(io: IO): Promise<void> {
   const configSub = getRedisConfigSub();
   await configSub.subscribe(CLUSTER_CHANNEL, (message) => {
     try {
-      const msg = JSON.parse(message) as ServerCleanupMessage;
+      const msg = JSON.parse(message) as ClusterMessage;
       if (msg.fromNode === NODE_ID()) return; // originator already ran locally
       if (msg.type === 'server_cleanup' && typeof msg.serverId === 'string') {
         cleanupServerVoice(io, msg.serverId);
+      } else if (msg.type === 'channel_cleanup' && typeof msg.channelId === 'string') {
+        cleanupChannelVoice(io, msg.channelId);
+      } else if (msg.type === 'voice_evict_user' && typeof msg.channelId === 'string' && typeof msg.userId === 'string') {
+        evictUserFromChannelVoice(io, msg.channelId, msg.userId);
       }
     } catch (err) {
       console.warn('[VoiceCluster] Malformed cluster message:', err);
@@ -69,10 +72,47 @@ export async function broadcastServerVoiceCleanup(io: IO, serverId: string): Pro
       type: 'server_cleanup',
       serverId,
       fromNode: NODE_ID(),
-    } satisfies ServerCleanupMessage));
+    } satisfies ClusterMessage));
   } catch (err) {
     // Peers self-heal via the dead-channel paths; the local cleanup already ran.
     console.warn('[VoiceCluster] Failed to broadcast server voice cleanup:', err);
+  }
+}
+
+/**
+ * Tear down live voice in ONE deleted channel on every node. Local first, then
+ * fan out — only the Router-owning node holds sessions, the rest no-op.
+ */
+export async function broadcastChannelVoiceCleanup(io: IO, channelId: string): Promise<void> {
+  cleanupChannelVoice(io, channelId);
+  try {
+    const { pub } = getRedisPubSub();
+    await pub.publish(CLUSTER_CHANNEL, JSON.stringify({
+      type: 'channel_cleanup',
+      channelId,
+      fromNode: NODE_ID(),
+    } satisfies ClusterMessage));
+  } catch (err) {
+    console.warn('[VoiceCluster] Failed to broadcast channel voice cleanup:', err);
+  }
+}
+
+/**
+ * Force one user out of one channel's live voice on every node — a secure
+ * channel membership removal must end media access immediately (spec §21).
+ */
+export async function broadcastVoiceEvictUser(io: IO, channelId: string, userId: string): Promise<void> {
+  evictUserFromChannelVoice(io, channelId, userId);
+  try {
+    const { pub } = getRedisPubSub();
+    await pub.publish(CLUSTER_CHANNEL, JSON.stringify({
+      type: 'voice_evict_user',
+      channelId,
+      userId,
+      fromNode: NODE_ID(),
+    } satisfies ClusterMessage));
+  } catch (err) {
+    console.warn('[VoiceCluster] Failed to broadcast voice eviction:', err);
   }
 }
 

@@ -9,6 +9,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission, hasChannelPermission, filterVisibleChannels, computeServerPermissions } from '../utils/permissionCalculator';
 import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
+import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -280,6 +281,11 @@ channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; chan
     await prisma.channel.delete({ where: { id: channelId } });
 
     getIO().to(`server:${serverId}`).emit('channel:deleted', { channelId, serverId });
+
+    // Live voice must die with the channel on every node — participants used
+    // to keep their transports (and the Redis mirror entry) until they left
+    // manually. (deleteSecureChannel does the same for the secure branch.)
+    await broadcastChannelVoiceCleanup(getIO(), channelId);
 
     res.json({ success: true, message: 'Channel deleted' });
   } catch (err) {

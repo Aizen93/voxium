@@ -14,7 +14,8 @@ import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
 import { leaveCurrentVoiceChannel } from '../websocket/voiceHandler';
-import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
+import { broadcastServerVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
+import { getRedis } from '../utils/redis';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { purgeSecureChannelState } from '../utils/secureChannelLifecycle';
@@ -290,6 +291,22 @@ serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>,
     // to their members), other memberships are removed so remaining members
     // rotate keys. Must run BEFORE the ServerMember delete.
     await purgeSecureChannelState(req.user!.userId, serverId);
+
+    // Leaving the server force-leaves its voice too (parity with kick — a
+    // departed member must not keep a live media session). Cross-node via the
+    // Redis reverse lookup + cluster eviction fan-out.
+    try {
+      const redis = getRedis();
+      const voiceChannelId = await redis.get(`voice:user:${req.user!.userId}`);
+      if (voiceChannelId) {
+        const voiceServerId = await redis.get(`voice:channel:server:${voiceChannelId}`);
+        if (voiceServerId === serverId) {
+          await broadcastVoiceEvictUser(getIO(), voiceChannelId, req.user!.userId);
+        }
+      }
+    } catch (err) {
+      console.warn('[Servers] Voice eviction on self-leave failed (reaper will catch up):', err);
+    }
 
     // Clean up ChannelRead records for this server's channels
     const textChannelIds = await prisma.channel.findMany({

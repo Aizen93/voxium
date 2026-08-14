@@ -116,15 +116,36 @@ export const E2E_LIMITS = {
 /** Prefix marking a group-session scope as a secure channel. */
 export const E2E_CHANNEL_SCOPE_PREFIX = 'ch:';
 
+/**
+ * Prefix marking a scope as a secure VOICE channel's media-key context
+ * (spec §21). Deliberately distinct from `ch:` so a sealed media key can never
+ * be confused with a message key-share for the same channel — the separation
+ * is enforced in every strict parser and rides inside AEAD AADs.
+ */
+export const E2E_VOICE_SCOPE_PREFIX = 'chv:';
+
 /** Build the group-session scope id for a secure channel. */
 export function e2eChannelScope(channelId: string): string {
   return `${E2E_CHANNEL_SCOPE_PREFIX}${channelId}`;
 }
 
+/** Build the media-key scope id for a secure voice channel. */
+export function e2eVoiceScope(channelId: string): string {
+  return `${E2E_VOICE_SCOPE_PREFIX}${channelId}`;
+}
+
 /** Split a scope string into its kind and raw id. */
 export function parseE2EScope(
   scope: string,
-): { kind: 'channel'; channelId: string } | { kind: 'dm'; conversationId: string } {
+):
+  | { kind: 'channel'; channelId: string }
+  | { kind: 'voice-channel'; channelId: string }
+  | { kind: 'dm'; conversationId: string } {
+  // 'chv:' first — it does not lexically collide with 'ch:' ('chv'[2] !== ':')
+  // but explicit ordering keeps that from ever becoming load-bearing.
+  if (scope.startsWith(E2E_VOICE_SCOPE_PREFIX)) {
+    return { kind: 'voice-channel', channelId: scope.slice(E2E_VOICE_SCOPE_PREFIX.length) };
+  }
   if (scope.startsWith(E2E_CHANNEL_SCOPE_PREFIX)) {
     return { kind: 'channel', channelId: scope.slice(E2E_CHANNEL_SCOPE_PREFIX.length) };
   }
@@ -529,4 +550,99 @@ export function parseCallSignalPlaintext(raw: string): E2ECallSignalPlaintext | 
   const keys = Object.keys(p).sort();
   if (keys.length !== 7 || keys.join(',') !== 'conversationId,epoch,senderDeviceId,senderUserId,seq,signal,v') return null;
   return obj as E2ECallSignalPlaintext;
+}
+
+// ─── Secure voice channels: E2E media frames + sealed sender keys (spec §21) ─
+//
+// Secure voice channels encrypt every encoded Opus frame client-side (WebRTC
+// encoded transforms) so the SFU forwards payloads it cannot read. Each
+// participant has its own AES-256-GCM sender key; the structures below define
+// the frame prefix constants and the Olm-sealed plaintext that distributes a
+// sender key to one peer device.
+
+/** Frame format version carried in the header's high nibble. */
+export const VOICE_FRAME_VERSION = 1;
+/** `[1B version|keyId-nibble][4B BE seq]` prefix on every encrypted frame. */
+export const VOICE_FRAME_HEADER_BYTES = 5;
+/** AES-GCM authentication tag length. */
+export const VOICE_FRAME_TAG_BYTES = 16;
+/** Smallest valid encrypted frame: header + tag (empty DTX payload). */
+export const VOICE_FRAME_MIN_BYTES = VOICE_FRAME_HEADER_BYTES + VOICE_FRAME_TAG_BYTES;
+/**
+ * Sender seq ceiling. Rotation is forced well before the u32 wraps so an IV
+ * can never repeat under one key even in a pathological session (~2.7 years
+ * of continuous audio — enforced anyway).
+ */
+export const VOICE_FRAME_SEQ_ROTATE_AT = 2 ** 32 - 2 ** 16;
+/**
+ * The string half of the frame AAD: `voxv1|chv:{channelId}|{senderUserId}`.
+ * The 5-byte frame header is appended at encrypt time, binding channel,
+ * sender, key generation, and sequence into the GCM tag.
+ */
+export function voiceFrameAadPrefix(channelId: string, senderUserId: string): string {
+  return `voxv1|${e2eVoiceScope(channelId)}|${senderUserId}`;
+}
+
+/** Relay cap for a sealed voice-key envelope (olm1 string on the socket). */
+export const VOICE_KEY_ENVELOPE_MAX = 16_384;
+/** Serialized-plaintext ceiling for a sealed voice-key message. */
+export const E2E_VOICE_KEY_PLAINTEXT_MAX = 1_024;
+/** Key generation ceiling (full counter; the wire nibble is keyId mod 16). */
+export const VOICE_KEY_ID_MAX = 2 ** 31;
+
+/**
+ * Olm plaintext distributing one sender media key to one peer device.
+ * Binding fields are re-verified by the receiver AGAINST ITS OWN state
+ * (active secure voice session + vetted participant device) — never trusted
+ * from the envelope alone. `epoch` + `seq` follow the call-signal semantics:
+ * receivers keep per-sender epoch/seq replay state and never accept a
+ * superseded epoch again.
+ */
+export interface E2EVoiceKeyPlaintext {
+  v: 1;
+  /** `chv:{channelId}` — must parse as kind 'voice-channel'. */
+  scope: string;
+  senderUserId: string;
+  senderDeviceId: string;
+  epoch: string;
+  /** Strictly increasing per epoch, starting at 0. */
+  seq: number;
+  /** Full key-generation counter for the sender's key. */
+  keyId: number;
+  /** 32-byte AES-256-GCM key, unpadded standard base64. */
+  keyB64: string;
+  /** Why this key exists — receivers use it for diagnostics only; the
+   *  trial-ratchet on frames is what actually disambiguates transitions. */
+  reason: 'initial' | 'ratchet' | 'fresh';
+}
+
+export function buildVoiceKeyPlaintext(p: E2EVoiceKeyPlaintext): string {
+  return JSON.stringify(p);
+}
+
+/** Strict parse of a decrypted voice-key plaintext. Null on any deviation. */
+export function parseVoiceKeyPlaintext(raw: string): E2EVoiceKeyPlaintext | null {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > E2E_VOICE_KEY_PLAINTEXT_MAX) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const p = obj as Record<string, unknown>;
+  if (p.v !== 1) return null;
+  if (typeof p.scope !== 'string' || parseE2EScope(p.scope).kind !== 'voice-channel') return null;
+  if (p.scope.length > 64 + E2E_VOICE_SCOPE_PREFIX.length) return null;
+  if (typeof p.senderUserId !== 'string' || p.senderUserId.length === 0 || p.senderUserId.length > 64) return null;
+  if (typeof p.senderDeviceId !== 'string' || !E2E_DEVICE_ID_RE.test(p.senderDeviceId)) return null;
+  if (typeof p.epoch !== 'string' || !E2E_CALL_EPOCH_RE.test(p.epoch)) return null;
+  if (typeof p.seq !== 'number' || !Number.isInteger(p.seq) || p.seq < 0) return null;
+  if (typeof p.keyId !== 'number' || !Number.isInteger(p.keyId) || p.keyId < 0 || p.keyId >= VOICE_KEY_ID_MAX) return null;
+  if (typeof p.keyB64 !== 'string' || !E2E_KEY_B64_RE.test(p.keyB64)) return null;
+  if (p.reason !== 'initial' && p.reason !== 'ratchet' && p.reason !== 'fresh') return null;
+  // Exactly the declared keys — extra fields are a smuggling channel
+  const keys = Object.keys(p).sort();
+  if (keys.length !== 9 || keys.join(',') !== 'epoch,keyB64,keyId,reason,scope,senderDeviceId,senderUserId,seq,v') return null;
+  return obj as E2EVoiceKeyPlaintext;
 }

@@ -190,6 +190,12 @@ interface VoiceState {
   /** The peer's E2E call device — every dm:voice:signal seals to exactly it. */
   dmCallPeerDevice: CallPeerDevice | null;
 
+  // ─── Secure Voice State (spec §21) ─────────────────────────────────
+  /** Participants of the active secure voice channel we could not key
+   *  (failed vetting / identity change / un-updated client) — UI badge. */
+  secureVoicePeerIssues: Record<string, string>;
+  markSecureVoicePeerExcluded: (channelId: string, userId: string, kind: string) => void;
+
   // ─── Shared Actions ────────────────────────────────────────────────
   setLocalUserId: (userId: string) => void;
   toggleMute: () => void;
@@ -259,6 +265,28 @@ interface VoiceState {
 let latencyInterval: ReturnType<typeof setInterval> | null = null;
 let pongHandler: ((timestamp: number) => void) | null = null;
 let transportRejoinAttempts = 0;
+
+// ─── Secure voice (spec §21) module state ───────────────────────────────────
+// The frame-crypto session handle lives OUTSIDE zustand (crypto bookkeeping
+// must survive store snapshots/resets — the callCrypto rule). Non-null only
+// while the active channel is a secure voice channel.
+let secureVoiceFrames: import('../services/e2e/voiceFrameTransform').FrameCryptoSession | null = null;
+let secureVoiceChannelId: string | null = null;
+
+function activeSecureVoiceSession(channelId: string | null): import('../services/e2e/voiceFrameTransform').FrameCryptoSession | null {
+  return channelId && secureVoiceChannelId === channelId ? secureVoiceFrames : null;
+}
+
+/** End the secure-voice session (if any) — leave/cleanup/reconnect paths. */
+function teardownSecureVoice(): void {
+  if (!secureVoiceChannelId) return;
+  const channelId = secureVoiceChannelId;
+  secureVoiceChannelId = null;
+  secureVoiceFrames = null;
+  void import('../services/e2e/secureVoiceKeys')
+    .then((m) => m.endSecureVoiceSession(channelId))
+    .catch((err) => console.warn('[SecureVoice] Session teardown failed:', err));
+}
 
 // Incremented on every join/leave (server voice AND DM calls). Guards the async
 // mic acquisition inside joins: a join superseded mid-getUserMedia must stop the
@@ -823,7 +851,15 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   dmCallPeerDevice: null,
   incomingCall: null,
 
+  // Secure voice state
+  secureVoicePeerIssues: {},
+
   setLocalUserId: (userId: string) => set({ localUserId: userId }),
+
+  markSecureVoicePeerExcluded: (channelId: string, userId: string, kind: string) => {
+    if (get().activeChannelId !== channelId) return;
+    set((state) => ({ secureVoicePeerIssues: { ...state.secureVoicePeerIssues, [userId]: kind } }));
+  },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SERVER VOICE (SFU)
@@ -842,8 +878,39 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       get().leaveChannel();
     }
 
+    // Captured BEFORE any await — every await below re-checks it so a
+    // concurrent leave/join supersedes this one (MED-9)
     const generation = ++voiceSessionGeneration;
     transportRejoinAttempts = 0; // Reset retry counter on explicit join
+
+    // Resolve the channel record — the SECURE flag decides the whole join
+    // shape. Fail closed if it cannot be resolved: joining a secure channel
+    // as-if-plaintext would leak unencrypted frames (spec §21).
+    let secure = false;
+    try {
+      const { useServerStore } = await import('./serverStore');
+      const record = useServerStore.getState().channels.find((c) => c.id === channelId);
+      if (!record) {
+        console.error(`[Voice] Channel ${channelId} not in the store — refusing to join`);
+        toast.error('Could not join the voice channel — try again');
+        return;
+      }
+      secure = record.secure === true;
+    } catch (err) {
+      console.error('[Voice] Channel resolution failed — refusing to join:', err);
+      toast.error('Could not join the voice channel — try again');
+      return;
+    }
+    if (generation !== voiceSessionGeneration) return;
+
+    if (secure) {
+      const { isSecureVoiceSupported } = await import('../services/e2e/secureVoiceKeys');
+      if (!isSecureVoiceSupported()) {
+        toast.error(i18n.t('secureVoice.unsupported'));
+        return;
+      }
+      if (generation !== voiceSessionGeneration) return;
+    }
 
     const settings = useSettingsStore.getState();
     setNoiseGateThreshold(settings.noiseGateThreshold);
@@ -889,10 +956,52 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     const effectiveMute = stream ? selfMute : true;
     const serverMute = isPTT ? true : effectiveMute;
-    set({ activeChannelId: channelId, activeVoiceServerId: serverId ?? null, localStream: stream, selfMute: effectiveMute });
+
+    // Secure channels: the E2E media session MUST exist before voice:join —
+    // key 0 is minted, the frame worker is live, and our deviceId is
+    // announced with the join. Any failure aborts (no plaintext fallback).
+    let joinDeviceId: string | undefined;
+    if (secure) {
+      try {
+        // First-join-after-launch can race E2E init (the DM-call precedent)
+        const { useE2EStore } = await import('./e2eStore');
+        const { useAuthStore } = await import('./authStore');
+        const me = useAuthStore.getState().user;
+        if (me && !useE2EStore.getState().ready) {
+          useE2EStore.getState().initialize(me.id).catch((err) => {
+            console.warn('[SecureVoice] E2E init kick failed (store records the error):', err);
+          });
+          await waitForE2EReady(10_000);
+        }
+        const { beginSecureVoiceSession } = await import('../services/e2e/secureVoiceKeys');
+        const { frames, deviceId } = await beginSecureVoiceSession(channelId);
+        if (generation !== voiceSessionGeneration) {
+          frames.destroy();
+          stream?.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        secureVoiceFrames = frames;
+        secureVoiceChannelId = channelId;
+        frames.onFatal(() => {
+          console.error('[SecureVoice] Frame-crypto failure — leaving voice (fail closed)');
+          toast.error(i18n.t('secureVoice.sessionFailed'));
+          get().leaveChannel();
+        });
+        joinDeviceId = deviceId;
+      } catch (err) {
+        console.error('[SecureVoice] Could not start the E2E media session — join aborted:', err);
+        stream?.getTracks().forEach((track) => track.stop());
+        stopSpeakingDetection();
+        stopNoiseSuppression();
+        toast.error(i18n.t('secureVoice.cantJoin'));
+        return;
+      }
+    }
+
+    set({ activeChannelId: channelId, activeVoiceServerId: serverId ?? null, localStream: stream, selfMute: effectiveMute, secureVoicePeerIssues: {} });
 
     // Emit voice:join — server will respond with voice:transport_created
-    socket.emit('voice:join', channelId, { selfMute: serverMute, selfDeaf });
+    socket.emit('voice:join', channelId, { selfMute: serverMute, selfDeaf, ...(joinDeviceId && { deviceId: joinDeviceId }) });
 
     get().startLatencyMeasurement();
   },
@@ -924,6 +1033,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // Clean up SFU resources
     get().cleanupSFU();
 
+    // Secure voice: the media keys die with the session (fresh key + epoch on
+    // any rejoin — the IV-reuse firewall, spec §21)
+    teardownSecureVoice();
+
     if (socket) {
       socket.emit('voice:leave');
     }
@@ -938,6 +1051,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       isScreenSharing: false,
       screenSharingUserId: null,
       remoteScreenStream: null,
+      secureVoicePeerIssues: {},
     });
   },
 
@@ -958,12 +1072,20 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // Bail if user left during async load
       if (!get().activeChannelId) { return; }
 
+      // Secure voice: the legacy Chromium transform path (createEncodedStreams)
+      // requires encodedInsertableStreams on the RTCPeerConnection. Harmless
+      // where the RTCRtpScriptTransform path is used instead.
+      const secureExtras = activeSecureVoiceSession(get().activeChannelId)
+        ? { additionalSettings: { encodedInsertableStreams: true } as RTCConfiguration }
+        : {};
+
       // 2. Create send transport
       const sendTransport = device.createSendTransport({
         id: data.sendTransport.id,
         iceParameters: data.sendTransport.iceParameters as IceParameters,
         iceCandidates: data.sendTransport.iceCandidates as IceCandidate[],
         dtlsParameters: data.sendTransport.dtlsParameters as DtlsParameters,
+        ...secureExtras,
       });
 
       sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -1030,6 +1152,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         iceParameters: data.recvTransport.iceParameters as IceParameters,
         iceCandidates: data.recvTransport.iceCandidates as IceCandidate[],
         dtlsParameters: data.recvTransport.dtlsParameters as DtlsParameters,
+        ...secureExtras,
       });
 
       recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -1085,6 +1208,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
               }
               set({ screenStream: null, isScreenSharing: false, screenSharingUserId: null });
               get().cleanupSFU();
+              // Secure voice: a transport restart is a SESSION restart — the
+              // full join path re-begins with a fresh key + epoch (IV-reuse
+              // firewall). Plaintext channels keep the light re-emit.
+              if (activeSecureVoiceSession(currentChannelId)) {
+                void get().joinChannel(currentChannelId, currentServerId ?? undefined);
+                return;
+              }
               const s = getSocket();
               if (s) {
                 const { selfMute: m, selfDeaf: d } = get();
@@ -1124,6 +1254,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       if (audioTrack && device.canProduce('audio')) {
         const voiceQuality = useSettingsStore.getState().voiceQuality;
         const maxBitrate = VOICE_QUALITY_BITRATE[voiceQuality];
+        // Secure voice: install the encrypt transform on the RTCRtpSender the
+        // moment it exists (before negotiation). If the attach fails, NOTHING
+        // may be produced — fail the whole join closed (spec §21).
+        const secureSession = activeSecureVoiceSession(get().activeChannelId);
+        let attachError: unknown = null;
+        let attachInvoked = false;
         const producer = await sendTransport.produce({
           track: audioTrack,
           codecOptions: {
@@ -1134,7 +1270,25 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
           },
           encodings: [{ maxBitrate }],
           appData: { type: 'audio' },
+          ...(secureSession && {
+            onRtpSender: (rtpSender: RTCRtpSender) => {
+              attachInvoked = true;
+              try {
+                secureSession.attachSender(rtpSender);
+              } catch (err) {
+                attachError = err;
+              }
+            },
+          }),
         });
+
+        if (secureSession && (attachError !== null || !attachInvoked)) {
+          console.error('[SecureVoice] Encrypt transform attach failed — leaving voice:', attachError ?? 'onRtpSender never fired');
+          producer.close();
+          toast.error(i18n.t('secureVoice.sessionFailed'));
+          get().leaveChannel();
+          return;
+        }
 
         const newProducers = new Map(get().msProducers);
         newProducers.set(producer.id, producer);
@@ -1157,13 +1311,43 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const { msRecvTransport, selfDeaf, activeChannelId } = get();
     if (!msRecvTransport || !activeChannelId) return;
 
+    // Secure voice is audio-only (spec §21) and every consumer MUST decrypt
+    // through the frame worker — a consumer without the transform would play
+    // ciphertext as audio. Defense in depth on top of the server rejection.
+    const secureSession = activeSecureVoiceSession(activeChannelId);
+    if (secureSession) {
+      const claimedType = (data.appData?.type as string) ?? 'audio';
+      if (data.kind !== 'audio' || claimedType !== 'audio') {
+        console.warn('[SecureVoice] Refusing non-audio consumer in a secure channel:', claimedType);
+        return;
+      }
+    }
+
     try {
+      let attachError: unknown = null;
+      let attachInvoked = false;
       const consumer = await msRecvTransport.consume({
         id: data.id,
         producerId: data.producerId,
         kind: data.kind,
         rtpParameters: data.rtpParameters as RtpParameters,
+        ...(secureSession && {
+          onRtpReceiver: (rtpReceiver: RTCRtpReceiver) => {
+            attachInvoked = true;
+            try {
+              secureSession.attachReceiver(rtpReceiver, data.producerUserId);
+            } catch (err) {
+              attachError = err;
+            }
+          },
+        }),
       });
+
+      if (secureSession && (attachError !== null || !attachInvoked)) {
+        console.error('[SecureVoice] Decrypt transform attach failed — dropping consumer:', attachError ?? 'onRtpReceiver never fired');
+        consumer.close();
+        return;
+      }
 
       // Route by the server-derived appData.type, NOT by kind: screen audio
       // arrives as kind 'audio' — treating it as mic audio would clobber the
@@ -1331,6 +1515,17 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       return { channelUsers: newMap, ...serverFix, ...screenFix };
     });
     // No peer creation needed — SFU handles media routing via consumers
+
+    // Secure voice: the initial replay lists the occupants present at OUR
+    // join — vet each and seal our CURRENT key (no ratchet; spec §21).
+    if (activeSecureVoiceSession(channelId)) {
+      const selfId = get().localUserId;
+      void import('../services/e2e/secureVoiceKeys').then((m) => {
+        for (const u of users) {
+          if (u.id !== selfId) m.onParticipantJoined(channelId, u, { initialReplay: true });
+        }
+      }).catch((err) => console.error('[SecureVoice] Initial participant keying failed:', err));
+    }
   },
 
   addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => {
@@ -1350,6 +1545,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       return { channelUsers: newMap, ...serverFix };
     });
     // No peer creation needed — SFU creates consumers server-side
+
+    // Secure voice: a genuine ARRIVAL ratchets our key forward so the joiner
+    // never decrypts past audio (spec §21). Self echo is skipped.
+    if (user.id !== get().localUserId && activeSecureVoiceSession(channelId)) {
+      void import('../services/e2e/secureVoiceKeys')
+        .then((m) => m.onParticipantJoined(channelId, user, { initialReplay: false }))
+        .catch((err) => console.error('[SecureVoice] Arrival keying failed:', err));
+    }
   },
 
   removeUserFromChannel: (channelId: string, userId: string) => {
@@ -1370,6 +1573,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         : {};
       return { channelUsers: newMap, ...screenFix };
     });
+
+    // Secure voice: a departure means a FRESH key for everyone remaining —
+    // the leaver must not decrypt future audio (spec §21).
+    if (userId !== get().localUserId && activeSecureVoiceSession(channelId)) {
+      void import('../services/e2e/secureVoiceKeys')
+        .then((m) => m.onParticipantLeft(channelId, userId))
+        .catch((err) => console.error('[SecureVoice] Departure rotation failed:', err));
+    }
   },
 
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => {
@@ -2430,8 +2641,15 @@ onSocketReconnect(async () => {
 
   if (activeChannelId) {
     debugLog('[Voice SFU] Socket reconnected — re-joining voice channel', activeChannelId);
-    // Re-emit voice:join — server will send voice:transport_created to re-establish SFU
-    socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+    if (secureVoiceChannelId === activeChannelId) {
+      // Secure voice: a socket reconnect is a SESSION restart — the full join
+      // re-begins with a fresh key + epoch (IV-reuse firewall, spec §21)
+      const serverId = useVoiceStore.getState().activeVoiceServerId;
+      void useVoiceStore.getState().joinChannel(activeChannelId, serverId ?? undefined);
+    } else {
+      // Re-emit voice:join — server will send voice:transport_created to re-establish SFU
+      socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+    }
   } else if (dmCallConversationId) {
     debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
     // deviceId must survive the rebind or the peer loses its sealing target

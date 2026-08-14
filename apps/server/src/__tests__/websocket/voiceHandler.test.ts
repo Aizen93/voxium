@@ -183,7 +183,7 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
-import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath } from '../../websocket/voiceHandler';
+import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath, getVoiceDiagnostics, cleanupChannelVoice, evictUserFromChannelVoice } from '../../websocket/voiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -209,12 +209,17 @@ function createMockSocket(userId = 'user-1', socketId = 'socket-1') {
 
 function createMockIO() {
   const emitFn = vi.fn();
+  const socketsJoinFn = vi.fn();
+  const socketsLeaveFn = vi.fn();
   return {
     to: vi.fn().mockReturnValue({ emit: emitFn }),
+    in: vi.fn().mockReturnValue({ socketsJoin: socketsJoinFn, socketsLeave: socketsLeaveFn }),
     sockets: {
       sockets: new Map(),
     },
     _emit: emitFn,
+    _socketsJoin: socketsJoinFn,
+    _socketsLeave: socketsLeaveFn,
   };
 }
 
@@ -687,7 +692,7 @@ describe('voiceHandler — clearVoiceState (boot cleanup, multi-node aware)', ()
 });
 
 describe('voiceHandler — handler registration', () => {
-  it('registers all 17 expected event handlers', () => {
+  it('registers all 19 expected event handlers', () => {
     const { socket, handlers } = createMockSocket();
     const io = createMockIO();
     handleVoiceEvents(io as any, socket as any);
@@ -707,13 +712,15 @@ describe('voiceHandler — handler registration', () => {
       'voice:server_deafen',
       'voice:force_move',
       'voice:signal',
+      'voice:e2e:key',
+      'voice:e2e:key_request',
       'voice:screen_share:start',
       'voice:screen_share:stop',
       'disconnecting',
     ];
 
-    expect(expectedEvents.length).toBe(17);
-    expect(handlers.size).toBe(17);
+    expect(expectedEvents.length).toBe(19);
+    expect(handlers.size).toBe(19);
 
     for (const event of expectedEvents) {
       expect(handlers.has(event)).toBe(true);
@@ -1728,5 +1735,216 @@ describe('voiceHandler — worker death eviction (MED-7)', () => {
     io._emit.mockClear();
     handleWorkerDeath(io as any, ['ch-med7-b']);
     expect(io._emit).not.toHaveBeenCalledWith('voice:user_left', expect.anything());
+  });
+});
+
+// ─── Secure voice channels (spec §21) ───────────────────────────────────────
+
+function mockJoinableSecurePrisma(serverId = 'ssec') {
+  vi.mocked(prisma.channel.findUnique).mockResolvedValue({ serverId, type: 'voice', secure: true } as any);
+  vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({ userId: 'x', serverId } as any);
+  vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'x', username: 'u', displayName: 'U', avatarUrl: null } as any);
+  vi.mocked(prisma.user.findMany).mockResolvedValue([] as any);
+}
+
+const DEVICE = 'device-aaaa1111';
+
+describe('voiceHandler — secure voice channels (spec §21)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinableSecurePrisma();
+  });
+
+  it('join stores a valid deviceId and broadcasts it on voice:user_joined', async () => {
+    const { socket, handlers } = createMockSocket('sv-1', 'sock-sv-1');
+    const io = createMockIO();
+    handleVoiceEvents(io as any, socket as any);
+
+    await handlers.get('voice:join')!('sec-a', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+
+    expect(io._emit).toHaveBeenCalledWith('voice:user_joined', expect.objectContaining({
+      channelId: 'sec-a',
+      user: expect.objectContaining({ deviceId: DEVICE }),
+    }));
+    // Mirrored to Redis so cross-node replays carry the routing hint too
+    expect(mockVoiceRedis.multi().hSet).toHaveBeenCalledWith(
+      'voice:channel:users:sec-a', 'sv-1', expect.stringContaining('"e2eDeviceId":"' + DEVICE + '"'),
+    );
+  });
+
+  it('STRIPS a malformed deviceId, and ignores deviceId entirely on plaintext channels', async () => {
+    const { socket, handlers } = createMockSocket('sv-2', 'sock-sv-2');
+    const io = createMockIO();
+    handleVoiceEvents(io as any, socket as any);
+
+    await handlers.get('voice:join')!('sec-b', { selfMute: false, selfDeaf: false, deviceId: 'bad device!!' });
+    const joined = io._emit.mock.calls.find((c: unknown[]) => c[0] === 'voice:user_joined');
+    expect((joined![1] as { user: Record<string, unknown> }).user.deviceId).toBeUndefined();
+
+    // Plaintext channel: a well-formed deviceId is still not honored
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    const { socket: s2, handlers: h2 } = createMockSocket('sv-3', 'sock-sv-3');
+    const io2 = createMockIO();
+    handleVoiceEvents(io2 as any, s2 as any);
+    await h2.get('voice:join')!('plain-b', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    const joined2 = io2._emit.mock.calls.find((c: unknown[]) => c[0] === 'voice:user_joined');
+    expect((joined2![1] as { user: Record<string, unknown> }).user.deviceId).toBeUndefined();
+  });
+
+  it('rejects video AND claimed screen-audio producers (audio-only v1)', async () => {
+    const { socket, handlers } = createMockSocket('sv-4', 'sock-sv-4');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('sec-c', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+
+    const ack1 = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'video', rtpParameters: {} }, ack1);
+    expect(ack1).toHaveBeenCalledWith({ error: 'Screen sharing is not available in secure voice channels' });
+
+    const ack2 = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } }, ack2);
+    expect(ack2).toHaveBeenCalledWith({ error: 'Screen sharing is not available in secure voice channels' });
+
+    // Plain mic audio still works
+    const ack3 = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, ack3);
+    expect(ack3).toHaveBeenCalledWith({ producerId: expect.any(String) });
+  });
+
+  it('rejects the screen-share slot claim', async () => {
+    const { socket, handlers } = createMockSocket('sv-5', 'sock-sv-5');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('sec-d', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+
+    const cb = vi.fn();
+    handlers.get('voice:screen_share:start')!(cb);
+    expect(cb).toHaveBeenCalledWith({ ok: false, error: 'Screen sharing is not available in secure voice channels' });
+  });
+
+  it('force_move out of a secure channel is refused with the opacity-preserving error', async () => {
+    const { socket, handlers } = createMockSocket('sv-6', 'sock-sv-6');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('sec-e', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+
+    const { socket: actor, handlers: actorHandlers } = createMockSocket('sv-mod', 'sock-sv-mod');
+    handleVoiceEvents(createMockIO() as any, actor as any);
+    await actorHandlers.get('voice:force_move')!({ userId: 'sv-6', targetChannelId: 'anywhere' });
+
+    // Same message a moderator gets for a user in NO channel — no oracle
+    expect(actor.emit).toHaveBeenCalledWith('voice:error', { message: 'User is not in a voice channel.' });
+  });
+
+  it('force_move INTO a secure channel is refused like a nonexistent target', async () => {
+    // Target user sits in a PLAINTEXT channel
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    const { socket, handlers } = createMockSocket('sv-7', 'sock-sv-7');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('plain-e');
+
+    // The move target resolves to a SECURE voice channel
+    vi.mocked(prisma.channel.findUnique).mockResolvedValue({ serverId: 's1', type: 'voice', secure: true } as any);
+    const { socket: actor, handlers: actorHandlers } = createMockSocket('sv-mod2', 'sock-sv-mod2');
+    handleVoiceEvents(createMockIO() as any, actor as any);
+    await actorHandlers.get('voice:force_move')!({ userId: 'sv-7', targetChannelId: 'sec-target' });
+
+    expect(actor.emit).toHaveBeenCalledWith('voice:error', { message: 'Invalid target voice channel.' });
+  });
+
+  it('voice:e2e:key relays opaque envelopes between co-participants only', async () => {
+    const io = createMockIO();
+    const { socket: a, handlers: ha } = createMockSocket('sv-ka', 'sock-sv-ka');
+    handleVoiceEvents(io as any, a as any);
+    await ha.get('voice:join')!('sec-k', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+
+    mockJoinableSecurePrisma();
+    const { socket: b, handlers: hb } = createMockSocket('sv-kb', 'sock-sv-kb');
+    handleVoiceEvents(io as any, b as any);
+    await hb.get('voice:join')!('sec-k', { selfMute: false, selfDeaf: false, deviceId: 'device-bbbb2222' });
+
+    io.to.mockClear();
+    io._emit.mockClear();
+
+    const envelope = '{"v":1,"e":"olm1","t":0,"b":"Zg"}';
+    ha.get('voice:e2e:key')!({ to: 'sv-kb', envelope });
+
+    expect(io.to).toHaveBeenCalledWith('sock-sv-kb');
+    expect(io._emit).toHaveBeenCalledWith('voice:e2e:key', {
+      channelId: 'sec-k',
+      from: 'sv-ka',
+      fromDeviceId: DEVICE,
+      envelope,
+    });
+
+    // Gating: non-participant target, self-target, non-envelope shape,
+    // oversized payload — all dropped without relay
+    io._emit.mockClear();
+    ha.get('voice:e2e:key')!({ to: 'stranger', envelope });
+    ha.get('voice:e2e:key')!({ to: 'sv-ka', envelope });
+    ha.get('voice:e2e:key')!({ to: 'sv-kb', envelope: '{"type":"plaintext"}' });
+    ha.get('voice:e2e:key')!({ to: 'sv-kb', envelope: '{"v":1,"e":"olm1"' + 'x'.repeat(20000) });
+    ha.get('voice:e2e:key')!({ to: 'sv-kb', envelope: 42 });
+    expect(io._emit).not.toHaveBeenCalled();
+
+    // key_request relays with the same co-presence gate
+    hb.get('voice:e2e:key_request')!({ to: 'sv-ka' });
+    expect(io._emit).toHaveBeenCalledWith('voice:e2e:key_request', { channelId: 'sec-k', from: 'sv-kb' });
+    io._emit.mockClear();
+    hb.get('voice:e2e:key_request')!({ to: 'nobody' });
+    expect(io._emit).not.toHaveBeenCalled();
+  });
+
+  it('voice:e2e:key never relays from a PLAINTEXT channel', async () => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('sv-kp', 'sock-sv-kp');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('plain-k');
+
+    io._emit.mockClear();
+    handlers.get('voice:e2e:key')!({ to: 'anyone', envelope: '{"v":1,"e":"olm1","t":0,"b":"Zg"}' });
+    expect(io._emit).not.toHaveBeenCalled();
+  });
+
+  it('getVoiceDiagnostics is BLIND to secure channels (admin opacity)', async () => {
+    const { socket, handlers } = createMockSocket('sv-8', 'sock-sv-8');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('sec-diag', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+
+    mockJoinablePrisma();
+    const { socket: s2, handlers: h2 } = createMockSocket('sv-9', 'sock-sv-9');
+    handleVoiceEvents(createMockIO() as any, s2 as any);
+    await h2.get('voice:join')!('plain-diag');
+
+    const diag = getVoiceDiagnostics();
+    const ids = diag.map((d) => d.channelId);
+    expect(ids).toContain('plain-diag');
+    expect(ids).not.toContain('sec-diag');
+  });
+
+  it('evictUserFromChannelVoice tears down one member; cleanupChannelVoice empties the channel', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('sv-ev', 'sock-sv-ev');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('sec-ev', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+
+    evictUserFromChannelVoice(io as any, 'sec-ev', 'sv-ev');
+    expect(io.to).toHaveBeenCalledWith('sock-sv-ev');
+    expect(io._emit).toHaveBeenCalledWith('voice:error', { message: 'You have been disconnected from this voice channel.' });
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'sec-ev', userId: 'sv-ev' });
+
+    // Rejoin, then delete the whole channel
+    mockJoinableSecurePrisma();
+    const { socket: s2, handlers: h2 } = createMockSocket('sv-ev2', 'sock-sv-ev2');
+    handleVoiceEvents(io as any, s2 as any);
+    await h2.get('voice:join')!('sec-ev2', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+
+    io._emit.mockClear();
+    cleanupChannelVoice(io as any, 'sec-ev2');
+    expect(io._emit).toHaveBeenCalledWith('voice:error', { message: 'This voice channel no longer exists.' });
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'sec-ev2', userId: 'sv-ev2' });
+    // Idempotent on an already-empty channel
+    cleanupChannelVoice(io as any, 'sec-ev2');
   });
 });

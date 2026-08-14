@@ -227,6 +227,30 @@ describe('Secure Channel Routes', () => {
       expect(res.status).toBe(400);
     });
 
+    it('creates a secure VOICE channel — type persisted, NO ChannelRead seeding (spec §21)', async () => {
+      prismaMock.channel.create.mockResolvedValue({ ...CH, type: 'voice', position: 3 });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'war-room', type: 'voice', memberIds: ['user-2', 'user-3'] });
+
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ type: 'voice', secure: true }) }),
+      );
+      // Voice channels carry no messages — no unread tracking rows
+      expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
+    });
+
+    it('400 on an invalid channel type', async () => {
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'war-room', type: 'video' });
+
+      expect(res.status).toBe(400);
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+    });
+
     it('400 when invitees exceed the member cap', async () => {
       const tooMany = Array.from(
         { length: E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP },

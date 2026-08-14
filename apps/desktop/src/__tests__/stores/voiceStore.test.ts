@@ -63,6 +63,19 @@ vi.mock('../../stores/dmStore', () => ({
   useDMStore: { getState: () => ({ conversations: [] }) },
 }));
 
+// joinChannel resolves the channel record (the `secure` flag decides the join
+// shape and an unresolvable channel fails closed) — give it the test channels.
+vi.mock('../../stores/serverStore', () => ({
+  useServerStore: {
+    getState: () => ({
+      channels: [
+        { id: 'ch-race', type: 'voice', secure: false },
+        { id: 'ch-ok', type: 'voice', secure: false },
+      ],
+    }),
+  },
+}));
+
 // The E2E environment joinDMCall consults for our own call device (all
 // reached via dynamic imports). Mutable so tests can simulate init-in-flight
 // and unavailable-device states.
