@@ -47,6 +47,8 @@ describe('index.html SEO contract', () => {
     expect(html).toContain('<h1>Voxium — Privacy-First Real-Time Communication Platform</h1>');
     // Crawlers must find real substance and the important links without JS.
     expect(html).toContain('Why communities choose Voxium');
+    // The E2E story is the differentiator — it must stay in the crawlable copy
+    expect(html).toContain('End-to-end encrypted DMs, invite-only encrypted channels');
     for (const href of ['/register', '/login', '/privacy', '/terms']) {
       expect(html, href).toContain(`href="${href}"`);
     }

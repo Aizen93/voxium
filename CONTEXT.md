@@ -2,7 +2,7 @@
 
 ## Overview
 
-**Voxium** is a modern, open-source voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
+**Voxium** is a modern, source-available voice and text communication platform — a Discord alternative. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
 
 **Version:** 1.7.3
 **Date:** 2026-04-10

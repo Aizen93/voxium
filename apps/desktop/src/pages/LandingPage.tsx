@@ -426,7 +426,7 @@ function Hero() {
         <div className="max-w-xl">
           <div className="inline-flex items-center gap-2 rounded-full border border-[#8d8df2]/25 bg-[#5b5bf7]/10 px-3.5 py-1.5 text-[13px] font-medium text-[#b9b8f5] animate-fade-in">
             <Code2 className="h-3.5 w-3.5" />
-            {t('landing.highlights.openSource')}
+            {t('landing.highlights.sourceAvailable')}
           </div>
           <h1 className="mt-6 text-4xl sm:text-5xl xl:text-[62px] font-bold tracking-tight text-vox-text-primary leading-[1.06] animate-fade-in">
             {t('landing.hero.headlinePart1')}{' '}
@@ -1269,7 +1269,7 @@ function ComparisonTable() {
   const { t } = useTranslation();
 
   const comparisonData: { feature: string; voxium: CellValue; discord: CellValue; teamspeak: CellValue; matrix: CellValue }[] = [
-    { feature: t('landing.comparison.openSource'),        voxium: true,                discord: false,          teamspeak: false,          matrix: true },
+    { feature: t('landing.comparison.sourceAvailable'),   voxium: true,                discord: false,          teamspeak: false,          matrix: true },
     { feature: t('landing.comparison.selfHostable'),      voxium: true,                discord: false,          teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.freeVoiceChat'),     voxium: true,                discord: true,           teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.sfuVoice'),          voxium: true,                discord: true,           teamspeak: true,           matrix: t('landing.comparison.viaJitsi') },
@@ -1283,7 +1283,8 @@ function ComparisonTable() {
     { feature: t('landing.comparison.noAdsTracking'),     voxium: true,                discord: false,          teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.desktopApp'),        voxium: true,                discord: true,           teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.lightweightClient'), voxium: 'Tauri (~10MB)',      discord: 'Electron',     teamspeak: 'Native',       matrix: 'Electron' },
-    { feature: t('landing.comparison.encryption'),        voxium: 'TLS + Planned E2E', discord: 'TLS',          teamspeak: 'AES',          matrix: 'E2E (Olm)' },
+    { feature: t('landing.comparison.encryption'),        voxium: 'E2E (Olm/Megolm)',  discord: 'TLS',          teamspeak: 'AES',          matrix: 'E2E (Olm)' },
+    { feature: t('landing.comparison.encryptedChannels'), voxium: true,                discord: false,          teamspeak: false,          matrix: true },
     { feature: t('landing.comparison.customBots'),        voxium: t('landing.comparison.planned'), discord: true, teamspeak: 'Plugins + SDK', matrix: true },
     { feature: t('landing.comparison.mobileApp'),         voxium: t('landing.comparison.planned'), discord: true, teamspeak: true,           matrix: true },
   ];
@@ -1342,7 +1343,8 @@ function WhyVoxium() {
 
   const highlights = [
     t('landing.highlights.noAds'),
-    t('landing.highlights.openSource'),
+    t('landing.highlights.sourceAvailable'),
+    t('landing.highlights.e2eEncrypted'),
     t('landing.highlights.freeForIndividuals'),
     t('landing.highlights.noiseSuppression'),
     t('landing.highlights.selfHostable'),
@@ -1371,8 +1373,8 @@ function WhyVoxium() {
             },
             {
               icon: Code2,
-              title: t('landing.why.openSource'),
-              description: t('landing.why.openSourceDesc'),
+              title: t('landing.why.sourceAvailable'),
+              description: t('landing.why.sourceAvailableDesc'),
             },
             {
               icon: HeartHandshake,
@@ -1484,7 +1486,7 @@ function CommunityFunding() {
   }, []);
 
   const cards = [
-    { icon: Code2, value: '100%', label: t('landing.funding.openSource'), color: 'from-pink-500/20 to-purple-500/20' },
+    { icon: Code2, value: '100%', label: t('landing.funding.sourceAvailable'), color: 'from-pink-500/20 to-purple-500/20' },
     { icon: Users, value: 'You', label: t('landing.funding.youDecide'), color: 'from-purple-500/20 to-blue-500/20' },
     { icon: Shield, value: 'Zero', label: t('landing.funding.zeroAds'), color: 'from-blue-500/20 to-pink-500/20' },
   ];

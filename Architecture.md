@@ -10,10 +10,11 @@
 6. [Database Design](#database-design)
 7. [Real-Time Communication](#real-time-communication)
 8. [Voice Architecture](#voice-architecture)
-9. [Authentication & Security](#authentication--security)
-10. [Scalability Strategy](#scalability-strategy)
-11. [Deployment Architecture](#deployment-architecture)
-12. [Future Architecture](#future-architecture)
+9. [End-to-End Encryption](#end-to-end-encryption)
+10. [Authentication & Security](#authentication--security)
+11. [Scalability Strategy](#scalability-strategy)
+12. [Deployment Architecture](#deployment-architecture)
+13. [Future Architecture](#future-architecture)
 
 ---
 
@@ -25,9 +26,10 @@ Voxium is a real-time communication platform enabling users to create communitie
 
 - **Real-time first:** All interactions are immediately reflected across connected clients
 - **Low latency:** Voice and messaging prioritize sub-100ms delivery
-- **Horizontal scalability:** Stateless services behind load balancers
+- **Horizontal scalability:** Multi-node in production — Socket.IO Redis adapter, Redis-backed shared state, channel-affinity voice relay with crash takeover
 - **Cross-platform:** Single codebase serves Windows, macOS, Linux, and web browsers (future: mobile)
 - **Privacy-first:** No third-party services — all traffic stays on user's own infrastructure
+- **End-to-end encrypted where it matters:** DMs (always on), invite-only secure channels, and DM call signaling use Olm/Megolm; the server stores ciphertext it cannot read
 - **Security:** JWT auth, input validation, rate limiting, CORS protection
 
 ---
@@ -764,11 +766,12 @@ graph TD
     UserB -->|"signaling"| Srv
 ```
 
-- WebRTC P2P (1-on-1 only) with self-hosted STUN for NAT traversal
+- WebRTC P2P (1-on-1 only) with self-hosted STUN for NAT traversal — media is end-to-end encrypted by DTLS-SRTP between the two peers
+- **E2E-authenticated signaling** — every SDP offer/answer and ICE candidate travels as a pairwise-Olm envelope sealed to the peer's pinned E2E device (`docs/e2e-dm-spec.md` §20). The server relays signals opaquely and cannot substitute DTLS fingerprints; a plaintext signal aborts the call rather than downgrading. The call panel shows a lock once the peer device is pinned.
 - **Self-hosted STUN server** — coturn in STUN-only mode (`--stun-only --no-auth`) runs alongside the Voxium backend via docker-compose. STUN is stateless UDP (~100 bytes each way) that tells each peer its public IP:port — no media flows through it. Privacy-first: no third-party STUN/TURN servers. Frontend derives STUN URL from `VITE_WS_URL` hostname + port 3478.
 - **Perfect Negotiation pattern** — resolves offer glare (both peers sending offers simultaneously) via polite/impolite roles based on userId comparison
 - **Mutually exclusive** with server voice — joining one leaves the other (cross-cleanup on both server and client)
-- In-memory state: `dmVoiceUsers` Map (conversationId → Map of userId → socketId) + `userDMCall` reverse lookup
+- Redis-backed call state (`dm:voice:users:{convId}` hashes, `dm:voice:call:{userId}` reverse lookup, `dm:voice:active` set) — DM calls work across cluster nodes
 - System messages ("Voice call started" / "Voice call ended") persisted to DB as `type: 'system'`
 - Call offer broadcasts to `dm:{conversationId}` room; incoming call shown via `IncomingCallModal` with looping ringtone (stops on accept/decline/cancel)
 - DM call UI has two layers: `DMCallPanel` renders inline in `DMChatArea` (full avatars + controls when viewing the conversation), and `DMVoicePanel` is a compact global panel rendered in both `ChannelSidebar` (after `VoicePanel`) and `DMList` so the user always sees their DM call status from any view
@@ -797,6 +800,42 @@ graph LR
 - **Live toggle:** Noise suppression can be enabled/disabled mid-call. A generation counter prevents race conditions on rapid toggles.
 - **Push-to-talk:** Works in both server voice and DM calls. PTT overrides mute — pressing the key temporarily enables the mic regardless of mute state. `pttActive` store state drives the speaking indicator so the green ring shows during PTT even when muted.
 - **Browser noiseSuppression inversion:** When RNNoise is enabled, the browser's built-in `noiseSuppression` getUserMedia constraint is disabled to avoid double-processing.
+
+---
+
+## End-to-End Encryption
+
+Authoritative spec: `docs/e2e-dm-spec.md`. Summary of what ships and how it fits the architecture:
+
+### Engine
+
+- **vodozemac WASM** (the audited Rust implementation of the Olm/Megolm double-ratchet protocols used by Matrix), wrapped in `packages/crypto-engine`. Hard rule: **no cryptography implemented in JavaScript** — the JS layer only orchestrates engine calls.
+- Key material lives in an IndexedDB vault, pickled under a key held in the OS keychain via Tauri (localStorage fallback for browser dev). The server only ever stores ciphertext, public keys, and sealed key shares.
+
+### Encrypted DMs (always on)
+
+- Every DM is end-to-end encrypted — there is no opt-in and no plaintext fallback; clients refuse plaintext user messages outright.
+- **Megolm group sessions** encrypt the message stream; session keys are delivered per recipient device over **pairwise Olm sessions**. Attachments are encrypted client-side and stored as opaque blobs with server-forced generic names.
+- **Multi-device:** up to 5 devices per account. New devices link via a short displayed code; revoking a device re-keys every conversation away from it immediately.
+- **Cross-signing:** one account master key signs devices, giving one safety number per account (verified out-of-band). Identity changes surface blocking warnings that must be explicitly accepted.
+- **Backups:** encrypted account-key backup unlockable with a recovery key, plus message-key backup so history follows the account onto new devices.
+- **Search** over encrypted conversations runs client-side against this device's decrypted history — the server cannot index what it cannot read.
+
+### Secure Channels (invite-only E2E server channels)
+
+- A `secure: true` channel grants access **only** via explicit channel membership — the permission calculator checks membership *before* the owner/ADMINISTRATOR fast paths, so even the server owner sees nothing without an invite.
+- Opacity as a design rule: every non-member probe answers exactly like a nonexistent channel. Moderation is deliberately blind — admins get a count endpoint and delete-by-id, never contents.
+- Same Megolm machinery as DMs via scope strings (`ch:{channelId}`); membership changes rotate the group session, and new members receive no history by design.
+
+### E2E-Authenticated DM Call Signaling
+
+- DM call media was always P2P DTLS-SRTP; the signaling relay was the MITM surface. Every `dm:voice:signal` payload is now a pairwise-Olm envelope pinned to the peer's call device, with epoch/sequence ordering, replay defense, and a hard cutover: non-envelope signals abort the call.
+
+### What stays plaintext (by design)
+
+- Server text channels (except secure channels) — moderation-friendly community spaces.
+- Server voice (SFU) media terminates at mediasoup; true SFU E2E (SFrame-class) is future work.
+- Metadata: participants, timing, sizes — the same envelope visibility as Signal-style designs generally.
 
 ---
 
@@ -1201,13 +1240,12 @@ User-created themes with a marketplace for sharing. Themes customize all `--vox-
 
 ## Scalability Strategy
 
-### Phase 1: Single Node (1K users)
+### Phase 1: Single Node (1K users) — superseded
 - Single Node.js process
 - PostgreSQL + Redis on same machine or nearby
-- In-memory voice state
-- Simple deployment
+- Simple deployment (still works: a lone node detects it is the sole node and runs full-cleanup boot paths)
 
-### Phase 2: Multi-Node (10K users)
+### Phase 2: Multi-Node (10K users) — IMPLEMENTED, running in production
 
 ```mermaid
 graph TD
@@ -1220,11 +1258,13 @@ graph TD
     N1 & N2 & N3 --> PG[("PostgreSQL<br/>Primary + Replica")]
 ```
 
-Key changes:
-- Socket.IO with Redis adapter for cross-node event distribution
-- Voice state in Redis
-- Sticky sessions for WebSocket connections (IP hash or cookie)
-- Connection pooling for PostgreSQL
+Implemented (validated live: 35/35 cross-node scenarios in `scripts/test-multi-node.ts`, including real RTP and hard owner-crash takeover):
+- Socket.IO Redis adapter for cross-node event distribution (4 Redis clients: data, pub, sub, configSub)
+- Presence, DM-call, and voice-channel metadata fully in Redis; mediasoup objects stay node-local
+- **Channel-affinity voice relay:** each voice channel's mediasoup Router lives on exactly ONE node (claimed atomically via `SET NX`); participants whose sockets live on other nodes are relayed over Redis pub/sub and represented on the owner node by shims. Clients send RTP straight to the owning node's announced IP — media bypasses nginx
+- **Node heartbeats + takeover:** `node:alive:{id}` keys (30s TTL) gate boot cleanups; a 60s reaper takes over channels owned by crashed peers
+- Sticky sessions for WebSocket connections (nginx `ip_hash`); feature flags and rate-limit overrides propagate to every node over Redis pub/sub
+- Cross-cluster room operations only (`socketsJoin`/`socketsLeave`/`io.in(room)`) — `fetchSockets()` is banned in hot paths (it waits on every node and throws when a peer is dead)
 
 ### Phase 3: Microservices (100K+ users)
 

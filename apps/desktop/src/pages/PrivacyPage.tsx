@@ -102,8 +102,8 @@ export function PrivacyPage() {
               <li>Export your data</li>
             </ul>
             <p className="mt-3">
-              Since Voxium is open source, you can also audit exactly how your data is handled by reviewing
-              the source code.
+              Since Voxium is source-available, you can also audit exactly how your data is handled by
+              reviewing the source code.
             </p>
           </section>
 

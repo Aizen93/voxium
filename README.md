@@ -13,8 +13,9 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 ## Why Voxium?
 
 - **Zero personal data required** — No phone number, no ID verification, no tracking
+- **End-to-end encrypted** — Always-on E2E DMs, invite-only encrypted channels, and E2E-authenticated calls (Signal-style Olm/Megolm via vodozemac); not even the server can read them
 - **Fully auditable, source-available** — Read every line, self-host on your own infrastructure
-- **Production-ready voice** — mediasoup SFU for servers, direct P2P for DM calls (private STUN), AI noise suppression (RNNoise ML)
+- **Production-ready voice** — mediasoup SFU for servers (multi-node with crash takeover), direct P2P for DM calls (private STUN), AI noise suppression (RNNoise ML)
 - **11 languages** — English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL)
 - **Theme engine** — 4 built-in themes, full custom theme editor with live preview, community marketplace
 - **Cross-platform** — Native desktop apps for Windows, macOS, and Linux via Tauri 2
@@ -67,6 +68,20 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 
 </td>
 </tr>
+<tr>
+<td width="50%">
+
+### End-to-End Encryption
+All DMs are end-to-end encrypted by default — Signal-style Olm/Megolm (vodozemac WASM), always on, with no plaintext fallback. Up to 5 devices per account with cross-signing, one safety number per account, device linking by short code, and instant revocation with re-keying. Invite-only **secure channels** bring E2E to servers: not even the server owner or admins can read them. Encrypted attachments, encrypted key backup with a recovery key, and DM call signaling sealed in Olm envelopes so not even the relay can tamper with a call.
+
+</td>
+<td width="50%">
+
+### Built for Multi-Node Scale
+Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-node events, Redis-backed presence and voice state, channel-affinity voice relay so each voice channel lives on exactly one mediasoup node with automatic takeover when a node crashes, cross-node DM calls, and heartbeat-gated cleanup. Validated live: 35/35 cross-node scenarios including real RTP and hard owner-crash takeover.
+
+</td>
+</tr>
 </table>
 
 ---
@@ -81,9 +96,16 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 | | Message Editing & Deletion | Edit inline, delete with confirmation; admins can delete any message |
 | | Reactions | Emoji reactions with grouped display and toggle support (channels and DMs) |
 | | Direct Messages | 1-on-1 text with real-time delivery, typing indicators, reactions, persistent unread tracking, conversation deletion |
-| | Message Search | Full-text search across server channels and DM conversations with jump-to-message navigation |
+| | Message Search | Full-text search across server channels and DM conversations with jump-to-message navigation; encrypted conversations search this device's decrypted history locally |
+| **Encryption** | E2E Direct Messages | Always-on end-to-end encryption for every DM (Olm/Megolm via vodozemac WASM) — no opt-in, no plaintext fallback; the server stores only ciphertext |
+| | Multi-Device | Up to 5 devices per account with per-device key shares; link a new device with a short code; revoke any device and conversations re-key instantly |
+| | Cross-Signing & Safety Numbers | One safety number per account, verified out-of-band; key changes surface loud warnings that must be explicitly accepted |
+| | Secure Channels | Invite-only E2E-encrypted server channels — invisible and unreadable to non-members, including the server owner and admins; membership changes rotate keys, new members see no history |
+| | E2E-Authenticated Calls | DM calls are P2P DTLS-SRTP with signaling sealed in Olm envelopes pinned to the peer's device — a compromised relay cannot substitute or inject call setup; plaintext signals abort the call |
+| | Encrypted Attachments | DM and secure-channel attachments are encrypted client-side; the server stores opaque blobs with forced generic names |
+| | Key & History Backup | Encrypted account-key backup with a recovery key, plus message-key backup so history follows the account to new devices |
 | **Voice** | Server Voice (SFU) | mediasoup Selective Forwarding Unit for scalable voice (25+ users per channel), speaking indicators, latency display |
-| | DM Voice Calls | 1-on-1 WebRTC P2P audio with Perfect Negotiation, private STUN server (coturn), incoming call modal, ringtone, speaking indicators, call history as system messages |
+| | DM Voice Calls | 1-on-1 WebRTC P2P audio with Perfect Negotiation, E2E-authenticated signaling (Olm-enveloped, device-pinned), private STUN server (coturn), incoming call modal, ringtone, speaking indicators, call history as system messages |
 | | Screen Sharing | Share screen in voice channels with real-time video and system audio, inline/floating viewer modes |
 | | AI Noise Suppression | ML-powered RNNoise WASM filter removes keyboard, mouse, and background noise in real time via AudioWorklet |
 | | Opus Optimization | DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate |
@@ -117,6 +139,7 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 | **Platform** | File Uploads | S3-compatible storage for avatars, server icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
 | | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
 | | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with Discord-inspired dark UI |
+| | Multi-Node Clustering | Socket.IO Redis adapter, Redis-backed presence/voice state, channel-affinity voice relay with automatic crash takeover, cross-node DM calls — validated live across nodes |
 | | Self-Hosted STUN | Private coturn STUN server for P2P WebRTC — STUN URL derived from your server hostname, zero reliance on Google or third-party STUN/TURN services |
 | | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |
 
