@@ -94,6 +94,13 @@ test.describe('E2E-authenticated DM calls', () => {
 
     const { userB, pageB, contextB } = await setupCallPair('call', page, request, browser);
 
+    // Signal decryption failing is invisible to the UI assertions below (the
+    // panel is socket-driven) — so E2E signaling breakage must fail HERE.
+    // This is what caught the Olm session-establishment glare bug.
+    const macFailures: string[] = [];
+    pageB.on('console', (m) => { if (/invalid MAC|decrypt.*failed/i.test(m.text())) macFailures.push(m.text()); });
+    page.on('console', (m) => { if (/invalid MAC|decrypt.*failed/i.test(m.text())) macFailures.push(m.text()); });
+
     await openDMWith(page, userB.username);
     await connectCall(page, pageB);
 
@@ -121,6 +128,9 @@ test.describe('E2E-authenticated DM calls', () => {
     await page.locator(CALL_PANEL).locator('button[title="Disconnect"]').click();
     await expect(page.locator(CALL_PANEL)).toHaveCount(0, { timeout: 10_000 });
     await expect(pageB.locator(CALL_PANEL)).toHaveCount(0, { timeout: 15_000 });
+
+    // Signaling must have actually WORKED, not just looked connected
+    expect(macFailures, `E2E signal decryption failed:\n${macFailures.slice(0, 3).join('\n')}`).toEqual([]);
 
     await contextB.close();
   });

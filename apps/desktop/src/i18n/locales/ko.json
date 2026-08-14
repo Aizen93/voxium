@@ -1099,7 +1099,8 @@
     "callAbortIdentityChanged": "통화 종료: {{name}}님의 보안 키가 변경되었습니다. 다시 통화하기 전에 새 안전 번호를 확인하세요.",
     "callAbortPeerMustUpdate": "통화 종료: {{name}}님의 앱이 보안 통화를 지원하지 않습니다. Voxium 업데이트를 요청하세요.",
     "callAbortPeerNotE2E": "통화 종료: {{name}}님이 아직 암호화를 설정하지 않아 보안 통화를 연결할 수 없습니다.",
-    "callAbortSignalingFailed": "통화 종료: 보안 통화 연결에 실패했습니다. 다시 시도하세요."
+    "callAbortSignalingFailed": "통화 종료: 보안 통화 연결에 실패했습니다. 다시 시도하세요.",
+    "callNotReady": "아직 보안 통화를 시작할 수 없습니다. 이 기기에서 암호화를 설정하는 중입니다. 잠시 후 다시 시도하세요."
   },
   "people": {
     "title": "사람",

@@ -364,15 +364,30 @@ export class E2EVault {
     return this.put(`master:${userId}`, pinned);
   }
 
-  // ── Pairwise Olm session pickles (one per REMOTE DEVICE) ──
+  // ── Pairwise Olm session pickles (one per REMOTE DEVICE, plus a fallback
+  //    slot for the session displaced by establishment glare — both sides of a
+  //    call create sessions simultaneously, and each keeps decrypting the
+  //    peer's chain through its fallback; see olmDecryptFromDevice) ──
   getSessionPickle(userId: string, deviceId: string): Promise<string | undefined> {
     return this.get(`session:${userId}:${deviceId}`);
   }
   putSessionPickle(userId: string, deviceId: string, pickle: string): Promise<void> {
     return this.put(`session:${userId}:${deviceId}`, pickle);
   }
-  deleteSession(userId: string, deviceId: string): Promise<void> {
-    return this.delete(`session:${userId}:${deviceId}`);
+  // Suffixed under the session: prefix so deleteSessionsForUser covers it
+  // (device ids cannot contain ':', so the keys never collide).
+  getFallbackSessionPickle(userId: string, deviceId: string): Promise<string | undefined> {
+    return this.get(`session:${userId}:${deviceId}:fb`);
+  }
+  putFallbackSessionPickle(userId: string, deviceId: string, pickle: string): Promise<void> {
+    return this.put(`session:${userId}:${deviceId}:fb`, pickle);
+  }
+  deleteFallbackSession(userId: string, deviceId: string): Promise<void> {
+    return this.delete(`session:${userId}:${deviceId}:fb`);
+  }
+  async deleteSession(userId: string, deviceId: string): Promise<void> {
+    await this.delete(`session:${userId}:${deviceId}`);
+    await this.delete(`session:${userId}:${deviceId}:fb`);
   }
   /** Drop every device session with one user (identity change / explicit reset). */
   deleteSessionsForUser(userId: string): Promise<void> {

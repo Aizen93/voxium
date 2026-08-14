@@ -134,14 +134,16 @@ function createMockSocket(userId = 'user-1', socketId = 'socket-1') {
 function createMockIO() {
   const emitFn = vi.fn();
   const fetchSocketsFn = vi.fn().mockResolvedValue([]);
+  const socketsLeaveFn = vi.fn();
   return {
     to: vi.fn().mockReturnValue({ emit: emitFn }),
-    in: vi.fn().mockReturnValue({ fetchSockets: fetchSocketsFn }),
+    in: vi.fn().mockReturnValue({ fetchSockets: fetchSocketsFn, socketsLeave: socketsLeaveFn }),
     sockets: {
       sockets: new Map(),
     },
     _emit: emitFn,
     _fetchSockets: fetchSocketsFn,
+    _socketsLeave: socketsLeaveFn,
   };
 }
 
@@ -1508,17 +1510,18 @@ describe('dmVoiceHandler — leaveCurrentDMVoiceChannel', () => {
       'user-2': JSON.stringify({ socketId: 'socket-2', selfMute: false, selfDeaf: false }),
     });
 
-    const mockRemoteSocket = { leave: vi.fn() };
     const { socket } = createMockSocket();
     const io = createMockIO();
-    // io.in('user:user-2').fetchSockets() returns the remote socket
-    io.in.mockReturnValue({ fetchSockets: vi.fn().mockResolvedValue([mockRemoteSocket]) });
 
     await leaveCurrentDMVoiceChannel(io as any, socket as any, 'user-1');
 
-    // Should clean up user-2 via fetchSockets
+    // user-2's sockets leave the voice room via socketsLeave — adapter-wide
+    // and fire-and-forget. NEVER fetchSockets here: it waits for every
+    // cluster node's reply, so one dead peer node made this throw and the
+    // left/ended emits below never reached the remaining participant.
     expect(io.in).toHaveBeenCalledWith('user:user-2');
-    expect(mockRemoteSocket.leave).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(io._socketsLeave).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(io._fetchSockets).not.toHaveBeenCalled();
 
     // Should remove user-2 from Redis (via the atomic Lua script)
     expect(mockRedis.eval).toHaveBeenCalledWith(

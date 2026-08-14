@@ -68,17 +68,49 @@ const ICE_SERVERS: RTCIceServer[] = [
 const ICE_RESTART_DELAY_MS = 3000;
 const MAX_TRANSPORT_REJOIN_ATTEMPTS = 3;
 
+/** Wait until the E2E store reports ready (or errored / timed out). */
+async function waitForE2EReady(timeoutMs: number): Promise<void> {
+  const { useE2EStore } = await import('./e2eStore');
+  if (useE2EStore.getState().ready) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      unsub();
+      resolve();
+    }, timeoutMs);
+    const unsub = useE2EStore.subscribe((s) => {
+      if (s.ready || s.error) {
+        clearTimeout(timer);
+        unsub();
+        resolve();
+      }
+    });
+  });
+}
+
 /**
  * The E2E device id this client would call from — announced on dm:voice:join
  * so the peer seals call signals to exactly this device (spec §20). Dynamic
  * imports per the resetStores eval-cycle rule.
+ *
+ * A call started right after app launch can race E2E initialization (WASM +
+ * vault open + first-run registration): reading `deviceId` before init lands
+ * throws, the join would go out without a device id, and the PEER would abort
+ * with a misleading "peer must update". Kick init (the store guards reentry)
+ * and wait briefly for readiness instead.
  */
 async function resolveOwnCallDeviceId(): Promise<string | undefined> {
   try {
     const { getE2EService } = await import('../services/e2e/e2eService');
     const { useAuthStore } = await import('./authStore');
+    const { useE2EStore } = await import('./e2eStore');
     const me = useAuthStore.getState().user;
     if (!me) return undefined;
+    if (!useE2EStore.getState().ready) {
+      useE2EStore.getState().initialize(me.id).catch((err) => {
+        console.warn('[DMVoice] E2E init kick failed (store records the error):', err);
+      });
+      await waitForE2EReady(10_000);
+    }
     return getE2EService(me.id).deviceId || undefined;
   } catch (err) {
     console.warn('[DMVoice] Could not resolve E2E device id:', err);
@@ -1871,6 +1903,18 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // to exactly it (spec §20), and pre-warm the peer's device list so the
     // first signal's vetting/bundle claim don't stack onto offer glare.
     const deviceId = await resolveOwnCallDeviceId();
+    if (generation !== voiceSessionGeneration) return; // superseded during the readiness wait
+
+    if (!deviceId) {
+      // Calls are E2E-only (hard cutover): joining without a device id would
+      // just make the PEER abort with "peer must update". Fail fast on OUR
+      // side, with an honest message.
+      console.warn('[DMVoice] E2E device unavailable — refusing to start an unprotectable call');
+      get().handleDMCallEnded();
+      toast.error(i18n.t('e2e.callNotReady'));
+      return;
+    }
+
     try {
       const { getE2EService } = await import('../services/e2e/e2eService');
       const { useAuthStore } = await import('./authStore');

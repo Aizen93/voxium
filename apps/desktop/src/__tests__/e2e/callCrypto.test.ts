@@ -187,6 +187,20 @@ describe('decryptCallSignal', () => {
     expect(await decryptCallSignal(CONV, PEER, env)).toBeNull();
   });
 
+  it('a SUPERSEDED epoch never returns — a withheld old-epoch envelope dies after re-glare', async () => {
+    // Olm retains skipped message keys, so an envelope the relay WITHHELD
+    // still decrypts when injected late. The epoch history is what stops it.
+    decryptFromDevice
+      .mockResolvedValueOnce(peerPlaintext({ epoch: 'epochA0000001', seq: 0 }))
+      .mockResolvedValueOnce(peerPlaintext({ epoch: 'epochB0000001', seq: 0 })) // re-glare
+      .mockResolvedValueOnce(peerPlaintext({ epoch: 'epochA0000001', seq: 5 })); // stale injection
+
+    const env = '{"v":1,"e":"olm1","t":1,"b":"ZmFrZQ"}';
+    expect(await decryptCallSignal(CONV, PEER, env)).toEqual(OFFER);
+    expect(await decryptCallSignal(CONV, PEER, env)).toEqual(OFFER);
+    expect(await decryptCallSignal(CONV, PEER, env)).toBeNull();
+  });
+
   it('drops (null) on binding mismatches: conversation, sender user, sender device', async () => {
     const env = '{"v":1,"e":"olm1","t":1,"b":"ZmFrZQ"}';
     for (const bad of [

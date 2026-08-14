@@ -3287,6 +3287,47 @@ describe('E2EService — device-sealed payloads', () => {
     expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, second)).toBe('signal-three');
   });
 
+  it('survives session-establishment GLARE — both sides seal before either decrypts (every call does this)', async () => {
+    const { alice, bob } = await pair();
+
+    // Crossed prekey messages: each side creates its own outbound session
+    // before seeing the other's. This is a DM call's offer glare, verbatim.
+    const a1 = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'offer-a');
+    const b1 = await bob.service.encryptToDevice(alice.userId, alice.service.deviceId, 'offer-b');
+    expect(JSON.parse(a1).t).toBe(0);
+    expect(JSON.parse(b1).t).toBe(0);
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, a1)).toBe('offer-a');
+    expect(await alice.service.decryptFromDevice(bob.userId, bob.service.deviceId, b1)).toBe('offer-b');
+
+    // Follow-ups in BOTH directions. The single-slot session store failed
+    // every one of these with invalid MAC once both sides had swapped.
+    for (let i = 0; i < 3; i++) {
+      const a = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, `candidate-a${i}`);
+      expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, a)).toBe(`candidate-a${i}`);
+      const b = await bob.service.encryptToDevice(alice.userId, alice.service.deviceId, `candidate-b${i}`);
+      expect(await alice.service.decryptFromDevice(bob.userId, bob.service.deviceId, b)).toBe(`candidate-b${i}`);
+    }
+  });
+
+  it('glare survives a reload: displaced sessions come back from the vault', async () => {
+    const { server, alice, bob } = await pair();
+
+    const a1 = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'offer-a');
+    const b1 = await bob.service.encryptToDevice(alice.userId, alice.service.deviceId, 'offer-b');
+    expect(await bob.service.decryptFromDevice(alice.userId, alice.service.deviceId, a1)).toBe('offer-a');
+    expect(await alice.service.decryptFromDevice(bob.userId, bob.service.deviceId, b1)).toBe('offer-b');
+
+    // Bob's app restarts mid-call: fresh service over the same vault (same
+    // namespace + pickle key = same device, same persisted sessions)
+    const bob2 = makeDevice(server, bob.userId, { keyProvider: bob.keyProvider, vaultNamespace: bob.vaultNamespace });
+    await bob2.service.initialize();
+    await flushQueue();
+    expect(bob2.service.deviceId).toBe(bob.service.deviceId);
+
+    const a2 = await alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'post-restart');
+    expect(await bob2.service.decryptFromDevice(alice.userId, alice.service.deviceId, a2)).toBe('post-restart');
+  });
+
   it('an envelope bound to the WRONG device decrypts to null', async () => {
     const { server, alice, bob } = await pair();
     // Bob has a second device the envelope was NOT encrypted to

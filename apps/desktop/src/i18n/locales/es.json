@@ -1099,7 +1099,8 @@
     "callAbortIdentityChanged": "Llamada finalizada: las claves de seguridad de {{name}} cambiaron. Verifica su nuevo número de seguridad antes de volver a llamar.",
     "callAbortPeerMustUpdate": "Llamada finalizada: la aplicación de {{name}} no puede hacer llamadas seguras. Pídele que actualice Voxium.",
     "callAbortPeerNotE2E": "Llamada finalizada: {{name}} aún no ha configurado el cifrado, así que no se puede establecer una llamada segura.",
-    "callAbortSignalingFailed": "Llamada finalizada: falló el establecimiento de la llamada segura. Inténtalo de nuevo."
+    "callAbortSignalingFailed": "Llamada finalizada: falló el establecimiento de la llamada segura. Inténtalo de nuevo.",
+    "callNotReady": "Aún no se puede iniciar una llamada segura: el cifrado todavía se está configurando en este dispositivo. Inténtalo de nuevo en un momento."
   },
   "people": {
     "title": "Personas",

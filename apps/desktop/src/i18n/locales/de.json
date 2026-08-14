@@ -1099,7 +1099,8 @@
     "callAbortIdentityChanged": "Anruf beendet: Die Sicherheitsschlüssel von {{name}} haben sich geändert. Überprüfe die neue Sicherheitsnummer, bevor du erneut anrufst.",
     "callAbortPeerMustUpdate": "Anruf beendet: Die App von {{name}} unterstützt keine sicheren Anrufe. Bitte um ein Update von Voxium.",
     "callAbortPeerNotE2E": "Anruf beendet: {{name}} hat die Verschlüsselung noch nicht eingerichtet, daher kann kein sicherer Anruf aufgebaut werden.",
-    "callAbortSignalingFailed": "Anruf beendet: Der sichere Verbindungsaufbau ist fehlgeschlagen. Versuche es erneut."
+    "callAbortSignalingFailed": "Anruf beendet: Der sichere Verbindungsaufbau ist fehlgeschlagen. Versuche es erneut.",
+    "callNotReady": "Ein sicherer Anruf ist noch nicht möglich — die Verschlüsselung wird auf diesem Gerät noch eingerichtet. Versuche es gleich erneut."
   },
   "people": {
     "title": "Personen",

@@ -1099,7 +1099,8 @@
     "callAbortIdentityChanged": "Chamada encerrada: as chaves de segurança de {{name}} mudaram. Verifique o novo número de segurança antes de ligar novamente.",
     "callAbortPeerMustUpdate": "Chamada encerrada: o aplicativo de {{name}} não consegue fazer chamadas seguras. Peça para atualizar o Voxium.",
     "callAbortPeerNotE2E": "Chamada encerrada: {{name}} ainda não configurou a criptografia, então não é possível estabelecer uma chamada segura.",
-    "callAbortSignalingFailed": "Chamada encerrada: falha ao estabelecer a chamada segura. Tente novamente."
+    "callAbortSignalingFailed": "Chamada encerrada: falha ao estabelecer a chamada segura. Tente novamente.",
+    "callNotReady": "Ainda não é possível iniciar uma chamada segura — a criptografia ainda está sendo configurada neste dispositivo. Tente novamente em instantes."
   },
   "people": {
     "title": "Pessoas",

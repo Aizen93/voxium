@@ -330,6 +330,15 @@ export class E2EService {
   private myDeviceId: string | null = null;
   /** pairwise Olm sessions, keyed `${userId}|${deviceId}` */
   private olmSessions = new Map<string, EngineSession>();
+  /**
+   * Sessions displaced by establishment glare, same keying. When both sides
+   * create outbound sessions simultaneously (a DM call's offer glare does this
+   * every time), each side's prekey message replaces the other's active
+   * session — WITHOUT this slot both directions go deaf on every follow-up
+   * message (invalid MAC). Each side keeps sending on its own session and
+   * decrypts the peer's chain through the fallback.
+   */
+  private olmFallbackSessions = new Map<string, EngineSession>();
   /** outbound group sessions, keyed by conversationId */
   private outbound = new Map<string, { session: EngineGroupSession; record: OutboundGroupSessionRecord }>();
   /** inbound group sessions, keyed by megolm session id */
@@ -429,6 +438,8 @@ export class E2EService {
     this.masterKey = null;
     for (const session of this.olmSessions.values()) session.free();
     this.olmSessions.clear();
+    for (const session of this.olmFallbackSessions.values()) session.free();
+    this.olmFallbackSessions.clear();
     for (const { session } of this.outbound.values()) session.free();
     this.outbound.clear();
     for (const { session } of this.inbound.values()) session.free();
@@ -456,6 +467,29 @@ export class E2EService {
 
   private async persistOlmSession(userId: string, deviceId: string, session: EngineSession): Promise<void> {
     await this.vault.putSessionPickle(userId, deviceId, session.pickle(this.vault.pickleKey()));
+  }
+
+  private async persistOlmFallbackSession(userId: string, deviceId: string, session: EngineSession): Promise<void> {
+    await this.vault.putFallbackSessionPickle(userId, deviceId, session.pickle(this.vault.pickleKey()));
+  }
+
+  /** The glare-displaced session for a device, if any (see olmFallbackSessions). */
+  private async loadOlmFallbackSession(userId: string, deviceId: string): Promise<EngineSession | null> {
+    const key = shareKey(userId, deviceId);
+    const cached = this.olmFallbackSessions.get(key);
+    if (cached) return cached;
+    const pickle = await this.vault.getFallbackSessionPickle(userId, deviceId);
+    if (!pickle) return null;
+    let session: EngineSession;
+    try {
+      session = EngineSession.fromPickle(pickle, this.vault.pickleKey());
+    } catch (err) {
+      console.warn(`e2e: fallback session pickle for ${key} unreadable — discarding:`, errText(err));
+      await this.vault.deleteFallbackSession(userId, deviceId);
+      return null;
+    }
+    this.olmFallbackSessions.set(key, session);
+    return session;
   }
 
   // ─── Device registration & key upkeep ───────────────────────────────────────
@@ -1761,12 +1795,7 @@ export class E2EService {
         await this.vault.putMasterIdentity(peerUserId, { masterKey: master, verified: false });
       }
 
-      for (const [key, session] of this.olmSessions) {
-        if (key.startsWith(`${peerUserId}|`)) {
-          session.free();
-          this.olmSessions.delete(key);
-        }
-      }
+      this.dropOlmSessionsInMemory(peerUserId);
       await this.vault.deleteSessionsForUser(peerUserId);
 
       for (const entry of entries) {
@@ -1816,14 +1845,21 @@ export class E2EService {
   /** Drop every pairwise session with a user so the next share re-establishes. */
   async resetSession(peerUserId: string): Promise<void> {
     return this.enqueue(async () => {
-      for (const [key, session] of this.olmSessions) {
-        if (key.startsWith(`${peerUserId}|`)) {
-          session.free();
-          this.olmSessions.delete(key);
-        }
-      }
+      this.dropOlmSessionsInMemory(peerUserId);
       await this.vault.deleteSessionsForUser(peerUserId);
     });
+  }
+
+  /** Free + forget every in-memory pairwise session (active AND fallback) with a user. */
+  private dropOlmSessionsInMemory(peerUserId: string): void {
+    for (const map of [this.olmSessions, this.olmFallbackSessions]) {
+      for (const [key, session] of map) {
+        if (key.startsWith(`${peerUserId}|`)) {
+          session.free();
+          map.delete(key);
+        }
+      }
+    }
   }
 
   // ─── Pairwise Olm sessions (key-share transport) ────────────────────────────
@@ -1936,30 +1972,63 @@ export class E2EService {
     const identity = await this.vault.getIdentity(userId, deviceId);
     if (!identity) return null;
     const account = this.requireAccount();
+    const key = shareKey(userId, deviceId);
     const session = await this.loadOlmSession(userId, deviceId);
 
     if (envelope.t === 0) {
-      // Pre-key message: either continues the session it announces, or
-      // establishes a new inbound session (bound to the pinned identity —
-      // vodozemac rejects a mismatch).
-      if (session && prekey_message_session_id(envelope.b) === session.sessionId()) {
+      // Pre-key message: either continues a session we know (active or
+      // fallback), or establishes a new inbound session (bound to the pinned
+      // identity — vodozemac rejects a mismatch).
+      const incomingSessionId = prekey_message_session_id(envelope.b);
+      if (session && incomingSessionId === session.sessionId()) {
         const text = session.decrypt(envelope.t, envelope.b);
         await this.persistOlmSession(userId, deviceId, session);
+        return text;
+      }
+      const fallback = await this.loadOlmFallbackSession(userId, deviceId);
+      if (fallback && incomingSessionId === fallback.sessionId()) {
+        const text = fallback.decrypt(envelope.t, envelope.b);
+        await this.persistOlmFallbackSession(userId, deviceId, fallback);
         return text;
       }
       const inbound = account.createInboundSession(identity.curve25519Key, envelope.b);
       const text = inbound.plaintext;
       const fresh = inbound.takeSession();
-      session?.free();
-      this.olmSessions.set(shareKey(userId, deviceId), fresh);
+      if (session) {
+        // GLARE: our own outbound session crossed the peer's prekey message
+        // in flight (both sides of a call establish simultaneously). DEMOTE
+        // it instead of discarding — the peer keeps decrypting our sends
+        // through their copy of it, and we decrypt theirs through this new
+        // inbound. Discarding deafened BOTH directions on every call.
+        fallback?.free();
+        this.olmFallbackSessions.set(key, session);
+        await this.persistOlmFallbackSession(userId, deviceId, session);
+      }
+      this.olmSessions.set(key, fresh);
       await this.persistOlmSession(userId, deviceId, fresh);
       await this.persistAccount(); // the used one-time key was consumed
       return text;
     }
 
-    if (!session) return null;
-    const text = session.decrypt(envelope.t, envelope.b);
-    await this.persistOlmSession(userId, deviceId, session);
+    // Normal message: try the active session, then the glare fallback —
+    // after crossed establishment each side sends on its own session.
+    if (session) {
+      try {
+        const text = session.decrypt(envelope.t, envelope.b);
+        await this.persistOlmSession(userId, deviceId, session);
+        return text;
+      } catch (primaryErr) {
+        const fallback = await this.loadOlmFallbackSession(userId, deviceId);
+        if (!fallback) throw primaryErr;
+        const text = fallback.decrypt(envelope.t, envelope.b); // both failing throws to the caller
+        await this.persistOlmFallbackSession(userId, deviceId, fallback);
+        return text;
+      }
+    }
+    const fallback = await this.loadOlmFallbackSession(userId, deviceId);
+    if (!fallback) return null;
+    const text = fallback.decrypt(envelope.t, envelope.b);
+    await this.persistOlmFallbackSession(userId, deviceId, fallback);
     return text;
   }
 
@@ -2868,6 +2937,8 @@ export class E2EService {
       const key = shareKey(this.userId, deviceId);
       this.olmSessions.get(key)?.free();
       this.olmSessions.delete(key);
+      this.olmFallbackSessions.get(key)?.free();
+      this.olmFallbackSessions.delete(key);
       await this.vault.deleteSession(this.userId, deviceId);
       await this.vault.deleteIdentity(this.userId, deviceId);
       this.deviceListCache.delete(this.userId);

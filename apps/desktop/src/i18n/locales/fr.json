@@ -1099,7 +1099,8 @@
     "callAbortIdentityChanged": "Appel terminé : les clés de sécurité de {{name}} ont changé. Vérifiez le nouveau numéro de sécurité avant de rappeler.",
     "callAbortPeerMustUpdate": "Appel terminé : l'application de {{name}} ne peut pas passer d'appels sécurisés. Demandez-lui de mettre à jour Voxium.",
     "callAbortPeerNotE2E": "Appel terminé : {{name}} n'a pas encore configuré le chiffrement, impossible d'établir un appel sécurisé.",
-    "callAbortSignalingFailed": "Appel terminé : l'établissement de l'appel sécurisé a échoué. Réessayez."
+    "callAbortSignalingFailed": "Appel terminé : l'établissement de l'appel sécurisé a échoué. Réessayez.",
+    "callNotReady": "Impossible de passer un appel sécurisé pour l'instant — le chiffrement est encore en cours de configuration sur cet appareil. Réessayez dans un instant."
   },
   "people": {
     "title": "Membres",

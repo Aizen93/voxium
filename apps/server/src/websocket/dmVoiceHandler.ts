@@ -260,11 +260,13 @@ function armCallTimeout(
       // Exactly 1 => still ringing (auto-cancel). 0 => already ended (do nothing).
       if (currentUsers.size === 1) {
         console.log(`[DMVoice] Call timeout for conversation ${conversationId}`);
-        // Clean up all remaining users
+        // Clean up all remaining users. socketsLeave is fire-and-forget across
+        // the cluster — fetchSockets here used to WAIT for every node's reply,
+        // so one dead/unresponsive peer node made this throw after 5s and the
+        // ended/left emits below never ran (clients stuck "in a call").
         for (const [uid] of currentUsers) {
           await removeDMVoiceUser(conversationId, uid);
-          const sockets = await io.in(`user:${uid}`).fetchSockets();
-          for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
+          io.in(`user:${uid}`).socketsLeave(`dm:voice:${conversationId}`);
         }
         io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: ringingUserId });
         io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
@@ -322,13 +324,15 @@ export async function leaveCurrentDMVoiceChannel(
   socket.leave(`dm:voice:${conversationId}`);
   socket.data.dmCallConversationId = undefined;
 
-  // DM calls are 1-on-1: always end the call when someone leaves
-  // Clean up remaining users' state and socket rooms
+  // DM calls are 1-on-1: always end the call when someone leaves.
+  // Clean up remaining users' state and socket rooms. socketsLeave is
+  // fire-and-forget across the cluster — fetchSockets here used to WAIT for
+  // every node's reply, so one dead/unresponsive peer node made this throw
+  // after 5s and the left/ended emits below never ran: the remaining
+  // participant's client stayed "in a call" forever.
   for (const remaining of remainingUsers) {
     await removeDMVoiceUser(conversationId, remaining.id);
-    // fetchSockets works across nodes via Redis adapter
-    const sockets = await io.in(`user:${remaining.id}`).fetchSockets();
-    for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
+    io.in(`user:${remaining.id}`).socketsLeave(`dm:voice:${conversationId}`);
   }
 
   clearCallTimeout(conversationId);
@@ -540,9 +544,8 @@ export function handleDMVoiceEvents(
     const callerIdForMsg = Array.from(callUsers.keys())[0];
     for (const [callerId] of callUsers) {
       await removeDMVoiceUser(conversationId, callerId);
-      // fetchSockets works across nodes via Redis adapter
-      const sockets = await io.in(`user:${callerId}`).fetchSockets();
-      for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
+      // socketsLeave: adapter-wide and fire-and-forget (never blocks on peers)
+      io.in(`user:${callerId}`).socketsLeave(`dm:voice:${conversationId}`);
     }
 
     clearCallTimeout(conversationId);

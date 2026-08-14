@@ -1158,7 +1158,10 @@ The receiver verifies every binding field against its OWN pinned state (the
 `epoch` exists because reconnects re-glare with fresh counters on one side
 only — a bare per-call seq would deadlock every reconnect. Exact replay is
 already impossible at the Olm layer; the epoch/seq check is ordering hygiene
-and defense-in-depth. The server relays the payload opaquely
+and defense-in-depth. A superseded epoch is never accepted again (per-call
+epoch history): Olm retains skipped message keys, so a relay that WITHHELD an
+old-epoch envelope could otherwise inject it — authentic but stale — after
+every re-glare. The server relays the payload opaquely
 (`dmVoiceHandler` requires string-or-object ≤ `DM_SIGNAL_MAX` and never
 parses it).
 
@@ -1190,6 +1193,18 @@ the device (an offer CAN beat it across the relay) are buffered — capped, and
 flushed in arrival order once the pin lands — because dropping them would
 deadlock the polite side of glare.
 
+**Olm session-establishment glare** (found in review, live): a call's offer
+glare makes BOTH sides create outbound pairwise sessions simultaneously, and
+the crossed prekey messages then replaced each side's active session — after
+the double swap every follow-up signal failed MAC in both directions, while
+the call still LOOKED connected (panel state is socket-driven). Messages
+never hit this (no glare), which is why it sat latent until calls. Fix: the
+displaced session is DEMOTED to a per-device fallback slot (vault-persisted),
+decrypt tries active-then-fallback, and each side simply keeps sending on its
+own session — two half-duplex sessions are perfectly valid Olm. The dm-calls
+Playwright spec now fails on ANY signal-decrypt failure so this class of
+breakage can't hide behind a connected-looking panel again.
+
 ### 20.5 Hard cutover
 
 A payload that is not an olm1 envelope string is a `legacy-signal` security
@@ -1198,6 +1213,15 @@ precedent as always-on DMs). Identity changes mid-call flag the existing
 warning UX and abort; `peer-not-e2e` (no published devices) aborts.
 Transient encrypt failures get exactly one retry, then abort. There is no
 plaintext fallback path, and none may ever be added.
+
+The cutover is symmetric: a client whose OWN E2E device is unavailable never
+joins a call either. `joinDMCall` waits briefly for E2E initialization (a
+call dialed right after app launch can race the WASM/vault/registration
+init) and refuses locally with "encryption is still setting up" if no device
+id can be resolved — ringing the peer into a guaranteed abort would
+misreport an updated client as out of date. Mid-call reconnects that
+transiently omit the device id are absorbed server-side: the socket rebind
+preserves the stored deviceId rather than erasing it.
 
 ### 20.6 UX
 

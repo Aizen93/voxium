@@ -44,6 +44,13 @@ interface CallSignalingState {
   /** Peer's most recent epoch + highest seq seen within it. */
   recvEpoch: string | null;
   recvSeq: number;
+  /**
+   * Every epoch this call has accepted. Olm retains skipped message keys, so a
+   * WITHHELD old-epoch envelope still decrypts when delivered late — without
+   * this set, each epoch change would re-arm a one-shot stale-signal injection
+   * for a malicious relay. A superseded epoch never comes back.
+   */
+  seenRecvEpochs: Set<string>;
   /** The peer device passed verified-device-list vetting (checked once per pin). */
   peerVetted: boolean;
 }
@@ -77,6 +84,7 @@ export function beginCallSignaling(conversationId: string, peer: CallPeerDevice)
     sendSeq: 0,
     recvEpoch: null,
     recvSeq: -1,
+    seenRecvEpochs: new Set(),
     peerVetted: false,
   });
 }
@@ -205,6 +213,12 @@ export async function decryptCallSignal(
   // stale reorders are dropped. Exact replay is already impossible at the Olm
   // layer — this is defense-in-depth and ordering hygiene.
   if (p.epoch !== state.recvEpoch) {
+    // A superseded epoch never returns: Olm keeps skipped message keys, so a
+    // relay that WITHHELD an old-epoch envelope could otherwise inject it
+    // after a re-glare (authentic but stale — pure negotiation churn). After
+    // a re-glare, old-epoch signals are stale by definition.
+    if (state.seenRecvEpochs.has(p.epoch)) return null;
+    state.seenRecvEpochs.add(p.epoch);
     state.recvEpoch = p.epoch;
     state.recvSeq = p.seq;
   } else {

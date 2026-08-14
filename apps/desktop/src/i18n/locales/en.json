@@ -1106,7 +1106,8 @@
     "callAbortIdentityChanged": "Call ended: {{name}}'s security keys changed. Verify their new safety number before calling again.",
     "callAbortPeerMustUpdate": "Call ended: {{name}}'s app can't make secure calls. Ask them to update Voxium.",
     "callAbortPeerNotE2E": "Call ended: {{name}} hasn't set up encryption yet, so a secure call can't be established.",
-    "callAbortSignalingFailed": "Call ended: secure call setup failed. Try again."
+    "callAbortSignalingFailed": "Call ended: secure call setup failed. Try again.",
+    "callNotReady": "Can't start a secure call yet — encryption is still setting up on this device. Try again in a moment."
   },
   "people": {
     "title": "People",

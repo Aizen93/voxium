@@ -63,6 +63,38 @@ vi.mock('../../stores/dmStore', () => ({
   useDMStore: { getState: () => ({ conversations: [] }) },
 }));
 
+// The E2E environment joinDMCall consults for our own call device (all
+// reached via dynamic imports). Mutable so tests can simulate init-in-flight
+// and unavailable-device states.
+const e2eEnv = vi.hoisted(() => ({
+  deviceId: 'device-me000001' as string | null,
+  ready: true,
+  error: null as string | null,
+  initialize: vi.fn(async (_userId: string) => {}),
+  subscribers: [] as Array<(s: { ready: boolean; error: string | null }) => void>,
+}));
+vi.mock('../../stores/authStore', () => ({
+  useAuthStore: { getState: () => ({ user: { id: 'me' } }) },
+}));
+vi.mock('../../services/e2e/e2eService', () => ({
+  getE2EService: () => ({
+    get deviceId(): string {
+      if (e2eEnv.deviceId === null) throw new Error('e2e service not initialized');
+      return e2eEnv.deviceId;
+    },
+    fetchDeviceList: vi.fn(async () => ({ devices: [], servedDeviceCount: 0, listVersion: 0, masterKey: null })),
+  }),
+}));
+vi.mock('../../stores/e2eStore', () => ({
+  useE2EStore: {
+    getState: () => ({ ready: e2eEnv.ready, error: e2eEnv.error, initialize: e2eEnv.initialize }),
+    subscribe: (cb: (s: { ready: boolean; error: string | null }) => void) => {
+      e2eEnv.subscribers.push(cb);
+      return () => {};
+    },
+  },
+}));
+
 vi.mock('@timephy/rnnoise-wasm', () => ({
   NoiseSuppressorWorklet_Name: 'NoiseSuppressorWorklet',
 }));
@@ -209,6 +241,11 @@ describe('voiceStore', () => {
     cc.encryptCallSignal.mockImplementation(async (_conv: string, _peer: unknown, signal: unknown) =>
       JSON.stringify({ env: signal }));
     cc.decryptCallSignal.mockImplementation(async (_conv: string, _peer: unknown, payload: unknown) => payload);
+    e2eEnv.deviceId = 'device-me000001';
+    e2eEnv.ready = true;
+    e2eEnv.error = null;
+    e2eEnv.initialize.mockClear();
+    e2eEnv.subscribers.length = 0;
     vi.mocked(vi.mocked(getSocket)()!.emit).mockClear();
   });
 
@@ -885,6 +922,44 @@ describe('voiceStore', () => {
       await flushAsync();
 
       expect(cc.endCallSignaling).not.toHaveBeenCalled();
+    });
+
+    it('joinDMCall announces our E2E deviceId on dm:voice:join', async () => {
+      useVoiceStore.getState().setLocalUserId('me');
+
+      await useVoiceStore.getState().joinDMCall('conv-1');
+
+      expect(socketEmit()).toHaveBeenCalledWith('dm:voice:join', 'conv-1',
+        expect.objectContaining({ deviceId: 'device-me000001' }));
+    });
+
+    it('REFUSES to start a call when our E2E device is unavailable — the peer must never see a deviceless join', async () => {
+      e2eEnv.deviceId = null; // deviceId getter throws (init genuinely failed)
+      useVoiceStore.getState().setLocalUserId('me');
+
+      await useVoiceStore.getState().joinDMCall('conv-1');
+
+      expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+      const joins = socketEmit().mock.calls.filter((c) => c[0] === 'dm:voice:join');
+      expect(joins).toHaveLength(0);
+    });
+
+    it('waits for in-flight E2E init before joining (first call right after app launch)', async () => {
+      e2eEnv.ready = false;
+      useVoiceStore.getState().setLocalUserId('me');
+
+      const joinPromise = useVoiceStore.getState().joinDMCall('conv-1');
+      await flushAsync();
+      // Still waiting on readiness: init kicked, nothing emitted yet
+      expect(e2eEnv.initialize).toHaveBeenCalledWith('me');
+      expect(socketEmit().mock.calls.filter((c) => c[0] === 'dm:voice:join')).toHaveLength(0);
+
+      e2eEnv.ready = true;
+      for (const cb of e2eEnv.subscribers.splice(0)) cb({ ready: true, error: null });
+      await joinPromise;
+
+      expect(socketEmit()).toHaveBeenCalledWith('dm:voice:join', 'conv-1',
+        expect.objectContaining({ deviceId: 'device-me000001' }));
     });
   });
 });

@@ -1099,7 +1099,8 @@
     "callAbortIdentityChanged": "通话已结束:{{name}}的安全密钥已更改。再次通话前请核对新的安全码。",
     "callAbortPeerMustUpdate": "通话已结束:{{name}}的应用无法进行安全通话。请对方更新 Voxium。",
     "callAbortPeerNotE2E": "通话已结束:{{name}}尚未设置加密,无法建立安全通话。",
-    "callAbortSignalingFailed": "通话已结束:安全通话建立失败。请重试。"
+    "callAbortSignalingFailed": "通话已结束:安全通话建立失败。请重试。",
+    "callNotReady": "暂时无法发起安全通话——此设备仍在设置加密。请稍后重试。"
   },
   "people": {
     "title": "成员",

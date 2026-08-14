@@ -1099,7 +1099,8 @@
     "callAbortIdentityChanged": "通話終了:{{name}}のセキュリティ鍵が変更されました。再度通話する前に新しい安全番号を確認してください。",
     "callAbortPeerMustUpdate": "通話終了:{{name}}のアプリは安全な通話に対応していません。Voxiumの更新を依頼してください。",
     "callAbortPeerNotE2E": "通話終了:{{name}}はまだ暗号化を設定していないため、安全な通話を確立できません。",
-    "callAbortSignalingFailed": "通話終了:安全な通話の確立に失敗しました。もう一度お試しください。"
+    "callAbortSignalingFailed": "通話終了:安全な通話の確立に失敗しました。もう一度お試しください。",
+    "callNotReady": "安全な通話をまだ開始できません — このデバイスで暗号化の設定が進行中です。しばらくしてからもう一度お試しください。"
   },
   "people": {
     "title": "メンバー",
