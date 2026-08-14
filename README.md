@@ -1,6 +1,6 @@
 # Voxium
 
-**A free, open-source real-time communication platform built for privacy.**
+**A free, source-available real-time communication platform built for privacy.**
 
 > **Try it now:** [https://voxium.app](https://voxium.app)
 
@@ -13,7 +13,7 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 ## Why Voxium?
 
 - **Zero personal data required** — No phone number, no ID verification, no tracking
-- **Fully open source** — Audit every line, self-host on your own infrastructure
+- **Fully auditable, source-available** — Read every line, self-host on your own infrastructure
 - **Production-ready voice** — mediasoup SFU for servers, direct P2P for DM calls (private STUN), AI noise suppression (RNNoise ML)
 - **11 languages** — English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL)
 - **Theme engine** — 4 built-in themes, full custom theme editor with live preview, community marketplace
@@ -657,4 +657,17 @@ pnpm test:e2e:headed         # Visible browser
 
 ## License
 
-This project is open source. See the repository for license details.
+Voxium is **source-available** under the [Voxium Community License 1.0](LICENSE.md).
+
+In short: run it, read it, audit it, modify it, share it — for yourself, your
+community, or internally in your organization. Access to any instance must
+stay free for its users: no paywalls, no gated features, no ads, no selling
+of user data. Commercial exploitation (selling access, hosted/managed
+offerings, bundling into paid products) is reserved to the project.
+Individuals and nonprofits may accept voluntary donations as long as nothing
+is gated behind them. If you deploy a modified version for people outside
+your organization, publish your changes.
+
+Releases up to `v1.7.3` were AGPL-3.0 and remain so — see
+[NOTICE.md](NOTICE.md) for the full history, and [TRADEMARK.md](TRADEMARK.md)
+for use of the Voxium name.

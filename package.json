@@ -70,5 +70,6 @@
     "otpauth": "^9.5.0",
     "redis": "^5.11.0",
     "typescript-eslint": "^8.57.1"
-  }
+  },
+  "license": "SEE LICENSE IN LICENSE.md"
 }

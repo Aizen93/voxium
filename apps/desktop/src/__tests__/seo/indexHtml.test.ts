@@ -15,7 +15,7 @@ const html = readFileSync(resolve(ROOT, 'index.html'), 'utf8');
 
 describe('index.html SEO contract', () => {
   it('carries the title and description', () => {
-    expect(html).toContain('<title>Voxium — Open-Source Real-Time Communication Platform</title>');
+    expect(html).toContain('<title>Voxium — Privacy-First Real-Time Communication Platform</title>');
     expect(html).toMatch(/<meta name="description" content="Privacy-first voice, video, chat and screen sharing\./);
     expect(html).toContain('<link rel="canonical" href="https://voxium.app/"');
   });
@@ -44,7 +44,7 @@ describe('index.html SEO contract', () => {
   });
 
   it('ships crawlable landing content inside #root, not an empty div', () => {
-    expect(html).toContain('<h1>Voxium — Open-Source Real-Time Communication Platform</h1>');
+    expect(html).toContain('<h1>Voxium — Privacy-First Real-Time Communication Platform</h1>');
     // Crawlers must find real substance and the important links without JS.
     expect(html).toContain('Why communities choose Voxium');
     for (const href of ['/register', '/login', '/privacy', '/terms']) {
@@ -62,6 +62,12 @@ describe('index.html SEO contract', () => {
     // communities, self-hosting always free. "Free forever" / "nothing to
     // buy" style claims contradict the planned Plus and server tiers.
     expect(html).not.toMatch(/forever|nothing to buy|always be free|free for everyone/i);
+  });
+
+  it('makes no open-source claim — Voxium is source-available (VCL-1.0)', () => {
+    // Since the relicense from AGPL (NOTICE.md), "open source" would be an
+    // openwashing claim the license cannot back. Say "source-available".
+    expect(html).not.toMatch(/open[- ]source/i);
   });
 
   it('references no third-party hosts — fonts are self-hosted', () => {
