@@ -414,6 +414,48 @@ describe('dmVoiceHandler — dm:voice:join', () => {
     }));
   });
 
+  it('a rebind WITHOUT deviceId PRESERVES the stored one (transient E2E hiccup must not strand the peer)', async () => {
+    mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall
+    // updateDMVoiceUserSocket merge-read of the current state
+    mockRedis.hGet.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'old-socket', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' })
+    );
+    mockRedis.eval.mockResolvedValueOnce(1); // rebind succeeds
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' }),
+    });
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser] as any);
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false }); // no deviceId this time
+
+    const evalCall = mockRedis.eval.mock.calls[0];
+    const stateJson = (evalCall[1] as { arguments: string[] }).arguments[1];
+    // The stored routing hint survives — erasing it would make the peer's next
+    // replay read a deviceId-less state and abort the call as "peer must update"
+    expect(JSON.parse(stateJson)).toMatchObject({ socketId: 'socket-1', deviceId: 'device-aaaa1111' });
+  });
+
+  it('a rebind WITH a different deviceId overwrites (legitimate device change)', async () => {
+    mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall
+    mockRedis.eval.mockResolvedValueOnce(1);
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-bbbb2222' }),
+    });
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser] as any);
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false, deviceId: 'device-bbbb2222' });
+
+    // No merge-read when a deviceId is supplied — the fresh value wins
+    expect(mockRedis.hGet).not.toHaveBeenCalled();
+    const evalCall = mockRedis.eval.mock.calls[0];
+    const stateJson = (evalCall[1] as { arguments: string[] }).arguments[1];
+    expect(JSON.parse(stateJson)).toMatchObject({ deviceId: 'device-bbbb2222' });
+  });
+
   it('emits dm:voice:joined to room when second user joins', async () => {
     // Set up as user-2 joining a call where user-1 already is
     const { socket: socket2, handlers: handlers2 } = createMockSocket('user-2', 'socket-2');

@@ -22,7 +22,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
 import { playJoinSound, playLeaveSound, playMessageSound, playMentionSound } from '../../services/notificationSounds';
 import { toast } from '../../stores/toastStore';
-import { stopSpeakingDetection, stopNoiseSuppression } from '../../services/audioAnalyser';
+import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
 import { SupportTicketView } from '../dm/SupportTicketView';
@@ -490,21 +490,11 @@ export function MainLayout() {
       dmVoiceEnded: ({ conversationId }: { conversationId: string }) => {
         const voiceState = useVoiceStore.getState();
         if (voiceState.dmCallConversationId === conversationId) {
-          // Inline cleanup instead of leaveDMCall() to avoid emitting dm:voice:leave
-          // back to the server (call was already ended server-side)
-          voiceState.stopLatencyMeasurement();
-          stopSpeakingDetection();
-          stopNoiseSuppression();
-          if (voiceState.localStream) {
-            voiceState.localStream.getTracks().forEach((track) => track.stop());
-          }
-          voiceState.destroyAllPeers();
-          useVoiceStore.setState({
-            dmCallConversationId: null,
-            dmCallUsers: [],
-            localStream: null,
-            latency: null,
-          });
+          // Full teardown without emitting dm:voice:leave back (the call was
+          // already ended server-side). Must go through the store action: an
+          // inline cleanup here once left the E2E device pin, signal chains,
+          // and callCrypto session state stale for the next call.
+          voiceState.handleDMCallEnded();
         }
         if (voiceState.incomingCall?.conversationId === conversationId) {
           voiceState.setIncomingCall(null);

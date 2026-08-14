@@ -852,5 +852,39 @@ describe('voiceStore', () => {
       expect(useVoiceStore.getState().dmCallPeerDevice).toBeNull();
       expect(cc.endCallSignaling).toHaveBeenCalledWith('conv-1');
     });
+
+    it('handleDMCallEnded (server-initiated end) does the FULL teardown without echoing dm:voice:leave', async () => {
+      useVoiceStore.setState({
+        dmCallConversationId: 'conv-1',
+        dmCallPeerDevice: PEER,
+        dmCallUsers: [peerUser],
+        pttActive: true,
+      });
+
+      useVoiceStore.getState().handleDMCallEnded();
+      await flushAsync();
+
+      const state = useVoiceStore.getState();
+      expect(state.dmCallConversationId).toBeNull();
+      expect(state.dmCallUsers).toHaveLength(0);
+      // The pin and crypto session must not survive into the next call —
+      // an inline cleanup that skipped these once left them stale
+      expect(state.dmCallPeerDevice).toBeNull();
+      expect(cc.endCallSignaling).toHaveBeenCalledWith('conv-1');
+      expect(state.pttActive).toBe(false);
+      // The server already ended the call — echoing leave back would be wrong
+      expect(socketEmit()).not.toHaveBeenCalledWith('dm:voice:leave', expect.anything());
+    });
+
+    it('an immediate re-dial of the SAME conversation is not torn down by the previous call\'s deferred cleanup', async () => {
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallPeerDevice: PEER });
+
+      useVoiceStore.getState().handleDMCallEnded();
+      // Re-dial lands before the dynamic-import cleanup continuation runs
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1' });
+      await flushAsync();
+
+      expect(cc.endCallSignaling).not.toHaveBeenCalled();
+    });
   });
 });

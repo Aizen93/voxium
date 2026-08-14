@@ -208,6 +208,9 @@ interface VoiceState {
   // ─── DM Call Actions ───────────────────────────────────────────────
   joinDMCall: (conversationId: string) => Promise<void>;
   leaveDMCall: () => void;
+  /** Full local teardown WITHOUT notifying the server — for server-initiated
+   *  ends (dm:voice:ended), where echoing dm:voice:leave would be wrong. */
+  handleDMCallEnded: () => void;
   /** Leave the call because of an E2E security condition, telling the user why. */
   abortDMCall: (reason: DMCallAbortReason) => void;
   acceptCall: () => Promise<void>;
@@ -1890,8 +1893,16 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   leaveDMCall: () => {
-    voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
     const socket = getSocket();
+    const { dmCallConversationId } = get();
+    if (socket && dmCallConversationId) {
+      socket.emit('dm:voice:leave', dmCallConversationId);
+    }
+    get().handleDMCallEnded();
+  },
+
+  handleDMCallEnded: () => {
+    voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
     const { localStream, dmCallConversationId } = get();
 
     get().stopLatencyMeasurement();
@@ -1905,10 +1916,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     get().destroyAllPeers();
 
-    if (socket && dmCallConversationId) {
-      socket.emit('dm:voice:leave', dmCallConversationId);
-    }
-
     set({
       dmCallConversationId: null,
       dmCallUsers: [],
@@ -1921,7 +1928,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     resetDMSignalChains();
     if (dmCallConversationId) {
       void import('../services/e2e/callCrypto')
-        .then(({ endCallSignaling }) => endCallSignaling(dmCallConversationId))
+        .then(({ endCallSignaling }) => {
+          // Immediate re-dial of the SAME conversation: the new call's pin
+          // owns the signaling state now — don't end it from underneath.
+          if (useVoiceStore.getState().dmCallConversationId === dmCallConversationId) return;
+          endCallSignaling(dmCallConversationId);
+        })
         .catch((err) => console.warn('[DMVoice] Failed to clear call signaling state:', err));
     }
   },

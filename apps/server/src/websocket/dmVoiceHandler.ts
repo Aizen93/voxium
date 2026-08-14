@@ -124,9 +124,23 @@ async function updateDMVoiceUserSocket(
   deviceId?: string
 ): Promise<boolean> {
   const redis = getRedis();
-  // deviceId travels with every rebind — a reconnect that omitted it would
-  // silently erase the peer's routing hint for encrypted signaling
-  const state: DMVoiceUserState = { socketId, selfMute, selfDeaf, ...(deviceId && { deviceId }) };
+  // A rebind that omits deviceId (transient E2E init failure on reconnect)
+  // must not erase the stored routing hint: the peer's next replay would read
+  // a deviceId-less state and abort the call as "peer must update". A rebind
+  // WITH a deviceId still overwrites — that is a legitimate device change.
+  let effectiveDeviceId = deviceId;
+  if (!effectiveDeviceId) {
+    try {
+      const currentStr = await redis.hGet(`dm:voice:users:${conversationId}`, userId);
+      if (currentStr) {
+        const current = JSON.parse(currentStr) as DMVoiceUserState;
+        if (current.deviceId) effectiveDeviceId = current.deviceId;
+      }
+    } catch (err) {
+      console.warn(`[DMVoice] Could not read call state for deviceId merge (rebind proceeds without it):`, err);
+    }
+  }
+  const state: DMVoiceUserState = { socketId, selfMute, selfDeaf, ...(effectiveDeviceId && { deviceId: effectiveDeviceId }) };
   const updated = await redis.eval(
     `if redis.call('hexists', KEYS[1], ARGV[1]) == 0 then return 0 end
      redis.call('hset', KEYS[1], ARGV[1], ARGV[2])
