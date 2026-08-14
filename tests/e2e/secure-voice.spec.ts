@@ -44,6 +44,17 @@ async function openServer(page: Page, serverName: string) {
   await expect(page.locator('textarea')).toBeVisible({ timeout: 15_000 });
 }
 
+// RNNoise classifies the harness's steady fake-mic tone as noise and
+// suppresses it to silence, so the 300ms silence gate pauses the producer
+// at the SFU and the frame counters starve (blocks the Firefox run; Chromium's
+// pulsed beep pattern only escapes by luck). This test is about E2E frames,
+// not noise suppression — keep the fake mic "speaking".
+function disableNoiseSuppression(page: Page) {
+  return page.addInitScript(() => {
+    window.localStorage.setItem('voxium_settings', JSON.stringify({ enableNoiseSuppression: false }));
+  });
+}
+
 async function removeSecureMemberViaApi(request: APIRequestContext, token: string, serverId: string, channelId: string, userId: string) {
   const res = await request.delete(`${API_URL}/servers/${serverId}/secure-channels/${channelId}/members/${userId}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -73,12 +84,14 @@ test.describe('Secure voice channels — E2E audio through the SFU', () => {
     await joinServerViaInvite(request, dataC.accessToken, await createInvite(request, dataA.accessToken, server.id));
     await joinServerViaInvite(request, dataD.accessToken, await createInvite(request, dataA.accessToken, server.id));
 
+    await disableNoiseSuppression(page);
     await injectAuth(page, dataA);
     const contextB = await browser.newContext();
     const pageB = await contextB.newPage();
     await injectAuth(pageB, dataB);
     const contextC = await browser.newContext();
     const pageC = await contextC.newPage();
+    await disableNoiseSuppression(pageC);
     await injectAuth(pageC, dataC);
     const contextD = await browser.newContext();
     const pageD = await contextD.newPage();
@@ -87,6 +100,7 @@ test.describe('Secure voice channels — E2E audio through the SFU', () => {
     await pageD.addInitScript(() => {
       (window as unknown as { __VOX_SECURE_VOICE_TEST__?: object }).__VOX_SECURE_VOICE_TEST__ = { dropInboundKeys: true };
     });
+    await disableNoiseSuppression(pageD);
     await injectAuth(pageD, dataD);
 
     await openServer(page, 'War Council');
