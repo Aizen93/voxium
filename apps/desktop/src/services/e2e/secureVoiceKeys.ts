@@ -38,7 +38,17 @@ export type SecureVoiceErrorKind =
   | 'unsupported-platform'
   | 'peer-not-e2e'
   | 'binding-mismatch'
-  | 'legacy-key';
+  | 'legacy-key'
+  | 'device-revoked'
+  | 'no-key';
+
+/** This join was superseded before it claimed the session — abort quietly. */
+export class SecureVoiceSupersededError extends Error {
+  constructor() {
+    super('secure voice join superseded');
+    this.name = 'SecureVoiceSupersededError';
+  }
+}
 
 /** A session-fatal security condition — the caller must leave voice, loudly. */
 export class SecureVoiceError extends Error {
@@ -53,6 +63,8 @@ export class SecureVoiceError extends Error {
 
 interface PeerState {
   deviceId: string;
+  /** THEIR session epoch, echoed as `recipientEpoch` in every key we seal. */
+  epoch: string;
   vetted: boolean;
   recvEpoch: string | null;
   recvSeq: number;
@@ -74,14 +86,30 @@ interface SecureVoiceSessionState {
    * can beat the participant event onto the chain (the DM pre-pin-buffer
    * problem). Drained after each successful vet; dropping instead would
    * silently deafen us to that sender until their next rotation.
+   *
+   * Keyed PER SENDER: a single flat buffer lets any co-present member spend
+   * the whole budget on junk envelopes during our join window and push out the
+   * honest keys we actually need (the relay accepts 120/min per sender).
    */
-  pendingKeys: Array<{ from: string; fromDeviceId: string; envelope: unknown }>;
+  pendingKeys: Map<string, Array<{ fromDeviceId: string; envelope: unknown }>>;
+  /** Watchdog bookkeeping per sender: last key_request + un-healed timer. */
+  keyRequests: Map<string, { lastAt: number; timer: ReturnType<typeof setTimeout> | null }>;
+  /** Periodic re-confirmation of membership AND pinned devices. */
+  confirmTimer: ReturnType<typeof setInterval> | null;
   /** Serializes ALL key mutations + seals so wire order matches state order. */
   chain: Promise<void>;
   ended: boolean;
 }
 
-const PENDING_KEYS_CAP = 16;
+/** Per-sender pending-key slots — 2 covers an arrival/rotation race. */
+const PENDING_KEYS_PER_SENDER = 3;
+/** Minimum spacing between key_requests to one sender. */
+const KEY_REQUEST_COOLDOWN_MS = 10_000;
+/** How long a stalled sender stays unreported while a re-seal is in flight. */
+const KEY_REQUEST_GRACE_MS = 8_000;
+/** Re-check membership + pinned devices while a call is live (revocations
+ *  emit no event of their own, so nothing else would ever notice one). */
+const MEMBERSHIP_RECHECK_MS = 60_000;
 
 // Per-channel module state — crypto bookkeeping that must survive store
 // snapshots/resets untouched (the callCrypto rule).
@@ -172,7 +200,10 @@ async function sealKeyTo(state: SecureVoiceSessionState, userId: string, reason:
   const peer = state.peers.get(userId);
   if (!peer || !peer.vetted) return;
   const selfId = await currentUserId();
-  if (!selfId) return;
+  // A teardown that lands mid-step must not seal: endSecureVoiceSession zeroes
+  // currentKey IN PLACE, so a step resuming after it would serialize a 32-byte
+  // all-zero key under our identity and emit it to peers.
+  if (!selfId || state.ended) return;
   const service = getE2EService(selfId);
 
   const plaintext = buildVoiceKeyPlaintext({
@@ -181,6 +212,7 @@ async function sealKeyTo(state: SecureVoiceSessionState, userId: string, reason:
     senderUserId: selfId,
     senderDeviceId: service.deviceId,
     epoch: state.epoch,
+    recipientEpoch: peer.epoch,
     seq: state.sendSeq++,
     keyId: state.keyId,
     keyB64: toB64(state.currentKey),
@@ -189,16 +221,18 @@ async function sealKeyTo(state: SecureVoiceSessionState, userId: string, reason:
 
   try {
     const envelope = await service.encryptToDevice(userId, peer.deviceId, plaintext);
+    if (state.ended) return;
     getSocket()?.emit('voice:e2e:key', { to: userId, envelope });
   } catch (err) {
     if (err instanceof E2EIdentityChangedError) {
       await flagIdentityChanged(err.peerUserId);
       throw err;
     }
-    // Transient seal failure: one retry, then give up — the peer's
-    // key_request / decrypt watchdog heals a missed key.
+    // Transient seal failure: one retry, then give up — the peer's decrypt
+    // watchdog asks for a re-seal (handleKeyRequest) if this key never lands.
     console.warn(`[SecureVoice] Sealing key to ${userId} failed, retrying once:`, err);
     const envelope = await service.encryptToDevice(userId, peer.deviceId, plaintext);
+    if (state.ended) return;
     getSocket()?.emit('voice:e2e:key', { to: userId, envelope });
   }
 }
@@ -211,7 +245,14 @@ async function sealKeyTo(state: SecureVoiceSessionState, userId: string, reason:
  * join (no plaintext fallback). Returns the frame session for transport
  * attachment plus our announced deviceId.
  */
-export async function beginSecureVoiceSession(channelId: string): Promise<{ frames: FrameCryptoSession; deviceId: string }> {
+export async function beginSecureVoiceSession(
+  channelId: string,
+  // Supersession guard: two overlapping joins for the same channel both reach
+  // the registry, and the LATER-resolving one would tear down the session the
+  // winner already registered (killing a live call's worker). Checked after the
+  // fetch, immediately before this call claims the registry.
+  opts?: { isCurrent?: () => boolean },
+): Promise<{ frames: FrameCryptoSession; deviceId: string; epoch: string }> {
   if (!isSecureVoiceSupported()) {
     throw new SecureVoiceError('unsupported-platform', 'encoded-frame transforms are not available in this runtime');
   }
@@ -222,6 +263,9 @@ export async function beginSecureVoiceSession(channelId: string): Promise<{ fram
   // Authoritative member list up front — also proves WE are a member and the
   // E2E stack is alive before any media plumbing exists.
   const { members } = await service.fetchChannelDeviceLists(channelId);
+  if (opts?.isCurrent && !opts.isCurrent()) {
+    throw new SecureVoiceSupersededError();
+  }
 
   // A previous session for this channel (reconnect) is torn down completely:
   // fresh key, fresh epoch, seq=0 — the IV-reuse firewall.
@@ -237,18 +281,53 @@ export async function beginSecureVoiceSession(channelId: string): Promise<{ fram
     frames,
     peers: new Map(),
     members: new Set(members.map((m) => m.userId)),
-    pendingKeys: [],
+    pendingKeys: new Map(),
+    keyRequests: new Map(),
+    confirmTimer: null,
     chain: Promise.resolve(),
     ended: false,
   };
   frames.setLocalKey(state.keyId, state.currentKey);
   frames.onCounterLow(() => rotateFresh(channelId, 'counter'));
+  frames.onDecryptStalled((senderUserId, stalled) => onDecryptStalled(state, senderUserId, stalled));
+  // Revocations and directory changes emit no event we could subscribe to, so
+  // the only way to notice one mid-call is to re-ask the authoritative endpoint.
+  state.confirmTimer = setInterval(() => confirmMembership(channelId), MEMBERSHIP_RECHECK_MS);
   sessions.set(channelId, state);
   if (import.meta.env.DEV) {
     // Diagnostics surface for the Playwright ciphertext proof — DEV builds only
     (globalThis as { __voxSecureVoiceDiag?: () => Promise<unknown> }).__voxSecureVoiceDiag = () => frames.getDiagnostics();
   }
-  return { frames, deviceId: service.deviceId };
+  return { frames, deviceId: service.deviceId, epoch: state.epoch };
+}
+
+/**
+ * Decrypt watchdog (spec §21.4). A sender we hold no usable key for is
+ * inaudible and otherwise indistinguishable from silence, so ask them once for
+ * a re-seal and — if that does not heal it — surface them in the UI as a
+ * member we cannot hear.
+ */
+function onDecryptStalled(state: SecureVoiceSessionState, senderUserId: string, stalled: boolean): void {
+  if (state.ended) return;
+  const entry = state.keyRequests.get(senderUserId) ?? { lastAt: 0, timer: null };
+
+  if (!stalled) {
+    if (entry.timer) clearTimeout(entry.timer);
+    state.keyRequests.delete(senderUserId);
+    void clearPeerIssue(state.channelId, senderUserId);
+    return;
+  }
+
+  const now = Date.now();
+  if (now - entry.lastAt < KEY_REQUEST_COOLDOWN_MS) return;
+  entry.lastAt = now;
+  getSocket()?.emit('voice:e2e:key_request', { to: senderUserId });
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => {
+    if (state.ended) return;
+    void notifyPeerExcluded(state.channelId, senderUserId, new SecureVoiceError('no-key', 'no usable media key for this member'));
+  }, KEY_REQUEST_GRACE_MS);
+  state.keyRequests.set(senderUserId, entry);
 }
 
 export function getSecureVoiceSession(channelId: string): FrameCryptoSession | null {
@@ -260,20 +339,22 @@ export function getSecureVoiceSession(channelId: string): FrameCryptoSession | n
  * Vets them, then — for genuine ARRIVALS (not the initial replay) — ratchets
  * our key forward so they can never decrypt past audio.
  */
-export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id' | 'deviceId'>, opts: { initialReplay: boolean }): void {
+export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id' | 'deviceId' | 'epoch'>, opts: { initialReplay: boolean }): void {
   const state = sessions.get(channelId);
   if (!state) return;
   enqueue(state, async () => {
     if (state.peers.has(user.id)) return; // duplicate event
-    if (!user.deviceId) {
+    if (!user.deviceId || !user.epoch) {
       // An un-updated client in a secure voice channel cannot exchange keys.
       // Excluding them (never keying them) is participant-fatal, not
       // session-fatal: everyone else keeps talking.
-      console.warn(`[SecureVoice] ${user.id} joined without an E2E device — they will not be keyed`);
+      console.warn(`[SecureVoice] ${user.id} joined without an E2E device/epoch — they will not be keyed`);
+      state.pendingKeys.delete(user.id);
       return;
     }
     const peer: PeerState = {
       deviceId: user.deviceId,
+      epoch: user.epoch,
       vetted: false,
       recvEpoch: null,
       recvSeq: -1,
@@ -282,32 +363,39 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
     state.peers.set(user.id, peer);
     try {
       await vetParticipant(state, user.id, user.deviceId);
+      if (state.ended) return;
       peer.vetted = true;
     } catch (err) {
       state.peers.delete(user.id);
+      state.pendingKeys.delete(user.id);
       console.error(`[SecureVoice] Vetting ${user.id} failed — excluded from the session:`, err);
       await notifyPeerExcluded(channelId, user.id, err);
       return;
     }
 
-    if (opts.initialReplay) {
-      // Existing occupant seen during OUR join: they need our current key.
-      await sealKeyTo(state, user.id, 'initial');
-    } else {
-      // Genuine arrival: ratchet forward, then key the joiner with the
-      // POST-ratchet key. Frames switch AFTER the ratchet is installed;
-      // existing receivers trial-ratchet from the frames themselves.
-      state.currentKey = await ratchetVoiceKey(state.currentKey);
-      state.keyId += 1;
-      state.frames.setLocalKey(state.keyId, state.currentKey);
-      await sealKeyTo(state, user.id, 'ratchet');
-    }
-
-    // Drain any of THEIR keys that arrived before the vet completed
-    const buffered = state.pendingKeys.filter((k) => k.from === user.id);
-    state.pendingKeys = state.pendingKeys.filter((k) => k.from !== user.id);
-    for (const k of buffered) {
-      await processInboundKeyLocked(state, peer, k.from, k.fromDeviceId, k.envelope);
+    try {
+      if (opts.initialReplay) {
+        // Existing occupant seen during OUR join: they need our current key.
+        await sealKeyTo(state, user.id, 'initial');
+      } else {
+        // Genuine arrival: ratchet forward, then key the joiner with the
+        // POST-ratchet key. Frames switch AFTER the ratchet is installed;
+        // existing receivers trial-ratchet from the frames themselves.
+        state.currentKey = await ratchetVoiceKey(state.currentKey);
+        state.keyId += 1;
+        state.frames.setLocalKey(state.keyId, state.currentKey);
+        await sealKeyTo(state, user.id, 'ratchet');
+      }
+    } finally {
+      // Drain any of THEIR keys that arrived before the vet completed. In a
+      // `finally` because a failed seal must not strand them: nothing else
+      // ever drains this buffer, so they would be dead weight for the session
+      // AND we would stay deaf to a sender whose key we already hold.
+      const buffered = state.pendingKeys.get(user.id) ?? [];
+      state.pendingKeys.delete(user.id);
+      for (const k of buffered) {
+        await processInboundKeyLocked(state, peer, user.id, k.fromDeviceId, k.envelope);
+      }
     }
   });
 }
@@ -318,9 +406,18 @@ export function onParticipantLeft(channelId: string, userId: string): void {
   if (!state) return;
   enqueue(state, async () => {
     if (!state.peers.delete(userId)) return;
-    state.frames.removeRemote(userId);
+    forgetPeer(state, userId);
     await rotateFreshLocked(state);
   });
+}
+
+/** Drop every trace of a peer: receiver ring, buffered keys, watchdog timers. */
+function forgetPeer(state: SecureVoiceSessionState, userId: string): void {
+  state.frames.removeRemote(userId);
+  state.pendingKeys.delete(userId);
+  const req = state.keyRequests.get(userId);
+  if (req?.timer) clearTimeout(req.timer);
+  state.keyRequests.delete(userId);
 }
 
 /** Force a fresh rotation (counter exhaustion, membership confirmation). */
@@ -364,14 +461,28 @@ export function confirmMembership(channelId: string): void {
   enqueue(state, async () => {
     const selfId = await currentUserId();
     if (!selfId) return;
-    const { members } = await getE2EService(selfId).fetchChannelDeviceLists(channelId);
+    const { members, lists } = await getE2EService(selfId).fetchChannelDeviceLists(channelId);
+    if (state.ended) return;
     state.members = new Set(members.map((m) => m.userId));
     let removed = false;
-    for (const userId of [...state.peers.keys()]) {
+    for (const [userId, peer] of [...state.peers.entries()]) {
       if (!state.members.has(userId)) {
         state.peers.delete(userId);
-        state.frames.removeRemote(userId);
+        forgetPeer(state, userId);
         removed = true;
+        continue;
+      }
+      // The device we pinned at vet time may since have been REVOKED — the
+      // stolen-laptop response. Revocation is not a membership change, so no
+      // event fires and the server never evicts them; without this check we
+      // would keep sealing every future key to a device its owner disowned.
+      const list = lists.get(userId);
+      if (list && !list.devices.some((d) => d.deviceId === peer.deviceId)) {
+        console.warn(`[SecureVoice] Pinned device of ${userId} is no longer published — excluding`);
+        state.peers.delete(userId);
+        forgetPeer(state, userId);
+        removed = true;
+        await notifyPeerExcluded(channelId, userId, new SecureVoiceError('device-revoked', 'the pinned device was revoked'));
       }
     }
     if (removed) await rotateFreshLocked(state);
@@ -399,11 +510,14 @@ export function handleInboundKey(channelId: string, from: string, fromDeviceId: 
     if (!peer || !peer.vetted) {
       // The key beat the participant event onto the chain — buffer it; the
       // vet path drains this once the sender is confirmed. Dropping would
-      // deafen us to them until their next rotation.
-      if (state.pendingKeys.length < PENDING_KEYS_CAP) {
-        state.pendingKeys.push({ from, fromDeviceId, envelope });
+      // deafen us to them until their next rotation. Per-sender slots, so a
+      // flood from one member cannot displace anyone else's key.
+      const slots = state.pendingKeys.get(from) ?? [];
+      if (slots.length < PENDING_KEYS_PER_SENDER) {
+        slots.push({ fromDeviceId, envelope });
+        state.pendingKeys.set(from, slots);
       } else {
-        console.warn('[SecureVoice] Pending-key buffer full — dropping key from', from);
+        console.warn('[SecureVoice] Pending-key slots full — dropping key from', from);
       }
       return;
     }
@@ -427,8 +541,11 @@ async function processInboundKeyLocked(
     if (typeof envelope !== 'string' || !envelope.startsWith('{"v":1,"e":"olm1"')) {
       console.warn(`[SecureVoice] Non-envelope key payload from ${from} — excluding sender (legacy-key)`);
       state.peers.delete(from);
-      state.frames.removeRemote(from);
+      forgetPeer(state, from);
       await notifyPeerExcluded(channelId, from, new SecureVoiceError('legacy-key', 'key payload is not an olm1 envelope'));
+      // Excluding a peer we already keyed means our current key is in hands we
+      // no longer trust — rotate so they cannot follow the rest of the call.
+      await rotateFreshLocked(state);
       return;
     }
 
@@ -443,8 +560,13 @@ async function processInboundKeyLocked(
       if (err instanceof E2EIdentityChangedError) {
         await flagIdentityChanged(err.peerUserId);
         state.peers.delete(from);
-        state.frames.removeRemote(from);
+        forgetPeer(state, from);
         await notifyPeerExcluded(channelId, from, err);
+        // Spec §21.4 lists identity change as a FRESH-rotation trigger: the
+        // device we just stopped trusting already holds our current key, and
+        // the server keeps forwarding our audio to it (an identity change is
+        // not a membership change, so nothing evicts them).
+        await rotateFreshLocked(state);
         return;
       }
       throw err;
@@ -456,6 +578,13 @@ async function processInboundKeyLocked(
     // Binding checks against OUR state (importKeyShare pattern)
     if (p.scope !== e2eVoiceScope(channelId)) return;
     if (p.senderUserId !== from || p.senderDeviceId !== peer.deviceId) return;
+    // Sealed for THIS session of ours. Our epoch is minted per session and
+    // unpredictable, so an envelope the server withheld from an earlier
+    // session cannot be delivered now: without this, every other binding
+    // still holds after we rejoin (fresh sessions start with empty replay
+    // state), letting a dead generation be re-installed and the frames
+    // recorded under it replayed as live audio.
+    if (p.recipientEpoch !== state.epoch) return;
 
     // Epoch-aware replay/ordering — superseded epochs never come back
     if (p.epoch !== peer.recvEpoch) {
@@ -485,8 +614,33 @@ export function handleKeyRequest(channelId: string, from: string): void {
 export function endSecureVoiceSession(channelId: string): void {
   const state = sessions.get(channelId);
   if (!state) return;
+  endSessionState(state);
+}
+
+/**
+ * Tear down a specific session object. Callers holding a session handle must
+ * use this rather than the by-channel form: a superseded join whose session was
+ * already replaced would otherwise destroy the LIVE session registered under
+ * the same channel id.
+ */
+export function endSecureVoiceSessionFor(channelId: string, frames: FrameCryptoSession): void {
+  const state = sessions.get(channelId);
+  if (state && state.frames === frames) {
+    endSessionState(state);
+    return;
+  }
+  // Not the registered session (superseded) — destroy just this handle.
+  frames.destroy();
+}
+
+function endSessionState(state: SecureVoiceSessionState): void {
   state.ended = true;
-  sessions.delete(channelId);
+  if (sessions.get(state.channelId) === state) sessions.delete(state.channelId);
+  if (state.confirmTimer) clearInterval(state.confirmTimer);
+  state.confirmTimer = null;
+  for (const req of state.keyRequests.values()) if (req.timer) clearTimeout(req.timer);
+  state.keyRequests.clear();
+  state.pendingKeys.clear();
   state.currentKey.fill(0);
   state.frames.destroy();
 }
@@ -502,5 +656,18 @@ async function notifyPeerExcluded(channelId: string, userId: string, err: unknow
     store.markSecureVoicePeerExcluded?.(channelId, userId, err instanceof SecureVoiceError ? err.kind : 'identity-changed');
   } catch (notifyErr) {
     console.warn('[SecureVoice] Could not surface peer exclusion to the UI:', notifyErr);
+  }
+}
+
+/** A previously un-hearable member started decrypting — drop the warning. */
+async function clearPeerIssue(channelId: string, userId: string): Promise<void> {
+  try {
+    const { useVoiceStore } = await import('../../stores/voiceStore');
+    const store = useVoiceStore.getState() as {
+      clearSecureVoicePeerIssue?: (channelId: string, userId: string) => void;
+    };
+    store.clearSecureVoicePeerIssue?.(channelId, userId);
+  } catch (err) {
+    console.warn('[SecureVoice] Could not clear a peer issue in the UI:', err);
   }
 }

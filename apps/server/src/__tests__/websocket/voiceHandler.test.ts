@@ -1748,6 +1748,7 @@ function mockJoinableSecurePrisma(serverId = 'ssec') {
 }
 
 const DEVICE = 'device-aaaa1111';
+const EPOCH = 'epochAAAA0001';
 
 describe('voiceHandler — secure voice channels (spec §21)', () => {
   beforeEach(() => {
@@ -1946,5 +1947,40 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
     expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'sec-ev2', userId: 'sv-ev2' });
     // Idempotent on an already-empty channel
     cleanupChannelVoice(io as any, 'sec-ev2');
+  });
+
+  it('eviction CLEARS the evicted local socket so it cannot keep acting on the channel', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('sv-ev3', 'sock-sv-ev3');
+    io.sockets.sockets.set('sock-sv-ev3', socket); // local participant
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('sec-ev3', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
+    expect(socket.data.voiceChannelId).toBe('sec-ev3');
+
+    evictUserFromChannelVoice(io as any, 'sec-ev3', 'sv-ev3');
+
+    // Left set, the routed-event wrapper would keep running handlers for a
+    // channel this member was removed from (speaking/key_request injection).
+    expect(socket.data.voiceChannelId).toBeUndefined();
+  });
+
+  it('announces the E2E epoch to peers and mirrors it (recipient-session binding)', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('sv-ep', 'sock-sv-ep');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('sec-ep', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
+
+    const joined = io._emit.mock.calls.find((c) => c[0] === 'voice:user_joined');
+    expect(joined?.[1].user).toMatchObject({ deviceId: DEVICE, epoch: EPOCH });
+  });
+
+  it('strips a malformed epoch rather than relaying it', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('sv-ep2', 'sock-sv-ep2');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('sec-ep2', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: 'no' });
+
+    const joined = io._emit.mock.calls.find((c) => c[0] === 'voice:user_joined');
+    expect(joined?.[1].user.epoch).toBeUndefined();
   });
 });

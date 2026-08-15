@@ -40,6 +40,12 @@ export interface FrameCryptoSession {
   removeRemote(senderUserId: string): void;
   /** Fires when the sender counter approaches the ceiling — rotate. */
   onCounterLow(cb: () => void): void;
+  /**
+   * Decrypt watchdog (spec §21.4): fires when a sender's frames have been
+   * failing for a sustained run (`stalled: true`), and again when that sender
+   * decrypts successfully (`stalled: false`).
+   */
+  onDecryptStalled(cb: (senderUserId: string, stalled: boolean) => void): void;
   /** Fires on any worker/pipe failure — the session must fail closed. */
   onFatal(cb: (message: string) => void): void;
   getDiagnostics(): Promise<WorkerDiagnostics>;
@@ -55,14 +61,21 @@ export function createFrameCryptoSession(channelId: string, selfUserId: string):
   worker.postMessage({ op: 'init', channelId, selfUserId });
 
   let counterLowCb: (() => void) | null = null;
+  let stalledCb: ((senderUserId: string, stalled: boolean) => void) | null = null;
   let fatalCb: ((message: string) => void) | null = null;
   let nextRequestId = 1;
   const statsWaiters = new Map<number, (d: WorkerDiagnostics) => void>();
   let destroyed = false;
 
   worker.addEventListener('message', (event: MessageEvent) => {
-    const msg = event.data as { op?: string; requestId?: number; diagnostics?: WorkerDiagnostics; message?: string };
+    // A destroyed session must never call back into the store: a message
+    // already queued when destroy() ran would otherwise tear down whatever
+    // channel the user joined next.
+    if (destroyed) return;
+    const msg = event.data as { op?: string; requestId?: number; diagnostics?: WorkerDiagnostics; message?: string; senderUserId?: string };
     if (msg.op === 'counterLow') counterLowCb?.();
+    else if (msg.op === 'decryptStalled' && msg.senderUserId) stalledCb?.(msg.senderUserId, true);
+    else if (msg.op === 'decryptRecovered' && msg.senderUserId) stalledCb?.(msg.senderUserId, false);
     else if (msg.op === 'stats' && typeof msg.requestId === 'number') {
       statsWaiters.get(msg.requestId)?.(msg.diagnostics!);
       statsWaiters.delete(msg.requestId);
@@ -72,6 +85,7 @@ export function createFrameCryptoSession(channelId: string, selfUserId: string):
     }
   });
   worker.addEventListener('error', (event) => {
+    if (destroyed) return;
     console.error('[SecureVoice] Frame-crypto worker error:', event.message);
     fatalCb?.(event.message || 'worker error');
   });
@@ -104,6 +118,7 @@ export function createFrameCryptoSession(channelId: string, selfUserId: string):
     setRemoteKey(senderUserId, keyId, raw) { worker.postMessage({ op: 'setRecvKey', senderUserId, keyId, raw }); },
     removeRemote(senderUserId) { worker.postMessage({ op: 'removeSender', senderUserId }); },
     onCounterLow(cb) { counterLowCb = cb; },
+    onDecryptStalled(cb) { stalledCb = cb; },
     onFatal(cb) { fatalCb = cb; },
     getDiagnostics() {
       return new Promise<WorkerDiagnostics>((resolve, reject) => {
@@ -118,6 +133,9 @@ export function createFrameCryptoSession(channelId: string, selfUserId: string):
     },
     destroy() {
       destroyed = true;
+      counterLowCb = null;
+      stalledCb = null;
+      fatalCb = null;
       statsWaiters.clear();
       worker.terminate();
     },

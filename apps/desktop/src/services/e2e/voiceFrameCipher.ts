@@ -158,7 +158,23 @@ export function createReceiverCipher(channelId: string, senderUserId: string): R
     }
   }
 
+  function sameKeyBytes(a: Uint8Array, b: Uint8Array): boolean {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
+  }
+
   async function install(keyId: number, raw: Uint8Array): Promise<void> {
+    // Re-delivery of a generation we already hold (a key_request re-seal, or a
+    // duplicated envelope) must NOT reset the replay window: doing so would let
+    // the SFU re-inject the frames it already forwarded under this key — they
+    // still carry valid tags and AAD, so a wiped window replays them as live
+    // audio. Different bytes for the same keyId IS a new generation (a peer
+    // restarted their session), so that case still installs fresh state.
+    const existing = ring.get(keyId);
+    if (existing && sameKeyBytes(existing.raw, raw)) return;
+
     ring.set(keyId, {
       raw,
       key: await importGcmKey(raw, 'decrypt'),

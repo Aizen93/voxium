@@ -3338,6 +3338,7 @@ describe('E2EService — device-sealed payloads', () => {
       senderUserId: alice.userId,
       senderDeviceId: alice.service.deviceId,
       epoch: 'epochAAAA0001',
+      recipientEpoch: 'epochBBBB0001',
       seq: 0,
       keyId: 0,
       keyB64: 'A'.repeat(43),

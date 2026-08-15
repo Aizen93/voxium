@@ -75,12 +75,32 @@ function encryptTransform(): TransformStream<EncodedFrame, EncodedFrame> {
   });
 }
 
+/**
+ * Decrypt watchdog (spec §21.4): a sender whose frames keep failing is one
+ * whose key we never received — a lost seal, a dropped envelope, a full pending
+ * buffer. Nothing else notices, because a missing key is indistinguishable from
+ * silence at the audio layer. After a run of consecutive failures we ask the
+ * main thread to request a re-seal, and re-arm only once a frame decrypts, so a
+ * still-broken sender re-asks on the next run instead of spinning.
+ */
+const DECRYPT_FAIL_RUN = 50; // ~1s of 20ms Opus frames
+const failRuns = new Map<string, number>();
+
 function decryptTransform(senderUserId: string): TransformStream<EncodedFrame, EncodedFrame> {
   const receiver = requireReceiver(senderUserId);
   return new TransformStream({
     async transform(frame, controller) {
       const out = await receiver.decrypt(frame.data);
-      if (out === null) return; // droppable — never surface ciphertext as audio
+      if (out === null) {
+        const run = (failRuns.get(senderUserId) ?? 0) + 1;
+        failRuns.set(senderUserId, run);
+        if (run === DECRYPT_FAIL_RUN) self.postMessage({ op: 'decryptStalled', senderUserId });
+        return; // droppable — never surface ciphertext as audio
+      }
+      if (failRuns.get(senderUserId)) {
+        failRuns.set(senderUserId, 0);
+        self.postMessage({ op: 'decryptRecovered', senderUserId });
+      }
       frame.data = out;
       controller.enqueue(frame);
     },
@@ -98,9 +118,16 @@ function pipe(readable: ReadableStream, writable: WritableStream, transform: Tra
     });
 }
 
+// Ops are serialized: postMessage delivers in FIFO order, but the async work
+// inside (WebCrypto importKey) resolves in ANY order, so two overlapping
+// setSenderKey messages could land the OLDER generation last — the sender would
+// then encrypt under a key the main thread believes was superseded and never
+// sealed to anyone. The chain makes completion order match arrival order.
+let opChain: Promise<void> = Promise.resolve();
+
 self.addEventListener('message', (event: MessageEvent<InboundMsg>) => {
   const msg = event.data;
-  void (async () => {
+  opChain = opChain.then(async () => {
     switch (msg.op) {
       case 'init':
         channelId = msg.channelId;
@@ -114,9 +141,13 @@ self.addEventListener('message', (event: MessageEvent<InboundMsg>) => {
         break;
       case 'setRecvKey':
         await requireReceiver(msg.senderUserId).setKey(msg.keyId, msg.raw);
+        // A fresh key restarts the watchdog run, so if it still does not
+        // decrypt the next failure run asks again instead of staying silent.
+        failRuns.set(msg.senderUserId, 0);
         break;
       case 'removeSender':
         receivers.delete(msg.senderUserId);
+        failRuns.delete(msg.senderUserId);
         break;
       case 'attachEncrypt':
         pipe(msg.readable, msg.writable, encryptTransform());
@@ -132,7 +163,7 @@ self.addEventListener('message', (event: MessageEvent<InboundMsg>) => {
         break;
       }
     }
-  })().catch((err) => {
+  }).catch((err) => {
     self.postMessage({ op: 'workerError', message: String(err) });
   });
 });

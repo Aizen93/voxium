@@ -14,6 +14,7 @@ export function VoicePanel() {
     isScreenSharing, screenSharingUserId, startScreenShare, stopScreenShare,
   } = useVoiceStore();
   const secureVoicePeerIssues = useVoiceStore((s) => s.secureVoicePeerIssues);
+  const secureVoiceActive = useVoiceStore((s) => s.secureVoiceActive);
   const { channels } = useServerStore();
   const { user } = useAuthStore();
   const servers = useServerStore((s) => s.servers);
@@ -36,7 +37,11 @@ export function VoicePanel() {
   const isServerDeafened = localVoiceUser?.serverDeafened ?? false;
 
   const otherSharing = screenSharingUserId && screenSharingUserId !== user?.id;
-  const isSecureVoice = channel?.secure === true;
+  // From the live voice session, NOT the viewed server's channel list: a user
+  // browsing another server still has `channels` swapped out from under them,
+  // which would drop the E2E lock and the un-keyed-member warning mid-call and
+  // put the screen-share button back in an audio-only encrypted channel.
+  const isSecureVoice = secureVoiceActive || channel?.secure === true;
 
   return (
     <div data-testid="voice-panel" className="mx-1 mb-1 rounded-xl border border-vox-border bg-vox-bg-tertiary">

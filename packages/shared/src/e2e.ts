@@ -605,6 +605,16 @@ export interface E2EVoiceKeyPlaintext {
   senderUserId: string;
   senderDeviceId: string;
   epoch: string;
+  /**
+   * The RECIPIENT's session epoch, echoed from their voice:join announcement.
+   * Without it, a key sealed to us in an earlier session still satisfies every
+   * other binding after we rejoin (fresh sessions start with empty replay
+   * state), so a server that WITHHELD an envelope could deliver it later and
+   * re-install a dead generation — then replay the frames it recorded under
+   * it, which still carry valid tags and AAD. Receivers accept only their
+   * own current epoch, which no other party can predict.
+   */
+  recipientEpoch: string;
   /** Strictly increasing per epoch, starting at 0. */
   seq: number;
   /** Full key-generation counter for the sender's key. */
@@ -637,12 +647,13 @@ export function parseVoiceKeyPlaintext(raw: string): E2EVoiceKeyPlaintext | null
   if (typeof p.senderUserId !== 'string' || p.senderUserId.length === 0 || p.senderUserId.length > 64) return null;
   if (typeof p.senderDeviceId !== 'string' || !E2E_DEVICE_ID_RE.test(p.senderDeviceId)) return null;
   if (typeof p.epoch !== 'string' || !E2E_CALL_EPOCH_RE.test(p.epoch)) return null;
+  if (typeof p.recipientEpoch !== 'string' || !E2E_CALL_EPOCH_RE.test(p.recipientEpoch)) return null;
   if (typeof p.seq !== 'number' || !Number.isInteger(p.seq) || p.seq < 0) return null;
   if (typeof p.keyId !== 'number' || !Number.isInteger(p.keyId) || p.keyId < 0 || p.keyId >= VOICE_KEY_ID_MAX) return null;
   if (typeof p.keyB64 !== 'string' || !E2E_KEY_B64_RE.test(p.keyB64)) return null;
   if (p.reason !== 'initial' && p.reason !== 'ratchet' && p.reason !== 'fresh') return null;
   // Exactly the declared keys — extra fields are a smuggling channel
   const keys = Object.keys(p).sort();
-  if (keys.length !== 9 || keys.join(',') !== 'epoch,keyB64,keyId,reason,scope,senderDeviceId,senderUserId,seq,v') return null;
+  if (keys.length !== 10 || keys.join(',') !== 'epoch,keyB64,keyId,reason,recipientEpoch,scope,senderDeviceId,senderUserId,seq,v') return null;
   return obj as E2EVoiceKeyPlaintext;
 }

@@ -27,6 +27,7 @@ function valid(over: Partial<E2EVoiceKeyPlaintext> = {}): E2EVoiceKeyPlaintext {
     senderUserId: 'user-1',
     senderDeviceId: 'device-aaaa1111',
     epoch: 'epoch-abc123',
+    recipientEpoch: 'epoch-xyz789',
     seq: 0,
     keyId: 0,
     keyB64: KEY_B64,
@@ -58,6 +59,7 @@ describe('voice-key plaintext build/parse', () => {
       { senderUserId: '' },
       { senderDeviceId: 'bad device!' },
       { epoch: 'no' },                  // too short for the epoch regex
+      { recipientEpoch: 'no' },         // the recipient-session binding (§21)
       { seq: -1 },
       { seq: 1.5 },
       { keyId: -1 },
@@ -79,6 +81,12 @@ describe('voice-key plaintext build/parse', () => {
     const missing = { ...valid() } as Record<string, unknown>;
     delete missing.keyB64;
     expect(parseVoiceKeyPlaintext(JSON.stringify(missing))).toBeNull();
+
+    // A pre-binding sender (no recipientEpoch) must not parse: accepting it
+    // would reopen dead-session key installs (spec §21).
+    const unbound = { ...valid() } as Record<string, unknown>;
+    delete unbound.recipientEpoch;
+    expect(parseVoiceKeyPlaintext(JSON.stringify(unbound))).toBeNull();
   });
 
   it('rejects oversized plaintexts', () => {

@@ -40,6 +40,7 @@ const frameSession = vi.hoisted(() => ({
   attachSender: vi.fn(),
   attachReceiver: vi.fn(),
   onCounterLow: vi.fn(),
+  onDecryptStalled: vi.fn(),
   onFatal: vi.fn(),
   getDiagnostics: vi.fn(),
   destroy: vi.fn(),
@@ -58,8 +59,9 @@ vi.mock('../../stores/e2eStore', () => ({
   useE2EStore: { getState: () => ({ flagIdentityChanged }) },
 }));
 const markExcluded = vi.fn();
+const clearIssue = vi.fn();
 vi.mock('../../stores/voiceStore', () => ({
-  useVoiceStore: { getState: () => ({ markSecureVoicePeerExcluded: markExcluded }) },
+  useVoiceStore: { getState: () => ({ markSecureVoicePeerExcluded: markExcluded, clearSecureVoicePeerIssue: clearIssue }) },
 }));
 
 import {
@@ -76,7 +78,10 @@ import {
 
 const CH = 'chan-1';
 const PEER_DEVICE = 'device-peer0001';
+const PEER_EPOCH = 'peerEpoch0001';
 const KEY_B64 = 'A'.repeat(43);
+/** OUR session epoch — peers must echo it back as recipientEpoch. */
+let myEpoch = '';
 
 const flush = async () => {
   // The session chain nests dynamic imports + async steps — settle generously
@@ -99,7 +104,8 @@ function peerKeyPlaintext(over: Partial<Parameters<typeof buildVoiceKeyPlaintext
     scope: e2eVoiceScope(CH),
     senderUserId: 'peer',
     senderDeviceId: PEER_DEVICE,
-    epoch: 'peerEpoch0001',
+    epoch: PEER_EPOCH,
+    recipientEpoch: myEpoch,
     seq: 0,
     keyId: 0,
     keyB64: KEY_B64,
@@ -115,6 +121,7 @@ async function begunSession() {
   fetchDeviceList.mockResolvedValue(deviceListFor(PEER_DEVICE));
   encryptToDevice.mockResolvedValue(ENV);
   const session = await beginSecureVoiceSession(CH);
+  myEpoch = session.epoch;
   return session;
 }
 
@@ -142,7 +149,7 @@ describe('beginSecureVoiceSession', () => {
 describe('participant lifecycle', () => {
   it('initial replay: vets the peer and seals the CURRENT key (no ratchet)', async () => {
     await begunSession();
-    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
     await flush();
 
     expect(fetchDeviceList).toHaveBeenCalledWith('peer', true);
@@ -154,7 +161,7 @@ describe('participant lifecycle', () => {
 
   it('genuine ARRIVAL ratchets our key and seals the post-ratchet key to the joiner', async () => {
     await begunSession();
-    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: false });
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: false });
     await flush();
 
     expect(frameSession.setLocalKey).toHaveBeenLastCalledWith(1, expect.any(Uint8Array));
@@ -172,8 +179,8 @@ describe('participant lifecycle', () => {
     });
     fetchDeviceList.mockImplementation(async (userId: string) =>
       userId === 'other' ? deviceListFor('device-other001') : deviceListFor(PEER_DEVICE));
-    onParticipantJoined(CH, { id: 'other', deviceId: 'device-other001' }, { initialReplay: true });
-    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'other', deviceId: 'device-other001', epoch: PEER_EPOCH }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
     await flush();
     encryptToDevice.mockClear();
     frameSession.setLocalKey.mockClear();
@@ -194,7 +201,7 @@ describe('participant lifecycle', () => {
   it('a participant missing from the AUTHORITATIVE list is excluded (refetch once, fail closed)', async () => {
     await begunSession();
     fetchChannelDeviceLists.mockResolvedValue({ members: [{ userId: 'me', isCreator: true }], lists: new Map(), unverifiableUserIds: [] });
-    onParticipantJoined(CH, { id: 'stranger', deviceId: PEER_DEVICE }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'stranger', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
     await flush();
 
     expect(encryptToDevice).not.toHaveBeenCalled();
@@ -204,7 +211,7 @@ describe('participant lifecycle', () => {
   it('a device outside the verified list is excluded (server-invented device)', async () => {
     await begunSession();
     fetchDeviceList.mockResolvedValue(deviceListFor('device-genuine1'));
-    onParticipantJoined(CH, { id: 'peer', deviceId: 'device-imposter' }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'peer', deviceId: 'device-imposter', epoch: PEER_EPOCH }, { initialReplay: true });
     await flush();
 
     expect(encryptToDevice).not.toHaveBeenCalled();
@@ -214,7 +221,7 @@ describe('participant lifecycle', () => {
   it('an identity change while sealing flags the warning UX and excludes the peer', async () => {
     await begunSession();
     fetchDeviceList.mockRejectedValueOnce(new E2EIdentityChangedError('peer'));
-    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
     await flush();
 
     expect(flagIdentityChanged).toHaveBeenCalledWith('peer');
@@ -224,7 +231,7 @@ describe('participant lifecycle', () => {
 
   it('confirmMembership removes peers the endpoint no longer lists and rotates fresh', async () => {
     await begunSession();
-    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
     await flush();
     frameSession.setLocalKey.mockClear();
 
@@ -240,7 +247,7 @@ describe('participant lifecycle', () => {
 describe('inbound keys', () => {
   async function withVettedPeer() {
     await begunSession();
-    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
     await flush();
     frameSession.setRemoteKey.mockClear();
   }
@@ -318,7 +325,7 @@ describe('inbound keys', () => {
     expect(frameSession.setRemoteKey).not.toHaveBeenCalled();
 
     // The participant event lands, the vet passes, the buffer drains
-    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
     await flush();
 
     expect(frameSession.setRemoteKey).toHaveBeenCalledWith('peer', 0, expect.any(Uint8Array));
@@ -337,13 +344,95 @@ describe('inbound keys', () => {
   });
 });
 
+describe('cross-session and exclusion hardening', () => {
+  async function withVettedPeer() {
+    await begunSession();
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    await flush();
+    frameSession.setRemoteKey.mockClear();
+  }
+
+  it('REJECTS a key sealed to a previous session of ours (withheld-envelope replay)', async () => {
+    await withVettedPeer();
+    // Same peer, same device, unseen epoch, fresh seq — everything a stale
+    // envelope from our last session would carry, EXCEPT our current epoch.
+    decryptFromDevice.mockResolvedValueOnce(peerKeyPlaintext({ recipientEpoch: 'staleEpoch01', keyId: 7, seq: 9 }));
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+
+    expect(frameSession.setRemoteKey).not.toHaveBeenCalled();
+  });
+
+  it('seals our key with the RECIPIENT epoch each peer announced', async () => {
+    await begunSession();
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    await flush();
+
+    expect(encryptToDevice.mock.calls[0][2]).toContain(`"recipientEpoch":"${PEER_EPOCH}"`);
+  });
+
+  it('identity change on an inbound key ROTATES — the untrusted device loses future audio', async () => {
+    await withVettedPeer();
+    frameSession.setLocalKey.mockClear();
+    decryptFromDevice.mockRejectedValueOnce(new E2EIdentityChangedError('peer'));
+
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'identity-changed');
+    expect(frameSession.removeRemote).toHaveBeenCalledWith('peer');
+    expect(frameSession.setLocalKey).toHaveBeenCalledWith(1, expect.any(Uint8Array));
+  });
+
+  it('a REVOKED pinned device is excluded and triggers a fresh rotation', async () => {
+    await withVettedPeer();
+    frameSession.setLocalKey.mockClear();
+    // Still a member, but the device we pinned is gone from their list
+    fetchChannelDeviceLists.mockResolvedValue({
+      members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }],
+      lists: new Map([['peer', deviceListFor('device-replaced1')]]),
+      unverifiableUserIds: [],
+    });
+
+    confirmMembership(CH);
+    await flush();
+
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'device-revoked');
+    expect(frameSession.removeRemote).toHaveBeenCalledWith('peer');
+    expect(frameSession.setLocalKey).toHaveBeenCalledWith(1, expect.any(Uint8Array));
+  });
+
+  it('per-sender pending slots: a flooder cannot displace an honest sender key', async () => {
+    await begunSession();
+    // A co-present member floods well-formed envelopes before anyone is vetted
+    for (let i = 0; i < 12; i++) handleInboundKey(CH, 'flooder', 'device-flood001', ENV);
+    // The honest sender's key arrives after the flood
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+    decryptFromDevice.mockResolvedValueOnce(peerKeyPlaintext({ seq: 0 }));
+
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    await flush();
+
+    expect(frameSession.setRemoteKey).toHaveBeenCalledWith('peer', 0, expect.any(Uint8Array));
+  });
+
+  it('a peer joining without an epoch is never keyed (un-updated client)', async () => {
+    await begunSession();
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
+    await flush();
+
+    expect(encryptToDevice).not.toHaveBeenCalled();
+  });
+});
+
 describe('teardown', () => {
   it('endSecureVoiceSession destroys the frame session and silences the module', async () => {
     await begunSession();
     endSecureVoiceSession(CH);
     expect(frameSession.destroy).toHaveBeenCalled();
 
-    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
     await flush();
     expect(encryptToDevice).not.toHaveBeenCalled();
   });

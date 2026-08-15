@@ -205,6 +205,11 @@ export interface VoiceUser {
   /** E2E device this participant joined SECURE voice from — peers seal media
    *  keys to exactly it (spec §21). Absent for plaintext channels. */
   deviceId?: string;
+  /** This participant's SECURE voice session epoch. Peers echo it back as
+   *  `recipientEpoch` inside every sealed key so a key from one of their dead
+   *  sessions can never be installed in a later one (spec §21). The server
+   *  only shape-checks and relays it; the binding is cryptographic. */
+  epoch?: string;
 }
 
 // ─── mediasoup SFU ──────────────────────────────────────────────────────────
@@ -391,9 +396,11 @@ export interface ServerToClientEvents {
 export interface ClientToServerEvents {
   'channel:join': (channelId: string) => void;
   'channel:leave': (channelId: string) => void;
-  // deviceId: the E2E device the client will seal/open media keys on — only
-  // honored for SECURE voice channels, shape-validated server-side (spec §21)
-  'voice:join': (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => void;
+  // deviceId: the E2E device the client will seal/open media keys on; epoch:
+  // this join's media-session id, which peers echo back inside sealed keys so
+  // dead-session keys cannot be re-installed. Both are only honored for SECURE
+  // voice channels and shape-validated server-side (spec §21)
+  'voice:join': (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string; epoch?: string }) => void;
   'voice:leave': () => void;
   'voice:mute': (muted: boolean) => void;
   'voice:deaf': (deafened: boolean) => void;

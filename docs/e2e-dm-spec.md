@@ -1285,6 +1285,17 @@ the §20 precedent) after vetting against BOTH the authoritative member
 endpoint (`GET /e2e/channels/:id/devices` — socket events are hints, §19.3)
 and the signature-checked verified device list.
 
+Every sealed key also carries `recipientEpoch`: the RECIPIENT's session epoch,
+announced alongside their `deviceId` at `voice:join` and echoed back inside the
+envelope. Receivers accept only their own current epoch. Without it, a key
+sealed in an earlier session still satisfies every other binding once we
+rejoin — sessions start with empty replay state by design — so a server that
+WITHHELD an envelope could deliver it later, re-install a dead generation, and
+replay the frames it recorded under it (their tags and AAD remain valid). The
+epoch is unpredictable to everyone else, so only the party we are actually
+talking to can produce a key we will install; the server relaying a wrong
+epoch can at worst deny, never replay.
+
 ### 21.4 Rotation
 
 - **Arrival:** every sender hash-ratchets its key forward (HKDF-SHA256,
@@ -1296,10 +1307,23 @@ and the signature-checked verified device list.
 - **Departure / kick / device revocation / identity change:** fresh random
   keys sealed to everyone remaining — no future audio for the leaver.
   Server-side, secure-member removal force-evicts live voice cluster-wide.
+  Every exclusion is a rotation trigger, including ones discovered mid-call
+  (an inbound key that fails its identity pin, or a `legacy-key` payload):
+  the excluded device already holds the current key and the server keeps
+  forwarding audio to it, since neither event is a membership change.
+  Revocation has no event of its own, so participants re-ask the authoritative
+  endpoint periodically and drop any peer whose PINNED device has left their
+  published list — the stolen-device response.
 - Receivers hold a 3-generation key ring per sender (rotation races), and
   sealed key messages carry §20-style epoch/seq replay state (superseded
-  epochs never return). A lost key heals via one `voice:e2e:key_request` +
-  a decrypt watchdog surfacing "can't be keyed" members in the UI.
+  epochs never return). Re-installing a generation already held preserves its
+  replay window — a re-seal must never re-open frames the SFU already sent.
+- A lost key heals via one `voice:e2e:key_request` + a decrypt watchdog: the
+  frame worker reports a sustained run of undecryptable frames per sender, the
+  main thread asks that sender once (rate-limited) for a re-seal, and a sender
+  still unheard after the grace period is surfaced in the UI as a member that
+  cannot be keyed. Without the requester side, a single lost envelope leaves a
+  receiver permanently, silently deaf to that participant.
 
 ### 21.5 Hard requirements
 

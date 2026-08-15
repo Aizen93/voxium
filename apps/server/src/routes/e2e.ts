@@ -931,6 +931,17 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
     // INSIDE the write transaction below: channel membership is mutable, and a
     // member removed concurrently must not be handed a share that commits
     // after their membership row is gone.
+    // Only DM and secure-channel scopes may be stored here. Voice media keys
+    // (`chv:` — kind 'voice-channel') travel the opaque voice:e2e:key socket
+    // relay and never this endpoint, so a chv: share is always illegitimate;
+    // without this guard it would match NEITHER gate below and be persisted
+    // unchecked (no membership check, no recipient-device check).
+    const unsupported = valid.find((s) => {
+      const kind = parseE2EScope(s.conversationId).kind;
+      return kind !== 'dm' && kind !== 'channel';
+    });
+    if (unsupported) throw new BadRequestError('Unsupported key share scope');
+
     const dmShares = valid.filter((s) => parseE2EScope(s.conversationId).kind === 'dm');
     const channelShares = valid.filter((s) => parseE2EScope(s.conversationId).kind === 'channel');
 

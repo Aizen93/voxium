@@ -15,7 +15,7 @@ import {
   relayVoiceEvent, resolveOrClaimChannelOwner, dropShim,
 } from './voiceRelay';
 import { hasChannelPermission, hasServerPermission, getHighestRolePosition } from '../utils/permissionCalculator';
-import { Permissions, E2E_DEVICE_ID_RE, VOICE_KEY_ENVELOPE_MAX } from '@voxium/shared';
+import { Permissions, E2E_DEVICE_ID_RE, E2E_CALL_EPOCH_RE, VOICE_KEY_ENVELOPE_MAX } from '@voxium/shared';
 
 // Re-exported for existing consumers (voiceCluster, tests)
 export { reapVoiceChannelMirror };
@@ -46,6 +46,19 @@ interface UserMediaState {
    *  Shape-validated routing metadata: peers seal media keys to it, and the
    *  cryptographic binding happens client-side. */
   e2eDeviceId?: string;
+  /** E2E media-session epoch announced on join — peers echo it inside sealed
+   *  keys so a dead session's key cannot be installed later. Opaque here. */
+  e2eEpoch?: string;
+}
+
+/** The E2E announcement fields mirrored/broadcast alongside voice state. */
+type E2EAnnouncement = Pick<UserMediaState, 'e2eDeviceId' | 'e2eEpoch'>;
+
+function e2eMirrorFields(e2e?: E2EAnnouncement): Record<string, string> {
+  return {
+    ...(e2e?.e2eDeviceId && { e2eDeviceId: e2e.e2eDeviceId }),
+    ...(e2e?.e2eEpoch && { e2eEpoch: e2e.e2eEpoch }),
+  };
 }
 
 // channelId → Map<userId, UserMediaState>
@@ -75,9 +88,9 @@ function findUserVoiceChannel(userId: string): string | undefined {
 // voice:screen:{channelId}         — String: userId (screen sharer)
 // voice:active                     — Set of channelIds with active voice users
 
-function mirrorVoiceJoin(channelId: string, serverId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false, e2eDeviceId?: string): void {
+function mirrorVoiceJoin(channelId: string, serverId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false, e2e?: E2EAnnouncement): void {
   getRedis().multi()
-    .hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID(), ...(e2eDeviceId && { e2eDeviceId }) }))
+    .hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID(), ...e2eMirrorFields(e2e) }))
     .set(`voice:channel:server:${channelId}`, serverId)
     .set(`voice:channel:node:${channelId}`, NODE_ID())
     .set(`voice:user:${userId}`, channelId)
@@ -101,11 +114,11 @@ function mirrorVoiceLeave(channelId: string, userId: string, channelEmpty: boole
   pipeline.exec().catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
 
-function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false, e2eDeviceId?: string): void {
-  // e2eDeviceId must travel with every rewrite — this hSet replaces the whole
-  // JSON, and erasing the announced device would strip the routing hint peers
-  // use to seal media keys (the DM-call rebind bug class).
-  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID(), ...(e2eDeviceId && { e2eDeviceId }) })).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+function mirrorVoiceStateUpdate(channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted = false, serverDeafened = false, e2e?: E2EAnnouncement): void {
+  // The E2E announcement must travel with every rewrite — this hSet replaces
+  // the whole JSON, and erasing it would strip the hints peers use to seal
+  // media keys (the DM-call rebind bug class).
+  getRedis().hSet(`voice:channel:users:${channelId}`, userId, JSON.stringify({ selfMute, selfDeaf, serverMuted, serverDeafened, nodeId: NODE_ID(), ...e2eMirrorFields(e2e) })).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
 
 // ─── Persistent server-mute/deafen (survives reconnect) ─────────────────────
@@ -260,7 +273,7 @@ export function createVoiceHandlers(
   };
 
   // ── voice:join ────────────────────────────────────────────────────────
-  on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => {
+  on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string; epoch?: string }) => {
     if (!socketRateLimit(socket, 'voice:join', 10)) return;
     if (!isString(channelId)) return;
     if (!isFeatureEnabled('voice')) {
@@ -286,6 +299,10 @@ export function createVoiceHandlers(
     const e2eDeviceId =
       channel.secure && typeof state?.deviceId === 'string' && E2E_DEVICE_ID_RE.test(state.deviceId)
         ? state.deviceId
+        : undefined;
+    const e2eEpoch =
+      channel.secure && typeof state?.epoch === 'string' && E2E_CALL_EPOCH_RE.test(state.epoch)
+        ? state.epoch
         : undefined;
 
     const membership = await prisma.serverMember.findUnique({
@@ -386,6 +403,7 @@ export function createVoiceHandlers(
       consumers: new Map(),
       rtpCapabilities: null,
       ...(e2eDeviceId && { e2eDeviceId }),
+      ...(e2eEpoch && { e2eEpoch }),
     };
 
     // Defensive: the channel Map was created before the awaits above; re-ensure it exists
@@ -396,6 +414,10 @@ export function createVoiceHandlers(
       channelUsersMap = new Map();
       voiceChannelUsers.set(channelId, channelUsersMap);
       channelServerMap.set(channelId, channel.serverId);
+      // A drain deletes the secure flag too — restore it with the rest of the
+      // channel state or this occupancy runs UNMARKED: diagnostics would stop
+      // redacting it, and the secure produce/force-move guards would not fire.
+      if (channel.secure) secureVoiceChannels.add(channelId);
     }
     channelUsersMap.set(userId, userMedia);
 
@@ -424,7 +446,7 @@ export function createVoiceHandlers(
     }
 
     // Mirror to Redis for cross-node visibility
-    mirrorVoiceJoin(channelId, channel.serverId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened, userMedia.e2eDeviceId);
+    mirrorVoiceJoin(channelId, channel.serverId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened, userMedia);
 
     // Fetch user info
     const user = await prisma.user.findUnique({
@@ -459,6 +481,7 @@ export function createVoiceHandlers(
             serverDeafened: uState?.serverDeafened ?? false,
             speaking: false,
             ...(uState?.e2eDeviceId && { deviceId: uState.e2eDeviceId }),
+            ...(uState?.e2eEpoch && { epoch: uState.e2eEpoch }),
           };
         });
 
@@ -475,7 +498,7 @@ export function createVoiceHandlers(
       // can VIEW this channel is subscribed to it (see socketServer connect +
       // syncChannelVisibilityRooms). Broadcasting server-wide leaked private
       // voice channel occupancy to members without VIEW_CHANNEL (HIGH-8).
-      const voiceUser = { ...user, selfMute: userMedia.selfMute, selfDeaf: userMedia.selfDeaf, serverMuted: userMedia.serverMuted, serverDeafened: userMedia.serverDeafened, speaking: false, ...(userMedia.e2eDeviceId && { deviceId: userMedia.e2eDeviceId }) };
+      const voiceUser = { ...user, selfMute: userMedia.selfMute, selfDeaf: userMedia.selfDeaf, serverMuted: userMedia.serverMuted, serverDeafened: userMedia.serverDeafened, speaking: false, ...(userMedia.e2eDeviceId && { deviceId: userMedia.e2eDeviceId }), ...(userMedia.e2eEpoch && { epoch: userMedia.e2eEpoch }) };
       io.to(`channel:${channelId}`).emit('voice:user_joined', {
         channelId,
         serverId: channel.serverId,
@@ -814,7 +837,7 @@ export function createVoiceHandlers(
       resumeUserAudioIfAllowed(userMedia);
     }
 
-    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened, userMedia.e2eDeviceId);
+    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened, userMedia);
     emitStateUpdate(channelId, userId, userMedia);
   });
 
@@ -839,7 +862,7 @@ export function createVoiceHandlers(
       pauseUserAudio(userMedia);
     }
 
-    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened, userMedia.e2eDeviceId);
+    mirrorVoiceStateUpdate(channelId, userId, userMedia.selfMute, userMedia.selfDeaf, userMedia.serverMuted, userMedia.serverDeafened, userMedia);
     emitStateUpdate(channelId, userId, userMedia);
   });
 
@@ -906,7 +929,7 @@ export function createVoiceHandlers(
       resumeUserAudioIfAllowed(targetMedia);
     }
 
-    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened, targetMedia.e2eDeviceId);
+    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened, targetMedia);
     emitStateUpdate(channelId, targetId, targetMedia);
   });
 
@@ -958,7 +981,7 @@ export function createVoiceHandlers(
       pauseUserAudio(targetMedia);
     }
 
-    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened, targetMedia.e2eDeviceId);
+    mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened, targetMedia);
     emitStateUpdate(channelId, targetId, targetMedia);
   });
 
@@ -1400,9 +1423,26 @@ export function cleanupChannelVoice(
       leave: (room) => { io.in(media.socketId).socketsLeave(room); },
     };
     leaveCurrentVoiceChannel(io, shim, uid);
+    clearEvictedLocalSocket(io, media.socketId);
     shimHandlerTables.delete(media.socketId);
     dropShim(media.socketId);
   }
+}
+
+/**
+ * Shim-based eviction clears voiceChannelId on the SHIM. When the evicted
+ * participant is local to this (Router-owning) node, their real Socket keeps
+ * the id — and the routed-event wrapper would go on running handlers for a
+ * channel they were evicted from (a removed member could still inject
+ * voice:speaking / key_request events into an E2E channel's room). Mirrors the
+ * real-socket clear cleanupServerVoice already does.
+ */
+function clearEvictedLocalSocket(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  socketId: string,
+): void {
+  const real = io.sockets.sockets.get(socketId);
+  if (real) real.data.voiceChannelId = undefined;
 }
 
 /**
@@ -1427,6 +1467,7 @@ export function evictUserFromChannelVoice(
     leave: (room) => { io.in(media.socketId).socketsLeave(room); },
   };
   leaveCurrentVoiceChannel(io, shim, userId);
+  clearEvictedLocalSocket(io, media.socketId);
   shimHandlerTables.delete(media.socketId);
   dropShim(media.socketId);
 }

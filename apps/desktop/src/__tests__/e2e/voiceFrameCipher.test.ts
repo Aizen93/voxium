@@ -112,6 +112,33 @@ describe('voiceFrameCipher — replay window', () => {
     expect(await receiver.decrypt(frames[0])).toBeNull();
     expect(receiver.stats().replayed).toBe(2);
   });
+
+  it('RE-INSTALLING the same generation keeps the window (key_request re-seal)', async () => {
+    const { sender, receiver, key } = await pair();
+
+    const frames: ArrayBuffer[] = [];
+    for (let i = 0; i < 3; i++) frames.push((await sender.encrypt(frame([i])))!);
+    for (const f of frames) expect(await receiver.decrypt(f)).not.toBeNull();
+
+    // The same key generation is delivered again — a re-seal answering a
+    // key_request, or a duplicated envelope. If this reset the window, the SFU
+    // could re-inject everything it already forwarded under this key: the tags
+    // and AAD are still valid, so it would play as live audio.
+    await receiver.setKey(0, key);
+
+    for (const f of frames) expect(await receiver.decrypt(f)).toBeNull();
+    expect(receiver.stats().replayed).toBe(3);
+  });
+
+  it('a DIFFERENT key under the same keyId still installs (peer restarted)', async () => {
+    const { receiver } = await pair();
+    const other = randomKey();
+    await receiver.setKey(0, other);
+
+    const restarted = createSenderCipher(CH, ME);
+    await restarted.setKey(0, other);
+    expect(await receiver.decrypt((await restarted.encrypt(frame([9])))!)).not.toBeNull();
+  });
 });
 
 describe('voiceFrameCipher — trial ratchet (member arrival, spec §21)', () => {

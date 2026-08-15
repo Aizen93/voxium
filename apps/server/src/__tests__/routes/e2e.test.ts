@@ -3233,6 +3233,22 @@ describe('E2E routes — secure-channel keyshare gate', () => {
     expect(prisma.e2EKeyShare.createMany).toHaveBeenCalled();
   });
 
+  it('REJECTS voice-channel (chv:) scopes outright — they match neither gate', async () => {
+    // Voice media keys travel the opaque voice:e2e:key socket relay, never
+    // this endpoint. A chv: share is kind 'voice-channel', so it would fall
+    // through both the DM participant check and the channel membership check
+    // and still be persisted — an unauthenticated inbox write.
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({
+        deviceId: DEVICE_A,
+        shares: [share({ conversationId: 'chv:sec-1', recipientUserId: 'user-9', recipientDeviceId: 'device-dddd4444' })],
+      });
+
+    expect(res.status).toBe(400);
+    expect(prisma.e2EKeyShare.createMany).not.toHaveBeenCalled();
+  });
+
   it('rejects channel shares when the SENDER is not a member', async () => {
     vi.mocked(prisma.channelMember.findMany).mockResolvedValue([
       { channelId: 'sec-1', userId: 'user-2' }, // sender user-1 missing
