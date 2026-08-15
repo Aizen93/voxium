@@ -85,6 +85,14 @@ function encryptTransform(): TransformStream<EncodedFrame, EncodedFrame> {
  */
 const DECRYPT_FAIL_RUN = 50; // ~1s of 20ms Opus frames
 const failRuns = new Map<string, number>();
+/**
+ * Senders we have reported as stalled. Tracked SEPARATELY from the run counter
+ * because installing a key resets that counter: without this, the first
+ * successful decrypt after a heal sees a zeroed counter, never reports the
+ * recovery, and the main thread's grace timer flags a member the user can
+ * hear perfectly — for the rest of the call.
+ */
+const stalledSenders = new Set<string>();
 
 function decryptTransform(senderUserId: string): TransformStream<EncodedFrame, EncodedFrame> {
   const receiver = requireReceiver(senderUserId);
@@ -94,11 +102,17 @@ function decryptTransform(senderUserId: string): TransformStream<EncodedFrame, E
       if (out === null) {
         const run = (failRuns.get(senderUserId) ?? 0) + 1;
         failRuns.set(senderUserId, run);
-        if (run === DECRYPT_FAIL_RUN) self.postMessage({ op: 'decryptStalled', senderUserId });
+        // Re-report every DECRYPT_FAIL_RUN frames while the stall persists —
+        // a re-seal that does not actually heal must be able to trigger
+        // another ask. The main thread throttles the resulting key_requests.
+        if (run % DECRYPT_FAIL_RUN === 0) {
+          stalledSenders.add(senderUserId);
+          self.postMessage({ op: 'decryptStalled', senderUserId });
+        }
         return; // droppable — never surface ciphertext as audio
       }
-      if (failRuns.get(senderUserId)) {
-        failRuns.set(senderUserId, 0);
+      failRuns.set(senderUserId, 0);
+      if (stalledSenders.delete(senderUserId)) {
         self.postMessage({ op: 'decryptRecovered', senderUserId });
       }
       frame.data = out;
@@ -148,6 +162,7 @@ self.addEventListener('message', (event: MessageEvent<InboundMsg>) => {
       case 'removeSender':
         receivers.delete(msg.senderUserId);
         failRuns.delete(msg.senderUserId);
+        stalledSenders.delete(msg.senderUserId);
         break;
       case 'attachEncrypt':
         pipe(msg.readable, msg.writable, encryptTransform());

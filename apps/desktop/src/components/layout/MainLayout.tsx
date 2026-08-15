@@ -4,7 +4,7 @@ import { translateServerError } from '../../utils/serverErrors';
 import i18n from '../../i18n';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
-import { useVoiceStore } from '../../stores/voiceStore';
+import { useVoiceStore, teardownSecureVoice } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useE2EStore } from '../../stores/e2eStore';
@@ -608,6 +608,10 @@ export function MainLayout() {
               voiceState.localStream.getTracks().forEach((track) => track.stop());
             }
             voiceState.cleanupSFU();
+            // The E2E session is NOT part of cleanupSFU: without this the
+            // crypto worker, the media key and the membership poll outlive the
+            // deleted server entirely.
+            teardownSecureVoice();
             useVoiceStore.setState({
               activeChannelId: null,
               localStream: null,
@@ -616,6 +620,8 @@ export function MainLayout() {
               isScreenSharing: false,
               screenSharingUserId: null,
               remoteScreenStream: null,
+              secureVoiceActive: false,
+              secureVoicePeerIssues: {},
             });
           }
         }

@@ -68,7 +68,6 @@ interface PeerState {
   vetted: boolean;
   recvEpoch: string | null;
   recvSeq: number;
-  seenRecvEpochs: Set<string>;
 }
 
 interface SecureVoiceSessionState {
@@ -92,6 +91,15 @@ interface SecureVoiceSessionState {
    * honest keys we actually need (the relay accepts 120/min per sender).
    */
   pendingKeys: Map<string, Array<{ fromDeviceId: string; envelope: unknown }>>;
+  /**
+   * Sender epochs already seen, per userId, for the WHOLE session — NOT inside
+   * PeerState. A peer's PeerState is destroyed and rebuilt on every one of
+   * their reconnects (voice:join force-leaves first, so we see left+joined),
+   * and rebuilding the history empty would let an envelope withheld from one
+   * of their earlier sessions install a dead generation afterwards. This is
+   * the mirror of the `recipientEpoch` guard, which only covers OUR restarts.
+   */
+  seenSenderEpochs: Map<string, Set<string>>;
   /** Watchdog bookkeeping per sender: last key_request + un-healed timer. */
   keyRequests: Map<string, { lastAt: number; timer: ReturnType<typeof setTimeout> | null }>;
   /** Periodic re-confirmation of membership AND pinned devices. */
@@ -282,6 +290,7 @@ export async function beginSecureVoiceSession(
     peers: new Map(),
     members: new Set(members.map((m) => m.userId)),
     pendingKeys: new Map(),
+    seenSenderEpochs: new Map(),
     keyRequests: new Map(),
     confirmTimer: null,
     chain: Promise.resolve(),
@@ -343,7 +352,18 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
   const state = sessions.get(channelId);
   if (!state) return;
   enqueue(state, async () => {
-    if (state.peers.has(user.id)) return; // duplicate event
+    const known = state.peers.get(user.id);
+    if (known) {
+      // Same session announced again: a duplicate event, ignore it. A
+      // DIFFERENT epoch means they restarted and their old keys are dead — we
+      // pinned their previous session, so keep processing as a fresh arrival
+      // instead of ignoring it, or their new keys would fail the epoch binding
+      // for the rest of the call. (A forged downgrade to an epoch we already
+      // retired is still caught by seenSenderEpochs.)
+      if (!user.epoch || known.epoch === user.epoch) return;
+      state.peers.delete(user.id);
+      forgetPeer(state, user.id);
+    }
     if (!user.deviceId || !user.epoch) {
       // An un-updated client in a secure voice channel cannot exchange keys.
       // Excluding them (never keying them) is participant-fatal, not
@@ -358,7 +378,6 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
       vetted: false,
       recvEpoch: null,
       recvSeq: -1,
-      seenRecvEpochs: new Set(),
     };
     state.peers.set(user.id, peer);
     try {
@@ -407,6 +426,7 @@ export function onParticipantLeft(channelId: string, userId: string): void {
   enqueue(state, async () => {
     if (!state.peers.delete(userId)) return;
     forgetPeer(state, userId);
+    clearPeerIssueFor(channelId, userId);
     await rotateFreshLocked(state);
   });
 }
@@ -418,6 +438,13 @@ function forgetPeer(state: SecureVoiceSessionState, userId: string): void {
   const req = state.keyRequests.get(userId);
   if (req?.timer) clearTimeout(req.timer);
   state.keyRequests.delete(userId);
+  // NOTE: seenSenderEpochs is deliberately NOT cleared — it must outlive the
+  // peer's reconnects to keep their dead sessions' keys uninstallable.
+}
+
+/** A member who is gone is not a member we "cannot hear" — drop the badge. */
+function clearPeerIssueFor(channelId: string, userId: string): void {
+  void clearPeerIssue(channelId, userId);
 }
 
 /** Force a fresh rotation (counter exhaustion, membership confirmation). */
@@ -461,7 +488,30 @@ export function confirmMembership(channelId: string): void {
   enqueue(state, async () => {
     const selfId = await currentUserId();
     if (!selfId) return;
-    const { members, lists } = await getE2EService(selfId).fetchChannelDeviceLists(channelId);
+
+    let members: Array<{ userId: string }>;
+    let lists: Map<string, { devices: Array<{ deviceId: string }> }>;
+    try {
+      ({ members, lists } = await getE2EService(selfId).fetchChannelDeviceLists(channelId));
+    } catch (err) {
+      if (err instanceof E2EIdentityChangedError) {
+        // The endpoint fetch verifies EVERY member's identity, so one member
+        // whose identity changed makes the whole call throw. Left to the
+        // chain's catch this would silently disable membership AND revocation
+        // checking for the rest of the call — for every participant — while
+        // the changed identity keeps receiving our keys. Exclude and rotate,
+        // exactly like the inbound-key identity path.
+        await flagIdentityChanged(err.peerUserId);
+        if (state.ended) return;
+        if (state.peers.delete(err.peerUserId)) {
+          forgetPeer(state, err.peerUserId);
+          await notifyPeerExcluded(channelId, err.peerUserId, err);
+          await rotateFreshLocked(state);
+        }
+        return;
+      }
+      throw err;
+    }
     if (state.ended) return;
     state.members = new Set(members.map((m) => m.userId));
     let removed = false;
@@ -585,11 +635,26 @@ async function processInboundKeyLocked(
     // state), letting a dead generation be re-installed and the frames
     // recorded under it replayed as live audio.
     if (p.recipientEpoch !== state.epoch) return;
+    // ...and sent from the session the peer is in RIGHT NOW. This is the
+    // mirror guard: recipientEpoch only covers our own restarts, while a peer
+    // reconnect (which happens on any blip) rebuilds their PeerState, so
+    // without this an envelope withheld from THEIR earlier session would sail
+    // through afterwards. The epoch they announced at voice:join is the same
+    // value they stamp into every envelope, so a stale one cannot match —
+    // and a server that forges the announcement to fit only breaks the peer's
+    // own keys, which fails loudly instead of replaying audio.
+    if (p.epoch !== peer.epoch) return;
 
-    // Epoch-aware replay/ordering — superseded epochs never come back
+    // Epoch-aware replay/ordering — superseded epochs never come back. The
+    // history is SESSION-scoped (survives their reconnects), not per-PeerState.
+    let seenEpochs = state.seenSenderEpochs.get(from);
+    if (!seenEpochs) {
+      seenEpochs = new Set();
+      state.seenSenderEpochs.set(from, seenEpochs);
+    }
     if (p.epoch !== peer.recvEpoch) {
-      if (peer.seenRecvEpochs.has(p.epoch)) return;
-      peer.seenRecvEpochs.add(p.epoch);
+      if (seenEpochs.has(p.epoch)) return;
+      seenEpochs.add(p.epoch);
       peer.recvEpoch = p.epoch;
       peer.recvSeq = p.seq;
     } else {

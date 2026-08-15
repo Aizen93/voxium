@@ -1761,7 +1761,7 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
     const io = createMockIO();
     handleVoiceEvents(io as any, socket as any);
 
-    await handlers.get('voice:join')!('sec-a', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    await handlers.get('voice:join')!('sec-a', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
 
     expect(io._emit).toHaveBeenCalledWith('voice:user_joined', expect.objectContaining({
       channelId: 'sec-a',
@@ -1773,14 +1773,25 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
     );
   });
 
-  it('STRIPS a malformed deviceId, and ignores deviceId entirely on plaintext channels', async () => {
+  it('REFUSES a secure join with a malformed E2E announcement, and ignores deviceId on plaintext channels', async () => {
     const { socket, handlers } = createMockSocket('sv-2', 'sock-sv-2');
     const io = createMockIO();
     handleVoiceEvents(io as any, socket as any);
 
-    await handlers.get('voice:join')!('sec-b', { selfMute: false, selfDeaf: false, deviceId: 'bad device!!' });
-    const joined = io._emit.mock.calls.find((c: unknown[]) => c[0] === 'voice:user_joined');
-    expect((joined![1] as { user: Record<string, unknown> }).user.deviceId).toBeUndefined();
+    // A secure voice channel has no plaintext mode: a participant nobody can
+    // key must not be admitted at all.
+    await handlers.get('voice:join')!('sec-b', { selfMute: false, selfDeaf: false, deviceId: 'bad device!!', epoch: EPOCH });
+    expect(io._emit.mock.calls.find((c: unknown[]) => c[0] === 'voice:user_joined')).toBeUndefined();
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', { message: 'This voice channel requires end-to-end encryption support.' });
+
+    // Same when the epoch is missing entirely (an un-updated client)
+    vi.clearAllMocks();
+    mockJoinableSecurePrisma();
+    const { socket: s0, handlers: h0 } = createMockSocket('sv-2b', 'sock-sv-2b');
+    const io0 = createMockIO();
+    handleVoiceEvents(io0 as any, s0 as any);
+    await h0.get('voice:join')!('sec-b2', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    expect(io0._emit.mock.calls.find((c: unknown[]) => c[0] === 'voice:user_joined')).toBeUndefined();
 
     // Plaintext channel: a well-formed deviceId is still not honored
     vi.clearAllMocks();
@@ -1788,7 +1799,7 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
     const { socket: s2, handlers: h2 } = createMockSocket('sv-3', 'sock-sv-3');
     const io2 = createMockIO();
     handleVoiceEvents(io2 as any, s2 as any);
-    await h2.get('voice:join')!('plain-b', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    await h2.get('voice:join')!('plain-b', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
     const joined2 = io2._emit.mock.calls.find((c: unknown[]) => c[0] === 'voice:user_joined');
     expect((joined2![1] as { user: Record<string, unknown> }).user.deviceId).toBeUndefined();
   });
@@ -1796,7 +1807,7 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
   it('rejects video AND claimed screen-audio producers (audio-only v1)', async () => {
     const { socket, handlers } = createMockSocket('sv-4', 'sock-sv-4');
     handleVoiceEvents(createMockIO() as any, socket as any);
-    await handlers.get('voice:join')!('sec-c', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    await handlers.get('voice:join')!('sec-c', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
 
     const ack1 = vi.fn();
     await handlers.get('voice:produce')!({ kind: 'video', rtpParameters: {} }, ack1);
@@ -1815,7 +1826,7 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
   it('rejects the screen-share slot claim', async () => {
     const { socket, handlers } = createMockSocket('sv-5', 'sock-sv-5');
     handleVoiceEvents(createMockIO() as any, socket as any);
-    await handlers.get('voice:join')!('sec-d', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    await handlers.get('voice:join')!('sec-d', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
 
     const cb = vi.fn();
     handlers.get('voice:screen_share:start')!(cb);
@@ -1825,7 +1836,7 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
   it('force_move out of a secure channel is refused with the opacity-preserving error', async () => {
     const { socket, handlers } = createMockSocket('sv-6', 'sock-sv-6');
     handleVoiceEvents(createMockIO() as any, socket as any);
-    await handlers.get('voice:join')!('sec-e', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    await handlers.get('voice:join')!('sec-e', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
 
     const { socket: actor, handlers: actorHandlers } = createMockSocket('sv-mod', 'sock-sv-mod');
     handleVoiceEvents(createMockIO() as any, actor as any);
@@ -1856,12 +1867,12 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
     const io = createMockIO();
     const { socket: a, handlers: ha } = createMockSocket('sv-ka', 'sock-sv-ka');
     handleVoiceEvents(io as any, a as any);
-    await ha.get('voice:join')!('sec-k', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    await ha.get('voice:join')!('sec-k', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
 
     mockJoinableSecurePrisma();
     const { socket: b, handlers: hb } = createMockSocket('sv-kb', 'sock-sv-kb');
     handleVoiceEvents(io as any, b as any);
-    await hb.get('voice:join')!('sec-k', { selfMute: false, selfDeaf: false, deviceId: 'device-bbbb2222' });
+    await hb.get('voice:join')!('sec-k', { selfMute: false, selfDeaf: false, deviceId: 'device-bbbb2222', epoch: 'epochBBBB0001' });
 
     io.to.mockClear();
     io._emit.mockClear();
@@ -1911,7 +1922,7 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
   it('getVoiceDiagnostics is BLIND to secure channels (admin opacity)', async () => {
     const { socket, handlers } = createMockSocket('sv-8', 'sock-sv-8');
     handleVoiceEvents(createMockIO() as any, socket as any);
-    await handlers.get('voice:join')!('sec-diag', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    await handlers.get('voice:join')!('sec-diag', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
 
     mockJoinablePrisma();
     const { socket: s2, handlers: h2 } = createMockSocket('sv-9', 'sock-sv-9');
@@ -1928,7 +1939,7 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
     const io = createMockIO();
     const { socket, handlers } = createMockSocket('sv-ev', 'sock-sv-ev');
     handleVoiceEvents(io as any, socket as any);
-    await handlers.get('voice:join')!('sec-ev', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    await handlers.get('voice:join')!('sec-ev', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
 
     evictUserFromChannelVoice(io as any, 'sec-ev', 'sv-ev');
     expect(io.to).toHaveBeenCalledWith('sock-sv-ev');
@@ -1939,7 +1950,7 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
     mockJoinableSecurePrisma();
     const { socket: s2, handlers: h2 } = createMockSocket('sv-ev2', 'sock-sv-ev2');
     handleVoiceEvents(io as any, s2 as any);
-    await h2.get('voice:join')!('sec-ev2', { selfMute: false, selfDeaf: false, deviceId: DEVICE });
+    await h2.get('voice:join')!('sec-ev2', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
 
     io._emit.mockClear();
     cleanupChannelVoice(io as any, 'sec-ev2');

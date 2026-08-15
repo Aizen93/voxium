@@ -268,17 +268,59 @@ describe('inbound keys', () => {
     expect(frameSession.setRemoteKey).toHaveBeenNthCalledWith(2, 'peer', 1, expect.any(Uint8Array));
   });
 
-  it('a SUPERSEDED epoch never returns', async () => {
+  it('a key whose epoch is not the one the peer ANNOUNCED is dropped', async () => {
     await withVettedPeer();
-    decryptFromDevice
-      .mockResolvedValueOnce(peerKeyPlaintext({ epoch: 'epochA0000001', seq: 0 }))
-      .mockResolvedValueOnce(peerKeyPlaintext({ epoch: 'epochB0000001', seq: 0, keyId: 1 }))
-      .mockResolvedValueOnce(peerKeyPlaintext({ epoch: 'epochA0000001', seq: 5, keyId: 2 }));
+    decryptFromDevice.mockResolvedValueOnce(peerKeyPlaintext({ epoch: 'otherEpoch01', seq: 0 }));
 
-    for (let i = 0; i < 3; i++) handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
     await flush();
 
-    expect(frameSession.setRemoteKey).toHaveBeenCalledTimes(2);
+    expect(frameSession.setRemoteKey).not.toHaveBeenCalled();
+  });
+
+  it('a SUPERSEDED epoch never returns AFTER the peer restarts (history is session-scoped)', async () => {
+    // The mirror of the recipientEpoch guard: a peer reconnect rebuilds their
+    // PeerState, and if the epoch history went with it, an envelope withheld
+    // from their PREVIOUS session would install a dead generation afterwards.
+    await withVettedPeer();
+    decryptFromDevice.mockResolvedValueOnce(peerKeyPlaintext({ epoch: PEER_EPOCH, seq: 0 }));
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+    expect(frameSession.setRemoteKey).toHaveBeenCalledTimes(1);
+
+    // The peer reconnects: left + joined with a FRESH epoch
+    onParticipantLeft(CH, 'peer');
+    await flush();
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: 'peerEpoch0002' }, { initialReplay: true });
+    await flush();
+    frameSession.setRemoteKey.mockClear();
+
+    // Their new session's key installs...
+    decryptFromDevice.mockResolvedValueOnce(peerKeyPlaintext({ epoch: 'peerEpoch0002', seq: 0, keyId: 1 }));
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+    expect(frameSession.setRemoteKey).toHaveBeenCalledTimes(1);
+
+    // ...but the withheld envelope from the DEAD session never does
+    decryptFromDevice.mockResolvedValueOnce(peerKeyPlaintext({ epoch: PEER_EPOCH, seq: 9, keyId: 7 }));
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+    expect(frameSession.setRemoteKey).toHaveBeenCalledTimes(1);
+  });
+
+  it('a re-announcement with a NEW epoch re-pins the peer instead of being ignored', async () => {
+    await withVettedPeer();
+    // No user_left in between (a reordered/duplicated event): the peer must
+    // still be re-pinned, or their new session keys would fail the binding
+    // for the rest of the call.
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: 'peerEpoch0003' }, { initialReplay: true });
+    await flush();
+
+    decryptFromDevice.mockResolvedValueOnce(peerKeyPlaintext({ epoch: 'peerEpoch0003', seq: 0 }));
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+
+    expect(frameSession.setRemoteKey).toHaveBeenCalledWith('peer', 0, expect.any(Uint8Array));
   });
 
   it('drops keys with mismatched binding fields (scope, sender, device)', async () => {
@@ -404,8 +446,9 @@ describe('cross-session and exclusion hardening', () => {
 
   it('per-sender pending slots: a flooder cannot displace an honest sender key', async () => {
     await begunSession();
-    // A co-present member floods well-formed envelopes before anyone is vetted
-    for (let i = 0; i < 12; i++) handleInboundKey(CH, 'flooder', 'device-flood001', ENV);
+    // Well past the old FLAT 16-slot cap, so this fails if the buffer is
+    // shared again rather than keyed per sender.
+    for (let i = 0; i < 40; i++) handleInboundKey(CH, 'flooder', 'device-flood001', ENV);
     // The honest sender's key arrives after the flood
     handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
     await flush();
@@ -417,12 +460,105 @@ describe('cross-session and exclusion hardening', () => {
     expect(frameSession.setRemoteKey).toHaveBeenCalledWith('peer', 0, expect.any(Uint8Array));
   });
 
+  it('an identity change during the periodic re-check excludes + rotates instead of wedging', async () => {
+    // fetchChannelDeviceLists verifies EVERY member, so one changed identity
+    // throws for the whole call. Swallowing that would silently disable
+    // membership AND revocation checking for the rest of the session.
+    await withVettedPeer();
+    frameSession.setLocalKey.mockClear();
+    fetchChannelDeviceLists.mockRejectedValueOnce(new E2EIdentityChangedError('peer'));
+
+    confirmMembership(CH);
+    await flush();
+
+    expect(flagIdentityChanged).toHaveBeenCalledWith('peer');
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'identity-changed');
+    expect(frameSession.removeRemote).toHaveBeenCalledWith('peer');
+    expect(frameSession.setLocalKey).toHaveBeenCalledWith(1, expect.any(Uint8Array));
+  });
+
+  it('a departing member stops being reported as un-hearable', async () => {
+    await withVettedPeer();
+    onParticipantLeft(CH, 'peer');
+    await flush();
+
+    expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
+  });
+
   it('a peer joining without an epoch is never keyed (un-updated client)', async () => {
     await begunSession();
     onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });
     await flush();
 
     expect(encryptToDevice).not.toHaveBeenCalled();
+  });
+});
+
+describe('decrypt watchdog (spec §21.4 lost-key healing)', () => {
+  /** The callback beginSecureVoiceSession hands the frame worker. */
+  function stallCb(): (senderUserId: string, stalled: boolean) => void {
+    return frameSession.onDecryptStalled.mock.calls[0][0];
+  }
+
+  async function withVettedPeer() {
+    await begunSession();
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    await flush();
+    socketEmit.mockClear();
+  }
+
+  it('a sustained stall asks the sender for a re-seal, then throttles', async () => {
+    await withVettedPeer();
+    const onStalled = stallCb();
+
+    onStalled('peer', true);
+    expect(socketEmit).toHaveBeenCalledWith('voice:e2e:key_request', { to: 'peer' });
+
+    // A second report inside the cooldown must not re-ask
+    socketEmit.mockClear();
+    onStalled('peer', true);
+    expect(socketEmit).not.toHaveBeenCalled();
+  });
+
+  it('a heal cancels the warning; an un-healed stall raises it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await withVettedPeer();
+      const onStalled = stallCb();
+
+      // Healed before the grace period: no warning, and any existing one goes
+      onStalled('peer', true);
+      onStalled('peer', false);
+      await flush();
+      expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
+      vi.advanceTimersByTime(30_000);
+      await flush();
+      expect(markExcluded).not.toHaveBeenCalledWith(CH, 'peer', 'no-key');
+
+      // Never healed: the member is surfaced as one we cannot hear
+      onStalled('peer', true);
+      vi.advanceTimersByTime(30_000);
+      await flush();
+      expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'no-key');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('teardown disarms the watchdog timers', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await withVettedPeer();
+      stallCb()('peer', true);
+      endSecureVoiceSession(CH);
+      markExcluded.mockClear();
+
+      vi.advanceTimersByTime(60_000);
+      await flush();
+      expect(markExcluded).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

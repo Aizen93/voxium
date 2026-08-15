@@ -211,7 +211,7 @@ interface VoiceState {
   destroyAllPeers: () => void;
 
   // ─── Server Voice Actions (SFU) ────────────────────────────────────
-  joinChannel: (channelId: string, serverId?: string, opts?: { secure?: boolean }) => Promise<void>;
+  joinChannel: (channelId: string, serverId?: string, opts?: { secure?: boolean; keepRetryCount?: boolean }) => Promise<void>;
   leaveChannel: () => void;
   setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string) => void;
   addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => void;
@@ -282,8 +282,13 @@ function activeSecureVoiceSession(channelId: string | null): import('../services
   return channelId && secureVoiceChannelId === channelId ? secureVoiceFrames : null;
 }
 
-/** End the secure-voice session (if any) — leave/cleanup/reconnect paths. */
-function teardownSecureVoice(): void {
+/**
+ * End the secure-voice session (if any) — leave/cleanup/reconnect paths.
+ * Exported because teardowns that deliberately skip leaveChannel (the server
+ * already ejected us, so emitting voice:leave would be wrong) must still kill
+ * the crypto worker, zero the media key, and stop the membership poll.
+ */
+export function teardownSecureVoice(): void {
   if (!secureVoiceChannelId) return;
   const channelId = secureVoiceChannelId;
   secureVoiceChannelId = null;
@@ -881,7 +886,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   // SERVER VOICE (SFU)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  joinChannel: async (channelId: string, serverId?: string, opts?: { secure?: boolean }) => {
+  joinChannel: async (channelId: string, serverId?: string, opts?: { secure?: boolean; keepRetryCount?: boolean }) => {
     const socket = getSocket();
     if (!socket) return;
 
@@ -897,7 +902,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // Captured BEFORE any await — every await below re-checks it so a
     // concurrent leave/join supersedes this one (MED-9)
     const generation = ++voiceSessionGeneration;
-    transportRejoinAttempts = 0; // Reset retry counter on explicit join
+    // Reset the retry counter on an EXPLICIT join only. The secure
+    // transport-failure path rejoins through here, and resetting would make
+    // MAX_TRANSPORT_REJOIN_ATTEMPTS unreachable — a permanently failing
+    // transport would loop forever, dragging every remaining participant
+    // through a rotation and a re-seal on each cycle.
+    if (!opts?.keepRetryCount) transportRejoinAttempts = 0;
 
     // Resolve the channel record — the SECURE flag decides the whole join
     // shape. Fail closed if it cannot be resolved: joining a secure channel
@@ -1026,12 +1036,18 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         joinDeviceId = deviceId;
         joinEpoch = epoch;
       } catch (err) {
+        // Only this join's own stream is safe to touch before the supersession
+        // check. The audio pipelines are module-level SINGLETONS shared by
+        // whatever call is now live: tearing them down here would close the
+        // WINNER's speaking-detection context — the very stream its producer
+        // was created from — leaving a connected-looking call transmitting
+        // silence with no detector left to resume it.
         stream?.getTracks().forEach((track) => track.stop());
+        // Superseded by a newer join/leave — not a failure, and the winner owns
+        // the UI (and the audio pipelines) from here.
+        if (generation !== voiceSessionGeneration) return;
         stopSpeakingDetection();
         stopNoiseSuppression();
-        // Superseded by a newer join/leave — not a failure, and the winner owns
-        // the UI from here.
-        if (generation !== voiceSessionGeneration) return;
         console.error('[SecureVoice] Could not start the E2E media session — join aborted:', err);
         toast.error(i18n.t('secureVoice.cantJoin'));
         return;
@@ -1253,7 +1269,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
               // full join path re-begins with a fresh key + epoch (IV-reuse
               // firewall). Plaintext channels keep the light re-emit.
               if (activeSecureVoiceSession(currentChannelId)) {
-                void get().joinChannel(currentChannelId, currentServerId ?? undefined, { secure: true });
+                void get().joinChannel(currentChannelId, currentServerId ?? undefined, { secure: true, keepRetryCount: true });
                 return;
               }
               const s = getSocket();

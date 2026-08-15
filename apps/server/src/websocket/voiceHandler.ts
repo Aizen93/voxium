@@ -305,6 +305,15 @@ export function createVoiceHandlers(
         ? state.epoch
         : undefined;
 
+    // A secure voice channel has no plaintext mode, so a join that announces
+    // no usable E2E session cannot participate: peers would refuse to key it
+    // and it would sit in the channel deaf and unheard, holding a slot. Fail
+    // the join instead of admitting a participant nobody can talk to.
+    if (channel.secure && (!e2eDeviceId || !e2eEpoch)) {
+      socket.emit('voice:error', { message: 'This voice channel requires end-to-end encryption support.' });
+      return;
+    }
+
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId, serverId: channel.serverId } },
     });

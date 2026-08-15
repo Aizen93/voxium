@@ -1285,16 +1285,25 @@ the §20 precedent) after vetting against BOTH the authoritative member
 endpoint (`GET /e2e/channels/:id/devices` — socket events are hints, §19.3)
 and the signature-checked verified device list.
 
-Every sealed key also carries `recipientEpoch`: the RECIPIENT's session epoch,
-announced alongside their `deviceId` at `voice:join` and echoed back inside the
-envelope. Receivers accept only their own current epoch. Without it, a key
-sealed in an earlier session still satisfies every other binding once we
-rejoin — sessions start with empty replay state by design — so a server that
-WITHHELD an envelope could deliver it later, re-install a dead generation, and
-replay the frames it recorded under it (their tags and AAD remain valid). The
-epoch is unpredictable to everyone else, so only the party we are actually
-talking to can produce a key we will install; the server relaying a wrong
-epoch can at worst deny, never replay.
+Both sides' session epochs bind a sealed key to the exact pair of sessions that
+are talking. Each participant announces its epoch alongside its `deviceId` at
+`voice:join`; a sealed key carries the sender's own epoch AND `recipientEpoch`,
+the epoch the recipient announced. Receivers accept a key only when it names
+their current epoch *and* the epoch the sender is currently announcing.
+
+Both halves are needed, because a withheld envelope can be replayed after
+EITHER side restarts, and a restart legitimately resets replay state:
+`recipientEpoch` covers our own restarts, the sender-epoch check covers theirs.
+The sender-epoch history is kept per userId for the whole session — NOT inside
+the peer record, which is destroyed and rebuilt on each of their reconnects —
+so a retired epoch can never be re-accepted. A server that lies about an
+announced epoch only breaks the keys of the party it lied about, which both
+watchdogs report; it cannot make a dead generation installable.
+
+A secure voice join that announces no usable device+epoch is REFUSED
+server-side: there is no plaintext mode to fall back to, so admitting a
+participant no one can key would only occupy a slot with someone deaf and
+unheard.
 
 ### 21.4 Rotation
 
