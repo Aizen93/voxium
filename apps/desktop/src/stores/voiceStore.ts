@@ -917,7 +917,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // only the VIEWED server's channels, and voice deliberately survives
     // browsing elsewhere, so reconnect/transport-restart/force-move must never
     // depend on it — the lookup would fail and strand a live call.
-    let secure = false;
+    let secure: boolean;
     if (typeof opts?.secure === 'boolean') {
       secure = opts.secure;
     } else {
@@ -1589,13 +1589,26 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     debugLog('[Voice] addUserToChannel:', channelId, user.displayName);
 
     const existing = get().channelUsers.get(channelId) || [];
-    if (existing.some((u) => u.id === user.id)) return;
+    const listed = existing.find((u) => u.id === user.id);
+    // A duplicate announcement is only a duplicate if it announces the SAME
+    // E2E session. A peer that reconnected announces a new deviceId/epoch, and
+    // dropping that here would strand the secure session: their re-pin never
+    // runs, so every key they seal from now on fails the epoch binding and the
+    // pair goes permanently silent. (Ghost list entries survive a missed
+    // voice:user_left and an owner-node takeover, so this is reachable.)
+    if (listed && listed.deviceId === user.deviceId && listed.epoch === user.epoch) return;
 
     set((state) => {
       const newMap = new Map(state.channelUsers);
       const current = newMap.get(channelId) || [];
-      if (current.some((u) => u.id === user.id)) return state;
-      newMap.set(channelId, [...current, user]);
+      const idx = current.findIndex((u) => u.id === user.id);
+      if (idx !== -1) {
+        const next = [...current];
+        next[idx] = user; // refresh the stale announcement
+        newMap.set(channelId, next);
+      } else {
+        newMap.set(channelId, [...current, user]);
+      }
       const serverFix = serverId && state.channelServers.get(channelId) !== serverId
         ? { channelServers: new Map(state.channelServers).set(channelId, serverId) }
         : {};

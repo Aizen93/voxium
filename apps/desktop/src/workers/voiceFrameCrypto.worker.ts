@@ -95,9 +95,15 @@ const failRuns = new Map<string, number>();
 const stalledSenders = new Set<string>();
 
 function decryptTransform(senderUserId: string): TransformStream<EncodedFrame, EncodedFrame> {
-  const receiver = requireReceiver(senderUserId);
+  requireReceiver(senderUserId); // exists from attach; keys arrive later
   return new TransformStream({
     async transform(frame, controller) {
+      // Look the cipher up PER FRAME rather than capturing it: removeSender
+      // deletes the map entry, and a transform holding its own reference would
+      // happily keep decrypting an excluded or departed member's audio for as
+      // long as the SFU kept forwarding it.
+      const receiver = receivers.get(senderUserId);
+      if (!receiver) return;
       const out = await receiver.decrypt(frame.data);
       if (out === null) {
         const run = (failRuns.get(senderUserId) ?? 0) + 1;

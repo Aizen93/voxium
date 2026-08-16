@@ -485,6 +485,61 @@ describe('cross-session and exclusion hardening', () => {
     expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
   });
 
+  it('an ALREADY-EXCLUDED member also stops being reported when they leave', async () => {
+    await begunSession();
+    fetchDeviceList.mockRejectedValueOnce(new E2EIdentityChangedError('peer'));
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    await flush();
+    clearIssue.mockClear();
+
+    // They are no longer in `peers`, so the badge must be cleared before the
+    // "was this peer known?" early return.
+    onParticipantLeft(CH, 'peer');
+    await flush();
+
+    expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
+  });
+
+  it('a TRANSIENT vet failure does not exclude — the next membership tick re-vets and keys them', async () => {
+    await begunSession();
+    // A 429/5xx/network blip must not be treated as a security verdict:
+    // an excluded peer is never re-vetted, never sealed to, and their
+    // key_requests are ignored — the pair goes mutually deaf for the call.
+    fetchDeviceList.mockRejectedValueOnce(new Error('Network Error'));
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    await flush();
+
+    expect(markExcluded).not.toHaveBeenCalled();
+    expect(encryptToDevice).not.toHaveBeenCalled();
+
+    // The 60s poll retries the un-vetted peer and seals to them
+    fetchDeviceList.mockResolvedValue(deviceListFor(PEER_DEVICE));
+    confirmMembership(CH);
+    await flush();
+
+    expect(encryptToDevice).toHaveBeenCalledWith('peer', PEER_DEVICE, expect.stringContaining('"reason":"fresh"'));
+  });
+
+  it('an identity conflict does not wedge the poll for everyone, every tick', async () => {
+    await withVettedPeer();
+    fetchChannelDeviceLists.mockRejectedValueOnce(new E2EIdentityChangedError('peer'));
+    confirmMembership(CH);
+    await flush();
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'identity-changed');
+
+    // The NEXT tick must run the membership/revocation body rather than dying
+    // on the same member again.
+    fetchChannelDeviceLists.mockResolvedValue({
+      members: [{ userId: 'me', isCreator: true }, { userId: 'other', isCreator: false }],
+      lists: new Map(),
+      unverifiableUserIds: [],
+    });
+    confirmMembership(CH);
+    await flush();
+
+    expect(fetchChannelDeviceLists).toHaveBeenCalledTimes(3); // begin + 2 ticks
+  });
+
   it('a peer joining without an epoch is never keyed (un-updated client)', async () => {
     await begunSession();
     onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE }, { initialReplay: true });

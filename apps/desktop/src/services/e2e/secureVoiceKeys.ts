@@ -100,6 +100,9 @@ interface SecureVoiceSessionState {
    * the mirror of the `recipientEpoch` guard, which only covers OUR restarts.
    */
   seenSenderEpochs: Map<string, Set<string>>;
+  /** Members already excluded for an identity change — skipped on later polls
+   *  so one unresolved conflict cannot wedge the check for everyone. */
+  identityConflicts: Set<string>;
   /** Watchdog bookkeeping per sender: last key_request + un-healed timer. */
   keyRequests: Map<string, { lastAt: number; timer: ReturnType<typeof setTimeout> | null }>;
   /** Periodic re-confirmation of membership AND pinned devices. */
@@ -291,6 +294,7 @@ export async function beginSecureVoiceSession(
     members: new Set(members.map((m) => m.userId)),
     pendingKeys: new Map(),
     seenSenderEpochs: new Map(),
+    identityConflicts: new Set(),
     keyRequests: new Map(),
     confirmTimer: null,
     chain: Promise.resolve(),
@@ -318,7 +322,7 @@ export async function beginSecureVoiceSession(
  */
 function onDecryptStalled(state: SecureVoiceSessionState, senderUserId: string, stalled: boolean): void {
   if (state.ended) return;
-  const entry = state.keyRequests.get(senderUserId) ?? { lastAt: 0, timer: null };
+  const entry = state.keyRequests.get(senderUserId) ?? { lastAt: Number.NEGATIVE_INFINITY, timer: null };
 
   if (!stalled) {
     if (entry.timer) clearTimeout(entry.timer);
@@ -327,7 +331,10 @@ function onDecryptStalled(state: SecureVoiceSessionState, senderUserId: string, 
     return;
   }
 
-  const now = Date.now();
+  // performance.now() is monotonic: a wall-clock jump (NTP correction, user
+  // changing the system time) must not disable the heal path for hours. It
+  // starts near zero, so "never asked" is -Infinity rather than 0.
+  const now = performance.now();
   if (now - entry.lastAt < KEY_REQUEST_COOLDOWN_MS) return;
   entry.lastAt = now;
   getSocket()?.emit('voice:e2e:key_request', { to: senderUserId });
@@ -385,6 +392,18 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
       if (state.ended) return;
       peer.vetted = true;
     } catch (err) {
+      const isSecurityVerdict = err instanceof SecureVoiceError || err instanceof E2EIdentityChangedError;
+      if (!isSecurityVerdict) {
+        // A network blip, a 429 or a 5xx during a rolling restart is NOT a
+        // security verdict. Excluding on it is unrecoverable: an excluded peer
+        // is never re-vetted (the poll only removes), never sealed to, and
+        // their key_requests are ignored — the pair goes mutually deaf for the
+        // rest of the call. Leave them un-vetted so the next membership tick
+        // retries, and say nothing to the user yet.
+        console.warn(`[SecureVoice] Vetting ${user.id} failed transiently — will retry:`, err);
+        peer.vetted = false;
+        return;
+      }
       state.peers.delete(user.id);
       state.pendingKeys.delete(user.id);
       console.error(`[SecureVoice] Vetting ${user.id} failed — excluded from the session:`, err);
@@ -424,9 +443,12 @@ export function onParticipantLeft(channelId: string, userId: string): void {
   const state = sessions.get(channelId);
   if (!state) return;
   enqueue(state, async () => {
+    // Clear the badge FIRST: an already-excluded peer is not in `peers`, so
+    // the early return below would otherwise leave "N members can't be keyed"
+    // on screen for the rest of the call after they have gone.
+    clearPeerIssueFor(channelId, userId);
     if (!state.peers.delete(userId)) return;
     forgetPeer(state, userId);
-    clearPeerIssueFor(channelId, userId);
     await rotateFreshLocked(state);
   });
 }
@@ -508,12 +530,39 @@ export function confirmMembership(channelId: string): void {
           await notifyPeerExcluded(channelId, err.peerUserId, err);
           await rotateFreshLocked(state);
         }
+        // Remember them so the NEXT poll is not thrown by the same member
+        // again: the fetch verifies every member, so one unresolved identity
+        // conflict would otherwise wedge membership AND revocation checking
+        // for the whole call — every tick dying on the same throw.
+        state.identityConflicts.add(err.peerUserId);
         return;
       }
       throw err;
     }
     if (state.ended) return;
     state.members = new Set(members.map((m) => m.userId));
+
+    // Retry peers whose vet failed transiently (a blip, a 429, a node
+    // restarting). They are still in the channel and will never re-announce,
+    // so this poll is their only way back into the session.
+    for (const [userId, peer] of [...state.peers.entries()]) {
+      if (peer.vetted || state.identityConflicts.has(userId)) continue;
+      try {
+        await vetParticipant(state, userId, peer.deviceId);
+        if (state.ended) return;
+        peer.vetted = true;
+        await sealKeyTo(state, userId, 'fresh');
+      } catch (err) {
+        if (err instanceof SecureVoiceError || err instanceof E2EIdentityChangedError) {
+          state.peers.delete(userId);
+          forgetPeer(state, userId);
+          await notifyPeerExcluded(channelId, userId, err);
+        } else {
+          console.warn(`[SecureVoice] Re-vetting ${userId} failed — will retry:`, err);
+        }
+      }
+    }
+
     let removed = false;
     for (const [userId, peer] of [...state.peers.entries()]) {
       if (!state.members.has(userId)) {

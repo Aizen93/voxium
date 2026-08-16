@@ -44,6 +44,19 @@ import type {
   ReactionGroup,
 } from '@voxium/shared';
 
+/**
+ * Is the live voice call on this server? Uses activeVoiceServerId, falling back
+ * to the channel list only when it is absent: serverStore.channels holds ONLY
+ * the viewed server's channels, and voice deliberately survives navigating
+ * away — so a lookup there silently skips cleanup for every user who happens
+ * to be browsing elsewhere (leaving a kicked member's E2E session alive).
+ */
+function activeVoiceServerIs(serverId: string): boolean {
+  const { activeChannelId, activeVoiceServerId } = useVoiceStore.getState();
+  if (activeVoiceServerId) return activeVoiceServerId === serverId;
+  return useServerStore.getState().channels.find((c) => c.id === activeChannelId)?.serverId === serverId;
+}
+
 export function MainLayout() {
   const { t } = useTranslation();
   const { fetchServers, activeServerId, channels } = useServerStore();
@@ -583,11 +596,8 @@ export function MainLayout() {
         // Leave voice if the active voice channel belongs to the kicked server
         const voiceState = useVoiceStore.getState();
         const serverState = useServerStore.getState();
-        if (voiceState.activeChannelId) {
-          const voiceChannel = serverState.channels.find((c) => c.id === voiceState.activeChannelId);
-          if (voiceChannel?.serverId === serverId) {
-            voiceState.leaveChannel();
-          }
+        if (voiceState.activeChannelId && activeVoiceServerIs(serverId)) {
+          voiceState.leaveChannel();
         }
         serverState.handleMemberKicked(serverId);
         toast.warning('You were kicked from the server');
@@ -599,9 +609,8 @@ export function MainLayout() {
         // Inline voice cleanup if in a voice channel on this server
         // (don't call leaveChannel() — it would emit voice:leave back to
         // the server, but the server already ejected us)
-        if (voiceState.activeChannelId) {
-          const voiceChannel = serverState.channels.find((c) => c.id === voiceState.activeChannelId);
-          if (voiceChannel?.serverId === serverId) {
+        if (voiceState.activeChannelId && activeVoiceServerIs(serverId)) {
+          {
             voiceState.stopLatencyMeasurement();
             stopSpeakingDetection();
             if (voiceState.localStream) {
