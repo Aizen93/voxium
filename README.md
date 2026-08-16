@@ -612,11 +612,25 @@ pnpm test:watch
 # Run with coverage report
 pnpm --filter @voxium/server test:coverage
 
-# Run E2E tests (requires backend + frontend + Redis running)
+# Run E2E tests (Playwright starts the backend, desktop and admin apps itself;
+# needs PostgreSQL + Redis, plus an SMTP catcher on :1025 for the
+# email-verification specs — e.g. docker run -p 1025:1025 axllent/mailpit)
 pnpm test:e2e               # Headless
 pnpm test:e2e:ui             # Interactive UI mode
 pnpm test:e2e:headed         # Visible browser
+
+# Cross-engine proof for encrypted voice (Gecko's RTCRtpScriptTransform path)
+npx playwright test secure-voice --config=playwright-firefox.config.ts
+
+# What CI gates on: everything except specs tagged @quarantine
+npx playwright test --grep-invert @quarantine
 ```
+
+E2E runs on every pull request and blocks merging. The job provisions
+PostgreSQL, Redis, Mailpit and MinIO, applies migrations, and runs the suite on
+Chromium plus the encrypted-voice spec on Firefox. Specs tagged `@quarantine`
+still run, but in a non-blocking step — see the note at the top of
+`tests/e2e/e2e-encryption.spec.ts` for why that one is currently tagged.
 
 ### Test Coverage
 

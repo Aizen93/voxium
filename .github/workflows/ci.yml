@@ -70,6 +70,201 @@ jobs:
           JWT_SECRET: ci-test-secret
           JWT_REFRESH_SECRET: ci-test-refresh-secret
 
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    # Public repo: PRs come from forks with a read-only token — keep it that
+    # way explicitly. Nothing in this job writes to the repo.
+    permissions:
+      contents: read
+    # The slowest job by far, so don't spend ~20 runner-minutes on a branch
+    # that does not even typecheck.
+    needs: lint-typecheck
+    # The suite is sequential (workers: 1, shared DB) and boots the real
+    # stack, so ~10-15 min is normal. 30 is the hang ceiling: past that the
+    # run is dead, and every extra minute just delays the red X.
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: voxium_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      # The email-verification specs assert on the "sent" confirmation, which
+      # only appears once the transport actually accepts the message — without
+      # a listener on 1025 nodemailer throws ESOCKET and those tests fail.
+      mailpit:
+        image: axllent/mailpit:v1.27
+        ports:
+          - 1025:1025
+          - 8025:8025
+
+    env:
+      # Server boot requirements (index.ts refuses to start without these)
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/voxium_e2e?schema=public
+      REDIS_URL: redis://127.0.0.1:6379
+      JWT_SECRET: ci-e2e-secret-at-least-32-characters-long
+      JWT_REFRESH_SECRET: ci-e2e-refresh-secret-at-least-32-chars
+      TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      S3_ASSETS_ENDPOINT: http://127.0.0.1:9000
+      S3_ASSETS_REGION: us-east-1
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_ASSETS_BUCKET: voxium-e2e
+      PORT: 3001
+      NODE_ENV: development
+      CORS_ORIGIN: http://localhost:8080
+      SMTP_HOST: 127.0.0.1
+      SMTP_PORT: 1025
+      SMTP_FROM: ci@voxium.test
+      SMTP_FROM_NAME: Voxium CI
+      CLIENT_URL: http://localhost:8080
+      # Media stays on loopback: the tests are same-host, and a wrong announced
+      # address makes every voice test fail on a timeout rather than an error.
+      MEDIASOUP_ANNOUNCED_IP: 127.0.0.1
+      MEDIASOUP_LISTEN_IP: 127.0.0.1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Read pnpm version from package.json
+        id: pnpm-ver
+        shell: bash
+        run: echo "version=$(sed -n 's/.*"packageManager".*"pnpm@\([^"]*\)".*/\1/p' package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node 24
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Activate pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@${{ steps.pnpm-ver.outputs.version }} --activate
+
+      - name: Cache pnpm store
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Object storage: one spec performs a REAL presigned upload of an
+      # encrypted attachment, so a stub endpoint is not enough. Run as a plain
+      # container rather than a service — MinIO needs a `server` command, and
+      # service containers cannot override the image's entrypoint arguments.
+      - name: Start MinIO and create the assets bucket
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+            server /data
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live && break
+            sleep 2
+          done
+          aws --endpoint-url http://127.0.0.1:9000 s3 mb "s3://$S3_ASSETS_BUCKET"
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Generate Prisma client (v7 — reads prisma.config.ts)
+        working-directory: apps/server
+        run: npx prisma generate
+
+      - name: Apply migrations
+        working-directory: apps/server
+        run: npx prisma migrate deploy
+
+      # The desktop app imports the BUILT shared package, so Vite would serve a
+      # stale (or missing) dist without this.
+      - name: Build shared
+        run: pnpm build:shared
+
+      # ~400MB of browser binaries — cached, this is seconds instead of
+      # minutes. Keyed on the lockfile: a Playwright bump changes it, and the
+      # binaries must match the driver version exactly.
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium firefox
+
+      # OS libraries are not part of the cached path and must be present
+      # either way; this apt pass is ~30s.
+      - name: Install Playwright system deps (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium firefox
+
+      # Playwright's webServer block boots the server, desktop and admin apps
+      # and waits on their health checks.
+      # Blocking gate. Excludes @quarantine — currently the e2e-encryption
+      # spec, which is intermittently red for a pre-existing crypto-engine
+      # init race (see the note at the top of that file). A merge gate that
+      # fails at random trains everyone to ignore it.
+      - name: E2E tests (Chromium)
+        run: npx playwright test --grep-invert @quarantine --reporter=github,line
+
+      # The flagship E2E-voice proof is the one place a second browser engine
+      # earns its runtime: it exercises the RTCRtpScriptTransform path that
+      # Chromium's legacy insertable-streams path never touches.
+      - name: E2E secure voice (Firefox — cross-engine transform path)
+        run: npx playwright test secure-voice --config=playwright-firefox.config.ts --reporter=github,line
+
+      # Visible but non-blocking, so the quarantine cannot rot silently: the
+      # step goes red in the UI while the job still passes.
+      - name: E2E quarantined specs (non-blocking)
+        continue-on-error: true
+        run: npx playwright test --grep @quarantine --reporter=github,line
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: MinIO logs (on failure)
+        if: failure()
+        run: docker logs minio || true
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest
