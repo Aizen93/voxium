@@ -259,6 +259,7 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
         return (
           <UserHoverTarget key={vu.id} userId={vu.id}>
             <div
+              data-testid={`voice-user-${vu.id}`}
               className="flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-vox-bg-hover cursor-default"
               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, vu.id); }}
             >

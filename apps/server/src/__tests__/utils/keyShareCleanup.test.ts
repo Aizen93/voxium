@@ -29,6 +29,7 @@ describe('E2E retention sweep', () => {
 
     const before = Date.now();
     const swept = await runSweep();
+    const after = Date.now();
 
     expect(swept).toBe(6);
     for (const call of [
@@ -36,9 +37,14 @@ describe('E2E retention sweep', () => {
       vi.mocked(prisma.e2EMasterTransfer.deleteMany).mock.calls[0],
     ]) {
       const cutoff = (call[0] as any).where.createdAt.lt as Date;
-      // exactly one retention window back, never "everything"
-      expect(before - cutoff.getTime()).toBeGreaterThanOrEqual(E2E_LIMITS.KEYSHARE_MAX_AGE_MS);
-      expect(before - cutoff.getTime()).toBeLessThan(E2E_LIMITS.KEYSHARE_MAX_AGE_MS + 60_000);
+      // Exactly one retention window back from the moment the sweep ran, never
+      // "everything". Bracketed by the real elapsed window rather than measured
+      // from `before` alone: the sweep reads its own Date.now() a moment later,
+      // so any elapsed millisecond made the old lower bound fail (flaked under
+      // full-suite load, passed in isolation).
+      const sweptAt = cutoff.getTime() + E2E_LIMITS.KEYSHARE_MAX_AGE_MS;
+      expect(sweptAt).toBeGreaterThanOrEqual(before);
+      expect(sweptAt).toBeLessThanOrEqual(after);
     }
   });
 

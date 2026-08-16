@@ -271,14 +271,15 @@ test.describe('Voice SFU', () => {
     await vp2.locator('button[title="Mute"]').click();
     await expect(vp2.locator('button[title="Unmute"]')).toBeVisible({ timeout: 3_000 });
 
-    // User A should see User B's MicOff icon in the VoicePanel user list
-    // The VoicePanel shows MicOff SVG next to muted users
-    const vp1 = voicePanel(page);
-    await expect(
-      vp1.locator('svg.lucide-mic-off').first()
-    ).toBeVisible({ timeout: 5_000 });
+    // User A sees B's muted icon on B's row in the channel's occupant list.
+    // Scoped to B's row on purpose: an unscoped mic-off lookup also matches
+    // A's OWN mute button, so it would pass whether or not the state ever
+    // crossed the wire (which is the whole point of this test).
+    const userBRow = page.getByTestId(`voice-user-${dataB.user.id}`);
+    await expect(userBRow.locator('svg.lucide-mic-off')).toBeVisible({ timeout: 5_000 });
 
     // Cleanup
+    const vp1 = voicePanel(page);
     await vp1.locator('button[title="Disconnect"]').click();
     await vp2.locator('button[title="Disconnect"]').click();
     await context2.close();
