@@ -13,8 +13,11 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   workers: 1,
   reporter: process.env.CI ? 'github' : 'html',
-  timeout: 30_000,
-  expect: { timeout: 10_000 },
+  // The first CI run measured the runner at ~2x local wall time (5.7m vs
+  // 2.8m for the suite), so a multi-step test that fits 30s locally is
+  // marginal there. Locally the tight budget stays — it catches slowness.
+  timeout: process.env.CI ? 60_000 : 30_000,
+  expect: { timeout: process.env.CI ? 15_000 : 10_000 },
 
   use: {
     baseURL: 'http://localhost:8080',

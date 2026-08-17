@@ -23,9 +23,20 @@ interface Diag {
 }
 
 function diagOf(page: Page): Promise<Diag | null> {
-  return page.evaluate(() =>
-    (window as unknown as { __voxSecureVoiceDiag?: () => Promise<unknown> }).__voxSecureVoiceDiag?.() ?? null,
-  ) as Promise<Diag | null>;
+  return page.evaluate(async () => {
+    const fn = (window as unknown as { __voxSecureVoiceDiag?: () => Promise<unknown> }).__voxSecureVoiceDiag;
+    if (!fn) return null;
+    // A transport restart legitimately tears the session down and re-begins
+    // with a fresh key (the IV firewall). A probe landing in that gap gets a
+    // 'destroyed' rejection — and a THROW inside expect.poll aborts the whole
+    // poll rather than retrying. Report "no reading" and let the poll go on;
+    // the rejoined session's counters satisfy it a moment later.
+    try {
+      return await fn();
+    } catch {
+      return null;
+    }
+  }) as Promise<Diag | null>;
 }
 
 async function okFrom(page: Page, senderUserId: string): Promise<number> {
@@ -41,7 +52,12 @@ async function failedFrom(page: Page, senderUserId: string): Promise<number> {
 
 async function openServer(page: Page, serverName: string) {
   await page.getByRole('button', { name: serverName, exact: true }).click({ timeout: 15_000 });
-  await expect(page.locator('textarea')).toBeVisible({ timeout: 15_000 });
+  // Don't rely on the app auto-selecting #general: with four contexts on a
+  // loaded CI runner the channel list renders but auto-select loses the race,
+  // and the composer never appears. Click the channel ourselves once it
+  // exists — idempotent when auto-select already won.
+  await page.getByRole('button', { name: 'general' }).first().click({ timeout: 30_000 });
+  await expect(page.locator('textarea')).toBeVisible({ timeout: 30_000 });
 }
 
 // RNNoise classifies the harness's steady fake-mic tone as noise and
@@ -101,8 +117,16 @@ test.describe('Secure voice channels — E2E audio through the SFU', () => {
       (window as unknown as { __VOX_SECURE_VOICE_TEST__?: object }).__VOX_SECURE_VOICE_TEST__ = { dropInboundKeys: true };
     });
     await disableNoiseSuppression(pageD);
+    // Three app boots from one IP have nearly drained the 100/min global
+    // bucket — refill BEFORE the fourth boots. On CI this failed for real:
+    // dave's server-detail and member fetches came back 429, the client does
+    // not retry them, and his channel list stayed empty for the whole test
+    // (proved by the run's network trace, six 429s on page D).
+    await clearRateLimits();
     await injectAuth(pageD, dataD);
 
+    // Same budget property for the four server opens (~6 requests each)
+    await clearRateLimits();
     await openServer(page, 'War Council');
     await openServer(pageB, 'War Council');
     await openServer(pageC, 'War Council');

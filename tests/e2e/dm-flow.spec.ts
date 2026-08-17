@@ -1,6 +1,6 @@
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
-import { registerUser, sendFriendRequest, acceptFriendRequest } from './helpers/api';
+import { registerUser, sendFriendRequest, acceptFriendRequest, API_URL } from './helpers/api';
 import { dmHeading } from './helpers/selectors';
 
 test.describe('DM flow: friend request -> accept -> message', () => {
@@ -40,6 +40,23 @@ test.describe('DM flow: friend request -> accept -> message', () => {
     const page2 = await context2.newPage();
     await injectAuth(page2, dataB);
     await expect(page2.getByRole('heading', { name: 'Direct Messages' }).first()).toBeVisible({ timeout: 20_000 });
+
+    // The heading proves B's page LOADED, not that B's E2E device is
+    // PUBLISHED — that happens asynchronously after (engine init, vault,
+    // device-key upload). Sending before it lands makes A's client find no
+    // device to encrypt to and refuse the send (the message stays in the
+    // composer). Fast machines win that race, CI runners lose it every time,
+    // so wait on the authoritative signal instead of the page.
+    await expect
+      .poll(async () => {
+        const res = await request.get(`${API_URL}/e2e/devices/${dataB.user.id}`, {
+          headers: { Authorization: `Bearer ${dataA.accessToken}` },
+        });
+        if (!res.ok()) return 0;
+        const body = (await res.json()) as { data?: { devices?: unknown[] } };
+        return body.data?.devices?.length ?? 0;
+      }, { timeout: 30_000, message: "user B's E2E device was never published" })
+      .toBeGreaterThan(0);
 
     // Send a message
     const msgA = `Hey from A! ${Date.now()}`;

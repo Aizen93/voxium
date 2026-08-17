@@ -133,16 +133,21 @@ jobs:
       S3_ASSETS_BUCKET: voxium-e2e
       PORT: 3001
       NODE_ENV: development
-      CORS_ORIGIN: http://localhost:8080
+      # BOTH client origins: the desktop app (8080) and the admin app (8082).
+      # With only 8080 the admin login preflight is refused and admin-flow
+      # fails on "Login failed" — mirrors the multi-origin local .env.
+      CORS_ORIGIN: http://localhost:8080,http://localhost:8082
       SMTP_HOST: 127.0.0.1
       SMTP_PORT: 1025
       SMTP_FROM: ci@voxium.test
       SMTP_FROM_NAME: Voxium CI
       CLIENT_URL: http://localhost:8080
-      # Media stays on loopback: the tests are same-host, and a wrong announced
-      # address makes every voice test fail on a timeout rather than an error.
-      MEDIASOUP_ANNOUNCED_IP: 127.0.0.1
-      MEDIASOUP_LISTEN_IP: 127.0.0.1
+      # MEDIASOUP_ANNOUNCED_IP is set per-run to the runner's REAL address
+      # (see the step below). Announcing 127.0.0.1 breaks Firefox: it will
+      # not complete ICE/DTLS against loopback candidates, so every voice
+      # transport dies on "DTLS connection failed" while Chromium sails
+      # through. A real interface address is also what local dev and
+      # production use — loopback was the odd one out.
 
     steps:
       - name: Checkout
@@ -231,6 +236,20 @@ jobs:
 
       # Playwright's webServer block boots the server, desktop and admin apps
       # and waits on their health checks.
+      - name: Announce mediasoup on the runner's real IP
+        run: |
+          RUNNER_IP=$(hostname -I | awk '{print $1}')
+          # An empty value would silently fall back to announcing 127.0.0.1
+          # (the || default in mediasoupConfig), reintroducing the Firefox
+          # DTLS failure with no visible cause. Refuse loudly instead.
+          if [ -z "$RUNNER_IP" ]; then
+            echo "Could not resolve the runner's IP — refusing to announce loopback"
+            exit 1
+          fi
+          echo "MEDIASOUP_ANNOUNCED_IP=$RUNNER_IP" >> "$GITHUB_ENV"
+          echo "MEDIASOUP_LISTEN_IP=0.0.0.0" >> "$GITHUB_ENV"
+          echo "mediasoup will announce $RUNNER_IP"
+
       # Blocking gate. Excludes @quarantine — currently the e2e-encryption
       # spec, which is intermittently red for a pre-existing crypto-engine
       # init race (see the note at the top of that file). A merge gate that
