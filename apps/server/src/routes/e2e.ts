@@ -258,7 +258,9 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
     const result = await prisma.$transaction(async (tx) => {
       const existing = await tx.e2EDevice.findUnique({
         where: { userId_deviceId: { userId, deviceId } },
-        select: { id: true },
+        // The identity keys are load-bearing, not decoration: they decide
+        // whether the inbox purge below fires (see it for why).
+        select: { id: true, curve25519Key: true, ed25519Key: true },
       });
       if (!existing) {
         const deviceCount = await tx.e2EDevice.count({ where: { userId } });
@@ -293,6 +295,26 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
           fallbackKeySignature: fallbackKey.signature,
         },
       });
+      // A re-registration that MINTS A NEW IDENTITY leaves the same dead inbox
+      // the revoke path already clears: every queued share is ciphertext under
+      // an Olm session that no longer exists. The client polls, fails to
+      // decrypt, and the rows keep counting against KEYSHARE_STORE_CAP_PER_SENDER
+      // and KEYSHARE_SENDER_TOTAL_CAP — evicting senders' genuinely needed new
+      // shares — until they age out 30 days later.
+      //
+      // ONLY when the keys actually changed. A client that re-registers
+      // idempotently with the SAME identity still holds the Olm sessions those
+      // shares were sealed to, so an unconditional purge would destroy
+      // perfectly decryptable material. Recipient side only, mirroring the
+      // revoke path: shares this device SENT are still decryptable by their
+      // recipients, who hold sessions with the old identity.
+      const identityChanged = !!existing &&
+        (existing.curve25519Key !== curve25519Key || existing.ed25519Key !== ed25519Key);
+      if (identityChanged) {
+        await tx.e2EKeyShare.deleteMany({ where: { recipientUserId: userId, recipientDeviceId: deviceId } });
+        await tx.e2EMasterTransfer.deleteMany({ where: { userId, recipientDeviceId: deviceId } });
+      }
+
       await tx.e2EOneTimeKey.deleteMany({ where: { deviceId: upserted.id } });
       await tx.e2EOneTimeKey.createMany({
         data: (oneTimeKeys as E2EPreKey[]).map((k) => ({

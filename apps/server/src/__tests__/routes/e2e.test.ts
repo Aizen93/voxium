@@ -254,7 +254,11 @@ describe('E2E routes — PUT /devices', () => {
 
   it('re-registering an EXISTING device is allowed at the limit', async () => {
     const device = makeTestDevice('user-1', DEVICE_A);
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    // The stored row must carry the SAME identity keys, or this stops covering
+    // the benign re-register it is named for (see the purge tests below)
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'dev-1', curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key,
+    } as any);
     vi.mocked(prisma.e2EDevice.count).mockResolvedValue(E2E_LIMITS.MAX_DEVICES);
     vi.mocked(prisma.e2EDevice.upsert).mockResolvedValue({ id: 'dev-1', updatedAt: new Date() } as any);
 
@@ -262,6 +266,59 @@ describe('E2E routes — PUT /devices', () => {
 
     expect(res.status).toBe(201);
     expect(prisma.e2EDevice.count).not.toHaveBeenCalled();
+  });
+
+  // ── F4: an identity-changing re-register must clear the dead inbox ───────
+
+  it('purges undecryptable keyshares and master transfers when the identity keys CHANGE', async () => {
+    // Same semantics as revoking the device: every queued share is ciphertext
+    // under an Olm session that no longer exists, and the rows keep counting
+    // against the per-pair and per-sender caps until they age out at 30 days,
+    // evicting shares that ARE deliverable.
+    const device = makeTestDevice('user-1', DEVICE_A);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'dev-1', curve25519Key: 'an-older-curve-key', ed25519Key: 'an-older-ed-key',
+    } as any);
+    vi.mocked(prisma.e2EDevice.upsert).mockResolvedValue({ id: 'dev-1', updatedAt: new Date() } as any);
+
+    const res = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+    expect(res.status).toBe(201);
+    expect(prisma.e2EKeyShare.deleteMany).toHaveBeenCalledWith({
+      where: { recipientUserId: 'user-1', recipientDeviceId: DEVICE_A },
+    });
+    expect(prisma.e2EMasterTransfer.deleteMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1', recipientDeviceId: DEVICE_A },
+    });
+  });
+
+  it('purges NOTHING when the same identity re-registers idempotently', async () => {
+    // A client that re-registers on startup with unchanged keys still holds
+    // the Olm sessions those shares were sealed to — purging would destroy
+    // perfectly decryptable material and break live sessions.
+    const device = makeTestDevice('user-1', DEVICE_A);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'dev-1', curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key,
+    } as any);
+    vi.mocked(prisma.e2EDevice.upsert).mockResolvedValue({ id: 'dev-1', updatedAt: new Date() } as any);
+
+    const res = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+    expect(res.status).toBe(201);
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('purges NOTHING for a first-time registration', async () => {
+    const device = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.e2EDevice.count).mockResolvedValue(0);
+    vi.mocked(prisma.e2EDevice.upsert).mockResolvedValue({ id: 'dev-2', updatedAt: new Date() } as any);
+
+    const res = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+    expect(res.status).toBe(201);
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
   });
 
   it('rejects a missing or malformed deviceId', async () => {
