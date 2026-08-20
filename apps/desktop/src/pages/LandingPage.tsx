@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { APP_VERSION } from '@voxium/shared';
 import { SoundWaveCanvas } from '../components/landing/SoundWaveCanvas';
+import { HeroAppMock } from '../components/landing/HeroAppMock';
 import { SUPPORTED_LANGUAGES } from '../i18n';
 
 /* ─── Animated SVG Illustrations ─── */
@@ -514,161 +515,7 @@ function Hero() {
           className="hidden md:block w-full animate-slide-up lg:scale-[1.06] lg:translate-x-6 xl:translate-x-10 origin-left"
           style={{ animationDelay: '0.3s', animationFillMode: 'backwards' }}
         >
-          <style>{`
-            @keyframes mockMsgIn {
-              0% { opacity: 0; transform: translateY(12px); }
-              100% { opacity: 1; transform: translateY(0); }
-            }
-            @keyframes mockReactionPop {
-              0% { transform: scale(0); opacity: 0; }
-              60% { transform: scale(1.3); }
-              100% { transform: scale(1); opacity: 1; }
-            }
-            @keyframes mockTypingDot {
-              0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
-              30% { opacity: 1; transform: translateY(-3px); }
-            }
-            @keyframes mockCursorBlink {
-              0%, 100% { opacity: 1; }
-              50% { opacity: 0; }
-            }
-            @keyframes mockSpeakRing {
-              0%, 100% { box-shadow: 0 0 0 0 rgba(62,186,104,0.5); }
-              50% { box-shadow: 0 0 0 3px rgba(62,186,104,0); }
-            }
-            @keyframes mockOnlinePulse {
-              0%, 100% { transform: scale(1); }
-              50% { transform: scale(1.3); }
-            }
-            @keyframes mockChannelGlow {
-              0%, 100% { background: #253356; }
-              50% { background: #2a3a60; }
-            }
-            .mock-msg-1 { animation: mockMsgIn 0.4s ease-out 0.8s backwards; }
-            .mock-msg-2 { animation: mockMsgIn 0.4s ease-out 1.8s backwards; }
-            .mock-msg-3 { animation: mockMsgIn 0.4s ease-out 4s backwards; }
-            .mock-reaction { animation: mockReactionPop 0.3s ease-out 3s backwards; }
-            .mock-typing-dot { animation: mockTypingDot 1.2s ease-in-out infinite; }
-            .mock-cursor { animation: mockCursorBlink 1s step-end infinite; }
-            .mock-speak-ring { animation: mockSpeakRing 1.5s ease-in-out infinite; }
-            .mock-speak-ring-d { animation: mockSpeakRing 1.5s ease-in-out 0.5s infinite; }
-            .mock-online { animation: mockOnlinePulse 2s ease-in-out infinite; }
-            .mock-online-d { animation: mockOnlinePulse 2s ease-in-out 1s infinite; }
-            .mock-ch-active { animation: mockChannelGlow 3s ease-in-out infinite; }
-          `}</style>
-          <div className="lp-frame">
-            <div className="lp-frame-inner">
-            {/* Title bar */}
-            <div className="flex items-center gap-2 px-4 py-3 bg-vox-bg-secondary border-b border-vox-border">
-              <div className="h-3 w-3 rounded-full bg-vox-accent-danger" />
-              <div className="h-3 w-3 rounded-full bg-vox-accent-warning" />
-              <div className="h-3 w-3 rounded-full bg-vox-accent-success" />
-              <img src="/logo_static.svg" alt="" className="ml-2 h-4 w-4 rounded-sm" />
-              <span className="text-xs text-vox-text-muted">Voxium</span>
-            </div>
-            {/* Fake layout */}
-            <div className="flex" style={{ height: 340 }}>
-              {/* Server sidebar */}
-              <div className="w-14 bg-vox-sidebar border-r border-vox-border flex flex-col items-center py-3 gap-2">
-                <img src="/logo_static.svg" alt="" className="h-10 w-10 rounded-2xl" />
-                <div className="h-[1px] w-8 bg-vox-border" />
-                <div className="h-10 w-10 rounded-2xl bg-vox-bg-tertiary" />
-                <div className="h-10 w-10 rounded-2xl bg-vox-bg-tertiary" />
-              </div>
-              {/* Channels */}
-              <div className="w-36 bg-vox-channel border-r border-vox-border p-3 flex flex-col">
-                <div className="text-[10px] font-semibold text-vox-text-muted uppercase tracking-wide mb-1.5">Text</div>
-                <div className="space-y-0.5">
-                  <div className="text-xs text-vox-text-primary rounded px-2 py-1 mock-ch-active"># general</div>
-                  <div className="text-xs text-vox-text-secondary px-2 py-1"># music</div>
-                  <div className="text-xs text-vox-text-secondary px-2 py-1"># dev</div>
-                </div>
-                <div className="text-[10px] font-semibold text-vox-text-muted uppercase tracking-wide mt-3 mb-1.5">Voice</div>
-                <div className="space-y-0.5">
-                  <div className="text-xs text-vox-text-secondary px-2 py-1">Lounge</div>
-                  {/* Voice users */}
-                  <div className="flex items-center gap-1.5 px-3 py-0.5">
-                    <div className="h-4 w-4 rounded-full bg-vox-accent-success shrink-0 mock-speak-ring" />
-                    <span className="text-[10px] text-vox-accent-success">Alice</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 px-3 py-0.5">
-                    <div className="h-4 w-4 rounded-full bg-vox-accent-primary shrink-0 mock-speak-ring-d" />
-                    <span className="text-[10px] text-vox-text-secondary">Bob</span>
-                  </div>
-                </div>
-              </div>
-              {/* Chat area */}
-              <div className="flex-1 bg-vox-chat flex flex-col">
-                {/* Messages */}
-                <div className="flex-1 p-3 flex flex-col justify-end gap-2.5 overflow-hidden">
-                  {/* Alice's message */}
-                  <div className="mock-msg-1">
-                    <div className="flex items-start gap-2">
-                      <div className="relative shrink-0">
-                        <div className="h-6 w-6 rounded-full bg-vox-accent-success" />
-                        <div className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-vox-accent-success border-2 border-vox-chat mock-online" />
-                      </div>
-                      <div>
-                        <span className="text-[10px] font-semibold text-vox-accent-success">Alice</span>
-                        <span className="text-[9px] text-vox-text-muted ml-1.5">12:01</span>
-                        <p className="text-xs text-vox-text-primary leading-snug">Hey, welcome to Voxium!</p>
-                        {/* Reaction */}
-                        <div className="mock-reaction mt-1 inline-flex items-center gap-0.5 rounded-full bg-vox-bg-tertiary/60 border border-vox-border px-1.5 py-0.5">
-                          <span className="text-[10px]">👋</span>
-                          <span className="text-[9px] text-vox-text-muted">2</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  {/* Bob's message */}
-                  <div className="mock-msg-2">
-                    <div className="flex items-start gap-2">
-                      <div className="relative shrink-0">
-                        <div className="h-6 w-6 rounded-full bg-vox-accent-primary" />
-                        <div className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-vox-accent-success border-2 border-vox-chat mock-online-d" />
-                      </div>
-                      <div>
-                        <span className="text-[10px] font-semibold text-vox-accent-primary">Bob</span>
-                        <span className="text-[9px] text-vox-text-muted ml-1.5">12:02</span>
-                        <p className="text-xs text-vox-text-primary leading-snug">Voice quality is insane 🔥</p>
-                      </div>
-                    </div>
-                  </div>
-                  {/* Charlie's message */}
-                  <div className="mock-msg-3">
-                    <div className="flex items-start gap-2">
-                      <div className="relative shrink-0">
-                        <div className="h-6 w-6 rounded-full bg-vox-accent-warning" />
-                        <div className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-vox-accent-success border-2 border-vox-chat mock-online" />
-                      </div>
-                      <div>
-                        <span className="text-[10px] font-semibold text-vox-accent-warning">Charlie</span>
-                        <span className="text-[9px] text-vox-text-muted ml-1.5">12:03</span>
-                        <p className="text-xs text-vox-text-primary leading-snug">Noise suppression is magic 🚀</p>
-                      </div>
-                    </div>
-                  </div>
-                  {/* Typing indicator */}
-                  <div className="flex items-center gap-1.5 px-1 h-4">
-                    <div className="flex gap-0.5">
-                      <div className="h-1.5 w-1.5 rounded-full bg-vox-text-muted mock-typing-dot" />
-                      <div className="h-1.5 w-1.5 rounded-full bg-vox-text-muted mock-typing-dot" style={{ animationDelay: '0.15s' }} />
-                      <div className="h-1.5 w-1.5 rounded-full bg-vox-text-muted mock-typing-dot" style={{ animationDelay: '0.3s' }} />
-                    </div>
-                    <span className="text-[9px] text-vox-text-muted">Alice is typing...</span>
-                  </div>
-                </div>
-                {/* Message input */}
-                <div className="px-3 pb-2.5">
-                  <div className="flex items-center rounded-md bg-vox-bg-floating border border-vox-border px-2.5 py-1.5">
-                    <span className="text-[10px] text-vox-text-muted">Message #general</span>
-                    <div className="ml-0.5 w-[1px] h-3 bg-vox-text-muted mock-cursor" />
-                  </div>
-                </div>
-              </div>
-            </div>
-            </div>
-          </div>
+          <HeroAppMock />
         </div>
         </div>
       </div>
@@ -942,13 +789,17 @@ function ThemeSwitcherCard() {
           <div className="h-2 w-2 rounded-full bg-green-400/70" />
           <span className="ml-1.5 text-[9px] font-medium" style={{ color: t.muted, transition: 'color 0.4s ease' }}>Voxium</span>
         </div>
-        <div className="flex flex-1 min-h-0">
-          {/* Mini sidebar */}
-          <div className="w-10 flex flex-col items-center py-2 gap-1.5" style={{ background: t.sidebar, borderRight: `1px solid ${t.border}`, transition: 'all 0.4s ease' }}>
-            <div className="h-6 w-6 rounded-lg" style={{ background: t.accent, opacity: 0.8, transition: 'background 0.4s ease' }} />
-            <div className="h-[1px] w-5" style={{ background: t.border, transition: 'background 0.4s ease' }} />
-            <div className="h-6 w-6 rounded-lg" style={{ background: t.border, transition: 'background 0.4s ease' }} />
+        {/* Mini spaces strip — tabs along the top, like the real shell */}
+        <div className="flex items-center gap-1 px-2 py-1" style={{ background: t.bg, borderBottom: `1px solid ${t.border}`, transition: 'all 0.4s ease' }}>
+          <div className="h-3.5 w-3.5 rounded-md shrink-0" style={{ background: t.accent, opacity: 0.8, transition: 'background 0.4s ease' }} />
+          <div className="h-3 w-px shrink-0" style={{ background: t.border, transition: 'background 0.4s ease' }} />
+          <div className="flex items-center gap-1 rounded-md px-1 py-0.5" style={{ background: t.chat, border: `1px solid ${t.border}`, transition: 'all 0.4s ease' }}>
+            <div className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ background: t.accent, transition: 'background 0.4s ease' }} />
+            <span className="text-[8px] font-semibold whitespace-nowrap" style={{ color: t.text, transition: 'color 0.4s ease' }}>Voxium HQ</span>
           </div>
+          <div className="h-3.5 w-3.5 rounded-md shrink-0" style={{ background: t.border, transition: 'background 0.4s ease' }} />
+        </div>
+        <div className="flex flex-1 min-h-0">
           {/* Chat */}
           <div className="flex-1 flex flex-col p-2.5 gap-2 justify-end" style={{ background: t.chat, transition: 'background 0.4s ease' }}>
             {['Alice', 'Bob', 'You'].map((name, i) => (
