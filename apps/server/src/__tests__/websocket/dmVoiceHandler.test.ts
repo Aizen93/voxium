@@ -46,9 +46,11 @@ const mockRedis = vi.hoisted(() => {
   };
 });
 
-const { mockAnyOtherNodeAlive, mockSocketExists } = vi.hoisted(() => ({
+const { mockAnyOtherNodeAlive, mockSocketExists, mockLiveSocketIds } = vi.hoisted(() => ({
   mockAnyOtherNodeAlive: vi.fn().mockResolvedValue(false),
   mockSocketExists: vi.fn().mockResolvedValue(false),
+  // null = adapter cannot answer, so the sweep uses the legacy per-socket path
+  mockLiveSocketIds: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../../utils/redis', () => ({
@@ -56,6 +58,7 @@ vi.mock('../../utils/redis', () => ({
   NODE_ID: vi.fn().mockReturnValue('test-node-1'),
   anyOtherNodeAlive: mockAnyOtherNodeAlive,
   socketExistsInCluster: mockSocketExists,
+  liveClusterSocketIds: mockLiveSocketIds,
 }));
 
 // Mock rate limiter — always allow by default
@@ -773,6 +776,7 @@ describe('dmVoiceHandler — clearDMVoiceState (multi-node scoped reap)', () => 
     resetRedis();
     mockAnyOtherNodeAlive.mockResolvedValue(false);
     mockSocketExists.mockResolvedValue(false);
+    mockLiveSocketIds.mockResolvedValue(null);
   });
 
   it('with live peers: reaps ONLY participants whose socket is gone cluster-wide', async () => {
@@ -1687,5 +1691,93 @@ describe('dmVoiceHandler — rate limiting', () => {
     const handler = handlers.get('dm:voice:signal')!;
     await handler({ to: 'user-2', signal: {} });
     expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:signal', 300);
+  });
+});
+
+// ─── Batched boot sweep (F9) ────────────────────────────────────────────────
+
+describe('dmVoiceHandler — clearDMVoiceState uses ONE cluster snapshot', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+    mockAnyOtherNodeAlive.mockResolvedValue(true);
+    mockLiveSocketIds.mockResolvedValue(null);
+  });
+
+  function twoParticipants() {
+    mockRedis.sMembers.mockResolvedValue(['conv-9']);
+    mockRedis.hGetAll.mockImplementation((key: string) =>
+      Promise.resolve(key === 'dm:voice:users:conv-9' ? {
+        'u-dead': JSON.stringify({ socketId: 's-dead', selfMute: false, selfDeaf: false }),
+        'u-live': JSON.stringify({ socketId: 's-live', selfMute: false, selfDeaf: false }),
+      } : {}));
+  }
+
+  it('asks the adapter ONCE and never probes per socket', async () => {
+    // The old loop did a cluster-wide fetchSockets PER ENTRY, including every
+    // live socket on every peer — just to `continue`.
+    twoParticipants();
+    mockLiveSocketIds.mockResolvedValue(new Set(['s-live']));
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    expect(mockLiveSocketIds).toHaveBeenCalledTimes(1);
+    expect(mockSocketExists).not.toHaveBeenCalled();
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-9', userId: 'u-dead' });
+    expect(io._emit).not.toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-9', userId: 'u-live' });
+  });
+
+  it('reaps NOTHING when the snapshot times out — a partial answer would hang up live calls', async () => {
+    twoParticipants();
+    mockLiveSocketIds.mockRejectedValue(new Error('timeout reached while waiting for allRooms response'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    expect(mockRedis.eval).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+describe('dmVoiceHandler — clearDMVoiceState snapshot ordering', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+    mockAnyOtherNodeAlive.mockResolvedValue(true);
+    mockLiveSocketIds.mockResolvedValue(null);
+  });
+
+  it('reads the call state BEFORE snapshotting liveness', async () => {
+    // Snapshot first and a call that starts between the two looks dead: absent
+    // from the snapshot, present in the hash, and hung up while it is live.
+    const order: string[] = [];
+    mockRedis.sMembers.mockImplementation(async () => { order.push('state'); return []; });
+    mockLiveSocketIds.mockImplementation(async () => { order.push('snapshot'); return new Set(); });
+
+    await clearDMVoiceState(createMockIO() as never);
+
+    expect(order).toEqual(['state', 'snapshot']);
+  });
+
+  it('still reaps orphaned reverse-keys when the snapshot fails', async () => {
+    // The dm:voice:call:* scan compares Redis against Redis and never consults
+    // socket liveness — a failed snapshot must not take it down too.
+    mockRedis.sMembers.mockResolvedValue([]);
+    mockLiveSocketIds.mockRejectedValue(new Error('timeout'));
+    mockRedis.scanIterator.mockImplementation(async function* () {
+      yield ['dm:voice:call:u-orphan'];
+    });
+    mockRedis.get.mockResolvedValue('conv-gone');
+    mockRedis.hExists.mockResolvedValue(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await clearDMVoiceState(createMockIO() as never);
+
+    expect(mockRedis.del).toHaveBeenCalledWith('dm:voice:call:u-orphan');
+    warn.mockRestore();
   });
 });

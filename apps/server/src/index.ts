@@ -39,6 +39,7 @@ import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/a
 import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
 import { startRegistrationHygiene, stopRegistrationHygiene } from './utils/registrationHygiene';
 import { startKeyShareCleanup, stopKeyShareCleanup } from './utils/keyShareCleanup';
+import { startOrphanCleanup, stopOrphanCleanup } from './utils/orphanCleanup';
 import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { ensureBucketEncryption } from './utils/s3';
@@ -130,6 +131,11 @@ async function main() {
   // Registration hygiene: unverified-account TTL + IP-record retention (GDPR)
   startRegistrationHygiene();
 
+  // Backstop for S3 objects whose DB row went without them. Age-gated and
+  // leader-locked — see the header of utils/orphanCleanup.ts for why both
+  // matter more than the sweep itself.
+  startOrphanCleanup();
+
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n[Node ${NODE_ID()}] Voxium server running on http://0.0.0.0:${PORT}\n`);
     // Signal readiness probe after full initialization (migrations, Redis, mediasoup)
@@ -146,12 +152,18 @@ async function main() {
     stopAttachmentCleanup();
     stopKeyShareCleanup();
     stopRegistrationHygiene();
+    stopOrphanCleanup();
     stopVoiceCluster();
     // Drop our liveness key FIRST so peer reapers promptly clean up any voice
     // state this node owned, instead of waiting out the heartbeat TTL.
     await stopNodeHeartbeat().catch((err) => console.warn('[Shutdown] Heartbeat cleanup failed:', err));
     // Gracefully disconnect all Socket.IO clients before closing HTTP server
-    io.disconnectSockets(true);
+    // .local: the adapter's disconnectSockets publishes a REMOTE_DISCONNECT
+    // with an empty room filter, which every peer (and this node) applies to
+    // its ENTIRE namespace — restarting one node would hang up every client in
+    // the cluster, tearing down the surviving node's voice sessions and DM
+    // calls too. (Pre-existing; found while reviewing the boot-sweep change.)
+    io.local.disconnectSockets(true);
     server.close();
     // Clean up presence so users don't appear online after shutdown.
     // Multi-node aware: with live peers this only reaps OUR dead sockets —

@@ -168,12 +168,38 @@ export async function getUserSockets(userId: string): Promise<string[]> {
 /** Minimal structural view of Socket.IO used for cluster-wide socket existence checks. */
 export interface ClusterSocketLookup {
   in: (room: string) => { fetchSockets: () => Promise<unknown[]> };
+  /** Adapter access for the batched liveness snapshot. Deliberately untyped
+   *  beyond "an object": `allRooms` lives on the Redis adapter subclass, not
+   *  on socket.io's base `Adapter`, so naming it here would make the real
+   *  `Server` fail to satisfy this interface. Narrowed at the call site. */
+  of?: (nsp: string) => { adapter: object };
 }
 
-/** True if the socket still exists ANYWHERE in the cluster (adapter-wide lookup). */
+/** True if the socket still exists ANYWHERE in the cluster (adapter-wide lookup).
+ *  ONE socket per call — use `liveClusterSocketIds` for a sweep. */
 export async function socketExistsInCluster(io: ClusterSocketLookup, socketId: string): Promise<boolean> {
   const sockets = await io.in(socketId).fetchSockets();
   return sockets.length > 0;
+}
+
+/**
+ * Every live socket id in the cluster, in ONE adapter round trip.
+ *
+ * Every socket auto-joins a room named after its own id, so the adapter's
+ * room list IS the liveness set (it also contains the named rooms — all of
+ * which are prefixed `user:` / `server:` / `channel:` / `dm:` / `voice:`, so
+ * they cannot be mistaken for a socket id).
+ *
+ * Returns null when the adapter cannot answer at all, so the caller can fall
+ * back to the per-socket path. THROWS when the adapter is present but the
+ * request times out — a partial answer would look like "those sockets are
+ * dead" and mark live users on a slow peer offline, so callers must skip the
+ * reap rather than act on it.
+ */
+export async function liveClusterSocketIds(io: ClusterSocketLookup): Promise<Set<string> | null> {
+  const adapter = io.of?.('/')?.adapter as { allRooms?: () => Promise<Set<string>> } | undefined;
+  if (typeof adapter?.allRooms !== 'function') return null;
+  return await adapter.allRooms();
 }
 
 /**
@@ -194,14 +220,42 @@ export async function clearPresenceState(
 
   if (io && await anyOtherNodeAlive()) {
     // Scoped reap: drop only cluster-wide-dead sockets; peers' users stay online.
+    //
+    // ONE adapter snapshot, not one cluster round trip per entry. `socket:users`
+    // is the GLOBAL hash, so the old loop probed every LIVE socket on every peer
+    // too — just to `continue`. After a crash or redeploy that is tens of
+    // thousands of serial 2-round-trip lookups before server.listen(), and an
+    // unresponsive peer made each one sit out the adapter's full 5s timeout.
+    // ORDER MATTERS: read the candidate list FIRST, take the snapshot AFTER.
+    // The reverse leaves a window where a socket that connects between the two
+    // is absent from the snapshot but present in the hash — and gets reaped
+    // while its user is connected. Snapshotting last makes the liveness view
+    // strictly newer than every candidate in it, which is the safe direction.
     const socketUsers = await redis.hGetAll('socket:users');
+
+    let live: Set<string> | null;
+    try {
+      live = await liveClusterSocketIds(io);
+    } catch (err) {
+      // A timed-out snapshot is PARTIAL. Acting on it would mark live users on
+      // a slow peer offline, which is worse than leaving stale rows for the
+      // next boot to clear.
+      console.warn('[Presence] Cluster socket snapshot failed — skipping the scoped reap:', err instanceof Error ? err.message : err);
+      return;
+    }
+
     const fullyOffline: string[] = [];
     for (const socketId of Object.keys(socketUsers)) {
-      try {
-        if (await socketExistsInCluster(io, socketId)) continue;
-      } catch (err) {
-        console.warn('[Presence] Cluster socket lookup failed, skipping reap for', socketId, err);
-        continue;
+      if (live) {
+        if (live.has(socketId)) continue;
+      } else {
+        // Adapter without allRooms (a hand-rolled io): legacy per-socket path
+        try {
+          if (await socketExistsInCluster(io, socketId)) continue;
+        } catch (err) {
+          console.warn('[Presence] Cluster socket lookup failed, skipping reap for', socketId, err);
+          continue;
+        }
       }
       const result = await setUserOffline(socketId);
       if (result?.fullyOffline) fullyOffline.push(result.userId);

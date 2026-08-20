@@ -310,4 +310,119 @@ describe('utils/redis — clearPresenceState (multi-node aware)', () => {
     vi.mocked(client.hGet).mockResolvedValue(null);
     vi.mocked(client.hGetAll).mockResolvedValue({});
   });
+
+  // ── F9: ONE adapter round trip for the whole sweep ────────────────────────
+
+  /** io whose adapter answers allRooms() with `rooms`, or rejects. */
+  function ioWithAdapter(rooms: string[] | Error) {
+    const fetchSockets = vi.fn().mockResolvedValue([]);
+    const allRooms = vi.fn(() =>
+      rooms instanceof Error ? Promise.reject(rooms) : Promise.resolve(new Set(rooms)));
+    return {
+      in: vi.fn(() => ({ fetchSockets })),
+      of: vi.fn(() => ({ adapter: { allRooms } })),
+      _allRooms: allRooms,
+      _fetchSockets: fetchSockets,
+    };
+  }
+
+  async function peersAliveWith(client: ReturnType<typeof import('../../utils/redis').getRedis>, sockets: Record<string, string>) {
+    vi.mocked(client.scanIterator).mockImplementation(async function* () {
+      yield ['node:alive:hb-node-1', 'node:alive:peer-x'];
+    });
+    // mockReset (not Once): a test that returns EARLY would otherwise leave a
+    // queued value for the next one to consume
+    vi.mocked(client.hGetAll).mockReset();
+    vi.mocked(client.hGetAll).mockResolvedValue(sockets);
+    vi.mocked(client.hDel).mockClear();
+  }
+
+  it('takes ONE adapter snapshot instead of a cluster round trip per socket', async () => {
+    // socket:users is the GLOBAL hash, so the old loop probed every LIVE socket
+    // on every peer too — tens of thousands of serial lookups before listen(),
+    // each able to sit out the adapter's full 5s timeout.
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, { 's-dead': 'u-dead', 's-live': 'u-live', 's-live-2': 'u-live-2' });
+    vi.mocked(client.hGet).mockResolvedValue('u-dead');
+    vi.mocked(client.sCard).mockResolvedValue(0);
+
+    const io = ioWithAdapter(['s-live', 's-live-2', 'user:u-live', 'server:srv-1']);
+    await mod.clearPresenceState(makeDb(), io);
+
+    expect(io._allRooms).toHaveBeenCalledTimes(1);
+    expect(io._fetchSockets).not.toHaveBeenCalled();
+    expect(client.hDel).toHaveBeenCalledWith('socket:users', 's-dead');
+    expect(client.hDel).not.toHaveBeenCalledWith('socket:users', 's-live');
+    expect(client.hDel).not.toHaveBeenCalledWith('socket:users', 's-live-2');
+
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGet).mockResolvedValue(null);
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  it('reaps NOTHING when the snapshot times out — a partial answer marks live users offline', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, { 's-a': 'u-a', 's-b': 'u-b' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const db = makeDb();
+    await mod.clearPresenceState(db, ioWithAdapter(new Error('timeout reached while waiting for allRooms response')));
+
+    expect(client.hDel).not.toHaveBeenCalled();
+    expect(db.user.updateMany).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalled();
+
+    warn.mockRestore();
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  it('reads socket:users BEFORE snapshotting liveness', async () => {
+    // Snapshot first and a socket that connects between the two is absent from
+    // the snapshot but present in the hash — reaped while its user is online.
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, {});
+
+    const order: string[] = [];
+    vi.mocked(client.hGetAll).mockImplementation(async () => { order.push('hash'); return {}; });
+    const io = ioWithAdapter([]);
+    io._allRooms.mockImplementation(async () => { order.push('snapshot'); return new Set<string>(); });
+
+    await mod.clearPresenceState(makeDb(), io);
+
+    expect(order).toEqual(['hash', 'snapshot']);
+
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGetAll).mockReset();
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  it('falls back to per-socket lookups when the adapter cannot answer at all', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, { 's-dead': 'u-dead' });
+    vi.mocked(client.hGet).mockResolvedValue('u-dead');
+    vi.mocked(client.sCard).mockResolvedValue(0);
+
+    const io = { in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) })) };
+    await mod.clearPresenceState(makeDb(), io);
+
+    expect(io.in).toHaveBeenCalledWith('s-dead');
+    expect(client.hDel).toHaveBeenCalledWith('socket:users', 's-dead');
+
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGet).mockResolvedValue(null);
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
 });

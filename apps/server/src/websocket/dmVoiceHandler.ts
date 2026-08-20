@@ -5,7 +5,7 @@ import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
-import { getRedis, anyOtherNodeAlive, socketExistsInCluster, type ClusterSocketLookup } from '../utils/redis';
+import { getRedis, anyOtherNodeAlive, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup } from '../utils/redis';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -167,7 +167,10 @@ export async function clearDMVoiceState(
   const redis = getRedis();
 
   if (io && await anyOtherNodeAlive()) {
-    let reaped = 0;
+    // ORDER MATTERS: collect the candidates FIRST, snapshot liveness AFTER, so
+    // the liveness view is strictly newer than everything it judges. Snapshot
+    // first and a call that starts in between looks dead and gets hung up.
+    const participants: Array<{ conversationId: string; userId: string; socketId?: string }> = [];
     const activeConvs = await redis.sMembers('dm:voice:active');
     for (const conversationId of activeConvs) {
       const users = await redis.hGetAll(`dm:voice:users:${conversationId}`);
@@ -178,12 +181,40 @@ export async function clearDMVoiceState(
         } catch {
           socketId = undefined; // malformed entry — treat as ghost
         }
-        try {
-          if (socketId && await socketExistsInCluster(io, socketId)) continue;
-        } catch (err) {
-          console.warn('[DMVoice] Cluster socket lookup failed, skipping reap for', userId, err);
-          continue;
+        participants.push({ conversationId, userId, socketId });
+      }
+    }
+
+    // One adapter snapshot for the whole sweep — see clearPresenceState. A
+    // timed-out snapshot is partial, and acting on it would hang up LIVE calls
+    // between users on a slow peer node, so the participant reap is skipped
+    // entirely. The orphan reverse-key scan below is NOT skipped: it compares
+    // Redis against Redis and never consults socket liveness.
+    let live: Set<string> | null = null;
+    let snapshotFailed = false;
+    try {
+      live = await liveClusterSocketIds(io);
+    } catch (err) {
+      console.warn('[DMVoice] Cluster socket snapshot failed — skipping the participant reap:', err instanceof Error ? err.message : err);
+      snapshotFailed = true;
+    }
+
+    let reaped = 0;
+    if (!snapshotFailed) {
+      for (const { conversationId, userId, socketId } of participants) {
+        let stillConnected: boolean;
+        if (live) {
+          stillConnected = !!socketId && live.has(socketId);
+        } else {
+          // Adapter without allRooms (a hand-rolled io): legacy per-socket path
+          try {
+            stillConnected = !!socketId && await socketExistsInCluster(io, socketId);
+          } catch (err) {
+            console.warn('[DMVoice] Cluster socket lookup failed, skipping reap for', userId, err);
+            continue;
+          }
         }
+        if (stillConnected) continue;
         await removeDMVoiceUser(conversationId, userId);
         io.to(`dm:voice:${conversationId}`).emit('dm:voice:left', { conversationId, userId });
         reaped++;
