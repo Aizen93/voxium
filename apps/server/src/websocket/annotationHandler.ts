@@ -16,8 +16,12 @@ import {
 import type { ServerToClientEvents, ClientToServerEvents, AnnotationOp, AnnotationObject, AnnotationScene } from '@voxium/shared';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { getRedis } from '../utils/redis';
-import { annotationKey, ANNOTATION_STATE_TTL_SECONDS, type StoredAnnotationState } from '../utils/annotationState';
+import { annotationKey, casAnnotationState, type StoredAnnotationState } from '../utils/annotationState';
 import { imageDimensions } from '../utils/imageHeader';
+
+/** CAS retries before refusing the batch. Two is generous for a scene that is
+ *  supposed to have exactly one writer — more would just delay the diagnosis. */
+const ANNOTATION_CAS_ATTEMPTS = 3;
 
 /**
  * Screen-share annotation ops (spec: session-only sharer-drawn overlays).
@@ -221,35 +225,63 @@ export function handleAnnotationEvents(
 
     try {
       const redis = getRedis();
-      // One round trip: sharer authorization + current scene
-      const [sharer, storedRaw] = await redis.mGet([`voice:screen:${channelId}`, annotationKey(channelId)]);
-      if (sharer !== userId) return ack({ ok: false, error: 'Not the active sharer' });
-
-      let prev: StoredAnnotationState = { rev: 0, sharerUserId: userId, scene: { objects: [] } };
+      let scene!: AnnotationScene;
+      let next!: StoredAnnotationState;
       let sceneRestarted = true;
-      if (storedRaw) {
-        try {
-          const parsed = JSON.parse(storedRaw) as StoredAnnotationState;
-          if (typeof parsed?.rev === 'number' && Array.isArray(parsed?.scene?.objects)) {
-            prev = parsed;
-            sceneRestarted = false;
+      let written = false;
+
+      // Read → apply → COMPARE-AND-SET, retried on contention. The read and
+      // the write are not one operation, so anything that lands between them
+      // (a pipelined batch from a modified client, a sharer handoff, the
+      // fire-and-forget scene delete) would otherwise be clobbered by a write
+      // computed from a scene that no longer exists. Contention is normal, not
+      // an error: retrying re-applies these ops on top of whatever landed, and
+      // the sharer never hears about it.
+      for (let attempt = 0; attempt < ANNOTATION_CAS_ATTEMPTS && !written; attempt++) {
+        // One round trip: sharer authorization + current scene
+        const [sharer, storedRaw] = await redis.mGet([`voice:screen:${channelId}`, annotationKey(channelId)]);
+        if (sharer !== userId) return ack({ ok: false, error: 'Not the active sharer' });
+
+        let prev: StoredAnnotationState = { rev: 0, sharerUserId: userId, scene: { objects: [] } };
+        sceneRestarted = true;
+        if (storedRaw) {
+          try {
+            const parsed = JSON.parse(storedRaw) as StoredAnnotationState;
+            if (typeof parsed?.rev === 'number' && Array.isArray(parsed?.scene?.objects)) {
+              // A scene left by the PREVIOUS sharer is not ours to extend: the
+              // release-side delete is fire-and-forget, so a fast first batch
+              // can still see it. Inheriting it would ship someone else's
+              // objects to viewers under this sharer's name.
+              if (parsed.sharerUserId === userId) {
+                prev = parsed;
+                sceneRestarted = false;
+              } else {
+                console.warn(`[Annotations] Discarding channel ${channelId}'s scene from a previous sharer`);
+              }
+            }
+          } catch {
+            // Corrupt state — fall through to a fresh scene rather than wedging the share
+            console.warn(`[Annotations] Corrupt scene for channel ${channelId}, resetting`);
           }
-        } catch {
-          // Corrupt state — fall through to a fresh scene rather than wedging the share
-          console.warn(`[Annotations] Corrupt scene for channel ${channelId}, resetting`);
         }
+
+        scene = applyAnnotationOps(prev.scene, ops as AnnotationOp[]);
+        next = { rev: prev.rev + 1, sharerUserId: userId, scene };
+        const serialized = JSON.stringify(next);
+        if (!sceneWithinLimits(scene) || serialized.length > ANNOTATION_SCENE_MAX) {
+          return ack({ ok: false, error: 'Scene limit reached' });
+        }
+
+        written = await casAnnotationState(channelId, userId, prev.rev, serialized);
       }
 
-      const scene = applyAnnotationOps(prev.scene, ops as AnnotationOp[]);
-      const next: StoredAnnotationState = { rev: prev.rev + 1, sharerUserId: userId, scene };
-      const serialized = JSON.stringify(next);
-      if (!sceneWithinLimits(scene) || serialized.length > ANNOTATION_SCENE_MAX) {
-        return ack({ ok: false, error: 'Scene limit reached' });
+      if (!written) {
+        // Sustained contention on a single-writer scene means something is
+        // wrong (a pipelining client, or a sharer slot flapping). Refusing is
+        // right — a blind write here is the clobber the CAS exists to prevent.
+        console.warn(`[Annotations] Scene write for channel ${channelId} lost ${ANNOTATION_CAS_ATTEMPTS} races — refusing`);
+        return ack({ ok: false, error: 'Scene is being modified concurrently' });
       }
-
-      // Redis-only RMW: every accepted batch must be written, or the next GET
-      // resurrects a scene missing these ops.
-      await redis.set(annotationKey(channelId), serialized, { EX: ANNOTATION_STATE_TTL_SECONDS });
 
       // Sender excluded — the sharer local-echoes its own ops.
       socket.to(`voice:${channelId}`).emit('voice:annotation:ops', {

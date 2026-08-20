@@ -164,3 +164,164 @@ describe('ensureComposite/stopComposite — fail-closed producer gate', () => {
     expect(handles.resumeProducer).not.toHaveBeenCalled();
   });
 });
+
+// ─── Live session: restoring the raw track (F10) ────────────────────────────
+//
+// The fail-closed suite above deliberately lets setup fail (jsdom has no media
+// pipeline). These tests stub just enough of it — MediaStream, video.play,
+// getContext, captureStream — for ensureComposite to install a REAL session,
+// which is the only way to reach stopComposite's restore branch.
+
+function fakeTrack(label: string) {
+  return {
+    label,
+    readyState: 'live' as MediaStreamTrackState,
+    stop: vi.fn(function (this: { readyState: string }) { this.readyState = 'ended'; }),
+    getSettings: () => ({ width: 640, height: 480 }),
+    clone: vi.fn(() => fakeTrack(`${label}-clone`)),
+  } as unknown as MediaStreamTrack & { stop: ReturnType<typeof vi.fn> };
+}
+
+function installMediaPipeline() {
+  const compositeTrack = fakeTrack('composite');
+  vi.stubGlobal('MediaStream', class { constructor(public tracks: unknown[]) {} });
+  vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    drawImage: vi.fn(), fillRect: vi.fn(), fillStyle: '',
+  } as unknown as CanvasRenderingContext2D);
+  (HTMLCanvasElement.prototype as unknown as { captureStream: () => MediaStream }).captureStream =
+    () => ({ getVideoTracks: () => [compositeTrack] }) as unknown as MediaStream;
+  return { compositeTrack };
+}
+
+function liveHandles(masks: MaskRect[] = [mask('m1')]) {
+  const live = { masks };
+  return {
+    live,
+    rawTrack: fakeTrack('raw'),
+    getMasks: () => live.masks,
+    replaceTrack: vi.fn(async (_track: MediaStreamTrack) => {}),
+    pauseProducer: vi.fn<() => void>(),
+    resumeProducer: vi.fn<() => void>(),
+    onFatal: vi.fn<() => void>(),
+    onRestoreFailed: vi.fn<() => void>(),
+  } satisfies CompositeHandles & { live: { masks: MaskRect[] } };
+}
+
+describe('stopComposite — restoring the raw track on a LIVE session', () => {
+  let compositeTrack: MediaStreamTrack & { stop: ReturnType<typeof vi.fn> };
+
+  beforeEach(async () => {
+    teardownComposite();
+    await stopComposite();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    compositeTrack = installMediaPipeline().compositeTrack as typeof compositeTrack;
+  });
+
+  it('installs a live session, then swaps the raw track back and tears down on success', async () => {
+    const handles = liveHandles();
+    await ensureComposite(handles);
+    expect(handles.onFatal).not.toHaveBeenCalled(); // the pipeline stub worked
+
+    handles.live.masks = [];
+    await stopComposite();
+
+    expect(handles.replaceTrack).toHaveBeenLastCalledWith(handles.rawTrack);
+    expect(handles.onRestoreFailed).not.toHaveBeenCalled();
+    expect(compositeTrack.stop).toHaveBeenCalled(); // torn down, CPU released
+  });
+
+  it('KEEPS the session and warns when the swap back fails, instead of blackening the share', async () => {
+    // F10: session/blockedHandles were nulled before the attempt and the catch
+    // fell through to destroySession, which stops the very track the producer
+    // still holds — a frozen black frame for the rest of the share, with the
+    // state already cleared so nothing could recover it, and no toast.
+    const handles = liveHandles();
+    await ensureComposite(handles);
+
+    handles.live.masks = [];
+    handles.replaceTrack.mockRejectedValueOnce(new Error('producer closed mid-swap'));
+    await stopComposite();
+
+    expect(handles.onRestoreFailed).toHaveBeenCalledTimes(1);
+    // The producer's track must stay LIVE — with masks empty the compositor is
+    // a plain passthrough, so viewers keep seeing the real screen
+    expect(compositeTrack.stop).not.toHaveBeenCalled();
+  });
+
+  it('retries the swap on the next mask add/remove, and succeeds', async () => {
+    const handles = liveHandles();
+    await ensureComposite(handles);
+
+    handles.live.masks = [];
+    handles.replaceTrack.mockRejectedValueOnce(new Error('transport hiccup'));
+    await stopComposite();
+    expect(compositeTrack.stop).not.toHaveBeenCalled();
+
+    await stopComposite(); // the session survived, so the retry has something to restore
+    expect(handles.replaceTrack).toHaveBeenLastCalledWith(handles.rawTrack);
+    expect(compositeTrack.stop).toHaveBeenCalled();
+  });
+
+  it('stays quiet when the share ended under the failing swap', async () => {
+    // teardownComposite is synchronous and unqueued, so it can land mid-await;
+    // a toast then would be noise about a share that no longer exists
+    const handles = liveHandles();
+    await ensureComposite(handles);
+
+    handles.live.masks = [];
+    handles.replaceTrack.mockImplementationOnce(async () => {
+      teardownComposite();
+      throw new Error('producer closed');
+    });
+    await stopComposite();
+
+    expect(handles.onRestoreFailed).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Fail-closed across the restore await ───────────────────────────────────
+
+describe('stopComposite — a mask added DURING the swap back', () => {
+  beforeEach(async () => {
+    teardownComposite();
+    await stopComposite();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    installMediaPipeline();
+  });
+
+  it('re-gates the producer when a mask reappears while the raw track is being restored', async () => {
+    // The session stays non-null across the await (so a failed restore can keep
+    // the share alive), which means annotationStore's synchronous
+    // `if (!isCompositing()) pauseProducer()` does NOT fire for a mask added in
+    // that window. Without a second check here the raw track goes live with a
+    // mask present — the one thing this module exists to prevent.
+    const handles = liveHandles();
+    await ensureComposite(handles);
+    // ensureComposite resumes once its own setup lands — start from clean
+    handles.pauseProducer.mockClear();
+    handles.resumeProducer.mockClear();
+
+    handles.live.masks = [];
+    handles.replaceTrack.mockImplementationOnce(async () => {
+      handles.live.masks = [mask('m2')]; // user re-masks mid-swap
+    });
+    await stopComposite();
+
+    expect(handles.pauseProducer).toHaveBeenCalled();
+    expect(handles.resumeProducer).not.toHaveBeenCalled();
+  });
+
+  it('leaves the producer running when no mask came back', async () => {
+    const handles = liveHandles();
+    await ensureComposite(handles);
+    handles.pauseProducer.mockClear();
+
+    handles.live.masks = [];
+    await stopComposite();
+
+    expect(handles.pauseProducer).not.toHaveBeenCalled();
+  });
+});

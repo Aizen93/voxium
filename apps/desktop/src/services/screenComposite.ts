@@ -28,6 +28,11 @@ export interface CompositeHandles {
   resumeProducer: () => void;
   /** Compositor could not start — the producer stays PAUSED; tell the sharer. */
   onFatal?: () => void;
+  /** The last mask was removed but the producer would not take the raw track
+   *  back, so the share keeps going THROUGH the compositor (right picture,
+   *  wasted CPU). Distinct from `onFatal`: nothing is paused and no mask is
+   *  involved, so that toast's text would be actively wrong here. */
+  onRestoreFailed?: () => void;
   /** Source resolution changed mid-share (window switch) — masks may misalign. */
   onSourceResize?: () => void;
 }
@@ -294,13 +299,40 @@ export async function stopComposite(): Promise<void> {
     // for a full replaceTrack round-trip. Keep the session; the queued
     // ensureComposite will see it and no-op.
     if (s.handles.getMasks().length > 0) return;
-    session = null;
-    blockedHandles = null;
+
     if (s.handles.rawTrack.readyState === 'live') {
       try {
         await s.handles.replaceTrack(s.handles.rawTrack);
       } catch (err) {
-        console.error('[ScreenComposite] Restoring the raw track failed:', err);
+        // The producer still references compositeTrack. Tearing down here
+        // would stop that track and the draw loop feeding it, leaving viewers
+        // a frozen black frame for the rest of the share with the state
+        // already cleared — unrecoverable, and silent.
+        //
+        // Instead KEEP the session: masks are empty by now, so the compositor
+        // is a plain passthrough of the raw frame. Costs CPU, shows the right
+        // picture, and a later mask add/remove retries the swap. The share
+        // ending still calls teardownComposite, which is unconditional.
+        // teardownComposite is synchronous and NOT queued on `transition`, so
+        // the share may have ended under our await — then the failure is moot
+        // and a toast would be pure noise.
+        if (session !== s) return;
+        console.error('[ScreenComposite] Restoring the raw track failed — staying composited:', err);
+        s.handles.onRestoreFailed?.();
+        return;
+      }
+    }
+    if (session === s) {
+      session = null;
+      // A mask added while the swap was in flight saw isCompositing() === true
+      // and so skipped annotationStore's synchronous producer pause. The raw
+      // track is now live, so re-gate here or unmasked frames ship until the
+      // queued ensureComposite gets its turn. FAIL CLOSED, as everywhere else.
+      if (s.handles.getMasks().length > 0) {
+        s.handles.pauseProducer();
+        blockedHandles = s.handles;
+      } else {
+        blockedHandles = null;
       }
     }
     destroySession(s);

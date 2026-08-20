@@ -48,3 +48,51 @@ export async function getAnnotationState(channelId: string): Promise<StoredAnnot
 export function deleteAnnotationState(channelId: string): void {
   getRedis().del(annotationKey(channelId)).catch((err) => console.warn('[Annotations] State delete failed:', err));
 }
+
+/**
+ * Compare-and-set the scene: write `serialized` only if the stored state is
+ * still at `expectedRev` AND `sharerUserId` still holds the share.
+ *
+ * The handler's read-modify-write is only single-writer because the CLIENT
+ * promises to serialize its batches on their acks. That is a fine optimisation
+ * but a poor foundation: a modified client can pipeline freely, and a server
+ * stall between the read and the write is enough on its own. Resting scene
+ * integrity on a promise made by the party whose scene it is, is exactly the
+ * kind of thing that reads fine until it doesn't.
+ *
+ * Checking the sharer INSIDE the script also closes the handoff window: the
+ * slot can change between the handler's authorization read and its write, and
+ * a departing sharer must not get one last batch in under the new one's name.
+ *
+ * Returns true on success, false when either check failed (the caller re-reads
+ * and retries — contention is not an error the user should hear about).
+ */
+export async function casAnnotationState(
+  channelId: string,
+  sharerUserId: string,
+  expectedRev: number,
+  serialized: string,
+): Promise<boolean> {
+  // `rev` is ALWAYS the first key of the serialized object (StoredAnnotationState
+  // is built as a literal in that order, and this module is its only writer), so
+  // a prefix match is exact and costs nothing — cjson.decode of a scene up to
+  // ANNOTATION_SCENE_MAX, on every batch, would not be. An unmatched or absent
+  // value reads as rev 0, matching the handler's own "fresh scene" fallback.
+  const result = await getRedis().eval(
+    `if redis.call('get', KEYS[2]) ~= ARGV[3] then return 0 end
+     local cur = redis.call('get', KEYS[1])
+     local currev = 0
+     if cur then
+       local m = string.match(cur, '^{"rev":(%d+)')
+       if m then currev = tonumber(m) end
+     end
+     if currev ~= tonumber(ARGV[1]) then return 0 end
+     redis.call('set', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[4]))
+     return 1`,
+    {
+      keys: [annotationKey(channelId), `voice:screen:${channelId}`],
+      arguments: [String(expectedRev), serialized, sharerUserId, String(ANNOTATION_STATE_TTL_SECONDS)],
+    },
+  ) as number;
+  return result === 1;
+}

@@ -17,6 +17,8 @@ const mockRedis = vi.hoisted(() => ({
   set: vi.fn().mockResolvedValue('OK'),
   get: vi.fn().mockResolvedValue(null),
   del: vi.fn().mockResolvedValue(1),
+  // The scene write is a Lua compare-and-set (1 = won, 0 = lost the race)
+  eval: vi.fn().mockResolvedValue(1),
 }));
 vi.mock('../../utils/redis', () => ({
   getRedis: vi.fn().mockReturnValue(mockRedis),
@@ -96,7 +98,14 @@ beforeEach(() => {
   mockRedis.mGet.mockResolvedValue([null, null]);
   mockRedis.set.mockResolvedValue('OK');
   mockRedis.get.mockResolvedValue(null);
+  mockRedis.eval.mockResolvedValue(1);
 });
+
+/** The state JSON the CAS was asked to write, or undefined if it never ran. */
+function writtenState(call = 0): string | undefined {
+  const args = mockRedis.eval.mock.calls[call]?.[1] as { arguments: string[] } | undefined;
+  return args?.arguments[1];
+}
 
 // ─── Authorization ──────────────────────────────────────────────────────────
 
@@ -107,7 +116,7 @@ describe('annotationHandler — authorization', () => {
     const ack = await send(opsHandler, [{ t: 'add', obj: stroke() }]);
     expect(ack).toHaveBeenCalledWith({ ok: false, error: 'Not the active sharer' });
     expect(toEmit).not.toHaveBeenCalled();
-    expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(mockRedis.eval).not.toHaveBeenCalled();
   });
 
   it('rejects a non-sharer even while someone else is sharing', async () => {
@@ -133,11 +142,14 @@ describe('annotationHandler — authorization', () => {
     const obj = stroke();
     const ack = await send(opsHandler, [{ t: 'add', obj }]);
 
-    expect(mockRedis.set).toHaveBeenCalledWith(
-      annotationKey(CHANNEL),
+    expect(writtenState()).toBe(
       JSON.stringify({ rev: 1, sharerUserId: SHARER, scene: { objects: [obj] } }),
-      { EX: ANNOTATION_STATE_TTL_SECONDS },
     );
+    // CAS keyed on the scene AND the sharer slot, with the expected rev and TTL
+    expect(mockRedis.eval.mock.calls[0][1]).toMatchObject({
+      keys: [annotationKey(CHANNEL), `voice:screen:${CHANNEL}`],
+      arguments: [String(0), expect.any(String), SHARER, String(ANNOTATION_STATE_TTL_SECONDS)],
+    });
     expect(socket.to).toHaveBeenCalledWith(`voice:${CHANNEL}`);
     expect(toEmit).toHaveBeenCalledWith('voice:annotation:ops', {
       channelId: CHANNEL,
@@ -174,7 +186,7 @@ describe('annotationHandler — validation', () => {
     const ack = await send(opsHandler, ops);
     expect(ack).toHaveBeenCalledWith({ ok: false, error });
     expect(toEmit).not.toHaveBeenCalled();
-    expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(mockRedis.eval).not.toHaveBeenCalled();
   }
 
   it('rejects a non-object payload', async () => {
@@ -257,7 +269,7 @@ describe('annotationHandler — validation', () => {
     const ack = await send(opsHandler, [{ t: 'add', obj: { ...base, src: webpDataUrl(512, 512) } }]);
     expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: true }));
     expect(toEmit).toHaveBeenCalled();
-    mockRedis.set.mockClear(); // expectInvalid asserts no writes — isolate from the accepted batch above
+    mockRedis.eval.mockClear(); // expectInvalid asserts no writes — isolate from the accepted batch above
 
     // Small BYTES, enormous declared pixel grid — the classic image bomb
     await expectInvalid([{ t: 'add', obj: { ...base, src: webpDataUrl(8192, 8192) } }]);
@@ -286,7 +298,7 @@ describe('annotationHandler — scene caps', () => {
     seedRedis(SHARER, { rev: 10, sharerUserId: SHARER, scene: { objects } });
     const ack = await send(opsHandler, [{ t: 'add', obj: stroke('one-too-many') }]);
     expect(ack).toHaveBeenCalledWith({ ok: false, error: 'Scene limit reached' });
-    expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(mockRedis.eval).not.toHaveBeenCalled();
     expect(toEmit).not.toHaveBeenCalled();
   });
 
@@ -296,7 +308,7 @@ describe('annotationHandler — scene caps', () => {
     seedRedis(SHARER, { rev: 1, sharerUserId: SHARER, scene: { objects: [stroke('full', { points: maxPoints })] } });
     const ack = await send(opsHandler, [{ t: 'append', id: 'full', points: [0.1, 0.1] }]);
     expect(ack).toHaveBeenCalledWith({ ok: false, error: 'Scene limit reached' });
-    expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(mockRedis.eval).not.toHaveBeenCalled();
   });
 
   it('rejects a batch that would exceed the serialized scene cap', async () => {
@@ -305,7 +317,7 @@ describe('annotationHandler — scene caps', () => {
     seedRedis(SHARER, { rev: 1, sharerUserId: SHARER, scene: { objects: [bloated] } });
     const ack = await send(opsHandler, [{ t: 'add', obj: stroke('extra', { points: Array.from({ length: 2000 }, () => 0.5) }) }]);
     expect(ack).toHaveBeenCalledWith({ ok: false, error: 'Scene limit reached' });
-    expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(mockRedis.eval).not.toHaveBeenCalled();
   });
 });
 
@@ -362,7 +374,7 @@ describe('annotationHandler — rate limiting and errors', () => {
     seedRedis(SHARER, { rev: 3, sharerUserId: SHARER, scene: { objects } });
     const ack = await send(opsHandler, [{ t: 'append', id: 's-0', points: [0.1, 0.1] }]);
     expect(ack).toHaveBeenCalledWith({ ok: false, error: 'Scene limit reached' });
-    expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(mockRedis.eval).not.toHaveBeenCalled();
   });
 
   it('rejects bidi-override and zero-width characters in text (spoofing guard)', async () => {
@@ -470,5 +482,77 @@ describe('applyAnnotationOps (shared reducer)', () => {
     const base = applyAnnotationOps(empty, [{ t: 'add', obj: stroke('a') }, { t: 'add', obj: stroke('b') }]);
     expect(applyAnnotationOps(base, [{ t: 'remove', id: 'a' }]).objects.map((o) => o.id)).toEqual(['b']);
     expect(applyAnnotationOps(base, [{ t: 'clear' }]).objects).toHaveLength(0);
+  });
+});
+
+// ─── Scene write is a compare-and-set (F8) ──────────────────────────────────
+//
+// The read-modify-write was single-writer only because the CLIENT promises to
+// serialize its batches on their acks. A modified client can pipeline freely,
+// and a server stall between the read and the write is enough on its own —
+// either way one batch silently clobbers the other's ops.
+
+describe('annotationHandler — concurrent scene writes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(socketRateLimit).mockReturnValue(true);
+    mockRedis.eval.mockResolvedValue(1);
+  });
+
+  it('re-reads and RE-APPLIES the ops when it loses the race, instead of clobbering', async () => {
+    const { opsHandler, toEmit } = setup();
+    const mine = stroke('mine');
+    const theirs = stroke('theirs');
+
+    // First attempt reads an empty scene and loses; the retry sees the scene
+    // the winner wrote and applies our ops on top of it.
+    mockRedis.mGet
+      .mockResolvedValueOnce([SHARER, null])
+      .mockResolvedValueOnce([SHARER, JSON.stringify({ rev: 1, sharerUserId: SHARER, scene: { objects: [theirs] } })]);
+    mockRedis.eval.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+    const ack = await send(opsHandler, [{ t: 'add', obj: mine }]);
+
+    expect(mockRedis.eval).toHaveBeenCalledTimes(2);
+    // The winner's object survives, ours is added, and the rev follows theirs
+    expect(writtenState(1)).toBe(
+      JSON.stringify({ rev: 2, sharerUserId: SHARER, scene: { objects: [theirs, mine] } }),
+    );
+    expect(toEmit).toHaveBeenCalledWith('voice:annotation:ops', expect.objectContaining({ rev: 2 }));
+    // Contention is invisible to the sharer — no error, no spurious restart
+    expect(ack).toHaveBeenCalledWith({ ok: true });
+  });
+
+  it('refuses rather than clobbering when it keeps losing', async () => {
+    const { opsHandler, toEmit } = setup();
+    seedRedis(SHARER, null);
+    mockRedis.eval.mockResolvedValue(0);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const ack = await send(opsHandler, [{ t: 'add', obj: stroke() }]);
+
+    expect(ack).toHaveBeenCalledWith({ ok: false, error: 'Scene is being modified concurrently' });
+    expect(toEmit).not.toHaveBeenCalled(); // never announce ops that were not stored
+    warn.mockRestore();
+  });
+
+  it('does NOT inherit a scene left by the PREVIOUS sharer', async () => {
+    // The release-side scene delete is fire-and-forget, so a fast first batch
+    // from the new sharer can still read the old one's objects. Extending it
+    // would ship someone else's annotations under this sharer's name.
+    const { opsHandler } = setup();
+    const theirs = stroke('previous-sharers-drawing');
+    const mine = stroke('mine');
+    seedRedis(SHARER, { rev: 7, sharerUserId: 'someone-else', scene: { objects: [theirs] } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const ack = await send(opsHandler, [{ t: 'add', obj: mine }]);
+
+    expect(writtenState()).toBe(
+      JSON.stringify({ rev: 1, sharerUserId: SHARER, scene: { objects: [mine] } }),
+    );
+    // A fresh scene from the server's perspective — the sharer must re-send
+    expect(ack).toHaveBeenCalledWith({ ok: true, restarted: true });
+    warn.mockRestore();
   });
 });

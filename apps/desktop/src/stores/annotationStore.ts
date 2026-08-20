@@ -240,6 +240,12 @@ function syncCompositeToMasks(): void {
         // removing the mask unfreezes the share.
         toast.error(i18n.t('voice.annotations.maskFailed'));
       },
+      onRestoreFailed: () => {
+        // Masks are gone and the share is still live — it is just still going
+        // out through the compositor. A warning, not an error: nothing the
+        // sharer must act on, but they should know why their CPU is busy.
+        toast.warning(i18n.t('voice.annotations.maskRestoreFailed'));
+      },
       onSourceResize: () => {
         // Source resolution changed (window switch) — masks re-project but the
         // content underneath moved. Debounced: live window-resizing fires this
