@@ -4,3 +4,4 @@ export * from './validators.js';
 export * from './permissions.js';
 export * from './e2e.js';
 export * from './annotations.js';
+export * from './pow.js';

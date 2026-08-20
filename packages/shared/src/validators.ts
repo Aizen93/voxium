@@ -293,3 +293,87 @@ export function validateThemeColors(colors: Record<string, string>): string | nu
   }
   return null;
 }
+
+// ─── Registration abuse defenses ─────────────────────────────────────────────
+
+/**
+ * Providers that ignore dots in the local part and route `+tag` to the same
+ * inbox. Canonicalization is provider-SPECIFIC on purpose: dots are
+ * significant at most providers, and +tags are a legitimate habit we only
+ * police where bots actually exploit them.
+ */
+const DOT_INSENSITIVE_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
+
+/**
+ * The duplicate-detection form of an email. NOT for display and NOT for
+ * delivery — the address as typed stays the address of record. One canonical
+ * form = one account, which is what kills the dotted-gmail alias vector
+ * (j.o.h.n+x@gmail.com and john@gmail.com are the same inbox).
+ */
+export function canonicalizeEmail(email: string): string {
+  const normalized = email.toLowerCase().trim();
+  const at = normalized.lastIndexOf('@');
+  if (at === -1) return normalized;
+  let local = normalized.slice(0, at);
+  const domain = normalized.slice(at + 1);
+  if (DOT_INSENSITIVE_DOMAINS.has(domain)) {
+    const plus = local.indexOf('+');
+    if (plus !== -1) local = local.slice(0, plus);
+    local = local.replace(/\./g, '');
+  }
+  return `${local}@${domain}`;
+}
+
+/**
+ * Vendored blocklist of high-volume disposable-email providers — a static,
+ * in-repo set so no lookup ever leaves our infrastructure (privacy rule: no
+ * third-party services at runtime). Deliberately the short head of the
+ * distribution, not an exhaustive list: additions are one line each, and the
+ * unverified-account sweep catches what this misses.
+ */
+const DISPOSABLE_EMAIL_DOMAINS = new Set([
+  '10minutemail.com', '10minutemail.net', 'guerrillamail.com', 'guerrillamail.net',
+  'guerrillamail.org', 'guerrillamailblock.com', 'sharklasers.com', 'grr.la',
+  'mailinator.com', 'mailinator.net', 'maildrop.cc', 'yopmail.com', 'yopmail.fr',
+  'yopmail.net', 'temp-mail.org', 'temp-mail.io', 'tempmail.dev', 'tempmailo.com',
+  'throwawaymail.com', 'trashmail.com', 'trashmail.de', 'getnada.com', 'nada.email',
+  'dispostable.com', 'mintemail.com', 'mohmal.com', 'tempinbox.com', 'fakeinbox.com',
+  'spamgourmet.com', 'mytemp.email', 'burnermail.io', 'emailondeck.com',
+  'mail-temp.com', 'moakt.com', 'tmpmail.org', 'tmpmail.net', 'tmails.net',
+  'disposablemail.com', 'mailsac.com', 'inboxkitten.com', 'harakirimail.com',
+]);
+
+/** True when the address's domain is a known disposable-email provider. */
+export function isDisposableEmailDomain(email: string): boolean {
+  const at = email.lastIndexOf('@');
+  if (at === -1) return false;
+  return DISPOSABLE_EMAIL_DOMAINS.has(email.slice(at + 1).toLowerCase().trim());
+}
+
+/**
+ * Large consumer mail providers, exempt from the novel-domain registration
+ * cap: gmail.com legitimately produces unbounded signups per day, while a
+ * $10 catch-all domain minting its 11th account of the day is not organic.
+ * French providers are listed deliberately — that is where the user base is.
+ */
+const COMMON_EMAIL_PROVIDERS = new Set([
+  'gmail.com', 'googlemail.com', 'outlook.com', 'outlook.fr', 'hotmail.com',
+  'hotmail.fr', 'live.com', 'live.fr', 'msn.com', 'yahoo.com', 'yahoo.fr',
+  'ymail.com', 'proton.me', 'protonmail.com', 'pm.me', 'icloud.com', 'me.com',
+  'mac.com', 'aol.com', 'gmx.com', 'gmx.de', 'gmx.net', 'gmx.fr', 'web.de',
+  'mail.com', 'zoho.com', 'fastmail.com', 'tuta.com', 'tutanota.com',
+  'tutamail.com', 'mailbox.org', 'posteo.de', 'orange.fr', 'wanadoo.fr',
+  'free.fr', 'sfr.fr', 'neuf.fr', 'laposte.net', 'bbox.fr', 'numericable.fr',
+]);
+
+/** The domain part of an email, lowercased — '' when there is none. */
+export function emailDomain(email: string): string {
+  const at = email.lastIndexOf('@');
+  return at === -1 ? '' : email.slice(at + 1).toLowerCase().trim();
+}
+
+/** True when the domain is a major consumer provider (exempt from the
+ *  novel-domain registration cap). */
+export function isCommonEmailProvider(domain: string): boolean {
+  return COMMON_EMAIL_PROVIDERS.has(domain);
+}

@@ -5,10 +5,12 @@ import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
 import type { UserRole } from '@voxium/shared';
-import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from '../utils/errors';
-import { validateEmail, validatePassword, validateUsername } from '@voxium/shared';
+import { BadRequestError, ConflictError, ForbiddenError, TooManyRequestsError, UnauthorizedError } from '../utils/errors';
+import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain, emailDomain, isCommonEmailProvider } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } from '../utils/email';
 import { sanitizeText } from '../utils/sanitize';
+import { getRedis } from '../utils/redis';
+import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap } from '../middleware/rateLimiter';
 
 // Timing-equalization hash for login attempts against unknown emails (same
 // convention as requestPasswordReset): skipping bcrypt when the user doesn't
@@ -31,8 +33,11 @@ async function getTimingEqualizerHash(): Promise<string> {
   return timingEqualizerHash;
 }
 
-export async function registerUser(username: string, email: string, password: string, displayName?: string) {
+export async function registerUser(username: string, email: string, password: string, displayName?: string, rawIp?: string) {
   email = email.toLowerCase().trim();
+
+  // Same normalization login uses — ban matching and attribution must agree
+  const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
 
   const usernameErr = validateUsername(username);
   if (usernameErr) throw new BadRequestError(usernameErr);
@@ -43,6 +48,26 @@ export async function registerUser(username: string, email: string, password: st
   const passwordErr = validatePassword(password);
   if (passwordErr) throw new BadRequestError(passwordErr);
 
+  // A banned IP must not mint fresh accounts — registration was the one auth
+  // surface IpBan did not cover (login checks it; sockets carry a JWT).
+  // Same message as the login path: an attacker learns nothing new here.
+  if (ip) {
+    const ipBan = await prisma.ipBan.findUnique({ where: { ip } });
+    if (ipBan) throw new ForbiddenError(ipBan.reason ? `Account banned: ${ipBan.reason}` : 'Your account has been banned');
+  }
+
+  // Disposable providers get the SAME generic conflict error as a duplicate:
+  // a distinct "domain blocked" message would hand bots an oracle for probing
+  // which domains pass.
+  if (isDisposableEmailDomain(email)) {
+    throw new ConflictError('Username or email already in use');
+  }
+
+  // Duplicate detection runs on the CANONICAL form: gmail ignores dots and
+  // +tags, so without this one inbox mints unlimited "unique" addresses
+  // (the dotted-gmail bot vector). The address of record stays as typed.
+  const emailCanonical = canonicalizeEmail(email);
+
   // Username check is case-INSENSITIVE: lookups elsewhere (friend requests,
   // member search) match insensitively, so allowing "Alice" alongside "alice"
   // at signup would route the other account's requests to an impersonator.
@@ -51,12 +76,26 @@ export async function registerUser(username: string, email: string, password: st
       OR: [
         { username: { equals: username, mode: 'insensitive' } },
         { email },
+        { emailCanonical },
       ],
     },
   });
 
   if (existing) {
     throw new ConflictError('Username or email already in use');
+  }
+
+  // NOVEL-DOMAIN daily cap: a $10 catch-all domain gives an attacker
+  // unlimited verifiable inboxes, which defeats both the disposable blocklist
+  // and the unverified-account TTL. Big consumer providers are exempt (gmail
+  // legitimately signs up unbounded users/day). Checked BEFORE create and
+  // counted only AFTER a successful create — a middleware-style blind consume
+  // would let an attacker burn a small company's domain budget with garbage
+  // attempts and lock its real employees out for the day.
+  const domain = emailDomain(email);
+  const domainCapped = !isCommonEmailProvider(domain);
+  if (domainCapped && (await getDomainRegistrationCount(domain)) >= domainRegistrationCap()) {
+    throw new TooManyRequestsError('Too many registrations from this email domain today — try again later');
   }
 
   const hashedPassword = await bcrypt.hash(password, 12);
@@ -69,6 +108,7 @@ export async function registerUser(username: string, email: string, password: st
     data: {
       username,
       email,
+      emailCanonical,
       displayName: sanitizeText(displayName) || username,
       password: hashedPassword,
       emailVerificationToken: hashedVerifyToken,
@@ -90,6 +130,25 @@ export async function registerUser(username: string, email: string, password: st
       createdAt: true,
     },
   });
+
+  // Count the successful create against the domain budget (see the check
+  // above for why this is post-create, not a blind pre-consume)
+  if (domainCapped) await countDomainRegistration(domain);
+
+  // The REGISTRATION IP is the forensic anchor for abuse attribution — the
+  // one sighting that was previously never recorded. kind is set at create
+  // and never overwritten by later logins from the same address.
+  if (ip) {
+    const geo = geoip.lookup(ip);
+    const countryNames = new Intl.DisplayNames(['en'], { type: 'region' });
+    const geoFields = geo ? {
+      countryCode: geo.country || null,
+      country: (geo.country && countryNames.of(geo.country)) || geo.country || null,
+    } : {};
+    await prisma.ipRecord.create({
+      data: { userId: user.id, ip, kind: 'register', ...geoFields },
+    }).catch((err) => console.warn('[Auth] Registration IP record failed:', err));
+  }
 
   // Send verification email (fire-and-forget)
   sendVerificationEmail(user.email, rawVerifyToken).catch((err) => {
@@ -305,6 +364,24 @@ export async function requestPasswordReset(email: string) {
 
   if (!user) return; // Silent return - attacker sees same timing as a real reset
 
+  // Per-INBOX daily cap, mirroring the verification-mail cap: the 3/15min IP
+  // limiter is useless against distributed sources, and without this a botnet
+  // can drip password-reset mail at a victim's real address indefinitely.
+  // On cap: SILENT skip, never an error — this endpoint's response must stay
+  // identical for existing and unknown emails (enumeration safety), so the
+  // only honest option is to stop sending while answering the same way.
+  try {
+    const inboxKey = `resetmail:${canonicalizeEmail(user.email)}`;
+    const sends = await getRedis().incr(inboxKey);
+    if (sends === 1) await getRedis().expire(inboxKey, 24 * 60 * 60);
+    if (sends > 5) {
+      console.warn('[Auth] Password-reset mail cap reached for an inbox — skipping send');
+      return;
+    }
+  } catch (err) {
+    console.warn('[Auth] Reset-mail cap check failed (allowing send):', err);
+  }
+
   await prisma.user.update({
     where: { id: user.id },
     data: {
@@ -405,6 +482,7 @@ export async function verifyEmail(token: string) {
     where: { id: user.id },
     data: {
       emailVerified: true,
+      emailVerifiedAt: new Date(),
       emailVerificationToken: null,
       emailVerificationTokenExpiresAt: null,
     },
@@ -418,6 +496,22 @@ export async function resendVerificationEmail(userId: string) {
   });
   if (!user) throw new UnauthorizedError('User not found');
   if (user.emailVerified) throw new BadRequestError('Email already verified');
+
+  // Hard daily cap PER INBOX, keyed on the canonical form: the per-user
+  // limiter (3/5min) bounds the burst rate, but a bot that owns the account
+  // can keep bursting forever — turning us into a drip harasser of whoever
+  // really owns the address. 5 mails to one mailbox per day is the ceiling
+  // no matter which account, IP, or cadence asks. Fail open on Redis errors:
+  // a broken counter must not lock legitimate users out of verification.
+  let sends = 0;
+  try {
+    const inboxKey = `verifymail:${canonicalizeEmail(user.email)}`;
+    sends = await getRedis().incr(inboxKey);
+    if (sends === 1) await getRedis().expire(inboxKey, 24 * 60 * 60);
+  } catch (err) {
+    console.warn('[Auth] Verification-mail cap check failed (allowing send):', err);
+  }
+  if (sends > 5) throw new BadRequestError('Too many verification emails requested — try again tomorrow');
 
   const rawToken = crypto.randomBytes(32).toString('hex');
   const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');

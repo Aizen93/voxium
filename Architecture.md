@@ -965,7 +965,7 @@ sequenceDiagram
 | Passwords | bcrypt with 12 salt rounds, PASSWORD_MAX=72 (matches bcrypt's actual input limit) |
 | Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
 | Email Verification | SHA-256 hashed tokens, 24hr expiry, single-use, format validation (64 hex chars, lowercase normalized), `requireVerifiedEmail` on all functional routes + attachment proxy + Socket.IO, StrictMode double-POST guard, migration preflight duplicate check |
-| Registration | Generic "Username or email already in use" error prevents email enumeration; email normalized to lowercase; Nodemailer structured address prevents header injection |
+| Registration | Generic "Username or email already in use" error prevents email enumeration; email normalized to lowercase; Nodemailer structured address prevents header injection; full anti-bot pipeline (see Registration Abuse Defenses below) |
 | CORS | Explicit origin whitelist (must include Tauri origins: `https://tauri.localhost` Win, `tauri://localhost` macOS, `http://tauri.localhost` Linux). No `withCredentials` on client (Bearer tokens, not cookies) — avoids strict CORS mode that breaks on custom protocol origins. Server CORS echoes first allowed origin on null-origin requests instead of `*` |
 | Input | Server-side validation on all endpoints + runtime type validation on all Socket.IO payloads |
 | SQL Injection | Prisma parameterized queries |
@@ -978,6 +978,48 @@ sequenceDiagram
 | S3 Uploads | Presigned PUT URLs enforce Content-Type via `signableHeaders`; proxy streaming for attachments (S3 URL never exposed) |
 | Trust Proxy | Conditional on `NODE_ENV=production` or `TRUST_PROXY=true` — prevents IP spoofing in dev |
 | CI/CD | GitHub Actions use env vars for attacker-controlled context (never interpolated in `run:`) |
+
+### Registration Abuse Defenses
+
+Registration is the cheapest attack surface on any open platform — bots feed
+breached-credential email lists through the form to squat accounts, validate
+stolen addresses, and turn the verification mailer into a spam cannon. The
+defense is layered so that each layer catches what the previous one cannot,
+and everything is self-hosted (no captcha services, no IP-reputation APIs —
+nothing about a visitor leaves the infrastructure):
+
+```mermaid
+flowchart TD
+    A[POST /auth/register] --> B{Rate limits<br/>3/min + 5/day per IP<br/>20/day per /24 subnet}
+    B -->|over budget| R1[429]
+    B --> C{Proof-of-work valid?<br/>HMAC challenge, single-use,<br/>difficulty scales with subnet pressure}
+    C -->|missing/invalid/replayed| R2[400 generic]
+    C --> D{IP banned?}
+    D -->|banned| R3[403]
+    D --> E{Disposable domain?<br/>CANONICAL email taken?<br/>gmail dots/+tags collapsed}
+    E -->|either| R4[409 generic — same message,<br/>no oracle]
+    E --> F{Novel-domain budget?<br/>10/day per non-provider domain,<br/>consumed only on SUCCESS}
+    F -->|exhausted| R5[429]
+    F --> G[Create user +<br/>IpRecord kind=register]
+    G --> H[Verification mail<br/>max 5/day per canonical inbox]
+    H --> I[Unverified after 7 days?<br/>Daily sweep deletes the account]
+```
+
+Key mechanisms:
+
+| Mechanism | What it defeats |
+|-----------|-----------------|
+| **Canonical email uniqueness** (`email_canonical`, unique) — lowercase everywhere; gmail-family additionally strips dots and `+tags` | One Gmail inbox minting unlimited "unique" addresses (`j.o.h.n+x@gmail.com` ≡ `john@gmail.com`) |
+| **Proof-of-work** — self-hosted, ALTCHA-style; server-enforced so direct-API scripts pay the same CPU as browsers; HMAC key derived from `JWT_SECRET` (cannot be unconfigured); base 16 bits, +2 per same-subnet registration that day (each step quadruples the work) | Off-the-shelf bot tooling; makes distributed campaigns pay per attempt. Known limit: a native SHA-256 solver is ~100× faster than browser WebCrypto — PoW raises cost, it does not make registration impossible |
+| **Long-window budgets** — 5/IP/day, 20 per /24 (IPv6 /48) per day, 10 per novel email domain per day (major consumer providers exempt; domain budget consumed only on successful create so garbage attempts cannot lock out a legitimate small-org domain) | Slow drips that slide under per-minute limits (one signup every 45 min = 32/day); catch-all domains that defeat the disposable blocklist |
+| **IP attribution + bans at the door** — registration records an `IpRecord` with `kind: 'register'` (offline geoip, never a third-party lookup); `IpBan` is enforced at registration, login, and socket connect | Anonymous registration; banned sources re-registering |
+| **Mail caps per canonical inbox** — 5 verification + 5 password-reset sends per day, regardless of source IP or account; reset cap skips silently (that endpoint must answer identically for existing and unknown emails) | Drip-harassment of breached-list victims; SMTP reputation damage |
+| **Unverified-account TTL** — daily 4:30 AM sweep deletes accounts unverified after 7 days (guards: `role='user'`, no owned servers); the same sweep expires `IpRecord` rows unseen for 180 days (GDPR retention) | Bot harvests holding value; squatted usernames/emails; indefinite IP retention |
+| **Observability** — `/admin/registration-stats` + the Users-tab panel (signups/hour and /24h, unverified backlog, top registering IPs and email domains over 7 days); hourly spike check mails the operator at 30+ signups/hour (Redis-deduped, one sender across the cluster) | Waves progressing unnoticed; the ultimate backstop is operational — the `registration` feature flag is a live killswitch |
+
+All counters are Redis-backed under the `rl:` prefix (admin-tunable at runtime,
+covered by the same clearing paths as every other limiter), so the whole
+pipeline is multi-node correct by construction.
 
 ### TOTP Two-Factor Authentication Flow
 

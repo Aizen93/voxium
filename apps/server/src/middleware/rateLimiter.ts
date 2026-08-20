@@ -19,6 +19,22 @@ interface RateLimitDef extends RateLimitConfig {
 const DEFAULTS: Record<string, RateLimitDef> = {
   login:          { keyPrefix: 'rl:login',    points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Login' },
   register:       { keyPrefix: 'rl:register', points: 3,   duration: 60,  blockDuration: 600, keyType: 'ip',     label: 'Register' },
+  // Long-window registration counters: the short window above misses slow
+  // drips entirely (one signup every 45 minutes is 32/day and never trips
+  // 3/min). Per-IP catches a patient single address; per-/24 catches rotation
+  // inside a range. Sized so no household hits them and a shared office NAT
+  // barely can (5 signups from one machine in a DAY is not organic).
+  registerDaily:  { keyPrefix: 'rl:regday',   points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per IP)' },
+  registerSubnet: { keyPrefix: 'rl:regnet',   points: 20,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per subnet)' },
+  // Challenge minting is stateless (HMAC) so it is cheap to serve, but a
+  // limit keeps a hostile client from turning the endpoint into a hash-mint
+  // treadmill. Generous: a legit flow needs exactly one per registration.
+  powChallenge:   { keyPrefix: 'rl:powchal',  points: 30,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Registration Challenge' },
+  // Novel-domain budget: keyed by EMAIL DOMAIN (major consumer providers are
+  // exempt in the service). NOT used as route middleware — consumed only
+  // after a successful create (authService), so garbage attempts cannot burn
+  // a legitimate small-org domain's budget and lock its employees out.
+  registerDomain: { keyPrefix: 'rl:regdom',   points: 10,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per email domain)' },
   forgotPassword: { keyPrefix: 'rl:forgot',   points: 3,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Forgot Password' },
   resetPassword:  { keyPrefix: 'rl:reset',    points: 5,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Reset Password' },
   refresh:        { keyPrefix: 'rl:refresh',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Token Refresh' },
@@ -220,10 +236,78 @@ function createMiddleware(
 const byIp = (req: Request) => req.ip || req.socket.remoteAddress || 'unknown';
 const byUserId = (req: Request) => req.user?.userId || req.ip || 'unknown';
 
+/**
+ * Collapse an address to its network for range-rotation detection: /24 for
+ * IPv4 (a home or small hosting range), /48 for IPv6 (the customer-site
+ * allocation — /64s are handed out per-device, so grouping by /64 would see
+ * every bot as a fresh network).
+ */
+export function subnetOf(rawIp: string): string {
+  const ip = rawIp.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+  if (ip.includes(':')) {
+    return ip.split(':').slice(0, 3).join(':') + '::/48';
+  }
+  const parts = ip.split('.');
+  return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}.0/24` : ip;
+}
+
+const bySubnet = (req: Request) => subnetOf(req.ip || req.socket.remoteAddress || 'unknown');
+
+/**
+ * How many registrations this caller's subnet has already made in the current
+ * daily window — READ without consuming. Feeds the proof-of-work difficulty:
+ * pressure raises the price instead of slamming the door (the NAT-friendly
+ * posture). Fails soft to 0: no Redis, no extra difficulty.
+ */
+export async function getSubnetRegistrationPressure(req: Request): Promise<number> {
+  try {
+    const res = await getLimiter('registerSubnet').get(bySubnet(req));
+    return res?.consumedPoints ?? 0;
+  } catch (err) {
+    console.warn('[RateLimit] Subnet pressure read failed (assuming 0):', err instanceof Error ? err.message : err);
+    return 0;
+  }
+}
+
+/**
+ * Novel-domain registration budget, split into READ (pre-create check) and
+ * CONSUME (post-create count) so failed attempts never charge the domain —
+ * see the `registerDomain` config note. A limiter bucket rather than a bare
+ * Redis counter on purpose: the `rl:` prefix keeps it inside every existing
+ * clearing path (test fixtures, admin resets), and the admin rate-limit API
+ * can tune or raise it live like any other bucket.
+ */
+export async function getDomainRegistrationCount(domain: string): Promise<number> {
+  try {
+    const res = await getLimiter('registerDomain').get(domain);
+    return res?.consumedPoints ?? 0;
+  } catch (err) {
+    console.warn('[RateLimit] Domain budget read failed (assuming 0):', err instanceof Error ? err.message : err);
+    return 0;
+  }
+}
+
+export async function countDomainRegistration(domain: string): Promise<void> {
+  try {
+    await getLimiter('registerDomain').consume(domain);
+  } catch (err) {
+    if (err instanceof RateLimiterRes) return; // over-consume past the cap is fine — reads gate, this only counts
+    console.warn('[RateLimit] Domain budget count failed:', err instanceof Error ? err.message : err);
+  }
+}
+
+/** The registration cap applied to non-provider domains (read-side gate). */
+export function domainRegistrationCap(): number {
+  return getConfig('registerDomain').points;
+}
+
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
 export const rateLimitLogin = createMiddleware('login', byIp);
 export const rateLimitRegister = createMiddleware('register', byIp);
+export const rateLimitRegisterDaily = createMiddleware('registerDaily', byIp);
+export const rateLimitRegisterSubnet = createMiddleware('registerSubnet', bySubnet);
+export const rateLimitPowChallenge = createMiddleware('powChallenge', byIp);
 export const rateLimitForgotPassword = createMiddleware('forgotPassword', byIp);
 export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);
 export const rateLimitRefresh = createMiddleware('refresh', byIp);

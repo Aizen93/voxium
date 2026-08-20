@@ -37,6 +37,7 @@ import { app } from './app';
 import { initSocketServer } from './websocket/socketServer';
 import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
 import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
+import { startRegistrationHygiene, stopRegistrationHygiene } from './utils/registrationHygiene';
 import { startKeyShareCleanup, stopKeyShareCleanup } from './utils/keyShareCleanup';
 import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
@@ -126,6 +127,9 @@ async function main() {
   // Sweep undeliverable E2E key shares (30-day retention)
   startKeyShareCleanup();
 
+  // Registration hygiene: unverified-account TTL + IP-record retention (GDPR)
+  startRegistrationHygiene();
+
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n[Node ${NODE_ID()}] Voxium server running on http://0.0.0.0:${PORT}\n`);
     // Signal readiness probe after full initialization (migrations, Redis, mediasoup)
@@ -141,6 +145,7 @@ async function main() {
     stopAdminMetricsEmitter();
     stopAttachmentCleanup();
     stopKeyShareCleanup();
+    stopRegistrationHygiene();
     stopVoiceCluster();
     // Drop our liveness key FIRST so peer reapers promptly clean up any voice
     // state this node owned, instead of waiting out the heartbeat TTL.

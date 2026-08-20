@@ -29,6 +29,9 @@ const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, pa
 
   const mockPrismaIpRecord = {
     upsert: vi.fn(),
+    // resolved value matters: the service calls .catch() on the returned
+    // promise, and a bare vi.fn() returns undefined
+    create: vi.fn().mockResolvedValue({}),
   };
 
   const mockRedisClient = {
@@ -115,6 +118,13 @@ vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 // Mock rate limiters — pass through all requests for most tests
 vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitRegister: passthroughMiddleware,
+  rateLimitRegisterDaily: passthroughMiddleware,
+  rateLimitRegisterSubnet: passthroughMiddleware,
+  rateLimitPowChallenge: passthroughMiddleware,
+  getSubnetRegistrationPressure: vi.fn().mockResolvedValue(0),
+  getDomainRegistrationCount: vi.fn().mockResolvedValue(0),
+  countDomainRegistration: vi.fn().mockResolvedValue(undefined),
+  domainRegistrationCap: vi.fn().mockReturnValue(10),
   rateLimitLogin: passthroughMiddleware,
   rateLimitForgotPassword: passthroughMiddleware,
   rateLimitResetPassword: passthroughMiddleware,
@@ -146,6 +156,17 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitE2EShares: passthroughMiddleware,
   rateLimitE2EApprove: passthroughMiddleware,
   socketRateLimit: vi.fn().mockReturnValue(true),
+}));
+
+// Mock the registration proof-of-work: verification has its own unit suite
+// (registrationPow.test.ts); route tests only assert it is REQUIRED and wired.
+const { mockVerifyPow, mockIssueChallenge } = vi.hoisted(() => ({
+  mockVerifyPow: vi.fn().mockResolvedValue(undefined),
+  mockIssueChallenge: vi.fn(() => ({ challenge: 'c'.repeat(32), difficulty: 4, expires: 4102444800000, sig: 's'.repeat(64) })),
+}));
+vi.mock('../../utils/registrationPow', () => ({
+  issueRegistrationChallenge: mockIssueChallenge,
+  verifyRegistrationPow: mockVerifyPow,
 }));
 
 // Now import the app (after all mocks are set up)
@@ -211,6 +232,29 @@ const MOCK_USER = {
 };
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
+
+describe('GET /api/v1/auth/register-challenge', () => {
+  it('returns a signed proof-of-work challenge', async () => {
+    const res = await request(app).get('/api/v1/auth/register-challenge');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ difficulty: expect.any(Number), sig: expect.any(String) });
+    expect(mockIssueChallenge).toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/v1/auth/register — proof-of-work gate', () => {
+  it('verifies the PoW BEFORE creating anything — a failed solve never reaches the service', async () => {
+    mockVerifyPow.mockRejectedValueOnce(Object.assign(new Error('Registration challenge is invalid or expired — refresh and try again'), { statusCode: 400 }));
+
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ username: 'bot', email: 'bot@example.com', password: 'ValidPass123' });
+
+    expect(mockVerifyPow).toHaveBeenCalled();
+    expect(mockPrismaUser.create).not.toHaveBeenCalled();
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+});
 
 describe('POST /api/v1/auth/register', () => {
   beforeEach(() => {

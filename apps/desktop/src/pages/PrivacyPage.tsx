@@ -38,6 +38,12 @@ export function PrivacyPage() {
               <li><strong className="text-vox-text-primary">Profile data</strong>, display name, avatar, and bio you choose to provide</li>
               <li><strong className="text-vox-text-primary">Messages</strong>, text messages you send through servers and direct messages</li>
               <li><strong className="text-vox-text-primary">Usage data</strong>, server memberships, channel participation, and online presence</li>
+              <li>
+                <strong className="text-vox-text-primary">Connection data</strong>, the IP address you register,
+                sign in and connect from, with a country derived locally on our servers (no third-party lookup).
+                Used solely for security and abuse prevention — detecting automated registrations, enforcing bans
+                and rate limits — and deleted automatically after 180 days of inactivity
+              </li>
             </ul>
           </section>
 

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
+import type { AdminUser, AdminIpRecord, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
 
 // Untyped socket interface for admin-specific events not in the shared event maps
 interface AdminSocket {
@@ -59,7 +59,7 @@ interface AdminState {
   usersSearch: string;
   usersFilter: string;
   usersSort: string;
-  selectedUser: (AdminUser & { ipRecords?: Array<{ ip: string; lastSeenAt: string }>; _count?: Record<string, number> }) | null;
+  selectedUser: (AdminUser & { ipRecords?: AdminIpRecord[]; _count?: Record<string, number> }) | null;
 
   // Servers
   servers: AdminServer[];

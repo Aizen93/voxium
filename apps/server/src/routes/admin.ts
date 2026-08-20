@@ -42,6 +42,52 @@ async function clearServerRoom(serverId: string): Promise<void> {
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
 
+
+// Registration abuse triage (anti-bot Phase 4): the numbers that make a bot
+// wave visible — volume over two windows, the unverified backlog, and which
+// registration IPs are pulling the average up. All queries are bounded
+// (counts + a groupBy take:10) per the admin-analytics rules.
+adminRouter.get('/registration-stats', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const [lastHour, last24h, unverifiedTotal, topRegisterIps, topDomains] = await Promise.all([
+      prisma.user.count({ where: { createdAt: { gte: hourAgo } } }),
+      prisma.user.count({ where: { createdAt: { gte: dayAgo } } }),
+      prisma.user.count({ where: { emailVerified: false } }),
+      prisma.ipRecord.groupBy({
+        by: ['ip'],
+        where: { kind: 'register', lastSeenAt: { gte: weekAgo } },
+        _count: { ip: true },
+        orderBy: { _count: { ip: 'desc' } },
+        take: 10,
+      }),
+      // Domain is derived, not stored, so raw SQL — bounded by LIMIT, and the
+      // only parameter is a server-computed Date (no user input reaches it)
+      prisma.$queryRaw<Array<{ domain: string; registrations: bigint }>>`
+        SELECT split_part(email, '@', 2) AS domain, COUNT(*) AS registrations
+        FROM users WHERE created_at >= ${weekAgo}
+        GROUP BY domain ORDER BY registrations DESC LIMIT 10`,
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        lastHour,
+        last24h,
+        unverifiedTotal,
+        topRegisterIps: topRegisterIps.map((r) => ({ ip: r.ip, registrations: r._count.ip })),
+        // bigint from raw SQL does not survive JSON.stringify
+        topDomains: topDomains.map((r) => ({ domain: r.domain, registrations: Number(r.registrations) })),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const [totalUsers, totalServers, totalMessages, bannedUsers, onlineUserIds, pendingReports, openTickets, totalConversations, totalFriendships] = await Promise.all([
@@ -217,7 +263,8 @@ adminRouter.get('/users/:userId', async (req: Request<{ userId: string }>, res: 
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
         bio: true, role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
-        ipRecords: { select: { ip: true, lastSeenAt: true }, orderBy: { lastSeenAt: 'desc' } },
+        emailVerified: true, emailVerifiedAt: true,
+        ipRecords: { select: { ip: true, kind: true, country: true, lastSeenAt: true }, orderBy: { lastSeenAt: 'desc' } },
         _count: { select: { messages: true, memberships: true, ownedServers: true } },
       },
     });

@@ -170,3 +170,15 @@ export async function sendPasswordResetEmail(to: string, token: string): Promise
     `,
   });
 }
+
+/** Plain operational alert to the configured admin address (spike warnings,
+ *  hygiene anomalies). Text-first: these are read in a hurry. */
+export async function sendAdminAlert(to: string, subject: string, lines: string[]): Promise<void> {
+  await getTransporter().sendMail({
+    from: getSenderFrom(),
+    to,
+    subject: `[Voxium] ${subject}`,
+    text: lines.join('\n'),
+    html: `<div style="font-family: monospace; padding: 16px;">${lines.map((l) => `<p style="margin: 4px 0;">${l}</p>`).join('')}</div>`,
+  });
+}

@@ -130,6 +130,7 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | **Security** | Two-Factor Auth | TOTP 2FA with authenticator app support, QR code setup, 8 backup codes, 30-day trusted device tokens |
 | | Authentication | JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation |
 | | Rate Limiting | Per-endpoint and per-socket rate limiting, admin-editable via Redis-backed registry |
+| | Anti-Bot Registration | Self-hosted proof-of-work (no captcha service — nothing leaves the platform), canonical-email dedupe (gmail dot/+tag aliases collapse to one account), daily per-IP/subnet/domain budgets, IP bans enforced at signup, per-inbox mail caps, 7-day unverified-account expiry, live abuse dashboard with spike alerts |
 | | Input Sanitization | HTML stripping, validation, CORS protection |
 | **Themes** | Built-in Themes | 4 built-in themes — Dark, Light, Midnight, Tactical — switchable instantly in settings |
 | | Custom Theme Editor | Full visual editor with live preview: customize all colors, patterns, and CSS overrides to match your branding |

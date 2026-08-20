@@ -2,23 +2,50 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterDaily, rateLimitRegisterSubnet, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification } from '../middleware/rateLimiter';
+import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
+
+// Ban matching, PoW binding and IpRecords must all see the same address form
+const normalizeIp = (ip: string) => (ip.startsWith('::ffff:') ? ip.slice(7) : ip);
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
 
 export const authRouter = Router();
 
-authRouter.post('/register', rateLimitRegister, async (req: Request, res: Response, next: NextFunction) => {
+// Proof-of-work challenge for registration (anti-bot Phase 3). Stateless:
+// the challenge is HMAC-signed, so nothing is stored until redemption.
+// Difficulty adapts to how many registrations the caller's subnet already
+// made today — pressure raises the price instead of slamming the door.
+authRouter.get('/register-challenge', rateLimitPowChallenge, async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (!isFeatureEnabled('registration')) {
       res.status(403).json({ success: false, error: 'Registration is currently disabled' });
       return;
     }
-    const { username, email, password, displayName } = req.body;
+    const ip = normalizeIp(req.ip || req.socket.remoteAddress || 'unknown');
+    const pressure = await getSubnetRegistrationPressure(req);
+    res.json({ success: true, data: issueRegistrationChallenge(ip, pressure) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.post('/register', rateLimitRegister, rateLimitRegisterDaily, rateLimitRegisterSubnet, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!isFeatureEnabled('registration')) {
+      res.status(403).json({ success: false, error: 'Registration is currently disabled' });
+      return;
+    }
+    const { username, email, password, displayName, pow } = req.body;
     if (!username || typeof username !== 'string') { res.status(400).json({ success: false, error: 'Username is required' }); return; }
     if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
     if (!password || typeof password !== 'string') { res.status(400).json({ success: false, error: 'Password is required' }); return; }
-    const result = await registerUser(username, email, password, displayName);
+
+    // Enforced HERE, server-side, so a script POSTing the API directly pays
+    // the same hash work as a browser — cadence and IP rotation don't help.
+    await verifyRegistrationPow(normalizeIp(req.ip || req.socket.remoteAddress || 'unknown'), pow);
+
+    const result = await registerUser(username, email, password, displayName, req.ip || req.socket.remoteAddress);
 
     res.status(201).json({
       success: true,

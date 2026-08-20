@@ -10,6 +10,7 @@ import { processImage } from '../utils/imageProcessing';
 import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
 import type { User } from '@voxium/shared';
+import { solveRegistrationPow } from '@voxium/shared';
 
 interface AuthState {
   user: User | null;
@@ -109,7 +110,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   register: async (username, email, password) => {
     set({ isSubmitting: true, error: null });
     try {
-      const { data } = await api.post('/auth/register', { username, email, password });
+      // Anti-bot proof-of-work: fetch a challenge and burn a moment of CPU
+      // solving it. Invisible to the user beyond the submitting state — no
+      // captcha, no third-party service, nothing leaves our infrastructure.
+      const { data: challengeRes } = await api.get('/auth/register-challenge');
+      const pow = await solveRegistrationPow(challengeRes.data);
+
+      const { data } = await api.post('/auth/register', { username, email, password, pow });
       const { user, accessToken, refreshToken } = data.data;
 
       setTokens(accessToken, refreshToken, true);

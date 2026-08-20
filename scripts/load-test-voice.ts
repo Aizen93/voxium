@@ -12,6 +12,7 @@
  */
 
 import axios from 'axios';
+import { solveRegistrationPow } from '../packages/shared/src/pow';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 import { Chrome111 } from 'mediasoup-client/handlers/Chrome111';
@@ -70,7 +71,9 @@ interface Target {
 
 const targets: Target[] = [];
 const h = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
-const LIMITS_TO_RAISE = ['login', 'register', 'admin', 'general'];
+// registerDaily/registerSubnet: the long-window anti-bot buckets would cap a
+// 25-user single-IP load test at 5 — they must be raised alongside 'register'
+const LIMITS_TO_RAISE = ['login', 'register', 'registerDaily', 'registerSubnet', 'registerDomain', 'admin', 'general'];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -285,7 +288,11 @@ async function run() {
         const email = `${username}@loadtest.local`;
         batch.push(
           (async () => {
-            try { await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD }); } catch { /* exists */ }
+            try {
+              const { data: chal } = await axios.get(`${API}/auth/register-challenge`);
+              const pow = await solveRegistrationPow(chal.data);
+              await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow });
+            } catch { /* exists */ }
             const { token } = await login(email);
             try {
               const { data: inv } = await axios.post(`${API}/invites/servers/${target.serverId}`, {}, h(seed.token));

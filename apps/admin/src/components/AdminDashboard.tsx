@@ -51,6 +51,7 @@ export function AdminDashboard() {
         <AdminStatCard label="Open Tickets" value={stats?.openTickets ?? 0} icon={LifeBuoy} color="text-vox-accent-info" />
       </div>
 
+
       {/* Real-time Metrics */}
       <div className="rounded-lg bg-vox-bg-secondary border border-vox-border p-4">
         <h3 className="text-sm font-semibold text-vox-text-primary mb-3 flex items-center gap-2">

@@ -22,8 +22,14 @@ model User {
   bannedAt    DateTime? @map("banned_at")
   banReason   String?  @map("ban_reason")
   emailVerified                 Boolean   @default(false) @map("email_verified")
+  emailVerifiedAt               DateTime? @map("email_verified_at")
   emailVerificationToken        String?   @unique @map("email_verification_token")
   emailVerificationTokenExpiresAt DateTime? @map("email_verification_token_expires_at")
+  /// Canonical form for DUPLICATE detection only (display email stays as
+  /// typed): lowercased, and for dot-insensitive providers (gmail) the dots
+  /// and +tag are stripped — one inbox, one account. Nullable only for
+  /// pre-migration rows whose canonical collided (keep-oldest wins the index).
+  emailCanonical                String?   @unique @map("email_canonical")
   tokenVersion        Int       @default(0) @map("token_version")
   resetToken          String?   @unique @map("reset_token")
   resetTokenExpiresAt DateTime? @map("reset_token_expires_at")
@@ -439,6 +445,10 @@ model IpRecord {
   ip          String
   countryCode String?  @map("country_code")
   country     String?
+  /// How this IP was FIRST seen for this user: 'register' | 'login' | 'socket'.
+  /// Never overwritten by later sightings — the registration IP is the
+  /// forensic anchor for bot attribution.
+  kind        String   @default("login")
   lastSeenAt  DateTime @default(now()) @map("last_seen_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)

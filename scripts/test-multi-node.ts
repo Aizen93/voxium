@@ -22,6 +22,7 @@
 
 import { spawn, type ChildProcess } from 'child_process';
 import axios from 'axios';
+import { solveRegistrationPow } from '../packages/shared/src/pow';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import path from 'path';
 import { createClient as createRedisClient } from 'redis';
@@ -138,10 +139,15 @@ async function login(api: string, username: string): Promise<string> {
 
 async function registerUser(api: string, username: string): Promise<string> {
   try {
+    // Registration requires a solved proof-of-work challenge (dev difficulty
+    // is tiny; same code path as production)
+    const { data: chal } = await axios.get(`${api}/auth/register-challenge`);
+    const pow = await solveRegistrationPow(chal.data);
     const res = await axios.post(`${api}/auth/register`, {
       username,
       email: `${username}@multinode.test`,
       password: PASSWORD,
+      pow,
     });
     return res.data.data.accessToken;
   } catch (err: any) {

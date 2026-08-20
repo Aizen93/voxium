@@ -1,3 +1,4 @@
+import { solveRegistrationPow } from '@voxium/shared';
 import type { APIRequestContext } from '@playwright/test';
 import { createClient } from 'redis';
 
@@ -24,11 +25,25 @@ export async function clearRateLimits() {
 }
 
 /** Register a new user via the API. Auto-verifies email for testing. Returns access + refresh tokens. */
+
+/**
+ * Fetch and solve the registration proof-of-work (anti-bot Phase 3). Dev/test
+ * servers issue a tiny difficulty, so this costs microseconds while still
+ * exercising the exact production code path (challenge -> solve -> redeem).
+ */
+async function solveRegisterChallenge(request: APIRequestContext) {
+  const res = await request.get(`${API_URL}/auth/register-challenge`);
+  if (!res.ok()) throw new Error(`Challenge fetch failed (${res.status()})`);
+  const { data } = await res.json();
+  return solveRegistrationPow(data);
+}
+
 export async function registerUser(
   request: APIRequestContext,
   user: { username: string; email: string; password: string },
 ) {
-  const res = await request.post(`${API_URL}/auth/register`, { data: user });
+  const pow = await solveRegisterChallenge(request);
+  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow } });
   if (!res.ok()) {
     const body = await res.json().catch(() => ({}));
     throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);
@@ -47,7 +62,8 @@ export async function registerUserUnverified(
   request: APIRequestContext,
   user: { username: string; email: string; password: string },
 ) {
-  const res = await request.post(`${API_URL}/auth/register`, { data: user });
+  const pow = await solveRegisterChallenge(request);
+  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow } });
   if (!res.ok()) {
     const body = await res.json().catch(() => ({}));
     throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);

@@ -549,6 +549,18 @@ export interface AdminUser {
   bannedAt: string | null;
   banReason: string | null;
   createdAt: string;
+  /** Present on the detail endpoint (abuse triage surfaces). */
+  emailVerified?: boolean;
+  emailVerifiedAt?: string | null;
+}
+
+/** One sighting of a user from an IP, as the admin detail endpoint returns it. */
+export interface AdminIpRecord {
+  ip: string;
+  /** How this IP was FIRST seen: 'register' | 'login' | 'socket'. */
+  kind: string;
+  country: string | null;
+  lastSeenAt: string;
 }
 
 export interface AdminServer {
