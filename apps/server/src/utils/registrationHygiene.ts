@@ -14,6 +14,7 @@
 //     long as they are useful for abuse attribution and not a day longer.
 import { prisma } from './prisma';
 import { getRedis } from './redis';
+import { deleteMultipleFromS3 } from './s3';
 import { sendAdminAlert, describeEmailError } from './email';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -84,14 +85,46 @@ export async function runRegistrationHygiene(): Promise<{ deletedUsers: number; 
   //  - no owned servers — Server.owner is onDelete: Restrict, so such a
   //    delete would throw anyway; excluding it keeps the sweep clean and
   //    covers any pre-verification-era legacy accounts
-  const { count: deletedUsers } = await prisma.user.deleteMany({
+  const staleUnverified = await prisma.user.findMany({
     where: {
       emailVerified: false,
       createdAt: { lt: userCutoff },
       role: 'user',
       ownedServers: { none: {} },
     },
+    // avatarUrl so the blob goes with the row — a DB-only delete leaks the
+    // object into the bucket forever (the nightly orphan sweep is a backstop,
+    // not an excuse to leak on a path we control).
+    select: { id: true, avatarUrl: true },
   });
+
+  // The guards are REPEATED on the delete, not just on the select above: a
+  // user who verifies their email between the two statements must survive, and
+  // only Postgres can decide that atomically.
+  const { count: deletedUsers } = staleUnverified.length > 0
+    ? await prisma.user.deleteMany({
+        where: {
+          id: { in: staleUnverified.map((u) => u.id) },
+          emailVerified: false,
+          createdAt: { lt: userCutoff },
+          role: 'user',
+          ownedServers: { none: {} },
+        },
+      })
+    : { count: 0 };
+
+  // AFTER the rows are gone: a failed delete must not strand a live avatar.
+  // If the counts disagree, someone in the batch was spared by the guards and
+  // we cannot tell WHICH — so delete nothing and let the nightly orphan sweep
+  // reclaim them in a week. Losing a live user's avatar is much worse than
+  // holding a few dead blobs a little longer.
+  const avatarKeys = staleUnverified.map((u) => u.avatarUrl).filter((k): k is string => !!k);
+  if (avatarKeys.length > 0 && deletedUsers === staleUnverified.length) {
+    await deleteMultipleFromS3(avatarKeys).catch((err) =>
+      console.warn('[RegHygiene] Avatar cleanup failed (the orphan sweep will reclaim them):', err instanceof Error ? err.message : err));
+  } else if (avatarKeys.length > 0) {
+    console.warn(`[RegHygiene] ${staleUnverified.length - deletedUsers} account(s) were spared by the delete guards — leaving their avatars to the orphan sweep`);
+  }
 
   const { count: deletedIpRecords } = await prisma.ipRecord.deleteMany({
     where: { lastSeenAt: { lt: ipCutoff } },

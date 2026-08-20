@@ -2,10 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../utils/prisma', () => ({
   prisma: {
-    user: { deleteMany: vi.fn(), count: vi.fn() },
+    user: { findMany: vi.fn(), deleteMany: vi.fn(), count: vi.fn() },
     ipRecord: { deleteMany: vi.fn() },
   },
 }));
+
+const deleteMultipleFromS3 = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../../utils/s3', () => ({ deleteMultipleFromS3 }));
 
 const redisSet = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/redis', () => ({
@@ -26,8 +29,12 @@ import { subnetOf } from '../../middleware/rateLimiter';
 describe('registration hygiene sweep', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(prisma.user.findMany).mockResolvedValue([
+      { id: 'u-1', avatarUrl: null }, { id: 'u-2', avatarUrl: null }, { id: 'u-3', avatarUrl: null },
+    ] as never);
     vi.mocked(prisma.user.deleteMany).mockResolvedValue({ count: 3 } as never);
     vi.mocked(prisma.ipRecord.deleteMany).mockResolvedValue({ count: 7 } as never);
+    deleteMultipleFromS3.mockResolvedValue(undefined);
   });
 
   it('deletes only STALE, UNVERIFIED, plain-role, serverless accounts', async () => {
@@ -35,7 +42,9 @@ describe('registration hygiene sweep', () => {
     const result = await runRegistrationHygiene();
     expect(result).toEqual({ deletedUsers: 3, deletedIpRecords: 7 });
 
-    const where = vi.mocked(prisma.user.deleteMany).mock.calls[0][0]!.where as {
+    // The guards moved to the SELECT that decides who dies; the delete is then
+    // by id, so the S3 keys can be read before the rows go.
+    const where = vi.mocked(prisma.user.findMany).mock.calls[0][0]!.where as {
       emailVerified: boolean; createdAt: { lt: Date }; role: string; ownedServers: { none: object };
     };
     // Every guard is load-bearing: emailVerified=false is the target,
@@ -108,5 +117,66 @@ describe('registration spike alert', () => {
     delete process.env.CLEANUP_REPORT_EMAIL;
     await checkRegistrationSpike();
     expect(prisma.user.count).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Avatars go with the rows (F15) ─────────────────────────────────────────
+
+describe('registration hygiene sweep — S3 cleanup', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.ipRecord.deleteMany).mockResolvedValue({ count: 0 } as never);
+    deleteMultipleFromS3.mockResolvedValue(undefined);
+  });
+
+  it('deletes the swept accounts\' avatars, after their rows are gone', async () => {
+    vi.mocked(prisma.user.findMany).mockResolvedValue([
+      { id: 'u-1', avatarUrl: 'avatars/u1.png' },
+      { id: 'u-2', avatarUrl: null },
+      { id: 'u-3', avatarUrl: 'avatars/u3.png' },
+    ] as never);
+    vi.mocked(prisma.user.deleteMany).mockResolvedValue({ count: 3 } as never);
+
+    await runRegistrationHygiene();
+
+    // The guards are REPEATED on the delete: a user who verifies between the
+    // select and the delete must survive, and only Postgres can decide that.
+    const where = vi.mocked(prisma.user.deleteMany).mock.calls[0][0]!.where as Record<string, unknown>;
+    expect(where.id).toEqual({ in: ['u-1', 'u-2', 'u-3'] });
+    expect(where.emailVerified).toBe(false);
+    expect(where.role).toBe('user');
+    expect(where.ownedServers).toEqual({ none: {} });
+    expect(deleteMultipleFromS3).toHaveBeenCalledWith(['avatars/u1.png', 'avatars/u3.png']);
+  });
+
+  it('does NOT delete blobs when the row delete removed nothing', async () => {
+    // A failed or raced delete must never strand a live account without its avatar
+    vi.mocked(prisma.user.findMany).mockResolvedValue([{ id: 'u-1', avatarUrl: 'avatars/u1.png' }] as never);
+    vi.mocked(prisma.user.deleteMany).mockResolvedValue({ count: 0 } as never);
+
+    await runRegistrationHygiene();
+
+    expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+  });
+
+  it('still reports success when S3 cleanup fails — the orphan sweep reclaims them', async () => {
+    vi.mocked(prisma.user.findMany).mockResolvedValue([{ id: 'u-1', avatarUrl: 'avatars/u1.png' }] as never);
+    vi.mocked(prisma.user.deleteMany).mockResolvedValue({ count: 1 } as never);
+    deleteMultipleFromS3.mockRejectedValue(new Error('s3 down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(runRegistrationHygiene()).resolves.toMatchObject({ deletedUsers: 1 });
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('skips both queries when nothing is stale', async () => {
+    vi.mocked(prisma.user.findMany).mockResolvedValue([] as never);
+
+    const result = await runRegistrationHygiene();
+
+    expect(prisma.user.deleteMany).not.toHaveBeenCalled();
+    expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    expect(result.deletedUsers).toBe(0);
   });
 });

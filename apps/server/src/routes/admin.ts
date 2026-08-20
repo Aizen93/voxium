@@ -17,6 +17,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
+import { runOrphanCleanup } from '../utils/orphanCleanup';
 import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
@@ -465,7 +466,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
     const target = await prisma.user.findUnique({
       where: { id: targetId },
-      select: { id: true, role: true },
+      // avatarUrl so the blob goes with the row — the user-facing paths delete
+      // their S3 objects (servers.ts on server delete, messages.ts on message
+      // delete) and the admin path was the odd one out, leaking on every
+      // deletion until an operator ran the orphan sweep by hand.
+      select: { id: true, role: true, avatarUrl: true },
     });
     if (!target) throw new NotFoundError('User');
     if (target.role === 'superadmin') throw new ForbiddenError('Cannot delete a super admin');
@@ -590,7 +595,15 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           await broadcastServerVoiceCleanup(io, action.serverId);
           io.to(`server:${action.serverId}`).emit('server:deleted', { serverId: action.serverId });
           await clearServerRoom(action.serverId);
+          // Read the icon key BEFORE the row goes; delete the blob after, so a
+          // failed delete never strands a live server without its icon. The
+          // user-facing DELETE /servers/:id already does exactly this.
+          const doomed = await prisma.server.findUnique({ where: { id: action.serverId }, select: { iconUrl: true } });
           await prisma.server.delete({ where: { id: action.serverId } });
+          if (doomed?.iconUrl) {
+            await deleteFromS3(doomed.iconUrl).catch((err) =>
+              console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
+          }
         }
       }
 
@@ -628,6 +641,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           timeout: 60_000,
           maxWait: 10_000,
         });
+
+      if (target.avatarUrl) {
+        await deleteFromS3(target.avatarUrl).catch((err) =>
+          console.warn('[Admin] Avatar cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
+      }
 
       logAuditEvent({
         actorId: req.user!.userId,
@@ -669,6 +687,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           timeout: 60_000,
           maxWait: 10_000,
         });
+
+      if (target.avatarUrl) {
+        await deleteFromS3(target.avatarUrl).catch((err) =>
+          console.warn('[Admin] Avatar cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
+      }
 
       logAuditEvent({
         actorId: req.user!.userId,
@@ -2115,40 +2138,24 @@ adminRouter.delete('/announcements/:id', async (req: Request<{ id: string }>, re
   }
 });
 
+// Manual trigger for the same sweep the scheduler runs nightly. Deliberately
+// shares runOrphanCleanup rather than reimplementing it: the age gate and the
+// list-before-DB ordering are what stop it deleting an upload whose message
+// has not been sent yet, and an operator-initiated run must not skip them.
+// `?dryRun=1` reports what would go without deleting anything.
 adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys] = await Promise.all([
-      listAllS3Objects(),
-      prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
-      prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
-      prisma.messageAttachment.findMany({ where: { expired: false }, select: { s3Key: true } }),
-    ]);
-
-    const referencedKeys = new Set<string>();
-    for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
-    for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
-    for (const a of attachmentKeys) referencedKeys.add(a.s3Key);
-
-    const orphans = objects.filter((obj) => !referencedKeys.has(obj.key));
-    let deleted = 0;
-
-    for (const orphan of orphans) {
-      try {
-        await deleteFromS3(orphan.key);
-        deleted++;
-      } catch {
-        // Continue with remaining orphans
-      }
-    }
+    const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+    const result = await runOrphanCleanup({ dryRun });
 
     logAuditEvent({
       actorId: req.user!.userId,
       action: 'storage.cleanup_orphans',
       targetType: 'storage',
-      metadata: { found: orphans.length, deleted },
+      metadata: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, dryRun },
     });
 
-    res.json({ success: true, data: { found: orphans.length, deleted } });
+    res.json({ success: true, data: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, notOurs: result.foreign, dryRun } });
   } catch (err) {
     next(err);
   }

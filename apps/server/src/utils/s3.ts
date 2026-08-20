@@ -204,10 +204,14 @@ export async function deleteFromS3(key: string): Promise<void> {
 }
 
 /**
- * Delete multiple objects from S3 in batches of 1000.
+ * Delete multiple objects from S3 in batches of 1000. Returns how many keys S3
+ * actually ACCEPTED — DeleteObjects answers 200 with a populated `Errors[]`
+ * when, say, the credentials lack s3:DeleteObject, so a caller that reads "no
+ * throw" as "all gone" reports success while nothing moved.
  */
-export async function deleteMultipleFromS3(keys: string[]): Promise<void> {
-  if (keys.length === 0) return;
+export async function deleteMultipleFromS3(keys: string[]): Promise<number> {
+  if (keys.length === 0) return 0;
+  let failed = 0;
   for (let i = 0; i < keys.length; i += 1000) {
     const batch = keys.slice(i, i + 1000);
     const response = await getS3Client().send(
@@ -217,7 +221,9 @@ export async function deleteMultipleFromS3(keys: string[]): Promise<void> {
       }),
     );
     if (response.Errors && response.Errors.length > 0) {
+      failed += response.Errors.length;
       console.error(`[S3] Failed to delete ${response.Errors.length} objects:`, response.Errors.map((e) => e.Key));
     }
   }
+  return keys.length - failed;
 }
