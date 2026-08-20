@@ -135,7 +135,7 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | | Anti-Bot Registration | Self-hosted proof-of-work (no captcha service — nothing leaves the platform), canonical-email dedupe (gmail dot/+tag aliases collapse to one account), daily per-IP/subnet/domain budgets, IP bans enforced at signup, per-inbox mail caps, 7-day unverified-account expiry, live abuse dashboard with spike alerts |
 | | Input Sanitization | HTML stripping, validation, CORS protection |
 | **Themes** | Built-in Themes | 4 built-in themes — Dark, Light, Midnight, Tactical — switchable instantly in settings |
-| | Custom Theme Editor | Full visual editor with live preview: customize all colors, patterns, and CSS overrides to match your branding |
+| | Custom Theme Editor | Full visual editor: customize all colors, patterns, and CSS overrides to match your branding, judged on a scale model of the real app shell — or applied to the whole app with one click and taken back with Escape |
 | | Theme Marketplace | Publish your custom themes for the community; browse, preview, and install themes created by other users |
 | **Internationalization** | 11 Languages | English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL) |
 | | Auto-Detection | Language auto-detected from browser locale; switchable in settings; RTL layout for Arabic |
@@ -654,7 +654,8 @@ still run, but in a non-blocking step — see the note at the top of
 | **Screen Annotations** | 38 | Sharer-only authorization, op/geometry/text validation, scene & byte budgets, image-bomb rejection, restart snapshot + resync ack, shared reducer semantics |
 | **Image Header Parsing** | 4 | PNG/JPEG/WebP dimension extraction from container headers, fail-closed on malformed input |
 | **DM Voice Handler** | 81 | P2P call lifecycle, signal relay, atomic mute/deaf (Lua), call timeout, 1-on-1 capacity, decline auth, mutual exclusivity |
-| **Theme Routes** | 29 | CRUD, publish/unpublish marketplace, browse/search, install count, validation |
+| **Theme Routes** | 63 | CRUD, publish/unpublish marketplace, browse/search, install count, validation |
+| **Theme Colors** | 11 | Which keys may carry alpha (translucent layers vs opaque surfaces), rgba/hex acceptance, CSS injection rejection, every built-in palette parsed from themes.css and re-validated |
 | **Auth Service** | 22 | Registration, login, tokens, password reset, email normalization |
 | **TOTP Service** | 19 | Setup, enable, verify, disable, encrypt/decrypt roundtrip, backup codes |
 | **Pure Utilities** | 75 | Sanitization, error classes, mentions, reactions, rate limiting |

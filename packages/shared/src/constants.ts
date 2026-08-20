@@ -262,4 +262,24 @@ export const THEME_COLOR_GROUPS: Record<string, readonly ThemeColorKey[]> = {
   'Selection': ['selection-bg', 'selection-text'],
 } as const;
 
+/**
+ * The theme keys that paint ON another surface instead of BEING one, where an
+ * alpha channel is meaningful — and, since the 2026 redesign, the norm: hover,
+ * active, hairline borders and scrollbars are mixed from the accent family into
+ * transparency, which is what keeps a dark theme tinted rather than grey.
+ *
+ * Everything else is an opaque surface. Alpha on those would let whatever sits
+ * behind show through a panel that is supposed to be solid, so the validator
+ * keeps them hex-only — see `isValidThemeColorValue`.
+ */
+export const TRANSLUCENT_THEME_COLOR_KEYS: readonly ThemeColorKey[] = [
+  'bg-hover',
+  'bg-active',
+  'border',
+  'scrollbar-thumb',
+  'scrollbar-thumb-hover',
+  'selection-bg',
+  'selection-text',
+] as const;
+
 export const BUILT_IN_THEME_IDS = ['dark', 'light', 'midnight', 'tactical'] as const;

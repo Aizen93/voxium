@@ -33,7 +33,7 @@ afterEach(() => {
 
 describe('HeroAppMock (landing hero product window)', () => {
   it('shows the spaces strip: active named tab, live/unread tabs, find pill', () => {
-    const strip = container.querySelector('[data-testid="hero-mock-strip"]');
+    const strip = container.querySelector('[data-testid="app-mock-strip"]');
     expect(strip).toBeTruthy();
     expect(strip!.textContent).toContain('Voxium HQ');
     expect(strip!.textContent).toContain('Find a space');
@@ -50,7 +50,7 @@ describe('HeroAppMock (landing hero product window)', () => {
   });
 
   it('renders the occupied voice channel as a card with a Join affordance', () => {
-    const card = container.querySelector('[data-testid="hero-mock-voice-card"]');
+    const card = container.querySelector('[data-testid="app-mock-voice-card"]');
     expect(card).toBeTruthy();
     expect(card!.textContent).toContain('Lounge');
     expect(card!.textContent).toContain('Join voice');
@@ -59,7 +59,7 @@ describe('HeroAppMock (landing hero product window)', () => {
   });
 
   it('renders the signed-in user card at the bottom of the sidebar column', () => {
-    const userCard = container.querySelector('[data-testid="hero-mock-user-card"]');
+    const userCard = container.querySelector('[data-testid="app-mock-user-card"]');
     expect(userCard).toBeTruthy();
     expect(userCard!.textContent).toContain('Charlie');
     expect(userCard!.textContent).toContain('Online');

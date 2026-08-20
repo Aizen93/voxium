@@ -1,4 +1,4 @@
-import { LIMITS, THEME_COLOR_KEYS, THEME_PATTERN_TYPES, THEME_PATTERN_AREAS } from './constants.js';
+import { LIMITS, THEME_COLOR_KEYS, TRANSLUCENT_THEME_COLOR_KEYS, THEME_PATTERN_TYPES, THEME_PATTERN_AREAS } from './constants.js';
 import { ROLE_COLOR_REGEX } from './permissions.js';
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -271,6 +271,27 @@ export function sanitizeThemePatterns(patterns: Record<string, unknown>): Record
   return clean;
 }
 
+/** Whether `key` is one of the layers where an alpha channel is meaningful. */
+export function allowsAlphaThemeColor(key: string): boolean {
+  return (TRANSLUCENT_THEME_COLOR_KEYS as readonly string[]).includes(key);
+}
+
+/**
+ * Whether `value` is acceptable for the theme color `key`.
+ *
+ * The single source of truth for both ends: the marketplace enforces it on
+ * publish, and the theme editor uses it to decide what a typed value may be.
+ * Anything they disagree on becomes a draft that saves locally and then fails
+ * to publish — which is exactly what a hex-only rule did to every theme
+ * derived from a built-in, since the 2026 palettes make hover, active, borders
+ * and scrollbars translucent by design.
+ */
+export function isValidThemeColorValue(key: string, value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  if (HEX_COLOR_RE.test(value)) return true;
+  return allowsAlphaThemeColor(key) && RGBA_COLOR_RE.test(value);
+}
+
 export function validateThemeColors(colors: Record<string, string>): string | null {
   if (!colors || typeof colors !== 'object') return 'Colors must be an object';
   const keys = Object.keys(colors);
@@ -280,15 +301,10 @@ export function validateThemeColors(colors: Record<string, string>): string | nu
     if (!(key in colors)) return `Missing color key: ${key}`;
     const val = colors[key];
     if (typeof val !== 'string') return `Color value for "${key}" must be a string`;
-    // selection-bg and selection-text allow rgba()
-    if (key === 'selection-bg' || key === 'selection-text') {
-      if (!HEX_COLOR_RE.test(val) && !RGBA_COLOR_RE.test(val)) {
-        return `Invalid color value for "${key}": must be hex (#RRGGBB) or rgba()`;
-      }
-    } else {
-      if (!HEX_COLOR_RE.test(val)) {
-        return `Invalid color value for "${key}": must be hex (#RRGGBB)`;
-      }
+    if (!isValidThemeColorValue(key, val)) {
+      return allowsAlphaThemeColor(key)
+        ? `Invalid color value for "${key}": must be hex (#RRGGBB) or rgba()`
+        : `Invalid color value for "${key}": must be hex (#RRGGBB)`;
     }
   }
   return null;

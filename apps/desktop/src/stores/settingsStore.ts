@@ -75,6 +75,12 @@ interface SettingsState extends PersistedSettings {
   /** Called by the modal once it has honoured `initialSettingsTab`. */
   clearInitialSettingsTab: () => void;
   setTheme: (theme: ThemeId) => void;
+  /**
+   * Re-apply the stored theme to the document without changing (or
+   * re-persisting) it — how the marketplace and the theme editor put the app
+   * back after a full-app preview painted someone else's colors on <html>.
+   */
+  reapplyTheme: () => void;
   setLanguage: (lang: string) => void;
   setAudioInputDeviceId: (deviceId: string) => void;
   setAudioOutputDeviceId: (deviceId: string) => void;
@@ -230,6 +236,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     applyTheme(theme, get().customThemes);
     set({ theme });
     persistSettings(get());
+  },
+
+  reapplyTheme: () => {
+    applyTheme(get().theme, get().customThemes);
   },
 
   setLanguage: (lang: string) => {
