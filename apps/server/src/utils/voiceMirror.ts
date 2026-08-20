@@ -1,4 +1,5 @@
 import { getRedis } from './redis';
+import { annotationKey } from './annotationState';
 
 /**
  * Delete one channel's entire Redis voice mirror (users hash, server/node
@@ -24,6 +25,7 @@ export async function reapVoiceChannelMirror(
     .del(`voice:channel:users:${channelId}`)
     .del(`voice:channel:server:${channelId}`)
     .del(`voice:screen:${channelId}`)
+    .del(annotationKey(channelId))
     .sRem('voice:active', channelId);
   if (!opts?.preserveNodeKey) {
     pipeline.del(`voice:channel:node:${channelId}`);

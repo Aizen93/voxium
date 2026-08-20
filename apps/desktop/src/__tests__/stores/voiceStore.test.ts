@@ -571,6 +571,51 @@ describe('voiceStore', () => {
     });
   });
 
+  describe('replaceScreenVideoTrack — privacy-mask compositor swap', () => {
+    it('swaps the track on the live screen-video producer only', async () => {
+      const mic = { ...fakeProducer('audio'), replaceTrack: vi.fn().mockResolvedValue(undefined) };
+      const screenVideo = { ...fakeProducer('screen-video'), replaceTrack: vi.fn().mockResolvedValue(undefined) };
+      useVoiceStore.setState({
+        msProducers: new Map([[mic.id, mic], [screenVideo.id, screenVideo]]) as unknown as Map<string, Producer>,
+      });
+
+      const track = { id: 'composite-track' } as unknown as MediaStreamTrack;
+      await useVoiceStore.getState().replaceScreenVideoTrack(track);
+
+      expect(screenVideo.replaceTrack).toHaveBeenCalledWith({ track });
+      expect(mic.replaceTrack).not.toHaveBeenCalled();
+    });
+
+    it('throws when no live screen-video producer exists (compositor must not silently no-op)', async () => {
+      const closed = { ...fakeProducer('screen-video'), closed: true, replaceTrack: vi.fn() };
+      useVoiceStore.setState({
+        msProducers: new Map([[closed.id, closed]]) as unknown as Map<string, Producer>,
+      });
+      await expect(useVoiceStore.getState().replaceScreenVideoTrack({} as MediaStreamTrack)).rejects.toThrow();
+      expect(closed.replaceTrack).not.toHaveBeenCalled();
+    });
+
+    it('setScreenVideoProducerPaused gates ONLY the screen-video producer, never the mic', () => {
+      const mic = fakeProducer('audio');
+      const screenVideo = fakeProducer('screen-video');
+      useVoiceStore.setState({
+        msProducers: new Map([[mic.id, mic], [screenVideo.id, screenVideo]]) as unknown as Map<string, Producer>,
+      });
+
+      useVoiceStore.getState().setScreenVideoProducerPaused(true);
+      expect(screenVideo.pause).toHaveBeenCalled();
+      expect(mic.pause).not.toHaveBeenCalled();
+      // The sharer's only signal that viewers see a frozen frame
+      expect(useVoiceStore.getState().screenShareFrozen).toBe(true);
+
+      screenVideo.paused = true;
+      useVoiceStore.getState().setScreenVideoProducerPaused(false);
+      expect(screenVideo.resume).toHaveBeenCalled();
+      expect(mic.resume).not.toHaveBeenCalled();
+      expect(useVoiceStore.getState().screenShareFrozen).toBe(false);
+    });
+  });
+
   describe('joinChannel — generation guard (MED-9)', () => {
     it('a join superseded by leaveChannel mid-mic-acquisition never emits voice:join', async () => {
       const socket = vi.mocked(getSocket)()!;

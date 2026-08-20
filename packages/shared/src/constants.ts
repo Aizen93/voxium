@@ -66,6 +66,45 @@ export const LIMITS = {
  */
 export const DM_SIGNAL_MAX = 65_536;
 
+// ─── Screen-share annotations (sharer-drawn overlays, session-only) ──────────
+// Serialized-length caps use UTF-16 char counts (JSON.stringify().length),
+// matching the DM_SIGNAL_MAX convention. All must stay well under the 1MB
+// engine.io frame default.
+
+/** Max serialized chars of one voice:annotation:ops batch (fits one max-size image op). */
+export const ANNOTATION_OPS_MAX = 400_000;
+/** Max ops per batch. */
+export const ANNOTATION_MAX_OPS_PER_BATCH = 64;
+/** Max serialized chars of the whole scene (= Redis value cap = snapshot emit cap). */
+export const ANNOTATION_SCENE_MAX = 800_000;
+/** Max objects in a scene (bounds viewer redraw cost). */
+export const ANNOTATION_MAX_OBJECTS = 300;
+/** Max points per stroke, appends included. */
+export const ANNOTATION_STROKE_MAX_POINTS = 2_000;
+/** Max chars for a text overlay. */
+export const ANNOTATION_TEXT_MAX = 200;
+/** Max chars for an image overlay data-URL (≈256KB decoded after base64 inflation). */
+export const ANNOTATION_IMAGE_DATAURL_MAX = 360_000;
+/** Client-side resize target for overlay images (px, longest edge). */
+export const ANNOTATION_IMAGE_MAX_EDGE = 512;
+/** Hard cap on an overlay image's DECODED pixel edge, enforced server-side by
+ *  header parsing and client-side at decode — a small-byte "image bomb" can
+ *  otherwise declare a multi-gigabyte bitmap and crash every viewer. */
+export const ANNOTATION_IMAGE_MAX_DECODED_EDGE = 4096;
+/** Total stroke points allowed in a scene (all strokes combined) — bounds the
+ *  per-frame redraw cost a hostile sharer can impose on every viewer. */
+export const ANNOTATION_MAX_SCENE_POINTS = 20_000;
+/** Client op-flush throttle — ≤ ~7 batches/s while actively drawing. */
+export const ANNOTATION_BATCH_INTERVAL_MS = 150;
+/** socketRateLimit bucket for voice:annotation:ops (150ms flush ⇒ ≤400/min + headroom). */
+export const ANNOTATION_RATE_PER_MIN = 600;
+/** Serialized ops chars a sharer may send per minute — the request-count
+ *  limiter alone would allow 600 × 400K chars/min of Redis write amplification. */
+export const ANNOTATION_BYTES_PER_MIN = 2_000_000;
+/** Client-side wait for a batch ack before sending the next chunk (keeps the
+ *  server's read-modify-write single-writer without wedging the queue). */
+export const ANNOTATION_ACK_TIMEOUT_MS = 3_000;
+
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
 export type ThemePatternType = (typeof THEME_PATTERN_TYPES)[number];
 
@@ -169,6 +208,8 @@ export const WS_EVENTS = {
   VOICE_SCREEN_SHARE_START: 'voice:screen_share:start',
   VOICE_SCREEN_SHARE_STOP: 'voice:screen_share:stop',
   VOICE_SCREEN_SHARE_STATE: 'voice:screen_share:state',
+  VOICE_ANNOTATION_OPS: 'voice:annotation:ops',
+  VOICE_ANNOTATION_STATE: 'voice:annotation:state',
   ADMIN_METRICS: 'admin:metrics',
   ADMIN_SUBSCRIBE_METRICS: 'admin:subscribe_metrics',
   ADMIN_UNSUBSCRIBE_METRICS: 'admin:unsubscribe_metrics',

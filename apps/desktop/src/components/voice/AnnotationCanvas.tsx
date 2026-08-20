@@ -1,0 +1,188 @@
+import { useRef, useEffect, useState } from 'react';
+import { ANNOTATION_IMAGE_MAX_DECODED_EDGE } from '@voxium/shared';
+import type { AnnotationScene } from '@voxium/shared';
+import { useAnnotationStore, type MaskRect } from '../../stores/annotationStore';
+import { useVideoContentRect } from '../../hooks/useVideoContentRect';
+
+/**
+ * Render-only overlay for screen-share annotations. Positions itself over the
+ * video CONTENT rect (object-contain letterboxing accounted for) inside a
+ * position:relative wrapper shared with the <video>. Pointer events pass
+ * through — the sharer's editor layer (separate component) handles input.
+ *
+ * Masks are local-only sharer state (empty for viewers): the sharer previews
+ * the RAW capture, so masks are painted here exactly as viewers receive them
+ * baked into the composited video — black boxes or cover images.
+ */
+
+interface AnnotationCanvasProps {
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+}
+
+// Decoded overlay images, keyed by cache id. Entries no longer referenced by
+// the scene/masks are dropped after each draw, so the cache tracks the scene.
+const imageCache = new Map<string, { src: string; img: HTMLImageElement; loaded: boolean }>();
+
+function cachedImage(id: string, src: string, usedIds: Set<string>, requestRedraw: () => void): HTMLImageElement | null {
+  usedIds.add(id);
+  let entry = imageCache.get(id);
+  if (!entry || entry.src !== src) {
+    const img = new Image();
+    entry = { src, img, loaded: false };
+    imageCache.set(id, entry);
+    img.onload = () => {
+      // Server-side header validation is the primary bomb gate; this is the
+      // viewer's own belt — never draw (or keep) an image that decoded larger
+      // than anything a legitimate client can produce.
+      if (img.naturalWidth > ANNOTATION_IMAGE_MAX_DECODED_EDGE || img.naturalHeight > ANNOTATION_IMAGE_MAX_DECODED_EDGE) {
+        console.warn('[Annotations] Overlay image exceeds decoded-size cap — dropped');
+        imageCache.delete(id);
+        return;
+      }
+      const current = imageCache.get(id);
+      if (current) current.loaded = true;
+      requestRedraw();
+    };
+    img.onerror = () => {
+      console.warn('[Annotations] Overlay image failed to decode');
+    };
+    img.src = src;
+  }
+  return entry.loaded ? entry.img : null;
+}
+
+function drawScene(
+  ctx: CanvasRenderingContext2D,
+  scene: AnnotationScene,
+  masks: MaskRect[],
+  w: number,
+  h: number,
+  requestRedraw: () => void,
+): void {
+  ctx.clearRect(0, 0, w, h);
+  const usedIds = new Set<string>();
+
+  // Masks under annotations — annotations must stay visible over a cover
+  for (const mask of masks) {
+    const x = mask.x * w, y = mask.y * h, bw = mask.w * w, bh = mask.h * h;
+    if (mask.src) {
+      const img = cachedImage(`mask:${mask.id}`, mask.src, usedIds, requestRedraw);
+      if (img) {
+        ctx.drawImage(img, x, y, bw, bh);
+      } else {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(x, y, bw, bh);
+      }
+    } else {
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(x, y, bw, bh);
+    }
+  }
+
+  for (const obj of scene.objects) {
+    switch (obj.kind) {
+      case 'stroke': {
+        if (obj.points.length < 4) break;
+        ctx.save();
+        if (obj.tool === 'highlighter') {
+          ctx.globalAlpha = 0.35;
+          ctx.globalCompositeOperation = 'multiply';
+        }
+        ctx.strokeStyle = obj.color;
+        ctx.lineWidth = Math.max(1, obj.width * h);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(obj.points[0] * w, obj.points[1] * h);
+        for (let i = 2; i < obj.points.length; i += 2) {
+          ctx.lineTo(obj.points[i] * w, obj.points[i + 1] * h);
+        }
+        ctx.stroke();
+        ctx.restore();
+        break;
+      }
+      case 'shape': {
+        ctx.save();
+        ctx.strokeStyle = obj.color;
+        ctx.fillStyle = obj.color;
+        ctx.lineWidth = Math.max(1, obj.width * h);
+        const x = obj.x * w, y = obj.y * h, bw = obj.w * w, bh = obj.h * h;
+        ctx.beginPath();
+        if (obj.shape === 'ellipse') {
+          ctx.ellipse(x + bw / 2, y + bh / 2, Math.abs(bw / 2), Math.abs(bh / 2), 0, 0, Math.PI * 2);
+        } else {
+          ctx.rect(x, y, bw, bh);
+        }
+        if (obj.fill) {
+          ctx.globalAlpha = 0.25;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+        ctx.stroke();
+        ctx.restore();
+        break;
+      }
+      case 'text': {
+        ctx.save();
+        ctx.fillStyle = obj.color;
+        const px = Math.max(9, obj.size * h);
+        ctx.font = `600 ${px}px system-ui, sans-serif`;
+        ctx.textBaseline = 'top';
+        // Subtle halo so text stays readable on any background
+        ctx.shadowColor = 'rgba(0,0,0,0.8)';
+        ctx.shadowBlur = Math.max(2, px * 0.12);
+        ctx.fillText(obj.text, obj.x * w, obj.y * h);
+        ctx.restore();
+        break;
+      }
+      case 'image': {
+        const img = cachedImage(obj.id, obj.src, usedIds, requestRedraw);
+        if (img) {
+          ctx.drawImage(img, obj.x * w, obj.y * h, obj.w * w, obj.h * h);
+        }
+        break;
+      }
+    }
+  }
+
+  for (const id of imageCache.keys()) {
+    if (!usedIds.has(id)) imageCache.delete(id);
+  }
+}
+
+export function AnnotationCanvas({ videoRef }: AnnotationCanvasProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scene = useAnnotationStore((s) => s.scene);
+  const masks = useAnnotationStore((s) => s.masks);
+  const rect = useVideoContentRect(videoRef);
+  const [redrawTick, setRedrawTick] = useState(0);
+
+  // The cache is module-level (survives re-renders); without this, decoded
+  // images from a share leak until the NEXT annotated share prunes them.
+  // Inline/floating render exactly one canvas at a time, so a full clear on
+  // unmount is safe — the next mount's draw repopulates from the scene.
+  useEffect(() => () => imageCache.clear(), []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || rect.w <= 0 || rect.h <= 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(rect.w * dpr));
+    canvas.height = Math.max(1, Math.round(rect.h * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1));
+  }, [scene, masks, rect, redrawTick]);
+
+  if (rect.w <= 0 || rect.h <= 0) return null;
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="pointer-events-none absolute"
+      style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
+      aria-hidden="true"
+    />
+  );
+}

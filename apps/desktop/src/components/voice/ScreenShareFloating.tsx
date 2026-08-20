@@ -1,8 +1,10 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { Maximize, Minimize2, MonitorOff } from 'lucide-react';
+import { AnnotationCanvas } from './AnnotationCanvas';
 
 const MIN_WIDTH = 240;
 const MIN_HEIGHT = 180;
@@ -10,9 +12,11 @@ const DEFAULT_WIDTH = 400;
 const DEFAULT_HEIGHT = 300;
 
 export function ScreenShareFloating() {
+  const { t } = useTranslation();
   const videoRef = useRef<HTMLVideoElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const { screenSharingUserId, remoteScreenStream, screenStream, isScreenSharing } = useVoiceStore();
+  const stageRef = useRef<HTMLDivElement>(null);
+  const { screenSharingUserId, remoteScreenStream, screenStream, isScreenSharing, screenShareFrozen } = useVoiceStore();
   const localUserId = useAuthStore((s) => s.user?.id);
   const setViewMode = useVoiceStore((s) => s.setScreenShareViewMode);
   const stopScreenShare = useVoiceStore((s) => s.stopScreenShare);
@@ -106,9 +110,11 @@ export function ScreenShareFloating() {
     return () => window.removeEventListener('resize', handleResize);
   }, [size]);
 
+  // Fullscreen the stage wrapper, NOT the bare <video> — the annotation
+  // canvas is a DOM sibling and would be invisible in element fullscreen.
   const handleFullscreen = () => {
-    if (videoRef.current) {
-      videoRef.current.requestFullscreen?.();
+    if (stageRef.current) {
+      stageRef.current.requestFullscreen?.();
     }
   };
 
@@ -123,21 +129,21 @@ export function ScreenShareFloating() {
         onMouseDown={handleDragStart}
         className="flex items-center justify-between px-2 py-1 bg-vox-bg-secondary cursor-move select-none"
       >
-        <span className="text-xs text-vox-text-muted truncate">Screen Share</span>
+        <span className="text-xs text-vox-text-muted truncate">{t('voice.screenShare')}</span>
         <div className="flex items-center gap-0.5">
           <button
             onClick={handleFullscreen}
             className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary transition-colors"
-            title="Fullscreen"
-            aria-label="Fullscreen"
+            title={t('voice.fullscreen')}
+            aria-label={t('voice.fullscreen')}
           >
             <Maximize size={12} />
           </button>
           <button
             onClick={() => setViewMode('inline')}
             className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary transition-colors"
-            title="Dock to inline"
-            aria-label="Dock to inline"
+            title={t('voice.dockToInline')}
+            aria-label={t('voice.dockToInline')}
           >
             <Minimize2 size={12} />
           </button>
@@ -145,8 +151,8 @@ export function ScreenShareFloating() {
             <button
               onClick={stopScreenShare}
               className="rounded p-1 text-vox-accent-danger hover:bg-vox-accent-danger/20 transition-colors"
-              title="Stop sharing"
-              aria-label="Stop sharing"
+              title={t('voice.stopSharing')}
+              aria-label={t('voice.stopSharing')}
             >
               <MonitorOff size={12} />
             </button>
@@ -154,18 +160,26 @@ export function ScreenShareFloating() {
         </div>
       </div>
 
-      {/* Video */}
-      <div className="flex flex-1 items-center justify-center" style={{ height: size.h - 28 }}>
+      {/* Video + annotation overlay stage */}
+      <div ref={stageRef} className="relative flex flex-1 items-center justify-center bg-black" style={{ height: size.h - 28 }}>
+        {isLocalSharing && screenShareFrozen && (
+          <div className="absolute inset-x-0 top-0 z-10 bg-vox-accent-danger/90 px-2 py-0.5 text-center text-[10px] text-white">
+            {t('voice.annotations.sharePaused')}
+          </div>
+        )}
         {stream ? (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="max-h-full max-w-full object-contain"
-          />
+          <>
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="max-h-full max-w-full object-contain"
+            />
+            <AnnotationCanvas videoRef={videoRef} />
+          </>
         ) : (
-          <p className="text-vox-text-muted text-xs">Waiting for stream...</p>
+          <p className="text-vox-text-muted text-xs">{t('voice.waitingForStream')}</p>
         )}
       </div>
 

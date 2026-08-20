@@ -98,6 +98,7 @@ const mockVoiceRedis = vi.hoisted(() => ({
   hGetAll: vi.fn().mockResolvedValue({}),
   set: vi.fn().mockResolvedValue('OK'),
   del: vi.fn().mockResolvedValue(1),
+  sRem: vi.fn().mockResolvedValue(1),
   sCard: vi.fn().mockResolvedValue(0),
   sMembers: vi.fn().mockResolvedValue([]),
   get: vi.fn().mockResolvedValue(null),
@@ -183,7 +184,7 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
-import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath, getVoiceDiagnostics, cleanupChannelVoice, evictUserFromChannelVoice } from '../../websocket/voiceHandler';
+import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath, getVoiceDiagnostics, cleanupChannelVoice, cleanupServerVoice, evictUserFromChannelVoice } from '../../websocket/voiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -1226,6 +1227,125 @@ describe('voiceHandler — screen share slot protocol (HIGH-1)', () => {
     await handlers.get('voice:join')!('ch-ss-8');
     // Unknown producer id — must be a silent no-op, no crash
     expect(() => handlers.get('voice:producer:close')!({ producerId: 'not-mine' })).not.toThrow();
+  });
+});
+
+describe('voiceHandler — screen-share annotation lifecycle', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+  });
+
+  it('share start AND stop both delete the annotation scene key (fresh share ⇒ fresh scene)', async () => {
+    const { socket, handlers } = createMockSocket('ann-1', 'sock-ann-1');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-ann-1');
+
+    handlers.get('voice:screen_share:start')!(vi.fn());
+    expect(mockVoiceRedis.del).toHaveBeenCalledWith('voice:annotations:ch-ann-1');
+
+    mockVoiceRedis.del.mockClear();
+    handlers.get('voice:screen_share:stop')!();
+    expect(mockVoiceRedis.del).toHaveBeenCalledWith('voice:annotations:ch-ann-1');
+  });
+
+  it('an idempotent SAME-USER re-claim preserves the annotation scene (rev-desync guard)', async () => {
+    const { socket, handlers } = createMockSocket('ann-6', 'sock-ann-6');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-ann-6');
+
+    handlers.get('voice:screen_share:start')!(vi.fn()); // fresh claim — wipes
+    mockVoiceRedis.del.mockClear();
+
+    // Retry after a failed produce (documented idempotent path) — the
+    // in-progress scene and its rev counter MUST survive
+    const ack = vi.fn();
+    handlers.get('voice:screen_share:start')!(ack);
+    expect(ack).toHaveBeenCalledWith({ ok: true });
+    expect(mockVoiceRedis.del).not.toHaveBeenCalledWith('voice:annotations:ch-ann-6');
+  });
+
+  it('the sharer leaving voice deletes the annotation scene key', async () => {
+    const { socket, handlers } = createMockSocket('ann-2', 'sock-ann-2');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    await handlers.get('voice:join')!('ch-ann-2');
+    handlers.get('voice:screen_share:start')!(vi.fn());
+
+    mockVoiceRedis.del.mockClear();
+    await handlers.get('voice:leave')!();
+    expect(mockVoiceRedis.del).toHaveBeenCalledWith('voice:annotations:ch-ann-2');
+  });
+
+  it('voice:join hydrates a late joiner with the stored annotation scene', async () => {
+    const io = createMockIO();
+    const a = createMockSocket('ann-3a', 'sock-ann-3a');
+    handleVoiceEvents(io as any, a.socket as any);
+    await a.handlers.get('voice:join')!('ch-ann-3');
+    a.handlers.get('voice:screen_share:start')!(vi.fn());
+
+    const scene = { objects: [{ id: 's1', kind: 'stroke', tool: 'pen', color: '#ff0000', width: 0.005, points: [0.1, 0.1, 0.2, 0.2] }] };
+    mockVoiceRedis.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'voice:annotations:ch-ann-3'
+        ? JSON.stringify({ rev: 7, sharerUserId: 'ann-3a', scene })
+        : null),
+    );
+
+    const b = createMockSocket('ann-3b', 'sock-ann-3b');
+    handleVoiceEvents(io as any, b.socket as any);
+    await b.handlers.get('voice:join')!('ch-ann-3');
+
+    expect(b.socket.emit).toHaveBeenCalledWith('voice:screen_share:state', { channelId: 'ch-ann-3', sharingUserId: 'ann-3a' });
+    expect(b.socket.emit).toHaveBeenCalledWith('voice:annotation:state', {
+      channelId: 'ch-ann-3', sharingUserId: 'ann-3a', rev: 7, scene,
+    });
+  });
+
+  it('voice:join does NOT hydrate a stale scene attributed to a DIFFERENT sharer (handoff race)', async () => {
+    const io = createMockIO();
+    const a = createMockSocket('ann-7a', 'sock-ann-7a');
+    handleVoiceEvents(io as any, a.socket as any);
+    await a.handlers.get('voice:join')!('ch-ann-7');
+    a.handlers.get('voice:screen_share:start')!(vi.fn());
+
+    // Previous sharer's scene still in Redis (fire-and-forget DEL not landed)
+    mockVoiceRedis.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'voice:annotations:ch-ann-7'
+        ? JSON.stringify({ rev: 9, sharerUserId: 'previous-sharer', scene: { objects: [] } })
+        : null),
+    );
+
+    const b = createMockSocket('ann-7b', 'sock-ann-7b');
+    handleVoiceEvents(io as any, b.socket as any);
+    await b.handlers.get('voice:join')!('ch-ann-7');
+
+    const annotationEmits = b.socket.emit.mock.calls.filter(([event]) => event === 'voice:annotation:state');
+    expect(annotationEmits).toHaveLength(0);
+  });
+
+  it('voice:join does NOT emit annotation state when no scene is stored', async () => {
+    const io = createMockIO();
+    const a = createMockSocket('ann-4a', 'sock-ann-4a');
+    handleVoiceEvents(io as any, a.socket as any);
+    await a.handlers.get('voice:join')!('ch-ann-4');
+    a.handlers.get('voice:screen_share:start')!(vi.fn());
+
+    const b = createMockSocket('ann-4b', 'sock-ann-4b');
+    handleVoiceEvents(io as any, b.socket as any);
+    await b.handlers.get('voice:join')!('ch-ann-4');
+
+    const annotationEmits = b.socket.emit.mock.calls.filter(([event]) => event === 'voice:annotation:state');
+    expect(annotationEmits).toHaveLength(0);
+  });
+
+  it('cleanupServerVoice deletes the annotation scene key for every reaped channel', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('ann-5', 'sock-ann-5');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-ann-5');
+
+    mockVoiceRedis.del.mockClear();
+    cleanupServerVoice(io as any, 's1');
+    expect(mockVoiceRedis.del).toHaveBeenCalledWith('voice:annotations:ch-ann-5');
   });
 });
 

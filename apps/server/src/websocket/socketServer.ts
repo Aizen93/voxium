@@ -7,6 +7,7 @@ import { setUserOnline, setUserOffline, getRedisPubSub } from '../utils/redis';
 import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, getVoiceStateForServers, getScreenShareState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
+import { handleAnnotationEvents } from './annotationHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { Permissions } from '@voxium/shared';
@@ -227,6 +228,12 @@ export function initSocketServer(httpServer: HttpServer) {
 
     // ─── DM Voice events ─────────────────────────────────────────────
     handleDMVoiceEvents(io, socket);
+
+    // ─── Screen-share annotation events ──────────────────────────────
+    // Deliberately OUTSIDE the voice relay table: annotations touch no
+    // mediasoup state, so they run on the sharer's own node and authorize
+    // against the Redis screen-share mirror (see annotationHandler.ts).
+    handleAnnotationEvents(io, socket);
 
     // ─── Admin metrics subscription ──────────────────────────────────
     socket.on('admin:subscribe_metrics', () => {

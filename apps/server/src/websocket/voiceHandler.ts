@@ -10,6 +10,7 @@ import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../me
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { getRedis, NODE_ID, isNodeAlive, socketExistsInCluster } from '../utils/redis';
 import { reapVoiceChannelMirror, reapDeadOwnerChannelMirror } from '../utils/voiceMirror';
+import { annotationKey, deleteAnnotationState, getAnnotationState } from '../utils/annotationState';
 import {
   getRemoteSession, setRemoteSession, clearRemoteSession,
   relayVoiceEvent, resolveOrClaimChannelOwner, dropShim,
@@ -109,7 +110,8 @@ function mirrorVoiceLeave(channelId: string, userId: string, channelEmpty: boole
       .del(`voice:channel:server:${channelId}`)
       .del(`voice:channel:node:${channelId}`)
       .sRem('voice:active', channelId)
-      .del(`voice:screen:${channelId}`);
+      .del(`voice:screen:${channelId}`)
+      .del(annotationKey(channelId));
   }
   pipeline.exec().catch((err) => console.warn('[Redis] Voice mirror failed:', err));
 }
@@ -150,13 +152,21 @@ async function getPersistedServerMuteDeaf(serverId: string, userId: string): Pro
   return { serverMuted: muted === '1', serverDeafened: deafened === '1' };
 }
 
-function mirrorScreenShare(channelId: string, userId: string | null): void {
+function mirrorScreenShare(channelId: string, userId: string | null, keepScene = false): void {
   const redis = getRedis();
   if (userId) {
     redis.set(`voice:screen:${channelId}`, userId).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   } else {
     redis.del(`voice:screen:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   }
+  // Fresh sharer ⇒ fresh annotation scene; cleared sharer ⇒ dead scene. This
+  // single choke point covers the start/stop handlers and sharer-leave — the
+  // annotation scene must never outlive (or predate) the share it belongs to.
+  // `keepScene` is the one exception: an idempotent SAME-USER re-claim (retry
+  // after a failed produce) continues the same share, and wiping the scene
+  // there would restart the rev counter at 1 while viewers still hold a higher
+  // rev — silently desyncing them for the rest of the share.
+  if (!keepScene) deleteAnnotationState(channelId);
 }
 
 
@@ -502,6 +512,19 @@ export function createVoiceHandlers(
       const currentSharer = screenSharers.get(channelId);
       if (currentSharer) {
         socket.emit('voice:screen_share:state', { channelId, sharingUserId: currentSharer });
+        // Late-joiner annotation hydration. Covers reconnects too (clients
+        // re-emit voice:join). Only the VoiceSocket surface is used — shim-safe.
+        try {
+          const ann = await getAnnotationState(channelId);
+          // The sharerUserId check guards the sharer-handoff race: the fire-and-
+          // forget DEL of the previous sharer's scene may not have landed yet,
+          // and a stale scene must never be attributed to the new sharer.
+          if (ann && ann.sharerUserId === currentSharer) {
+            socket.emit('voice:annotation:state', { channelId, sharingUserId: currentSharer, rev: ann.rev, scene: ann.scene });
+          }
+        } catch (err) {
+          console.warn('[Annotations] Late-join hydration failed:', err instanceof Error ? err.message : err);
+        }
       }
 
       // Broadcast to the channel's visibility room — every member whose socket
@@ -1155,7 +1178,8 @@ export function createVoiceHandlers(
     }
 
     screenSharers.set(channelId, userId);
-    mirrorScreenShare(channelId, userId);
+    // Same-user re-claim must preserve the in-progress annotation scene
+    mirrorScreenShare(channelId, userId, currentSharer === userId);
     io.to(`channel:${channelId}`).emit('voice:screen_share:start', { channelId, userId });
     ack({ ok: true });
   });
@@ -1776,6 +1800,7 @@ export function cleanupServerVoice(
     redis.del(`voice:channel:node:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
     redis.sRem('voice:active', channelId).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
     redis.del(`voice:screen:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
+    deleteAnnotationState(channelId);
   }
 
   // Release mediasoup Routers for these channels

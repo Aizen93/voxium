@@ -1,14 +1,22 @@
 import { useRef, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
+import { useAnnotationStore } from '../../stores/annotationStore';
 import { Maximize, PictureInPicture2, MonitorOff } from 'lucide-react';
+import { AnnotationCanvas } from './AnnotationCanvas';
+import { AnnotationToolbar } from './AnnotationToolbar';
+import { AnnotationEditorLayer } from './AnnotationEditorLayer';
 
 export function ScreenShareViewer() {
+  const { t } = useTranslation();
   const videoRef = useRef<HTMLVideoElement>(null);
-  const { screenSharingUserId, remoteScreenStream, screenStream, isScreenSharing, channelUsers, activeChannelId } = useVoiceStore();
+  const stageRef = useRef<HTMLDivElement>(null);
+  const { screenSharingUserId, remoteScreenStream, screenStream, isScreenSharing, screenShareFrozen, channelUsers, activeChannelId } = useVoiceStore();
   const localUserId = useAuthStore((s) => s.user?.id);
   const setViewMode = useVoiceStore((s) => s.setScreenShareViewMode);
   const stopScreenShare = useVoiceStore((s) => s.stopScreenShare);
+  const isEditing = useAnnotationStore((s) => s.isEditing);
 
   const isLocalSharing = screenSharingUserId === localUserId;
   const stream = isLocalSharing ? screenStream : remoteScreenStream;
@@ -16,7 +24,7 @@ export function ScreenShareViewer() {
   // Find the sharer's display name
   const users = activeChannelId ? channelUsers.get(activeChannelId) || [] : [];
   const sharer = users.find((u) => u.id === screenSharingUserId);
-  const sharerName = sharer?.displayName || 'Someone';
+  const sharerName = sharer?.displayName || t('voice.someone');
 
   useEffect(() => {
     const video = videoRef.current;
@@ -30,9 +38,11 @@ export function ScreenShareViewer() {
     };
   }, [stream]);
 
+  // Fullscreen the stage wrapper, NOT the bare <video> — the annotation
+  // canvas is a DOM sibling and would be invisible in element fullscreen.
   const handleFullscreen = () => {
-    if (videoRef.current) {
-      videoRef.current.requestFullscreen?.();
+    if (stageRef.current) {
+      stageRef.current.requestFullscreen?.();
     }
   };
 
@@ -41,23 +51,22 @@ export function ScreenShareViewer() {
       {/* Header bar */}
       <div className="flex items-center justify-between px-4 py-2 bg-vox-bg-secondary border-b border-vox-border">
         <span className="text-sm text-vox-text-primary">
-          <span className="font-semibold">{isLocalSharing ? 'You are' : sharerName + ' is'}</span>
-          {' '}sharing their screen
+          {isLocalSharing ? t('voice.youAreSharing') : t('voice.userIsSharing', { name: sharerName })}
         </span>
         <div className="flex items-center gap-1">
           <button
             onClick={handleFullscreen}
             className="rounded p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
-            title="Fullscreen"
-            aria-label="Fullscreen"
+            title={t('voice.fullscreen')}
+            aria-label={t('voice.fullscreen')}
           >
             <Maximize size={16} />
           </button>
           <button
             onClick={() => setViewMode('floating')}
             className="rounded p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
-            title="Pop out to floating panel"
-            aria-label="Pop out to floating panel"
+            title={t('voice.popOut')}
+            aria-label={t('voice.popOut')}
           >
             <PictureInPicture2 size={16} />
           </button>
@@ -65,8 +74,8 @@ export function ScreenShareViewer() {
             <button
               onClick={stopScreenShare}
               className="rounded p-1.5 text-vox-accent-danger hover:bg-vox-accent-danger/20 transition-colors"
-              title="Stop sharing"
-              aria-label="Stop sharing"
+              title={t('voice.stopSharing')}
+              aria-label={t('voice.stopSharing')}
             >
               <MonitorOff size={16} />
             </button>
@@ -74,20 +83,35 @@ export function ScreenShareViewer() {
         </div>
       </div>
 
-      {/* Video */}
-      <div className="flex flex-1 items-center justify-center min-h-0">
-        {stream ? (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            preload="none"
-            className="max-h-full max-w-full object-contain"
-          />
-        ) : (
-          <p className="text-vox-text-muted text-sm">Waiting for screen share stream...</p>
+      {/* Stage = the fullscreen target. The toolbar and the frozen banner live
+          INSIDE it, or the sharer would lose all editing controls (and the
+          only warning that viewers see a frozen share) the moment they go
+          fullscreen — the Fullscreen API renders nothing outside the target. */}
+      <div ref={stageRef} className="flex flex-1 flex-col min-h-0 bg-black">
+        {isLocalSharing && <AnnotationToolbar />}
+        {isLocalSharing && screenShareFrozen && (
+          <div className="bg-vox-accent-danger/90 px-3 py-1 text-center text-xs font-medium text-white">
+            {t('voice.annotations.sharePaused')}
+          </div>
         )}
+        <div className="relative flex flex-1 items-center justify-center min-h-0">
+          {stream ? (
+            <>
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                preload="none"
+                className="max-h-full max-w-full object-contain"
+              />
+              <AnnotationCanvas videoRef={videoRef} />
+              {isLocalSharing && isEditing && <AnnotationEditorLayer videoRef={videoRef} />}
+            </>
+          ) : (
+            <p className="text-vox-text-muted text-sm">{t('voice.waitingForStream')}</p>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -1,3 +1,5 @@
+import type { AnnotationOp, AnnotationScene } from './annotations.js';
+
 // ─── User ────────────────────────────────────────────────────────────────────
 
 export type UserRole = 'user' | 'admin' | 'superadmin';
@@ -379,6 +381,11 @@ export interface ServerToClientEvents {
   'voice:screen_share:start': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:stop': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:state': (data: { channelId: string; sharingUserId: string | null }) => void;
+  // rev = server-assigned monotonic counter per share session — late joiners
+  // drop ops with rev <= the snapshot's rev (snapshot and ops can arrive from
+  // different nodes with no cross-node ordering guarantee)
+  'voice:annotation:ops': (data: { channelId: string; userId: string; rev: number; ops: AnnotationOp[] }) => void;
+  'voice:annotation:state': (data: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene }) => void;
   'announcement:new': (announcement: Announcement) => void;
   'announcement:init': (data: { announcements: Announcement[] }) => void;
   'admin:metrics': (data: AdminMetricsSnapshot) => void;
@@ -435,6 +442,10 @@ export interface ClientToServerEvents {
   'voice:force_move': (data: { userId: string; targetChannelId: string }) => void;
   'voice:screen_share:start': (callback?: (response: { ok: boolean; error?: string }) => void) => void;
   'voice:screen_share:stop': () => void;
+  // restarted: the authoritative scene was rebuilt from empty for this batch
+  // (fresh share, Redis loss, TTL expiry, corrupt state) — the sharer's client
+  // re-sends its full local scene so viewers regain pre-loss objects
+  'voice:annotation:ops': (data: { channelId: string; ops: AnnotationOp[] }, callback?: (response: { ok: boolean; error?: string; restarted?: boolean }) => void) => void;
   'admin:subscribe_metrics': () => void;
   'admin:unsubscribe_metrics': () => void;
   'admin:subscribe_reports': () => void;

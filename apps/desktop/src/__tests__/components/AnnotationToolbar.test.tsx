@@ -1,0 +1,115 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-i18next')>();
+  return { ...actual, useTranslation: () => ({ t: (key: string) => key }) };
+});
+
+// annotationStore pulls in the socket service and voiceStore (module-scope
+// lifecycle subscription) — stub both.
+vi.mock('../../services/socket', () => ({
+  getSocket: vi.fn().mockReturnValue({ emit: vi.fn() }),
+}));
+vi.mock('../../stores/voiceStore', () => ({
+  useVoiceStore: {
+    getState: () => ({ activeChannelId: 'chan-1', screenSharingUserId: null, isScreenSharing: false }),
+    subscribe: () => () => {},
+  },
+}));
+
+import { AnnotationToolbar } from '../../components/voice/AnnotationToolbar';
+import { useAnnotationStore } from '../../stores/annotationStore';
+
+const initialState = useAnnotationStore.getState();
+
+let container: HTMLDivElement;
+let root: Root;
+
+function render(el: React.ReactElement) {
+  act(() => {
+    root.render(el);
+  });
+}
+
+function click(el: Element | null) {
+  act(() => {
+    el?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
+beforeEach(() => {
+  useAnnotationStore.setState(initialState, true);
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+});
+
+describe('AnnotationToolbar', () => {
+  it('starts collapsed and expands into the full toolbar via the Annotate toggle', () => {
+    render(<AnnotationToolbar />);
+    expect(container.querySelector('[data-testid="annotation-toolbar-collapsed"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="annotation-toolbar"]')).toBeNull();
+
+    click(container.querySelector('button'));
+
+    expect(useAnnotationStore.getState().isEditing).toBe(true);
+    expect(container.querySelector('[data-testid="annotation-toolbar"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="annotation-toolbar-collapsed"]')).toBeNull();
+  });
+
+  it('selects tools and reflects the active one via aria-pressed', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    render(<AnnotationToolbar />);
+
+    const maskButton = container.querySelector('[aria-label="voice.annotations.mask"]')!;
+    click(maskButton);
+    expect(useAnnotationStore.getState().activeTool).toBe('mask');
+    expect(maskButton.getAttribute('aria-pressed')).toBe('true');
+
+    const penButton = container.querySelector('[aria-label="voice.annotations.pen"]')!;
+    expect(penButton.getAttribute('aria-pressed')).toBe('false');
+    click(penButton);
+    expect(useAnnotationStore.getState().activeTool).toBe('pen');
+  });
+
+  it('changing tools clears any selection', () => {
+    useAnnotationStore.setState({ isEditing: true, selectedObjectId: 'obj-1' });
+    render(<AnnotationToolbar />);
+    click(container.querySelector('[aria-label="voice.annotations.rectangle"]'));
+    expect(useAnnotationStore.getState().selectedObjectId).toBeNull();
+  });
+
+  it('sets color and stroke width from the presets', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    render(<AnnotationToolbar />);
+
+    click(container.querySelector('[aria-label="voice.annotations.color #ffd60a"]'));
+    expect(useAnnotationStore.getState().color).toBe('#ffd60a');
+
+    click(container.querySelector('[aria-label="voice.annotations.width thick"]'));
+    expect(useAnnotationStore.getState().strokeWidth).toBe(0.008);
+  });
+
+  it('Done collapses the toolbar and drops the selection', () => {
+    useAnnotationStore.setState({ isEditing: true, selectedObjectId: 'obj-1' });
+    render(<AnnotationToolbar />);
+    click(container.querySelector('[aria-label="voice.annotations.done"]'));
+    const state = useAnnotationStore.getState();
+    expect(state.isEditing).toBe(false);
+    expect(state.selectedObjectId).toBeNull();
+  });
+
+  it('the mask tool carries the privacy hint in its tooltip', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    render(<AnnotationToolbar />);
+    const maskButton = container.querySelector('[aria-label="voice.annotations.mask"]')!;
+    expect(maskButton.getAttribute('title')).toContain('voice.annotations.maskPrivacyHint');
+  });
+});

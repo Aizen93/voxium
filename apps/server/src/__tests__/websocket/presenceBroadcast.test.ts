@@ -110,6 +110,10 @@ vi.mock('../../websocket/dmVoiceHandler', () => ({
   handleDMVoiceEvents: vi.fn(),
 }));
 
+vi.mock('../../websocket/annotationHandler', () => ({
+  handleAnnotationEvents: vi.fn(),
+}));
+
 vi.mock('jsonwebtoken', () => ({
   default: {
     verify: vi.fn().mockReturnValue({

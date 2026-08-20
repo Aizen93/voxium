@@ -37,11 +37,12 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
+import { useAnnotationStore } from '../../stores/annotationStore';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
   MemberRole, Role, Announcement, SupportMessageData, SupportTicketStatus,
-  ReactionGroup,
+  ReactionGroup, AnnotationOp, AnnotationScene,
 } from '@voxium/shared';
 
 /**
@@ -564,6 +565,18 @@ export function MainLayout() {
           }
         }
       },
+      voiceAnnotationOps: ({ channelId, userId, rev, ops }: { channelId: string; userId: string; rev: number; ops: AnnotationOp[] }) => {
+        const voiceState = useVoiceStore.getState();
+        // Only the live voice channel's active sharer may paint our overlay —
+        // stray late batches after a stop/handoff are dropped here.
+        if (voiceState.activeChannelId !== channelId) return;
+        if (voiceState.screenSharingUserId !== userId) return;
+        useAnnotationStore.getState().applyRemoteOps(channelId, rev, ops);
+      },
+      voiceAnnotationState: ({ channelId, rev, scene }: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene }) => {
+        if (useVoiceStore.getState().activeChannelId !== channelId) return;
+        useAnnotationStore.getState().hydrate(channelId, rev, scene);
+      },
       memberRoleUpdated: ({ serverId, userId, role }: { serverId: string; userId: string; role: MemberRole }) => {
         useServerStore.getState().handleMemberRoleUpdated(serverId, userId, role);
       },
@@ -702,6 +715,8 @@ export function MainLayout() {
       ['voice:screen_share:start', handlers.voiceScreenShareStart],
       ['voice:screen_share:stop', handlers.voiceScreenShareStop],
       ['voice:screen_share:state', handlers.voiceScreenShareState],
+      ['voice:annotation:ops', handlers.voiceAnnotationOps],
+      ['voice:annotation:state', handlers.voiceAnnotationState],
       ['member:joined', handlers.memberJoined],
       ['member:left', handlers.memberLeft],
       ['channel:created', handlers.channelCreated],

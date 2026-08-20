@@ -5,6 +5,7 @@ import { getSocket, onSocketReconnect } from '../services/socket';
 import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused } from '../services/audioAnalyser';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
+import { teardownComposite } from '../services/screenComposite';
 import { optimizeOpusSDP } from '../services/sdpUtils';
 import i18n from '../i18n';
 import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared';
@@ -182,6 +183,11 @@ interface VoiceState {
   screenSharingUserId: string | null;
   remoteScreenStream: MediaStream | null;
   screenShareViewMode: 'inline' | 'floating';
+  /** True while outgoing screen RTP is gated by the mask compositor (setup in
+   *  flight, or setup failed and the share is held frozen fail-closed). The
+   *  sharer's own preview keeps playing the raw capture, so without this flag
+   *  they would never know viewers see a frozen frame. */
+  screenShareFrozen: boolean;
 
   // ─── DM Call State ─────────────────────────────────────────────────
   dmCallConversationId: string | null;
@@ -247,6 +253,13 @@ interface VoiceState {
   stopScreenShare: () => void;
   setScreenSharingUser: (channelId: string, userId: string | null) => void;
   setScreenShareViewMode: (mode: 'inline' | 'floating') => void;
+  /** Swap the live screen-video producer's track (privacy-mask compositor —
+   *  no renegotiation; encodings preserved). Throws if no producer is live. */
+  replaceScreenVideoTrack: (track: MediaStreamTrack) => Promise<void>;
+  /** Fail-closed gate for the mask compositor: pause stops outgoing RTP on the
+   *  screen-video producer (mic/screen-audio untouched) while masks are being
+   *  set up, so no raw frame can ship under a mask. No-op without a producer. */
+  setScreenVideoProducerPaused: (paused: boolean) => void;
 
   // ─── DM Call Actions ───────────────────────────────────────────────
   joinDMCall: (conversationId: string) => Promise<void>;
@@ -854,6 +867,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   screenSharingUserId: null,
   remoteScreenStream: null,
   screenShareViewMode: 'inline',
+  screenShareFrozen: false,
 
   // DM call state
   dmCallConversationId: null,
@@ -2013,10 +2027,20 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // desktop content. Without encodings the producer gets a default bitrate
       // far too low for 1080p, leaving viewers in permanent blur.
       videoTrack.contentHint = 'detail';
+      // stopTracks:false — mediasoup must NOT own the capture track's lifecycle:
+      // its default replaceTrack() behavior STOPS the old track, which would
+      // kill the raw capture the mask compositor reads from (stopScreenShare
+      // stops screenStream tracks explicitly). disableTrackOnPause:false +
+      // zeroRtpOnPause:true — the compositor's fail-closed pause must suppress
+      // RTP at the sender WITHOUT disabling the shared raw track (a disabled
+      // track delivers black frames to the compositor's source video).
       const videoProducer = await msSendTransport.produce({
         track: videoTrack,
         encodings: [{ maxBitrate: SCREEN_SHARE_MAX_BITRATE }],
         codecOptions: { videoGoogleStartBitrate: 1000 },
+        stopTracks: false,
+        disableTrackOnPause: false,
+        zeroRtpOnPause: true,
         appData: { type: 'screen-video' },
       });
       createdProducers.push(videoProducer);
@@ -2053,6 +2077,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // release the capture stream (clears the OS capture indicator), and
       // free the sharer slot on the server.
       const s = getSocket();
+      teardownComposite(); // defensive — masks can't exist pre-produce, but a stray loop must die
       const producers = new Map(get().msProducers);
       for (const producer of createdProducers) {
         if (s) s.emit('voice:producer:close', { producerId: producer.id });
@@ -2071,9 +2096,31 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
   },
 
+  replaceScreenVideoTrack: async (track: MediaStreamTrack) => {
+    const producer = [...get().msProducers.values()].find(
+      (p) => (p.appData as Record<string, unknown>)?.type === 'screen-video' && !p.closed,
+    );
+    if (!producer) throw new Error('No live screen-video producer to swap');
+    await producer.replaceTrack({ track });
+  },
+
+  setScreenVideoProducerPaused: (paused: boolean) => {
+    const producer = [...get().msProducers.values()].find(
+      (p) => (p.appData as Record<string, unknown>)?.type === 'screen-video' && !p.closed,
+    );
+    if (!producer) return;
+    if (paused && !producer.paused) producer.pause();
+    else if (!paused && producer.paused) producer.resume();
+    set({ screenShareFrozen: paused });
+  },
+
   stopScreenShare: () => {
     const socket = getSocket();
     const { screenStream, msProducers } = get();
+
+    // Stop the mask compositor's draw loop FIRST — canvas capture tracks
+    // never end on their own, and a stopped share must not keep burning CPU.
+    teardownComposite();
 
     // Close screen producers on BOTH sides. The server-side close
     // (voice:producer:close) frees the producer immediately and notifies every
@@ -2102,6 +2149,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       screenStream: null,
       isScreenSharing: false,
       screenSharingUserId: null,
+      screenShareFrozen: false,
     });
   },
 
