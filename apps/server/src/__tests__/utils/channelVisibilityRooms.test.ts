@@ -2,13 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
-const { mockIn, mockFetchSockets, mockPrisma, mockFilterVisibleChannels, mockGetIO } = vi.hoisted(() => {
+const { mockIn, mockFetchSockets, mockPrisma, mockFilterForUsers, mockGetIO } = vi.hoisted(() => {
   const mockFetchSockets = vi.fn();
   const mockIn = vi.fn();
   return {
     mockIn,
     mockFetchSockets,
-    mockFilterVisibleChannels: vi.fn(),
+    mockFilterForUsers: vi.fn(),
     mockGetIO: vi.fn(),
     mockPrisma: {
       channel: { findMany: vi.fn() },
@@ -26,7 +26,7 @@ vi.mock('../../utils/prisma', () => ({
 }));
 
 vi.mock('../../utils/permissionCalculator', () => ({
-  filterVisibleChannels: mockFilterVisibleChannels,
+  filterVisibleChannelsForUsers: mockFilterForUsers,
 }));
 
 import { syncChannelVisibilityRooms } from '../../utils/channelVisibilityRooms';
@@ -48,9 +48,16 @@ function resetMocks() {
   mockFetchSockets.mockResolvedValue([]);
   mockPrisma.channel.findMany.mockResolvedValue([]);
   mockPrisma.serverMember.findUnique.mockResolvedValue({ userId: 'any' });
-  mockFilterVisibleChannels.mockImplementation(
-    async (_uid: string, _sid: string, channels: { id: string }[]) => channels,
+  // Default: everyone sees every channel
+  mockFilterForUsers.mockImplementation(
+    async (userIds: string[], _sid: string, channels: { id: string }[]) =>
+      new Map(userIds.map((u) => [u, new Set(channels.map((c) => c.id))])),
   );
+}
+
+/** Build the userId → visible-channel-id-set map the batched helper returns. */
+function visibility(map: Record<string, string[]>) {
+  return new Map(Object.entries(map).map(([u, ids]) => [u, new Set(ids)]));
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -62,7 +69,7 @@ describe('syncChannelVisibilityRooms', () => {
     const socket = createMockSocket('user-1');
     mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-pub' }, { id: 'ch-priv' }]);
-    mockFilterVisibleChannels.mockResolvedValueOnce([{ id: 'ch-pub' }]);
+    mockFilterForUsers.mockResolvedValueOnce(visibility({ 'user-1': ['ch-pub'] }));
 
     await syncChannelVisibilityRooms('server-1');
 
@@ -101,14 +108,15 @@ describe('syncChannelVisibilityRooms', () => {
     const socket = createMockSocket('user-9');
     mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }, { id: 'ch-2' }]);
-    mockPrisma.serverMember.findUnique.mockResolvedValueOnce(null);
+    // Membership is re-verified INSIDE the batch now: a non-member comes back
+    // with an empty visible set rather than costing a separate query
+    mockFilterForUsers.mockResolvedValueOnce(visibility({ 'user-9': [] }));
 
     await syncChannelVisibilityRooms('server-1', { userId: 'user-9' });
 
     expect(socket.leave).toHaveBeenCalledWith('channel:ch-1');
     expect(socket.leave).toHaveBeenCalledWith('channel:ch-2');
     expect(socket.join).not.toHaveBeenCalled();
-    expect(mockFilterVisibleChannels).not.toHaveBeenCalled();
   });
 
   it('never removes a socket from the room of the voice channel it is actively in', async () => {
@@ -116,7 +124,7 @@ describe('syncChannelVisibilityRooms', () => {
     mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-voice' }, { id: 'ch-text' }]);
     // User lost visibility to BOTH channels
-    mockFilterVisibleChannels.mockResolvedValueOnce([]);
+    mockFilterForUsers.mockResolvedValueOnce(visibility({ 'user-1': [] }));
 
     await syncChannelVisibilityRooms('server-1');
 
@@ -133,10 +141,27 @@ describe('syncChannelVisibilityRooms', () => {
 
     await syncChannelVisibilityRooms('server-1');
 
-    expect(mockFilterVisibleChannels).toHaveBeenCalledTimes(2); // user-1, user-2
+    // F6: ONE batched recompute covering both users, not one call per user —
+    // the per-user loop fired 4-5 sequential queries each and a single role
+    // edit on a large server turned into ~20k of them.
+    expect(mockFilterForUsers).toHaveBeenCalledTimes(1);
+    expect(mockFilterForUsers).toHaveBeenCalledWith(
+      expect.arrayContaining(['user-1', 'user-2']), 'server-1', [{ id: 'ch-1' }],
+    );
     for (const s of [s1, s2, s3]) {
       expect(s.join).toHaveBeenCalledWith('channel:ch-1');
     }
+  });
+
+  it('stays at ONE batched recompute regardless of how many users are connected', async () => {
+    const sockets = Array.from({ length: 120 }, (_, i) => createMockSocket(`user-${i}`));
+    mockFetchSockets.mockResolvedValueOnce(sockets);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }]);
+
+    await syncChannelVisibilityRooms('server-1');
+
+    expect(mockFilterForUsers).toHaveBeenCalledTimes(1);
+    expect(mockFilterForUsers.mock.calls[0][0]).toHaveLength(120);
   });
 
   it('is a no-op when no sockets are connected', async () => {

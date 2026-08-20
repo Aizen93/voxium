@@ -455,5 +455,121 @@ export async function filterVisibleChannelsMulti<
   });
 }
 
+/**
+ * Multi-USER variant: which of `channels` each of `userIds` can view, in a
+ * FIXED number of queries regardless of how many users are involved.
+ *
+ * `filterVisibleChannelsMulti` batches across SERVERS for one user — every one
+ * of its queries filters on `userId` — so calling it per user in a loop still
+ * costs 4-5 round trips each. That is what made a single `PATCH /roles/:id`
+ * on a large server fan out ~20k sequential queries: `syncChannelVisibilityRooms`
+ * awaited `filterVisibleChannels` once per connected member, uncapped, while
+ * the role-manage limiter happily allowed 20 such edits a minute.
+ *
+ * Returns userId → set of visible channel ids. Users with no entry in the
+ * membership data still get an (empty) set, so callers can treat a missing
+ * channel as "leave the room" without a second lookup.
+ *
+ * Membership IS verified here (unlike `filterVisibleChannelsMulti`, whose
+ * caller contract assumes it): the sockets this feeds come from a room, not
+ * from a membership query, and a member who just left must lose their rooms.
+ */
+export async function filterVisibleChannelsForUsers<T extends { id: string; secure?: boolean }>(
+  userIds: string[],
+  serverId: string,
+  channels: T[],
+): Promise<Map<string, Set<string>>> {
+  const result = new Map<string, Set<string>>(userIds.map((id) => [id, new Set<string>()]));
+  if (userIds.length === 0 || channels.length === 0) return result;
+
+  const secureIds = channels.filter((c) => c.secure).map((c) => c.id);
+  const plainIds = channels.filter((c) => !c.secure).map((c) => c.id);
+
+  const [server, everyoneRole, memberRoles, overrides, members, secureRows] = await Promise.all([
+    prisma.server.findUnique({ where: { id: serverId }, select: { ownerId: true } }),
+    prisma.role.findFirst({ where: { serverId, isDefault: true }, select: { id: true, permissions: true } }),
+    prisma.memberRole.findMany({
+      where: { serverId, userId: { in: userIds } },
+      select: { userId: true, roleId: true, role: { select: { permissions: true } } },
+    }),
+    plainIds.length > 0
+      ? prisma.channelPermissionOverride.findMany({ where: { channelId: { in: plainIds } } })
+      : Promise.resolve([]),
+    prisma.serverMember.findMany({
+      where: { serverId, userId: { in: userIds } },
+      select: { userId: true },
+    }),
+    secureIds.length > 0
+      ? prisma.channelMember.findMany({
+          where: { channelId: { in: secureIds }, userId: { in: userIds } },
+          select: { channelId: true, userId: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  if (!server) return result; // server deleted mid-flight — nobody sees anything
+
+  const memberSet = new Set(members.map((m) => m.userId));
+  const secureByUser = new Map<string, Set<string>>();
+  for (const row of secureRows) {
+    let set = secureByUser.get(row.userId);
+    if (!set) secureByUser.set(row.userId, (set = new Set()));
+    set.add(row.channelId);
+  }
+  const rolesByUser = new Map<string, typeof memberRoles>();
+  for (const mr of memberRoles) {
+    const list = rolesByUser.get(mr.userId) || [];
+    list.push(mr);
+    rolesByUser.set(mr.userId, list);
+  }
+  const overridesByChannel = new Map<string, typeof overrides>();
+  for (const o of overrides) {
+    const list = overridesByChannel.get(o.channelId) || [];
+    list.push(o);
+    overridesByChannel.set(o.channelId, list);
+  }
+  const everyonePerms = everyoneRole
+    ? permissionsFromString(everyoneRole.permissions)
+    : DEFAULT_EVERYONE_PERMISSIONS;
+
+  for (const userId of userIds) {
+    const visible = result.get(userId)!;
+    // Secure channels are membership-only and are decided BEFORE the
+    // owner/ADMINISTRATOR fast paths — a non-member owner sees nothing.
+    const secureMemberships = secureByUser.get(userId);
+    if (secureMemberships) for (const id of secureMemberships) visible.add(id);
+
+    if (!memberSet.has(userId)) continue; // no longer a member: plaintext all denied
+    if (server.ownerId === userId) {
+      for (const c of channels) if (!c.secure) visible.add(c.id);
+      continue;
+    }
+
+    const userRoles = rolesByUser.get(userId) || [];
+    const base = computeBasePermissions(everyonePerms, userRoles.map((mr) => permissionsFromString(mr.role.permissions)));
+    if (base === ALL_PERMISSIONS) { // ADMINISTRATOR
+      for (const c of channels) if (!c.secure) visible.add(c.id);
+      continue;
+    }
+
+    const userRoleIds = new Set(userRoles.map((mr) => mr.roleId));
+    for (const channel of channels) {
+      if (channel.secure) continue;
+      let everyoneOverride: { allow: bigint; deny: bigint } | null = null;
+      const roleOverrides: { allow: bigint; deny: bigint }[] = [];
+      for (const o of overridesByChannel.get(channel.id) || []) {
+        const allow = permissionsFromString(o.allow);
+        const deny = permissionsFromString(o.deny);
+        if (everyoneRole && o.roleId === everyoneRole.id) everyoneOverride = { allow, deny };
+        else if (userRoleIds.has(o.roleId)) roleOverrides.push({ allow, deny });
+      }
+      if (hasFlag(computeChannelPermissions(base, everyoneOverride, roleOverrides), Permissions.VIEW_CHANNEL)) {
+        visible.add(channel.id);
+      }
+    }
+  }
+
+  return result;
+}
+
 // Re-export Permissions for convenient use in route guards
 export { Permissions, hasFlag as hasPermission };

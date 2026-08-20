@@ -1,6 +1,10 @@
 import { getIO } from '../websocket/socketServer';
 import { prisma } from './prisma';
-import { filterVisibleChannels } from './permissionCalculator';
+import { filterVisibleChannelsForUsers } from './permissionCalculator';
+
+/** Users per batched recompute. Keeps the `userId IN (...)` lists bounded on a
+ *  server with tens of thousands of sockets connected at once. */
+const USER_BATCH = 500;
 
 /**
  * Re-sync `channel:{id}` room membership for connected members after a
@@ -50,32 +54,28 @@ export async function syncChannelVisibilityRooms(
       socketsByUser.set(uid, list);
     }
 
-    for (const [uid, userSockets] of socketsByUser) {
-      // When scoped by userId, sockets come from the user room — confirm the
-      // user is still a member of this server before recomputing visibility
-      if (opts?.userId) {
-        const membership = await prisma.serverMember.findUnique({
-          where: { userId_serverId: { userId: uid, serverId } },
-          select: { userId: true },
-        });
-        if (!membership) {
-          for (const ch of channels) {
-            for (const s of userSockets) s.leave(`channel:${ch.id}`);
-          }
-          continue;
-        }
-      }
-
-      const visible = await filterVisibleChannels(uid, serverId, channels);
-      const visibleIds = new Set(visible.map((c) => c.id));
-      for (const ch of channels) {
-        for (const s of userSockets) {
-          if (visibleIds.has(ch.id)) {
-            s.join(`channel:${ch.id}`);
-          } else if (s.data.voiceChannelId !== ch.id) {
-            // Never cut a socket off from the voice channel it is actively in —
-            // it must keep receiving that channel's presence events until it leaves
-            s.leave(`channel:${ch.id}`);
+    // ONE batched recompute for every affected user, not one per user. The
+    // per-user loop here cost 4-5 sequential queries each: a single role
+    // permission edit on a 10k-member server with 5k sockets connected fired
+    // ~20k uncapped queries, and rateLimitRoleManage allows 20 such edits a
+    // minute. Membership is re-verified inside the batch (a user who left
+    // loses their rooms), which also subsumes the old per-user lookup.
+    const uids = [...socketsByUser.keys()];
+    for (let i = 0; i < uids.length; i += USER_BATCH) {
+      const batch = uids.slice(i, i + USER_BATCH);
+      const visibleByUser = await filterVisibleChannelsForUsers(batch, serverId, channels);
+      for (const uid of batch) {
+        const visibleIds = visibleByUser.get(uid) ?? new Set<string>();
+        const userSockets = socketsByUser.get(uid)!;
+        for (const ch of channels) {
+          for (const s of userSockets) {
+            if (visibleIds.has(ch.id)) {
+              s.join(`channel:${ch.id}`);
+            } else if (s.data.voiceChannelId !== ch.id) {
+              // Never cut a socket off from the voice channel it is actively in —
+              // it must keep receiving that channel's presence events until it leaves
+              s.leave(`channel:${ch.id}`);
+            }
           }
         }
       }

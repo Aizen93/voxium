@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { Permissions } from '@voxium/shared';
+import { Permissions, permissionsToString, DEFAULT_EVERYONE_PERMISSIONS } from '@voxium/shared';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -76,6 +76,18 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
   },
   serverLimits: {
+    findUnique: vi.fn(),
+  },
+  // Used by visibilityRoomsForNewChannel (F5): who can VIEW a brand-new
+  // channel, decided from BASE permissions (@everyone + roles).
+  role: {
+    findFirst: vi.fn(),
+    findMany: vi.fn(),
+  },
+  memberRole: {
+    findMany: vi.fn(),
+  },
+  server: {
     findUnique: vi.fn(),
   },
   $transaction: vi.fn(),
@@ -161,6 +173,14 @@ describe('Channel Routes', () => {
     mockHasServerPermission.mockResolvedValue(true);
     mockHasChannelPermission.mockResolvedValue(true);
     mockGetHighestRolePosition.mockResolvedValue(Infinity);
+    // Default server shape: @everyone carries VIEW_CHANNEL, the ordinary case
+    prismaMock.role.findFirst.mockResolvedValue({
+      id: 'everyone',
+      permissions: permissionsToString(DEFAULT_EVERYONE_PERMISSIONS),
+    });
+    prismaMock.role.findMany.mockResolvedValue([]);
+    prismaMock.memberRole.findMany.mockResolvedValue([]);
+    prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner-1' });
   });
 
   // ── GET /api/v1/servers/:serverId/channels ──────────────────────────────
@@ -428,6 +448,113 @@ describe('Channel Routes', () => {
       // One adapter-wide op subscribes every connected member to the new room
       expect(mockIn).toHaveBeenCalledWith('server:srv-1');
       expect(mockSocketsJoin).toHaveBeenCalledWith('channel:ch-new');
+    });
+
+    // ── F5: channel:{id} IS the VIEW_CHANNEL boundary ──────────────────────
+
+    it('does NOT join or announce to members without VIEW_CHANNEL when @everyone lacks it', async () => {
+      // The standard staff-only setup. The old code joined EVERY connected
+      // member on the premise that a new channel has no overrides — but
+      // visibility comes from base permissions, before overrides matter, so
+      // non-privileged members received message:new, typing, reactions and
+      // voice presence for a channel they cannot see, until they reconnected.
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
+      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-staff', name: 'staff', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
+      });
+      prismaMock.role.findFirst.mockResolvedValue({
+        id: 'everyone', permissions: permissionsToString(Permissions.SEND_MESSAGES), // no VIEW
+      });
+      prismaMock.role.findMany.mockResolvedValue([
+        { id: 'everyone', permissions: permissionsToString(Permissions.SEND_MESSAGES) },
+        { id: 'staff', permissions: permissionsToString(Permissions.VIEW_CHANNEL) },
+      ]);
+      prismaMock.memberRole.findMany.mockResolvedValue([{ userId: 'mod-7' }]);
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner-1' });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'staff', type: 'text' });
+
+      expect(res.status).toBe(201);
+      expect(mockIn).not.toHaveBeenCalledWith('server:srv-1');
+      expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
+      // The VIEW-granting role's holders, the owner (who may hold no MemberRole
+      // rows at all), and the creator — MANAGE_CHANNELS and VIEW_CHANNEL are
+      // independent bits, so the creator can be outside the derived audience
+      // and would then get no channel:created for the channel they just made.
+      const rooms = mockIn.mock.calls[0][0] as string[];
+      expect(rooms).toEqual(expect.arrayContaining(['user:mod-7', 'user:owner-1', 'user:user-1']));
+      expect(rooms).toHaveLength(3);
+      expect(mockSocketsJoin).toHaveBeenCalledWith('channel:ch-staff');
+    });
+
+    it('keeps the emit and the join on the SAME audience', async () => {
+      // Narrowing one alone leaves clients showing a channel that produces no
+      // events, or receiving events for a channel they never learned about.
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
+      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-staff', name: 'staff', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
+      });
+      prismaMock.role.findFirst.mockResolvedValue({ id: 'everyone', permissions: permissionsToString(0n) });
+      prismaMock.role.findMany.mockResolvedValue([
+        { id: 'staff', permissions: permissionsToString(Permissions.VIEW_CHANNEL) },
+      ]);
+      prismaMock.memberRole.findMany.mockResolvedValue([{ userId: 'mod-7' }]);
+
+      await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'staff', type: 'text' });
+
+      expect(mockTo.mock.calls.map((c) => c[0])).toEqual(mockIn.mock.calls.map((c) => c[0]));
+    });
+
+    it('treats ADMINISTRATOR as VIEW so admins are never locked out of the room', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
+      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-staff', name: 'staff', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
+      });
+      prismaMock.role.findFirst.mockResolvedValue({ id: 'everyone', permissions: permissionsToString(0n) });
+      prismaMock.role.findMany.mockResolvedValue([
+        { id: 'admins', permissions: permissionsToString(Permissions.ADMINISTRATOR) },
+      ]);
+      prismaMock.memberRole.findMany.mockResolvedValue([{ userId: 'admin-3' }]);
+
+      await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'staff', type: 'text' });
+
+      expect(prismaMock.memberRole.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { serverId: 'srv-1', roleId: { in: ['admins'] } } }),
+      );
+      expect(mockIn.mock.calls[0][0]).toContain('user:admin-3');
+    });
+
+    it('keeps the O(1) server-wide fast path when @everyone CAN view', async () => {
+      // MED-15's cheap path must survive for the default configuration
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
+      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-open', name: 'general', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
+      });
+
+      await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'general', type: 'text' });
+
+      expect(mockIn).toHaveBeenCalledWith('server:srv-1');
+      expect(prismaMock.memberRole.findMany).not.toHaveBeenCalled();
     });
 
     it('emits channel:created socket event', async () => {

@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateChannelName, WS_EVENTS, Permissions, type Channel } from '@voxium/shared';
+import { validateChannelName, WS_EVENTS, Permissions, permissionsFromString, hasPermission, DEFAULT_EVERYONE_PERMISSIONS, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
@@ -14,6 +14,68 @@ import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 export const channelRouter = Router({ mergeParams: true });
 
 channelRouter.use(authenticate, requireVerifiedEmail);
+
+/** User rooms per broadcast when the audience has to be enumerated. Bounds the
+ *  size of a single adapter message on a large staff-gated server. */
+const ROOM_FANOUT_BATCH = 500;
+
+/**
+ * The rooms to announce a BRAND-NEW channel to. A new channel has no overrides
+ * yet, so visibility is exactly base VIEW_CHANNEL — no per-user recompute
+ * needed, and in the common case no enumeration either.
+ *
+ * Fast path: if @everyone already carries VIEW_CHANNEL (or ADMINISTRATOR),
+ * every member can see it and one server-wide op does the whole job — the
+ * O(1) behaviour MED-15 was careful to keep.
+ *
+ * Otherwise the audience is derived from roles: members holding a role with
+ * VIEW_CHANNEL or ADMINISTRATOR, plus the owner (who may hold no MemberRole
+ * rows at all). Addressed as `user:{id}` rooms, which are adapter-wide and so
+ * work across nodes — never `fetchSockets()`.
+ */
+async function visibilityRoomsForNewChannel(serverId: string, creatorId: string): Promise<(string | string[])[]> {
+  const [everyoneRole, server] = await Promise.all([
+    prisma.role.findFirst({ where: { serverId, isDefault: true }, select: { id: true, permissions: true } }),
+    prisma.server.findUnique({ where: { id: serverId }, select: { ownerId: true } }),
+  ]);
+  const everyonePerms = everyoneRole
+    ? permissionsFromString(everyoneRole.permissions)
+    : DEFAULT_EVERYONE_PERMISSIONS;
+  const grantsView = (perms: bigint) =>
+    hasPermission(perms, Permissions.VIEW_CHANNEL) || hasPermission(perms, Permissions.ADMINISTRATOR);
+
+  if (grantsView(everyonePerms)) return [`server:${serverId}`];
+
+  const viewRoles = (await prisma.role.findMany({ where: { serverId }, select: { id: true, permissions: true } }))
+    .filter((r) => grantsView(permissionsFromString(r.permissions)))
+    .map((r) => r.id);
+  const holders = viewRoles.length > 0
+    ? await prisma.memberRole.findMany({
+        where: { serverId, roleId: { in: viewRoles } },
+        // distinct: a member holding several VIEW-granting roles would
+        // otherwise appear once per role, inflating the fan-out for nothing
+        distinct: ['userId'],
+        select: { userId: true },
+      })
+    : [];
+
+  const userIds = new Set(holders.map((h) => h.userId));
+  if (server) userIds.add(server.ownerId);
+  // The creator, unconditionally. MANAGE_CHANNELS and VIEW_CHANNEL are
+  // independent bits, so someone can be allowed to create a channel they
+  // cannot see — and then the create succeeds while their sidebar never
+  // updates and no error is shown, so they try again.
+  userIds.add(creatorId);
+
+  const rooms = [...userIds].map((id) => `user:${id}`);
+  // BroadcastOperator accepts an ARRAY of rooms and matches a socket in ANY of
+  // them, so each batch is one adapter op rather than one per user.
+  const batches: string[][] = [];
+  for (let i = 0; i < rooms.length; i += ROOM_FANOUT_BATCH) {
+    batches.push(rooms.slice(i, i + ROOM_FANOUT_BATCH));
+  }
+  return batches;
+}
 
 // Bulk reorder channels (with optional category reassignment)
 channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -141,13 +203,25 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
       data: { name, type, serverId, position: channelCount, categoryId: categoryId || null },
     });
 
-    getIO().to(`server:${serverId}`).emit('channel:created', channel as unknown as Channel);
-
-    // Auto-subscribe all connected members' sockets to the new channel room —
-    // one adapter-wide op instead of fetching and looping every socket. A new
-    // channel has no permission overrides yet, so everyone can view it. Voice
-    // channels get the room too (it carries voice presence events).
-    getIO().in(`server:${serverId}`).socketsJoin(`channel:${channel.id}`);
+    // Announce to — and subscribe — exactly the members who can VIEW the new
+    // channel, and nobody else. The old code did both server-wide on the
+    // premise that "a new channel has no overrides, so everyone can view it",
+    // but visibility is decided by BASE permissions (@everyone + the member's
+    // roles) BEFORE overrides matter. In the standard staff-only setup, where
+    // @everyone has no VIEW_CHANNEL, that put every connected member in the
+    // room: they received message:new, typing, reactions — and, since voice
+    // channels get the room too, voice presence and screen-share events —
+    // until they happened to reconnect. `channel:{id}` is supposed to BE the
+    // VIEW_CHANNEL boundary.
+    //
+    // The emit and the join must keep the SAME audience: narrowing one alone
+    // leaves clients showing a channel that never produces events, or vice
+    // versa.
+    for (const room of await visibilityRoomsForNewChannel(serverId, req.user!.userId)) {
+      getIO().to(room).emit('channel:created', channel as unknown as Channel);
+      // Voice channels get the room too — it carries voice presence events.
+      getIO().in(room).socketsJoin(`channel:${channel.id}`);
+    }
 
     // NOTE (MED-15): no per-member ChannelRead seeding here. A brand-new channel
     // has zero messages, so the unread computation (COALESCE(last_read_at, epoch))

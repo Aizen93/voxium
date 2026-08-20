@@ -10,7 +10,7 @@ import {
 
 const prismaMock = {
   server: { findUnique: vi.fn(), findMany: vi.fn() },
-  serverMember: { findUnique: vi.fn() },
+  serverMember: { findUnique: vi.fn(), findMany: vi.fn() },
   role: { findFirst: vi.fn(), findMany: vi.fn() },
   memberRole: { findMany: vi.fn() },
   channelPermissionOverride: { findMany: vi.fn() },
@@ -37,6 +37,7 @@ import {
   getEffectivePermissions,
   filterVisibleChannels,
   filterVisibleChannelsMulti,
+  filterVisibleChannelsForUsers,
   SECURE_MEMBER_PERMISSIONS,
   SECURE_VOICE_MEMBER_PERMISSIONS,
   SECURE_CREATOR_PERMISSIONS,
@@ -880,5 +881,111 @@ describe('permissionCalculator', () => {
       expect(perms & Permissions.SEND_MESSAGES).toBe(0n);
       expect(perms & Permissions.VIEW_CHANNEL).toBe(Permissions.VIEW_CHANNEL);
     });
+  });
+});
+
+// ─── filterVisibleChannelsForUsers (F6 — batched across USERS) ──────────────
+
+describe('filterVisibleChannelsForUsers', () => {
+  const CH_PUB = { id: 'ch-pub' };
+  const CH_SEC = { id: 'ch-sec', secure: true };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner' });
+    prismaMock.role.findFirst.mockResolvedValue({
+      id: 'everyone',
+      permissions: permissionsToString(DEFAULT_EVERYONE_PERMISSIONS),
+    });
+    prismaMock.memberRole.findMany.mockResolvedValue([]);
+    prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
+    prismaMock.channelMember.findMany.mockResolvedValue([]);
+    prismaMock.serverMember.findMany.mockResolvedValue([
+      { userId: 'owner' }, { userId: 'member' }, { userId: 'stranger' },
+    ]);
+  });
+
+  it('issues a FIXED number of queries regardless of how many users are asked about', async () => {
+    const many = Array.from({ length: 200 }, (_, i) => `u-${i}`);
+    prismaMock.serverMember.findMany.mockResolvedValue(many.map((userId) => ({ userId })));
+
+    await filterVisibleChannelsForUsers(many, 'srv', [CH_PUB, CH_SEC]);
+
+    // 6 total: server, everyone role, memberRoles, overrides, members, secure
+    expect(prismaMock.server.findUnique).toHaveBeenCalledTimes(1);
+    expect(prismaMock.role.findFirst).toHaveBeenCalledTimes(1);
+    expect(prismaMock.memberRole.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.channelPermissionOverride.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.serverMember.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.channelMember.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('matches filterVisibleChannels: @everyone without VIEW_CHANNEL hides the channel', async () => {
+    prismaMock.role.findFirst.mockResolvedValue({
+      id: 'everyone',
+      permissions: permissionsToString(Permissions.SEND_MESSAGES), // no VIEW
+    });
+
+    const result = await filterVisibleChannelsForUsers(['member'], 'srv', [CH_PUB]);
+
+    expect([...result.get('member')!]).toEqual([]);
+  });
+
+  it('grants the channel to a member whose ROLE carries VIEW_CHANNEL', async () => {
+    prismaMock.role.findFirst.mockResolvedValue({
+      id: 'everyone', permissions: permissionsToString(0n),
+    });
+    prismaMock.memberRole.findMany.mockResolvedValue([
+      { userId: 'member', roleId: 'staff', role: { permissions: permissionsToString(Permissions.VIEW_CHANNEL) } },
+    ]);
+
+    const result = await filterVisibleChannelsForUsers(['member', 'stranger'], 'srv', [CH_PUB]);
+
+    expect([...result.get('member')!]).toEqual(['ch-pub']);
+    expect([...result.get('stranger')!]).toEqual([]);
+  });
+
+  it('gives the owner every plaintext channel but NOT a secure channel they are not a member of', async () => {
+    // The secure check must stay ahead of the owner fast path (§19)
+    const result = await filterVisibleChannelsForUsers(['owner'], 'srv', [CH_PUB, CH_SEC]);
+
+    expect(result.get('owner')!.has('ch-pub')).toBe(true);
+    expect(result.get('owner')!.has('ch-sec')).toBe(false);
+  });
+
+  it('gives a secure channel ONLY to its ChannelMembers, per user', async () => {
+    prismaMock.channelMember.findMany.mockResolvedValue([{ channelId: 'ch-sec', userId: 'member' }]);
+
+    const result = await filterVisibleChannelsForUsers(['member', 'stranger'], 'srv', [CH_SEC]);
+
+    expect([...result.get('member')!]).toEqual(['ch-sec']);
+    expect([...result.get('stranger')!]).toEqual([]);
+  });
+
+  it('denies every plaintext channel to a user who is no longer a server member', async () => {
+    prismaMock.serverMember.findMany.mockResolvedValue([]); // all left
+
+    const result = await filterVisibleChannelsForUsers(['member'], 'srv', [CH_PUB]);
+
+    expect([...result.get('member')!]).toEqual([]);
+  });
+
+  it('returns an empty set per user when the server is gone', async () => {
+    prismaMock.server.findUnique.mockResolvedValue(null);
+
+    const result = await filterVisibleChannelsForUsers(['a', 'b'], 'srv', [CH_PUB]);
+
+    expect([...result.get('a')!]).toEqual([]);
+    expect([...result.get('b')!]).toEqual([]);
+  });
+
+  it('honours a channel override that denies VIEW_CHANNEL to @everyone', async () => {
+    prismaMock.channelPermissionOverride.findMany.mockResolvedValue([
+      { channelId: 'ch-pub', roleId: 'everyone', allow: permissionsToString(0n), deny: permissionsToString(Permissions.VIEW_CHANNEL) },
+    ]);
+
+    const result = await filterVisibleChannelsForUsers(['member'], 'srv', [CH_PUB]);
+
+    expect([...result.get('member')!]).toEqual([]);
   });
 });
