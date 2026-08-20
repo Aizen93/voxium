@@ -36,7 +36,7 @@ Role-based access control with 20 granular permission flags, per-channel overrid
 <td width="50%">
 
 ### Production-Ready Voice
-mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing, and voice quality selector. DM calls use direct P2P WebRTC with Perfect Negotiation, routed through a private self-hosted STUN server (coturn) — no third-party relay.
+mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing with live annotations and source-composited privacy masks, and voice quality selector. DM calls use direct P2P WebRTC with Perfect Negotiation, routed through a private self-hosted STUN server (coturn) — no third-party relay.
 
 </td>
 </tr>
@@ -107,6 +107,8 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | **Voice** | Server Voice (SFU) | mediasoup Selective Forwarding Unit for scalable voice (25+ users per channel), speaking indicators, latency display |
 | | DM Voice Calls | 1-on-1 WebRTC P2P audio with Perfect Negotiation, E2E-authenticated signaling (Olm-enveloped, device-pinned), private STUN server (coturn), incoming call modal, ringtone, speaking indicators, call history as system messages |
 | | Screen Sharing | Share screen in voice channels with real-time video and system audio, inline/floating viewer modes |
+| | Screen Annotations & Overlays | Draw (pen/highlighter/shapes/text) and place movable image overlays (logos, promos) over a live share — rendered vector-crisp on every viewer, synced in real time, late joiners included |
+| | Privacy Masks | Cover screen regions with black boxes composited into the video **on the sharer's machine** — covered pixels never leave it; masking fails closed (share pauses with a banner rather than exposing content) |
 | | AI Noise Suppression | ML-powered RNNoise WASM filter removes keyboard, mouse, and background noise in real time via AudioWorklet |
 | | Opus Optimization | DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate |
 | | Push-to-Talk | Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode |
@@ -648,7 +650,9 @@ still run, but in a non-blocking step — see the note at the top of
 | **DM Routes** | 18 | Conversations, messages, cascade delete, authorization |
 | **Upload Routes** | 19 | S3 redirect/proxy, Express 5 wildcards, path traversal prevention |
 | **Permission System** | 119 | Role CRUD, hierarchy enforcement, channel overrides, permission calculator, bitmask utilities |
-| **Voice Handler** | 45 | Transport ACK on all code paths, join validation, mute/deaf/speaking, server_mute/deafen/force_move + deafen-implies-mute |
+| **Voice Handler** | 118 | Transport ACK on all code paths, join validation, mute/deaf/speaking, moderation + deafen-implies-mute, screen-share slot protocol, annotation scene lifecycle/hydration, multi-node routing, secure voice |
+| **Screen Annotations** | 38 | Sharer-only authorization, op/geometry/text validation, scene & byte budgets, image-bomb rejection, restart snapshot + resync ack, shared reducer semantics |
+| **Image Header Parsing** | 4 | PNG/JPEG/WebP dimension extraction from container headers, fail-closed on malformed input |
 | **DM Voice Handler** | 81 | P2P call lifecycle, signal relay, atomic mute/deaf (Lua), call timeout, 1-on-1 capacity, decline auth, mutual exclusivity |
 | **Theme Routes** | 29 | CRUD, publish/unpublish marketplace, browse/search, install count, validation |
 | **Auth Service** | 22 | Registration, login, tokens, password reset, email normalization |
