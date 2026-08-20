@@ -66,6 +66,13 @@ const { mockPrisma } = vi.hoisted(() => {
       conversationRead: {
         createMany: vi.fn(),
       },
+      // Reached only once channel.findMany returns rows: the connect handler
+      // then runs the real filterVisibleChannelsMulti over them.
+      server: { findMany: vi.fn().mockResolvedValue([]) },
+      role: { findMany: vi.fn().mockResolvedValue([]) },
+      memberRole: { findMany: vi.fn().mockResolvedValue([]) },
+      channelPermissionOverride: { findMany: vi.fn().mockResolvedValue([]) },
+      channelMember: { findMany: vi.fn().mockResolvedValue([]) },
       $queryRawUnsafe: vi.fn().mockResolvedValue([]),
     },
   };
@@ -95,8 +102,10 @@ vi.mock('../../utils/prisma', () => ({
   prisma: mockPrisma,
 }));
 
-vi.mock('../../middleware/rateLimiter', () => ({
+vi.mock('../../middleware/rateLimiter', async (importOriginal) => ({
   socketRateLimit: vi.fn().mockReturnValue(true),
+  // normalizeIp is a pure helper with no store behind it
+  normalizeIp: (await importOriginal<typeof import('../../middleware/rateLimiter')>()).normalizeIp,
 }));
 
 vi.mock('../../websocket/voiceHandler', () => ({
@@ -471,6 +480,108 @@ describe('socketServer — DM presence broadcast on disconnect', () => {
     expect(dmCalls).toHaveLength(1);
     expect(dmCalls[0][0]).toBe('dm:conv-1');
     expect(serverCalls).toHaveLength(0);
+
+    httpServer.close();
+  });
+});
+
+// ─── Connect-time voice replay (F3) ─────────────────────────────────────────
+
+import { getVoiceStateForServers } from '../../websocket/voiceHandler';
+
+describe('socketServer — voice:channel_users replay on connect', () => {
+  const savedJwtSecret = process.env.JWT_SECRET;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-secret';
+    mockPrisma.user.findUnique.mockResolvedValue({
+      bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true,
+    });
+    mockPrisma.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-1' }]);
+    mockPrisma.channel.findMany.mockResolvedValue([
+      { id: 'sec-vc', serverId: 'srv-1', type: 'voice', secure: true },
+    ]);
+    mockPrisma.conversation.findMany.mockResolvedValue([]);
+    mockPrisma.ipBan.findUnique.mockResolvedValue(null);
+    mockPrisma.ipRecord.upsert.mockResolvedValue({});
+    mockPrisma.supportTicket.findUnique.mockResolvedValue(null);
+    mockPrisma.announcement.findMany.mockResolvedValue([]);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    if (savedJwtSecret !== undefined) process.env.JWT_SECRET = savedJwtSecret;
+    else delete process.env.JWT_SECRET;
+  });
+
+  it('forwards e2eDeviceId/e2eEpoch as deviceId/epoch, matching the voice:join replay shape', async () => {
+    // F3: this replay dropped both fields, so a client that reconnected during
+    // a secure voice call excluded every occupant from keying for the rest of
+    // the call — silent, and only reachable on reconnect.
+    const { socket, emitFn } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const connectionHandler = getConnectionHandler();
+
+    // Secure channel visibility is membership-derived — without this row the
+    // replay is (correctly) filtered out before it is ever emitted
+    mockPrisma.channelMember.findMany.mockResolvedValue([{ channelId: 'sec-vc' }]);
+    mockPrisma.user.findMany.mockResolvedValueOnce([
+      { id: 'peer-1', username: 'peer', displayName: 'Peer', avatarUrl: null },
+    ]);
+    vi.mocked(getVoiceStateForServers).mockResolvedValueOnce([{
+      channelId: 'sec-vc',
+      serverId: 'srv-1',
+      userIds: ['peer-1'],
+      userStates: new Map([['peer-1', {
+        selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false,
+        e2eDeviceId: 'device-aaaa1111', e2eEpoch: 'epochAAAA0001',
+      }]]),
+    }] as never);
+
+    await connectionHandler(socket);
+
+    const replay = emitFn.mock.calls.find((c) => c[0] === 'voice:channel_users');
+    expect(replay?.[1].users[0]).toMatchObject({
+      id: 'peer-1',
+      deviceId: 'device-aaaa1111',
+      epoch: 'epochAAAA0001',
+    });
+
+    httpServer.close();
+  });
+
+  it('omits the keys entirely for a plaintext channel, rather than sending undefined', async () => {
+    // Conditional spread, exactly like voiceHandler's replay — a present-but-
+    // undefined key would read as "announced no device" on the client
+    const { socket, emitFn } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const connectionHandler = getConnectionHandler();
+
+    mockPrisma.channel.findMany.mockResolvedValue([
+      { id: 'vc', serverId: 'srv-1', type: 'voice', secure: false },
+    ]);
+    mockPrisma.server.findMany.mockResolvedValue([{ id: 'srv-1', ownerId: 'user-1' }]);
+    mockPrisma.user.findMany.mockResolvedValueOnce([
+      { id: 'peer-1', username: 'peer', displayName: 'Peer', avatarUrl: null },
+    ]);
+    vi.mocked(getVoiceStateForServers).mockResolvedValueOnce([{
+      channelId: 'vc',
+      serverId: 'srv-1',
+      userIds: ['peer-1'],
+      userStates: new Map([['peer-1', {
+        selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false,
+      }]]),
+    }] as never);
+
+    await connectionHandler(socket);
+
+    const replay = emitFn.mock.calls.find((c) => c[0] === 'voice:channel_users');
+    expect(replay?.[1].users[0]).not.toHaveProperty('deviceId');
+    expect(replay?.[1].users[0]).not.toHaveProperty('epoch');
 
     httpServer.close();
   });

@@ -92,6 +92,8 @@ const mockVoiceRedis = vi.hoisted(() => ({
     hDel: vi.fn().mockReturnThis(),
     del: vi.fn().mockReturnThis(),
     sRem: vi.fn().mockReturnThis(),
+    get: vi.fn().mockReturnThis(),
+    hGetAll: vi.fn().mockReturnThis(),
     exec: vi.fn().mockResolvedValue([]),
   }),
   hSet: vi.fn().mockResolvedValue(1),
@@ -184,7 +186,7 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
-import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath, getVoiceDiagnostics, cleanupChannelVoice, cleanupServerVoice, evictUserFromChannelVoice } from '../../websocket/voiceHandler';
+import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath, getVoiceDiagnostics, cleanupChannelVoice, cleanupServerVoice, evictUserFromChannelVoice, getVoiceStateForServers } from '../../websocket/voiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -270,7 +272,10 @@ describe('voiceHandler — voice:join', () => {
   });
 
   it('emits error when user is not a server member', async () => {
-    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({ serverId: 's1', type: 'voice' } as any);
+    // TWO lookups: the routing wrapper's opacity check, then the handler's own
+    vi.mocked(prisma.channel.findUnique)
+      .mockResolvedValueOnce({ serverId: 's1', type: 'voice' } as any)
+      .mockResolvedValueOnce({ serverId: 's1', type: 'voice' } as any);
     vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce(null);
     const handler = handlers.get('voice:join')!;
     await handler('channel-1');
@@ -1516,6 +1521,7 @@ describe('voiceHandler — multi-node routing (HIGH-15)', () => {
 
   it('voice:join relays to a remote owner and records the remote session (no local mediasoup work)', async () => {
     mockRelay.resolveOrClaimChannelOwner.mockResolvedValue('peer-node');
+    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({ serverId: 's1', type: 'voice', secure: false } as any);
     const { socket, handlers } = createMockSocket('mn-2', 'sock-mn-2');
     handleVoiceEvents(createMockIO() as any, socket as any);
     await handlers.get('voice:join')!('ch-mn-2', { selfMute: true, selfDeaf: false });
@@ -1527,8 +1533,12 @@ describe('voiceHandler — multi-node routing (HIGH-15)', () => {
       'peer-node', 'voice:join', socket, ['ch-mn-2', { selfMute: true, selfDeaf: false }],
       expect.any(Function), // internal relay ACK — guards against a dead owner
     );
-    // No local channel/membership lookups — the OWNER validates and joins
-    expect(prisma.channel.findUnique).not.toHaveBeenCalled();
+    // The wrapper reads the channel ONCE, to decide whether opacity applies —
+    // a secure channel has to be authorized before the owner claim and the
+    // force-leave, or those side effects become the oracle themselves. For a
+    // plaintext channel it does no membership work: the OWNER validates.
+    expect(prisma.channel.findUnique).toHaveBeenCalledTimes(1);
+    expect(hasChannelPermission).not.toHaveBeenCalled();
     expect(socket.join).not.toHaveBeenCalledWith('voice:ch-mn-2');
   });
 
@@ -2113,5 +2123,115 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
 
     const joined = io._emit.mock.calls.find((c) => c[0] === 'voice:user_joined');
     expect(joined?.[1].user.epoch).toBeUndefined();
+  });
+});
+
+// ─── §19 opacity on voice:join (F14) ────────────────────────────────────────
+
+describe('voiceHandler — secure voice channel join is opaque to non-members', () => {
+  const NOT_FOUND = { message: 'Voice channel not found.' };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('answers a non-SERVER-member exactly like a nonexistent channel', async () => {
+    const { socket, handlers } = createMockSocket('probe-1', 'sock-probe-1');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({ serverId: 's1', type: 'voice', secure: true } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce(null);
+
+    await handlers.get('voice:join')!('sec-hidden');
+
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', NOT_FOUND);
+  });
+
+  it('answers a server member who is not a CHANNEL member exactly like a nonexistent channel', async () => {
+    const { socket, handlers } = createMockSocket('probe-2', 'sock-probe-2');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({ serverId: 's1', type: 'voice', secure: true } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce({ userId: 'probe-2', serverId: 's1' } as any);
+    // computeUserChannelPermissions returns 0n for a non-ChannelMember of a
+    // secure channel, ahead of the owner/ADMINISTRATOR fast paths
+    vi.mocked(hasChannelPermission).mockResolvedValueOnce(false);
+
+    await handlers.get('voice:join')!('sec-hidden');
+
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', NOT_FOUND);
+    // The oracle was the message string — nothing else distinguishes the two
+    expect(socket.emit).not.toHaveBeenCalledWith('voice:error', { message: 'You do not have permission to join this voice channel.' });
+  });
+
+  it('keeps the informative messages for NON-secure voice channels', async () => {
+    const { socket, handlers } = createMockSocket('probe-3', 'sock-probe-3');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    vi.mocked(prisma.channel.findUnique)
+      .mockResolvedValueOnce({ serverId: 's1', type: 'voice', secure: false } as any)
+      .mockResolvedValueOnce({ serverId: 's1', type: 'voice', secure: false } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce({ userId: 'probe-3', serverId: 's1' } as any);
+    vi.mocked(hasChannelPermission).mockResolvedValueOnce(false);
+
+    await handlers.get('voice:join')!('open-vc');
+
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', { message: 'You do not have permission to join this voice channel.' });
+  });
+});
+
+// ─── Connect-time replay carries the E2E routing hints (F3) ─────────────────
+
+describe('voiceHandler — getVoiceStateForServers', () => {
+  /** Drive the two pipelined exec() calls: channel→server, then the user hashes. */
+  function mockMirror(channelId: string, serverId: string, users: Record<string, string>) {
+    mockVoiceRedis.sMembers.mockResolvedValueOnce([channelId]);
+    const chain = mockVoiceRedis.multi();
+    chain.exec.mockResolvedValueOnce([serverId]).mockResolvedValueOnce([users]);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('carries e2eDeviceId/e2eEpoch through the round trip', async () => {
+    // Dropping these made every occupant trip the client's "joined without an
+    // E2E device/epoch" branch on reconnect, which deletes their buffered keys
+    // and never re-vets them (spec §21).
+    mockMirror('sec-vc', 'srv-1', {
+      'u-1': JSON.stringify({
+        selfMute: true, selfDeaf: false, nodeId: 'n1',
+        e2eDeviceId: 'device-aaaa1111', e2eEpoch: 'epochAAAA0001',
+      }),
+    });
+
+    const [state] = await getVoiceStateForServers(['srv-1']);
+
+    expect(state.userStates.get('u-1')).toMatchObject({
+      selfMute: true,
+      selfDeaf: false,
+      serverMuted: false,
+      serverDeafened: false,
+      e2eDeviceId: 'device-aaaa1111',
+      e2eEpoch: 'epochAAAA0001',
+    });
+  });
+
+  it('skips a malformed mirror entry instead of throwing', async () => {
+    // The unguarded JSON.parse here aborted the REST of connection setup for
+    // every user connecting to that server — unread counts, DM presence, the
+    // status:'online' write — on one bad hash value.
+    mockMirror('vc', 'srv-1', {
+      'u-bad': 'not json at all',
+      'u-good': JSON.stringify({ selfMute: false, selfDeaf: false }),
+    });
+
+    const [state] = await getVoiceStateForServers(['srv-1']);
+
+    expect(state.userIds).toEqual(['u-good']);
+    expect(state.userStates.has('u-bad')).toBe(false);
+  });
+
+  it('drops a channel whose entries are ALL unparseable rather than replaying an empty one', async () => {
+    mockMirror('vc', 'srv-1', { 'u-bad': '{{{' });
+
+    await expect(getVoiceStateForServers(['srv-1'])).resolves.toEqual([]);
   });
 });

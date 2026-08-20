@@ -55,6 +55,19 @@ interface UserMediaState {
 /** The E2E announcement fields mirrored/broadcast alongside voice state. */
 type E2EAnnouncement = Pick<UserMediaState, 'e2eDeviceId' | 'e2eEpoch'>;
 
+/**
+ * What `voice:channel:users:{channelId}` carries per occupant, as read back by
+ * peers. The E2E fields are part of the contract, not an extra: every replay
+ * that reconstructs an occupant list has to forward them, or a reconnecting
+ * client silently excludes everyone already in a secure call.
+ */
+export type MirroredVoiceState = {
+  selfMute: boolean;
+  selfDeaf: boolean;
+  serverMuted: boolean;
+  serverDeafened: boolean;
+} & E2EAnnouncement;
+
 function e2eMirrorFields(e2e?: E2EAnnouncement): Record<string, string> {
   return {
     ...(e2e?.e2eDeviceId && { e2eDeviceId: e2e.e2eDeviceId }),
@@ -315,19 +328,29 @@ export function createVoiceHandlers(
         ? state.epoch
         : undefined;
 
+    // §19 opacity: for a SECURE channel every non-member answer must be
+    // byte-identical to a nonexistent id. Both branches below otherwise
+    // confirm "a channel exists at this id" to anyone holding one — from a
+    // leaked link, a report, an old client cache, a reorder probe — which is
+    // precisely the oracle the rule forbids. Non-secure voice channels keep
+    // their informative messages.
+    const notFound = { message: 'Voice channel not found.' };
+
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId, serverId: channel.serverId } },
     });
     if (!membership) {
       console.log(`[Voice] User ${userId} not a member of server`);
-      socket.emit('voice:error', { message: 'You are not a member of this server.' });
+      socket.emit('voice:error', channel.secure ? notFound : { message: 'You are not a member of this server.' });
       return;
     }
 
-    // Check CONNECT permission for this voice channel
+    // Check CONNECT permission for this voice channel. For a secure channel
+    // this is membership: computeUserChannelPermissions returns 0n for a
+    // non-ChannelMember ahead of the owner/ADMINISTRATOR fast paths.
     const canConnect = await hasChannelPermission(userId, channelId, channel.serverId, Permissions.CONNECT);
     if (!canConnect) {
-      socket.emit('voice:error', { message: 'You do not have permission to join this voice channel.' });
+      socket.emit('voice:error', channel.secure ? notFound : { message: 'You do not have permission to join this voice channel.' });
       return;
     }
 
@@ -1255,6 +1278,28 @@ export function handleVoiceEvents(
     if (!socketRateLimit(socket, 'voice:join:route', 30)) return;
     if (!isString(channelId)) return;
 
+    // AUTHORIZE BEFORE ROUTING. Everything below this point is observable to
+    // the caller: claiming ownership writes `voice:channel:node:{id}`, and a
+    // remote-owned channel force-leaves whatever call the caller was already
+    // in. For a secure channel that difference IS the §19 oracle the inner
+    // handler's unified error message exists to remove — a prober's own DM
+    // call dying tells them a channel exists at that id and is live on another
+    // node — and it is a self-inflicted DoS any user can trigger with a
+    // guessed id. Only secure channels pay the extra lookup; everything else
+    // routes exactly as before and is authorized by the handler as usual.
+    const routed = await prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { serverId: true, type: true, secure: true },
+    });
+    if (routed?.secure) {
+      const allowed = routed.type === 'voice'
+        && await hasChannelPermission(userId, channelId, routed.serverId, Permissions.CONNECT);
+      if (!allowed) {
+        socket.emit('voice:error', { message: 'Voice channel not found.' });
+        return;
+      }
+    }
+
     let ownerNodeId: string;
     try {
       ownerNodeId = await resolveOrClaimChannelOwner(channelId);
@@ -1916,7 +1961,7 @@ export function getVoiceDiagnostics(): {
  * getVoiceStateForServer once per server, and each call scanned EVERY globally
  * active channel — a user in 20 servers burned thousands of Redis ops per connect.
  */
-export async function getVoiceStateForServers(serverIds: string[]): Promise<{ channelId: string; serverId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }> }[]> {
+export async function getVoiceStateForServers(serverIds: string[]): Promise<{ channelId: string; serverId: string; userIds: string[]; userStates: Map<string, MirroredVoiceState> }[]> {
   if (serverIds.length === 0) return [];
   const redis = getRedis();
   const activeChannels = await redis.sMembers('voice:active');
@@ -1942,18 +1987,41 @@ export async function getVoiceStateForServers(serverIds: string[]): Promise<{ ch
   }
   const usersResultsRaw = await usersPipeline.exec();
 
-  const result: { channelId: string; serverId: string; userIds: string[]; userStates: Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }> }[] = [];
+  const result: { channelId: string; serverId: string; userIds: string[]; userStates: Map<string, MirroredVoiceState> }[] = [];
   for (let i = 0; i < matching.length; i++) {
     const usersData = usersResultsRaw[i] as unknown as Record<string, string>;
     if (!usersData || typeof usersData !== 'object') continue;
-    const userIds = Object.keys(usersData);
-    if (userIds.length === 0) continue;
 
-    const userStates = new Map<string, { selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }>();
+    const userStates = new Map<string, MirroredVoiceState>();
     for (const [uid, json] of Object.entries(usersData)) {
-      const { selfMute, selfDeaf, serverMuted, serverDeafened } = JSON.parse(json);
-      userStates.set(uid, { selfMute, selfDeaf, serverMuted: serverMuted ?? false, serverDeafened: serverDeafened ?? false });
+      let parsed: Partial<MirroredVoiceState>;
+      try {
+        parsed = JSON.parse(json);
+      } catch (err) {
+        // One malformed or legacy hash value used to throw here, and the
+        // connection handler's outer catch then abandoned everything after
+        // this call — unread counts, the DM presence broadcast, the
+        // status:'online' write — for EVERY user connecting to that server.
+        console.warn(`[Voice] Skipping unparseable mirror entry for ${uid} in ${matching[i].channelId}:`, err instanceof Error ? err.message : err);
+        continue;
+      }
+      userStates.set(uid, {
+        selfMute: parsed.selfMute ?? false,
+        selfDeaf: parsed.selfDeaf ?? false,
+        serverMuted: parsed.serverMuted ?? false,
+        serverDeafened: parsed.serverDeafened ?? false,
+        // Secure voice keying depends on these two surviving the round trip:
+        // a replay without them makes every occupant trip the client's
+        // "joined without an E2E device/epoch" branch, which drops their
+        // buffered keys and never re-vets them (spec §21).
+        e2eDeviceId: parsed.e2eDeviceId,
+        e2eEpoch: parsed.e2eEpoch,
+      });
     }
+    // userIds must come from the states we could actually parse — a skipped
+    // entry would otherwise be replayed with no state at all.
+    const userIds = [...userStates.keys()];
+    if (userIds.length === 0) continue;
     result.push({ channelId: matching[i].channelId, serverId: matching[i].serverId, userIds, userStates });
   }
   return result;

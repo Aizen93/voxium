@@ -8,17 +8,12 @@ import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, getVoiceStateForServers, getScreenShareState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { handleAnnotationEvents } from './annotationHandler';
-import { socketRateLimit } from '../middleware/rateLimiter';
+import { socketRateLimit, normalizeIp } from '../middleware/rateLimiter';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { Permissions } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
-
-/** Strip IPv4-mapped IPv6 prefix (::ffff:1.2.3.4 → 1.2.3.4) */
-function normalizeIp(raw: string): string {
-  return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
-}
 
 /**
  * Get the real client IP. Only reads X-Forwarded-For in production
@@ -541,6 +536,13 @@ export function initSocketServer(httpServer: HttpServer) {
                 serverMuted: state?.serverMuted ?? false,
                 serverDeafened: state?.serverDeafened ?? false,
                 speaking: false,
+                // Same conditional-spread shape the voice:join replay uses —
+                // this list has to be indistinguishable from that one, because
+                // a secure-voice client feeds BOTH to onParticipantJoined and
+                // an entry missing these is excluded from keying for the rest
+                // of the call (spec §21).
+                ...(state?.e2eDeviceId && { deviceId: state.e2eDeviceId }),
+                ...(state?.e2eEpoch && { epoch: state.e2eEpoch }),
               };
             });
           socket.emit('voice:channel_users', { channelId, serverId, users: voiceUsers });
