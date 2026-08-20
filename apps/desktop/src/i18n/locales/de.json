@@ -55,6 +55,7 @@
       "passwordPlaceholder": "Mindestens 8 Zeichen",
       "createAccount": "Konto erstellen",
       "creatingAccount": "Konto wird erstellt...",
+      "verifyingBrowser": "Browser wird überprüft…",
       "hasAccount": "Bereits ein Konto?",
       "signIn": "Anmelden",
       "passwordWeak": "Schwaches Passwort",
@@ -753,6 +754,7 @@
       "maskPrivacyHint": "An der Quelle verborgen — abgedeckte Pixel verlassen dieses Gerät nie",
       "masksMayMisalign": "Der geteilte Inhalt hat sich geändert — prüfe, ob die Masken noch das Richtige abdecken",
       "maskFailed": "Die Datenschutzmaske konnte nicht angewendet werden — deine Bildschirmübertragung ist pausiert, bis du die Maske entfernst",
+      "maskRestoreFailed": "Deine Bildschirmübertragung läuft weiter über den Masken-Compositor — die Zuschauer sehen weiterhin das Richtige, es kostet nur zusätzliche CPU. Übertragung neu starten, um das zu beenden.",
       "sharePaused": "Zuschauer sehen deinen Bildschirm gerade nicht — eine Datenschutzmaske wird angewendet oder konnte nicht angewendet werden",
       "syncError": "Eine Anmerkung konnte nicht geteilt werden — deine Ansicht kann von der der Zuschauer abweichen"
     }

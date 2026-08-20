@@ -1,3 +1,4 @@
+import net from 'node:net';
 import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis, getRedisPubSub, getRedisConfigSub } from '../utils/redis';
@@ -24,8 +25,21 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // 3/min). Per-IP catches a patient single address; per-/24 catches rotation
   // inside a range. Sized so no household hits them and a shared office NAT
   // barely can (5 signups from one machine in a DAY is not organic).
+  //
+  // Charged atomically by `chargeRegistrationBudgets` and REFUNDED unless the
+  // request actually created an account — see that function for why a read-then-
+  // consume-later split loses the bound entirely. As plain consuming middleware
+  // they charged every 400: a user who hit taken-username → taken-email →
+  // expired challenge burned 3 of 5 daily points, and 20 throwaway POSTs from
+  // any address in a target org's /24 locked that whole range out for a day.
+  // The cheap attempt bucket below is what bounds garbage instead.
   registerDaily:  { keyPrefix: 'rl:regday',   points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per IP)' },
   registerSubnet: { keyPrefix: 'rl:regnet',   points: 20,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per subnet)' },
+  // Attempts — successful or not — per IP per day. This is the bucket that
+  // bounds username/email enumeration now that the two above only count
+  // successes. Deliberately cheap and generous: a fumbling real user has
+  // plenty of headroom, while a prober gets 30 probes a day per address.
+  registerAttempt:{ keyPrefix: 'rl:regatt',   points: 30,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily attempts per IP)' },
   // Challenge minting is stateless (HMAC) so it is cheap to serve, but a
   // limit keeps a hostile client from turning the endpoint into a hash-mint
   // treadmill. Generous: a legit flow needs exactly one per registration.
@@ -35,6 +49,15 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // after a successful create (authService), so garbage attempts cannot burn
   // a legitimate small-org domain's budget and lock its employees out.
   registerDomain: { keyPrefix: 'rl:regdom',   points: 10,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per email domain)' },
+  // Per-INBOX daily mail caps, keyed on the CANONICAL address. The per-IP and
+  // per-user limiters bound the burst rate; these bound how much mail one real
+  // mailbox can be made to receive in a day no matter which account, address
+  // spelling, IP or cadence asks — we must never become a drip harasser of
+  // whoever really owns an address. blockDuration MUST stay 0: a block would
+  // push the window past 24h. Consumed via `consumeMailCap`, not middleware —
+  // the key is an email, not a request property.
+  verifyMail:     { keyPrefix: 'rl:vfymail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Verification mail (daily per inbox)' },
+  resetMail:      { keyPrefix: 'rl:rstmail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Password-reset mail (daily per inbox)' },
   forgotPassword: { keyPrefix: 'rl:forgot',   points: 3,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Forgot Password' },
   resetPassword:  { keyPrefix: 'rl:reset',    points: 5,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Reset Password' },
   refresh:        { keyPrefix: 'rl:refresh',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Token Refresh' },
@@ -233,31 +256,182 @@ function createMiddleware(
   };
 }
 
-const byIp = (req: Request) => req.ip || req.socket.remoteAddress || 'unknown';
+/**
+ * ONE canonical form for an address, used by every key that must agree about
+ * "the same caller": rate-limit buckets, subnet grouping, IpBan matching, the
+ * PoW HMAC binding, and IpRecord attribution.
+ *
+ * Handles what the old inline `startsWith('::ffff:')` strip did not:
+ *  - zone ids (`fe80::1%eth0`) — a per-interface suffix that would key a
+ *    link-local address per NIC;
+ *  - the IPv4-mapped form in UPPERCASE (`::FFFF:1.2.3.4`) and in hex
+ *    (`::ffff:cb00:7107`), both of which slipped through as IPv6 and
+ *    collapsed every such client into one shared bucket;
+ *  - hex case, so `2001:DB8::1` and `2001:db8::1` are one caller.
+ */
+export function normalizeIp(rawIp: string): string {
+  // Strip a zone id ONLY when what is left is a real address — otherwise a
+  // stray '%' in garbage input would silently truncate the passthrough value.
+  const zoneless = rawIp.split('%')[0];
+  const ip = net.isIP(zoneless) ? zoneless : rawIp;
+  if (net.isIPv4(ip)) return ip;
+  const hextets = ipv6Hextets(ip);
+  if (!hextets) return ip; // not an address at all — pass through untouched
+  const mapped = mappedIPv4(hextets);
+  return mapped ?? ip.toLowerCase();
+}
+
+const byIp = (req: Request) => normalizeIp(req.ip || req.socket.remoteAddress || 'unknown');
 const byUserId = (req: Request) => req.user?.userId || req.ip || 'unknown';
+
+/**
+ * Charge the daily registration budgets, then REFUND them unless the request
+ * actually created an account.
+ *
+ * Why not simply read them here and consume after the create: a read is not a
+ * reservation. Between the check and the charge sits the whole handler —
+ * a PoW verify, an IpBan lookup, a uniqueness query and a bcrypt(12) — so a
+ * concurrent burst all reads the same pre-burst count and all passes. Measured:
+ * 200 simultaneous requests against a cap of 20 admitted all 200; issued
+ * serially the same requests admitted exactly 20. The per-/48 bucket is the
+ * only control that survives IPv6 address rotation, so losing its atomicity
+ * loses the bound entirely.
+ *
+ * Consume-then-refund keeps the atomic INCR and still gives failed attempts
+ * back their points, which is what the fix was actually for: as plain
+ * consuming middleware, a user who hit taken-username → taken-email → expired
+ * challenge burned 3 of 5 daily points, and 20 garbage POSTs from any address
+ * in a target org's /24 locked that whole range out of signup for a day.
+ * Enumeration stays bounded by `registerAttempt`, which is never refunded.
+ */
+export const chargeRegistrationBudgets = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  const charged: Array<{ name: string; key: string }> = [];
+  let rejection: RateLimiterRes | null = null;
+
+  for (const [name, key] of [['registerDaily', byIp(req)], ['registerSubnet', bySubnet(req)]] as const) {
+    if (rejection) break;
+    try {
+      await getLimiter(name).consume(key);
+      charged.push({ name, key });
+    } catch (err) {
+      if (err instanceof RateLimiterRes) {
+        rejection = err;
+        // A rejected consume still INCREMENTED — refund it too, or a refused
+        // attempt would push the bucket permanently past its cap and keep
+        // inflating the subnet's PoW difficulty for everyone behind it.
+        charged.push({ name, key });
+      // Redis error or unexpected — fail open but log for visibility
+      } else console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  if (rejection) {
+    // Everything taken, back out: the caller is not registering today, so it
+    // must cost them nothing on either bucket.
+    await Promise.all(charged.map((c) => refund(c.name, c.key)));
+    res.set('Retry-After', String(Math.ceil(rejection.msBeforeNext / 1000)));
+    res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    return;
+  }
+
+  // 'finish' fires for every terminal outcome, including errors turned into a
+  // response by the error middleware. A client that aborts mid-request emits
+  // 'close' without 'finish' and keeps the charge — erring toward charging is
+  // the safe direction for an abuse counter.
+  res.on('finish', () => {
+    const created = res.statusCode >= 200 && res.statusCode < 300;
+    if (created) return;
+    void Promise.all(charged.map((c) => refund(c.name, c.key)));
+  });
+  next();
+};
+
+async function refund(name: string, key: string): Promise<void> {
+  try {
+    await getLimiter(name).reward(key);
+  } catch (err) {
+    // An unrefunded point costs one signup from that address today — noisy for
+    // the user, never a security failure, so it is only worth logging.
+    console.warn(`[RateLimit] ${name} refund failed:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * Expand an IPv6 literal to its 8 hextets, or null if it is not one.
+ *
+ * The old implementation was `ip.split(':').slice(0, 3)`, which reads the
+ * COMPRESSED text rather than the address: `2001:db8::a` splits to
+ * ['2001','db8','','a'], so the third hextet was lost and the address keyed
+ * `2001:db8:::/48` while its /48 neighbour `2001:db8:0:1::a` keyed
+ * `2001:db8:0::/48`. Worse, with hextets 2 AND 3 both zero the key absorbed
+ * the interface id and the /48 limiter degraded to per-address — unbounded,
+ * not merely doubled.
+ */
+function ipv6Hextets(ip: string): number[] | null {
+  if (!net.isIPv6(ip)) return null;
+  let text = ip;
+  // A trailing dotted quad occupies the last two hextets (::ffff:1.2.3.4)
+  const dotted = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(text);
+  let tail: number[] = [];
+  if (dotted) {
+    const octets = dotted[1].split('.').map(Number);
+    tail = [(octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]];
+    text = text.slice(0, dotted.index);
+    if (text.endsWith(':') && !text.endsWith('::')) text = text.slice(0, -1);
+  }
+  const [head, rest, extra] = text.split('::');
+  if (extra !== undefined) return null; // more than one '::' is not an address
+  const parse = (part: string) => (part ? part.split(':').map((h) => parseInt(h, 16)) : []);
+  const left = parse(head);
+  const right = rest === undefined ? [] : parse(rest);
+  const filled = [...left, ...right, ...tail];
+  if (rest === undefined) return filled.length === 8 ? filled : null;
+  const gap = 8 - filled.length;
+  if (gap < 0) return null;
+  return [...left, ...Array(gap).fill(0), ...right, ...tail];
+}
+
+/** Dotted form when these hextets are an IPv4-mapped address, else null. */
+function mappedIPv4(h: number[]): string | null {
+  if (h[0] || h[1] || h[2] || h[3] || h[4] || h[5] !== 0xffff) return null;
+  return `${h[6] >> 8}.${h[6] & 0xff}.${h[7] >> 8}.${h[7] & 0xff}`;
+}
 
 /**
  * Collapse an address to its network for range-rotation detection: /24 for
  * IPv4 (a home or small hosting range), /48 for IPv6 (the customer-site
  * allocation — /64s are handed out per-device, so grouping by /64 would see
  * every bot as a fresh network).
+ *
+ * Unparseable input passes through unchanged rather than being decorated with
+ * a `/48` suffix — grouping strangers together is worse than not grouping.
  */
 export function subnetOf(rawIp: string): string {
-  const ip = rawIp.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
-  if (ip.includes(':')) {
-    return ip.split(':').slice(0, 3).join(':') + '::/48';
+  const ip = normalizeIp(rawIp);
+  if (net.isIPv4(ip)) {
+    const [a, b, c] = ip.split('.');
+    return `${a}.${b}.${c}.0/24`;
   }
-  const parts = ip.split('.');
-  return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}.0/24` : ip;
+  const hextets = ipv6Hextets(ip);
+  if (!hextets) return ip;
+  return `${hextets.slice(0, 3).map((h) => h.toString(16)).join(':')}::/48`;
 }
 
 const bySubnet = (req: Request) => subnetOf(req.ip || req.socket.remoteAddress || 'unknown');
 
 /**
- * How many registrations this caller's subnet has already made in the current
- * daily window — READ without consuming. Feeds the proof-of-work difficulty:
- * pressure raises the price instead of slamming the door (the NAT-friendly
- * posture). Fails soft to 0: no Redis, no extra difficulty.
+ * How many SUCCESSFUL registrations this caller's subnet has already made in
+ * the current daily window — READ without consuming. Feeds the proof-of-work
+ * difficulty: pressure raises the price instead of slamming the door (the
+ * NAT-friendly posture). Fails soft to 0: no Redis, no extra difficulty.
+ *
+ * Successes only, since failed attempts are refunded. That is the point: they
+ * used to escalate difficulty for every co-resident of the /24, so three
+ * fumbles by one neighbour quadrupled the work for everyone behind the same
+ * NAT. (A challenge minted in the brief window between a failing attempt's
+ * charge and its refund still sees it — self-correcting, and erring toward
+ * more work is the safe direction.) Enumeration is bounded by
+ * `registerAttempt` instead, which costs nobody any CPU.
  */
 export async function getSubnetRegistrationPressure(req: Request): Promise<number> {
   try {
@@ -267,6 +441,27 @@ export async function getSubnetRegistrationPressure(req: Request): Promise<numbe
     console.warn('[RateLimit] Subnet pressure read failed (assuming 0):', err instanceof Error ? err.message : err);
     return 0;
   }
+}
+
+/**
+ * Consume one point of a per-inbox mail cap. Returns false when over cap,
+ * true otherwise — including when the store is unreachable, so a broken
+ * counter can never lock users out of verification or password reset.
+ *
+ * A bucket rather than a bare Redis INCR because the `rl:` prefix is what the
+ * e2e fixture clears between specs, what `clearUserRateLimits` can release for
+ * a support case, and what the admin rate-limit API can raise during an
+ * incident. Decision made OUTSIDE the try, per the house rule.
+ */
+export async function consumeMailCap(name: 'verifyMail' | 'resetMail', inbox: string): Promise<boolean> {
+  let overCap = false;
+  try {
+    await getLimiter(name).consume(inbox);
+  } catch (err) {
+    if (err instanceof RateLimiterRes) overCap = true;
+    else console.warn(`[RateLimit] ${name} cap check failed (allowing send):`, err instanceof Error ? err.message : err);
+  }
+  return !overCap;
 }
 
 /**
@@ -305,8 +500,7 @@ export function domainRegistrationCap(): number {
 
 export const rateLimitLogin = createMiddleware('login', byIp);
 export const rateLimitRegister = createMiddleware('register', byIp);
-export const rateLimitRegisterDaily = createMiddleware('registerDaily', byIp);
-export const rateLimitRegisterSubnet = createMiddleware('registerSubnet', bySubnet);
+export const rateLimitRegisterAttempt = createMiddleware('registerAttempt', byIp);
 export const rateLimitPowChallenge = createMiddleware('powChallenge', byIp);
 export const rateLimitForgotPassword = createMiddleware('forgotPassword', byIp);
 export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);

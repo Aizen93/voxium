@@ -118,9 +118,12 @@ vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 // Mock rate limiters — pass through all requests for most tests
 vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitRegister: passthroughMiddleware,
-  rateLimitRegisterDaily: passthroughMiddleware,
-  rateLimitRegisterSubnet: passthroughMiddleware,
+  rateLimitRegisterAttempt: passthroughMiddleware,
+  chargeRegistrationBudgets: passthroughMiddleware,
   rateLimitPowChallenge: passthroughMiddleware,
+  normalizeIp: (ip: string) => (ip.startsWith('::ffff:') ? ip.slice(7) : ip),
+  subnetOf: (ip: string) => ip,
+  consumeMailCap: vi.fn().mockResolvedValue(true),
   getSubnetRegistrationPressure: vi.fn().mockResolvedValue(0),
   getDomainRegistrationCount: vi.fn().mockResolvedValue(0),
   countDomainRegistration: vi.fn().mockResolvedValue(undefined),

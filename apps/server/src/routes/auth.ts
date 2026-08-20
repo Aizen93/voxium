@@ -2,11 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterDaily, rateLimitRegisterSubnet, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
-
-// Ban matching, PoW binding and IpRecords must all see the same address form
-const normalizeIp = (ip: string) => (ip.startsWith('::ffff:') ? ip.slice(7) : ip);
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
 
@@ -30,7 +27,12 @@ authRouter.get('/register-challenge', rateLimitPowChallenge, async (req: Request
   }
 });
 
-authRouter.post('/register', rateLimitRegister, rateLimitRegisterDaily, rateLimitRegisterSubnet, async (req: Request, res: Response, next: NextFunction) => {
+// The daily/subnet buckets are charged ATOMICALLY here and refunded unless the
+// request actually creates an account — a failed attempt must not spend a real
+// user's or a whole /24's signup budget, but a read-then-charge-later split
+// would let a concurrent burst walk straight through the cap.
+// `registerAttempt` is the never-refunded bucket that bounds enumeration.
+authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, chargeRegistrationBudgets, async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (!isFeatureEnabled('registration')) {
       res.status(403).json({ success: false, error: 'Registration is currently disabled' });

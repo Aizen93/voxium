@@ -28,15 +28,24 @@ vi.mock('../../utils/redis', () => ({
   getRedis: () => ({ incr: redisIncr, expire: redisExpire, get: redisGet }),
 }));
 
-const { domainCount, domainConsume } = vi.hoisted(() => ({
+const { domainCount, domainConsume, mailCap } = vi.hoisted(() => ({
   domainCount: vi.fn().mockResolvedValue(0),
   domainConsume: vi.fn().mockResolvedValue(undefined),
+  mailCap: vi.fn().mockResolvedValue(true),
 }));
-vi.mock('../../middleware/rateLimiter', () => ({
-  getDomainRegistrationCount: domainCount,
-  countDomainRegistration: domainConsume,
-  domainRegistrationCap: () => 10,
-}));
+vi.mock('../../middleware/rateLimiter', async (importOriginal) => {
+  // normalizeIp / subnetOf are pure functions with no store behind them — the
+  // real ones are exactly what registerUser's key agreement must be tested
+  // against, so they are NOT stubbed.
+  const actual = await importOriginal<typeof import('../../middleware/rateLimiter')>();
+  return {
+    normalizeIp: actual.normalizeIp,
+    getDomainRegistrationCount: domainCount,
+    countDomainRegistration: domainConsume,
+    domainRegistrationCap: () => 10,
+    consumeMailCap: mailCap,
+  };
+});
 
 vi.mock('../../utils/sanitize', () => ({
   sanitizeText: vi.fn((str: unknown) => typeof str === 'string' ? str.replace(/<[^>]*>/g, '').trim() : ''),
@@ -230,30 +239,80 @@ describe('authService — verification email hygiene', () => {
     expect(update.data.emailVerifiedAt).toBeInstanceOf(Date);
   });
 
-  it('caps verification emails PER CANONICAL INBOX at 5/day — a bot-owned account cannot drip-harass the real mailbox owner', async () => {
+  it('caps verification emails PER CANONICAL INBOX — a bot-owned account cannot drip-harass the real mailbox owner', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue({
       id: 'user-1', email: 'j.doe@gmail.com', emailVerified: false,
     } as any);
     vi.mocked(prisma.user.update).mockResolvedValue({} as any);
 
-    redisIncr.mockResolvedValueOnce(6);
+    mailCap.mockResolvedValueOnce(false);
     await expect(resendVerificationEmail('user-1'))
       .rejects.toThrow('Too many verification emails requested');
-    expect(redisIncr).toHaveBeenCalledWith('verifymail:jdoe@gmail.com'); // canonical key
+    // Keyed on the CANONICAL inbox (gmail dots stripped), in the 'rl:' bucket
+    // the e2e fixture and the admin rate-limit API can both reach.
+    expect(mailCap).toHaveBeenCalledWith('verifyMail', 'jdoe@gmail.com');
 
-    redisIncr.mockResolvedValueOnce(1);
+    mailCap.mockResolvedValueOnce(true);
     await expect(resendVerificationEmail('user-1')).resolves.toBeUndefined();
-    expect(redisExpire).toHaveBeenCalledWith('verifymail:jdoe@gmail.com', 24 * 60 * 60);
   });
 
-  it('the cap FAILS OPEN on Redis errors — a broken counter must not lock users out of verifying', async () => {
+  it('the cap FAILS OPEN on store errors — a broken counter must not lock users out of verifying', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
       id: 'user-1', email: 'someone@example.com', emailVerified: false,
     } as any);
     vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
-    redisIncr.mockRejectedValueOnce(new Error('redis down'));
+    // consumeMailCap swallows store failures and answers "allowed" — the
+    // fail-open contract now lives in the helper, asserted in its own suite.
+    mailCap.mockResolvedValueOnce(true);
 
     await expect(resendVerificationEmail('user-1')).resolves.toBeUndefined();
+  });
+});
+
+describe('authService — registerUser conflict handling', () => {
+  const mockCreated = () => vi.mocked(prisma.user.create).mockResolvedValueOnce({
+    id: 'user-1', username: 'testuser', displayName: 'testuser',
+    email: 'x@gmail.com', avatarUrl: null, bio: null, status: 'offline',
+    role: 'user', totpEnabled: false, emailVerified: false,
+    isSupporter: false, supporterTier: null, tokenVersion: 0, createdAt: new Date(),
+  } as any);
+
+  it('normalizes an IPv4-mapped address for ban matching and attribution', async () => {
+    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
+    mockCreated();
+    vi.mocked(prisma.ipRecord.create).mockResolvedValueOnce({} as any);
+
+    await registerUser('testuser', 'x@gmail.com', 'ValidPass123', undefined, '::ffff:203.0.113.5');
+
+    expect(prisma.ipBan.findUnique).toHaveBeenCalledWith({ where: { ip: '203.0.113.5' } });
+    const record = vi.mocked(prisma.ipRecord.create).mock.calls[0][0] as any;
+    expect(record.data.ip).toBe('203.0.113.5');
+  });
+
+  it('surfaces a unique-constraint race as the SAME generic conflict, never a 500', async () => {
+    // F11: the findFirst pre-check is friendly, not enforcement — two
+    // concurrent signups both see it empty. The DB index is what holds, and
+    // its P2002 must not escape as a raw Prisma error (a 500 plus the
+    // constraint name in the logs, and a response distinguishable from an
+    // ordinary duplicate).
+    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
+    const p2002 = Object.assign(new Error('Unique constraint failed'), {
+      code: 'P2002',
+      meta: { target: ['users_username_lower_key'] },
+    });
+    vi.mocked(prisma.user.create).mockRejectedValueOnce(p2002);
+
+    await expect(registerUser('Alice', 'alice@gmail.com', 'ValidPass123'))
+      .rejects.toThrow('Username or email already in use');
+    expect(domainConsume).not.toHaveBeenCalled();
+  });
+
+  it('does not swallow non-constraint database errors', async () => {
+    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
+    vi.mocked(prisma.user.create).mockRejectedValueOnce(new Error('connection reset'));
+
+    await expect(registerUser('testuser', 'x@gmail.com', 'ValidPass123'))
+      .rejects.toThrow('connection reset');
   });
 });
 
@@ -306,27 +365,28 @@ describe('authService — novel-domain registration cap', () => {
 });
 
 describe('authService — password-reset mail cap', () => {
-  it('SILENTLY stops sending after 5 resets to one canonical inbox in a day (no enumeration signal)', async () => {
+  it('SILENTLY stops sending once the inbox is capped (no enumeration signal)', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-1', email: 'j.doe@gmail.com' } as any);
     vi.mocked(prisma.user.update).mockResolvedValue({} as any);
 
-    redisIncr.mockResolvedValueOnce(6);
+    mailCap.mockResolvedValueOnce(false);
     // Same resolved outcome as success — the response must not change
     await expect(requestPasswordReset('j.doe@gmail.com')).resolves.toBeUndefined();
-    expect(redisIncr).toHaveBeenCalledWith('resetmail:jdoe@gmail.com'); // canonical key
+    expect(mailCap).toHaveBeenCalledWith('resetMail', 'jdoe@gmail.com'); // canonical key
     // ...but no token was stored and no mail went out
     expect(prisma.user.update).not.toHaveBeenCalled();
   });
 
-  it('sends normally under the cap and fails open on Redis errors', async () => {
+  it('sends normally under the cap and when the store is unreachable (fail open)', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-1', email: 'someone@example.com' } as any);
     vi.mocked(prisma.user.update).mockResolvedValue({} as any);
 
-    redisIncr.mockResolvedValueOnce(1);
+    mailCap.mockResolvedValueOnce(true);
     await requestPasswordReset('someone@example.com');
     expect(prisma.user.update).toHaveBeenCalledTimes(1);
 
-    redisIncr.mockRejectedValueOnce(new Error('redis down'));
+    // consumeMailCap answers "allowed" on a store failure — see its own suite
+    mailCap.mockResolvedValueOnce(true);
     await requestPasswordReset('someone@example.com');
     expect(prisma.user.update).toHaveBeenCalledTimes(2);
   });

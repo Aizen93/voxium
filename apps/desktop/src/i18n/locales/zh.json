@@ -55,6 +55,7 @@
       "passwordPlaceholder": "至少 8 个字符",
       "createAccount": "创建账号",
       "creatingAccount": "正在创建账号...",
+      "verifyingBrowser": "正在验证您的浏览器…",
       "hasAccount": "已有账号？",
       "signIn": "登录",
       "passwordWeak": "密码强度弱",
@@ -753,6 +754,7 @@
       "maskPrivacyHint": "在源头隐藏 — 被遮盖的像素绝不会离开此设备",
       "masksMayMisalign": "共享内容已变化 — 请确认遮罩仍覆盖预期区域",
       "maskFailed": "隐私遮罩无法应用 — 在你移除遮罩之前，屏幕共享将保持暂停",
+      "maskRestoreFailed": "你的屏幕仍在通过遮罩合成器发送 — 观众看到的画面是正确的，只是会多占用一些 CPU。重新开始共享即可恢复。",
       "sharePaused": "观看者目前看不到你的屏幕 — 正在应用隐私遮罩或应用失败",
       "syncError": "有一条标注未能共享 — 你看到的内容可能与观看者不同"
     }

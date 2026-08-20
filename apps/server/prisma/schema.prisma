@@ -11,6 +11,14 @@ datasource db {
 
 model User {
   id          String   @id @default(cuid())
+  // ALSO covered by a FUNCTIONAL unique index on lower(username), added in
+  // migration 20260820210000_username_case_insensitive_unique. Prisma cannot
+  // express expression indexes, so `users_username_lower_key` is invisible
+  // here and `prisma migrate dev` will read it as drift and offer to DROP it.
+  // Do not let it: that index is what actually enforces the case-insensitive
+  // rule registerUser only pre-checks (two concurrent 'Alice'/'alice' signups
+  // both pass the check, and every insensitive lookup afterwards — friend
+  // requests, member search — becomes nondeterministic between them).
   username    String   @unique
   email       String   @unique
   displayName String   @map("display_name")

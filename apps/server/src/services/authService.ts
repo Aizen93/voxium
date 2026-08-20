@@ -9,8 +9,7 @@ import { BadRequestError, ConflictError, ForbiddenError, TooManyRequestsError, U
 import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain, emailDomain, isCommonEmailProvider } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } from '../utils/email';
 import { sanitizeText } from '../utils/sanitize';
-import { getRedis } from '../utils/redis';
-import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap } from '../middleware/rateLimiter';
+import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, consumeMailCap, normalizeIp } from '../middleware/rateLimiter';
 
 // Timing-equalization hash for login attempts against unknown emails (same
 // convention as requestPasswordReset): skipping bcrypt when the user doesn't
@@ -36,8 +35,10 @@ async function getTimingEqualizerHash(): Promise<string> {
 export async function registerUser(username: string, email: string, password: string, displayName?: string, rawIp?: string) {
   email = email.toLowerCase().trim();
 
-  // Same normalization login uses — ban matching and attribution must agree
-  const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+  // Same normalization the limiters use — ban matching, attribution and the
+  // daily/subnet budgets all have to agree on one spelling of the address, or
+  // the gate reads a key the consume never writes and silently stops applying.
+  const ip = rawIp ? normalizeIp(rawIp) : undefined;
 
   const usernameErr = validateUsername(username);
   if (usernameErr) throw new BadRequestError(usernameErr);
@@ -104,35 +105,51 @@ export async function registerUser(username: string, email: string, password: st
   const rawVerifyToken = crypto.randomBytes(32).toString('hex');
   const hashedVerifyToken = crypto.createHash('sha256').update(rawVerifyToken).digest('hex');
 
-  const user = await prisma.user.create({
-    data: {
-      username,
-      email,
-      emailCanonical,
-      displayName: sanitizeText(displayName) || username,
-      password: hashedPassword,
-      emailVerificationToken: hashedVerifyToken,
-      emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
-    },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      email: true,
-      avatarUrl: true,
-      bio: true,
-      status: true,
-      role: true,
-      totpEnabled: true,
-      emailVerified: true,
-      isSupporter: true, supporterTier: true,
-      tokenVersion: true,
-      createdAt: true,
-    },
-  });
+  // The findFirst above is a FRIENDLY pre-check, not the enforcement — two
+  // concurrent signups both see it empty. The DB's unique indexes are what
+  // actually hold (username case-insensitively, email, emailCanonical), and
+  // their P2002 has to surface as the SAME generic conflict the pre-check
+  // raises: letting it escape turned an ordinary duplicate into a 500 and
+  // wrote the violated constraint's name into the logs.
+  let user;
+  try {
+    user = await prisma.user.create({
+      data: {
+        username,
+        email,
+        emailCanonical,
+        displayName: sanitizeText(displayName) || username,
+        password: hashedPassword,
+        emailVerificationToken: hashedVerifyToken,
+        emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+      },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        email: true,
+        avatarUrl: true,
+        bio: true,
+        status: true,
+        role: true,
+        totpEnabled: true,
+        emailVerified: true,
+        isSupporter: true, supporterTier: true,
+        tokenVersion: true,
+        createdAt: true,
+      },
+    });
+  } catch (err) {
+    if ((err as { code?: string })?.code === 'P2002') {
+      throw new ConflictError('Username or email already in use');
+    }
+    throw err;
+  }
 
   // Count the successful create against the domain budget (see the check
-  // above for why this is post-create, not a blind pre-consume)
+  // above for why this is post-create, not a blind pre-consume). The per-IP
+  // and per-subnet budgets are charged atomically in the route middleware and
+  // refunded on any non-2xx — see `chargeRegistrationBudgets`.
   if (domainCapped) await countDomainRegistration(domain);
 
   // The REGISTRATION IP is the forensic anchor for abuse attribution — the
@@ -370,16 +387,12 @@ export async function requestPasswordReset(email: string) {
   // On cap: SILENT skip, never an error — this endpoint's response must stay
   // identical for existing and unknown emails (enumeration safety), so the
   // only honest option is to stop sending while answering the same way.
-  try {
-    const inboxKey = `resetmail:${canonicalizeEmail(user.email)}`;
-    const sends = await getRedis().incr(inboxKey);
-    if (sends === 1) await getRedis().expire(inboxKey, 24 * 60 * 60);
-    if (sends > 5) {
-      console.warn('[Auth] Password-reset mail cap reached for an inbox — skipping send');
-      return;
-    }
-  } catch (err) {
-    console.warn('[Auth] Reset-mail cap check failed (allowing send):', err);
+  // The decision is made OUTSIDE consumeMailCap's fail-open try (it returns a
+  // boolean rather than throwing) — a `return` inside one has been benign so
+  // far only because it cannot throw.
+  if (!(await consumeMailCap('resetMail', canonicalizeEmail(user.email)))) {
+    console.warn('[Auth] Password-reset mail cap reached for an inbox — skipping send');
+    return;
   }
 
   await prisma.user.update({
@@ -501,17 +514,11 @@ export async function resendVerificationEmail(userId: string) {
   // limiter (3/5min) bounds the burst rate, but a bot that owns the account
   // can keep bursting forever — turning us into a drip harasser of whoever
   // really owns the address. 5 mails to one mailbox per day is the ceiling
-  // no matter which account, IP, or cadence asks. Fail open on Redis errors:
+  // no matter which account, IP, or cadence asks. Fail open on store errors:
   // a broken counter must not lock legitimate users out of verification.
-  let sends = 0;
-  try {
-    const inboxKey = `verifymail:${canonicalizeEmail(user.email)}`;
-    sends = await getRedis().incr(inboxKey);
-    if (sends === 1) await getRedis().expire(inboxKey, 24 * 60 * 60);
-  } catch (err) {
-    console.warn('[Auth] Verification-mail cap check failed (allowing send):', err);
+  if (!(await consumeMailCap('verifyMail', canonicalizeEmail(user.email)))) {
+    throw new BadRequestError('Too many verification emails requested — try again tomorrow');
   }
-  if (sends > 5) throw new BadRequestError('Too many verification emails requested — try again tomorrow');
 
   const rawToken = crypto.randomBytes(32).toString('hex');
   const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');

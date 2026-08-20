@@ -23,7 +23,7 @@ function getPasswordStrength(pw: string): { level: 'weak' | 'medium' | 'strong';
 
 export function RegisterPage() {
   const { t } = useTranslation();
-  const { register, error, clearError, isSubmitting } = useAuthStore();
+  const { register, error, clearError, isSubmitting, powProgress } = useAuthStore();
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -190,6 +190,23 @@ export function RegisterPage() {
               >
                 {isSubmitting ? t('auth.register.creatingAccount') : t('auth.register.createAccount')}
               </button>
+
+              {/* Anti-bot proof-of-work. Only shown once it is slow enough to
+                  need explaining — a sub-second solve on an unloaded subnet
+                  would just flash a bar at the user for no reason. */}
+              {powProgress !== null && powProgress > 0 && (
+                <div className="mt-3" aria-live="polite">
+                  <div className="h-1 w-full overflow-hidden rounded-full bg-vox-bg-tertiary">
+                    <div
+                      className="h-full rounded-full bg-vox-accent-primary transition-[width] duration-300"
+                      style={{ width: `${Math.round(powProgress * 100)}%` }}
+                    />
+                  </div>
+                  <p className="mt-1.5 text-center text-xs text-vox-text-secondary">
+                    {t('auth.register.verifyingBrowser')}
+                  </p>
+                </div>
+              )}
             </div>
           </form>
 

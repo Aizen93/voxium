@@ -55,6 +55,7 @@
       "passwordPlaceholder": "8자 이상",
       "createAccount": "계정 만들기",
       "creatingAccount": "계정 생성 중...",
+      "verifyingBrowser": "브라우저를 확인하는 중…",
       "hasAccount": "이미 계정이 있으신가요?",
       "signIn": "로그인",
       "passwordWeak": "취약한 비밀번호",
@@ -753,6 +754,7 @@
       "maskPrivacyHint": "원본에서 숨김 — 가려진 픽셀은 이 기기를 절대 벗어나지 않습니다",
       "masksMayMisalign": "공유 중인 내용이 변경되었습니다 — 마스크가 의도한 영역을 여전히 가리는지 확인하세요",
       "maskFailed": "프라이버시 마스크를 적용할 수 없습니다 — 마스크를 제거할 때까지 화면 공유가 일시 중지됩니다",
+      "maskRestoreFailed": "화면 공유가 여전히 마스크 합성기를 거치고 있습니다 — 시청자에게는 올바른 화면이 보이지만 CPU를 더 사용합니다. 공유를 다시 시작하면 해결됩니다.",
       "sharePaused": "지금 시청자는 화면을 볼 수 없습니다 — 프라이버시 마스크를 적용 중이거나 적용에 실패했습니다",
       "syncError": "주석을 공유하지 못했습니다 — 내 화면이 시청자가 보는 것과 다를 수 있습니다"
     }

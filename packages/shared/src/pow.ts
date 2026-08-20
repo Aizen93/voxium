@@ -38,12 +38,56 @@ export interface PowSolution extends PowChallenge {
 
 /** Sanity ceiling — a signed difficulty above this is rejected outright
  *  (a tampered/foreign signature would already fail the HMAC, this is
- *  defense-in-depth against ever asking a browser for an unsolvable puzzle). */
-export const POW_MAX_DIFFICULTY = 24;
+ *  defense-in-depth against ever asking a browser for an unsolvable puzzle).
+ *
+ *  WHY 20 AND NOT HIGHER. Solve time is geometric in the number of tries, so
+ *  the MEAN is not the number that matters — the tail is. Measured WebCrypto
+ *  throughput is ~60k digests/s on a fast desktop and roughly a tenth of that
+ *  on a low-end phone. At 24 bits (16.8M expected digests) a third of solves
+ *  blew the old 5-minute window on Node speed alone and most did on a phone:
+ *  the ceiling was a registration outage for anyone sharing a busy /24. At 20
+ *  bits (1.05M expected) the phone case averages ~105s against the 15-minute
+ *  window below, i.e. a tail failure rate around 0.02%.
+ *
+ *  If you ever raise this, raise POW_CHALLENGE_TTL_MS with it — the guard test
+ *  in registrationPow.test.ts pins the relationship. */
+export const POW_MAX_DIFFICULTY = 20;
 
-/** Challenge lifetime. Long enough for a slow device to solve and the user
- *  to finish typing; short enough that hoarding cheap challenges is useless. */
-export const POW_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+/** Challenge lifetime. Sized so the SLOWEST plausible device still solves the
+ *  HARDEST issuable challenge inside it with room to spare (see the ceiling
+ *  note above), then finishes typing. A longer window costs nothing
+ *  security-wise: the challenge is random, single-use, HMAC-bound to the
+ *  caller's IP and burned in Redis on redemption, so hoarding cheap challenges
+ *  buys an attacker no work reduction — every registration still pays. */
+export const POW_CHALLENGE_TTL_MS = 15 * 60 * 1000;
+
+/** Expected number of digests to clear `difficulty` leading zero bits. The
+ *  distribution is geometric, so this is a mean, not a bound — a solve can
+ *  legitimately take several times this. Used for progress reporting. */
+export function powExpectedAttempts(difficulty: number): number {
+  return 2 ** difficulty;
+}
+
+export interface PowSolveOptions {
+  /** Called every `batchSize` attempts with the running attempt count. */
+  onProgress?: (attempts: number, expected: number) => void;
+  /** Attempts between progress callbacks. Ignored without `onProgress`. */
+  batchSize?: number;
+}
+
+/** Thrown when the challenge's own deadline passes mid-solve — the solution
+ *  would be rejected by `verifyRegistrationPow` anyway, so grinding on is pure
+ *  waste. Callers should fetch a fresh challenge and retry. */
+export class PowExpiredError extends Error {
+  constructor() {
+    super('Registration challenge expired before it was solved');
+    this.name = 'PowExpiredError';
+  }
+}
+
+/** Attempts between deadline checks. Coarse on purpose: one Date.now() per
+ *  nonce would cost more than the hash on a fast machine. */
+const DEADLINE_CHECK_EVERY = 4096;
 
 /** Count leading zero bits of a hash. */
 export function leadingZeroBits(bytes: Uint8Array): number {
@@ -61,15 +105,43 @@ export function leadingZeroBits(bytes: Uint8Array): number {
  * Solve a registration challenge. Difficulty 16 ≈ 65k hashes (a second or two
  * of WebCrypto); dev/test environments issue tiny difficulties so suites pay
  * microseconds, through the exact same code path as production.
+ *
+ * Stays a plain async function on purpose — the desktop app runs it inside a
+ * Web Worker (see apps/desktop/src/services/powSolver.ts) while the Playwright
+ * helpers and the load scripts call it directly under Node. A worker-only
+ * rewrite would break those and the environment-agnostic contract at the top
+ * of this file.
  */
-export async function solveRegistrationPow(challenge: PowChallenge): Promise<PowSolution> {
+export async function solveRegistrationPow(
+  challenge: PowChallenge,
+  options?: PowSolveOptions,
+): Promise<PowSolution> {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) throw new Error('WebCrypto unavailable — cannot solve registration challenge');
   const encoder = new TextEncoder();
+  const expected = powExpectedAttempts(challenge.difficulty);
+  const batchSize = Math.max(1, options?.batchSize ?? 2048);
+  // The deadline is measured as ELAPSED LOCAL TIME, not against the server's
+  // absolute `expires`. Comparing a client wall clock to a server timestamp
+  // makes a device whose clock runs fast unable to register AT ALL: it bails
+  // before nonce 0, refetches, bails again — while the server, judging by its
+  // own clock, would have accepted the solve. Skewed clocks are not rare in
+  // aggregate (dead CMOS battery, resumed VM, hand-set phone).
+  const startedAt = Date.now();
+  const remaining = challenge.expires - startedAt;
+  const budgetMs = remaining > 0 && remaining <= POW_CHALLENGE_TTL_MS ? remaining : POW_CHALLENGE_TTL_MS;
   for (let nonce = 0; ; nonce++) {
     const digest = new Uint8Array(await subtle.digest('SHA-256', encoder.encode(`${challenge.challenge}.${nonce}`)));
     if (leadingZeroBits(digest) >= challenge.difficulty) {
       return { ...challenge, nonce: String(nonce) };
+    }
+    // Bail once the window has elapsed instead of grinding for minutes on a
+    // solution the server will reject — the caller can refetch and restart.
+    if (nonce > 0 && nonce % DEADLINE_CHECK_EVERY === 0 && Date.now() - startedAt >= budgetMs) {
+      throw new PowExpiredError();
+    }
+    if (options?.onProgress && nonce > 0 && nonce % batchSize === 0) {
+      options.onProgress(nonce, expected);
     }
   }
 }

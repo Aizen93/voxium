@@ -56,6 +56,7 @@
       "passwordPlaceholder": "At least 8 characters",
       "createAccount": "Create Account",
       "creatingAccount": "Creating account...",
+      "verifyingBrowser": "Verifying your browser…",
       "hasAccount": "Already have an account?",
       "signIn": "Sign in",
       "passwordWeak": "Weak password",
@@ -759,6 +760,7 @@
       "maskPrivacyHint": "Hidden at the source — covered pixels never leave this device",
       "masksMayMisalign": "Shared content changed — check that masks still cover what you intended",
       "maskFailed": "Privacy mask could not be applied — your shared screen is paused until you remove the mask",
+      "maskRestoreFailed": "Your screen is still going out through the mask compositor — viewers see the right picture, it just costs extra CPU. Restart the share to clear it.",
       "sharePaused": "Viewers cannot see your screen right now — a privacy mask is being applied or failed to apply",
       "syncError": "An annotation could not be shared — your view may differ from what viewers see"
     }

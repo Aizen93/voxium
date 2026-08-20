@@ -55,6 +55,7 @@
       "passwordPlaceholder": "Au moins 8 caractères",
       "createAccount": "Créer un compte",
       "creatingAccount": "Création du compte…",
+      "verifyingBrowser": "Vérification de votre navigateur…",
       "hasAccount": "Vous avez déjà un compte ?",
       "signIn": "Se connecter",
       "passwordWeak": "Mot de passe faible",
@@ -753,6 +754,7 @@
       "maskPrivacyHint": "Masqué à la source — les pixels couverts ne quittent jamais cet appareil",
       "masksMayMisalign": "Le contenu partagé a changé — vérifiez que les masques couvrent toujours la bonne zone",
       "maskFailed": "Le masque de confidentialité n'a pas pu être appliqué — votre partage d'écran est en pause jusqu'à ce que vous retiriez le masque",
+      "maskRestoreFailed": "Votre écran continue de passer par le compositeur de masques — les spectateurs voient la bonne image, cela consomme juste du processeur en plus. Relancez le partage pour y remédier.",
       "sharePaused": "Les spectateurs ne voient pas votre écran pour le moment — un masque de confidentialité est en cours d'application ou a échoué",
       "syncError": "Une annotation n'a pas pu être partagée — votre affichage peut différer de celui des spectateurs"
     }

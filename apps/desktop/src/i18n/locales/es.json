@@ -55,6 +55,7 @@
       "passwordPlaceholder": "Al menos 8 caracteres",
       "createAccount": "Crear cuenta",
       "creatingAccount": "Creando cuenta...",
+      "verifyingBrowser": "Verificando tu navegador…",
       "hasAccount": "¿Ya tienes una cuenta?",
       "signIn": "Iniciar sesión",
       "passwordWeak": "Contraseña débil",
@@ -753,6 +754,7 @@
       "maskPrivacyHint": "Oculto en el origen — los píxeles cubiertos nunca salen de este dispositivo",
       "masksMayMisalign": "El contenido compartido cambió — comprueba que las máscaras siguen cubriendo lo previsto",
       "maskFailed": "No se pudo aplicar la máscara de privacidad — tu pantalla compartida está en pausa hasta que quites la máscara",
+      "maskRestoreFailed": "Tu pantalla sigue transmitiéndose a través del compositor de máscaras — los espectadores ven la imagen correcta, solo consume CPU adicional. Reinicia la transmisión para solucionarlo.",
       "sharePaused": "Los espectadores no pueden ver tu pantalla ahora mismo — se está aplicando una máscara de privacidad o su aplicación falló",
       "syncError": "No se pudo compartir una anotación — tu vista puede diferir de la de los espectadores"
     }
