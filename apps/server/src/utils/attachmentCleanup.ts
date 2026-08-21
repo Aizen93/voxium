@@ -2,6 +2,7 @@ import { prisma } from './prisma';
 import { deleteMultipleFromS3 } from './s3';
 import { sendCleanupReport, describeEmailError } from './email';
 import { LIMITS } from '@voxium/shared';
+import { msUntilDailySlot } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
@@ -9,20 +10,10 @@ let stopped = true;
 const CLEANUP_HOUR = 4; // 4 AM
 const BATCH_SIZE = 100;
 
-function msUntilNext4AM(): number {
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(CLEANUP_HOUR, 0, 0, 0);
-  if (next.getTime() <= now.getTime()) {
-    next.setDate(next.getDate() + 1);
-  }
-  return next.getTime() - now.getTime();
-}
-
 export function startAttachmentCleanup() {
   if (!stopped) return;
   stopped = false;
-  scheduleNext();
+  scheduleNext(false);
 }
 
 export function stopAttachmentCleanup() {
@@ -33,9 +24,9 @@ export function stopAttachmentCleanup() {
   }
 }
 
-function scheduleNext() {
+function scheduleNext(afterRun: boolean) {
   if (stopped) return;
-  const delay = msUntilNext4AM();
+  const delay = msUntilDailySlot(CLEANUP_HOUR, 0, afterRun);
   console.log(`[Cleanup] Next run scheduled in ${Math.round(delay / 60000)} minutes`);
   timeoutId = setTimeout(runCleanup, delay);
 }
@@ -104,5 +95,5 @@ async function runCleanup() {
     }
   }
 
-  scheduleNext();
+  scheduleNext(true);
 }

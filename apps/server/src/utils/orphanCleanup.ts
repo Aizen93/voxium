@@ -24,6 +24,7 @@
 import { prisma } from './prisma';
 import { listAllS3Objects, deleteMultipleFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from './s3';
 import { getRedis, NODE_ID } from './redis';
+import { msUntilDailySlot } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
@@ -52,18 +53,10 @@ export interface OrphanSweepResult {
 
 const EMPTY: OrphanSweepResult = { scanned: 0, orphaned: 0, deleted: 0, tooYoung: 0, foreign: 0 };
 
-function msUntilNextSweep(): number {
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(SWEEP_HOUR, SWEEP_MINUTE, 0, 0);
-  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
-  return next.getTime() - now.getTime();
-}
-
 export function startOrphanCleanup() {
   if (!stopped) return;
   stopped = false;
-  scheduleNext();
+  scheduleNext(false);
 }
 
 export function stopOrphanCleanup() {
@@ -74,14 +67,14 @@ export function stopOrphanCleanup() {
   }
 }
 
-function scheduleNext() {
+function scheduleNext(afterRun: boolean) {
   if (stopped) return;
-  const delay = msUntilNextSweep();
+  const delay = msUntilDailySlot(SWEEP_HOUR, SWEEP_MINUTE, afterRun);
   console.log(`[OrphanSweep] Next sweep in ${Math.round(delay / 60000)} minutes`);
   timeoutId = setTimeout(() => {
     runScheduledOrphanCleanup()
       .catch((err) => console.error('[OrphanSweep] Sweep failed:', err))
-      .finally(scheduleNext);
+      .finally(() => scheduleNext(true));
   }, delay);
   timeoutId.unref?.();
 }

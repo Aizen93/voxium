@@ -17,6 +17,7 @@ import { getRedis, NODE_ID } from './redis';
 import { deleteMultipleFromS3 } from './s3';
 import { sendAdminAlert, describeEmailError } from './email';
 import { logAuditEvent } from './auditLog';
+import { msUntilDailySlot } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let spikeIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -64,20 +65,10 @@ const SPIKE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 /** One alert per 6h — a sustained wave should not mailbomb the operator. */
 const SPIKE_ALERT_DEDUPE_SECONDS = 6 * 60 * 60;
 
-function msUntilNextSweep(): number {
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(SWEEP_HOUR, SWEEP_MINUTE, 0, 0);
-  if (next.getTime() <= now.getTime()) {
-    next.setDate(next.getDate() + 1);
-  }
-  return next.getTime() - now.getTime();
-}
-
 export function startRegistrationHygiene() {
   if (!stopped) return;
   stopped = false;
-  scheduleNext();
+  scheduleNext(false);
   spikeIntervalId = setInterval(() => {
     checkRegistrationSpike().catch((err) => console.warn('[RegHygiene] Spike check failed:', err));
   }, SPIKE_CHECK_INTERVAL_MS);
@@ -95,14 +86,14 @@ export function stopRegistrationHygiene() {
   }
 }
 
-function scheduleNext() {
+function scheduleNext(afterRun: boolean) {
   if (stopped) return;
-  const delay = msUntilNextSweep();
+  const delay = msUntilDailySlot(SWEEP_HOUR, SWEEP_MINUTE, afterRun);
   console.log(`[RegHygiene] Next sweep in ${Math.round(delay / 60000)} minutes`);
   timeoutId = setTimeout(() => {
     runRegistrationHygieneLocked({ trigger: 'scheduled' })
       .catch((err) => console.error('[RegHygiene] Sweep failed:', err))
-      .finally(scheduleNext);
+      .finally(() => scheduleNext(true));
   }, delay);
 }
 
