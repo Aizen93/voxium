@@ -107,6 +107,33 @@ function writtenState(call = 0): string | undefined {
   return args?.arguments[1];
 }
 
+/** The rev the CAS was told to EXPECT — i.e. what it believes is in Redis. */
+function casExpectedRev(call = 0): string | undefined {
+  const args = mockRedis.eval.mock.calls[call]?.[1] as { arguments: string[] } | undefined;
+  return args?.arguments[0];
+}
+
+/**
+ * Drive `mockRedis.eval` with the REAL script's semantics against a seeded
+ * value: write only if the caller's expected rev matches the rev actually
+ * stored AND the sharer slot still belongs to them.
+ *
+ * The blanket `mockResolvedValue(1)` in `beforeEach` is fine for tests about
+ * what gets written, but it makes any assertion about the DISCARD paths
+ * vacuous: the handler used to expect rev 0 against a stored rev of 7, which
+ * loses every attempt in production while the stub cheerfully said yes.
+ */
+function evalLikeTheRealScript(storedRaw: string | null, sharer: string | null) {
+  mockRedis.eval.mockImplementation((_script: unknown, opts: unknown) => {
+    const { arguments: args } = opts as { arguments: string[] };
+    const [expectedRev, , sharerArg] = args;
+    if (sharer !== sharerArg) return Promise.resolve(0);
+    const m = storedRaw ? /^\{"rev":(\d+)/.exec(storedRaw) : null;
+    const currentRev = m ? Number(m[1]) : 0;
+    return Promise.resolve(currentRev === Number(expectedRev) ? 1 : 0);
+  });
+}
+
 // ─── Authorization ──────────────────────────────────────────────────────────
 
 describe('annotationHandler — authorization', () => {
@@ -543,15 +570,61 @@ describe('annotationHandler — concurrent scene writes', () => {
     const { opsHandler } = setup();
     const theirs = stroke('previous-sharers-drawing');
     const mine = stroke('mine');
-    seedRedis(SHARER, { rev: 7, sharerUserId: 'someone-else', scene: { objects: [theirs] } });
+    const stored = JSON.stringify({ rev: 7, sharerUserId: 'someone-else', scene: { objects: [theirs] } });
+    mockRedis.mGet.mockResolvedValue([SHARER, stored]);
+    // Real CAS semantics: expecting the wrong rev here loses, as it would live.
+    evalLikeTheRealScript(stored, SHARER);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const ack = await send(opsHandler, [{ t: 'add', obj: mine }]);
 
+    // The EXPECTATION describes what is in Redis (7), not the empty scene we
+    // chose to build on. Passing 0 here loses all three attempts and wedges
+    // annotations for the rest of the share, since nothing rewrites the key.
+    expect(casExpectedRev()).toBe('7');
+    expect(mockRedis.eval).toHaveBeenCalledTimes(1);
+    // Their objects are gone; the counter continues rather than going backwards
+    // under viewers who already hydrated the discarded scene.
     expect(writtenState()).toBe(
-      JSON.stringify({ rev: 1, sharerUserId: SHARER, scene: { objects: [mine] } }),
+      JSON.stringify({ rev: 8, sharerUserId: SHARER, scene: { objects: [mine] } }),
     );
     // A fresh scene from the server's perspective — the sharer must re-send
+    expect(ack).toHaveBeenCalledWith({ ok: true, restarted: true });
+    warn.mockRestore();
+  });
+
+  it('writes over a structurally invalid scene of its OWN instead of losing to it', async () => {
+    // `rev` is a number so the Lua's prefix match reads 9, but `scene.objects`
+    // is not an array so the handler cannot adopt it — the same divergence as
+    // the previous-sharer case, reached without any handoff.
+    const { opsHandler } = setup();
+    const mine = stroke('mine');
+    const stored = '{"rev":9,"sharerUserId":"' + SHARER + '","scene":{"objects":"truncated"}}';
+    mockRedis.mGet.mockResolvedValue([SHARER, stored]);
+    evalLikeTheRealScript(stored, SHARER);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const ack = await send(opsHandler, [{ t: 'add', obj: mine }]);
+
+    expect(casExpectedRev()).toBe('9');
+    expect(writtenState()).toBe(
+      JSON.stringify({ rev: 10, sharerUserId: SHARER, scene: { objects: [mine] } }),
+    );
+    expect(ack).toHaveBeenCalledWith({ ok: true, restarted: true });
+    warn.mockRestore();
+  });
+
+  it('still expects rev 0 when the stored value is corrupt beyond the rev prefix', async () => {
+    // The script reads an unmatched value as rev 0, so the handler must too —
+    // deriving the expectation the same way is what keeps them in agreement.
+    const { opsHandler } = setup();
+    mockRedis.mGet.mockResolvedValue([SHARER, '{not json']);
+    evalLikeTheRealScript('{not json', SHARER);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const ack = await send(opsHandler, [{ t: 'add', obj: stroke('mine') }]);
+
+    expect(casExpectedRev()).toBe('0');
     expect(ack).toHaveBeenCalledWith({ ok: true, restarted: true });
     warn.mockRestore();
   });

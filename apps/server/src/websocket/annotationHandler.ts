@@ -16,7 +16,7 @@ import {
 import type { ServerToClientEvents, ClientToServerEvents, AnnotationOp, AnnotationObject, AnnotationScene } from '@voxium/shared';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { getRedis } from '../utils/redis';
-import { annotationKey, casAnnotationState, type StoredAnnotationState } from '../utils/annotationState';
+import { annotationKey, casAnnotationState, observedSceneRev, type StoredAnnotationState } from '../utils/annotationState';
 import { imageDimensions } from '../utils/imageHeader';
 
 /** CAS retries before refusing the batch. Two is generous for a scene that is
@@ -242,7 +242,19 @@ export function handleAnnotationEvents(
         const [sharer, storedRaw] = await redis.mGet([`voice:screen:${channelId}`, annotationKey(channelId)]);
         if (sharer !== userId) return ack({ ok: false, error: 'Not the active sharer' });
 
-        let prev: StoredAnnotationState = { rev: 0, sharerUserId: userId, scene: { objects: [] } };
+        // The rev to EXPECT is whatever is in Redis — kept separate from the
+        // scene we build on, because the two diverge on every path that throws
+        // the stored scene away. Expecting the discarded scene's rev of 0
+        // against a stored rev of 12 loses all ANNOTATION_CAS_ATTEMPTS races,
+        // and since nothing on that path rewrites the key, every later batch
+        // loses identically: annotations wedge for the rest of the share while
+        // the sharer's own canvas has already local-echoed them.
+        const observedRev = observedSceneRev(storedRaw);
+        // Continue the counter from what is stored rather than restarting at 1.
+        // A backwards rev under viewers who hydrated the discarded scene would
+        // make them drop these ops as stale; the restart snapshot below already
+        // re-baselines them, and monotonic is one less thing to depend on.
+        let baseScene: AnnotationScene = { objects: [] };
         sceneRestarted = true;
         if (storedRaw) {
           try {
@@ -253,7 +265,7 @@ export function handleAnnotationEvents(
               // can still see it. Inheriting it would ship someone else's
               // objects to viewers under this sharer's name.
               if (parsed.sharerUserId === userId) {
-                prev = parsed;
+                baseScene = parsed.scene;
                 sceneRestarted = false;
               } else {
                 console.warn(`[Annotations] Discarding channel ${channelId}'s scene from a previous sharer`);
@@ -265,14 +277,14 @@ export function handleAnnotationEvents(
           }
         }
 
-        scene = applyAnnotationOps(prev.scene, ops as AnnotationOp[]);
-        next = { rev: prev.rev + 1, sharerUserId: userId, scene };
+        scene = applyAnnotationOps(baseScene, ops as AnnotationOp[]);
+        next = { rev: observedRev + 1, sharerUserId: userId, scene };
         const serialized = JSON.stringify(next);
         if (!sceneWithinLimits(scene) || serialized.length > ANNOTATION_SCENE_MAX) {
           return ack({ ok: false, error: 'Scene limit reached' });
         }
 
-        written = await casAnnotationState(channelId, userId, prev.rev, serialized);
+        written = await casAnnotationState(channelId, userId, observedRev, serialized);
       }
 
       if (!written) {

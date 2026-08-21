@@ -50,6 +50,26 @@ export function deleteAnnotationState(channelId: string): void {
 }
 
 /**
+ * The rev `casAnnotationState` will read out of the stored value, derived the
+ * SAME way its script derives it — a prefix match on the raw string, never
+ * `JSON.parse`.
+ *
+ * Callers need this because the rev they must EXPECT is whatever is in Redis,
+ * which is not always the rev of the scene they decided to build on. The two
+ * diverge on exactly the paths that deliberately throw the stored scene away
+ * (it belongs to a previous sharer, or it is structurally invalid): there the
+ * base scene resets to empty, and expecting its rev of 0 against a stored rev
+ * of 12 loses every CAS attempt. Reading it through the same prefix match the
+ * script uses means the expectation and the check cannot disagree — including
+ * on a corrupt value, where both read 0.
+ */
+export function observedSceneRev(raw: string | null | undefined): number {
+  if (!raw) return 0;
+  const m = /^\{"rev":(\d+)/.exec(raw);
+  return m ? Number(m[1]) : 0;
+}
+
+/**
  * Compare-and-set the scene: write `serialized` only if the stored state is
  * still at `expectedRev` AND `sharerUserId` still holds the share.
  *
