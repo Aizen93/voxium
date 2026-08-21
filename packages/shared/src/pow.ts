@@ -133,15 +133,22 @@ export async function solveRegistrationPow(
   const encoder = new TextEncoder();
   const expected = powExpectedAttempts(challenge.difficulty);
   const batchSize = Math.max(1, options?.batchSize ?? 2048);
-  // The deadline is measured as ELAPSED LOCAL TIME, not against the server's
-  // absolute `expires`. Comparing a client wall clock to a server timestamp
-  // makes a device whose clock runs fast unable to register AT ALL: it bails
-  // before nonce 0, refetches, bails again — while the server, judging by its
-  // own clock, would have accepted the solve. Skewed clocks are not rare in
-  // aggregate (dead CMOS battery, resumed VM, hand-set phone).
+  // The deadline is ELAPSED LOCAL TIME and nothing else — not the difference
+  // between a server timestamp and a client clock, in either direction.
+  //
+  // Deriving the budget from `expires` looks harmless because the CHECK below
+  // is still local, but it smuggles the server's clock back in: a device 12
+  // minutes fast computes `expires - now` as three minutes and gives up on a
+  // solve the server would have accepted, then refetches and gives up again.
+  // It is not even monotonic — skew past the whole TTL makes the difference
+  // negative and hands back the FULL budget, so a mildly wrong clock is
+  // punished harder than a wildly wrong one. Network and page-load latency come
+  // out of the same allowance.
+  //
+  // Overrunning costs only local CPU: the server rejects a genuinely stale
+  // solve on its own clock, which is the only clock entitled to that call.
   const startedAt = Date.now();
-  const remaining = challenge.expires - startedAt;
-  const budgetMs = remaining > 0 && remaining <= POW_CHALLENGE_TTL_MS ? remaining : POW_CHALLENGE_TTL_MS;
+  const budgetMs = POW_CHALLENGE_TTL_MS;
   for (let nonce = 0; ; nonce++) {
     const digest = new Uint8Array(await subtle.digest('SHA-256', encoder.encode(`${challenge.challenge}.${nonce}`)));
     if (leadingZeroBits(digest) >= challenge.difficulty) {

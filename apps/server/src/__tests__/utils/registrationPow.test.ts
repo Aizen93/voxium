@@ -68,6 +68,41 @@ describe('registration proof-of-work', () => {
     await expect(solveRegistrationPow(skewed)).resolves.toMatchObject({ challenge: skewed.challenge });
   });
 
+  it('does not let a fast clock SHORTEN the solve budget either', async () => {
+    // Deriving budgetMs from `expires - now` smuggles the server's clock back
+    // in even though the check itself is local: a device twelve minutes fast
+    // gets a three-minute window instead of fifteen and abandons solves the
+    // server would have taken. It was not even monotonic — skew past the whole
+    // TTL made the difference negative and restored the FULL budget, so a mild
+    // clock error was punished harder than an absurd one.
+    const challenge = {
+      challenge: '00000000000000000000000000000001',
+      difficulty: POW_MAX_DIFFICULTY,
+      // What a client 12 minutes fast computes for a freshly issued challenge
+      expires: Date.now() + POW_CHALLENGE_TTL_MS - 12 * 60_000,
+      sig: 'f'.repeat(64),
+    };
+    const startedAt = Date.now();
+    let checks = 0;
+    // Call 1 is `startedAt`. Call 2 is the in-loop deadline check at nonce
+    // 4096: elapsed sits just INSIDE the real 15-minute budget, but far past
+    // the ~3 minutes the old code derived from `expires`. Call 3 pushes past
+    // the real budget so the solve terminates instead of grinding.
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => {
+      checks++;
+      if (checks <= 1) return startedAt;
+      if (checks === 2) return startedAt + POW_CHALLENGE_TTL_MS - 1_000;
+      return startedAt + POW_CHALLENGE_TTL_MS + 1;
+    });
+
+    await expect(solveRegistrationPow(challenge)).rejects.toBeInstanceOf(PowExpiredError);
+    // The decisive assertion: it survived the FIRST in-loop check. Deriving the
+    // budget from `expires` would have bailed there, at checks === 2.
+    expect(checks).toBeGreaterThanOrEqual(3);
+
+    clock.mockRestore();
+  });
+
   it('abandons a challenge whose deadline passes MID-solve', async () => {
     // Deterministic by construction, not by timing: SHA-256 is fixed, and no
     // nonce below 8192 clears 20 leading zero bits for THIS challenge string
@@ -80,9 +115,10 @@ describe('registration proof-of-work', () => {
       expires: Date.now() + 60_000,
       sig: 'f'.repeat(64),
     };
+    const startedAt = Date.now();
     let checks = 0;
     const clock = vi.spyOn(Date, 'now').mockImplementation(() =>
-      ++checks <= 1 ? challenge.expires - 1 : challenge.expires + 1);
+      ++checks <= 1 ? startedAt : startedAt + POW_CHALLENGE_TTL_MS + 1);
 
     await expect(solveRegistrationPow(challenge)).rejects.toBeInstanceOf(PowExpiredError);
     expect(checks).toBeGreaterThan(1); // it really did start solving
