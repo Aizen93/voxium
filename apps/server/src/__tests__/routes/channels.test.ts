@@ -482,13 +482,16 @@ describe('Channel Routes', () => {
       expect(res.status).toBe(201);
       expect(mockIn).not.toHaveBeenCalledWith('server:srv-1');
       expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
-      // The VIEW-granting role's holders, the owner (who may hold no MemberRole
-      // rows at all), and the creator — MANAGE_CHANNELS and VIEW_CHANNEL are
-      // independent bits, so the creator can be outside the derived audience
-      // and would then get no channel:created for the channel they just made.
+      // Exactly the VIEW-granting role's holders plus the owner (who may hold
+      // no MemberRole rows at all). The CREATOR is not added on top:
+      // MANAGE_CHANNELS and VIEW_CHANNEL are independent bits, so a channel
+      // manager without a VIEW-granting role would otherwise be joined to the
+      // room of a channel GET /channels filters out for them — the same leak,
+      // narrowed to one person.
       const rooms = mockIn.mock.calls[0][0] as string[];
-      expect(rooms).toEqual(expect.arrayContaining(['user:mod-7', 'user:owner-1', 'user:user-1']));
-      expect(rooms).toHaveLength(3);
+      expect(rooms).toEqual(expect.arrayContaining(['user:mod-7', 'user:owner-1']));
+      expect(rooms).not.toContain('user:user-1');
+      expect(rooms).toHaveLength(2);
       expect(mockSocketsJoin).toHaveBeenCalledWith('channel:ch-staff');
     });
 
@@ -750,7 +753,11 @@ describe('Channel Routes', () => {
         .delete('/api/v1/servers/srv-1/channels/ch-1')
         .set('Authorization', `Bearer ${token}`);
 
-      expect(mockTo).toHaveBeenCalledWith('server:srv-1');
+      // The channel's own room, not the server's — that room IS the
+      // VIEW_CHANNEL audience, and nobody outside it has the channel in a
+      // sidebar to remove.
+      expect(mockTo).toHaveBeenCalledWith('channel:ch-1');
+      expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
       expect(mockEmit).toHaveBeenCalledWith('channel:deleted', { channelId: 'ch-1', serverId: 'srv-1' });
     });
   });
@@ -878,6 +885,31 @@ describe('Channel Routes', () => {
         where: { id: { in: ['ch-1', 'sec-1'] }, serverId: 'srv-1', secure: false },
         select: { id: true },
       });
+    });
+
+    it('PUT /reorder: CHANNEL_UPDATED goes to the per-channel room, not the server', async () => {
+      // Reordering a sidebar submits the whole order, which for an admin
+      // includes channels other members cannot view. Broadcasting the updated
+      // rows to server:{id} put those channels' NAMES on the wire for everyone
+      // — the stock client drops them, which is not the same as not sending.
+      const token = makeToken();
+      prismaMock.channel.findMany
+        .mockResolvedValueOnce([{ id: 'ch-open' }, { id: 'ch-hr' }])   // validation
+        .mockResolvedValueOnce([                                        // re-read for the emit
+          { id: 'ch-open', name: 'general', serverId: 'srv-1', position: 0, categoryId: null },
+          { id: 'ch-hr', name: 'hr-terminations', serverId: 'srv-1', position: 1, categoryId: null },
+        ]);
+      prismaMock.$transaction.mockResolvedValue([]);
+
+      const res = await request(app)
+        .put('/api/v1/servers/srv-1/channels/reorder')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ order: [{ id: 'ch-open', position: 0 }, { id: 'ch-hr', position: 1 }] });
+
+      expect(res.status).toBe(200);
+      expect(mockTo).toHaveBeenCalledWith('channel:ch-open');
+      expect(mockTo).toHaveBeenCalledWith('channel:ch-hr');
+      expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
     });
 
     it('PATCH (category move): a secure channel reads as not-found', async () => {

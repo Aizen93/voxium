@@ -33,7 +33,7 @@ const ROOM_FANOUT_BATCH = 500;
  * rows at all). Addressed as `user:{id}` rooms, which are adapter-wide and so
  * work across nodes — never `fetchSockets()`.
  */
-async function visibilityRoomsForNewChannel(serverId: string, creatorId: string): Promise<(string | string[])[]> {
+async function visibilityRoomsForNewChannel(serverId: string): Promise<(string | string[])[]> {
   const [everyoneRole, server] = await Promise.all([
     prisma.role.findFirst({ where: { serverId, isDefault: true }, select: { id: true, permissions: true } }),
     prisma.server.findUnique({ where: { id: serverId }, select: { ownerId: true } }),
@@ -60,12 +60,17 @@ async function visibilityRoomsForNewChannel(serverId: string, creatorId: string)
     : [];
 
   const userIds = new Set(holders.map((h) => h.userId));
+  // The owner always sees everything here: this route cannot create a secure
+  // channel, and secure is the one case where the owner fast path is skipped.
   if (server) userIds.add(server.ownerId);
-  // The creator, unconditionally. MANAGE_CHANNELS and VIEW_CHANNEL are
-  // independent bits, so someone can be allowed to create a channel they
-  // cannot see — and then the create succeeds while their sidebar never
-  // updates and no error is shown, so they try again.
-  userIds.add(creatorId);
+  // The creator is NOT added unconditionally. MANAGE_CHANNELS and VIEW_CHANNEL
+  // are independent bits, so a channel manager without a VIEW-granting role can
+  // create a channel they cannot see — and adding them would put a socket in
+  // `channel:{id}` for a channel `GET /servers/:id/channels` filters out for
+  // them, which is precisely the leak this function exists to close, just
+  // narrowed to one person. They are already in `holders` whenever they can
+  // actually view it; when they cannot, announcing it live and then omitting it
+  // from every subsequent fetch is the inconsistency, not the fix.
 
   const rooms = [...userIds].map((id) => `user:${id}`);
   // BroadcastOperator accepts an ARRAY of rooms and matches a socket in ANY of
@@ -132,9 +137,14 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
     const updated = await prisma.channel.findMany({
       where: { id: { in: channelIds } },
     });
+    // To the channel's OWN room, not the server's. Since the create path was
+    // narrowed, `channel:{id}` IS the VIEW_CHANNEL audience — and a reorder
+    // that includes a staff-only channel would otherwise put its name on the
+    // wire for every connected member. The stock client drops it, which is not
+    // the same as it not being sent.
     const io = getIO();
     for (const ch of updated) {
-      io.to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED, ch as unknown as Channel);
+      io.to(`channel:${ch.id}`).emit(WS_EVENTS.CHANNEL_UPDATED, ch as unknown as Channel);
     }
 
     res.json({ success: true });
@@ -217,7 +227,7 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
     // The emit and the join must keep the SAME audience: narrowing one alone
     // leaves clients showing a channel that never produces events, or vice
     // versa.
-    for (const room of await visibilityRoomsForNewChannel(serverId, req.user!.userId)) {
+    for (const room of await visibilityRoomsForNewChannel(serverId)) {
       getIO().to(room).emit('channel:created', channel as unknown as Channel);
       // Voice channels get the room too — it carries voice presence events.
       getIO().in(room).socketsJoin(`channel:${channel.id}`);
@@ -276,8 +286,8 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
     const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
     if (!canManage) throw new ForbiddenError('You do not have permission to update channels');
 
-    // Secure channels read as not-found: they are uncategorized by design and
-    // a CHANNEL_UPDATED broadcast to server:{id} would leak their name
+    // Secure channels read as not-found: they are uncategorized by design, and
+    // their lifecycle events go through secureChannelLifecycle, never here
     const channel = await prisma.channel.findFirst({
       where: { id: channelId, serverId, secure: false },
     });
@@ -299,7 +309,8 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
       data: { categoryId },
     });
 
-    getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED, updated as unknown as Channel);
+    // The channel's own room is the VIEW_CHANNEL audience; see the reorder note.
+    getIO().to(`channel:${channelId}`).emit(WS_EVENTS.CHANNEL_UPDATED, updated as unknown as Channel);
 
     res.json({ success: true, data: updated });
   } catch (err) {
@@ -354,7 +365,9 @@ channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; chan
 
     await prisma.channel.delete({ where: { id: channelId } });
 
-    getIO().to(`server:${serverId}`).emit('channel:deleted', { channelId, serverId });
+    // Same audience as every other lifecycle event for this channel: the people
+    // who could see it. Nobody else has it in their sidebar to remove.
+    getIO().to(`channel:${channelId}`).emit('channel:deleted', { channelId, serverId });
 
     // Live voice must die with the channel on every node — participants used
     // to keep their transports (and the Redis mirror entry) until they left
