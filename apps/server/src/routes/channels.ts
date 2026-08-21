@@ -101,9 +101,14 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
     const channelIds = order.map((o: { id: string }) => o.id);
     const channels = await prisma.channel.findMany({
       where: { id: { in: channelIds }, serverId, secure: false },
-      select: { id: true },
+      select: { id: true, secure: true },
     });
-    if (channels.length !== channelIds.length) {
+    // A channel the caller cannot VIEW fails exactly like a foreign id: same
+    // error, no way to tell the two apart, and no reordering of channels they
+    // cannot see. Their own client only ever submits the visible ones, so this
+    // costs a legitimate reorder nothing.
+    const visible = await filterVisibleChannels(req.user!.userId, serverId, channels);
+    if (visible.length !== channelIds.length) {
       throw new BadRequestError('One or more channel IDs do not belong to this server');
     }
 
@@ -185,6 +190,22 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
 
     const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
     if (!canManage) throw new ForbiddenError('You do not have permission to create channels');
+
+    // VIEW_CHANNEL is a PREREQUISITE for managing a channel, not an unrelated
+    // bit. They are independent flags (1<<0 and 1<<1) with no implication
+    // between them, so a role can carry MANAGE_CHANNELS without VIEW_CHANNEL —
+    // and its holder could then create a channel they cannot see or read. That
+    // state has no coherent meaning: either they get told about a channel they
+    // are not allowed to read, or the create silently produces nothing they can
+    // find. Secure channels never had the problem, because their creator is
+    // unconditionally a member (secureChannels.ts). This is the plaintext
+    // equivalent of that guarantee.
+    //
+    // Base permissions decide it exactly: a brand-new channel has no overrides.
+    const base = await computeServerPermissions(req.user!.userId, serverId);
+    if (!hasPermission(base, Permissions.VIEW_CHANNEL)) {
+      throw new ForbiddenError('You cannot create a channel you would not be able to see');
+    }
 
     const nameErr = validateChannelName(name);
     if (nameErr) throw new BadRequestError(nameErr);
@@ -293,6 +314,13 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
     });
     if (!channel) throw new NotFoundError('Channel');
 
+    // Managing a channel requires being able to SEE it. Answering 404 rather
+    // than 403 matches what this same caller gets for an id that does not
+    // exist, so the check adds no existence oracle of its own.
+    if (!await hasChannelPermission(req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+      throw new NotFoundError('Channel');
+    }
+
     const { categoryId } = req.body;
     if (categoryId === undefined) throw new BadRequestError('categoryId is required');
 
@@ -362,6 +390,13 @@ channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; chan
     if (!canManage) throw new ForbiddenError('You do not have permission to delete channels');
 
     if (!channel) throw new NotFoundError('Channel');
+
+    // Same prerequisite as every other management op, and the same 404 as a
+    // nonexistent id gives this caller. (The secure branch above returns
+    // earlier and keeps its own, deliberately inverted, opacity rules.)
+    if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+      throw new NotFoundError('Channel');
+    }
 
     await prisma.channel.delete({ where: { id: channelId } });
 

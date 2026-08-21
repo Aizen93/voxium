@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { Permissions, permissionsToString, DEFAULT_EVERYONE_PERMISSIONS } from '@voxium/shared';
+import { Permissions, permissionsToString, DEFAULT_EVERYONE_PERMISSIONS, ALL_PERMISSIONS } from '@voxium/shared';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -173,6 +173,11 @@ describe('Channel Routes', () => {
     mockHasServerPermission.mockResolvedValue(true);
     mockHasChannelPermission.mockResolvedValue(true);
     mockGetHighestRolePosition.mockResolvedValue(Infinity);
+    // VIEW_CHANNEL is a prerequisite for every channel-management op, so the
+    // default caller has to carry it in their base permissions.
+    mockComputeServerPermissions.mockResolvedValue(
+      Permissions.VIEW_CHANNEL | Permissions.MANAGE_CHANNELS,
+    );
     // Default server shape: @everyone carries VIEW_CHANNEL, the ordinary case
     prismaMock.role.findFirst.mockResolvedValue({
       id: 'everyone',
@@ -451,6 +456,40 @@ describe('Channel Routes', () => {
     });
 
     // ── F5: channel:{id} IS the VIEW_CHANNEL boundary ──────────────────────
+
+    it('refuses to create a channel the creator would not be able to see', async () => {
+      // VIEW_CHANNEL and MANAGE_CHANNELS are independent bits, so a role can
+      // carry the second without the first. Creating from that role produced a
+      // channel its own creator could neither see nor read — a state with no
+      // coherent meaning. Secure channels never had it: their creator is
+      // unconditionally a member.
+      const token = makeToken();
+      mockComputeServerPermissions.mockResolvedValue(Permissions.MANAGE_CHANNELS); // no VIEW
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'orphan', type: 'text' });
+
+      expect(res.status).toBe(403);
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+    });
+
+    it('allows the create when VIEW comes from ADMINISTRATOR', async () => {
+      const token = makeToken();
+      mockComputeServerPermissions.mockResolvedValue(ALL_PERMISSIONS);
+      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-new', name: 'general', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'general', type: 'text' });
+
+      expect(res.status).toBe(201);
+    });
 
     it('does NOT join or announce to members without VIEW_CHANNEL when @everyone lacks it', async () => {
       // The standard staff-only setup. The old code joined EVERY connected
@@ -883,8 +922,41 @@ describe('Channel Routes', () => {
       expect(res.status).toBe(400);
       expect(prismaMock.channel.findMany).toHaveBeenCalledWith({
         where: { id: { in: ['ch-1', 'sec-1'] }, serverId: 'srv-1', secure: false },
-        select: { id: true },
+        select: { id: true, secure: true },
       });
+    });
+
+    it('a channel you cannot VIEW cannot be edited, deleted or reordered', async () => {
+      // Discord's rule: a channel you cannot see is inert for you. 404 rather
+      // than 403 so the check answers exactly like a nonexistent id does for
+      // this same caller, adding no existence oracle of its own.
+      const token = makeToken();
+      mockHasChannelPermission.mockResolvedValue(false); // no VIEW on the target
+      prismaMock.channel.findFirst.mockResolvedValue({
+        id: 'ch-hidden', serverId: 'srv-1', secure: false, createdById: 'someone', server: { ownerId: 'owner-1' },
+      });
+
+      const patched = await request(app)
+        .patch('/api/v1/servers/srv-1/channels/ch-hidden')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ categoryId: null });
+      expect(patched.status).toBe(404);
+
+      const deleted = await request(app)
+        .delete('/api/v1/servers/srv-1/channels/ch-hidden')
+        .set('Authorization', `Bearer ${token}`);
+      expect(deleted.status).toBe(404);
+      expect(prismaMock.channel.delete).not.toHaveBeenCalled();
+
+      // Reorder: an invisible id fails exactly like a foreign one
+      prismaMock.channel.findMany.mockResolvedValueOnce([{ id: 'ch-hidden', secure: false }]);
+      mockFilterVisibleChannels.mockResolvedValueOnce([]); // nothing visible
+      const reordered = await request(app)
+        .put('/api/v1/servers/srv-1/channels/reorder')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ order: [{ id: 'ch-hidden', position: 0 }] });
+      expect(reordered.status).toBe(400);
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
     });
 
     it('PUT /reorder: CHANNEL_UPDATED goes to the per-channel room, not the server', async () => {
