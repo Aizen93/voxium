@@ -313,14 +313,18 @@ describe('utils/redis — clearPresenceState (multi-node aware)', () => {
 
   // ── F9: ONE adapter round trip for the whole sweep ────────────────────────
 
-  /** io whose adapter answers allRooms() with `rooms`, or rejects. */
-  function ioWithAdapter(rooms: string[] | Error) {
+  /** io whose adapter answers allRooms() with `rooms`, or rejects.
+   *  `serverCount` mirrors the real adapter's PUBSUB NUMSUB probe; omit it to
+   *  model an adapter that does not expose one. */
+  function ioWithAdapter(rooms: string[] | Error, serverCount?: number) {
     const fetchSockets = vi.fn().mockResolvedValue([]);
     const allRooms = vi.fn(() =>
       rooms instanceof Error ? Promise.reject(rooms) : Promise.resolve(new Set(rooms)));
+    const adapter: Record<string, unknown> = { allRooms };
+    if (serverCount !== undefined) adapter.serverCount = vi.fn().mockResolvedValue(serverCount);
     return {
       in: vi.fn(() => ({ fetchSockets })),
-      of: vi.fn(() => ({ adapter: { allRooms } })),
+      of: vi.fn(() => ({ adapter })),
       _allRooms: allRooms,
       _fetchSockets: fetchSockets,
     };
@@ -380,6 +384,58 @@ describe('utils/redis — clearPresenceState (multi-node aware)', () => {
     warn.mockRestore();
     // eslint-disable-next-line require-yield
     vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  // The adapter's OTHER way of returning a partial answer, and the dangerous
+  // one because it does not announce itself: @socket.io/redis-adapter resolves
+  // allRooms() with this node's OWN rooms whenever PUBSUB NUMSUB reports <= 1
+  // subscriber. At boot, before server.listen(), that set is EMPTY — so it
+  // reads as "every socket in the cluster is dead".
+  it('reaps NOTHING when the adapter sees no cluster but peers are alive', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, { 's-a': 'u-a', 's-b': 'u-b' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Exactly the short-circuit shape: one subscriber, and an empty room set
+    const io = ioWithAdapter([], 1);
+    const db = makeDb();
+    await mod.clearPresenceState(db, io);
+
+    expect(client.hDel).not.toHaveBeenCalled();
+    expect(db.user.updateMany).not.toHaveBeenCalled();
+    // Refused before it even asked — the answer could only have been local
+    expect(io._allRooms).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalled();
+
+    warn.mockRestore();
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  it('accepts the snapshot once the adapter can actually see the cluster', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, { 's-live': 'u-live', 's-dead': 'u-dead' });
+    vi.mocked(client.hGet).mockImplementation(async (_key, field) =>
+      (field === 's-dead' ? 'u-dead' : 'u-live'));
+    vi.mocked(client.sCard).mockResolvedValue(0);
+
+    const io = ioWithAdapter(['s-live', 'user:u-live'], 2);
+    const db = makeDb();
+    await mod.clearPresenceState(db, io);
+
+    expect(io._allRooms).toHaveBeenCalledTimes(1);
+    expect(client.hDel).toHaveBeenCalledWith('socket:users', 's-dead');
+    expect(client.hDel).not.toHaveBeenCalledWith('socket:users', 's-live');
+
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGet).mockResolvedValue(null);
     vi.mocked(client.hGetAll).mockResolvedValue({});
   });
 

@@ -110,16 +110,26 @@ export async function isNodeAlive(nodeId: string): Promise<boolean> {
   return (await getRedis().exists(heartbeatKey(nodeId))) === 1;
 }
 
-/** True if any node OTHER than this one holds a live heartbeat. */
-export async function anyOtherNodeAlive(): Promise<boolean> {
+/** How many nodes hold a live heartbeat, split by self vs peers. `total` may
+ *  exclude this node at boot, before `startNodeHeartbeat` has written its key —
+ *  which is why callers that need "is there anyone else" read `peers`. */
+export async function liveNodeCounts(): Promise<{ total: number; peers: number }> {
   const redis = getRedis();
   const self = heartbeatKey(NODE_ID());
+  let total = 0;
+  let peers = 0;
   for await (const batch of redis.scanIterator({ MATCH: 'node:alive:*', COUNT: 100 })) {
     for (const key of batch) {
-      if (key !== self) return true;
+      total++;
+      if (key !== self) peers++;
     }
   }
-  return false;
+  return { total, peers };
+}
+
+/** True if any node OTHER than this one holds a live heartbeat. */
+export async function anyOtherNodeAlive(): Promise<boolean> {
+  return (await liveNodeCounts()).peers > 0;
 }
 
 // ─── Presence helpers (multi-node safe: 1 user → many sockets) ──────────────
@@ -191,14 +201,46 @@ export async function socketExistsInCluster(io: ClusterSocketLookup, socketId: s
  * they cannot be mistaken for a socket id).
  *
  * Returns null when the adapter cannot answer at all, so the caller can fall
- * back to the per-socket path. THROWS when the adapter is present but the
- * request times out — a partial answer would look like "those sockets are
- * dead" and mark live users on a slow peer offline, so callers must skip the
- * reap rather than act on it.
+ * back to the per-socket path. THROWS when the adapter is present but its
+ * answer would be PARTIAL — a partial answer looks like "those sockets are
+ * dead" and marks live users on a peer offline, so callers must skip the reap
+ * rather than act on it. There are two ways to get a partial answer and only
+ * one of them announces itself:
+ *
+ *  - the cluster request TIMES OUT — the adapter rejects, and that propagates;
+ *  - the adapter decides there is no cluster to ask. `@socket.io/redis-adapter`
+ *    resolves `allRooms()` with THIS NODE'S OWN rooms, silently and with no
+ *    error, whenever `PUBSUB NUMSUB` on its request channel reports <= 1
+ *    subscriber. That is indistinguishable from a complete answer, and at boot
+ *    — before `server.listen()` — this node's room set is EMPTY, so it reads as
+ *    "every socket in the cluster is dead". The callers would then mark every
+ *    connected user offline and hang up every live DM call in the cluster.
+ *
+ * `peerCount` is what the heartbeats say. If peers exist but the adapter can
+ * see at most itself, the two oracles disagree — the heartbeat lives on the
+ * data connection, `serverCount()` on the subscriber one, and a Redis failover
+ * or a reconnecting subscriber drops the latter while the former is still
+ * fresh. Refusing costs one skipped boot sweep; trusting it costs the cluster.
  */
-export async function liveClusterSocketIds(io: ClusterSocketLookup): Promise<Set<string> | null> {
-  const adapter = io.of?.('/')?.adapter as { allRooms?: () => Promise<Set<string>> } | undefined;
+export async function liveClusterSocketIds(
+  io: ClusterSocketLookup,
+  peerCount = 0,
+): Promise<Set<string> | null> {
+  const adapter = io.of?.('/')?.adapter as {
+    allRooms?: () => Promise<Set<string>>;
+    serverCount?: () => Promise<number>;
+  } | undefined;
   if (typeof adapter?.allRooms !== 'function') return null;
+
+  if (peerCount > 0 && typeof adapter.serverCount === 'function') {
+    const seen = await adapter.serverCount();
+    if (seen <= 1) {
+      throw new Error(
+        `adapter sees ${seen} server(s) but ${peerCount} peer heartbeat(s) are live — `
+        + 'the snapshot would be this node\'s own rooms, not the cluster\'s',
+      );
+    }
+  }
   return await adapter.allRooms();
 }
 
@@ -218,7 +260,8 @@ export async function clearPresenceState(
 ): Promise<void> {
   const redis = getRedis();
 
-  if (io && await anyOtherNodeAlive()) {
+  const { peers } = io ? await liveNodeCounts() : { peers: 0 };
+  if (io && peers > 0) {
     // Scoped reap: drop only cluster-wide-dead sockets; peers' users stay online.
     //
     // ONE adapter snapshot, not one cluster round trip per entry. `socket:users`
@@ -235,12 +278,13 @@ export async function clearPresenceState(
 
     let live: Set<string> | null;
     try {
-      live = await liveClusterSocketIds(io);
+      live = await liveClusterSocketIds(io, peers);
     } catch (err) {
-      // A timed-out snapshot is PARTIAL. Acting on it would mark live users on
-      // a slow peer offline, which is worse than leaving stale rows for the
-      // next boot to clear.
-      console.warn('[Presence] Cluster socket snapshot failed — skipping the scoped reap:', err instanceof Error ? err.message : err);
+      // A partial snapshot — timed out, or an adapter that cannot see the
+      // cluster it is being asked about. Acting on it would mark live users on
+      // a peer offline, which is worse than leaving stale rows for the next
+      // boot to clear.
+      console.warn('[Presence] Cluster socket snapshot unusable — skipping the scoped reap:', err instanceof Error ? err.message : err);
       return;
     }
 

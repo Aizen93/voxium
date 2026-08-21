@@ -46,8 +46,8 @@ const mockRedis = vi.hoisted(() => {
   };
 });
 
-const { mockAnyOtherNodeAlive, mockSocketExists, mockLiveSocketIds } = vi.hoisted(() => ({
-  mockAnyOtherNodeAlive: vi.fn().mockResolvedValue(false),
+const { mockLiveNodeCounts, mockSocketExists, mockLiveSocketIds } = vi.hoisted(() => ({
+  mockLiveNodeCounts: vi.fn().mockResolvedValue({ total: 1, peers: 0 }),
   mockSocketExists: vi.fn().mockResolvedValue(false),
   // null = adapter cannot answer, so the sweep uses the legacy per-socket path
   mockLiveSocketIds: vi.fn().mockResolvedValue(null),
@@ -56,7 +56,7 @@ const { mockAnyOtherNodeAlive, mockSocketExists, mockLiveSocketIds } = vi.hoiste
 vi.mock('../../utils/redis', () => ({
   getRedis: vi.fn().mockReturnValue(mockRedis),
   NODE_ID: vi.fn().mockReturnValue('test-node-1'),
-  anyOtherNodeAlive: mockAnyOtherNodeAlive,
+  liveNodeCounts: mockLiveNodeCounts,
   socketExistsInCluster: mockSocketExists,
   liveClusterSocketIds: mockLiveSocketIds,
 }));
@@ -774,13 +774,13 @@ describe('dmVoiceHandler — clearDMVoiceState (multi-node scoped reap)', () => 
   beforeEach(() => {
     vi.clearAllMocks();
     resetRedis();
-    mockAnyOtherNodeAlive.mockResolvedValue(false);
+    mockLiveNodeCounts.mockResolvedValue({ total: 1, peers: 0 });
     mockSocketExists.mockResolvedValue(false);
     mockLiveSocketIds.mockResolvedValue(null);
   });
 
   it('with live peers: reaps ONLY participants whose socket is gone cluster-wide', async () => {
-    mockAnyOtherNodeAlive.mockResolvedValue(true);
+    mockLiveNodeCounts.mockResolvedValue({ total: 2, peers: 1 });
     mockRedis.sMembers.mockResolvedValue(['conv-9']);
     mockRedis.hGetAll.mockImplementation((key: string) =>
       Promise.resolve(key === 'dm:voice:users:conv-9' ? {
@@ -799,6 +799,10 @@ describe('dmVoiceHandler — clearDMVoiceState (multi-node scoped reap)', () => 
     );
     expect(io.to).toHaveBeenCalledWith('dm:voice:conv-9');
     expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-9', userId: 'u-dead' });
+    // The peer count reaches the snapshot, which is what lets it refuse an
+    // adapter answer that could only have covered this node — without it a
+    // Redis pub/sub blip during a boot hangs up every live call in the cluster.
+    expect(mockLiveSocketIds).toHaveBeenCalledWith(io, 1);
     // The live cross-node participant is untouched
     expect(mockRedis.eval).not.toHaveBeenCalledWith(
       expect.any(String),
@@ -809,7 +813,7 @@ describe('dmVoiceHandler — clearDMVoiceState (multi-node scoped reap)', () => 
   });
 
   it('with live peers: reaps orphaned dm:voice:call keys whose user is no longer in the call hash', async () => {
-    mockAnyOtherNodeAlive.mockResolvedValue(true);
+    mockLiveNodeCounts.mockResolvedValue({ total: 2, peers: 1 });
     mockRedis.sMembers.mockResolvedValue([]);
     mockRedis.scanIterator.mockImplementation(async function* (opts: { MATCH?: string }) {
       if (opts?.MATCH === 'dm:voice:call:*') yield ['dm:voice:call:u-orphan'];
@@ -825,7 +829,7 @@ describe('dmVoiceHandler — clearDMVoiceState (multi-node scoped reap)', () => 
   });
 
   it('falls back to the full wipe when this is the sole node, even with io provided', async () => {
-    mockAnyOtherNodeAlive.mockResolvedValue(false);
+    mockLiveNodeCounts.mockResolvedValue({ total: 1, peers: 0 });
     mockRedis.scanIterator.mockImplementation(async function* () {
       yield ['dm:voice:active', 'dm:voice:users:conv-1'];
     });
@@ -1700,7 +1704,7 @@ describe('dmVoiceHandler — clearDMVoiceState uses ONE cluster snapshot', () =>
   beforeEach(() => {
     vi.clearAllMocks();
     resetRedis();
-    mockAnyOtherNodeAlive.mockResolvedValue(true);
+    mockLiveNodeCounts.mockResolvedValue({ total: 2, peers: 1 });
     mockLiveSocketIds.mockResolvedValue(null);
   });
 
@@ -1747,7 +1751,7 @@ describe('dmVoiceHandler — clearDMVoiceState snapshot ordering', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetRedis();
-    mockAnyOtherNodeAlive.mockResolvedValue(true);
+    mockLiveNodeCounts.mockResolvedValue({ total: 2, peers: 1 });
     mockLiveSocketIds.mockResolvedValue(null);
   });
 

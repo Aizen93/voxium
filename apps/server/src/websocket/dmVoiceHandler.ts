@@ -5,7 +5,7 @@ import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
-import { getRedis, anyOtherNodeAlive, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup } from '../utils/redis';
+import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup } from '../utils/redis';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -166,7 +166,8 @@ export async function clearDMVoiceState(
 ): Promise<void> {
   const redis = getRedis();
 
-  if (io && await anyOtherNodeAlive()) {
+  const { peers } = io ? await liveNodeCounts() : { peers: 0 };
+  if (io && peers > 0) {
     // ORDER MATTERS: collect the candidates FIRST, snapshot liveness AFTER, so
     // the liveness view is strictly newer than everything it judges. Snapshot
     // first and a call that starts in between looks dead and gets hung up.
@@ -193,9 +194,9 @@ export async function clearDMVoiceState(
     let live: Set<string> | null = null;
     let snapshotFailed = false;
     try {
-      live = await liveClusterSocketIds(io);
+      live = await liveClusterSocketIds(io, peers);
     } catch (err) {
-      console.warn('[DMVoice] Cluster socket snapshot failed — skipping the participant reap:', err instanceof Error ? err.message : err);
+      console.warn('[DMVoice] Cluster socket snapshot unusable — skipping the participant reap:', err instanceof Error ? err.message : err);
       snapshotFailed = true;
     }
 
