@@ -39,6 +39,27 @@ describe('username case-insensitive uniqueness is enforced by the database', () 
     expect(sql).toMatch(/RAISE EXCEPTION/);
   });
 
+  it('ranks VERIFIED rows first, so an older unverified squatter cannot survive the repair', () => {
+    // Ordering by age alone loses the case the repair exists for: an unverified
+    // squatter registered BEFORE a real account takes rn = 1 and is never
+    // renamed, while the verified row is rn > 1 but excluded by the
+    // `email_verified = false` filter. Both survive, step 2 raises, and
+    // `migrate deploy` aborts — under docker-entrypoint.sh's `set -e` that is a
+    // boot failure plus a P3009 record blocking every later deploy.
+    expect(sql).toMatch(
+      /ORDER BY\s+"email_verified" DESC,\s*"created_at" ASC,\s*id ASC/
+    );
+    // ...and specifically NOT the age-only ordering it replaced.
+    expect(sql).not.toMatch(/ORDER BY\s+"created_at" ASC,\s*id ASC\s*\n?\s*\)/);
+  });
+
+  it('says VERIFIED when it refuses, since that is the only collision that can reach step 2', () => {
+    // After the repair, a surviving collision is verified-vs-verified by
+    // construction. An operator reading "verified accounts collide" while one
+    // of the two is a bot squatter would go looking for the wrong problem.
+    expect(sql).toMatch(/two or more VERIFIED accounts collide/);
+  });
+
   it('keeps the replacement username inside the app\'s own charset and length rules', () => {
     // [a-zA-Z0-9_.-], 3..32 — left(...,24) + '_' + 6 hex chars = 31 max
     expect(sql).toMatch(/left\(u\."username", 24\) \|\| '_' \|\| substr\(md5\(u\.id\), 1, 6\)/);
