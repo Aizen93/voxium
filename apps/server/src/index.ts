@@ -41,7 +41,7 @@ import { startRegistrationHygiene, stopRegistrationHygiene } from './utils/regis
 import { startKeyShareCleanup, stopKeyShareCleanup } from './utils/keyShareCleanup';
 import { startOrphanCleanup, stopOrphanCleanup } from './utils/orphanCleanup';
 import { prisma } from './utils/prisma';
-import { initRedis, clearPresenceState, NODE_ID, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
+import { initRedis, clearPresenceState, NODE_ID, NODE_HEARTBEAT_TTL_S, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { ensureBucketEncryption } from './utils/s3';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { loadFeatureFlags } from './utils/featureFlags';
@@ -99,11 +99,46 @@ async function main() {
   // Reset stale state from previous runs (crash, hot reload, redeploy). All three
   // are multi-node aware: with live peer nodes they reap only cluster-wide-dead
   // state; the full wipes run only when this is the sole node.
-  await clearPresenceState(prisma, io);
-  console.log('[Presence] Stale presence cleared');
+  const presence = await clearPresenceState(prisma, io);
+  if (!presence.skipped) console.log('[Presence] Stale presence cleared');
   await clearVoiceState(io).catch((err) => console.warn('[Voice] Stale voice cleanup failed:', err));
-  await clearDMVoiceState(io).catch((err) => console.warn('[DMVoice] Stale DM-call cleanup failed:', err));
+  const dmVoice = await clearDMVoiceState(io).catch((err) => {
+    console.warn('[DMVoice] Stale DM-call cleanup failed:', err);
+    return { skipped: false };
+  });
   console.log('[Voice] Stale voice state cleared');
+
+  // A sweep that REFUSED an unusable cluster snapshot has left real stale state
+  // behind, and nothing else reaps presence. The ambiguity it refused on is
+  // "a heartbeat exists but the adapter sees no peer", which is either a live
+  // peer whose subscriber connection blipped, or the CORPSE of a node that was
+  // killed hard — and a corpse's heartbeat expires within its TTL. So the
+  // ambiguity resolves itself; we just have to look again afterwards.
+  //
+  // This is not hypothetical: NODE_ID defaults to a fresh random id per
+  // process, so a hard-killed node is a peer to its own replacement, and every
+  // SIGKILL restart of a sole node hit this. Retrying once past the TTL turns
+  // that into a short delay instead of ghost "online" users that survive until
+  // some later boot happens to catch a clean snapshot.
+  if (presence.skipped || dmVoice.skipped) {
+    const retryMs = (NODE_HEARTBEAT_TTL_S + 5) * 1000;
+    console.log(`[Presence] Boot sweep deferred — retrying in ${Math.round(retryMs / 1000)}s, once any stale heartbeat has expired`);
+    setTimeout(() => {
+      void (async () => {
+        try {
+          if (presence.skipped) {
+            const retry = await clearPresenceState(prisma, io);
+            console.log(retry.skipped
+              ? '[Presence] Deferred sweep still could not see the cluster — leaving state for the next boot'
+              : '[Presence] Deferred sweep completed');
+          }
+          if (dmVoice.skipped) await clearDMVoiceState(io);
+        } catch (err) {
+          console.warn('[Presence] Deferred boot sweep failed:', err instanceof Error ? err.message : err);
+        }
+      })();
+    }, retryMs).unref?.();
+  }
 
   // Cross-node voice coordination: server-deletion fan-out + dead-node reaper
   await initVoiceCluster(io);

@@ -72,7 +72,7 @@ export function getRedisConfigSub(): RedisClientType {
 // Production runs multiple horizontally-scaled instances — boot/periodic cleanup
 // must NEVER assume it is the only node.
 
-const NODE_HEARTBEAT_TTL_S = 30;
+export const NODE_HEARTBEAT_TTL_S = 30;
 const NODE_HEARTBEAT_INTERVAL_MS = 10_000;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -257,7 +257,7 @@ export async function liveClusterSocketIds(
 export async function clearPresenceState(
   db: { user: { updateMany: (args: { where: { status: string; id?: { in: string[] } }; data: { status: string } }) => Promise<unknown> } },
   io?: ClusterSocketLookup,
-): Promise<void> {
+): Promise<{ skipped: boolean }> {
   const redis = getRedis();
 
   const { peers } = io ? await liveNodeCounts() : { peers: 0 };
@@ -285,7 +285,7 @@ export async function clearPresenceState(
       // a peer offline, which is worse than leaving stale rows for the next
       // boot to clear.
       console.warn('[Presence] Cluster socket snapshot unusable — skipping the scoped reap:', err instanceof Error ? err.message : err);
-      return;
+      return { skipped: true };
     }
 
     const fullyOffline: string[] = [];
@@ -308,7 +308,7 @@ export async function clearPresenceState(
       await db.user.updateMany({ where: { status: 'online', id: { in: fullyOffline } }, data: { status: 'offline' } });
       console.log(`[Presence] Reaped ${fullyOffline.length} stale user(s) (scoped, peers alive)`);
     }
-    return;
+    return { skipped: false };
   }
 
   // Sole node: legacy full wipe.
@@ -318,4 +318,5 @@ export async function clearPresenceState(
   }
   await redis.del(['online_users', 'socket:users']);
   await db.user.updateMany({ where: { status: 'online' }, data: { status: 'offline' } });
+  return { skipped: false };
 }

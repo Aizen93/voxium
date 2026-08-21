@@ -402,13 +402,19 @@ describe('utils/redis — clearPresenceState (multi-node aware)', () => {
     // Exactly the short-circuit shape: one subscriber, and an empty room set
     const io = ioWithAdapter([], 1);
     const db = makeDb();
-    await mod.clearPresenceState(db, io);
+    const result = await mod.clearPresenceState(db, io);
 
     expect(client.hDel).not.toHaveBeenCalled();
     expect(db.user.updateMany).not.toHaveBeenCalled();
     // Refused before it even asked — the answer could only have been local
     expect(io._allRooms).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalled();
+    // REPORTED, not silent. Refusing leaves real stale state behind and nothing
+    // else reaps presence, so the caller has to know in order to retry once the
+    // ambiguous heartbeat has had time to expire. NODE_ID defaults to a fresh
+    // random id per process, so a hard-killed node is a peer to its own
+    // replacement and every SIGKILL restart of a sole node lands here.
+    expect(result).toEqual({ skipped: true });
 
     warn.mockRestore();
     // eslint-disable-next-line require-yield
@@ -427,8 +433,9 @@ describe('utils/redis — clearPresenceState (multi-node aware)', () => {
 
     const io = ioWithAdapter(['s-live', 'user:u-live'], 2);
     const db = makeDb();
-    await mod.clearPresenceState(db, io);
+    const result = await mod.clearPresenceState(db, io);
 
+    expect(result).toEqual({ skipped: false });
     expect(io._allRooms).toHaveBeenCalledTimes(1);
     expect(client.hDel).toHaveBeenCalledWith('socket:users', 's-dead');
     expect(client.hDel).not.toHaveBeenCalledWith('socket:users', 's-live');

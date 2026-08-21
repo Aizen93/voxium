@@ -163,7 +163,7 @@ async function updateDMVoiceUserSocket(
  */
 export async function clearDMVoiceState(
   io?: ClusterSocketLookup & { to: (room: string) => { emit: (event: 'dm:voice:left', data: { conversationId: string; userId: string }) => void } },
-): Promise<void> {
+): Promise<{ skipped: boolean }> {
   const redis = getRedis();
 
   const { peers } = io ? await liveNodeCounts() : { peers: 0 };
@@ -234,7 +234,7 @@ export async function clearDMVoiceState(
     if (reaped > 0) {
       console.log(`[DMVoice] Reaped ${reaped} stale DM-call participant(s) (scoped, peers alive)`);
     }
-    return;
+    return { skipped: snapshotFailed };
   }
 
   // Sole node: every socket is gone, all DM-voice state is stale — full wipe.
@@ -246,6 +246,7 @@ export async function clearDMVoiceState(
     await redis.del(keys);
     console.log(`[DMVoice] Cleared ${keys.length} stale DM-voice key(s)`);
   }
+  return { skipped: false };
 }
 
 async function removeDMVoiceUser(conversationId: string, userId: string): Promise<void> {
