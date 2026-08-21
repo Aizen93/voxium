@@ -191,22 +191,15 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
     const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
     if (!canManage) throw new ForbiddenError('You do not have permission to create channels');
 
-    // VIEW_CHANNEL is a PREREQUISITE for managing a channel, not an unrelated
-    // bit. They are independent flags (1<<0 and 1<<1) with no implication
-    // between them, so a role can carry MANAGE_CHANNELS without VIEW_CHANNEL —
-    // and its holder could then create a channel they cannot see or read. That
-    // state has no coherent meaning: either they get told about a channel they
-    // are not allowed to read, or the create silently produces nothing they can
-    // find. Secure channels never had the problem, because their creator is
-    // unconditionally a member (secureChannels.ts). This is the plaintext
-    // equivalent of that guarantee.
-    //
-    // Base permissions decide it exactly: a brand-new channel has no overrides.
-    const base = await computeServerPermissions(req.user!.userId, serverId);
-    if (!hasPermission(base, Permissions.VIEW_CHANNEL)) {
-      throw new ForbiddenError('You cannot create a channel you would not be able to see');
-    }
-
+    // No VIEW_CHANNEL check here, deliberately. A new channel has no overrides,
+    // so who can see it is decided entirely by base permissions — and a
+    // MANAGE_CHANNELS holder carries VIEW_CHANNEL in any sane role setup
+    // (@everyone has it by default), so the creator sees what they made for the
+    // same reason everyone else does. Creation confers no special status, and
+    // rejecting the create for a role that lacks VIEW would refuse work Discord
+    // allows, to protect against a role nobody builds. The management routes
+    // below DO require VIEW on their target — that is about not editing what
+    // you cannot see, which is a different question.
     const nameErr = validateChannelName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 

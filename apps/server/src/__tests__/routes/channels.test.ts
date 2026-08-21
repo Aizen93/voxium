@@ -457,27 +457,13 @@ describe('Channel Routes', () => {
 
     // ── F5: channel:{id} IS the VIEW_CHANNEL boundary ──────────────────────
 
-    it('refuses to create a channel the creator would not be able to see', async () => {
-      // VIEW_CHANNEL and MANAGE_CHANNELS are independent bits, so a role can
-      // carry the second without the first. Creating from that role produced a
-      // channel its own creator could neither see nor read — a state with no
-      // coherent meaning. Secure channels never had it: their creator is
-      // unconditionally a member.
+    it('does not refuse a create just because the creator lacks VIEW_CHANNEL', async () => {
+      // Creation confers no special status: a new channel has no overrides, so
+      // who sees it is decided by base permissions, and a MANAGE_CHANNELS
+      // holder carries VIEW in any sane role setup. Refusing here would block
+      // work Discord allows, to guard against a role nobody builds.
       const token = makeToken();
       mockComputeServerPermissions.mockResolvedValue(Permissions.MANAGE_CHANNELS); // no VIEW
-
-      const res = await request(app)
-        .post('/api/v1/servers/srv-1/channels')
-        .set('Authorization', `Bearer ${token}`)
-        .send({ name: 'orphan', type: 'text' });
-
-      expect(res.status).toBe(403);
-      expect(prismaMock.channel.create).not.toHaveBeenCalled();
-    });
-
-    it('allows the create when VIEW comes from ADMINISTRATOR', async () => {
-      const token = makeToken();
-      mockComputeServerPermissions.mockResolvedValue(ALL_PERMISSIONS);
       prismaMock.channel.count.mockResolvedValue(0);
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-new', name: 'general', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
