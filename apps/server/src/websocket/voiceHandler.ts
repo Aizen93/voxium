@@ -1285,19 +1285,33 @@ export function handleVoiceEvents(
     // handler's unified error message exists to remove — a prober's own DM
     // call dying tells them a channel exists at that id and is live on another
     // node — and it is a self-inflicted DoS any user can trigger with a
-    // guessed id. Only secure channels pay the extra lookup; everything else
-    // routes exactly as before and is authorized by the handler as usual.
+    // guessed id. A joinable channel routes exactly as before and is
+    // authorized again by the handler, which has to do it anyway: relayed
+    // joins arrive there without passing through here.
     const routed = await prisma.channel.findUnique({
       where: { id: channelId },
       select: { serverId: true, type: true, secure: true },
     });
-    if (routed?.secure) {
-      const allowed = routed.type === 'voice'
-        && await hasChannelPermission(userId, channelId, routed.serverId, Permissions.CONNECT);
-      if (!allowed) {
-        socket.emit('voice:error', { message: 'Voice channel not found.' });
+    // Nonexistent, not a voice channel, or a SECURE one this user is not a
+    // member of — all three answer identically, pay the same tolls, and touch
+    // no cluster state. Opacity is not only about the message: a prober reads
+    // the difference just as well from a side effect, or from which ids are
+    // still being answered once a bucket is spent.
+    const joinable = routed?.type === 'voice'
+      && (!routed.secure
+        || await hasChannelPermission(userId, channelId, routed.serverId, Permissions.CONNECT));
+    if (!joinable) {
+      // The tolls the inner handler charges before it would have answered.
+      // Skipping them let a prober spend the inner bucket on random ids and
+      // then tell a real secure channel apart by the fact that it still
+      // replies — the same oracle, rebuilt out of rate limiting.
+      if (!socketRateLimit(socket, 'voice:join', 10)) return;
+      if (!isFeatureEnabled('voice')) {
+        socket.emit('voice:error', { message: 'Voice channels are currently disabled' });
         return;
       }
+      socket.emit('voice:error', { message: 'Voice channel not found.' });
+      return;
     }
 
     let ownerNodeId: string;

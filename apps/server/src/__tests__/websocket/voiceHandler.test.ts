@@ -2162,6 +2162,43 @@ describe('voiceHandler — secure voice channel join is opaque to non-members', 
     expect(socket.emit).not.toHaveBeenCalledWith('voice:error', { message: 'You do not have permission to join this voice channel.' });
   });
 
+  it('charges the SAME rate-limit bucket a nonexistent id charges', async () => {
+    // The message was only half the oracle. The wrapper answered a secure
+    // channel before the inner handler's 'voice:join' bucket was touched, so a
+    // prober could spend that bucket on random ids — which then go unanswered —
+    // and tell a real secure channel apart by the fact that it still replies.
+    const { socket, handlers } = createMockSocket('probe-4', 'sock-probe-4');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({ serverId: 's1', type: 'voice', secure: true } as any);
+    vi.mocked(hasChannelPermission).mockResolvedValueOnce(false);
+
+    await handlers.get('voice:join')!('sec-hidden');
+
+    expect(vi.mocked(socketRateLimit)).toHaveBeenCalledWith(socket, 'voice:join', 10);
+  });
+
+  it('claims no channel ownership for a secure, a nonexistent, or a text-channel id', async () => {
+    // Claiming writes voice:channel:node:{id}, and for a remote-owned channel
+    // it force-leaves whatever call the caller was in — a side effect a prober
+    // can feel. All three non-joinable answers must leave cluster state alone.
+    for (const [label, row] of [
+      ['secure', { serverId: 's1', type: 'voice', secure: true }],
+      ['nonexistent', null],
+      ['text channel', { serverId: 's1', type: 'text', secure: false }],
+    ] as const) {
+      vi.clearAllMocks();
+      const { socket, handlers } = createMockSocket(`probe-${label}`, `sock-${label}`);
+      handleVoiceEvents(createMockIO() as any, socket as any);
+      vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce(row as any);
+      vi.mocked(hasChannelPermission).mockResolvedValueOnce(false);
+
+      await handlers.get('voice:join')!('probe-id');
+
+      expect(socket.emit, label).toHaveBeenCalledWith('voice:error', NOT_FOUND);
+      expect(mockRelay.resolveOrClaimChannelOwner, label).not.toHaveBeenCalled();
+    }
+  });
+
   it('keeps the informative messages for NON-secure voice channels', async () => {
     const { socket, handlers } = createMockSocket('probe-3', 'sock-probe-3');
     handleVoiceEvents(createMockIO() as any, socket as any);
