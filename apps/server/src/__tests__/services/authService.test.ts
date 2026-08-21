@@ -450,6 +450,24 @@ describe('authService — loginUser', () => {
     );
   });
 
+  it('matches IP bans on the SAME canonical address every other control uses', async () => {
+    // loginUser carried the last private copy of the `::ffff:` strip:
+    // case-sensitive, blind to zone ids and to the hex IPv4-mapped form. An
+    // `::FFFF:` client reached ipBan as an IPv6 string no ban row is written
+    // as, so the ban silently stopped applying — and nothing on the happy path
+    // notices a keyed control that fails open.
+    const bcrypt = await import('bcryptjs');
+    const hash = await bcrypt.hash('ValidPass123', 4);
+
+    for (const raw of ['::ffff:203.0.113.7', '::FFFF:203.0.113.7', '203.0.113.7']) {
+      vi.mocked(prisma.ipBan.findUnique).mockResolvedValueOnce(null);
+      vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ ...mockUser, password: hash } as any);
+      await loginUser('test@example.com', 'ValidPass123', true, raw);
+      expect(prisma.ipBan.findUnique, raw).toHaveBeenCalledWith({ where: { ip: '203.0.113.7' } });
+      vi.mocked(prisma.ipBan.findUnique).mockClear();
+    }
+  });
+
   it('rejects invalid credentials (wrong password)', async () => {
     const bcrypt = await import('bcryptjs');
     const hash = await bcrypt.hash('ValidPass123', 4);

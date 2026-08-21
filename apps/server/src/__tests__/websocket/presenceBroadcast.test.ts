@@ -133,7 +133,7 @@ vi.mock('jsonwebtoken', () => ({
   },
 }));
 
-import { initSocketServer } from '../../websocket/socketServer';
+import { initSocketServer, getSocketIp } from '../../websocket/socketServer';
 import http from 'http';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -584,5 +584,57 @@ describe('socketServer — voice:channel_users replay on connect', () => {
     expect(replay?.[1].users[0]).not.toHaveProperty('epoch');
 
     httpServer.close();
+  });
+});
+
+// ─── Which address the socket surface believes it is talking to ─────────────
+
+describe('getSocketIp', () => {
+  const handshake = (address: string, xff?: string | string[]) => ({
+    handshake: { address, headers: xff === undefined ? {} : { 'x-forwarded-for': xff } },
+  });
+  let prevEnv: string | undefined;
+
+  beforeEach(() => { prevEnv = process.env.NODE_ENV; });
+  afterEach(() => { process.env.NODE_ENV = prevEnv; });
+
+  it('takes the LAST forwarded hop, the only one a trusted proxy wrote', () => {
+    process.env.NODE_ENV = 'production';
+    // nginx sets `X-Forwarded-For $proxy_add_x_forwarded_for`, i.e.
+    // "$http_x_forwarded_for, $remote_addr" — the client owns everything left
+    // of the last comma. Reading the FIRST entry let a banned client name the
+    // address the IpBan lookup queries, on the one surface that can evict an
+    // already-authenticated session.
+    expect(getSocketIp(handshake('10.0.0.5', '10.0.0.1, 203.0.113.7'))).toBe('203.0.113.7');
+  });
+
+  it('ignores a spoofed single-entry header in favour of the proxy-appended one', () => {
+    process.env.NODE_ENV = 'production';
+    expect(getSocketIp(handshake('10.0.0.5', '198.51.100.99, 203.0.113.7'))).toBe('203.0.113.7');
+  });
+
+  it('agrees with the REST controls about IPv4-mapped and uppercase forms', () => {
+    process.env.NODE_ENV = 'production';
+    // Two keyed controls that disagree about an address fail OPEN
+    expect(getSocketIp(handshake('x', '10.0.0.1, ::ffff:203.0.113.7'))).toBe('203.0.113.7');
+    expect(getSocketIp(handshake('x', '10.0.0.1, ::FFFF:203.0.113.7'))).toBe('203.0.113.7');
+    expect(getSocketIp(handshake('x', '10.0.0.1, 2001:DB8::1'))).toBe('2001:db8::1');
+  });
+
+  it('handles a repeated header, which arrives as an array', () => {
+    process.env.NODE_ENV = 'production';
+    expect(getSocketIp(handshake('10.0.0.5', ['10.0.0.1', '203.0.113.7']))).toBe('203.0.113.7');
+  });
+
+  it('ignores the header entirely outside production, where no proxy is trusted', () => {
+    process.env.NODE_ENV = 'development';
+    expect(getSocketIp(handshake('203.0.113.9', '1.2.3.4'))).toBe('203.0.113.9');
+  });
+
+  it('falls back to the socket address when the header is absent or empty', () => {
+    process.env.NODE_ENV = 'production';
+    expect(getSocketIp(handshake('::ffff:203.0.113.9'))).toBe('203.0.113.9');
+    expect(getSocketIp(handshake('203.0.113.9', '  '))).toBe('203.0.113.9');
+    expect(getSocketIp(handshake(''))).toBeUndefined();
   });
 });

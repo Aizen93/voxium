@@ -21,12 +21,22 @@ let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
  * `trust proxy` setting. In other environments, uses the direct
  * socket address to prevent header spoofing.
  */
-function getSocketIp(socket: { handshake: { address: string; headers: Record<string, string | string[] | undefined> } }): string | undefined {
+export function getSocketIp(socket: { handshake: { address: string; headers: Record<string, string | string[] | undefined> } }): string | undefined {
   if (process.env.NODE_ENV === 'production') {
-    const forwarded = socket.handshake.headers['x-forwarded-for'];
+    const raw = socket.handshake.headers['x-forwarded-for'];
+    // The LAST hop, matching Express's `trust proxy: 1`, because that is the
+    // only entry a trusted proxy wrote. nginx sets
+    // `X-Forwarded-For $proxy_add_x_forwarded_for`, which is
+    // "$http_x_forwarded_for, $remote_addr" — so the FIRST entry is whatever
+    // the client put in the header themselves. Reading it let a banned client
+    // pick the address the IpBan lookup queries, and made the socket surface
+    // disagree with every REST control about who is calling; the socket is the
+    // one surface that can evict an already-authenticated session.
+    const forwarded = Array.isArray(raw) ? raw.join(',') : raw;
     if (typeof forwarded === 'string') {
-      const firstHop = forwarded.split(',')[0].trim();
-      if (firstHop) return normalizeIp(firstHop);
+      const hops = forwarded.split(',');
+      const lastHop = hops[hops.length - 1].trim();
+      if (lastHop) return normalizeIp(lastHop);
     }
   }
   return socket.handshake.address ? normalizeIp(socket.handshake.address) : undefined;

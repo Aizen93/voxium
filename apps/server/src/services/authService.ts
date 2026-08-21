@@ -181,8 +181,12 @@ export async function registerUser(username: string, email: string, password: st
 export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string, trustedDeviceToken?: string) {
   email = email.toLowerCase().trim();
 
-  // Normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 → 1.2.3.4) for consistent ban matching
-  const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+  // The SAME normalization registerUser and every limiter use. This was the
+  // last private copy of the `::ffff:` strip: case-sensitive, blind to zone ids
+  // and to the hex IPv4-mapped form, so `::FFFF:1.2.3.4` reached ipBan as an
+  // IPv6 string that no ban row is ever written as. Two keyed controls that
+  // disagree about an address fail OPEN, and nothing on the happy path notices.
+  const ip = rawIp ? normalizeIp(rawIp) : undefined;
 
   // Check IP ban before anything else
   if (ip) {
