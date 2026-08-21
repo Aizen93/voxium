@@ -77,13 +77,24 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
     case 'ip_ban.create':
       return metadata.reason ? `Reason: ${metadata.reason}` : '';
     case 'storage.cleanup_orphans':
-      return `Found: ${metadata.found}, Deleted: ${metadata.deleted}`;
+      return metadata.skipped
+        ? `Found: ${metadata.found}, SKIPPED (${metadata.skipped})`
+        : `Found: ${metadata.found}, Deleted: ${metadata.deleted}`;
+    case 'registration.hygiene_sweep':
+      // The counts are the whole point of the row: this is the durable record
+      // of a destructive job nobody watches run.
+      return `${metadata.trigger}: ${metadata.deletedUsers} account(s), `
+        + `${metadata.deletedAvatars} avatar(s), ${metadata.deletedIpRecords} IP record(s) `
+        + `in ${metadata.durationMs}ms`;
     case 'feature_flag.update':
       return `${metadata.enabled ? 'Enabled' : 'Disabled'}`;
     default:
       return '';
   }
 }
+
+/** Actions a scheduled job performs with no human actor. */
+const SYSTEM_ACTIONS = new Set<AuditAction>(['registration.hygiene_sweep']);
 
 const ALL_ACTIONS: AuditAction[] = [
   'user.ban', 'user.unban', 'user.delete', 'user.role_change',
@@ -95,6 +106,7 @@ const ALL_ACTIONS: AuditAction[] = [
   'support.claim', 'support.close',
   'ratelimit.update', 'ratelimit.reset', 'ratelimit.clear_user',
   'feature_flag.update', 'feature_flag.reset',
+  'registration.hygiene_sweep',
 ];
 
 export function AdminAuditLog() {
@@ -133,7 +145,16 @@ export function AdminAuditLog() {
     ),
     actor: (
       <span className="text-vox-text-primary font-medium">
-        {log.actorUsername || <span className="text-vox-text-muted italic">Deleted</span>}
+        {log.actorUsername || (
+          // A null actor means one of two very different things. A scheduled
+          // job has no actor by design (the column is nullable precisely so
+          // those stay auditable); an admin-initiated action whose account was
+          // later removed does. Rendering both as "Deleted" told an operator
+          // that a departed colleague ran the nightly sweep.
+          <span className="text-vox-text-muted italic">
+            {SYSTEM_ACTIONS.has(log.action) ? 'System' : 'Deleted'}
+          </span>
+        )}
       </span>
     ),
     target: log.targetType ? (
