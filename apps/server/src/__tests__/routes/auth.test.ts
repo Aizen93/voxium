@@ -119,6 +119,7 @@ vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitRegister: passthroughMiddleware,
   rateLimitRegisterAttempt: passthroughMiddleware,
+  rateLimitRegisterAttemptSubnet: passthroughMiddleware,
   chargeRegistrationBudgets: passthroughMiddleware,
   rateLimitPowChallenge: passthroughMiddleware,
   normalizeIp: (ip: string) => (ip.startsWith('::ffff:') ? ip.slice(7) : ip),

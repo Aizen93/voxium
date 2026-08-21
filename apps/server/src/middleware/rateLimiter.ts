@@ -32,7 +32,8 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // they charged every 400: a user who hit taken-username → taken-email →
   // expired challenge burned 3 of 5 daily points, and 20 throwaway POSTs from
   // any address in a target org's /24 locked that whole range out for a day.
-  // The cheap attempt bucket below is what bounds garbage instead.
+  // The cheap attempt buckets below are what bound garbage instead — one per
+  // address, one per range, neither ever refunded.
   registerDaily:  { keyPrefix: 'rl:regday',   points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per IP)' },
   registerSubnet: { keyPrefix: 'rl:regnet',   points: 20,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per subnet)' },
   // Attempts — successful or not — per IP per day. This is the bucket that
@@ -40,6 +41,21 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // successes. Deliberately cheap and generous: a fumbling real user has
   // plenty of headroom, while a prober gets 30 probes a day per address.
   registerAttempt:{ keyPrefix: 'rl:regatt',   points: 30,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily attempts per IP)' },
+  // The same bound, per RANGE — and the one that actually holds. Per-address is
+  // no bound at all against an attacker who has a /24, or any routed IPv6 /64:
+  // 254 x 30 is 7,620 confirmed probes a day, and v6 rotation is free. Since a
+  // 409 on a random username means the EMAIL exists, registration is an
+  // account-existence oracle, and before the daily budgets started refunding
+  // failures it was capped at 20 probes per /24 per day.
+  //
+  // 300 rather than 20: this must never re-create the availability bug the
+  // refund fixed. A NAT'd office shares one or two addresses, so `registerAttempt`
+  // binds there long before this does, and 300 signup ATTEMPTS a day out of one
+  // /24 or /48 is already far past organic. It is a `rl:` bucket like the rest,
+  // so the admin rate-limit API can raise it for a genuinely large shared range
+  // without a deploy.
+  registerAttemptSubnet:
+                  { keyPrefix: 'rl:regattnet', points: 300, duration: 86400, blockDuration: 0, keyType: 'ip',    label: 'Register (daily attempts per subnet)' },
   // Challenge minting is stateless (HMAC) so it is cheap to serve, but a
   // limit keeps a hostile client from turning the endpoint into a hash-mint
   // treadmill. Generous: a legit flow needs exactly one per registration.
@@ -431,7 +447,9 @@ const bySubnet = (req: Request) => subnetOf(req.ip || req.socket.remoteAddress |
  * NAT. (A challenge minted in the brief window between a failing attempt's
  * charge and its refund still sees it — self-correcting, and erring toward
  * more work is the safe direction.) Enumeration is bounded by
- * `registerAttempt` instead, which costs nobody any CPU.
+ * `registerAttempt` / `registerAttemptSubnet` instead, which cost nobody any
+ * CPU — and it takes BOTH: per-address alone is not a bound against anyone who
+ * can rotate inside a /24 or a /48.
  */
 export async function getSubnetRegistrationPressure(req: Request): Promise<number> {
   try {
@@ -501,6 +519,7 @@ export function domainRegistrationCap(): number {
 export const rateLimitLogin = createMiddleware('login', byIp);
 export const rateLimitRegister = createMiddleware('register', byIp);
 export const rateLimitRegisterAttempt = createMiddleware('registerAttempt', byIp);
+export const rateLimitRegisterAttemptSubnet = createMiddleware('registerAttemptSubnet', bySubnet);
 export const rateLimitPowChallenge = createMiddleware('powChallenge', byIp);
 export const rateLimitForgotPassword = createMiddleware('forgotPassword', byIp);
 export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);

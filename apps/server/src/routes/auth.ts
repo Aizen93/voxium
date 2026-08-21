@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterAttempt, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
@@ -31,8 +31,11 @@ authRouter.get('/register-challenge', rateLimitPowChallenge, async (req: Request
 // request actually creates an account — a failed attempt must not spend a real
 // user's or a whole /24's signup budget, but a read-then-charge-later split
 // would let a concurrent burst walk straight through the cap.
-// `registerAttempt` is the never-refunded bucket that bounds enumeration.
-authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, chargeRegistrationBudgets, async (req: Request, res: Response, next: NextFunction) => {
+// `registerAttempt` (per address) and `registerAttemptSubnet` (per /24, per
+// /48) are the never-refunded buckets that bound enumeration. Both are needed:
+// a 409 on a random username means the email exists, and an attacker who can
+// rotate addresses inside one range pays the per-address cap 254 times over.
+authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (!isFeatureEnabled('registration')) {
       res.status(403).json({ success: false, error: 'Registration is currently disabled' });

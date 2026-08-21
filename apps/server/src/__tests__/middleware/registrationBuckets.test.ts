@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Request, Response } from 'express';
 
 // Drive the real limiter logic against an in-memory store: RateLimiterMemory
@@ -16,6 +18,8 @@ vi.mock('../../utils/redis', () => ({
 
 import {
   chargeRegistrationBudgets,
+  rateLimitRegisterAttempt,
+  rateLimitRegisterAttemptSubnet,
   getSubnetRegistrationPressure,
   consumeMailCap,
   getAllRateLimits,
@@ -23,6 +27,8 @@ import {
 
 const DAILY_CAP = getAllRateLimits().find((l) => l.name === 'registerDaily')!.points;
 const SUBNET_CAP = getAllRateLimits().find((l) => l.name === 'registerSubnet')!.points;
+const ATTEMPT_CAP = getAllRateLimits().find((l) => l.name === 'registerAttempt')!.points;
+const ATTEMPT_SUBNET_CAP = getAllRateLimits().find((l) => l.name === 'registerAttemptSubnet')!.points;
 
 function reqFor(ip: string): Request {
   return { ip, socket: { remoteAddress: ip } } as unknown as Request;
@@ -158,6 +164,89 @@ describe('registration daily/subnet budgets', () => {
     await attempt(ip, 201);
 
     expect(await getSubnetRegistrationPressure(reqFor(ip))).toBe(2);
+  });
+});
+
+// Since the daily budgets refund every failure, they no longer bound a prober:
+// a 409 on a random username means the EMAIL exists, so registration is an
+// account-existence oracle and something has to charge failed attempts. These
+// two buckets are that something, and neither is ever refunded.
+describe('never-refunded registration attempt buckets', () => {
+  /** The attempt chain as mounted on POST /register: per address, then per range. */
+  async function attemptChain(ip: string) {
+    const spy = resSpy();
+    let passed = 0;
+    const next = () => { passed++; };
+    await rateLimitRegisterAttempt(reqFor(ip), spy.res, next as never);
+    if (passed === 1) await rateLimitRegisterAttemptSubnet(reqFor(ip), spy.res, next as never);
+    return { ...spy, allowed: passed === 2 };
+  }
+
+  it('charges a FAILED attempt and never gives it back', async () => {
+    const ip = '198.51.100.40';
+    // Every one of these ends 409 — the daily budgets refund them, these do not
+    for (let i = 0; i < ATTEMPT_CAP; i++) {
+      expect((await attemptChain(ip)).allowed).toBe(true);
+    }
+
+    const blocked = await attemptChain(ip);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.json).toHaveBeenCalledWith({
+      success: false,
+      error: 'Too many requests. Please try again later.',
+    });
+    expect(blocked.res.set).toHaveBeenCalledWith('Retry-After', expect.any(String));
+  });
+
+  it('bounds probing per RANGE, so rotating addresses inside a /24 buys nothing', async () => {
+    // The whole point: per-address alone is not a bound. 254 addresses x the
+    // per-address cap is thousands of confirmed probes a day out of one /24,
+    // and a routed IPv6 /64 makes rotation free.
+    const addressesNeeded = Math.ceil(ATTEMPT_SUBNET_CAP / ATTEMPT_CAP);
+    let spent = 0;
+    for (let host = 1; host <= addressesNeeded && spent < ATTEMPT_SUBNET_CAP; host++) {
+      for (let i = 0; i < ATTEMPT_CAP && spent < ATTEMPT_SUBNET_CAP; i++, spent++) {
+        expect((await attemptChain(`203.0.60.${host}`)).allowed).toBe(true);
+      }
+    }
+
+    // A previously untouched address in the same /24 is refused on the range
+    expect((await attemptChain('203.0.60.200')).allowed).toBe(false);
+    // ...while a different /24 is unaffected
+    expect((await attemptChain('203.0.61.1')).allowed).toBe(true);
+  });
+
+  it('groups IPv6 by /48, the allocation an attacker actually rotates inside', async () => {
+    const addressesNeeded = Math.ceil(ATTEMPT_SUBNET_CAP / ATTEMPT_CAP);
+    let spent = 0;
+    for (let host = 1; host <= addressesNeeded && spent < ATTEMPT_SUBNET_CAP; host++) {
+      for (let i = 0; i < ATTEMPT_CAP && spent < ATTEMPT_SUBNET_CAP; i++, spent++) {
+        await attemptChain(`2001:db8:41:${host}::1`);
+      }
+    }
+
+    expect((await attemptChain('2001:db8:41:ffff::9')).allowed).toBe(false); // same /48
+    expect((await attemptChain('2001:db8:42::1')).allowed).toBe(true);       // a different one
+  });
+
+  it('is actually MOUNTED on POST /register', () => {
+    // auth.test.ts stubs every limiter to a passthrough, so nothing in the
+    // route suite would notice either of these being dropped from the chain —
+    // and they are the only thing charging a failed attempt now.
+    const source = readFileSync(resolve(__dirname, '../../routes/auth.ts'), 'utf8');
+    const chain = /authRouter\.post\(\s*'\/register',([^)]*?)async/s.exec(source)?.[1] ?? '';
+    expect(chain).toContain('rateLimitRegisterAttempt,');
+    expect(chain).toContain('rateLimitRegisterAttemptSubnet,');
+  });
+
+  it('lives under rl:, so the e2e fixture, clearUserRateLimits and the admin API all reach it', async () => {
+    // A bare counter here would survive the per-test sweep and kill CI on the
+    // sixth spec that registers, and no operator could raise it in an incident.
+    for (const name of ['registerAttempt', 'registerAttemptSubnet']) {
+      const def = getAllRateLimits().find((l) => l.name === name);
+      expect(def, `${name} must be registered in DEFAULTS`).toBeDefined();
+      expect(def!.keyPrefix).toMatch(/^rl:/);
+    }
   });
 });
 
