@@ -13,9 +13,10 @@
 //     deleted. IPs are personal data (GDPR/CNIL): we keep them exactly as
 //     long as they are useful for abuse attribution and not a day longer.
 import { prisma } from './prisma';
-import { getRedis } from './redis';
+import { getRedis, NODE_ID } from './redis';
 import { deleteMultipleFromS3 } from './s3';
 import { sendAdminAlert, describeEmailError } from './email';
+import { logAuditEvent } from './auditLog';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let spikeIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -25,6 +26,37 @@ const SWEEP_HOUR = 4;
 const SWEEP_MINUTE = 30;
 export const UNVERIFIED_ACCOUNT_TTL_DAYS = 7;
 export const IP_RETENTION_DAYS = 180;
+
+/** Only one node sweeps. Both would otherwise run the identical `deleteMany`
+ *  at 04:30: harmless (the loser matches zero rows) but it makes the loser's
+ *  count disagree with its own select, which trips the avatar-safety check and
+ *  logs a misleading "spared by the delete guards" warning every night. Same
+ *  `SET NX EX` idiom as the spike alert below. */
+const HYGIENE_LOCK_KEY = 'lock:reghygiene';
+const HYGIENE_LOCK_TTL_SECONDS = 900;
+/** Operator-visible run history. Redis, not the DB: it is diagnostics, and a
+ *  flush costs nothing (the durable record is the audit-log row). */
+const HYGIENE_LAST_RUN_KEY = 'hygiene:last-run';
+const HYGIENE_HISTORY_KEY = 'hygiene:history';
+const HYGIENE_HISTORY_MAX = 20;
+
+export interface HygieneResult {
+  deletedUsers: number;
+  deletedIpRecords: number;
+  /** Avatar objects handed to S3. Zero when the guard counts disagreed. */
+  deletedAvatars: number;
+  /** True ⇒ nothing was deleted; the counts are what WOULD have gone. */
+  dryRun: boolean;
+}
+
+export interface HygieneRun extends HygieneResult {
+  at: string;
+  durationMs: number;
+  trigger: 'scheduled' | 'manual';
+  /** null for the scheduled run — no human asked for it. */
+  actorId: string | null;
+  nodeId: string;
+}
 /** Registrations in one hour that trip the operator alert. A healthy young
  *  platform sees a handful; a bot wave is unmistakable at this level. */
 export const REGISTRATION_SPIKE_PER_HOUR = 30;
@@ -68,14 +100,19 @@ function scheduleNext() {
   const delay = msUntilNextSweep();
   console.log(`[RegHygiene] Next sweep in ${Math.round(delay / 60000)} minutes`);
   timeoutId = setTimeout(() => {
-    runRegistrationHygiene()
+    runRegistrationHygieneLocked({ trigger: 'scheduled' })
       .catch((err) => console.error('[RegHygiene] Sweep failed:', err))
       .finally(scheduleNext);
   }, delay);
 }
 
-/** Exported for tests and for a manual admin trigger. */
-export async function runRegistrationHygiene(): Promise<{ deletedUsers: number; deletedIpRecords: number }> {
+/**
+ * The sweep itself. Exported for tests and for the admin trigger, but callers
+ * that actually delete should go through `runRegistrationHygieneLocked` so the
+ * cluster lock and the run record apply.
+ */
+export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): Promise<HygieneResult> {
+  const dryRun = opts.dryRun === true;
   const userCutoff = new Date(Date.now() - UNVERIFIED_ACCOUNT_TTL_DAYS * 24 * 60 * 60 * 1000);
   const ipCutoff = new Date(Date.now() - IP_RETENTION_DAYS * 24 * 60 * 60 * 1000);
 
@@ -101,17 +138,19 @@ export async function runRegistrationHygiene(): Promise<{ deletedUsers: number; 
   // The guards are REPEATED on the delete, not just on the select above: a
   // user who verifies their email between the two statements must survive, and
   // only Postgres can decide that atomically.
-  const { count: deletedUsers } = staleUnverified.length > 0
-    ? await prisma.user.deleteMany({
-        where: {
-          id: { in: staleUnverified.map((u) => u.id) },
-          emailVerified: false,
-          createdAt: { lt: userCutoff },
-          role: 'user',
-          ownedServers: { none: {} },
-        },
-      })
-    : { count: 0 };
+  const { count: deletedUsers } = dryRun
+    ? { count: staleUnverified.length }
+    : staleUnverified.length > 0
+      ? await prisma.user.deleteMany({
+          where: {
+            id: { in: staleUnverified.map((u) => u.id) },
+            emailVerified: false,
+            createdAt: { lt: userCutoff },
+            role: 'user',
+            ownedServers: { none: {} },
+          },
+        })
+      : { count: 0 };
 
   // AFTER the rows are gone: a failed delete must not strand a live avatar.
   // If the counts disagree, someone in the batch was spared by the guards and
@@ -119,22 +158,131 @@ export async function runRegistrationHygiene(): Promise<{ deletedUsers: number; 
   // reclaim them in a week. Losing a live user's avatar is much worse than
   // holding a few dead blobs a little longer.
   const avatarKeys = staleUnverified.map((u) => u.avatarUrl).filter((k): k is string => !!k);
+  let deletedAvatars = 0;
   if (avatarKeys.length > 0 && deletedUsers === staleUnverified.length) {
-    await deleteMultipleFromS3(avatarKeys).catch((err) =>
-      console.warn('[RegHygiene] Avatar cleanup failed (the orphan sweep will reclaim them):', err instanceof Error ? err.message : err));
+    deletedAvatars = avatarKeys.length;
+    if (!dryRun) {
+      await deleteMultipleFromS3(avatarKeys).catch((err) =>
+        console.warn('[RegHygiene] Avatar cleanup failed (the orphan sweep will reclaim them):', err instanceof Error ? err.message : err));
+    }
   } else if (avatarKeys.length > 0) {
     console.warn(`[RegHygiene] ${staleUnverified.length - deletedUsers} account(s) were spared by the delete guards — leaving their avatars to the orphan sweep`);
   }
 
-  const { count: deletedIpRecords } = await prisma.ipRecord.deleteMany({
-    where: { lastSeenAt: { lt: ipCutoff } },
-  });
+  const { count: deletedIpRecords } = dryRun
+    ? { count: await prisma.ipRecord.count({ where: { lastSeenAt: { lt: ipCutoff } } }) }
+    : await prisma.ipRecord.deleteMany({ where: { lastSeenAt: { lt: ipCutoff } } });
 
-  if (deletedUsers > 0 || deletedIpRecords > 0) {
-    console.log(`[RegHygiene] Deleted ${deletedUsers} unverified account(s) older than ${UNVERIFIED_ACCOUNT_TTL_DAYS}d and ${deletedIpRecords} IP record(s) unseen for ${IP_RETENTION_DAYS}d`);
+  return { deletedUsers, deletedIpRecords, deletedAvatars, dryRun };
+}
+
+/**
+ * The sweep, with the cluster lock and the run record around it. This is what
+ * the scheduler and the admin trigger both call.
+ *
+ * A dry run takes no lock and records nothing: it deletes nothing, so there is
+ * no concurrency to guard and no history worth keeping.
+ */
+export async function runRegistrationHygieneLocked(
+  opts: { trigger: 'scheduled' | 'manual'; actorId?: string | null; dryRun?: boolean },
+): Promise<HygieneRun | { skipped: 'locked' }> {
+  const startedAt = Date.now();
+  const base = {
+    at: new Date(startedAt).toISOString(),
+    trigger: opts.trigger,
+    actorId: opts.actorId ?? null,
+    nodeId: NODE_ID(),
+  };
+
+  if (opts.dryRun) {
+    const result = await runRegistrationHygiene({ dryRun: true });
+    const run: HygieneRun = { ...base, ...result, durationMs: Date.now() - startedAt };
+    console.log(`[RegHygiene] Dry run in ${run.durationMs}ms — WOULD delete ${result.deletedUsers} unverified account(s), ${result.deletedAvatars} avatar(s), ${result.deletedIpRecords} IP record(s)`);
+    return run;
   }
 
-  return { deletedUsers, deletedIpRecords };
+  let claimed: string | null;
+  try {
+    claimed = await getRedis().set(HYGIENE_LOCK_KEY, NODE_ID(), { NX: true, EX: HYGIENE_LOCK_TTL_SECONDS });
+  } catch (err) {
+    // Fail CLOSED. Skipping a night costs nothing — the accounts are still
+    // there tomorrow — whereas racing a peer produces the confusing
+    // guard-mismatch warning this lock exists to prevent.
+    console.warn('[RegHygiene] Could not claim the sweep lock — skipping this run:', err instanceof Error ? err.message : err);
+    return { skipped: 'locked' };
+  }
+  if (claimed === null) {
+    console.log('[RegHygiene] Another node holds the sweep lock — skipping this run');
+    return { skipped: 'locked' };
+  }
+
+  try {
+    const result = await runRegistrationHygiene();
+    const run: HygieneRun = { ...base, ...result, durationMs: Date.now() - startedAt };
+
+    // Unconditional: "it ran and found nothing" is the answer an operator most
+    // often needs, and the old log only spoke when it deleted something.
+    console.log(`[RegHygiene] Sweep complete in ${run.durationMs}ms — deleted ${result.deletedUsers} unverified account(s) older than ${UNVERIFIED_ACCOUNT_TTL_DAYS}d, ${result.deletedAvatars} avatar(s), ${result.deletedIpRecords} IP record(s) unseen for ${IP_RETENTION_DAYS}d`);
+
+    await recordHygieneRun(run);
+    // Durable trail, unlike the Redis history: survives a flush and shows up in
+    // the admin audit log next to every other destructive action.
+    logAuditEvent({
+      actorId: run.actorId,
+      action: 'registration.hygiene_sweep',
+      targetType: 'registration',
+      metadata: {
+        trigger: run.trigger,
+        nodeId: run.nodeId,
+        deletedUsers: run.deletedUsers,
+        deletedAvatars: run.deletedAvatars,
+        deletedIpRecords: run.deletedIpRecords,
+        durationMs: run.durationMs,
+      },
+    });
+    return run;
+  } finally {
+    await getRedis().del(HYGIENE_LOCK_KEY).catch((err) =>
+      console.warn('[RegHygiene] Lock release failed (it expires on its own):', err instanceof Error ? err.message : err));
+  }
+}
+
+/** Best-effort: a failed write must never fail the sweep that already ran. */
+async function recordHygieneRun(run: HygieneRun): Promise<void> {
+  try {
+    const redis = getRedis();
+    const json = JSON.stringify(run);
+    await redis.set(HYGIENE_LAST_RUN_KEY, json);
+    await redis.lPush(HYGIENE_HISTORY_KEY, json);
+    await redis.lTrim(HYGIENE_HISTORY_KEY, 0, HYGIENE_HISTORY_MAX - 1);
+  } catch (err) {
+    console.warn('[RegHygiene] Could not record the run:', err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * When the sweep last ran and what it took, newest first. `lastRun` is null
+ * when it has never run on this deployment — which is itself the answer to
+ * "is this thing actually working?", and was previously unanswerable.
+ */
+export async function getHygieneHistory(): Promise<{ lastRun: HygieneRun | null; history: HygieneRun[] }> {
+  try {
+    const redis = getRedis();
+    const [lastRaw, historyRaw] = await Promise.all([
+      redis.get(HYGIENE_LAST_RUN_KEY),
+      redis.lRange(HYGIENE_HISTORY_KEY, 0, HYGIENE_HISTORY_MAX - 1),
+    ]);
+    const parse = (raw: string): HygieneRun | null => {
+      try { return JSON.parse(raw) as HygieneRun; } catch { return null; }
+    };
+    return {
+      lastRun: lastRaw ? parse(lastRaw) : null,
+      history: (historyRaw ?? []).map(parse).filter((r): r is HygieneRun => r !== null),
+    };
+  } catch (err) {
+    console.warn('[RegHygiene] Could not read the run history:', err instanceof Error ? err.message : err);
+    return { lastRun: null, history: [] };
+  }
 }
 
 /**

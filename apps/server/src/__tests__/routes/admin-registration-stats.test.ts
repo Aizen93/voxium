@@ -81,6 +81,16 @@ vi.mock('../../utils/s3', () => ({
   deleteFromS3: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('../../utils/auditLog', () => ({ logAuditEvent: vi.fn() }));
+
+const { hygieneRun, hygieneHistory } = vi.hoisted(() => ({
+  hygieneRun: vi.fn(),
+  hygieneHistory: vi.fn(),
+}));
+vi.mock('../../utils/registrationHygiene', () => ({
+  runRegistrationHygieneLocked: hygieneRun,
+  getHygieneHistory: hygieneHistory,
+  UNVERIFIED_ACCOUNT_TTL_DAYS: 7,
+}));
 vi.mock('../../utils/featureFlags', () => ({ isFeatureEnabled: vi.fn().mockReturnValue(true) }));
 
 // ─── App ────────────────────────────────────────────────────────────────────
@@ -154,5 +164,102 @@ describe('GET /api/v1/admin/registration-stats', () => {
 
     expect(res.status).toBe(403);
     expect(prismaMock.user.count).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Registration hygiene sweep ─────────────────────────────────────────────
+
+describe('admin registration hygiene sweep', () => {
+  const RUN = {
+    at: '2026-08-21T04:30:00.000Z',
+    durationMs: 412,
+    trigger: 'manual' as const,
+    actorId: 'admin-1',
+    nodeId: 'node-1',
+    deletedUsers: 112,
+    deletedAvatars: 0,
+    deletedIpRecords: 0,
+    dryRun: false,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAdminAuth();
+    hygieneHistory.mockResolvedValue({ lastRun: RUN, history: [RUN] });
+    prismaMock.user.count.mockResolvedValue(112);
+    hygieneRun.mockResolvedValue(RUN);
+  });
+
+  it('GET reports when it last ran and what is queued for the next sweep', async () => {
+    // Before this endpoint the ONLY evidence the job had ever run was a log
+    // line that appeared solely when it deleted something.
+    const res = await request(createApp())
+      .get('/api/v1/admin/registration/hygiene')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({
+      lastRun: { deletedUsers: 112, trigger: 'manual' },
+      pendingDeletions: 112,
+      ttlDays: 7,
+    });
+    expect(res.body.data.history).toHaveLength(1);
+  });
+
+  it('GET says so plainly when the sweep has never run', async () => {
+    hygieneHistory.mockResolvedValue({ lastRun: null, history: [] });
+
+    const res = await request(createApp())
+      .get('/api/v1/admin/registration/hygiene')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.lastRun).toBeNull();
+  });
+
+  it('POST runs the sweep as a MANUAL trigger attributed to the caller', async () => {
+    const res = await request(createApp())
+      .post('/api/v1/admin/registration/hygiene')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(hygieneRun).toHaveBeenCalledWith({ trigger: 'manual', actorId: 'admin-1', dryRun: false });
+    expect(res.body.data.deletedUsers).toBe(112);
+  });
+
+  it('POST ?dryRun=1 asks for a dry run', async () => {
+    hygieneRun.mockResolvedValue({ ...RUN, dryRun: true });
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/registration/hygiene?dryRun=1')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(hygieneRun).toHaveBeenCalledWith({ trigger: 'manual', actorId: 'admin-1', dryRun: true });
+    expect(res.body.data.dryRun).toBe(true);
+  });
+
+  it('POST answers 409 when a sweep already holds the cluster lock', async () => {
+    // Saying "already running" is more use to an operator than a success
+    // response reporting zero deletions.
+    hygieneRun.mockResolvedValue({ skipped: 'locked' });
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/registration/hygiene')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('rejects a non-admin', async () => {
+    mockAdminAuth('user');
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/registration/hygiene')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(403);
+    expect(hygieneRun).not.toHaveBeenCalled();
   });
 });

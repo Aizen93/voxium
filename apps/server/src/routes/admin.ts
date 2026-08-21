@@ -18,6 +18,7 @@ import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroad
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup } from '../utils/orphanCleanup';
+import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
 import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
@@ -48,6 +49,61 @@ async function clearServerRoom(serverId: string): Promise<void> {
 // wave visible — volume over two windows, the unverified backlog, and which
 // registration IPs are pulling the average up. All queries are bounded
 // (counts + a groupBy take:10) per the admin-analytics rules.
+// ─── Registration hygiene sweep ─────────────────────────────────────────────
+// The unverified-account TTL runs itself nightly at 04:30. These two make it
+// observable and operable: before, the only evidence it had ever run was a log
+// line that only appeared when it deleted something, and there was no way to
+// run it on demand.
+
+adminRouter.get('/registration/hygiene', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [{ lastRun, history }, pending] = await Promise.all([
+      getHygieneHistory(),
+      // What the NEXT run would take, so the panel can show the backlog
+      // without an operator having to trigger a dry run to find out.
+      prisma.user.count({
+        where: {
+          emailVerified: false,
+          createdAt: { lt: new Date(Date.now() - UNVERIFIED_ACCOUNT_TTL_DAYS * 24 * 60 * 60 * 1000) },
+          role: 'user',
+          ownedServers: { none: {} },
+        },
+      }),
+    ]);
+    res.json({
+      success: true,
+      data: { lastRun, history, pendingDeletions: pending, ttlDays: UNVERIFIED_ACCOUNT_TTL_DAYS },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// requireAdmin, not superadmin: this cannot delete anything the nightly job
+// would not delete by itself a few hours later. `?dryRun=1` reports without
+// touching a row.
+adminRouter.post('/registration/hygiene', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+    const result = await runRegistrationHygieneLocked({
+      trigger: 'manual',
+      actorId: req.user!.userId,
+      dryRun,
+    });
+
+    if ('skipped' in result) {
+      // A sweep is already running — on this node or a peer. Saying so is more
+      // use than silently reporting zero deletions.
+      res.status(409).json({ success: false, error: 'A hygiene sweep is already running. Try again shortly.' });
+      return;
+    }
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
 adminRouter.get('/registration-stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const hourAgo = new Date(Date.now() - 60 * 60 * 1000);

@@ -156,6 +156,7 @@ apps/server/
 │       ├── email.ts             # Nodemailer transporter + password reset email + cleanup report email
 │       ├── attachmentCleanup.ts # Scheduled job (daily 4 AM) — expires attachments older than retention period, deletes from S3, emails report
 │       ├── orphanCleanup.ts    # Scheduled job (daily 5 AM) — deletes S3 objects nothing references, age-gated (7d) and leader-locked; backstop for delete paths that miss a blob
+│       ├── registrationHygiene.ts # Scheduled job (daily 4:30 AM) — deletes unverified accounts past the 7d TTL + IpRecords past 180d; leader-locked, records each run for the admin panel
 │       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
 │       ├── mentions.ts          # @mention extraction, resolution, batch resolution (server members only)
 │       ├── memberBroadcast.ts   # Server room join + member event broadcast

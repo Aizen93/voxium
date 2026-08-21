@@ -819,6 +819,7 @@ export type AuditAction =
   | 'server.delete'
   | 'ip_ban.create' | 'ip_ban.delete'
   | 'storage.file_delete' | 'storage.cleanup_orphans'
+  | 'registration.hygiene_sweep'
   | 'announcement.create' | 'announcement.publish' | 'announcement.delete'
   | 'report.resolve' | 'report.dismiss'
   | 'support.claim' | 'support.close'
