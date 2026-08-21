@@ -407,11 +407,15 @@ export async function requestPasswordReset(email: string) {
     },
   });
 
-  try {
-    await sendPasswordResetEmail(user.email, rawToken);
-  } catch (err) {
-    console.error('[Auth] Failed to send password reset email:', describeEmailError(err));
-  }
+  // NOT awaited. The unknown-email branch above returns after two in-process
+  // hashes; awaiting an unpooled SMTP transaction here makes the known-email
+  // branch answer hundreds of milliseconds to seconds later — or after a full
+  // connect timeout when the relay is down. Both branches return the identical
+  // body, so the wording defence is complete and the CLOCK walks straight
+  // around it. The send still has to be reported, so it keeps its own catch;
+  // it just no longer sits on the response path.
+  void sendPasswordResetEmail(user.email, rawToken)
+    .catch((err) => console.error('[Auth] Failed to send password reset email:', describeEmailError(err)));
 }
 
 export async function resetPassword(token: string, newPassword: string) {

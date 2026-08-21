@@ -560,6 +560,44 @@ describe('authService — requestPasswordReset', () => {
       expect.objectContaining({ where: { email: 'test@example.com' } }),
     );
   });
+
+  it('does not wait for SMTP, so the clock cannot enumerate accounts', async () => {
+    // The unknown-email branch returns after two in-process hashes. Awaiting an
+    // unpooled SMTP transaction on the known-email branch answers hundreds of
+    // milliseconds later — or after a full connect timeout when the relay is
+    // down — while both return the identical body. The wording defence is
+    // complete and the response TIME walks straight around it.
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    let releaseSmtp: () => void = () => {};
+    vi.mocked(sendPasswordResetEmail).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { releaseSmtp = resolve; }),
+    );
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'test@example.com' } as any);
+    vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
+
+    // Resolves while the transport is still hanging
+    await expect(requestPasswordReset('test@example.com')).resolves.toBeUndefined();
+    expect(sendPasswordResetEmail).toHaveBeenCalled();
+
+    releaseSmtp();
+  });
+
+  it('still logs a send failure, now that nothing awaits it', async () => {
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(new Error('relay refused'));
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'test@example.com' } as any);
+    vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await requestPasswordReset('test@example.com');
+    await new Promise((r) => setImmediate(r)); // let the detached catch run
+
+    expect(error).toHaveBeenCalledWith(
+      '[Auth] Failed to send password reset email:',
+      expect.anything(),
+    );
+    error.mockRestore();
+  });
 });
 
 describe('authService — verifyEmail', () => {
