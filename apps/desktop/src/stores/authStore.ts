@@ -10,7 +10,7 @@ import { processImage } from '../utils/imageProcessing';
 import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
 import type { User } from '@voxium/shared';
-import { PowExpiredError } from '@voxium/shared';
+import { PowExpiredError, PowAbortedError } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../services/powSolver';
 
 interface AuthState {
@@ -18,6 +18,14 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   isSubmitting: boolean;
+  /** Registration only, deliberately NOT `isSubmitting`.
+   *
+   *  Before the proof-of-work moved into a worker the solve froze the main
+   *  thread, so nobody could leave the register view mid-solve. Now they can —
+   *  and a store-wide submitting flag then disables the SIGN IN button on the
+   *  login page for the tens of seconds the abandoned solve keeps running,
+   *  reading "Signing in…" with Enter inert and no explanation. */
+  isRegistering: boolean;
   error: string | null;
   /** Anti-bot proof-of-work progress in [0, 1] while registering, else null.
    *  The solve can run for tens of seconds on a slow device under subnet
@@ -33,6 +41,10 @@ interface AuthState {
   verifyTOTP: (code: string) => Promise<void>;
   cancelTOTP: () => void;
   register: (username: string, email: string, password: string) => Promise<void>;
+  /** Abandon an in-flight registration: stop the solve and clear its state.
+   *  Without it the abandoned solve finishes, POSTs, and signs the user into
+   *  the account they walked away from. */
+  cancelRegistration: () => void;
   logout: () => void;
   checkAuth: () => Promise<void>;
   clearError: () => void;
@@ -55,11 +67,12 @@ interface AuthState {
  * Exactly one retry — an unbounded loop on a device too slow for the issued
  * difficulty would grind forever instead of surfacing the failure.
  */
-async function solveWithRetry(onProgress: (fraction: number) => void) {
+async function solveWithRetry(onProgress: (fraction: number) => void, signal: AbortSignal) {
   for (let attempt = 0; ; attempt++) {
+    if (signal.aborted) throw new PowAbortedError();
     const { data: challengeRes } = await api.get('/auth/register-challenge');
     try {
-      return await solveRegistrationPowOffThread(challengeRes.data, onProgress);
+      return await solveRegistrationPowOffThread(challengeRes.data, onProgress, signal);
     } catch (err) {
       if (attempt >= 1 || !(err instanceof PowExpiredError)) throw err;
       console.warn('[PoW] Challenge expired mid-solve — retrying with a fresh one');
@@ -68,11 +81,17 @@ async function solveWithRetry(onProgress: (fraction: number) => void) {
   }
 }
 
+/** The in-flight registration's abort handle. Module scope, not store state:
+ *  it is a live object, never rendered, and must not be part of the reset
+ *  snapshot `resetAccountStores` captures. */
+let registrationAbort: AbortController | null = null;
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   isAuthenticated: false,
   isLoading: true,
   isSubmitting: false,
+  isRegistering: false,
   error: null,
   powProgress: null,
   totpRequired: false,
@@ -135,17 +154,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   register: async (username, email, password) => {
-    set({ isSubmitting: true, error: null, powProgress: 0 });
+    registrationAbort?.abort();
+    const controller = new AbortController();
+    registrationAbort = controller;
+    set({ isRegistering: true, error: null, powProgress: 0 });
     try {
       // Anti-bot proof-of-work: fetch a challenge and burn CPU solving it. No
       // captcha, no third-party service, nothing leaves our infrastructure.
       // Solved in a worker so the page stays interactive, with progress shown
       // — under subnet pressure this is tens of seconds, not a blink.
-      const pow = await solveWithRetry((fraction) => set({ powProgress: fraction }));
+      const pow = await solveWithRetry((fraction) => set({ powProgress: fraction }), controller.signal);
+      if (controller.signal.aborted) throw new PowAbortedError();
 
       const { data } = await api.post('/auth/register', { username, email, password, pow });
       const { user, accessToken, refreshToken } = data.data;
 
+      // The account now EXISTS, so there is nothing left to abandon: finish the
+      // sign-in even if the view was left in the meantime, rather than stranding
+      // someone with credentials they were never told about.
       setTokens(accessToken, refreshToken, true);
 
       // Don't connect socket until email is verified
@@ -153,15 +179,26 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         connectSocket(accessToken);
       }
 
-      set({ user, isAuthenticated: true, isSubmitting: false, powProgress: null });
+      set({ user, isAuthenticated: true, isRegistering: false, powProgress: null });
     } catch (err) {
+      // An abandoned solve is not a failure to report — the view is gone and
+      // `cancelRegistration` already cleared the flags.
+      if (err instanceof PowAbortedError) throw err;
       set({
         error: getTranslatedError(err, i18n.t, 'auth.register.registrationFailed'),
-        isSubmitting: false,
+        isRegistering: false,
         powProgress: null,
       });
       throw err;
+    } finally {
+      if (registrationAbort === controller) registrationAbort = null;
     }
+  },
+
+  cancelRegistration: () => {
+    registrationAbort?.abort();
+    registrationAbort = null;
+    set({ isRegistering: false, powProgress: null });
   },
 
   logout: () => {

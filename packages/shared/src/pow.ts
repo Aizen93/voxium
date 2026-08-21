@@ -73,11 +73,23 @@ export interface PowSolveOptions {
   onProgress?: (attempts: number, expected: number) => void;
   /** Attempts between progress callbacks. Ignored without `onProgress`. */
   batchSize?: number;
+  /** Abort an in-flight solve. Checked at the same cadence as the deadline, so
+   *  a caller that walks away (the register view unmounting, say) stops paying
+   *  for a solution nobody is waiting for — on the in-thread path this loop is
+   *  the main thread. */
+  signal?: AbortSignal;
 }
 
 /** Thrown when the challenge's own deadline passes mid-solve — the solution
  *  would be rejected by `verifyRegistrationPow` anyway, so grinding on is pure
  *  waste. Callers should fetch a fresh challenge and retry. */
+export class PowAbortedError extends Error {
+  constructor() {
+    super('Registration proof-of-work was aborted');
+    this.name = 'PowAbortedError';
+  }
+}
+
 export class PowExpiredError extends Error {
   constructor() {
     super('Registration challenge expired before it was solved');
@@ -135,10 +147,12 @@ export async function solveRegistrationPow(
     if (leadingZeroBits(digest) >= challenge.difficulty) {
       return { ...challenge, nonce: String(nonce) };
     }
-    // Bail once the window has elapsed instead of grinding for minutes on a
-    // solution the server will reject — the caller can refetch and restart.
-    if (nonce > 0 && nonce % DEADLINE_CHECK_EVERY === 0 && Date.now() - startedAt >= budgetMs) {
-      throw new PowExpiredError();
+    if (nonce > 0 && nonce % DEADLINE_CHECK_EVERY === 0) {
+      // Nobody is waiting for this any more — stop burning the thread.
+      if (options?.signal?.aborted) throw new PowAbortedError();
+      // Bail once the window has elapsed instead of grinding for minutes on a
+      // solution the server will reject — the caller can refetch and restart.
+      if (Date.now() - startedAt >= budgetMs) throw new PowExpiredError();
     }
     if (options?.onProgress && nonce > 0 && nonce % batchSize === 0) {
       options.onProgress(nonce, expected);

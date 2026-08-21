@@ -23,7 +23,7 @@ function getPasswordStrength(pw: string): { level: 'weak' | 'medium' | 'strong';
 
 export function RegisterPage() {
   const { t } = useTranslation();
-  const { register, error, clearError, isSubmitting, powProgress } = useAuthStore();
+  const { register, cancelRegistration, error, clearError, isRegistering, powProgress } = useAuthStore();
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -45,6 +45,13 @@ export function RegisterPage() {
   useEffect(() => {
     return () => clearTimeout(typingTimeoutRef.current);
   }, []);
+
+  // Leaving this view abandons the registration. The proof-of-work solve runs
+  // for tens of seconds under subnet pressure, and since it moved off the main
+  // thread the user can navigate away mid-solve — without this it finishes in
+  // the background, POSTs, and signs them into the account they walked away
+  // from, on top of a worker still burning a core.
+  useEffect(() => cancelRegistration, [cancelRegistration]);
 
   const isWatching = isPasswordFocused && isTypingPassword;
 
@@ -185,10 +192,10 @@ export function RegisterPage() {
             >
               <button
                 type="submit"
-                disabled={isSubmitting}
+                disabled={isRegistering}
                 className="btn-primary w-full py-2.5 transition-all duration-150 active:scale-[0.98] hover:shadow-lg hover:shadow-vox-accent-primary/20"
               >
-                {isSubmitting ? t('auth.register.creatingAccount') : t('auth.register.createAccount')}
+                {isRegistering ? t('auth.register.creatingAccount') : t('auth.register.createAccount')}
               </button>
 
               {/* Anti-bot proof-of-work. Only shown once it is slow enough to

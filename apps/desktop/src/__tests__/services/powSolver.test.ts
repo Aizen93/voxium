@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { PowExpiredError, type PowChallenge } from '@voxium/shared';
+import { PowExpiredError, PowAbortedError, type PowChallenge } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../../services/powSolver';
 
 // The solve itself is exercised against the real shared solver in the server
@@ -76,10 +76,73 @@ describe('powSolver — off-thread registration proof of work', () => {
   });
 
   it('rejects — and does not hang — when the worker dies mid-solve', async () => {
-    const { terminate } = installWorker((_post, fail) => fail('worker crashed'));
+    // It reported progress first, so the worker demonstrably RAN: this is a
+    // crashed renderer or an OOM, and there is nothing to fall back to that
+    // would not just crash again.
+    const { terminate } = installWorker((post, fail) => {
+      post({ op: 'progress', attempts: 512, expected: 1024 });
+      fail('worker crashed');
+    });
 
     await expect(solveRegistrationPowOffThread(CHALLENGE)).rejects.toThrow('worker crashed');
     expect(terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back in-thread when the worker never LOADS, instead of failing registration', async () => {
+    // `new Worker(...)` succeeds and the module fetch then fails — a hashed
+    // chunk missing after a redeploy, a filtering proxy, a content blocker. The
+    // error arrives asynchronously, long after spawnWorker's try/catch could
+    // see it, and rejecting here made registration impossible on that browser
+    // forever even though the identical solver runs fine on the main thread.
+    const { terminate } = installWorker((_post, fail) => fail(''));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const solution = await solveRegistrationPowOffThread(CHALLENGE);
+
+    expect(Number(solution.nonce)).toBeGreaterThanOrEqual(0);
+    expect(solution.challenge).toBe(CHALLENGE.challenge);
+    expect(warn).toHaveBeenCalled();
+    expect(terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts an in-flight worker solve and terminates it', async () => {
+    // Leaving the register view must stop the solve: otherwise it finishes in
+    // the background, POSTs, and signs the user into the account they walked
+    // away from — while a worker keeps burning a core.
+    const { terminate } = installWorker((post) => {
+      post({ op: 'progress', attempts: 1, expected: 1024 });
+      // ...and never solves
+    });
+    const controller = new AbortController();
+
+    const pending = solveRegistrationPowOffThread(CHALLENGE, undefined, controller.signal);
+    controller.abort();
+
+    await expect(pending).rejects.toBeInstanceOf(PowAbortedError);
+    expect(terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses immediately when handed an already-aborted signal', async () => {
+    const { terminate } = installWorker((post) => post({ op: 'solved', solution: { ...CHALLENGE, nonce: '1' } }));
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      solveRegistrationPowOffThread(CHALLENGE, undefined, controller.signal),
+    ).rejects.toBeInstanceOf(PowAbortedError);
+    // Never even spawned — nothing to terminate
+    expect(terminate).not.toHaveBeenCalled();
+  });
+
+  it('honours the signal on the in-thread path too, where the loop IS the main thread', async () => {
+    vi.stubGlobal('Worker', undefined);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      // difficulty 24 would grind for minutes if the signal were ignored
+      solveRegistrationPowOffThread({ ...CHALLENGE, difficulty: 24 }, undefined, controller.signal),
+    ).rejects.toBeInstanceOf(PowAbortedError);
   });
 
   it('still solves in-thread when Worker is unavailable', async () => {
