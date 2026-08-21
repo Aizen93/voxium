@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockPrisma, mockList, mockDeleteMany, mockRedisSet, mockRedisDel } = vi.hoisted(() => ({
+const { mockPrisma, mockList, mockDeleteMany, mockRedisSet, mockRedisDel, mockRedisEval } = vi.hoisted(() => ({
   mockPrisma: {
     user: { findMany: vi.fn().mockResolvedValue([]) },
     server: { findMany: vi.fn().mockResolvedValue([]) },
@@ -10,6 +10,7 @@ const { mockPrisma, mockList, mockDeleteMany, mockRedisSet, mockRedisDel } = vi.
   mockDeleteMany: vi.fn(async (keys: string[]) => keys.length),
   mockRedisSet: vi.fn().mockResolvedValue('OK'),
   mockRedisDel: vi.fn().mockResolvedValue(1),
+  mockRedisEval: vi.fn().mockResolvedValue(1),
 }));
 
 vi.mock('../../utils/prisma', () => ({ prisma: mockPrisma }));
@@ -22,11 +23,11 @@ vi.mock('../../utils/s3', async (importOriginal) => ({
   VALID_ATTACHMENT_KEY_RE: (await importOriginal<typeof import('../../utils/s3')>()).VALID_ATTACHMENT_KEY_RE,
 }));
 vi.mock('../../utils/redis', () => ({
-  getRedis: () => ({ set: mockRedisSet, del: mockRedisDel }),
+  getRedis: () => ({ set: mockRedisSet, del: mockRedisDel, eval: mockRedisEval }),
   NODE_ID: () => 'node-1',
 }));
 
-import { runOrphanCleanup, runScheduledOrphanCleanup, ORPHAN_GRACE_DAYS } from '../../utils/orphanCleanup';
+import { runOrphanCleanup, runScheduledOrphanCleanup, ORPHAN_GRACE_DAYS, ORPHAN_MAX_DELETES_PER_RUN } from '../../utils/orphanCleanup';
 
 const DAY = 24 * 60 * 60 * 1000;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -44,6 +45,42 @@ beforeEach(() => {
   mockDeleteMany.mockImplementation(async (keys: string[]) => keys.length);
   mockRedisSet.mockResolvedValue('OK');
   mockRedisDel.mockResolvedValue(1);
+  mockRedisEval.mockResolvedValue(1);
+});
+
+describe('orphan sweep — blast-radius ceiling', () => {
+  // Everything this job deletes is something the DB said nothing points at, so
+  // `referencedKeys()` is load-bearing in a way nothing else here is. A renamed
+  // column, a query that silently returns fewer rows, an upload kind nobody
+  // added — each turns "delete the orphans" into "delete the bucket", and
+  // neither the age gate nor the shape whitelist helps, because live objects
+  // pass both.
+  it('refuses the whole run rather than deleting an implausible number of objects', async () => {
+    const many = Array.from({ length: ORPHAN_MAX_DELETES_PER_RUN + 1 }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY));
+    mockList.mockResolvedValue(many);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await runOrphanCleanup();
+
+    // Reported, so an operator can see what it found — but nothing deleted
+    expect(result.orphaned).toBe(ORPHAN_MAX_DELETES_PER_RUN + 1);
+    expect(result.deleted).toBe(0);
+    expect(result.skipped).toBe('over-cap');
+    expect(mockDeleteMany).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('REFUSING to delete'));
+
+    error.mockRestore();
+  });
+
+  it('deletes normally right up to the ceiling', async () => {
+    const many = Array.from({ length: ORPHAN_MAX_DELETES_PER_RUN }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY));
+    mockList.mockResolvedValue(many);
+
+    const result = await runOrphanCleanup();
+
+    expect(result.deleted).toBe(ORPHAN_MAX_DELETES_PER_RUN);
+    expect(result.skipped).toBeUndefined();
+  });
 });
 
 describe('orphan sweep — what it deletes', () => {
@@ -202,8 +239,28 @@ describe('orphan sweep — cluster leadership', () => {
     expect(mockRedisSet).toHaveBeenCalledWith('lock:orphan-sweep', 'node-1', { NX: true, EX: 3600 });
     expect(result.deleted).toBe(1);
     // Released rather than left to expire, so a sweep that fails early can be
-    // retried inside the hour instead of being locked out by its own corpse
-    expect(mockRedisDel).toHaveBeenCalledWith('lock:orphan-sweep');
+    // retried inside the hour instead of being locked out by its own corpse —
+    // and released by compare-and-delete, never a blind DEL: a full-bucket scan
+    // can outrun the one-hour TTL, at which point the lock in Redis belongs to
+    // whoever started next.
+    expect(mockRedisDel).not.toHaveBeenCalled();
+    expect(mockRedisEval).toHaveBeenCalledWith(
+      expect.stringContaining("redis.call('get', KEYS[1]) == ARGV[1]"),
+      { keys: ['lock:orphan-sweep'], arguments: ['node-1'] },
+    );
+  });
+
+  it('does NOT release a lock it no longer owns', async () => {
+    // A full-bucket scan can outrun the one-hour TTL. By then Redis holds the
+    // NEXT runner's value, and a blind DEL would hand their lock to a third —
+    // which is the mutual exclusion this lock exists to provide, gone.
+    mockList.mockResolvedValue([]);
+    mockRedisEval.mockResolvedValue(0); // compare-and-delete found someone else's value
+
+    await runScheduledOrphanCleanup();
+
+    expect(mockRedisDel).not.toHaveBeenCalled();
+    expect(mockRedisEval).toHaveBeenCalledTimes(1);
   });
 
   it('does nothing when a peer already holds the lock', async () => {

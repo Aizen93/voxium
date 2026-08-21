@@ -17,7 +17,7 @@ import { getRedis, NODE_ID } from './redis';
 import { deleteMultipleFromS3 } from './s3';
 import { sendAdminAlert, describeEmailError } from './email';
 import { logAuditEvent } from './auditLog';
-import { msUntilDailySlot } from './dailySchedule';
+import { msUntilDailySlot, releaseLockIfOwned } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let spikeIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -151,10 +151,21 @@ export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): P
   const avatarKeys = staleUnverified.map((u) => u.avatarUrl).filter((k): k is string => !!k);
   let deletedAvatars = 0;
   if (avatarKeys.length > 0 && deletedUsers === staleUnverified.length) {
-    deletedAvatars = avatarKeys.length;
-    if (!dryRun) {
-      await deleteMultipleFromS3(avatarKeys).catch((err) =>
-        console.warn('[RegHygiene] Avatar cleanup failed (the orphan sweep will reclaim them):', err instanceof Error ? err.message : err));
+    if (dryRun) {
+      deletedAvatars = avatarKeys.length;
+    } else {
+      // What S3 ACCEPTED, not what we asked it to take. DeleteObjects answers
+      // 200 with a populated Errors[] when the credentials lack
+      // s3:DeleteObject, which is exactly why deleteMultipleFromS3 returns a
+      // count — reporting the candidate count instead would put a clean number
+      // in the durable audit row while nothing moved.
+      deletedAvatars = await deleteMultipleFromS3(avatarKeys).catch((err) => {
+        console.warn('[RegHygiene] Avatar cleanup failed (the orphan sweep will reclaim them):', err instanceof Error ? err.message : err);
+        return 0;
+      });
+      if (deletedAvatars < avatarKeys.length) {
+        console.error(`[RegHygiene] S3 refused ${avatarKeys.length - deletedAvatars} avatar deletion(s) — check the bucket policy / IAM permissions`);
+      }
     }
   } else if (avatarKeys.length > 0) {
     console.warn(`[RegHygiene] ${staleUnverified.length - deletedUsers} account(s) were spared by the delete guards — leaving their avatars to the orphan sweep`);
@@ -192,9 +203,10 @@ export async function runRegistrationHygieneLocked(
     return run;
   }
 
+  const owner = NODE_ID();
   let claimed: string | null;
   try {
-    claimed = await getRedis().set(HYGIENE_LOCK_KEY, NODE_ID(), { NX: true, EX: HYGIENE_LOCK_TTL_SECONDS });
+    claimed = await getRedis().set(HYGIENE_LOCK_KEY, owner, { NX: true, EX: HYGIENE_LOCK_TTL_SECONDS });
   } catch (err) {
     // Fail CLOSED. Skipping a night costs nothing — the accounts are still
     // there tomorrow — whereas racing a peer produces the confusing
@@ -233,7 +245,9 @@ export async function runRegistrationHygieneLocked(
     });
     return run;
   } finally {
-    await getRedis().del(HYGIENE_LOCK_KEY).catch((err) =>
+    // Only if we still own it: a large backlog can outrun the 15-minute TTL,
+    // and a blind DEL would then release a lock another runner now holds.
+    await releaseLockIfOwned(getRedis(), HYGIENE_LOCK_KEY, owner).catch((err) =>
       console.warn('[RegHygiene] Lock release failed (it expires on its own):', err instanceof Error ? err.message : err));
   }
 }

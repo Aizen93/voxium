@@ -7,20 +7,21 @@ vi.mock('../../utils/prisma', () => ({
   },
 }));
 
-const deleteMultipleFromS3 = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const deleteMultipleFromS3 = vi.hoisted(() => vi.fn(async (keys: string[]) => keys.length));
 vi.mock('../../utils/s3', () => ({ deleteMultipleFromS3 }));
 
-const { redisSet, redisDel, redisGet, redisLPush, redisLTrim, redisLRange } = vi.hoisted(() => ({
+const { redisSet, redisDel, redisGet, redisLPush, redisLTrim, redisLRange, redisEval } = vi.hoisted(() => ({
   redisSet: vi.fn(),
   redisDel: vi.fn().mockResolvedValue(1),
   redisGet: vi.fn().mockResolvedValue(null),
   redisLPush: vi.fn().mockResolvedValue(1),
   redisLTrim: vi.fn().mockResolvedValue('OK'),
   redisLRange: vi.fn().mockResolvedValue([]),
+  redisEval: vi.fn().mockResolvedValue(1),
 }));
 vi.mock('../../utils/redis', () => ({
   getRedis: () => ({
-    set: redisSet, del: redisDel, get: redisGet,
+    set: redisSet, del: redisDel, get: redisGet, eval: redisEval,
     lPush: redisLPush, lTrim: redisLTrim, lRange: redisLRange,
   }),
   NODE_ID: () => 'node-under-test',
@@ -48,7 +49,7 @@ describe('registration hygiene sweep', () => {
     ] as never);
     vi.mocked(prisma.user.deleteMany).mockResolvedValue({ count: 3 } as never);
     vi.mocked(prisma.ipRecord.deleteMany).mockResolvedValue({ count: 7 } as never);
-    deleteMultipleFromS3.mockResolvedValue(undefined);
+    deleteMultipleFromS3.mockImplementation(async (keys: string[]) => keys.length);
   });
 
   it('deletes only STALE, UNVERIFIED, plain-role, serverless accounts', async () => {
@@ -140,7 +141,7 @@ describe('registration hygiene sweep — S3 cleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(prisma.ipRecord.deleteMany).mockResolvedValue({ count: 0 } as never);
-    deleteMultipleFromS3.mockResolvedValue(undefined);
+    deleteMultipleFromS3.mockImplementation(async (keys: string[]) => keys.length);
   });
 
   it('deletes the swept accounts\' avatars, after their rows are gone', async () => {
@@ -161,6 +162,35 @@ describe('registration hygiene sweep — S3 cleanup', () => {
     expect(where.role).toBe('user');
     expect(where.ownedServers).toEqual({ none: {} });
     expect(deleteMultipleFromS3).toHaveBeenCalledWith(['avatars/u1.png', 'avatars/u3.png']);
+  });
+
+  it('reports the avatars S3 ACCEPTED, not the ones it was handed', async () => {
+    // DeleteObjects answers 200 with a populated Errors[] when the credentials
+    // lack s3:DeleteObject, which is why deleteMultipleFromS3 returns a count.
+    // Reporting the candidate count instead puts a clean number in the durable
+    // audit row and the operator panel while nothing actually moved.
+    vi.mocked(prisma.user.findMany).mockResolvedValue([
+      { id: 'u-1', avatarUrl: 'avatars/u1.png' },
+      { id: 'u-2', avatarUrl: 'avatars/u2.png' },
+    ] as never);
+    vi.mocked(prisma.user.deleteMany).mockResolvedValue({ count: 2 } as never);
+    deleteMultipleFromS3.mockResolvedValue(0); // S3 refused both
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await runRegistrationHygiene();
+
+    expect(result.deletedAvatars).toBe(0);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('S3 refused 2 avatar deletion'));
+    error.mockRestore();
+  });
+
+  it('reports the full count in a dry run, where nothing is handed to S3 at all', async () => {
+    vi.mocked(prisma.user.findMany).mockResolvedValue([{ id: 'u-1', avatarUrl: 'avatars/u1.png' }] as never);
+
+    const result = await runRegistrationHygiene({ dryRun: true });
+
+    expect(result.deletedAvatars).toBe(1);
+    expect(deleteMultipleFromS3).not.toHaveBeenCalled();
   });
 
   it('does NOT delete blobs when the row delete removed nothing', async () => {
@@ -210,7 +240,7 @@ describe('registration hygiene sweep — locking and observability', () => {
     vi.mocked(prisma.ipRecord.count).mockResolvedValue(7 as never);
     redisSet.mockResolvedValue('OK');
     redisDel.mockResolvedValue(1);
-    deleteMultipleFromS3.mockResolvedValue(undefined);
+    deleteMultipleFromS3.mockImplementation(async (keys: string[]) => keys.length);
   });
 
   it('claims a cluster lock and releases it afterwards', async () => {
@@ -220,7 +250,13 @@ describe('registration hygiene sweep — locking and observability', () => {
     const run = await runRegistrationHygieneLocked({ trigger: 'scheduled' });
 
     expect(redisSet).toHaveBeenCalledWith('lock:reghygiene', 'node-under-test', { NX: true, EX: 900 });
-    expect(redisDel).toHaveBeenCalledWith('lock:reghygiene');
+    expect(redisDel).not.toHaveBeenCalled();
+    // Compare-and-delete, never a blind DEL: a large backlog can outrun the
+    // 15-minute TTL, and by then the lock in Redis belongs to the next runner.
+    expect(redisEval).toHaveBeenCalledWith(
+      expect.stringContaining("redis.call('get', KEYS[1]) == ARGV[1]"),
+      { keys: ['lock:reghygiene'], arguments: ['node-under-test'] },
+    );
     expect(run).toMatchObject({ deletedUsers: 3, trigger: 'scheduled', actorId: null });
   });
 
@@ -249,7 +285,13 @@ describe('registration hygiene sweep — locking and observability', () => {
     vi.mocked(prisma.user.deleteMany).mockRejectedValue(new Error('db gone'));
 
     await expect(runRegistrationHygieneLocked({ trigger: 'scheduled' })).rejects.toThrow('db gone');
-    expect(redisDel).toHaveBeenCalledWith('lock:reghygiene');
+    expect(redisDel).not.toHaveBeenCalled();
+    // Compare-and-delete, never a blind DEL: a large backlog can outrun the
+    // 15-minute TTL, and by then the lock in Redis belongs to the next runner.
+    expect(redisEval).toHaveBeenCalledWith(
+      expect.stringContaining("redis.call('get', KEYS[1]) == ARGV[1]"),
+      { keys: ['lock:reghygiene'], arguments: ['node-under-test'] },
+    );
   });
 
   it('records the run so an operator can see when it last happened', async () => {

@@ -43,3 +43,28 @@ export function msUntilDailySlot(
   }
   return next.getTime() - now.getTime();
 }
+
+/**
+ * Release a `SET NX EX` lock only if this caller still owns it.
+ *
+ * A plain `DEL` in a `finally` releases whatever is there, including a lock a
+ * DIFFERENT node acquired after the TTL expired mid-run — at which point the
+ * mutual exclusion the lock exists for is simply gone, and a third caller can
+ * claim it while the second is still working. Both nightly sweeps write
+ * `NODE_ID()` as the value precisely so ownership can be checked; they just
+ * were not checking it.
+ *
+ * Compare-and-delete in Lua so the read and the delete cannot be interleaved.
+ */
+export async function releaseLockIfOwned(
+  redis: { eval: (script: string, opts: { keys: string[]; arguments: string[] }) => Promise<unknown> },
+  key: string,
+  owner: string,
+): Promise<boolean> {
+  const released = await redis.eval(
+    `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end
+     return 0`,
+    { keys: [key], arguments: [owner] },
+  );
+  return released === 1;
+}

@@ -93,6 +93,15 @@ vi.mock('../../utils/registrationHygiene', () => ({
 }));
 vi.mock('../../utils/featureFlags', () => ({ isFeatureEnabled: vi.fn().mockReturnValue(true) }));
 
+const { orphanRun, orphanScheduled } = vi.hoisted(() => ({
+  orphanRun: vi.fn(),
+  orphanScheduled: vi.fn(),
+}));
+vi.mock('../../utils/orphanCleanup', () => ({
+  runOrphanCleanup: orphanRun,
+  runScheduledOrphanCleanup: orphanScheduled,
+}));
+
 // ─── App ────────────────────────────────────────────────────────────────────
 
 import { adminRouter } from '../../routes/admin';
@@ -261,5 +270,70 @@ describe('admin registration hygiene sweep', () => {
 
     expect(res.status).toBe(403);
     expect(hygieneRun).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Orphan sweep trigger ───────────────────────────────────────────────────
+
+describe('POST /api/v1/admin/storage/cleanup-orphans', () => {
+  const EMPTY = { scanned: 0, orphaned: 0, deleted: 0, tooYoung: 0, foreign: 0 };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orphanRun.mockResolvedValue(EMPTY);
+    orphanScheduled.mockResolvedValue(EMPTY);
+  });
+
+  it('takes the cluster lock for a destructive run, like the nightly one does', async () => {
+    // Two concurrent full-bucket destructive scans, from two different
+    // snapshots, is exactly what the lock exists to prevent — an operator
+    // clicking Run must not be the way around it.
+    mockAdminAuth();
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/storage/cleanup-orphans')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(orphanScheduled).toHaveBeenCalledTimes(1);
+    expect(orphanRun).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 while a sweep is already running', async () => {
+    // More use to an operator than a success response reporting zero deletions
+    // — and a 504 from nginx on a large bucket makes retrying the obvious move.
+    mockAdminAuth();
+    orphanScheduled.mockResolvedValue({ ...EMPTY, skipped: 'not-leader' });
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/storage/cleanup-orphans')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('runs a dry run WITHOUT the lock, since it deletes nothing', async () => {
+    // Looking must never be blocked by a sweep in progress.
+    mockAdminAuth();
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/storage/cleanup-orphans?dryRun=1')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(orphanRun).toHaveBeenCalledWith({ dryRun: true });
+    expect(orphanScheduled).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-admin', async () => {
+    mockAdminAuth('user');
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/storage/cleanup-orphans')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(403);
+    expect(orphanScheduled).not.toHaveBeenCalled();
   });
 });

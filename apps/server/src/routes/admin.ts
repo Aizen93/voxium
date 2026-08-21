@@ -17,7 +17,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
-import { runOrphanCleanup } from '../utils/orphanCleanup';
+import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
 import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
@@ -2195,23 +2195,37 @@ adminRouter.delete('/announcements/:id', async (req: Request<{ id: string }>, re
 });
 
 // Manual trigger for the same sweep the scheduler runs nightly. Deliberately
-// shares runOrphanCleanup rather than reimplementing it: the age gate and the
-// list-before-DB ordering are what stop it deleting an upload whose message
-// has not been sent yet, and an operator-initiated run must not skip them.
+// shares the same functions rather than reimplementing them: the age gate, the
+// list-before-DB ordering and the cluster lock are what stop it deleting an
+// upload whose message has not been sent yet or racing the nightly run, and an
+// operator-initiated sweep must not skip any of them.
 // `?dryRun=1` reports what would go without deleting anything.
 adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
-    const result = await runOrphanCleanup({ dryRun });
+    // A destructive run takes the SAME cluster lock the nightly one does, and
+    // answers 409 rather than starting a second full-bucket scan from a second
+    // snapshot. Without it an operator clicking through nginx's 60s read
+    // timeout adds a concurrent scan per retry, and each run's audit row claims
+    // the full orphan count as its own. Dry runs stay unlocked — they delete
+    // nothing, so there is no concurrency to guard, and an operator must always
+    // be able to look.
+    const result = dryRun
+      ? await runOrphanCleanup({ dryRun: true })
+      : await runScheduledOrphanCleanup();
+    if (result.skipped === 'not-leader') {
+      res.status(409).json({ success: false, error: 'An orphan sweep is already running. Try again once it finishes.' });
+      return;
+    }
 
     logAuditEvent({
       actorId: req.user!.userId,
       action: 'storage.cleanup_orphans',
       targetType: 'storage',
-      metadata: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, dryRun },
+      metadata: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, dryRun, skipped: result.skipped ?? null },
     });
 
-    res.json({ success: true, data: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, notOurs: result.foreign, dryRun } });
+    res.json({ success: true, data: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, notOurs: result.foreign, dryRun, skipped: result.skipped ?? null } });
   } catch (err) {
     next(err);
   }

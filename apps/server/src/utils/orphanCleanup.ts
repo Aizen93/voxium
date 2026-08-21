@@ -24,7 +24,7 @@
 import { prisma } from './prisma';
 import { listAllS3Objects, deleteMultipleFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from './s3';
 import { getRedis, NODE_ID } from './redis';
-import { msUntilDailySlot } from './dailySchedule';
+import { msUntilDailySlot, releaseLockIfOwned } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
@@ -39,6 +39,19 @@ const PAGE_SIZE = 1000;
  *  we want. Same `SET NX EX` idiom as the registration spike alert. */
 const LOCK_KEY = 'lock:orphan-sweep';
 const LOCK_TTL_SECONDS = 3600;
+/**
+ * Blast-radius cap, not a performance knob.
+ *
+ * Every object this job deletes is one the DB said nothing points at. That
+ * makes `referencedKeys()` load-bearing in a way nothing else here is: a schema
+ * change that renames a column, a query that silently returns fewer rows, a new
+ * upload kind nobody added — any of those turn "delete the orphans" into
+ * "delete the bucket", and the age gate and shape whitelist do not help because
+ * live objects pass both. A ceiling turns that from an outage into a very loud
+ * log line and one night's worth of damage. A healthy bucket never comes close;
+ * anything that does is a bug worth stopping for.
+ */
+export const ORPHAN_MAX_DELETES_PER_RUN = 50_000;
 
 export interface OrphanSweepResult {
   scanned: number;
@@ -48,7 +61,9 @@ export interface OrphanSweepResult {
   tooYoung: number;
   /** Unreferenced and old, but not shaped like anything this app writes. */
   foreign: number;
-  skipped?: 'not-leader';
+  /** `not-leader`: a peer holds the sweep lock. `over-cap`: too many candidates
+   *  to be believable, so nothing was deleted — see ORPHAN_MAX_DELETES_PER_RUN. */
+  skipped?: 'not-leader' | 'over-cap';
 }
 
 const EMPTY: OrphanSweepResult = { scanned: 0, orphaned: 0, deleted: 0, tooYoung: 0, foreign: 0 };
@@ -81,9 +96,10 @@ function scheduleNext(afterRun: boolean) {
 
 /** The scheduled entry point: claims the cluster lock, then sweeps. */
 export async function runScheduledOrphanCleanup(): Promise<OrphanSweepResult> {
+  const owner = NODE_ID();
   let claimed: string | null;
   try {
-    claimed = await getRedis().set(LOCK_KEY, NODE_ID(), { NX: true, EX: LOCK_TTL_SECONDS });
+    claimed = await getRedis().set(LOCK_KEY, owner, { NX: true, EX: LOCK_TTL_SECONDS });
   } catch (err) {
     // Fail CLOSED: without the lock we cannot tell whether a peer is already
     // scanning, and a destructive sweep is not worth racing.
@@ -96,8 +112,11 @@ export async function runScheduledOrphanCleanup(): Promise<OrphanSweepResult> {
     return await runOrphanCleanup();
   } finally {
     // Release rather than waiting out the TTL, so a sweep that fails early can
-    // be retried inside the hour instead of being locked out by its own corpse.
-    await getRedis().del(LOCK_KEY).catch((err) =>
+    // be retried inside the hour instead of being locked out by its own corpse
+    // — but only if we STILL own it. A full-bucket scan can outrun a one-hour
+    // TTL, and a blind DEL would then hand the next runner's lock away while it
+    // is mid-scan.
+    await releaseLockIfOwned(getRedis(), LOCK_KEY, owner).catch((err) =>
       console.warn('[OrphanSweep] Lock release failed (it expires on its own):', err instanceof Error ? err.message : err));
   }
 }
@@ -139,8 +158,21 @@ export async function runOrphanCleanup(
     orphanKeys.push(obj.key);
   }
 
+  // Refuse the run rather than trimming it: if this many keys look orphaned,
+  // the likeliest explanation is that the reference query is wrong, and
+  // deleting "only" the first 50k of a bad answer is still deleting live data.
+  // The candidates are still reported, so an operator can see what it found.
+  const overCap = orphanKeys.length > ORPHAN_MAX_DELETES_PER_RUN;
+  if (overCap) {
+    console.error(
+      `[OrphanSweep] REFUSING to delete: ${orphanKeys.length} candidates exceeds the ${ORPHAN_MAX_DELETES_PER_RUN} per-run ceiling. `
+      + 'That many unreferenced objects usually means the reference query is wrong, not that the bucket is that dirty. '
+      + 'Investigate with ?dryRun=1 before raising the cap.',
+    );
+  }
+
   let deleted = 0;
-  if (!opts.dryRun && orphanKeys.length > 0) {
+  if (!opts.dryRun && !overCap && orphanKeys.length > 0) {
     // Batched (1000/call) rather than one DeleteObject per key — a bucket with
     // 10k orphans was 10k sequential round trips inside one HTTP request. The
     // return value is what S3 ACCEPTED: reporting the candidate count instead
@@ -159,10 +191,10 @@ export async function runOrphanCleanup(
   console.log(
     `[OrphanSweep] scanned=${result.scanned} orphaned=${result.orphaned} deleted=${result.deleted} within-grace=${result.tooYoung} not-ours=${result.foreign}${opts.dryRun ? ' (dry run)' : ''}`
   );
-  if (!opts.dryRun && deleted < orphanKeys.length) {
+  if (!opts.dryRun && !overCap && deleted < orphanKeys.length) {
     console.error(`[OrphanSweep] S3 refused ${orphanKeys.length - deleted} deletion(s) — check the bucket policy / IAM permissions`);
   }
-  return result;
+  return overCap ? { ...result, skipped: 'over-cap' } : result;
 }
 
 /**
