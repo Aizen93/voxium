@@ -93,8 +93,23 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
   }
 }
 
-/** Actions a scheduled job performs with no human actor. */
+/** Actions a scheduled job can perform with no human actor. */
 const SYSTEM_ACTIONS = new Set<AuditAction>(['registration.hygiene_sweep']);
+
+/**
+ * Was this null-actor row written by the system rather than by an admin
+ * whose account has since been deleted? The action alone cannot say: the
+ * hygiene sweep is ALSO triggerable by hand, and that row carries the
+ * admin's id — which `AuditLog.actor` nulls out on account deletion. The
+ * row's own `trigger` decides; the action set is only the fallback for rows
+ * written before it was recorded.
+ */
+function isSystemActor(log: { action: AuditAction; metadata: Record<string, unknown> | null }): boolean {
+  if (!SYSTEM_ACTIONS.has(log.action)) return false;
+  const trigger = log.metadata?.trigger;
+  if (trigger === 'manual') return false;
+  return trigger === 'scheduled' || trigger === undefined;
+}
 
 const ALL_ACTIONS: AuditAction[] = [
   'user.ban', 'user.unban', 'user.delete', 'user.role_change',
@@ -150,9 +165,10 @@ export function AdminAuditLog() {
           // job has no actor by design (the column is nullable precisely so
           // those stay auditable); an admin-initiated action whose account was
           // later removed does. Rendering both as "Deleted" told an operator
-          // that a departed colleague ran the nightly sweep.
+          // that a departed colleague ran the nightly sweep — and keying on
+          // the action alone told them the reverse for a manual run.
           <span className="text-vox-text-muted italic">
-            {SYSTEM_ACTIONS.has(log.action) ? 'System' : 'Deleted'}
+            {isSystemActor(log) ? 'System' : 'Deleted'}
           </span>
         )}
       </span>

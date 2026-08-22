@@ -71,11 +71,13 @@ interface Target {
 
 const targets: Target[] = [];
 const h = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
-// registerDaily/registerSubnet/registerAttempt: the long-window anti-bot
-// buckets would cap a 25-user single-IP load test at 5 — they must be raised
-// alongside 'register'. registerAttempt counts every POST regardless of
-// outcome, so a rerun after a partial failure hits it before the others.
-const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerDaily', 'registerSubnet', 'registerDomain', 'admin', 'general'];
+// registerDaily/registerSubnet/registerAttempt/registerAttemptSubnet: the
+// long-window anti-bot buckets would cap a 25-user single-IP load test at 5 —
+// they must be raised alongside 'register'. The two *Attempt buckets count
+// every POST regardless of outcome and are never refunded, so a rerun after a
+// partial failure hits them before the others; registerAttemptSubnet (300/day
+// per /24) is the one a third default run of the day hits from one host.
+const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'admin', 'general'];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

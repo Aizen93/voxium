@@ -6,9 +6,23 @@ import type { Request, Response } from 'express';
 // Drive the real limiter logic against an in-memory store: RateLimiterMemory
 // implements the same consume/reward/get contract, so the charge-then-refund
 // handshake is exercised end to end without Redis.
+// Every consume/reward is also recorded per bucket, so a test can observe a
+// refund DIRECTLY rather than infer it — the only honest way to check that
+// a rejection on one bucket gave back the points already taken on another.
+const limiterCalls = vi.hoisted(() => [] as Array<{ op: 'consume' | 'reward'; prefix: string; key: string }>);
 vi.mock('rate-limiter-flexible', async (importOriginal) => {
   const actual = await importOriginal<typeof import('rate-limiter-flexible')>();
-  return { ...actual, RateLimiterRedis: actual.RateLimiterMemory };
+  class RecordingMemory extends actual.RateLimiterMemory {
+    consume(key: string | number, points?: number, options?: object) {
+      limiterCalls.push({ op: 'consume', prefix: this.keyPrefix, key: String(key) });
+      return super.consume(key, points, options);
+    }
+    reward(key: string | number, points?: number, options?: object) {
+      limiterCalls.push({ op: 'reward', prefix: this.keyPrefix, key: String(key) });
+      return super.reward(key, points, options);
+    }
+  }
+  return { ...actual, RateLimiterRedis: RecordingMemory };
 });
 vi.mock('../../utils/redis', () => ({
   getRedis: vi.fn(() => ({})),
@@ -74,6 +88,7 @@ async function attempt(ip: string, status: number) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  limiterCalls.length = 0;
 });
 
 describe('registration daily/subnet budgets', () => {
@@ -118,11 +133,23 @@ describe('registration daily/subnet budgets', () => {
     }
 
     const victim = '203.0.50.99';
+    limiterCalls.length = 0;
     expect((await charge(victim)).allowed).toBe(false);
     // registerDaily was charged before registerSubnet rejected — if it stayed
     // charged, being caught behind a noisy neighbour would silently cost the
-    // victim their own per-IP points too
+    // victim their own per-IP points too. Observed on the bucket itself: the
+    // old assertion only read subnet pressure, which a refund of the
+    // REJECTING bucket alone would also have satisfied.
+    expect(limiterCalls).toContainEqual({ op: 'consume', prefix: 'rl:regday', key: victim });
+    expect(limiterCalls).toContainEqual({ op: 'reward', prefix: 'rl:regday', key: victim });
+    expect(limiterCalls).toContainEqual({ op: 'reward', prefix: 'rl:regnet', key: '203.0.50.0/24' });
     expect(await getSubnetRegistrationPressure(reqFor(victim))).toBe(SUBNET_CAP);
+    // And the victim's own daily budget is genuinely intact: a different,
+    // quiet subnet is not available to them, but their per-IP bucket must
+    // still hold every point — consume it down from another test's vantage
+    // by checking no net charge remains
+    const dailyOps = limiterCalls.filter((c) => c.prefix === 'rl:regday' && c.key === victim);
+    expect(dailyOps.filter((c) => c.op === 'consume')).toHaveLength(dailyOps.filter((c) => c.op === 'reward').length);
   });
 
   // The reason this is middleware and not a read-then-charge-later split: a

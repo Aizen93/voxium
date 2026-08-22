@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -2130,36 +2130,98 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
 
 describe('voiceHandler — secure voice channel join is opaque to non-members', () => {
   const NOT_FOUND = { message: 'Voice channel not found.' };
+  const SECURE_ROW = { serverId: 's1', type: 'voice', secure: true };
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // mockReset on the mocks these tests queue once-values for: clearAllMocks
+    // keeps queued mockResolvedValueOnce values, so a once-value a test never
+    // consumed armed the NEXT test — this describe used to pass in the full
+    // run and fail when run on its own. Defaults re-established after.
+    vi.mocked(prisma.channel.findUnique).mockReset();
+    vi.mocked(prisma.serverMember.findUnique).mockReset();
+    vi.mocked(hasChannelPermission).mockReset();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
   });
 
-  it('answers a non-SERVER-member exactly like a nonexistent channel', async () => {
+  afterEach(() => {
+    // Leave nothing queued for the describes that follow
+    vi.mocked(prisma.channel.findUnique).mockReset();
+    vi.mocked(prisma.serverMember.findUnique).mockReset();
+    vi.mocked(hasChannelPermission).mockReset();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+  });
+
+  // There are TWO paths into the join and both have a secure arm. The
+  // routing wrapper's pre-check answers a non-member before the inner
+  // handler runs; the inner handler's own membership + CONNECT checks are
+  // what the relay/dispatch path — which never passes through the wrapper —
+  // relies on. Each arm is exercised on its own: a test that only reaches the
+  // wrapper leaves the inner arm's opacity entirely unverified.
+
+  it('wrapper: answers a secure channel the user cannot CONNECT to exactly like a nonexistent channel', async () => {
     const { socket, handlers } = createMockSocket('probe-1', 'sock-probe-1');
     handleVoiceEvents(createMockIO() as any, socket as any);
-    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({ serverId: 's1', type: 'voice', secure: true } as any);
-    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce(null);
-
-    await handlers.get('voice:join')!('sec-hidden');
-
-    expect(socket.emit).toHaveBeenCalledWith('voice:error', NOT_FOUND);
-  });
-
-  it('answers a server member who is not a CHANNEL member exactly like a nonexistent channel', async () => {
-    const { socket, handlers } = createMockSocket('probe-2', 'sock-probe-2');
-    handleVoiceEvents(createMockIO() as any, socket as any);
-    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({ serverId: 's1', type: 'voice', secure: true } as any);
-    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce({ userId: 'probe-2', serverId: 's1' } as any);
-    // computeUserChannelPermissions returns 0n for a non-ChannelMember of a
-    // secure channel, ahead of the owner/ADMINISTRATOR fast paths
+    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce(SECURE_ROW as any);
     vi.mocked(hasChannelPermission).mockResolvedValueOnce(false);
 
     await handlers.get('voice:join')!('sec-hidden');
 
     expect(socket.emit).toHaveBeenCalledWith('voice:error', NOT_FOUND);
+    expect(prisma.serverMember.findUnique).not.toHaveBeenCalled(); // never reached the inner handler
+  });
+
+  it('inner handler: answers a non-SERVER-member exactly like a nonexistent channel', async () => {
+    const { socket, handlers } = createMockSocket('probe-1b', 'sock-probe-1b');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    // One row for the wrapper's pre-check (which passes: CONNECT defaults to
+    // true), one for the inner handler's own lookup
+    vi.mocked(prisma.channel.findUnique)
+      .mockResolvedValueOnce(SECURE_ROW as any)
+      .mockResolvedValueOnce(SECURE_ROW as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce(null);
+
+    await handlers.get('voice:join')!('sec-hidden');
+
+    expect(prisma.serverMember.findUnique).toHaveBeenCalledTimes(1);
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', NOT_FOUND);
+    expect(socket.emit).not.toHaveBeenCalledWith('voice:error', { message: 'You are not a member of this server.' });
+  });
+
+  it('inner handler: answers a server member who is not a CHANNEL member exactly like a nonexistent channel', async () => {
+    const { socket, handlers } = createMockSocket('probe-2', 'sock-probe-2');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    vi.mocked(prisma.channel.findUnique)
+      .mockResolvedValueOnce(SECURE_ROW as any)
+      .mockResolvedValueOnce(SECURE_ROW as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce({ userId: 'probe-2', serverId: 's1' } as any);
+    // Wrapper pre-check passes, the inner handler's own CONNECT check fails:
+    // computeUserChannelPermissions returns 0n for a non-ChannelMember of a
+    // secure channel, ahead of the owner/ADMINISTRATOR fast paths
+    vi.mocked(hasChannelPermission)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    await handlers.get('voice:join')!('sec-hidden');
+
+    expect(hasChannelPermission).toHaveBeenCalledTimes(2);
+    expect(socket.emit).toHaveBeenCalledWith('voice:error', NOT_FOUND);
     // The oracle was the message string — nothing else distinguishes the two
     expect(socket.emit).not.toHaveBeenCalledWith('voice:error', { message: 'You do not have permission to join this voice channel.' });
+  });
+
+  it('relay path: a non-member shim dispatched by the owner node gets the opaque answer too', async () => {
+    // dispatchVoiceEvent → createVoiceHandlers bypasses the wrapper entirely;
+    // the inner handler's secure arms are the ONLY defense here.
+    const io = createMockIO();
+    const shim = { id: 'shim-probe', data: { userId: 'probe-5' }, emit: vi.fn(), join: vi.fn(), leave: vi.fn() };
+    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce(SECURE_ROW as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce(null);
+
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:join', ['sec-hidden', null], vi.fn());
+
+    expect(shim.emit).toHaveBeenCalledWith('voice:error', NOT_FOUND);
+    expect(shim.emit).not.toHaveBeenCalledWith('voice:error', { message: 'You are not a member of this server.' });
   });
 
   it('charges the SAME rate-limit bucket a nonexistent id charges', async () => {
