@@ -44,6 +44,7 @@ import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, NODE_HEARTBEAT_TTL_S, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { ensureBucketEncryption } from './utils/s3';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
+import { repairIpBanSpellings } from './utils/ipBans';
 import { loadFeatureFlags } from './utils/featureFlags';
 import { initMediasoup, onWorkerDeath } from './mediasoup/mediasoupManager';
 import { clearVoiceState, dispatchVoiceEvent, handleWorkerDeath } from './websocket/voiceHandler';
@@ -74,6 +75,18 @@ async function main() {
   // Load feature flags from Redis
   await loadFeatureFlags();
   console.log('[FeatureFlags] Loaded');
+
+  // Bans stored before the admin write path normalized addresses never
+  // matched the canonical form readers query. Non-fatal: a failure here
+  // leaves those rows as they were, which is the state they were in anyway.
+  try {
+    const repaired = await repairIpBanSpellings(prisma);
+    if (repaired.rewritten || repaired.merged) {
+      console.log(`[IpBan] Repaired ${repaired.rewritten} non-canonical ban(s), merged ${repaired.merged} duplicate(s)`);
+    }
+  } catch (err) {
+    console.warn('[IpBan] Spelling repair failed (bans in non-canonical form stay inert):', err instanceof Error ? err.message : err);
+  }
 
   // Apply bucket-default encryption when S3_SSE is set (never throws;
   // logs loudly if the provider/key can't do it — uploads keep working)

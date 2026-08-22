@@ -283,7 +283,12 @@ function createMiddleware(
  *  - the IPv4-mapped form in UPPERCASE (`::FFFF:1.2.3.4`) and in hex
  *    (`::ffff:cb00:7107`), both of which slipped through as IPv6 and
  *    collapsed every such client into one shared bucket;
- *  - hex case, so `2001:DB8::1` and `2001:db8::1` are one caller.
+ *  - hex case, so `2001:DB8::1` and `2001:db8::1` are one caller;
+ *  - spelling, so `2001:db8:0:0:0:0:0:1` and `2001:db8::1` are one caller.
+ *    The output is the RFC 5952 text form — the same one the OS hands Node
+ *    for a socket's remote address — re-serialised from the parsed hextets,
+ *    so every writer (an operator typing a ban, a proxy header, a socket)
+ *    lands on the exact string every reader queries.
  */
 export function normalizeIp(rawIp: string): string {
   // Strip a zone id ONLY when what is left is a real address — otherwise a
@@ -294,7 +299,26 @@ export function normalizeIp(rawIp: string): string {
   const hextets = ipv6Hextets(ip);
   if (!hextets) return ip; // not an address at all — pass through untouched
   const mapped = mappedIPv4(hextets);
-  return mapped ?? ip.toLowerCase();
+  return mapped ?? canonicalIPv6(hextets);
+}
+
+/** RFC 5952 text form: lowercase hex, no leading zeros, the LONGEST run of
+ *  two or more zero hextets collapsed to `::` (the first such run on a tie). */
+function canonicalIPv6(h: number[]): string {
+  let bestStart = -1;
+  let bestLen = 0;
+  for (let i = 0; i < 8; ) {
+    if (h[i] !== 0) { i++; continue; }
+    let j = i;
+    while (j < 8 && h[j] === 0) j++;
+    if (j - i >= 2 && j - i > bestLen) { bestStart = i; bestLen = j - i; }
+    i = j;
+  }
+  const hex = (v: number) => v.toString(16);
+  if (bestStart === -1) return h.map(hex).join(':');
+  const head = h.slice(0, bestStart).map(hex).join(':');
+  const tail = h.slice(bestStart + bestLen).map(hex).join(':');
+  return `${head}::${tail}`;
 }
 
 const byIp = (req: Request) => normalizeIp(req.ip || req.socket.remoteAddress || 'unknown');

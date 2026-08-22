@@ -35,6 +35,7 @@ const prismaMock: Record<string, any> = {
   ipBan: {
     createMany: vi.fn().mockResolvedValue({ count: 0 }),
     deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    upsert: vi.fn(),
   },
   auditLog: {
     create: vi.fn().mockResolvedValue({}),
@@ -65,9 +66,12 @@ vi.mock('../../websocket/socketServer', () => ({
 }));
 
 // Rate limiters
-vi.mock('../../middleware/rateLimiter', () => {
+vi.mock('../../middleware/rateLimiter', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../middleware/rateLimiter')>();
   const passthrough = (_req: any, _res: any, next: () => void) => next();
-  return { rateLimitAdmin: passthrough };
+  // The real normalizeIp: the ip-ban tests below are about the write side
+  // agreeing with the read side, and a stub would make that vacuous.
+  return { rateLimitAdmin: passthrough, normalizeIp: actual.normalizeIp };
 });
 
 // Redis
@@ -432,5 +436,72 @@ describe('GET /admin/storage/top-uploaders — SQL aggregation + top-N name reso
     ]);
     expect(typeof res.body.data[0].fileCount).toBe('number');
     expect(typeof res.body.data[0].totalSize).toBe('number');
+  });
+});
+
+// ─── POST /admin/ip-bans — the write side must agree with every reader ───────
+
+describe('POST /admin/ip-bans — stores the canonical address form', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.ipBan.upsert.mockImplementation(({ create }: any) =>
+      Promise.resolve({ id: 'ban-1', ...create, createdAt: new Date() }));
+    app = createApp();
+  });
+
+  // Every reader — login, register, the socket handshake — looks the ban up
+  // by normalizeIp() of the caller's address against an exact-match unique
+  // column. A row stored in the operator's spelling was a ban nothing hit.
+  it.each([
+    ['2001:DB8::1', '2001:db8::1'],
+    ['::ffff:203.0.113.7', '203.0.113.7'],
+    ['::ffff:cb00:7107', '203.0.113.7'],
+    ['2001:db8:0:0:0:0:0:1', '2001:db8::1'],
+    ['fe80::1%eth0', 'fe80::1'],
+    ['  203.0.113.9  ', '203.0.113.9'],
+  ])('%s is stored as %s', async (typed, stored) => {
+    mockUsers({ 'admin-1': { role: 'admin' } });
+
+    const res = await request(app)
+      .post('/api/v1/admin/ip-bans')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ ip: typed, reason: 'abuse' });
+
+    expect(res.status).toBe(201);
+    expect(prismaMock.ipBan.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { ip: stored },
+      create: expect.objectContaining({ ip: stored }),
+    }));
+    expect(res.body.data.ip).toBe(stored);
+  });
+
+  it('re-banning an address in another spelling updates the existing row instead of 500ing on the unique index', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' } });
+    prismaMock.ipBan.upsert.mockResolvedValue({ id: 'ban-existing', ip: '2001:db8::1', reason: 'again', createdAt: new Date() });
+
+    const res = await request(app)
+      .post('/api/v1/admin/ip-bans')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ ip: '2001:DB8:0:0:0:0:0:1', reason: 'again' });
+
+    expect(res.status).toBe(201);
+    expect(prismaMock.ipBan.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { ip: '2001:db8::1' },
+      update: expect.objectContaining({ reason: 'again' }),
+    }));
+  });
+
+  it('still rejects something that is not an address', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' } });
+
+    const res = await request(app)
+      .post('/api/v1/admin/ip-bans')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ ip: 'not-an-ip' });
+
+    expect(res.status).toBe(400);
+    expect(prismaMock.ipBan.upsert).not.toHaveBeenCalled();
   });
 });

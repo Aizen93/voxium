@@ -63,6 +63,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return {
     rateLimitAdmin: passthrough,
+    normalizeIp: (ip: string) => ip,
   };
 });
 

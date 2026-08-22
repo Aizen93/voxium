@@ -19,10 +19,28 @@ describe('normalizeIp — one spelling of an address for every keyed control', (
     ['::ffff:cb00:7107', '203.0.113.7', 'IPv4-mapped, hex form — the old strip missed it entirely'],
     ['fe80::1%eth0', 'fe80::1', 'zone id would key a link-local address per NIC'],
     ['2001:DB8::1', '2001:db8::1', 'hex case is not part of the address'],
+    // IpBan.ip is an exact-match unique column and every reader queries the
+    // normalized form, so a ban an operator typed in any OTHER spelling was a
+    // row nothing ever hit. The output is the RFC 5952 text form — what the OS
+    // hands Node for a remote address — so writers and readers converge.
+    ['2001:db8:0:0:0:0:0:1', '2001:db8::1', 'expanded spelling'],
+    ['2001:0db8:0000:0000:0000:0000:0000:0001', '2001:db8::1', 'leading zeros'],
+    ['2001:db8:0:0:1:0:0:1', '2001:db8::1:0:0:1', 'the FIRST of two equal zero runs is compressed'],
+    ['2001:db8:0:1:0:0:0:1', '2001:db8:0:1::1', 'the LONGEST zero run is compressed'],
+    ['2001:db8:0:1:2:3:4:5', '2001:db8:0:1:2:3:4:5', 'a single zero hextet is never collapsed'],
+    ['::1', '::1', 'loopback keeps its shape'],
+    ['::', '::', 'the unspecified address keeps its shape'],
+    ['fe80::1', 'fe80::1', 'an already-canonical address is unchanged'],
     ['unknown', 'unknown', 'non-addresses pass through untouched'],
     [')(*&^%', ')(*&^%', 'a stray % must not truncate garbage'],
   ])('%s → %s (%s)', (input, expected) => {
     expect(normalizeIp(input)).toBe(expected);
+  });
+
+  it('is idempotent — normalizing an already-normalized address is a no-op', () => {
+    for (const ip of ['2001:db8::1:0:0:1', '203.0.113.7', 'fe80::1', '2001:db8:0:1::1', '::']) {
+      expect(normalizeIp(normalizeIp(ip))).toBe(normalizeIp(ip));
+    }
   });
 });
 

@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import net from 'net';
 import { authenticate } from '../middleware/auth';
 import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin';
-import { rateLimitAdmin } from '../middleware/rateLimiter';
+import { rateLimitAdmin, normalizeIp } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { purgeE2EMaterial } from '../utils/e2ePurge';
 import { purgeSecureChannelStateForAccount } from '../utils/secureChannelLifecycle';
@@ -1216,18 +1216,26 @@ adminRouter.post('/ip-bans', async (req: Request, res: Response, next: NextFunct
     if (net.isIP(trimmedIp) === 0) {
       throw new BadRequestError('Invalid IP address format');
     }
+    // Every reader (login, register, the socket handshake) looks a ban up by
+    // normalizeIp() of the caller's address and IpBan.ip is an exact-match
+    // unique column, so a ban stored in the operator's spelling — uppercase
+    // hextets, an IPv4-mapped form, an expanded IPv6, a zone id — was a row
+    // nothing ever hit: a silently dead ban. Store the canonical form.
+    const banIp = normalizeIp(trimmedIp);
 
     const sanitizedReason = reason ? sanitizeText(reason) : null;
 
-    const ipBan = await prisma.ipBan.create({
-      data: { ip: trimmedIp, reason: sanitizedReason, bannedBy: req.user!.userId },
+    const ipBan = await prisma.ipBan.upsert({
+      where: { ip: banIp },
+      create: { ip: banIp, reason: sanitizedReason, bannedBy: req.user!.userId },
+      update: { reason: sanitizedReason, bannedBy: req.user!.userId },
     });
 
     logAuditEvent({
       actorId: req.user!.userId,
       action: 'ip_ban.create',
       targetType: 'ip',
-      targetId: trimmedIp,
+      targetId: banIp,
       metadata: { reason: sanitizedReason },
     });
 
