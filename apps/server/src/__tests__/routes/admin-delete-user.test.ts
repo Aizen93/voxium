@@ -120,6 +120,12 @@ vi.mock('../../websocket/socketServer', () => ({
 }));
 
 // Rate limiters
+// Visibility-room resync (owner reassignment changes VIEW_CHANNEL for the heir)
+const mockSyncVisibilityRooms = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/channelVisibilityRooms', () => ({
+  syncChannelVisibilityRooms: (...args: any[]) => mockSyncVisibilityRooms(...args),
+}));
+
 vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return { rateLimitAdmin: passthrough, normalizeIp: (ip: string) => ip };
@@ -388,6 +394,9 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     });
     // …and the purge+delete are still atomic on their own.
     expectAtomicPurgeAndDelete('target-1');
+    // The heir was already a member, so their channel:{id} rooms were computed
+    // at connect against the old owner — owner status has to be resynced.
+    expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-owned', { userId: 'heir-1' });
   });
 
   it('purges the TARGET user, never the acting admin', async () => {

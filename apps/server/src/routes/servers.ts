@@ -19,6 +19,7 @@ import { getRedis } from '../utils/redis';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { purgeSecureChannelState } from '../utils/secureChannelLifecycle';
+import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 
 export const serverRouter = Router();
 
@@ -729,6 +730,18 @@ serverRouter.post(
       ]);
 
       const io = getIO();
+
+      // `server.ownerId` is the pivot of every visibility calculator's owner
+      // fast path, so this transfer changes VIEW_CHANNEL for two users at once:
+      // the new owner can now see every channel and the old one drops to what
+      // their roles grant. channel:{id} rooms are only computed at connect, so
+      // without a resync the old owner keeps receiving messages, typing and
+      // voice presence for staff-only channels they can no longer view, and
+      // the new owner misses every channel-scoped lifecycle event until they
+      // reconnect. Two user-scoped recomputes, after the transaction commits
+      // (the util re-reads ownerId).
+      void syncChannelVisibilityRooms(serverId, { userId: targetUserId });
+      void syncChannelVisibilityRooms(serverId, { userId: req.user!.userId });
 
       // Emit role updates for both users
       io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {

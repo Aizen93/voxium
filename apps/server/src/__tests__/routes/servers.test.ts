@@ -132,6 +132,12 @@ vi.mock('../../utils/memberBroadcast', () => ({
   joinServerRoom: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Visibility-room resync (owner transfer changes VIEW_CHANNEL for two users)
+const mockSyncVisibilityRooms = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/channelVisibilityRooms', () => ({
+  syncChannelVisibilityRooms: (...args: any[]) => mockSyncVisibilityRooms(...args),
+}));
+
 // Secure-channel lifecycle (leave/kick purge their secure state first)
 const mockPurgeSecureChannelState = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../utils/secureChannelLifecycle', () => ({
@@ -826,6 +832,35 @@ describe('Server Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/targetUserId/i);
+    });
+
+    // server.ownerId is the pivot of every visibility calculator's owner fast
+    // path, and channel:{id} rooms are computed at connect. Without a resync
+    // the old owner keeps receiving staff-only channels' events and the new
+    // owner misses channel-scoped lifecycle events until reconnect.
+    it('resyncs channel visibility rooms for BOTH the new and the old owner after the transaction', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockImplementation(({ where }: any) =>
+        Promise.resolve(where.userId_serverId.userId === 'user-1'
+          ? { userId: 'user-1', serverId: 'srv-1', role: 'owner' }
+          : { userId: 'user-2', serverId: 'srv-1', role: 'member' }));
+      const order: string[] = [];
+      prismaMock.$transaction.mockImplementation(async () => { order.push('txn'); return []; });
+      mockSyncVisibilityRooms.mockImplementation(async (_sid: string, opts: { userId: string }) => { order.push(`sync:${opts.userId}`); });
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: null, invitesLocked: false, ownerId: 'user-2', createdAt: new Date() });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/transfer-ownership')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ targetUserId: 'user-2' });
+
+      expect(res.status).toBe(200);
+      expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-1', { userId: 'user-2' });
+      expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-1', { userId: 'user-1' });
+      // After the commit: the util re-reads ownerId, so syncing before it
+      // would recompute against the OLD owner
+      expect(order[0]).toBe('txn');
+      expect(order).toEqual(expect.arrayContaining(['sync:user-2', 'sync:user-1']));
     });
   });
 });

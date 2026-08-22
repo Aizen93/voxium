@@ -33,9 +33,12 @@ import { syncChannelVisibilityRooms } from '../../utils/channelVisibilityRooms';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function createMockSocket(userId: string, opts?: { voiceChannelId?: string }) {
+function createMockSocket(userId: string, opts?: { voiceChannelId?: string; rooms?: string[] }) {
   return {
     data: { userId, voiceChannelId: opts?.voiceChannelId },
+    // fetchSockets() serialises `rooms` onto every RemoteSocket; the real
+    // shape always carries it, so the default mirrors a socket in no voice room
+    rooms: new Set(opts?.rooms ?? [userId === 'any' ? '' : `user:${userId}`]),
     join: vi.fn(),
     leave: vi.fn(),
   };
@@ -130,6 +133,38 @@ describe('syncChannelVisibilityRooms', () => {
 
     expect(socket.leave).toHaveBeenCalledWith('channel:ch-text');
     expect(socket.leave).not.toHaveBeenCalledWith('channel:ch-voice');
+  });
+
+  // A participant whose channel's Router lives on ANOTHER node never gets
+  // socket.data.voiceChannelId on their home socket — that field is written
+  // on the owner node's shim and is, on the home node, the local-vs-relayed
+  // discriminator that must stay unset. The shim's join does put the real
+  // socket in voice:{id} (io.in(socketId).socketsJoin), and fetchSockets()
+  // serialises rooms onto the RemoteSocket, so room membership is the
+  // node-independent signal. The old guard cut relayed participants off from
+  // channel:{id} — where every voice presence event is broadcast — mid-call.
+  it('keeps a CROSS-NODE voice participant (voice room, no data.voiceChannelId) in the channel room', async () => {
+    const relayed = createMockSocket('user-1', { rooms: ['user:user-1', 'voice:ch-voice', 'channel:ch-voice'] });
+    mockFetchSockets.mockResolvedValueOnce([relayed]);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-voice' }, { id: 'ch-text' }]);
+    mockFilterForUsers.mockResolvedValueOnce(visibility({ 'user-1': [] }));
+
+    await syncChannelVisibilityRooms('server-1');
+
+    expect(relayed.data.voiceChannelId).toBeUndefined();
+    expect(relayed.leave).toHaveBeenCalledWith('channel:ch-text');
+    expect(relayed.leave).not.toHaveBeenCalledWith('channel:ch-voice');
+  });
+
+  it('still leaves the channel room of a voice channel the socket is NOT in, by either signal', async () => {
+    const bystander = createMockSocket('user-1', { rooms: ['user:user-1', 'voice:ch-other'] });
+    mockFetchSockets.mockResolvedValueOnce([bystander]);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-voice' }]);
+    mockFilterForUsers.mockResolvedValueOnce(visibility({ 'user-1': [] }));
+
+    await syncChannelVisibilityRooms('server-1');
+
+    expect(bystander.leave).toHaveBeenCalledWith('channel:ch-voice');
   });
 
   it('computes visibility once per user, applying to all their sockets (multi-device)', async () => {

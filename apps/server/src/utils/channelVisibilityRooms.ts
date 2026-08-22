@@ -26,6 +26,27 @@ const USER_BATCH = 500;
  * with the Redis adapter. Errors are logged, never thrown — a failed resync
  * must not fail the originating mutation (the next reconnect self-heals).
  */
+/**
+ * Is this socket an active participant of voice channel `channelId`?
+ *
+ * Judged by ROOM membership, which is node-independent: a local participant
+ * joins `voice:{id}` in the voice handler, and a relayed participant (channel
+ * owned by another node) is put in the same room by the owner-side shim via
+ * `io.in(socketId).socketsJoin`. `socket.data.voiceChannelId` is NOT — it is
+ * written on the owner node's shim only, and on the participant's home node
+ * it is deliberately unset (it is the local-vs-relayed discriminator in
+ * voice:join). Checking it alone made this guard depend on which node the
+ * channel's Router happened to live on: a VIEW revoke mid-call dropped a
+ * cross-node participant from `channel:{id}` — where every voice presence and
+ * screen-share event is broadcast — while a same-node one kept it.
+ * `fetchSockets()` serialises `rooms` onto every RemoteSocket, so the room
+ * check works for both; the data field stays as a fallback for a hand-rolled
+ * socket shape without rooms.
+ */
+function inVoiceChannel(s: { rooms?: Set<string>; data: { voiceChannelId?: string } }, channelId: string): boolean {
+  return s.rooms?.has(`voice:${channelId}`) === true || s.data.voiceChannelId === channelId;
+}
+
 export async function syncChannelVisibilityRooms(
   serverId: string,
   opts?: { channelId?: string; userId?: string },
@@ -71,7 +92,7 @@ export async function syncChannelVisibilityRooms(
           for (const s of userSockets) {
             if (visibleIds.has(ch.id)) {
               s.join(`channel:${ch.id}`);
-            } else if (s.data.voiceChannelId !== ch.id) {
+            } else if (!inVoiceChannel(s, ch.id)) {
               // Never cut a socket off from the voice channel it is actively in —
               // it must keep receiving that channel's presence events until it leaves
               s.leave(`channel:${ch.id}`);

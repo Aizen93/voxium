@@ -3,6 +3,7 @@ import net from 'net';
 import { authenticate } from '../middleware/auth';
 import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin';
 import { rateLimitAdmin, normalizeIp } from '../middleware/rateLimiter';
+import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { prisma } from '../utils/prisma';
 import { purgeE2EMaterial } from '../utils/e2ePurge';
 import { purgeSecureChannelStateForAccount } from '../utils/secureChannelLifecycle';
@@ -622,6 +623,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
                 data: { role: 'owner' },
               }),
             ]);
+            // Owner status changes VIEW_CHANNEL for the new owner; their
+            // channel:{id} rooms were computed at connect against the old
+            // ownerId. (The new-member branch above gets this for free from
+            // broadcastMemberJoined, which joins rooms after the transaction.)
+            void syncChannelVisibilityRooms(action.serverId, { userId: action.newOwnerId });
           }
 
           // Emit role + server update events
