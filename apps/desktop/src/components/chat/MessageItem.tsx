@@ -143,6 +143,16 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
 
   // Look up member for nickname and role color (only applies in server context)
   const members = useServerStore((s) => s.members);
+  // Messages in a SECURE channel cannot be reported: their content is not
+  // the server's to read, so there is nothing a platform moderator could act
+  // on — the members deal with each other, and a member who wants the channel
+  // gone hands its id (context menu → "Copy channel ID") to a server admin,
+  // whose only lever is delete-by-id in server settings. The server refuses
+  // such reports too; hiding the button keeps the UI honest about that.
+  // (A primitive selector: `.find(...)?.secure === true` never allocates.)
+  const inSecureChannel = useServerStore(
+    (s) => channelId !== undefined && s.channels.find((c) => c.id === channelId)?.secure === true,
+  );
   const authorMember = useMemo(
     () => channelId ? members.find((m) => m.userId === message.author.id) ?? null : null,
     [members, channelId, message.author.id],
@@ -266,7 +276,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 <Trash2 size={14} />
               </button>
             )}
-            {!isOwn && !isSystemMessage && (
+            {!isOwn && !isSystemMessage && !inSecureChannel && (
               <button
                 onClick={() => setShowReportModal(true)}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-accent-warning hover:bg-vox-accent-warning/10 transition-colors"

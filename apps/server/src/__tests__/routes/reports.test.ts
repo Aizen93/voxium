@@ -212,7 +212,12 @@ describe('Report Routes — E2E message reports', () => {
     channel: { serverId: 'srv-1', secure: true },
   };
 
-  it('a secure-channel MEMBER can report with their decrypted plaintext', async () => {
+  // Messages in a secure channel cannot be reported, by anyone: the content
+  // is not the server's to read, so the only "evidence" would be text the
+  // reporter typed. The members deal with each other; a member who wants the
+  // channel gone copies its id from the context menu and hands it to a server
+  // admin, whose lever is delete-by-id in server settings.
+  it('a secure-channel MEMBER cannot report — answered like a nonexistent message', async () => {
     mockHappyPath(baseSecureMessage);
     vi.mocked(prisma.channelMember.findUnique).mockResolvedValue({ userId: 'user-1' } as any);
 
@@ -227,15 +232,12 @@ describe('Report Routes — E2E message reports', () => {
         reportedContent: 'the decrypted offending text',
       });
 
-    expect(res.status).toBe(201);
-    expect(prisma.report.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          messageContent: 'the decrypted offending text',
-          contentSource: 'reporter',
-        }),
-      }),
-    );
+    expect(res.status).toBe(404);
+    expect(prisma.report.create).not.toHaveBeenCalled();
+    // Refused BEFORE any membership lookup: the answer — and its cost — is the
+    // same for a member, a non-member, and a message that does not exist
+    expect(prisma.channelMember.findUnique).not.toHaveBeenCalled();
+    expect(prisma.serverMember.findUnique).not.toHaveBeenCalled();
   });
 
   it('a server member who is NOT a channel member gets 404 — not an oracle', async () => {

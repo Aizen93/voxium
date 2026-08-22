@@ -273,7 +273,7 @@ verification and shows a warning.
 | Reply previews | resolved from plaintext cache; lock placeholder otherwise |
 | Notifications | client decrypts first → body shows plaintext locally (never leaves device) |
 | Server search | E2E messages excluded server-side; client-side search is Phase C |
-| Reports | reporter's client attaches its decrypted plaintext (`reportedContent`); stored with `contentSource: "reporter"` — flagged unverifiable, ciphertext never copied |
+| Reports | DMs: reporter's client attaches its decrypted plaintext (`reportedContent`); stored with `contentSource: "reporter"` — flagged unverifiable, ciphertext never copied. Secure channels: not reportable (§19.1) |
 | Attachments | encrypted client-side (AES-256-GCM in the binding); real metadata inside the message ciphertext; server stores opaque blobs (§13) |
 | Edits | fresh ratchet ciphertext under the same id; plaintext cache versioned by editedAt |
 | Logout | WASM objects freed, vault closed but **kept** (device keys persist like trusted-device tokens) |
@@ -1024,9 +1024,13 @@ machinery above, not a second protocol. The crypto engine is unchanged.
   rename, role overrides, reorder, mark-read, search, key-share posting, the
   batch device endpoint) answers exactly as it would for a channel that does
   not exist. The single non-member surface is moderation: a COUNT in server
-  settings (MANAGE_SERVER), and delete-by-id (owner/ADMINISTRATOR, the id
-  learned from an abuse report). Content is never readable; deletion is the
-  only lever.
+  settings (MANAGE_SERVER), and delete-by-id (owner/ADMINISTRATOR). The id
+  reaches the admin from a MEMBER — the channel context menu offers "Copy
+  channel ID" to every member — never from the server: messages in a secure
+  channel cannot be reported (the reports endpoint answers exactly like a
+  nonexistent message, for members and non-members alike, before any
+  membership lookup), so the members deal with each other and escalate by
+  handing the id over. Content is never readable; deletion is the only lever.
 - Members can leave; only the creator invites/removes/renames/deletes. A
   creator leaving the server (kick, leave, account deletion) deletes their
   channels, with member-scoped events and S3 blob cleanup.
@@ -1092,8 +1096,10 @@ names. The client refuses `encrypted: false` user rows in a secure channel —
 the same forgery rule as §9's DM table.
 
 Client search over a secure channel runs on this device's plaintext cache,
-like encrypted DMs. Reports from channel members carry reporter-decrypted
-plaintext (`contentSource: 'reporter'`), gated on channel membership.
+like encrypted DMs. Unlike encrypted DMs, secure-channel messages are NOT
+reportable at all (§19.1): the report button is absent for them and the
+endpoint refuses opaquely. The `contentSource: 'reporter'` path applies to
+DMs only.
 
 ### 19.6 Known gaps
 

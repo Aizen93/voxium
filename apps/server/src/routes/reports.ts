@@ -90,16 +90,19 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
         throw new BadRequestError('Reported user does not match message author');
       }
 
+      // Messages in a SECURE channel cannot be reported, by anyone. Their
+      // content is not the server's to read, so a report could only ever carry
+      // reporter-provided text nobody can verify — and moderation of a secure
+      // channel is not content moderation: the members deal with each other,
+      // and a member who wants the channel gone hands its id to a server
+      // admin, whose only lever is delete-by-id (§19). Answered exactly like a
+      // nonexistent message, for members and non-members alike, BEFORE any
+      // membership lookup: the reports endpoint must not become the oracle
+      // that tells a prober a secure channel exists (same cost, same body).
+      if (message.channel?.secure) throw new NotFoundError('Message');
+
       // Verify the reporter has access to this message
-      if (message.channel?.secure) {
-        // Secure channels: only channel members can see (and thus report)
-        // messages — server membership alone must not act as an oracle
-        const channelMembership = await prisma.channelMember.findUnique({
-          where: { channelId_userId: { channelId: message.channelId!, userId } },
-          select: { userId: true },
-        });
-        if (!channelMembership) throw new NotFoundError('Message');
-      } else if (message.channel?.serverId) {
+      if (message.channel?.serverId) {
         const membership = await prisma.serverMember.findUnique({
           where: { userId_serverId: { userId, serverId: message.channel.serverId } },
           select: { userId: true },

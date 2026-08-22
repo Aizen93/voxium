@@ -6,7 +6,7 @@ import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
-import { Volume2, Plus, ChevronRight, MicOff, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings, AudioLines, Lock, Users, LogOut } from 'lucide-react';
+import { Volume2, Plus, ChevronRight, MicOff, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings, AudioLines, Lock, Users, LogOut, Copy } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
 import { ServerSettingsModal } from '../server/ServerSettingsModal';
 import { ChannelPermissionsEditor } from '../server/ChannelPermissionsEditor';
@@ -18,6 +18,7 @@ import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { toast } from '../../stores/toastStore';
+import { copyToClipboard } from '../../utils/clipboard';
 import { clsx } from 'clsx';
 import {
   DndContext,
@@ -622,6 +623,21 @@ export function ChannelSidebar() {
     }
   };
 
+  // The one sanctioned way a secure channel's id leaves its membership.
+  // Admins cannot list secure channels (§19 opacity) — their only lever is
+  // delete-by-id in server settings — so a member who wants one shut down
+  // hands the id over. Messages in secure channels cannot be reported; the
+  // members deal with each other, and this is how they escalate.
+  const handleCopySecureChannelId = async (channelId: string) => {
+    try {
+      await copyToClipboard(channelId);
+      toast.success(t('secureChannel.idCopied'));
+    } catch (err) {
+      console.warn('[SecureChannel] Failed to copy channel id:', err);
+      toast.error(t('secureChannel.idCopyFailed'));
+    }
+  };
+
   const handleCreateCategory = async () => {
     if (!activeServerId || !newCategoryName.trim()) return;
     try {
@@ -1085,6 +1101,18 @@ export function ChannelSidebar() {
           >
             <Users size={16} className="text-vox-accent-primary" />
             {t('secureChannel.members')}
+          </button>
+          <button
+            onClick={() => {
+              void handleCopySecureChannelId(channelContextMenu.channel.id);
+              setChannelContextMenu(null);
+            }}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+            title={t('secureChannel.copyIdHint')}
+            data-testid="secure-channel-copy-id"
+          >
+            <Copy size={16} className="text-vox-text-muted" />
+            {t('secureChannel.copyId')}
           </button>
           {channelContextMenu.channel.createdById === user?.id ? (
             <button
