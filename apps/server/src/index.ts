@@ -120,6 +120,14 @@ async function main() {
   // SIGKILL restart of a sole node hit this. Retrying once past the TTL turns
   // that into a short delay instead of ghost "online" users that survive until
   // some later boot happens to catch a clean snapshot.
+  //
+  // The retry fires AFTER server.listen() below, so `allowFullWipe: false` is
+  // load-bearing: by then this node is serving clients, and the sole-node
+  // full wipe — which the corpse's expired heartbeat would otherwise select,
+  // since that is exactly how the ambiguity resolves — would erase the
+  // presence and DM-call state of everyone who connected in the meantime. The
+  // scoped path is complete on a sole node (its own rooms are the cluster's),
+  // so it reaps precisely the crash ghosts and nothing else.
   if (presence.skipped || dmVoice.skipped) {
     const retryMs = (NODE_HEARTBEAT_TTL_S + 5) * 1000;
     console.log(`[Presence] Boot sweep deferred — retrying in ${Math.round(retryMs / 1000)}s, once any stale heartbeat has expired`);
@@ -127,12 +135,17 @@ async function main() {
       void (async () => {
         try {
           if (presence.skipped) {
-            const retry = await clearPresenceState(prisma, io);
+            const retry = await clearPresenceState(prisma, io, { allowFullWipe: false });
             console.log(retry.skipped
               ? '[Presence] Deferred sweep still could not see the cluster — leaving state for the next boot'
               : '[Presence] Deferred sweep completed');
           }
-          if (dmVoice.skipped) await clearDMVoiceState(io);
+          if (dmVoice.skipped) {
+            const retry = await clearDMVoiceState(io, { allowFullWipe: false });
+            console.log(retry.skipped
+              ? '[DMVoice] Deferred sweep still could not see the cluster — leaving state for the next boot'
+              : '[DMVoice] Deferred sweep completed');
+          }
         } catch (err) {
           console.warn('[Presence] Deferred boot sweep failed:', err instanceof Error ? err.message : err);
         }

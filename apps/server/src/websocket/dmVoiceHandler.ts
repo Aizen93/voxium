@@ -5,7 +5,7 @@ import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
-import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup } from '../utils/redis';
+import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup, type SweepOptions } from '../utils/redis';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -163,11 +163,16 @@ async function updateDMVoiceUserSocket(
  */
 export async function clearDMVoiceState(
   io?: ClusterSocketLookup & { to: (room: string) => { emit: (event: 'dm:voice:left', data: { conversationId: string; userId: string }) => void } },
+  { allowFullWipe = true }: SweepOptions = {},
 ): Promise<{ skipped: boolean }> {
   const redis = getRedis();
 
+  // `allowFullWipe: false` — the post-listen retry of a refused boot sweep —
+  // forces the scoped path even with no peers alive: the full wipe below
+  // assumes every socket is dead, which stopped being true at listen(). See
+  // SweepOptions in utils/redis.ts.
   const { peers } = io ? await liveNodeCounts() : { peers: 0 };
-  if (io && peers > 0) {
+  if (io && (peers > 0 || !allowFullWipe)) {
     // ORDER MATTERS: collect the candidates FIRST, snapshot liveness AFTER, so
     // the liveness view is strictly newer than everything it judges. Snapshot
     // first and a call that starts in between looks dead and gets hung up.
@@ -232,7 +237,7 @@ export async function clearDMVoiceState(
       }
     }
     if (reaped > 0) {
-      console.log(`[DMVoice] Reaped ${reaped} stale DM-call participant(s) (scoped, peers alive)`);
+      console.log(`[DMVoice] Reaped ${reaped} stale DM-call participant(s) (scoped, ${peers} peer(s) alive)`);
     }
     return { skipped: snapshotFailed };
   }

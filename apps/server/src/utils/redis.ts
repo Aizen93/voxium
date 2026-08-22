@@ -216,11 +216,18 @@ export async function socketExistsInCluster(io: ClusterSocketLookup, socketId: s
  *    "every socket in the cluster is dead". The callers would then mark every
  *    connected user offline and hang up every live DM call in the cluster.
  *
- * `peerCount` is what the heartbeats say. If peers exist but the adapter can
- * see at most itself, the two oracles disagree — the heartbeat lives on the
- * data connection, `serverCount()` on the subscriber one, and a Redis failover
- * or a reconnecting subscriber drops the latter while the former is still
- * fresh. Refusing costs one skipped boot sweep; trusting it costs the cluster.
+ * `peerCount` is what the heartbeats say. The adapter must see at least this
+ * node PLUS every node that holds a heartbeat, or the two oracles disagree —
+ * the heartbeat lives on the data connection, `serverCount()` on the
+ * subscriber one, and a Redis failover or a reconnecting subscriber drops the
+ * latter while the former is still fresh. The comparison is against the peer
+ * count, not against "more than just me": `allRooms()` resolves as soon as
+ * `numSub - 1` replies arrive and never learns WHICH nodes answered, so on a
+ * 3-node cluster with one peer's subscriber down it returns the other peer's
+ * rooms plus our own and calls that complete — every socket on the silent peer
+ * reads as dead. Refusing costs one deferred boot sweep (a hard-killed peer's
+ * heartbeat lingers up to its TTL, which the caller's retry waits out);
+ * trusting it costs the cluster.
  */
 export async function liveClusterSocketIds(
   io: ClusterSocketLookup,
@@ -234,14 +241,33 @@ export async function liveClusterSocketIds(
 
   if (peerCount > 0 && typeof adapter.serverCount === 'function') {
     const seen = await adapter.serverCount();
-    if (seen <= 1) {
+    if (seen < peerCount + 1) {
       throw new Error(
         `adapter sees ${seen} server(s) but ${peerCount} peer heartbeat(s) are live — `
-        + 'the snapshot would be this node\'s own rooms, not the cluster\'s',
+        + 'the snapshot would be missing at least one live node\'s rooms',
       );
     }
   }
   return await adapter.allRooms();
+}
+
+/**
+ * Options shared by the boot/shutdown sweeps.
+ *
+ * `allowFullWipe` (default true) is what makes the sole-node branch safe to
+ * run: it assumes EVERY socket is dead, which is true exactly once — before
+ * `server.listen()`, or after shutdown has disconnected everything. A sweep
+ * that runs while this node is serving clients — the deferred retry of a
+ * refused boot sweep — must pass `false` and take the scoped path regardless
+ * of the peer count. With no peers alive the scoped path is still complete:
+ * `allRooms()` on a sole node returns this node's own rooms, and by then that
+ * IS the cluster's liveness set. The retry used to re-derive its mode from
+ * the heartbeats, and a sole node whose predecessor's corpse heartbeat had
+ * expired — the very case the retry exists for — wiped the presence and
+ * DM-call state of every client that had connected since listen().
+ */
+export interface SweepOptions {
+  allowFullWipe?: boolean;
 }
 
 /**
@@ -257,11 +283,12 @@ export async function liveClusterSocketIds(
 export async function clearPresenceState(
   db: { user: { updateMany: (args: { where: { status: string; id?: { in: string[] } }; data: { status: string } }) => Promise<unknown> } },
   io?: ClusterSocketLookup,
+  { allowFullWipe = true }: SweepOptions = {},
 ): Promise<{ skipped: boolean }> {
   const redis = getRedis();
 
   const { peers } = io ? await liveNodeCounts() : { peers: 0 };
-  if (io && peers > 0) {
+  if (io && (peers > 0 || !allowFullWipe)) {
     // Scoped reap: drop only cluster-wide-dead sockets; peers' users stay online.
     //
     // ONE adapter snapshot, not one cluster round trip per entry. `socket:users`
@@ -306,12 +333,12 @@ export async function clearPresenceState(
     }
     if (fullyOffline.length > 0) {
       await db.user.updateMany({ where: { status: 'online', id: { in: fullyOffline } }, data: { status: 'offline' } });
-      console.log(`[Presence] Reaped ${fullyOffline.length} stale user(s) (scoped, peers alive)`);
+      console.log(`[Presence] Reaped ${fullyOffline.length} stale user(s) (scoped, ${peers} peer(s) alive)`);
     }
     return { skipped: false };
   }
 
-  // Sole node: legacy full wipe.
+  // Sole node, before listen() or after shutdown: legacy full wipe.
   const staleUsers = await redis.sMembers('online_users');
   if (staleUsers.length > 0) {
     await redis.del(staleUsers.map((id) => `user:sockets:${id}`));

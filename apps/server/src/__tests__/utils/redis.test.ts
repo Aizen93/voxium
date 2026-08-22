@@ -446,6 +446,80 @@ describe('utils/redis — clearPresenceState (multi-node aware)', () => {
     vi.mocked(client.hGetAll).mockResolvedValue({});
   });
 
+  // The guard has to compare the two oracles, not test "more than just me":
+  // allRooms() resolves after numSub-1 replies without learning WHICH nodes
+  // answered, so on three nodes with one peer's subscriber mid-reconnect it
+  // returns the other peer's rooms plus our own and calls that complete.
+  it('refuses a snapshot that cannot include every live peer (3 nodes, adapter sees 2)', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, { 's-on-silent-peer': 'u-a' });
+    vi.mocked(client.scanIterator).mockImplementation(async function* () {
+      yield ['node:alive:hb-node-1', 'node:alive:peer-x', 'node:alive:peer-y'];
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const io = ioWithAdapter(['s-somewhere-else'], 2);
+    const db = makeDb();
+    const result = await mod.clearPresenceState(db, io);
+
+    expect(result).toEqual({ skipped: true });
+    expect(io._allRooms).not.toHaveBeenCalled();
+    expect(client.hDel).not.toHaveBeenCalled();
+    expect(db.user.updateMany).not.toHaveBeenCalled();
+
+    warn.mockRestore();
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  // The deferred retry of a refused sweep fires after server.listen(), once
+  // the corpse heartbeat it waited out has expired — so the node now reads as
+  // sole, and re-deriving the mode from the heartbeats would select the full
+  // wipe against every client that connected in the meantime.
+  it('allowFullWipe:false takes the scoped path as the sole node and spares connected sockets', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, { 's-ghost': 'u-ghost', 's-live': 'u-live' });
+    // No peers: only our own heartbeat
+    vi.mocked(client.scanIterator).mockImplementation(async function* () {
+      yield ['node:alive:hb-node-1'];
+    });
+    vi.mocked(client.hGet).mockImplementation(async (_key, field) =>
+      (field === 's-ghost' ? 'u-ghost' : 'u-live'));
+    vi.mocked(client.sCard).mockResolvedValue(0);
+    vi.mocked(client.sMembers).mockClear();
+    vi.mocked(client.del).mockClear();
+
+    // Sole node after listen(): the adapter answers with its own rooms, which
+    // IS the cluster's liveness set now. serverCount = 1 must not refuse it —
+    // there is no peer whose rooms could be missing.
+    const io = ioWithAdapter(['s-live', 'user:u-live'], 1);
+    const db = makeDb();
+    const result = await mod.clearPresenceState(db, io, { allowFullWipe: false });
+
+    expect(result).toEqual({ skipped: false });
+    expect(io._allRooms).toHaveBeenCalledTimes(1);
+    expect(client.hDel).toHaveBeenCalledWith('socket:users', 's-ghost');
+    expect(client.hDel).not.toHaveBeenCalledWith('socket:users', 's-live');
+    // No global wipe, and the DB reset is scoped to the reaped users
+    expect(client.del).not.toHaveBeenCalledWith(['online_users', 'socket:users']);
+    expect(client.sMembers).not.toHaveBeenCalledWith('online_users');
+    expect(db.user.updateMany).toHaveBeenCalledWith({
+      where: { status: 'online', id: { in: ['u-ghost'] } },
+      data: { status: 'offline' },
+    });
+    expect(db.user.updateMany).not.toHaveBeenCalledWith({ where: { status: 'online' }, data: { status: 'offline' } });
+
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGet).mockResolvedValue(null);
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
   it('reads socket:users BEFORE snapshotting liveness', async () => {
     // Snapshot first and a socket that connects between the two is absent from
     // the snapshot but present in the hash — reaped while its user is online.

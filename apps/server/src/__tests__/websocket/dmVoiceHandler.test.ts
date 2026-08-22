@@ -839,6 +839,42 @@ describe('dmVoiceHandler — clearDMVoiceState (multi-node scoped reap)', () => 
 
     expect(mockRedis.del).toHaveBeenCalledWith(['dm:voice:active', 'dm:voice:users:conv-1']);
   });
+
+  // The deferred retry of a refused boot sweep runs AFTER server.listen(). By
+  // then the corpse heartbeat it was waiting out has expired, so the node
+  // reads as sole — and the full wipe would hang up every call that started
+  // in the meantime. The retry must take the scoped path regardless.
+  it('allowFullWipe:false never full-wipes, even as the sole node — only socket-dead participants go', async () => {
+    mockLiveNodeCounts.mockResolvedValue({ total: 1, peers: 0 });
+    mockRedis.sMembers.mockResolvedValue(['conv-9']);
+    mockRedis.hGetAll.mockImplementation((key: string) =>
+      Promise.resolve(key === 'dm:voice:users:conv-9' ? {
+        'u-ghost': JSON.stringify({ socketId: 's-ghost', selfMute: false, selfDeaf: false }),
+        'u-live': JSON.stringify({ socketId: 's-live', selfMute: false, selfDeaf: false }),
+      } : {}));
+    // Sole node after listen(): the adapter's own room set IS the cluster's
+    mockLiveSocketIds.mockResolvedValue(new Set(['s-live', 'user:u-live']));
+    mockRedis.scanIterator.mockImplementation(async function* () {
+      yield ['dm:voice:active', 'dm:voice:users:conv-9', 'dm:voice:call:u-live'];
+    });
+
+    const io = createMockIO();
+    const result = await clearDMVoiceState(io as never, { allowFullWipe: false });
+
+    expect(result).toEqual({ skipped: false });
+    expect(mockLiveSocketIds).toHaveBeenCalledWith(io, 0);
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ arguments: ['u-ghost', 'conv-9'] }),
+    );
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-9', userId: 'u-ghost' });
+    expect(mockRedis.eval).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ arguments: ['u-live', 'conv-9'] }),
+    );
+    // The full wipe's signature is a single del of every scanned dm:voice:* key
+    expect(mockRedis.del).not.toHaveBeenCalledWith(expect.arrayContaining(['dm:voice:active']));
+  });
 });
 
 // ─── dm:voice:decline ───────────────────────────────────────────────────────
