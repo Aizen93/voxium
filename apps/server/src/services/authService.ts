@@ -377,13 +377,10 @@ export async function requestPasswordReset(email: string) {
 
   const user = await prisma.user.findUnique({ where: { email } });
 
-  // Always do the expensive crypto work regardless of whether the user exists.
-  // This prevents timing side-channel attacks that could enumerate email addresses
-  // by measuring response time differences (crypto work vs early return).
+  // Generate the token regardless of whether the user exists, so the two
+  // branches do the same in-process work before answering.
   const rawToken = crypto.randomBytes(32).toString('hex');
   const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
-
-  if (!user) return; // Silent return - attacker sees same timing as a real reset
 
   // Per-INBOX daily cap, mirroring the verification-mail cap: the 3/15min IP
   // limiter is useless against distributed sources, and without this a botnet
@@ -394,28 +391,44 @@ export async function requestPasswordReset(email: string) {
   // The decision is made OUTSIDE consumeMailCap's fail-open try (it returns a
   // boolean rather than throwing) — a `return` inside one has been benign so
   // far only because it cannot throw.
-  if (!(await consumeMailCap('resetMail', canonicalizeEmail(user.email)))) {
+  //
+  // Charged on BOTH branches, keyed on the address as asked. The unknown-email
+  // branch used to return before this round trip while the known-email one
+  // paid it, which is a timing difference the wording defence cannot hide.
+  // Charging an inbox that does not exist costs nothing and sends nothing.
+  const underCap = await consumeMailCap('resetMail', canonicalizeEmail(email));
+
+  if (!user) return; // Silent return — same response, same work, as a real reset
+
+  if (!underCap) {
     console.warn('[Auth] Password-reset mail cap reached for an inbox — skipping send');
     return;
   }
 
-  await prisma.user.update({
-    where: { id: user.id },
-    data: {
-      resetToken: hashedToken,
-      resetTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
-    },
-  });
-
-  // NOT awaited. The unknown-email branch above returns after two in-process
-  // hashes; awaiting an unpooled SMTP transaction here makes the known-email
-  // branch answer hundreds of milliseconds to seconds later — or after a full
-  // connect timeout when the relay is down. Both branches return the identical
-  // body, so the wording defence is complete and the CLOCK walks straight
-  // around it. The send still has to be reported, so it keeps its own catch;
-  // it just no longer sits on the response path.
-  void sendPasswordResetEmail(user.email, rawToken)
-    .catch((err) => console.error('[Auth] Failed to send password reset email:', describeEmailError(err)));
+  // NOT awaited — neither the token write nor the send. Both branches above
+  // return after the same work (one lookup, one cap consume, two hashes);
+  // anything the known-email branch still awaited here — a DB UPDATE, let
+  // alone an unpooled SMTP transaction that can sit out a connect timeout —
+  // answered measurably later, and both branches return the identical body,
+  // so the CLOCK was the only oracle left. The write stays sequenced before
+  // the send (a link must not arrive before its token exists), and each step
+  // keeps its own error report; they just no longer sit on the response path.
+  void (async () => {
+    try {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          resetToken: hashedToken,
+          resetTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+        },
+      });
+    } catch (err) {
+      console.error('[Auth] Failed to store password reset token:', err instanceof Error ? err.message : err);
+      return; // no token in the DB — a link would be dead on arrival
+    }
+    await sendPasswordResetEmail(user.email, rawToken)
+      .catch((err) => console.error('[Auth] Failed to send password reset email:', describeEmailError(err)));
+  })();
 }
 
 export async function resetPassword(token: string, newPassword: string) {

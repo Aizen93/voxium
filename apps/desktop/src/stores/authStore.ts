@@ -171,7 +171,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       // The account now EXISTS, so there is nothing left to abandon: finish the
       // sign-in even if the view was left in the meantime, rather than stranding
-      // someone with credentials they were never told about.
+      // someone with credentials they were never told about — UNLESS the user
+      // already signed in as someone else while this POST was in flight. The
+      // abandoned registration must not silently swap their session for the
+      // account they walked away from; they can sign in to it deliberately.
+      const current = get();
+      if (controller.signal.aborted && current.isAuthenticated && current.user && current.user.id !== user.id) {
+        return;
+      }
       setTokens(accessToken, refreshToken, true);
 
       // Don't connect socket until email is verified
@@ -182,8 +189,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ user, isAuthenticated: true, isRegistering: false, powProgress: null });
     } catch (err) {
       // An abandoned solve is not a failure to report — the view is gone and
-      // `cancelRegistration` already cleared the flags.
+      // `cancelRegistration` already cleared the flags. The same goes for a
+      // POST that was already in flight when the view was left: the store's
+      // `error` is shared with LoginPage, which would render a 409 from this
+      // abandoned registration as a failed login the user never attempted.
       if (err instanceof PowAbortedError) throw err;
+      if (controller.signal.aborted) throw new PowAbortedError();
       set({
         error: getTranslatedError(err, i18n.t, 'auth.register.registrationFailed'),
         isRegistering: false,

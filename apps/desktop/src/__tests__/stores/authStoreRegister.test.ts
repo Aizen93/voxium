@@ -128,4 +128,60 @@ describe('authStore.register — proof-of-work flow', () => {
     expect(useAuthStore.getState().powProgress).toBeNull();
     expect(useAuthStore.getState().isSubmitting).toBe(false);
   });
+
+  // The solve is abortable; the POST that follows it is not. Walking away
+  // while it is in flight used to leak its outcome onto whatever page the
+  // user went to: `error` is shared with LoginPage.
+  describe('cancel while the POST is in flight', () => {
+    function hangingPost() {
+      let settle!: { resolve: (v: unknown) => void; reject: (e: unknown) => void };
+      api.post.mockImplementation(() => new Promise((resolve, reject) => { settle = { resolve, reject }; }));
+      return () => settle;
+    }
+
+    it('does not surface a 409 from the abandoned registration as an error on the next page', async () => {
+      solver.solveRegistrationPowOffThread.mockResolvedValue({ ...CHALLENGE, nonce: '3' });
+      const post = hangingPost();
+
+      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+      await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
+      useAuthStore.getState().cancelRegistration(); // RegisterPage unmounted → LoginPage mounted, clearError ran
+      post().reject(Object.assign(new Error('conflict'), { response: { status: 409, data: { error: 'Username or email already in use' } } }));
+
+      await expect(pending).rejects.toBeInstanceOf(PowAbortedError);
+      expect(useAuthStore.getState().error).toBeNull();
+      expect(useAuthStore.getState().isRegistering).toBe(false);
+    });
+
+    it('still finishes the sign-in on success when nobody else signed in meanwhile — the account exists now', async () => {
+      solver.solveRegistrationPowOffThread.mockResolvedValue({ ...CHALLENGE, nonce: '3' });
+      const post = hangingPost();
+
+      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+      await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
+      useAuthStore.getState().cancelRegistration();
+      post().resolve({ data: { data: { user: { id: 'u-new', emailVerified: false }, accessToken: 'at', refreshToken: 'rt' } } });
+
+      await pending;
+      expect(useAuthStore.getState().isAuthenticated).toBe(true);
+      expect(useAuthStore.getState().user?.id).toBe('u-new');
+    });
+
+    it('does NOT replace a session the user established as someone else while the POST was in flight', async () => {
+      solver.solveRegistrationPowOffThread.mockResolvedValue({ ...CHALLENGE, nonce: '3' });
+      const post = hangingPost();
+
+      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+      await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
+      useAuthStore.getState().cancelRegistration();
+      // Meanwhile: logged in as an existing account on LoginPage
+      useAuthStore.setState({ user: { id: 'u-existing' } as never, isAuthenticated: true });
+      post().resolve({ data: { data: { user: { id: 'u-new', emailVerified: true }, accessToken: 'at', refreshToken: 'rt' } } });
+
+      await pending;
+      expect(useAuthStore.getState().user?.id).toBe('u-existing');
+      const { setTokens } = await import('../../services/tokenStorage');
+      expect(setTokens).not.toHaveBeenCalledWith('at', 'rt', true);
+    });
+  });
 });

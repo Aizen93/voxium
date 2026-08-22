@@ -577,9 +577,55 @@ describe('authService — requestPasswordReset', () => {
 
     // Resolves while the transport is still hanging
     await expect(requestPasswordReset('test@example.com')).resolves.toBeUndefined();
+    await new Promise((r) => setImmediate(r)); // the detached token write, then the send
     expect(sendPasswordResetEmail).toHaveBeenCalled();
 
     releaseSmtp();
+  });
+
+  it('returns after the SAME work on both branches — the DB write is off the response path too', async () => {
+    // Dropping the SMTP await left the known-email branch awaiting a Redis
+    // consume and a DB UPDATE that the unknown-email branch skipped: the body
+    // was identical, the latency was not. Now both branches consume the cap,
+    // and the write is sequenced before the send inside the detached work.
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    let releaseUpdate: () => void = () => {};
+    vi.mocked(prisma.user.update).mockImplementationOnce(
+      () => new Promise<never>((resolve) => { releaseUpdate = resolve as () => void; }) as any,
+    );
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'test@example.com' } as any);
+    mailCap.mockClear();
+
+    // Known email: resolves while the UPDATE is still hanging
+    await expect(requestPasswordReset('test@example.com')).resolves.toBeUndefined();
+    expect(prisma.user.update).toHaveBeenCalledTimes(1);
+    // ...and the mail is NOT sent until the token is stored
+    await new Promise((r) => setImmediate(r));
+    expect(sendPasswordResetEmail).not.toHaveBeenCalled();
+    releaseUpdate();
+    await new Promise((r) => setImmediate(r));
+    expect(sendPasswordResetEmail).toHaveBeenCalledWith('test@example.com', expect.any(String));
+
+    // Unknown email: pays the same cap consume, keyed on the address as asked
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null);
+    await requestPasswordReset('no.body@gmail.com');
+    expect(mailCap).toHaveBeenCalledWith('resetMail', 'nobody@gmail.com');
+    expect(mailCap).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a failed token write on its own, and does not send a link that would be dead on arrival', async () => {
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    vi.mocked(sendPasswordResetEmail).mockClear();
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'test@example.com' } as any);
+    vi.mocked(prisma.user.update).mockRejectedValueOnce(new Error('db gone'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await requestPasswordReset('test@example.com');
+    await new Promise((r) => setImmediate(r));
+
+    expect(error).toHaveBeenCalledWith('[Auth] Failed to store password reset token:', 'db gone');
+    expect(sendPasswordResetEmail).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it('still logs a send failure, now that nothing awaits it', async () => {
