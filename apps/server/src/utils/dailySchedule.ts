@@ -4,6 +4,9 @@
 // Each of them used to carry its own copy of "ms until HH:MM, tomorrow if that
 // is already past", and each inherited the same bug from it.
 
+import { randomUUID } from 'crypto';
+import { NODE_ID } from './redis';
+
 /**
  * How close to the slot counts as "this is the run we just did".
  *
@@ -45,14 +48,31 @@ export function msUntilDailySlot(
 }
 
 /**
+ * The value to store in a `SET NX EX` lock: unique per ACQUISITION, not per
+ * process.
+ *
+ * `NODE_ID()` alone identified the process, and one process can hold two
+ * acquisitions of the same lock: the scheduled sweep and an admin's manual
+ * trigger (POST /storage/cleanup-orphans, POST /registration/hygiene) run in
+ * the same node, and once a long scan outruns the TTL the manual run's
+ * `SET NX` succeeds with the very same value. The scheduled run's `finally`
+ * then compared 'A' == 'A' and released the manual run's lock mid-scan, and
+ * the operator's retry started a third concurrent full-bucket sweep. The node
+ * id stays as a readable prefix for MONITOR and the logs.
+ */
+export function lockToken(): string {
+  return `${NODE_ID()}:${randomUUID()}`;
+}
+
+/**
  * Release a `SET NX EX` lock only if this caller still owns it.
  *
  * A plain `DEL` in a `finally` releases whatever is there, including a lock a
- * DIFFERENT node acquired after the TTL expired mid-run — at which point the
- * mutual exclusion the lock exists for is simply gone, and a third caller can
- * claim it while the second is still working. Both nightly sweeps write
- * `NODE_ID()` as the value precisely so ownership can be checked; they just
- * were not checking it.
+ * DIFFERENT acquisition took after the TTL expired mid-run — at which point
+ * the mutual exclusion the lock exists for is simply gone, and a third caller
+ * can claim it while the second is still working. The value compared is the
+ * per-acquisition `lockToken()`, so even a re-acquisition by the SAME process
+ * (the manual-trigger case above) is someone else's lock.
  *
  * Compare-and-delete in Lua so the read and the delete cannot be interleaved.
  */

@@ -162,6 +162,11 @@ describe('registration hygiene sweep — S3 cleanup', () => {
     expect(where.role).toBe('user');
     expect(where.ownedServers).toEqual({ none: {} });
     expect(deleteMultipleFromS3).toHaveBeenCalledWith(['avatars/u1.png', 'avatars/u3.png']);
+    // AFTER the rows, not before: a failed delete must not strand a live
+    // account without its avatar. The title said so; nothing checked it.
+    const rowsGone = vi.mocked(prisma.user.deleteMany).mock.invocationCallOrder[0];
+    const blobsGone = vi.mocked(deleteMultipleFromS3).mock.invocationCallOrder[0];
+    expect(rowsGone).toBeLessThan(blobsGone);
   });
 
   it('reports the avatars S3 ACCEPTED, not the ones it was handed', async () => {
@@ -249,15 +254,32 @@ describe('registration hygiene sweep — locking and observability', () => {
     // misleading "spared by the delete guards" warning every single night.
     const run = await runRegistrationHygieneLocked({ trigger: 'scheduled' });
 
-    expect(redisSet).toHaveBeenCalledWith('lock:reghygiene', 'node-under-test', { NX: true, EX: 900 });
+    // The token is unique per ACQUISITION, not per process: the admin's manual
+    // trigger runs in the same node as the scheduler, and with NODE_ID alone
+    // the scheduled run's release matched — and freed — the manual run's lock
+    // after a TTL overrun.
+    expect(redisSet).toHaveBeenCalledWith('lock:reghygiene', expect.stringMatching(/^node-under-test:[0-9a-f-]{36}$/), { NX: true, EX: 900 });
     expect(redisDel).not.toHaveBeenCalled();
     // Compare-and-delete, never a blind DEL: a large backlog can outrun the
     // 15-minute TTL, and by then the lock in Redis belongs to the next runner.
+    const token = redisSet.mock.calls.find((c) => c[0] === 'lock:reghygiene')![1];
     expect(redisEval).toHaveBeenCalledWith(
       expect.stringContaining("redis.call('get', KEYS[1]) == ARGV[1]"),
-      { keys: ['lock:reghygiene'], arguments: ['node-under-test'] },
+      { keys: ['lock:reghygiene'], arguments: [token] },
     );
     expect(run).toMatchObject({ deletedUsers: 3, trigger: 'scheduled', actorId: null });
+  });
+
+  it('uses a different token for every acquisition, so a same-node re-acquire is another runner\'s lock', async () => {
+    await runRegistrationHygieneLocked({ trigger: 'scheduled' });
+    await runRegistrationHygieneLocked({ trigger: 'manual', actorId: 'admin-1' });
+
+    const tokens = redisSet.mock.calls.filter((c) => c[0] === 'lock:reghygiene').map((c) => c[1]);
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).not.toBe(tokens[1]);
+    // And the release compares against the OWN token each time
+    const released = redisEval.mock.calls.map((c) => c[1].arguments[0]);
+    expect(released).toEqual(tokens);
   });
 
   it('does NOTHING when a peer already holds the lock', async () => {
@@ -290,7 +312,7 @@ describe('registration hygiene sweep — locking and observability', () => {
     // 15-minute TTL, and by then the lock in Redis belongs to the next runner.
     expect(redisEval).toHaveBeenCalledWith(
       expect.stringContaining("redis.call('get', KEYS[1]) == ARGV[1]"),
-      { keys: ['lock:reghygiene'], arguments: ['node-under-test'] },
+      { keys: ['lock:reghygiene'], arguments: [expect.stringMatching(/^node-under-test:/)] },
     );
   });
 

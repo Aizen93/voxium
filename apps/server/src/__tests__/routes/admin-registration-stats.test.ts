@@ -295,8 +295,31 @@ describe('POST /api/v1/admin/storage/cleanup-orphans', () => {
       .set('Authorization', `Bearer ${makeToken()}`);
 
     expect(res.status).toBe(200);
-    expect(orphanScheduled).toHaveBeenCalledTimes(1);
+    expect(orphanScheduled).toHaveBeenCalledWith({ force: false });
     expect(orphanRun).not.toHaveBeenCalled();
+  });
+
+  it('passes ?force=1 through to the locked sweep — the only place the proportional bound can be lifted', async () => {
+    mockAdminAuth();
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/storage/cleanup-orphans?force=1')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(orphanScheduled).toHaveBeenCalledWith({ force: true });
+  });
+
+  it('reports a refusal as a refusal, with what was scanned, so the UI cannot read it as success', async () => {
+    mockAdminAuth();
+    orphanScheduled.mockResolvedValue({ scanned: 2000, orphaned: 2000, deleted: 0, tooYoung: 0, foreign: 0, skipped: 'over-fraction' });
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/storage/cleanup-orphans')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ found: 2000, deleted: 0, scanned: 2000, skipped: 'over-fraction', force: false });
   });
 
   it('answers 409 while a sweep is already running', async () => {

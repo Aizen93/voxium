@@ -2213,10 +2213,14 @@ adminRouter.delete('/announcements/:id', async (req: Request<{ id: string }>, re
 // list-before-DB ordering and the cluster lock are what stop it deleting an
 // upload whose message has not been sent yet or racing the nightly run, and an
 // operator-initiated sweep must not skip any of them.
-// `?dryRun=1` reports what would go without deleting anything.
+// `?dryRun=1` reports what would go without deleting anything. `?force=1`
+// lifts the proportional bound (never the absolute ceiling) for a bucket that
+// genuinely is mostly orphans — a first-ever sweep — and exists ONLY here: the
+// nightly path cannot pass it.
 adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+    const force = req.query.force === '1' || req.query.force === 'true';
     // A destructive run takes the SAME cluster lock the nightly one does, and
     // answers 409 rather than starting a second full-bucket scan from a second
     // snapshot. Without it an operator clicking through nginx's 60s read
@@ -2226,7 +2230,7 @@ adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response,
     // be able to look.
     const result = dryRun
       ? await runOrphanCleanup({ dryRun: true })
-      : await runScheduledOrphanCleanup();
+      : await runScheduledOrphanCleanup({ force });
     if (result.skipped === 'not-leader') {
       res.status(409).json({ success: false, error: 'An orphan sweep is already running. Try again once it finishes.' });
       return;
@@ -2236,10 +2240,10 @@ adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response,
       actorId: req.user!.userId,
       action: 'storage.cleanup_orphans',
       targetType: 'storage',
-      metadata: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, dryRun, skipped: result.skipped ?? null },
+      metadata: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, dryRun, force, skipped: result.skipped ?? null },
     });
 
-    res.json({ success: true, data: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, notOurs: result.foreign, dryRun, skipped: result.skipped ?? null } });
+    res.json({ success: true, data: { found: result.orphaned, deleted: result.deleted, scanned: result.scanned, withinGrace: result.tooYoung, notOurs: result.foreign, dryRun, force, skipped: result.skipped ?? null } });
   } catch (err) {
     next(err);
   }

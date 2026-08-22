@@ -23,8 +23,8 @@
 // window even with the age gate.
 import { prisma } from './prisma';
 import { listAllS3Objects, deleteMultipleFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from './s3';
-import { getRedis, NODE_ID } from './redis';
-import { msUntilDailySlot, releaseLockIfOwned } from './dailySchedule';
+import { getRedis } from './redis';
+import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
@@ -52,6 +52,21 @@ const LOCK_TTL_SECONDS = 3600;
  * anything that does is a bug worth stopping for.
  */
 export const ORPHAN_MAX_DELETES_PER_RUN = 50_000;
+/**
+ * The proportional half of the same guard. An absolute ceiling protects no
+ * bucket smaller than itself — and this one is: attachment blobs are purged at
+ * 3 days by attachmentCleanup while the orphan grace is 7, so steady state is
+ * avatars + icons + a few days of attachments, far under 50k. Against that, a
+ * reference query that returns nothing would have deleted every live object
+ * and logged it like a healthy night. A sweep that finds more than this
+ * fraction of the bucket unreferenced is refused too, once the candidate count
+ * is past a floor that keeps a tiny or fresh bucket from tripping on ordinary
+ * churn. A first-ever sweep of a long-unswept bucket can legitimately be
+ * mostly orphans, which is what `force` on the admin endpoint is for — after a
+ * dry run, never on the scheduled path.
+ */
+export const ORPHAN_MAX_FRACTION = 0.25;
+export const ORPHAN_FRACTION_FLOOR = 200;
 
 export interface OrphanSweepResult {
   scanned: number;
@@ -61,9 +76,10 @@ export interface OrphanSweepResult {
   tooYoung: number;
   /** Unreferenced and old, but not shaped like anything this app writes. */
   foreign: number;
-  /** `not-leader`: a peer holds the sweep lock. `over-cap`: too many candidates
-   *  to be believable, so nothing was deleted — see ORPHAN_MAX_DELETES_PER_RUN. */
-  skipped?: 'not-leader' | 'over-cap';
+  /** `not-leader`: a peer holds the sweep lock. `over-cap`: more candidates than
+   *  ORPHAN_MAX_DELETES_PER_RUN. `over-fraction`: more than ORPHAN_MAX_FRACTION of
+   *  the bucket looked orphaned. In both refusal cases nothing was deleted. */
+  skipped?: 'not-leader' | 'over-cap' | 'over-fraction';
 }
 
 const EMPTY: OrphanSweepResult = { scanned: 0, orphaned: 0, deleted: 0, tooYoung: 0, foreign: 0 };
@@ -94,9 +110,11 @@ function scheduleNext(afterRun: boolean) {
   timeoutId.unref?.();
 }
 
-/** The scheduled entry point: claims the cluster lock, then sweeps. */
-export async function runScheduledOrphanCleanup(): Promise<OrphanSweepResult> {
-  const owner = NODE_ID();
+/** The scheduled entry point: claims the cluster lock, then sweeps.
+ *  `force` lifts the proportional bound only (never the absolute ceiling) and
+ *  is reachable from the admin endpoint alone — the scheduler never passes it. */
+export async function runScheduledOrphanCleanup(opts: { force?: boolean } = {}): Promise<OrphanSweepResult> {
+  const owner = lockToken();
   let claimed: string | null;
   try {
     claimed = await getRedis().set(LOCK_KEY, owner, { NX: true, EX: LOCK_TTL_SECONDS });
@@ -109,7 +127,7 @@ export async function runScheduledOrphanCleanup(): Promise<OrphanSweepResult> {
   if (claimed === null) return { ...EMPTY, skipped: 'not-leader' };
 
   try {
-    return await runOrphanCleanup();
+    return await runOrphanCleanup({ force: opts.force });
   } finally {
     // Release rather than waiting out the TTL, so a sweep that fails early can
     // be retried inside the hour instead of being locked out by its own corpse
@@ -129,7 +147,7 @@ export async function runScheduledOrphanCleanup(): Promise<OrphanSweepResult> {
  * inspect a bucket before trusting the sweep with it.
  */
 export async function runOrphanCleanup(
-  opts: { minAgeMs?: number; dryRun?: boolean } = {},
+  opts: { minAgeMs?: number; dryRun?: boolean; force?: boolean } = {},
 ): Promise<OrphanSweepResult> {
   const minAgeMs = opts.minAgeMs ?? ORPHAN_GRACE_DAYS * 24 * 60 * 60 * 1000;
   const listedAt = Date.now();
@@ -162,17 +180,30 @@ export async function runOrphanCleanup(
   // the likeliest explanation is that the reference query is wrong, and
   // deleting "only" the first 50k of a bad answer is still deleting live data.
   // The candidates are still reported, so an operator can see what it found.
+  // Two bounds, because the absolute one has no force below its own size: on
+  // a bucket of 20k objects a reference query that returns nothing yields 20k
+  // candidates, under the ceiling, and deletes everything.
   const overCap = orphanKeys.length > ORPHAN_MAX_DELETES_PER_RUN;
+  const overFraction = !opts.force
+    && orphanKeys.length > ORPHAN_FRACTION_FLOOR
+    && orphanKeys.length > objects.length * ORPHAN_MAX_FRACTION;
+  const refused: OrphanSweepResult['skipped'] | undefined = overCap ? 'over-cap' : overFraction ? 'over-fraction' : undefined;
   if (overCap) {
     console.error(
       `[OrphanSweep] REFUSING to delete: ${orphanKeys.length} candidates exceeds the ${ORPHAN_MAX_DELETES_PER_RUN} per-run ceiling. `
       + 'That many unreferenced objects usually means the reference query is wrong, not that the bucket is that dirty. '
       + 'Investigate with ?dryRun=1 before raising the cap.',
     );
+  } else if (overFraction) {
+    console.error(
+      `[OrphanSweep] REFUSING to delete: ${orphanKeys.length} of ${objects.length} scanned objects (${Math.round(orphanKeys.length / objects.length * 100)}%) look orphaned, `
+      + `over the ${ORPHAN_MAX_FRACTION * 100}% bound. A healthy bucket is nowhere near this; a broken reference query is. `
+      + 'Inspect with ?dryRun=1, and if the bucket genuinely is that dirty, run the admin sweep once with ?force=1.',
+    );
   }
 
   let deleted = 0;
-  if (!opts.dryRun && !overCap && orphanKeys.length > 0) {
+  if (!opts.dryRun && !refused && orphanKeys.length > 0) {
     // Batched (1000/call) rather than one DeleteObject per key — a bucket with
     // 10k orphans was 10k sequential round trips inside one HTTP request. The
     // return value is what S3 ACCEPTED: reporting the candidate count instead
@@ -191,10 +222,10 @@ export async function runOrphanCleanup(
   console.log(
     `[OrphanSweep] scanned=${result.scanned} orphaned=${result.orphaned} deleted=${result.deleted} within-grace=${result.tooYoung} not-ours=${result.foreign}${opts.dryRun ? ' (dry run)' : ''}`
   );
-  if (!opts.dryRun && !overCap && deleted < orphanKeys.length) {
+  if (!opts.dryRun && !refused && deleted < orphanKeys.length) {
     console.error(`[OrphanSweep] S3 refused ${orphanKeys.length - deleted} deletion(s) — check the bucket policy / IAM permissions`);
   }
-  return overCap ? { ...result, skipped: 'over-cap' } : result;
+  return refused ? { ...result, skipped: refused } : result;
 }
 
 /**

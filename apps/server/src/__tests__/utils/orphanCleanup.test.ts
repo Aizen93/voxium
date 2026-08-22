@@ -27,7 +27,7 @@ vi.mock('../../utils/redis', () => ({
   NODE_ID: () => 'node-1',
 }));
 
-import { runOrphanCleanup, runScheduledOrphanCleanup, ORPHAN_GRACE_DAYS, ORPHAN_MAX_DELETES_PER_RUN } from '../../utils/orphanCleanup';
+import { runOrphanCleanup, runScheduledOrphanCleanup, ORPHAN_GRACE_DAYS, ORPHAN_MAX_DELETES_PER_RUN, ORPHAN_MAX_FRACTION, ORPHAN_FRACTION_FLOOR } from '../../utils/orphanCleanup';
 
 const DAY = 24 * 60 * 60 * 1000;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -72,14 +72,100 @@ describe('orphan sweep — blast-radius ceiling', () => {
     error.mockRestore();
   });
 
-  it('deletes normally right up to the ceiling', async () => {
-    const many = Array.from({ length: ORPHAN_MAX_DELETES_PER_RUN }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY));
-    mockList.mockResolvedValue(many);
+  it('deletes normally right up to the ceiling when the orphans are a small share of the bucket', async () => {
+    const orphans = Array.from({ length: ORPHAN_MAX_DELETES_PER_RUN }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY));
+    // Enough referenced objects that 50k is under the proportional bound
+    const liveCount = Math.ceil(ORPHAN_MAX_DELETES_PER_RUN / ORPHAN_MAX_FRACTION);
+    const live = Array.from({ length: liveCount }, (_, i) => s3(`avatars/live-${i}.webp`, 30 * DAY));
+    mockList.mockResolvedValue([...orphans, ...live]);
+    mockPrisma.user.findMany.mockResolvedValue(live.map((o, i) => ({ id: `u-${i}`, avatarUrl: o.key })));
 
     const result = await runOrphanCleanup();
 
     expect(result.deleted).toBe(ORPHAN_MAX_DELETES_PER_RUN);
     expect(result.skipped).toBeUndefined();
+  });
+
+  // The absolute ceiling protects no bucket smaller than itself — and this
+  // one is (attachment blobs go at 3 days, grace is 7). A reference query that
+  // returned nothing used to delete every live object of a 20k bucket and log
+  // it like a healthy night. The real hazard is the PROPORTION.
+  it('refuses when more than the fraction bound of the bucket looks orphaned — a broken reference query, not a dirty bucket', async () => {
+    const total = 2000;
+    const all = Array.from({ length: total }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY));
+    mockList.mockResolvedValue(all);
+    mockPrisma.user.findMany.mockResolvedValue([]); // "nothing is referenced"
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await runOrphanCleanup();
+
+    expect(result.orphaned).toBe(total);
+    expect(result.deleted).toBe(0);
+    expect(result.skipped).toBe('over-fraction');
+    expect(mockDeleteMany).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('REFUSING to delete'));
+    error.mockRestore();
+  });
+
+  it('the proportional bound is exactly ORPHAN_MAX_FRACTION of what was scanned', async () => {
+    const total = 4000;
+    const orphanCount = Math.floor(total * ORPHAN_MAX_FRACTION);
+    const all = Array.from({ length: total }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY));
+    mockList.mockResolvedValue(all);
+    const referenced = all.slice(orphanCount).map((o, i) => ({ id: `u-${i}`, avatarUrl: o.key }));
+    mockPrisma.user.findMany.mockResolvedValue(referenced);
+
+    // Exactly at the fraction: allowed
+    const atBound = await runOrphanCleanup();
+    expect(atBound.skipped).toBeUndefined();
+    expect(atBound.deleted).toBe(orphanCount);
+
+    // One more orphan: refused
+    mockPrisma.user.findMany.mockResolvedValue(referenced.slice(1));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const overBound = await runOrphanCleanup();
+    expect(overBound.skipped).toBe('over-fraction');
+    expect(overBound.deleted).toBe(0);
+    error.mockRestore();
+  });
+
+  it('never applies the fraction bound below the floor, so a tiny or fresh bucket sweeps normally', async () => {
+    // 100% orphaned, but only ORPHAN_FRACTION_FLOOR of them: ordinary churn on
+    // a small self-hosted bucket, not a sign of a broken query
+    const few = Array.from({ length: ORPHAN_FRACTION_FLOOR }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY));
+    mockList.mockResolvedValue(few);
+
+    const result = await runOrphanCleanup();
+
+    expect(result.skipped).toBeUndefined();
+    expect(result.deleted).toBe(ORPHAN_FRACTION_FLOOR);
+  });
+
+  it('force lifts the proportional bound but NEVER the absolute ceiling', async () => {
+    const total = 2000;
+    mockList.mockResolvedValue(Array.from({ length: total }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY)));
+    const forced = await runOrphanCleanup({ force: true });
+    expect(forced.skipped).toBeUndefined();
+    expect(forced.deleted).toBe(total);
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockList.mockResolvedValue(Array.from({ length: ORPHAN_MAX_DELETES_PER_RUN + 1 }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY)));
+    const stillCapped = await runOrphanCleanup({ force: true });
+    expect(stillCapped.skipped).toBe('over-cap');
+    expect(stillCapped.deleted).toBe(0);
+    error.mockRestore();
+  });
+
+  it('a dry run reports the refusal too, so an operator can see it coming', async () => {
+    mockList.mockResolvedValue(Array.from({ length: 2000 }, (_, i) => s3(`avatars/u-${i}.webp`, 30 * DAY)));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await runOrphanCleanup({ dryRun: true });
+
+    expect(result.skipped).toBe('over-fraction');
+    expect(result.orphaned).toBe(2000);
+    expect(mockDeleteMany).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 });
 
@@ -229,14 +315,34 @@ describe('orphan sweep — what it deletes', () => {
   });
 });
 
+/**
+ * A tiny Redis with REAL `SET NX EX` / compare-and-delete semantics, so the
+ * lock tests exercise what the Lua script does rather than a stub that
+ * answers 0 or 1 regardless — which passed against a blind DEL.
+ */
+function fakeLockStore() {
+  const store = new Map<string, string>();
+  mockRedisSet.mockImplementation(async (key: string, value: string, opts?: { NX?: boolean }) => {
+    if (opts?.NX && store.has(key)) return null;
+    store.set(key, value);
+    return 'OK';
+  });
+  mockRedisEval.mockImplementation(async (script: string, { keys, arguments: args }: { keys: string[]; arguments: string[] }) => {
+    expect(script).toContain("redis.call('get', KEYS[1]) == ARGV[1]");
+    if (store.get(keys[0]) === args[0]) { store.delete(keys[0]); return 1; }
+    return 0;
+  });
+  return store;
+}
+
 describe('orphan sweep — cluster leadership', () => {
-  it('sweeps when it wins the lock', async () => {
-    mockRedisSet.mockResolvedValue('OK');
+  it('sweeps when it wins the lock, and releases it by compare-and-delete with its OWN token', async () => {
+    const store = fakeLockStore();
     mockList.mockResolvedValue([s3('avatars/old.webp', 30 * DAY)]);
 
     const result = await runScheduledOrphanCleanup();
 
-    expect(mockRedisSet).toHaveBeenCalledWith('lock:orphan-sweep', 'node-1', { NX: true, EX: 3600 });
+    expect(mockRedisSet).toHaveBeenCalledWith('lock:orphan-sweep', expect.stringMatching(/^node-1:[0-9a-f-]{36}$/), { NX: true, EX: 3600 });
     expect(result.deleted).toBe(1);
     // Released rather than left to expire, so a sweep that fails early can be
     // retried inside the hour instead of being locked out by its own corpse —
@@ -244,23 +350,52 @@ describe('orphan sweep — cluster leadership', () => {
     // can outrun the one-hour TTL, at which point the lock in Redis belongs to
     // whoever started next.
     expect(mockRedisDel).not.toHaveBeenCalled();
-    expect(mockRedisEval).toHaveBeenCalledWith(
-      expect.stringContaining("redis.call('get', KEYS[1]) == ARGV[1]"),
-      { keys: ['lock:orphan-sweep'], arguments: ['node-1'] },
-    );
+    const token = mockRedisSet.mock.calls[0][1];
+    expect(mockRedisEval).toHaveBeenCalledWith(expect.any(String), { keys: ['lock:orphan-sweep'], arguments: [token] });
+    expect(store.has('lock:orphan-sweep')).toBe(false);
   });
 
-  it('does NOT release a lock it no longer owns', async () => {
+  it('does NOT release a lock that a later acquisition holds — even one from the SAME process', async () => {
     // A full-bucket scan can outrun the one-hour TTL. By then Redis holds the
     // NEXT runner's value, and a blind DEL would hand their lock to a third —
-    // which is the mutual exclusion this lock exists to provide, gone.
-    mockList.mockResolvedValue([]);
-    mockRedisEval.mockResolvedValue(0); // compare-and-delete found someone else's value
+    // which is the mutual exclusion this lock exists to provide, gone. The
+    // next runner can be THIS node: an admin's manual trigger runs in the same
+    // process as the scheduler, and a per-process token (NODE_ID) made the
+    // scheduled run's release match it.
+    const store = fakeLockStore();
+    let resolveList!: (v: never[]) => void;
+    mockList.mockReturnValueOnce(new Promise<never[]>((r) => { resolveList = r; }));
 
-    await runScheduledOrphanCleanup();
+    const first = runScheduledOrphanCleanup();
+    await vi.waitFor(() => expect(mockRedisSet).toHaveBeenCalledTimes(1));
+    // TTL expiry mid-scan, then the manual run claims the lock with its own token
+    store.delete('lock:orphan-sweep');
+    mockList.mockResolvedValue([]);
+    const second = await runScheduledOrphanCleanup();
+    expect(second.skipped).toBeUndefined();
+    const secondToken = mockRedisSet.mock.calls[1][1];
+    expect(secondToken).not.toBe(mockRedisSet.mock.calls[0][1]);
+    // Put the second runner's lock back as if it were still mid-scan, then let
+    // the first finish: it must leave that lock alone.
+    store.set('lock:orphan-sweep', secondToken);
+    resolveList([]);
+    await first;
 
     expect(mockRedisDel).not.toHaveBeenCalled();
-    expect(mockRedisEval).toHaveBeenCalledTimes(1);
+    expect(store.get('lock:orphan-sweep')).toBe(secondToken);
+  });
+
+  it('mints a fresh token for every acquisition', async () => {
+    fakeLockStore();
+    mockList.mockResolvedValue([]);
+
+    await runScheduledOrphanCleanup();
+    await runScheduledOrphanCleanup();
+
+    const [a, b] = mockRedisSet.mock.calls.map((c) => c[1]);
+    expect(a).toMatch(/^node-1:/);
+    expect(b).toMatch(/^node-1:/);
+    expect(a).not.toBe(b);
   });
 
   it('does nothing when a peer already holds the lock', async () => {

@@ -70,7 +70,17 @@ export function AdminStorage() {
   const handleCleanup = async () => {
     try {
       const result = await cleanupOrphans();
-      toast.success(`Cleaned up ${result.deleted} of ${result.found} orphaned files`);
+      // The sweep answers 200 with `skipped` set when it REFUSED — an
+      // implausible number of candidates means a broken reference query, not
+      // a dirty bucket. Reporting that as "Cleaned up 0 of N" sent operators
+      // looking at S3 permissions instead of at the refusal.
+      if (result.skipped === 'over-cap') {
+        toast.error(`Sweep refused: ${result.found} candidates exceed the per-run ceiling. Nothing was deleted — inspect with a dry run first.`);
+      } else if (result.skipped === 'over-fraction') {
+        toast.error(`Sweep refused: ${result.found} of ${result.scanned ?? '?'} objects look orphaned, which usually means a broken reference query. Nothing was deleted — inspect with a dry run first.`);
+      } else {
+        toast.success(`Cleaned up ${result.deleted} of ${result.found} orphaned files`);
+      }
     } catch {
       toast.error('Failed to cleanup orphans');
     }

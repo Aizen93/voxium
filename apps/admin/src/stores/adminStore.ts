@@ -28,6 +28,18 @@ let supportMessageHandler: ((msg: SupportMessageData) => void) | null = null;
 let supportStatusHandler: ((data: { ticketId: string; status: string; claimedById?: string; claimedByUsername?: string }) => void) | null = null;
 let supportReconnectUnsub: (() => void) | null = null;
 
+/** What POST /admin/storage/cleanup-orphans answers. `skipped` is set when the
+ *  sweep REFUSED (nothing deleted) — the UI must not read that as success. */
+export interface OrphanCleanupResult {
+  found: number;
+  deleted: number;
+  scanned?: number;
+  withinGrace?: number;
+  notOurs?: number;
+  dryRun?: boolean;
+  skipped?: 'over-cap' | 'over-fraction' | null;
+}
+
 export interface OwnedServerInfo {
   id: string;
   name: string;
@@ -227,7 +239,7 @@ interface AdminState {
   fetchStorageFiles: (page?: number) => Promise<void>;
   setStorageFilter: (filter: string) => void;
   deleteStorageFile: (key: string) => Promise<void>;
-  cleanupOrphans: () => Promise<{ found: number; deleted: number }>;
+  cleanupOrphans: () => Promise<OrphanCleanupResult>;
 
   // Infrastructure Servers
   fetchInfraServers: () => Promise<void>;
@@ -925,7 +937,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   cleanupOrphans: async () => {
-    const { data } = await api.post('/admin/storage/cleanup-orphans');
+    const { data } = await api.post<{ data: OrphanCleanupResult }>('/admin/storage/cleanup-orphans');
     await Promise.all([get().fetchStorageStats(), get().fetchStorageFiles()]);
     return data.data;
   },

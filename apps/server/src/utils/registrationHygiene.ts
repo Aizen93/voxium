@@ -17,7 +17,7 @@ import { getRedis, NODE_ID } from './redis';
 import { deleteMultipleFromS3 } from './s3';
 import { sendAdminAlert, describeEmailError } from './email';
 import { logAuditEvent } from './auditLog';
-import { msUntilDailySlot, releaseLockIfOwned } from './dailySchedule';
+import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let spikeIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -203,7 +203,7 @@ export async function runRegistrationHygieneLocked(
     return run;
   }
 
-  const owner = NODE_ID();
+  const owner = lockToken();
   let claimed: string | null;
   try {
     claimed = await getRedis().set(HYGIENE_LOCK_KEY, owner, { NX: true, EX: HYGIENE_LOCK_TTL_SECONDS });
