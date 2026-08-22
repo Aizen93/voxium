@@ -573,9 +573,9 @@ export function MainLayout() {
         if (voiceState.screenSharingUserId !== userId) return;
         useAnnotationStore.getState().applyRemoteOps(channelId, rev, ops);
       },
-      voiceAnnotationState: ({ channelId, rev, scene }: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene }) => {
+      voiceAnnotationState: ({ channelId, rev, scene, restarted }: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene; restarted?: boolean }) => {
         if (useVoiceStore.getState().activeChannelId !== channelId) return;
-        useAnnotationStore.getState().hydrate(channelId, rev, scene);
+        useAnnotationStore.getState().hydrate(channelId, rev, scene, restarted === true);
       },
       memberRoleUpdated: ({ serverId, userId, role }: { serverId: string; userId: string; role: MemberRole }) => {
         useServerStore.getState().handleMemberRoleUpdated(serverId, userId, role);

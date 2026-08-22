@@ -385,7 +385,11 @@ export interface ServerToClientEvents {
   // drop ops with rev <= the snapshot's rev (snapshot and ops can arrive from
   // different nodes with no cross-node ordering guarantee)
   'voice:annotation:ops': (data: { channelId: string; userId: string; rev: number; ops: AnnotationOp[] }) => void;
-  'voice:annotation:state': (data: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene }) => void;
+  // restarted: the server's rev counter started over (scene key lost to TTL
+  // expiry, Redis loss or a cleanup del mid-share) and this snapshot is the
+  // new generation's baseline — a viewer must drop everything it buffered from
+  // the previous generation rather than replay it over the snapshot.
+  'voice:annotation:state': (data: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene; restarted?: boolean }) => void;
   'announcement:new': (announcement: Announcement) => void;
   'announcement:init': (data: { announcements: Announcement[] }) => void;
   'admin:metrics': (data: AdminMetricsSnapshot) => void;

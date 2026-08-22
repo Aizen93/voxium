@@ -425,11 +425,17 @@ describe('annotationHandler — scene-restart snapshot', () => {
     await send(opsHandler, [{ t: 'add', obj }]);
 
     expect(toEmit).toHaveBeenCalledWith('voice:annotation:ops', expect.objectContaining({ rev: 1 }));
+    // `restarted` is how a viewer tells this snapshot from a join-race one:
+    // revs cannot. Without it a viewer at rev 60 replayed its buffered
+    // pre-restart batches over the rev-1 snapshot and pinned itself at 60,
+    // dropping the sharer's resync (rev 2, 3, …) as stale for the rest of
+    // the share.
     expect(toEmit).toHaveBeenCalledWith('voice:annotation:state', {
       channelId: CHANNEL,
       sharingUserId: SHARER,
       rev: 1,
       scene: { objects: [obj] },
+      restarted: true,
     });
   });
 
@@ -437,7 +443,7 @@ describe('annotationHandler — scene-restart snapshot', () => {
     const { opsHandler, toEmit } = setup();
     mockRedis.mGet.mockResolvedValue([SHARER, '{not json']);
     await send(opsHandler, [{ t: 'add', obj: stroke() }]);
-    expect(toEmit).toHaveBeenCalledWith('voice:annotation:state', expect.objectContaining({ rev: 1 }));
+    expect(toEmit).toHaveBeenCalledWith('voice:annotation:state', expect.objectContaining({ rev: 1, restarted: true }));
   });
 
   it('does NOT broadcast a snapshot (nor flag restarted) on a normal incremental batch', async () => {

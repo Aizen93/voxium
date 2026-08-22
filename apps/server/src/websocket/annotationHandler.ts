@@ -312,11 +312,17 @@ export function handleAnnotationEvents(
         // this same session would silently drop every rev-1..N op as stale —
         // a full snapshot re-baselines them (hydrate overwrites rev wholesale).
         // On a genuinely fresh share this is one tiny redundant emit.
+        // `restarted` is what lets a viewer tell this snapshot from the
+        // join-race kind: revs alone cannot. A viewer at rev 60 that receives
+        // a rev-1 snapshot would otherwise replay its buffered rev-29..60
+        // batches on top of it and pin itself at 60, dropping the sharer's
+        // resync (rev 2..) as stale for the rest of the share.
         socket.to(`voice:${channelId}`).emit('voice:annotation:state', {
           channelId,
           sharingUserId: userId,
           rev: next.rev,
           scene,
+          restarted: true,
         });
       }
       ack(sceneRestarted ? { ok: true, restarted: true } : { ok: true });

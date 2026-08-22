@@ -59,7 +59,10 @@ interface AnnotationState {
   masks: MaskRect[];
 
   // Viewer path
-  hydrate: (channelId: string, rev: number, scene: AnnotationScene) => void;
+  /** `restarted`: the server's rev counter began a new generation (scene key
+   *  lost mid-share) — take the snapshot wholesale and discard everything
+   *  buffered from the previous generation. */
+  hydrate: (channelId: string, rev: number, scene: AnnotationScene, restarted?: boolean) => void;
   applyRemoteOps: (channelId: string, rev: number, ops: AnnotationOp[]) => void;
   clearViewerScene: () => void;
 
@@ -276,11 +279,19 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
   selectedObjectId: null,
   masks: [],
 
-  hydrate: (channelId, rev, scene) => {
+  hydrate: (channelId, rev, scene, restarted = false) => {
+    // A restart snapshot opens a NEW rev generation: every buffered batch is
+    // from the old one, and "rev > snapshot.rev" is true of all of them — the
+    // exact comparison that, for a join-race snapshot, correctly selects the
+    // batches that raced ahead. Replaying them here rebuilt the pre-restart
+    // scene on top of the fresh one and pinned rev at the old maximum, so the
+    // sharer's resync (rev 2, 3, …) was dropped as stale for the rest of the
+    // share. Revs cannot tell the two apart; the flag can.
+    if (restarted) recentRemoteOps = [];
     // Replay buffered batches NEWER than the snapshot: ops that raced ahead of
-    // a voice:join hydration (applied to an empty base) or that follow a
-    // scene-restart snapshot. The snapshot always includes its own batch, so
-    // only rev > snapshot.rev is re-applied — never a double-apply.
+    // a voice:join hydration (applied to an empty base), or that arrived after
+    // a restart snapshot was taken. The snapshot always includes its own
+    // batch, so only rev > snapshot.rev is re-applied — never a double-apply.
     const buffered = get().sceneChannelId === channelId
       ? recentRemoteOps.filter((b) => b.rev > rev).sort((a, b) => a.rev - b.rev)
       : [];

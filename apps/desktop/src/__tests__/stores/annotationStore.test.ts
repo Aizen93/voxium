@@ -135,10 +135,61 @@ describe('annotationStore — viewer path', () => {
     // The restart snapshot (rev 1, INCLUDES the rev-1 batch) re-baselines;
     // replaying the buffered rev-1 batch on top would double-apply it
     const postRestartObj = (stroke('post-restart') as { t: 'add'; obj: never }).obj;
-    useAnnotationStore.getState().hydrate('chan-1', 1, { objects: [postRestartObj] });
+    useAnnotationStore.getState().hydrate('chan-1', 1, { objects: [postRestartObj] }, true);
     const s = useAnnotationStore.getState();
     expect(s.scene.objects.map((o) => o.id)).toEqual(['post-restart']);
     expect(s.rev).toBe(1);
+  });
+
+  it('a RESTART snapshot drops the buffered batches of the previous generation instead of replaying them', () => {
+    // The previous test seeded rev 40 through hydrate(), which leaves the
+    // buffer empty — the real path to rev 40 is applyRemoteOps, which buffers
+    // every batch. With the buffer full, a rev-1 snapshot's "replay rev > 1"
+    // rebuilt the whole pre-restart scene on top of it and pinned rev at 40.
+    for (let rev = 1; rev <= 40; rev++) {
+      useAnnotationStore.getState().applyRemoteOps('chan-1', rev, [stroke(`old-${rev}`)]);
+    }
+    expect(useAnnotationStore.getState().rev).toBe(40);
+
+    // Scene key lost server-side; the sharer draws again → rev 1, restarted
+    useAnnotationStore.getState().applyRemoteOps('chan-1', 1, [stroke('new-1')]); // stale by rev, buffered
+    const new1 = (stroke('new-1') as { t: 'add'; obj: never }).obj;
+    useAnnotationStore.getState().hydrate('chan-1', 1, { objects: [new1] }, true);
+
+    let s = useAnnotationStore.getState();
+    expect(s.scene.objects.map((o) => o.id)).toEqual(['new-1']);
+    expect(s.rev).toBe(1);
+
+    // The sharer's resync (clear + re-adds) at rev 2, 3 must now APPLY, not be
+    // dropped as stale behind the old rev 40
+    useAnnotationStore.getState().applyRemoteOps('chan-1', 2, [{ t: 'clear' } as never]);
+    useAnnotationStore.getState().applyRemoteOps('chan-1', 3, [stroke('resynced')]);
+    s = useAnnotationStore.getState();
+    expect(s.scene.objects.map((o) => o.id)).toEqual(['resynced']);
+    expect(s.rev).toBe(3);
+  });
+
+  it('a restart snapshot still replays batches that arrived AFTER it in the new generation', () => {
+    for (let rev = 1; rev <= 5; rev++) {
+      useAnnotationStore.getState().applyRemoteOps('chan-1', rev, [stroke(`old-${rev}`)]);
+    }
+    // New generation: rev 1 (in the snapshot) and rev 2 land before the
+    // snapshot is processed — both are dropped as stale by rev and buffered
+    useAnnotationStore.getState().applyRemoteOps('chan-1', 1, [stroke('new-1')]);
+    useAnnotationStore.getState().applyRemoteOps('chan-1', 2, [stroke('new-2')]);
+    const new1 = (stroke('new-1') as { t: 'add'; obj: never }).obj;
+    useAnnotationStore.getState().hydrate('chan-1', 1, { objects: [new1] }, true);
+
+    // Only what arrived after the restart snapshot was taken can be recovered;
+    // new-2 arrived before the snapshot was processed but belongs to the new
+    // generation — it is lost with the buffer, and the sharer's next batch
+    // carries on from rev 3. Pinning this documents the trade-off: a clean
+    // re-baseline over a perfectly recovered buffer.
+    const s = useAnnotationStore.getState();
+    expect(s.scene.objects.map((o) => o.id)).toEqual(['new-1']);
+    expect(s.rev).toBe(1);
+    useAnnotationStore.getState().applyRemoteOps('chan-1', 3, [stroke('new-3')]);
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['new-1', 'new-3']);
   });
 
   it('applyRemoteOps for a different channel starts from an empty scene', () => {
