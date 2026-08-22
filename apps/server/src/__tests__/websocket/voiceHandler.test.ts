@@ -2271,4 +2271,24 @@ describe('voiceHandler — getVoiceStateForServers', () => {
 
     await expect(getVoiceStateForServers(['srv-1'])).resolves.toEqual([]);
   });
+
+  // Valid JSON that is not an object slipped past the parse guard: `null`
+  // parses cleanly and the first property read then threw OUTSIDE the try —
+  // the exact outer-catch abort the guard was added to prevent.
+  it.each([
+    ['null', 'null'],
+    ['a number', '1'],
+    ['a string', '"x"'],
+    ['an array', '[1]'],
+  ])('skips a mirror entry that is valid JSON but %s', async (_what, json) => {
+    mockMirror('vc', 'srv-1', {
+      'u-bad': json,
+      'u-good': JSON.stringify({ selfMute: true, selfDeaf: false }),
+    });
+
+    const [state] = await getVoiceStateForServers(['srv-1']);
+
+    expect(state.userIds).toEqual(['u-good']);
+    expect(state.userStates.get('u-good')?.selfMute).toBe(true);
+  });
 });

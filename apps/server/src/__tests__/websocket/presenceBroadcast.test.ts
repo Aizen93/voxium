@@ -594,9 +594,13 @@ describe('getSocketIp', () => {
     handshake: { address, headers: xff === undefined ? {} : { 'x-forwarded-for': xff } },
   });
   let prevEnv: string | undefined;
+  let prevTrust: string | undefined;
 
-  beforeEach(() => { prevEnv = process.env.NODE_ENV; });
-  afterEach(() => { process.env.NODE_ENV = prevEnv; });
+  beforeEach(() => { prevEnv = process.env.NODE_ENV; prevTrust = process.env.TRUST_PROXY; delete process.env.TRUST_PROXY; });
+  afterEach(() => {
+    process.env.NODE_ENV = prevEnv;
+    if (prevTrust === undefined) delete process.env.TRUST_PROXY; else process.env.TRUST_PROXY = prevTrust;
+  });
 
   it('takes the LAST forwarded hop, the only one a trusted proxy wrote', () => {
     process.env.NODE_ENV = 'production';
@@ -628,6 +632,23 @@ describe('getSocketIp', () => {
 
   it('ignores the header entirely outside production, where no proxy is trusted', () => {
     process.env.NODE_ENV = 'development';
+    expect(getSocketIp(handshake('203.0.113.9', '1.2.3.4'))).toBe('203.0.113.9');
+  });
+
+  // Express trusts the proxy on TRUST_PROXY=true too (app.ts) — the documented
+  // knob for "behind nginx" outside the Docker image. Gating the socket side on
+  // NODE_ENV alone left such a deploy with REST bans keyed on real client IPs
+  // and socket bans keyed on nginx's address: two keyed controls disagreeing
+  // about an address, which fails open.
+  it('honours TRUST_PROXY=true outside production, exactly like Express does', () => {
+    process.env.NODE_ENV = 'staging';
+    process.env.TRUST_PROXY = 'true';
+    expect(getSocketIp(handshake('10.0.0.5', '198.51.100.99, 203.0.113.7'))).toBe('203.0.113.7');
+  });
+
+  it('does not trust the header on any other TRUST_PROXY value', () => {
+    process.env.NODE_ENV = 'staging';
+    process.env.TRUST_PROXY = '1';
     expect(getSocketIp(handshake('203.0.113.9', '1.2.3.4'))).toBe('203.0.113.9');
   });
 

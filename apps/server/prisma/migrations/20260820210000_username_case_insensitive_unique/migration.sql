@@ -74,4 +74,11 @@ END $$;
 --      CREATE UNIQUE INDEX CONCURRENTLY "users_username_lower_key" ON "users" (lower("username"));
 --    (CONCURRENTLY cannot run inside a migration's transaction) and then
 --    `prisma migrate resolve --applied 20260820210000_username_case_insensitive_unique`.
-CREATE UNIQUE INDEX "users_username_lower_key" ON "users" (lower("username"));
+--
+--    IF NOT EXISTS is what makes that procedure safe: docker-entrypoint.sh
+--    runs `migrate deploy` on EVERY container start, so any restart that lands
+--    between the out-of-band build and the `migrate resolve` would otherwise
+--    fail here with "relation already exists" — recording the P3009 row that
+--    blocks every later deploy, the failure step 1 was rewritten to avoid.
+--    Steps 1 and 2 are already idempotent.
+CREATE UNIQUE INDEX IF NOT EXISTS "users_username_lower_key" ON "users" (lower("username"));

@@ -9,6 +9,7 @@ import { handleVoiceEvents, getVoiceStateForServers, getScreenShareState } from 
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { handleAnnotationEvents } from './annotationHandler';
 import { socketRateLimit, normalizeIp } from '../middleware/rateLimiter';
+import { trustsProxy } from '../utils/trustProxy';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { Permissions } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
@@ -16,13 +17,14 @@ import { hasChannelPermission } from '../utils/permissionCalculator';
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
 /**
- * Get the real client IP. Only reads X-Forwarded-For in production
- * (where a trusted reverse proxy is expected), matching Express's
- * `trust proxy` setting. In other environments, uses the direct
- * socket address to prevent header spoofing.
+ * Get the real client IP. Reads X-Forwarded-For only when a trusted reverse
+ * proxy is expected — the SAME condition app.ts uses for Express's
+ * `trust proxy` (utils/trustProxy.ts), so the socket handshake and every REST
+ * control agree about who is calling. Otherwise uses the direct socket
+ * address to prevent header spoofing.
  */
 export function getSocketIp(socket: { handshake: { address: string; headers: Record<string, string | string[] | undefined> } }): string | undefined {
-  if (process.env.NODE_ENV === 'production') {
+  if (trustsProxy()) {
     const raw = socket.handshake.headers['x-forwarded-for'];
     // The LAST hop, matching Express's `trust proxy: 1`, because that is the
     // only entry a trusted proxy wrote. nginx sets

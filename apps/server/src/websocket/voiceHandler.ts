@@ -2010,7 +2010,14 @@ export async function getVoiceStateForServers(serverIds: string[]): Promise<{ ch
     for (const [uid, json] of Object.entries(usersData)) {
       let parsed: Partial<MirroredVoiceState>;
       try {
-        parsed = JSON.parse(json);
+        const value: unknown = JSON.parse(json);
+        // Valid JSON is not necessarily an object: `null` parses cleanly and
+        // then throws on the first property read — OUTSIDE any try — which is
+        // the same outer-catch abort the parse guard exists to prevent.
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+          throw new Error(`expected an object, got ${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}`);
+        }
+        parsed = value as Partial<MirroredVoiceState>;
       } catch (err) {
         // One malformed or legacy hash value used to throw here, and the
         // connection handler's outer catch then abandoned everything after

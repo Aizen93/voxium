@@ -26,6 +26,7 @@ import { themeRouter } from './routes/themes';
 import { e2eRouter } from './routes/e2e';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
+import { trustsProxy } from './utils/trustProxy';
 
 export const app = express();
 
@@ -34,7 +35,7 @@ let _trustProxySet = false;
 app.use((req, _res, next) => {
   if (!_trustProxySet) {
     _trustProxySet = true;
-    if (process.env.TRUST_PROXY === 'true' || process.env.NODE_ENV === 'production') {
+    if (trustsProxy()) {
       req.app.set('trust proxy', 1);
     }
   }

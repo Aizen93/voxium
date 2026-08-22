@@ -29,8 +29,12 @@ const schema = readFileSync(SCHEMA, 'utf8');
 const authService = readFileSync(AUTH_SERVICE, 'utf8');
 
 describe('username case-insensitive uniqueness is enforced by the database', () => {
-  it('creates the functional unique index', () => {
-    expect(sql).toMatch(/CREATE UNIQUE INDEX "users_username_lower_key" ON "users" \(lower\("username"\)\)/);
+  it('creates the functional unique index, idempotently', () => {
+    // The file's own production guidance is to build the index CONCURRENTLY
+    // out-of-band and then `migrate resolve --applied`; a container booting
+    // between those two steps runs `migrate deploy` and would fail on a bare
+    // CREATE with "relation already exists" — the P3009 boot failure again.
+    expect(sql).toMatch(/CREATE UNIQUE INDEX IF NOT EXISTS "users_username_lower_key" ON "users" \(lower\("username"\)\)/);
   });
 
   it('repairs only UNVERIFIED squatters automatically and refuses to rename a real user', () => {
