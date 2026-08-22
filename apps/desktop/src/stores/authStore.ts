@@ -9,7 +9,7 @@ import { resetAccountStores } from './resetStores';
 import { processImage } from '../utils/imageProcessing';
 import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
-import type { User } from '@voxium/shared';
+import type { User, RegistrationConsent } from '@voxium/shared';
 import { PowExpiredError, PowAbortedError } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../services/powSolver';
 
@@ -40,7 +40,7 @@ interface AuthState {
   login: (email: string, password: string, rememberMe?: boolean) => Promise<void>;
   verifyTOTP: (code: string) => Promise<void>;
   cancelTOTP: () => void;
-  register: (username: string, email: string, password: string) => Promise<void>;
+  register: (username: string, email: string, password: string, consent: RegistrationConsent) => Promise<void>;
   /** Abandon an in-flight registration: stop the solve and clear its state.
    *  Without it the abandoned solve finishes, POSTs, and signs the user into
    *  the account they walked away from. */
@@ -153,7 +153,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ totpRequired: false, totpToken: null, totpRememberMe: true, error: null });
   },
 
-  register: async (username, email, password) => {
+  register: async (username, email, password, consent) => {
     registrationAbort?.abort();
     const controller = new AbortController();
     registrationAbort = controller;
@@ -166,7 +166,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const pow = await solveWithRetry((fraction) => set({ powProgress: fraction }), controller.signal);
       if (controller.signal.aborted) throw new PowAbortedError();
 
-      const { data } = await api.post('/auth/register', { username, email, password, pow });
+      const { data } = await api.post('/auth/register', { username, email, password, pow, ...consent });
       const { user, accessToken, refreshToken } = data.data;
 
       // The account now EXISTS, so there is nothing left to abandon: finish the

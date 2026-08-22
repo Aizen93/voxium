@@ -85,7 +85,23 @@ afterEach(() => {
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
+const CONSENT = { acceptTerms: true, acceptPrivacy: true };
+
 describe('authService — registerUser', () => {
+  // The route answers 400 for missing consent; this is the service's OWN
+  // guard, so no other caller (a script, a future admin tool) can mint an
+  // account without recorded consent.
+  it.each([
+    ['no consent', undefined],
+    ['terms only', { acceptTerms: true, acceptPrivacy: false }],
+    ['privacy only', { acceptTerms: false, acceptPrivacy: true }],
+  ])('refuses to create an account with %s', async (_label, consent) => {
+    vi.mocked(prisma.user.findFirst).mockResolvedValue(null);
+    await expect(registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, undefined, consent as never))
+      .rejects.toThrow(/accept the Terms of Service and the Privacy Policy/);
+    expect(prisma.user.create).not.toHaveBeenCalled();
+  });
+
   it('creates a user with hashed password', async () => {
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
     vi.mocked(prisma.user.create).mockResolvedValueOnce({
@@ -105,7 +121,7 @@ describe('authService — registerUser', () => {
       createdAt: new Date(),
     } as any);
 
-    const result = await registerUser('testuser', 'test@example.com', 'ValidPass123');
+    const result = await registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, undefined, CONSENT);
 
     expect(result.user).toBeDefined();
     expect(result.accessToken).toBeDefined();
@@ -131,7 +147,7 @@ describe('authService — registerUser', () => {
       isSupporter: false, supporterTier: null, tokenVersion: 0, createdAt: new Date(),
     } as any);
 
-    await registerUser('testuser', 'Test@EXAMPLE.COM', 'ValidPass123');
+    await registerUser('testuser', 'Test@EXAMPLE.COM', 'ValidPass123', undefined, undefined, CONSENT);
 
     const createCall = vi.mocked(prisma.user.create).mock.calls[0][0];
     expect(createCall.data.email).toBe('test@example.com');
@@ -140,28 +156,28 @@ describe('authService — registerUser', () => {
   it('rejects duplicate username or email', async () => {
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce({ id: 'existing' } as any);
 
-    await expect(registerUser('testuser', 'test@example.com', 'ValidPass123'))
+    await expect(registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, undefined, CONSENT))
       .rejects.toThrow('Username or email already in use');
   });
 
   it('rejects invalid username (too short)', async () => {
-    await expect(registerUser('ab', 'test@example.com', 'ValidPass123'))
+    await expect(registerUser('ab', 'test@example.com', 'ValidPass123', undefined, undefined, CONSENT))
       .rejects.toThrow(/Username/);
   });
 
   it('rejects invalid email', async () => {
-    await expect(registerUser('testuser', 'not-an-email', 'ValidPass123'))
+    await expect(registerUser('testuser', 'not-an-email', 'ValidPass123', undefined, undefined, CONSENT))
       .rejects.toThrow(/email/i);
   });
 
   it('rejects password exceeding 72 chars (bcrypt limit)', async () => {
     const longPassword = 'A'.repeat(73);
-    await expect(registerUser('testuser', 'test@example.com', longPassword))
+    await expect(registerUser('testuser', 'test@example.com', longPassword, undefined, undefined, CONSENT))
       .rejects.toThrow(/Password/);
   });
 
   it('rejects password below minimum length', async () => {
-    await expect(registerUser('testuser', 'test@example.com', 'short'))
+    await expect(registerUser('testuser', 'test@example.com', 'short', undefined, undefined, CONSENT))
       .rejects.toThrow(/Password/);
   });
 });
@@ -180,7 +196,7 @@ describe('authService — registration abuse defenses', () => {
     vi.mocked(prisma.ipRecord.create).mockResolvedValueOnce({} as any);
     mockCreatedUser();
 
-    await registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, '::ffff:203.0.113.9');
+    await registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, '::ffff:203.0.113.9', CONSENT);
 
     expect(prisma.ipBan.findUnique).toHaveBeenCalledWith({ where: { ip: '203.0.113.9' } });
     expect(prisma.ipRecord.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -191,7 +207,7 @@ describe('authService — registration abuse defenses', () => {
   it('REFUSES registration from a banned IP — the gap the bots walked through', async () => {
     vi.mocked(prisma.ipBan.findUnique).mockResolvedValueOnce({ id: 'ban-1', ip: '203.0.113.9', reason: 'bot wave' } as any);
 
-    await expect(registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, '203.0.113.9'))
+    await expect(registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, '203.0.113.9', CONSENT))
       .rejects.toThrow('Account banned: bot wave');
     expect(prisma.user.create).not.toHaveBeenCalled();
   });
@@ -199,7 +215,7 @@ describe('authService — registration abuse defenses', () => {
   it('dedupes on the CANONICAL email — dotted-gmail aliases cannot mint accounts', async () => {
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce({ id: 'existing' } as any);
 
-    await expect(registerUser('newuser', 'J.o.h.n.D.o.e+bot@GMAIL.com', 'ValidPass123'))
+    await expect(registerUser('newuser', 'J.o.h.n.D.o.e+bot@GMAIL.com', 'ValidPass123', undefined, undefined, CONSENT))
       .rejects.toThrow('Username or email already in use');
 
     const where = vi.mocked(prisma.user.findFirst).mock.calls[0][0]!.where as any;
@@ -210,7 +226,7 @@ describe('authService — registration abuse defenses', () => {
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
     mockCreatedUser();
 
-    await registerUser('testuser', 'John.Doe+x@gmail.com', 'ValidPass123');
+    await registerUser('testuser', 'John.Doe+x@gmail.com', 'ValidPass123', undefined, undefined, CONSENT);
 
     const createCall = vi.mocked(prisma.user.create).mock.calls[0][0] as any;
     expect(createCall.data.emailCanonical).toBe('johndoe@gmail.com');
@@ -218,7 +234,7 @@ describe('authService — registration abuse defenses', () => {
   });
 
   it('rejects disposable-email domains with the SAME generic error (no oracle)', async () => {
-    await expect(registerUser('testuser', 'bot@mailinator.com', 'ValidPass123'))
+    await expect(registerUser('testuser', 'bot@mailinator.com', 'ValidPass123', undefined, undefined, CONSENT))
       .rejects.toThrow('Username or email already in use');
     expect(prisma.user.findFirst).not.toHaveBeenCalled();
     expect(prisma.user.create).not.toHaveBeenCalled();
@@ -282,7 +298,7 @@ describe('authService — registerUser conflict handling', () => {
     mockCreated();
     vi.mocked(prisma.ipRecord.create).mockResolvedValueOnce({} as any);
 
-    await registerUser('testuser', 'x@gmail.com', 'ValidPass123', undefined, '::ffff:203.0.113.5');
+    await registerUser('testuser', 'x@gmail.com', 'ValidPass123', undefined, '::ffff:203.0.113.5', CONSENT);
 
     expect(prisma.ipBan.findUnique).toHaveBeenCalledWith({ where: { ip: '203.0.113.5' } });
     const record = vi.mocked(prisma.ipRecord.create).mock.calls[0][0] as any;
@@ -302,7 +318,7 @@ describe('authService — registerUser conflict handling', () => {
     });
     vi.mocked(prisma.user.create).mockRejectedValueOnce(p2002);
 
-    await expect(registerUser('Alice', 'alice@gmail.com', 'ValidPass123'))
+    await expect(registerUser('Alice', 'alice@gmail.com', 'ValidPass123', undefined, undefined, CONSENT))
       .rejects.toThrow('Username or email already in use');
     expect(domainConsume).not.toHaveBeenCalled();
   });
@@ -311,7 +327,7 @@ describe('authService — registerUser conflict handling', () => {
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
     vi.mocked(prisma.user.create).mockRejectedValueOnce(new Error('connection reset'));
 
-    await expect(registerUser('testuser', 'x@gmail.com', 'ValidPass123'))
+    await expect(registerUser('testuser', 'x@gmail.com', 'ValidPass123', undefined, undefined, CONSENT))
       .rejects.toThrow('connection reset');
   });
 });
@@ -328,7 +344,7 @@ describe('authService — novel-domain registration cap', () => {
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
     domainCount.mockResolvedValueOnce(10);
 
-    await expect(registerUser('testuser', 'bot@catchall.example', 'ValidPass123'))
+    await expect(registerUser('testuser', 'bot@catchall.example', 'ValidPass123', undefined, undefined, CONSENT))
       .rejects.toThrow('Too many registrations from this email domain');
     expect(domainCount).toHaveBeenCalledWith('catchall.example');
     expect(prisma.user.create).not.toHaveBeenCalled();
@@ -338,20 +354,20 @@ describe('authService — novel-domain registration cap', () => {
   it('counts the budget only AFTER a successful create — garbage attempts cannot burn a legit domain', async () => {
     // Duplicate username: fails BEFORE the domain budget is ever consumed
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce({ id: 'existing' } as any);
-    await expect(registerUser('taken', 'a@smallcorp.example', 'ValidPass123')).rejects.toThrow();
+    await expect(registerUser('taken', 'a@smallcorp.example', 'ValidPass123', undefined, undefined, CONSENT)).rejects.toThrow();
     expect(domainConsume).not.toHaveBeenCalled();
 
     // Successful create: counted
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
     mockCreated();
-    await registerUser('testuser', 'b@smallcorp.example', 'ValidPass123');
+    await registerUser('testuser', 'b@smallcorp.example', 'ValidPass123', undefined, undefined, CONSENT);
     expect(domainConsume).toHaveBeenCalledWith('smallcorp.example');
   });
 
   it('EXEMPTS major consumer providers — gmail signs up unbounded users/day', async () => {
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
     mockCreated();
-    await registerUser('testuser', 'human@gmail.com', 'ValidPass123');
+    await registerUser('testuser', 'human@gmail.com', 'ValidPass123', undefined, undefined, CONSENT);
     expect(domainCount).not.toHaveBeenCalled();
     expect(domainConsume).not.toHaveBeenCalled();
   });
@@ -360,7 +376,7 @@ describe('authService — novel-domain registration cap', () => {
     vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
     domainCount.mockResolvedValueOnce(0); // the helper itself fails soft to 0
     mockCreated();
-    await expect(registerUser('testuser', 'x@newdomain.example', 'ValidPass123')).resolves.toBeDefined();
+    await expect(registerUser('testuser', 'x@newdomain.example', 'ValidPass123', undefined, undefined, CONSENT)).resolves.toBeDefined();
   });
 });
 

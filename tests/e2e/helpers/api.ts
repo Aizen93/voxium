@@ -43,7 +43,8 @@ export async function registerUser(
   user: { username: string; email: string; password: string },
 ) {
   const pow = await solveRegisterChallenge(request);
-  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow } });
+  // Consent is required server-side, exactly as the form requires it
+  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow, acceptTerms: true, acceptPrivacy: true } });
   if (!res.ok()) {
     const body = await res.json().catch(() => ({}));
     throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);
@@ -63,7 +64,8 @@ export async function registerUserUnverified(
   user: { username: string; email: string; password: string },
 ) {
   const pow = await solveRegisterChallenge(request);
-  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow } });
+  // Consent is required server-side, exactly as the form requires it
+  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow, acceptTerms: true, acceptPrivacy: true } });
   if (!res.ok()) {
     const body = await res.json().catch(() => ({}));
     throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);

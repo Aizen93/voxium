@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
-import type { UserRole } from '@voxium/shared';
+import type { UserRole, RegistrationConsent } from '@voxium/shared';
 import { BadRequestError, ConflictError, ForbiddenError, TooManyRequestsError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain, emailDomain, isCommonEmailProvider } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } from '../utils/email';
@@ -32,7 +32,21 @@ async function getTimingEqualizerHash(): Promise<string> {
   return timingEqualizerHash;
 }
 
-export async function registerUser(username: string, email: string, password: string, displayName?: string, rawIp?: string) {
+export async function registerUser(
+  username: string,
+  email: string,
+  password: string,
+  displayName?: string,
+  rawIp?: string,
+  consent?: RegistrationConsent,
+) {
+  // The route validates the flags and answers 400; this is the service's own
+  // guard so no other caller can mint an account without recorded consent.
+  if (!consent || consent.acceptTerms !== true || consent.acceptPrivacy !== true) {
+    throw new BadRequestError('You must accept the Terms of Service and the Privacy Policy');
+  }
+  const consentedAt = new Date();
+
   email = email.toLowerCase().trim();
 
   // Same normalization the limiters use — ban matching, attribution and the
@@ -122,6 +136,8 @@ export async function registerUser(username: string, email: string, password: st
         password: hashedPassword,
         emailVerificationToken: hashedVerifyToken,
         emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+        termsAcceptedAt: consentedAt,
+        privacyAcceptedAt: consentedAt,
       },
       select: {
         id: true,

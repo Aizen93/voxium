@@ -246,13 +246,61 @@ describe('GET /api/v1/auth/register-challenge', () => {
   });
 });
 
+describe('POST /api/v1/auth/register — consent (CNIL/GDPR)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrismaUser.findFirst.mockResolvedValue(null);
+    mockPrismaUser.create.mockResolvedValue({ ...MOCK_USER });
+  });
+
+  const body = { username: 'testuser', email: 'test@example.com', password: 'password123' };
+
+  it.each([
+    ['no consent at all', {}],
+    ['terms only', { acceptTerms: true }],
+    ['privacy only', { acceptPrivacy: true }],
+    ['a truthy string is not acceptance', { acceptTerms: 'true', acceptPrivacy: 'true' }],
+    ['explicit refusal', { acceptTerms: true, acceptPrivacy: false }],
+  ])('refuses to register with %s', async (_label, consent) => {
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ ...body, ...consent });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/accept the (Terms of Service|Privacy Policy)/);
+    expect(mockPrismaUser.create).not.toHaveBeenCalled();
+    // Refused with the other cheap validations, BEFORE the proof-of-work is
+    // verified — a verify burns the challenge, and the client only refetches
+    // one on expiry
+    expect(mockVerifyPow).not.toHaveBeenCalled();
+  });
+
+  it('records WHEN each document was accepted, not just that it was', async () => {
+    const before = Date.now();
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ ...body, acceptTerms: true, acceptPrivacy: true });
+
+    expect(res.status).toBe(201);
+    const data = mockPrismaUser.create.mock.calls[0][0].data;
+    expect(data.termsAcceptedAt).toBeInstanceOf(Date);
+    expect(data.privacyAcceptedAt).toBeInstanceOf(Date);
+    expect(data.termsAcceptedAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(data.privacyAcceptedAt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+});
+
 describe('POST /api/v1/auth/register — proof-of-work gate', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('verifies the PoW BEFORE creating anything — a failed solve never reaches the service', async () => {
     mockVerifyPow.mockRejectedValueOnce(Object.assign(new Error('Registration challenge is invalid or expired — refresh and try again'), { statusCode: 400 }));
 
     const res = await request(app)
       .post('/api/v1/auth/register')
-      .send({ username: 'bot', email: 'bot@example.com', password: 'ValidPass123' });
+      .send({ username: 'bot', email: 'bot@example.com', password: 'ValidPass123', acceptTerms: true, acceptPrivacy: true });
 
     expect(mockVerifyPow).toHaveBeenCalled();
     expect(mockPrismaUser.create).not.toHaveBeenCalled();
@@ -275,6 +323,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(201);
@@ -296,6 +346,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(409);
@@ -310,6 +362,8 @@ describe('POST /api/v1/auth/register', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -323,6 +377,8 @@ describe('POST /api/v1/auth/register', () => {
       .send({
         username: 'testuser',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -352,6 +408,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'test@example.com',
         password: longPassword,
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -369,6 +427,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'TEST@EXAMPLE.COM',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(201);
@@ -384,6 +444,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'ab',
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -397,6 +459,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'not-an-email',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -426,6 +490,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'Alice',
         email: 'brand-new@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(409);
@@ -467,6 +533,8 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(200);
@@ -514,6 +582,8 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'nonexistent@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(401);
@@ -561,6 +631,8 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'TEST@EXAMPLE.COM',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(200);
@@ -585,6 +657,8 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(403);
@@ -600,6 +674,8 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(403);
@@ -1041,6 +1117,8 @@ describe('POST /api/v1/auth/login — TOTP flow', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(200);

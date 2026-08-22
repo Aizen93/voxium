@@ -148,6 +148,8 @@ async function registerUser(api: string, username: string): Promise<string> {
       email: `${username}@multinode.test`,
       password: PASSWORD,
       pow,
+      acceptTerms: true,
+      acceptPrivacy: true,
     });
     return res.data.data.accessToken;
   } catch (err: any) {

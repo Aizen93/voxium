@@ -295,7 +295,7 @@ async function run() {
             try {
               const { data: chal } = await axios.get(`${API}/auth/register-challenge`);
               const pow = await solveRegistrationPow(chal.data);
-              await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow });
+              await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow, acceptTerms: true, acceptPrivacy: true });
             } catch { /* exists */ }
             const { token } = await login(email);
             try {

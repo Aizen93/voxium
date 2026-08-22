@@ -859,3 +859,13 @@ export interface AuditLogEntry {
   metadata: Record<string, unknown> | null;
   createdAt: string;
 }
+
+/**
+ * Consent flags a registration must carry. Two separate decisions, one per
+ * document (CNIL: no bundled or pre-ticked consent); the server refuses a
+ * registration without both and records when each was given.
+ */
+export interface RegistrationConsent {
+  acceptTerms: boolean;
+  acceptPrivacy: boolean;
+}

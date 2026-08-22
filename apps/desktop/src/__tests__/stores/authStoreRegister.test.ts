@@ -37,6 +37,7 @@ vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
 import { useAuthStore } from '../../stores/authStore';
 
 const CHALLENGE = { challenge: 'a'.repeat(32), difficulty: 1, expires: Date.now() + 60_000, sig: 'f'.repeat(64) };
+const CONSENT = { acceptTerms: true, acceptPrivacy: true };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -60,7 +61,7 @@ function hangingSolve() {
 describe('authStore.register — proof-of-work flow', () => {
   it('does NOT set the shared isSubmitting flag, so the login page stays usable', async () => {
     hangingSolve();
-    const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+    const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
     await vi.waitFor(() => expect(useAuthStore.getState().isRegistering).toBe(true));
 
     // LoginPage's submit button is gated on isSubmitting. If registration set
@@ -74,7 +75,7 @@ describe('authStore.register — proof-of-work flow', () => {
 
   it('cancelRegistration aborts the solve and never creates the account', async () => {
     hangingSolve();
-    const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+    const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
     await vi.waitFor(() => expect(useAuthStore.getState().isRegistering).toBe(true));
 
     useAuthStore.getState().cancelRegistration();
@@ -91,7 +92,7 @@ describe('authStore.register — proof-of-work flow', () => {
     // The view is gone; an error toast on the page they navigated TO would be
     // the app blaming them for leaving.
     hangingSolve();
-    const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+    const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
     await vi.waitFor(() => expect(useAuthStore.getState().isRegistering).toBe(true));
 
     useAuthStore.getState().cancelRegistration();
@@ -102,7 +103,7 @@ describe('authStore.register — proof-of-work flow', () => {
 
   it('passes an abort signal through to the solver', async () => {
     hangingSolve();
-    const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+    const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
     await vi.waitFor(() => expect(solver.solveRegistrationPowOffThread).toHaveBeenCalled());
 
     const signal = solver.solveRegistrationPowOffThread.mock.calls[0][2] as AbortSignal;
@@ -120,9 +121,10 @@ describe('authStore.register — proof-of-work flow', () => {
       data: { data: { user: { id: 'u1', emailVerified: false }, accessToken: 'at', refreshToken: 'rt' } },
     });
 
-    await useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+    await useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
 
-    expect(api.post).toHaveBeenCalledWith('/auth/register', expect.objectContaining({ username: 'alice' }));
+    // Consent travels with the POST — the server refuses a registration without it
+    expect(api.post).toHaveBeenCalledWith('/auth/register', expect.objectContaining({ username: 'alice', acceptTerms: true, acceptPrivacy: true }));
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
     expect(useAuthStore.getState().isRegistering).toBe(false);
     expect(useAuthStore.getState().powProgress).toBeNull();
@@ -143,7 +145,7 @@ describe('authStore.register — proof-of-work flow', () => {
       solver.solveRegistrationPowOffThread.mockResolvedValue({ ...CHALLENGE, nonce: '3' });
       const post = hangingPost();
 
-      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
       await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
       useAuthStore.getState().cancelRegistration(); // RegisterPage unmounted → LoginPage mounted, clearError ran
       post().reject(Object.assign(new Error('conflict'), { response: { status: 409, data: { error: 'Username or email already in use' } } }));
@@ -157,7 +159,7 @@ describe('authStore.register — proof-of-work flow', () => {
       solver.solveRegistrationPowOffThread.mockResolvedValue({ ...CHALLENGE, nonce: '3' });
       const post = hangingPost();
 
-      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
       await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
       useAuthStore.getState().cancelRegistration();
       post().resolve({ data: { data: { user: { id: 'u-new', emailVerified: false }, accessToken: 'at', refreshToken: 'rt' } } });
@@ -171,7 +173,7 @@ describe('authStore.register — proof-of-work flow', () => {
       solver.solveRegistrationPowOffThread.mockResolvedValue({ ...CHALLENGE, nonce: '3' });
       const post = hangingPost();
 
-      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123');
+      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
       await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
       useAuthStore.getState().cancelRegistration();
       // Meanwhile: logged in as an existing account on LoginPage

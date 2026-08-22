@@ -41,16 +41,22 @@ authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, rateLi
       res.status(403).json({ success: false, error: 'Registration is currently disabled' });
       return;
     }
-    const { username, email, password, displayName, pow } = req.body;
+    const { username, email, password, displayName, pow, acceptTerms, acceptPrivacy } = req.body;
     if (!username || typeof username !== 'string') { res.status(400).json({ success: false, error: 'Username is required' }); return; }
     if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
     if (!password || typeof password !== 'string') { res.status(400).json({ success: false, error: 'Password is required' }); return; }
+    // Consent (CNIL/GDPR): both documents, each as its own explicit `true` —
+    // a truthy string or a missing field is not acceptance. Checked with the
+    // other cheap validations, BEFORE the proof-of-work is verified: a verify
+    // burns the challenge, and the client only refetches one on expiry.
+    if (acceptTerms !== true) { res.status(400).json({ success: false, error: 'You must accept the Terms of Service' }); return; }
+    if (acceptPrivacy !== true) { res.status(400).json({ success: false, error: 'You must accept the Privacy Policy' }); return; }
 
     // Enforced HERE, server-side, so a script POSTing the API directly pays
     // the same hash work as a browser — cadence and IP rotation don't help.
     await verifyRegistrationPow(normalizeIp(req.ip || req.socket.remoteAddress || 'unknown'), pow);
 
-    const result = await registerUser(username, email, password, displayName, req.ip || req.socket.remoteAddress);
+    const result = await registerUser(username, email, password, displayName, req.ip || req.socket.remoteAddress, { acceptTerms, acceptPrivacy });
 
     res.status(201).json({
       success: true,
