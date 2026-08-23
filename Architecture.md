@@ -76,7 +76,7 @@ graph TD
 | Auth | JWT (jsonwebtoken) | 9.x |
 | Rate Limiting | rate-limiter-flexible | 9.x |
 | Password Hashing | bcryptjs | 3.x |
-| File Storage | S3-compatible (OVH) | — |
+| File Storage | S3-compatible object storage | — |
 | S3 Presigning | @aws-sdk/s3-request-presigner | — |
 | Email | Nodemailer | 8.x |
 

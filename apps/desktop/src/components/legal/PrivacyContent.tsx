@@ -107,9 +107,9 @@ export function PrivacyContent() {
             Your data is stored in a PostgreSQL database. Passwords are hashed using bcrypt and are never
             stored in plain text. We use JWT-based authentication with token versioning to allow session
             invalidation, and optional two-factor authentication whose secrets are encrypted at rest. File uploads
-            (avatars, server icons, message attachments) are stored in S3-compatible object storage encrypted at
-            rest with keys managed by the storage provider (SSE-OMK, OVHcloud-managed keys); end-to-end encrypted
-            attachments are additionally stored as opaque blobs encrypted on your device.
+            (avatars, server icons, message attachments) are stored in S3-compatible object storage with
+            server-side encryption at rest; end-to-end encrypted attachments are additionally stored as opaque
+            blobs encrypted on your device.
           </p>
         </section>
 

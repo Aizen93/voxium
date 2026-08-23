@@ -168,7 +168,7 @@ const sampleInfraServer = {
   name: 'EU-West-1',
   country: 'France',
   city: 'Paris',
-  provider: 'OVH',
+  provider: 'Hetzner',
   latitude: 48.86,
   longitude: 2.35,
   createdAt: new Date().toISOString(),
@@ -225,7 +225,7 @@ describe('Admin Infrastructure Server Routes', () => {
       const res = await request(app)
         .post('/api/v1/admin/infra-servers')
         .set('Authorization', `Bearer ${token}`)
-        .send({ name: 'EU-West-1', country: 'France', city: 'Paris', provider: 'OVH', latitude: 48.86, longitude: 2.35 });
+        .send({ name: 'EU-West-1', country: 'France', city: 'Paris', provider: 'Hetzner', latitude: 48.86, longitude: 2.35 });
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
@@ -236,7 +236,7 @@ describe('Admin Infrastructure Server Routes', () => {
       const res = await request(app)
         .post('/api/v1/admin/infra-servers')
         .set('Authorization', `Bearer ${token}`)
-        .send({ country: 'France', city: 'Paris', provider: 'OVH', latitude: 48.86, longitude: 2.35 });
+        .send({ country: 'France', city: 'Paris', provider: 'Hetzner', latitude: 48.86, longitude: 2.35 });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/name/i);
@@ -246,7 +246,7 @@ describe('Admin Infrastructure Server Routes', () => {
       const res = await request(app)
         .post('/api/v1/admin/infra-servers')
         .set('Authorization', `Bearer ${token}`)
-        .send({ name: 'EU-West-1', city: 'Paris', provider: 'OVH', latitude: 48.86, longitude: 2.35 });
+        .send({ name: 'EU-West-1', city: 'Paris', provider: 'Hetzner', latitude: 48.86, longitude: 2.35 });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/country/i);
@@ -256,7 +256,7 @@ describe('Admin Infrastructure Server Routes', () => {
       const res = await request(app)
         .post('/api/v1/admin/infra-servers')
         .set('Authorization', `Bearer ${token}`)
-        .send({ name: 'EU-West-1', country: 'France', provider: 'OVH', latitude: 48.86, longitude: 2.35 });
+        .send({ name: 'EU-West-1', country: 'France', provider: 'Hetzner', latitude: 48.86, longitude: 2.35 });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/city/i);
@@ -276,7 +276,7 @@ describe('Admin Infrastructure Server Routes', () => {
       const res = await request(app)
         .post('/api/v1/admin/infra-servers')
         .set('Authorization', `Bearer ${token}`)
-        .send({ name: 'Test', country: 'France', city: 'Paris', provider: 'OVH', latitude: 91, longitude: 2.35 });
+        .send({ name: 'Test', country: 'France', city: 'Paris', provider: 'Hetzner', latitude: 91, longitude: 2.35 });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/latitude/i);
@@ -286,7 +286,7 @@ describe('Admin Infrastructure Server Routes', () => {
       const res = await request(app)
         .post('/api/v1/admin/infra-servers')
         .set('Authorization', `Bearer ${token}`)
-        .send({ name: 'Test', country: 'France', city: 'Paris', provider: 'OVH', latitude: -91, longitude: 2.35 });
+        .send({ name: 'Test', country: 'France', city: 'Paris', provider: 'Hetzner', latitude: -91, longitude: 2.35 });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/latitude/i);
@@ -296,7 +296,7 @@ describe('Admin Infrastructure Server Routes', () => {
       const res = await request(app)
         .post('/api/v1/admin/infra-servers')
         .set('Authorization', `Bearer ${token}`)
-        .send({ name: 'Test', country: 'France', city: 'Paris', provider: 'OVH', latitude: 48.86, longitude: 181 });
+        .send({ name: 'Test', country: 'France', city: 'Paris', provider: 'Hetzner', latitude: 48.86, longitude: 181 });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/longitude/i);
@@ -306,7 +306,7 @@ describe('Admin Infrastructure Server Routes', () => {
       const res = await request(app)
         .post('/api/v1/admin/infra-servers')
         .set('Authorization', `Bearer ${token}`)
-        .send({ name: 123, country: 'France', city: 'Paris', provider: 'OVH', latitude: 48.86, longitude: 2.35 });
+        .send({ name: 123, country: 'France', city: 'Paris', provider: 'Hetzner', latitude: 48.86, longitude: 2.35 });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/name/i);
@@ -316,7 +316,7 @@ describe('Admin Infrastructure Server Routes', () => {
       const res = await request(app)
         .post('/api/v1/admin/infra-servers')
         .set('Authorization', `Bearer ${token}`)
-        .send({ name: 'Test', country: 'France', city: 'Paris', provider: 'OVH', latitude: 'abc', longitude: 2.35 });
+        .send({ name: 'Test', country: 'France', city: 'Paris', provider: 'Hetzner', latitude: 'abc', longitude: 2.35 });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/latitude/i);

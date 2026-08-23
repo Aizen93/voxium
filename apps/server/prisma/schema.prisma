@@ -145,7 +145,7 @@ model InfraServer {
   name      String
   country   String
   city      String
-  provider  String   // OVH, AWS, Azure, GCP, Hetzner, etc.
+  provider  String   // Hosting provider label, free-form (e.g. AWS, Azure, GCP, Hetzner)
   latitude  Float
   longitude Float
   createdAt DateTime @default(now()) @map("created_at")
