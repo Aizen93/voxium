@@ -217,8 +217,12 @@ function isValidOp(op: unknown, v2: boolean): op is AnnotationOp {
   const o = op as Record<string, unknown>;
   switch (o.t) {
     case 'add':
+      // `at` is an ordering hint every client's undo may send (re-adding a
+      // deleted v1 shape under what was drawn over it) — NOT a v2 construct.
+      // A genuine v1 server ignored unknown fields and appended; a node with
+      // the flag off must not do worse and reject the batch.
       return isValidObject(o.obj, v2)
-        && (o.at === undefined || (v2 && typeof o.at === 'number' && Number.isInteger(o.at) && o.at >= 0 && o.at <= ANNOTATION_MAX_OBJECTS));
+        && (o.at === undefined || (typeof o.at === 'number' && Number.isInteger(o.at) && o.at >= 0 && o.at <= ANNOTATION_MAX_OBJECTS));
     case 'append':
       // Same per-op point bound as 'add' — without it a single append sized to
       // the batch cap forces a full parse/spread/serialize cycle before the

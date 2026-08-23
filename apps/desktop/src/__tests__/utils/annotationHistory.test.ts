@@ -119,6 +119,25 @@ describe('addedIds / compactForward', () => {
     expect(compactForward(forward, new Set(['a']), after)).toEqual([{ t: 'add', obj: stroke('a', [0, 0, 0.1, 0.1, 0.2, 0.2]) }]);
   });
 
+  it('coalesces a drag of a pre-existing object: many translates/updates become one op for redo', () => {
+    const translates: AnnotationOp[] = Array.from({ length: 40 }, () => ({ t: 'translate', id: 'old', dx: 0.005, dy: -0.002 }));
+    const after = applyAnnotationOps({ objects: [shape('old')] }, translates);
+    const compact = compactForward(translates, new Set(), after);
+    expect(compact).toHaveLength(1);
+    expect((compact[0] as { dx: number }).dx).toBeCloseTo(0.2);
+    expect((compact[0] as { dy: number }).dy).toBeCloseTo(-0.08);
+
+    const updates: AnnotationOp[] = [
+      { t: 'update', id: 'old', patch: { x: 0.2 } },
+      { t: 'update', id: 'old', patch: { x: 0.3, y: 0.4 } },
+      { t: 'update', id: 'other', patch: { x: 0.9 } }, // different id: not merged
+    ];
+    expect(compactForward(updates, new Set(), after)).toEqual([
+      { t: 'update', id: 'old', patch: { x: 0.3, y: 0.4 } },
+      { t: 'update', id: 'other', patch: { x: 0.9 } },
+    ]);
+  });
+
   it('keeps ops on pre-existing objects verbatim and drops objects added-then-removed', () => {
     const forward: AnnotationOp[] = [
       { t: 'add', obj: shape('tmp') },

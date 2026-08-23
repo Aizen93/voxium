@@ -26,6 +26,7 @@ export function ColorPalettePopover() {
   const [pos, setPos] = useState({ left: 0, top: 0 });
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const customRef = useRef<HTMLInputElement>(null);
   const color = useAnnotationStore((s) => s.color);
   const recentColors = useAnnotationStore((s) => s.recentColors);
   const setColor = useAnnotationStore((s) => s.setColor);
@@ -33,7 +34,11 @@ export function ColorPalettePopover() {
   const place = () => {
     const r = buttonRef.current?.getBoundingClientRect();
     if (!r) return;
-    setPos({ left: Math.max(8, Math.min(window.innerWidth - 8 - 232, r.left)), top: r.bottom + 6 });
+    setPos({
+      left: Math.max(8, Math.min(window.innerWidth - 8 - 232, r.left)),
+      // Below the button, unless a short window would push it off-screen
+      top: Math.max(8, Math.min(window.innerHeight - 8 - 240, r.bottom + 6)),
+    });
   };
 
   useLayoutEffect(() => {
@@ -67,6 +72,18 @@ export function ColorPalettePopover() {
     // Recents are for colours the six quick swatches do not already offer
     setColor(normalized, { recent: !(ANNOTATION_COLORS as readonly string[]).includes(normalized) });
   };
+
+  // The native picker fires `input` for every wheel drag tick: previewing the
+  // default colour on each is fine, but applying it to a selected object on
+  // each would ship an op and push a history entry per tick. The commit (the
+  // native `change`, which React does not expose separately) applies it.
+  useEffect(() => {
+    const el = customRef.current;
+    if (!open || !el) return;
+    const onCommit = () => pick(el.value);
+    el.addEventListener('change', onCommit);
+    return () => el.removeEventListener('change', onCommit);
+  }, [open]); // `pick` reads the latest store action on each call
 
   const swatch = (c: string, label: string) => (
     <button
@@ -117,9 +134,13 @@ export function ColorPalettePopover() {
           )}
           <label className="mt-3 flex items-center gap-2 text-xs text-vox-text-secondary">
             <input
+              ref={customRef}
               type="color"
               value={color}
-              onChange={(e) => pick(e.target.value)}
+              onChange={(e) => {
+                const normalized = normalizeHexColor(e.target.value);
+                if (normalized) setColor(normalized, { selection: false });
+              }}
               className="h-6 w-8 cursor-pointer rounded border border-vox-border bg-transparent p-0"
               aria-label={t('voice.annotations.customColor')}
               data-testid="palette-custom"

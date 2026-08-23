@@ -749,6 +749,22 @@ describe('AnnotationEditorLayer — eraser and stroke editing', () => {
     expect((useAnnotationStore.getState().scene.objects[0] as { points: number[] }).points[1]).toBeCloseTo(0.2);
   });
 
+  it('strokes are NOT selectable against a v1 server (a move would ship a v2 translate op)', () => {
+    useAnnotationStore.getState().localApply([strokeAt('s', 0.5)]);
+    useAnnotationStore.setState({ activeTool: 'select' });
+    voiceState.screenShareAnnotationsVersion = 1;
+    try {
+      render();
+      pointerDown(layer(), 400, 225); // on the stroke
+      pointerMove(layer(), 400, 300);
+      pointerUp(layer());
+      expect(useAnnotationStore.getState().selectedObjectId).toBeNull();
+      expect((useAnnotationStore.getState().scene.objects[0] as { points: number[] }).points[1]).toBe(0.5);
+    } finally {
+      voiceState.screenShareAnnotationsVersion = 2;
+    }
+  });
+
   it('double-clicking a caption edits its text; emptying it deletes it', () => {
     const store = useAnnotationStore.getState();
     store.localApply([{ t: 'add', obj: { id: 't', kind: 'text', text: 'hello', color: '#ffffff', size: 0.045, x: 0.2, y: 0.2 } }]);
@@ -782,3 +798,45 @@ describe('AnnotationEditorLayer — mask styles', () => {
     expect(useAnnotationStore.getState().masks[1].style).toBeUndefined();
   });
 });
+
+describe('AnnotationEditorLayer — review fixes', () => {
+  it('a spotlight added over an annotation does not steal its clicks: hit order mirrors paint order', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([{ t: 'add', obj: { id: 'sh', kind: 'shape', shape: 'rect', color: '#00ff00', width: 0.004, x: 0.4, y: 0.4, w: 0.2, h: 0.2 } }]);
+    store.localApply([{ t: 'add', obj: { id: 'sp', kind: 'spotlight', x: 0.25, y: 0.25, w: 0.5, h: 0.5 } }]); // later = last in the array
+    useAnnotationStore.setState({ activeTool: 'select' });
+    render();
+    pointerDown(layer(), 400, 225); pointerUp(layer()); // inside BOTH; the shape is the visible one
+    expect(useAnnotationStore.getState().selectedObjectId).toBe('sh');
+    pointerDown(layer(), 240, 135); pointerUp(layer()); // inside the spotlight only
+    expect(useAnnotationStore.getState().selectedObjectId).toBe('sp');
+
+    // The eraser sweeps the same way: the shape goes before the spotlight
+    act(() => { useAnnotationStore.getState().setActiveTool('eraser'); });
+    pointerDown(layer(), 400, 225); pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['sp']);
+  });
+
+  it('the 2000-point roll-over carries `fade` into the continuation stroke', () => {
+    useAnnotationStore.getState().setInkMode('vanishing');
+    useAnnotationStore.setState({ activeTool: 'pen' });
+    render();
+    pointerDown(layer(), 0, 45);
+    // Enough >2px steps to cross ANNOTATION_STROKE_MAX_POINTS and roll over
+    for (let i = 0; i < 2010; i++) {
+      const x = 10 + (i % 2 ? 3 : 0) + Math.floor(i / 2) * 0; // wiggle in place is filtered — walk instead
+      void x;
+      pointerMoveRaw(layer(), 10 + (i * 3) % 780, 45 + Math.floor((i * 3) / 780) * 3);
+    }
+    pointerUp(layer());
+    const strokes = useAnnotationStore.getState().scene.objects.filter((o) => o.kind === 'stroke');
+    expect(strokes.length).toBeGreaterThanOrEqual(2); // rolled over at the cap
+    for (const st of strokes) expect((st as { fade?: true }).fade).toBe(true);
+    useAnnotationStore.getState().setInkMode('persistent');
+  });
+});
+
+/** pointermove without act() batching per event — 2000 acts would take minutes. */
+function pointerMoveRaw(el: Element, x: number, y: number) {
+  act(() => { el.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: x, clientY: y })); });
+}

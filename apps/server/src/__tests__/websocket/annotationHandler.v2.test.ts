@@ -204,7 +204,7 @@ describe('wire v2 — add at a z-index', () => {
     expect(applyAnnotationOps(base, [{ t: 'add', obj: stroke({ id: 'c' }) as AnnotationObject, at: 0 }]).objects.map((o) => o.id)).toEqual(['c', 'a']);
   });
 
-  it('validates `at` as a non-negative integer up to the object cap, v2 only, and keeps it through ownership stamping', async () => {
+  it('validates `at` as a non-negative integer up to the object cap, on v1 AND v2 (undo of a v1 delete sends it), and keeps it through ownership stamping', async () => {
     const { opsHandler, toEmit } = setup();
     expect((await send(opsHandler, [{ t: 'add', obj: stroke(), at: 0 }])).mock.calls[0][0].ok).toBe(true);
     const broadcast = toEmit.mock.calls.find((c) => c[0] === 'voice:annotation:ops')![1] as { ops: AnnotationOp[] };
@@ -213,7 +213,10 @@ describe('wire v2 — add at a z-index', () => {
       expect((await send(opsHandler, [{ t: 'add', obj: stroke(), at }])).mock.calls[0][0].ok).toBe(false);
     }
     flags.annotations_v2 = false;
-    expect((await send(opsHandler, [{ t: 'add', obj: stroke(), at: 0 }])).mock.calls[0][0].ok).toBe(false);
+    // Flag off: `at` still passes (a v1 shape re-added by undo carries it);
+    // a malformed one is still refused
+    expect((await send(opsHandler, [{ t: 'add', obj: stroke(), at: 0 }])).mock.calls[0][0].ok).toBe(true);
+    expect((await send(opsHandler, [{ t: 'add', obj: stroke(), at: -1 }])).mock.calls[0][0].ok).toBe(false);
     expect((await send(opsHandler, [{ t: 'add', obj: stroke() }])).mock.calls[0][0].ok).toBe(true);
   });
 });

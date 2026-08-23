@@ -204,14 +204,24 @@ describe('AnnotationToolbar', () => {
 
     click(container.querySelector('[data-testid="palette-toggle"]'));
     const custom = document.querySelector('[data-testid="palette-custom"]') as HTMLInputElement;
-    act(() => {
+    const setValue = (v: string) => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
-      setter.call(custom, '#123456');
-      custom.dispatchEvent(new Event('input', { bubbles: true }));
-    });
+      setter.call(custom, v);
+    };
+    // A wheel drag (`input` ticks) previews the default only: no recent, and
+    // a selected object is not touched per tick
+    useAnnotationStore.setState({ sceneChannelId: 'chan-1', scene: { objects: [{ id: 'sh', kind: 'shape', shape: 'rect', color: '#00ff00', width: 0.004, x: 0, y: 0, w: 0.1, h: 0.1 }] }, selectedObjectId: 'sh' });
+    act(() => { setValue('#101010'); custom.dispatchEvent(new Event('input', { bubbles: true })); });
+    act(() => { setValue('#123456'); custom.dispatchEvent(new Event('input', { bubbles: true })); });
     expect(useAnnotationStore.getState().color).toBe('#123456');
+    expect(useAnnotationStore.getState().recentColors).toEqual(['#bf5af2']);
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ color: '#00ff00' });
+    // The commit (native `change`) applies it: recent + the selection recoloured once
+    act(() => { custom.dispatchEvent(new Event('change', { bubbles: true })); });
     expect(useAnnotationStore.getState().recentColors).toEqual(['#123456', '#bf5af2']);
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ color: '#123456' });
     expect(document.querySelectorAll('[data-testid="palette-recents"] button')).toHaveLength(2);
+    useAnnotationStore.setState({ scene: { objects: [] }, selectedObjectId: null });
 
     // Escape closes it
     act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
@@ -255,6 +265,23 @@ describe('AnnotationToolbar', () => {
       useAnnotationStore.setState({ masks: [{ id: 'm', x: 0.1, y: 0.1, w: 0.2, h: 0.2, style: 'blur' }], selectedObjectId: 'm' });
     });
     expect(container.querySelector('[data-mask-style="blur"]')!.getAttribute('aria-pressed')).toBe('true');
+    useAnnotationStore.setState({ maskStyle: 'cover' });
+  });
+
+  it('a cosmetic style shows a VISIBLE note and replaces the "never leaves this device" tooltip', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    act(() => { useAnnotationStore.getState().setActiveTool('mask'); });
+    render(<AnnotationToolbar />);
+    // Cover: the privacy promise, no note
+    expect(container.querySelector('[data-tool="mask"]')!.getAttribute('title')).toContain('voice.annotations.maskPrivacyHint');
+    expect(container.querySelector('[data-testid="mask-style-cosmetic-note"]')).toBeNull();
+    click(container.querySelector('[data-mask-style="pixelate"]'));
+    // Pixelate: the promise is gone, the cosmetic note is visible text
+    expect(container.querySelector('[data-tool="mask"]')!.getAttribute('title')).toContain('voice.annotations.maskStyleCosmetic');
+    expect(container.querySelector('[data-tool="mask"]')!.getAttribute('title')).not.toContain('maskPrivacyHint');
+    const note = container.querySelector('[data-testid="mask-style-cosmetic-note"]')!;
+    expect(note).not.toBeNull();
+    expect(note.textContent).toBe('voice.annotations.maskStyleCosmeticShort');
     useAnnotationStore.setState({ maskStyle: 'cover' });
   });
 

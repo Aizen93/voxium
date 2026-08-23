@@ -219,6 +219,11 @@ export const useAnnotationLiveStore = create<AnnotationLiveState>((set, get) => 
   },
 
   touchFading: (id, now = Date.now()) => {
+    // A vanishing stroke being drawn touches its clock per mousemove; the
+    // fade only cares about ~100 ms granularity, so skip the Map clone (and
+    // the subscriber wakeups) for rapid retouches of a live clock
+    const existing = get().fading.get(id);
+    if (existing && !existing.hidden && now - existing.at < 100 && now >= existing.at) return;
     set((s) => {
       const fading = new Map(s.fading);
       fading.set(id, { at: now, hidden: false });

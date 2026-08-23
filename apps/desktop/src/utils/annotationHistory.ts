@@ -115,6 +115,17 @@ export function compactForward(forward: AnnotationOp[], added: ReadonlySet<strin
       }
       continue;
     }
+    // A drag is one op per mousemove; redo only needs the sum/merge — the
+    // same coalescing the wire queue applies
+    const tail = result[result.length - 1];
+    if (tail && op.t === 'translate' && tail.t === 'translate' && tail.id === op.id) {
+      result[result.length - 1] = { t: 'translate', id: op.id, dx: tail.dx + op.dx, dy: tail.dy + op.dy };
+      continue;
+    }
+    if (tail && op.t === 'update' && tail.t === 'update' && tail.id === op.id) {
+      result[result.length - 1] = { t: 'update', id: op.id, patch: { ...tail.patch, ...op.patch } };
+      continue;
+    }
     result.push(op);
   }
   return result;

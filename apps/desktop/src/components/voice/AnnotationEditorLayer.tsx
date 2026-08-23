@@ -10,6 +10,18 @@ import { useTextDraft } from '../../hooks/useTextDraft';
 import { isEditableTarget } from '../../hooks/useAnnotationShortcuts';
 import { pxToNorm } from '../../utils/annotationGeometry';
 import { normBox, clampBox, clampPos, clampTranslation, objectBbox, hitTestBox, topmostHit, type Bbox } from '../../utils/annotationHit';
+import type { AnnotationObject as SceneObject } from '@voxium/shared';
+
+/**
+ * Hit-testing must mirror the PAINT order, and the spotlight paints under
+ * everything wherever it sits in the array: a click inside its bright rect
+ * must grab the annotation the user can see there, and only fall back to the
+ * spotlight itself when nothing else is hit.
+ */
+function topmostVisibleHit(objects: readonly SceneObject[], nx: number, ny: number, filter?: (o: SceneObject) => boolean): SceneObject | null {
+  return topmostHit(objects, nx, ny, (o) => o.kind !== 'spotlight' && (!filter || filter(o)))
+    ?? topmostHit(objects, nx, ny, (o) => o.kind === 'spotlight' && (!filter || filter(o)));
+}
 import { nextCalloutNumber } from '../../utils/annotationCallouts';
 import { clampTextSize } from '../../utils/annotationPrefs';
 import { toast } from '../../stores/toastStore';
@@ -217,7 +229,9 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     }
 
     if (!canUse(activeTool)) return;
-    layerRef.current?.setPointerCapture(e.pointerId);
+    // The laser holds no drag, and capture would suppress pointerleave — the
+    // event that turns the dot off when the cursor exits the stage
+    if (activeTool !== 'laser') layerRef.current?.setPointerCapture(e.pointerId);
 
     switch (activeTool) {
       case 'pen':
@@ -264,7 +278,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         break;
       }
       case 'callout': {
-        const n = nextCalloutNumber(scene.objects);
+        const n = nextCalloutNumber(store.scene.objects);
         if (n === null) {
           toast.error(t('voice.annotations.calloutLimit', { max: ANNOTATION_CALLOUT_MAX }));
           break;
@@ -281,7 +295,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         // gesture (one undo step). Shift at the start = elliptical cut-out.
         store.beginGesture();
         const id = crypto.randomUUID();
-        const replaced = scene.objects.map((obj, at) => ({ obj, at })).filter(({ obj }) => obj.kind === 'spotlight');
+        const replaced = store.scene.objects.map((obj, at) => ({ obj, at })).filter(({ obj }) => obj.kind === 'spotlight');
         store.localApply([
           ...replaced.map(({ obj }) => ({ t: 'remove' as const, id: obj.id })),
           { t: 'add', obj: { id, kind: 'spotlight', x: norm.x, y: norm.y, w: 0, h: 0, ...(e.shiftKey ? { shape: 'ellipse' as const } : {}) } },
@@ -319,8 +333,11 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         break;
       }
       case 'select': {
-        // Annotations first (drawn on top), then masks
-        const hitObj = topmostHit(scene.objects, norm.x, norm.y, (o) => SELECTABLE_KINDS.has(o.kind));
+        // Annotations first (drawn on top), then masks. A stroke moves with
+        // `translate`, a v2 op: below wire version 2 strokes stay paint-only,
+        // or the first drag would have the whole batch rejected.
+        const v2 = useVoiceStore.getState().screenShareAnnotationsVersion >= 2;
+        const hitObj = topmostVisibleHit(store.scene.objects, norm.x, norm.y, (o) => SELECTABLE_KINDS.has(o.kind) && (v2 || o.kind !== 'stroke'));
         if (hitObj) {
           store.setSelectedObjectId(hitObj.id);
           store.beginGesture(); // a move is one undo step however many updates it sends
@@ -332,7 +349,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
           }
           break;
         }
-        const hitMask = capabilities.masks ? [...masks].reverse().find((m) => hitTestBox(m, norm.x, norm.y)) : undefined;
+        const hitMask = capabilities.masks ? [...store.masks].reverse().find((m) => hitTestBox(m, norm.x, norm.y)) : undefined;
         if (hitMask) {
           store.setSelectedObjectId(hitMask.id);
           dragRef.current = { mode: 'move', id: hitMask.id, isMask: true, grabOffset: { x: norm.x - hitMask.x, y: norm.y - hitMask.y } };
@@ -363,7 +380,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
   /** Remove every object under the point that this erase gesture has not removed yet. */
   const eraseAt = (nx: number, ny: number, erased: Set<string>) => {
     const store = useAnnotationStore.getState();
-    const hit = topmostHit(store.scene.objects, nx, ny, (o) => !erased.has(o.id));
+    const hit = topmostVisibleHit(store.scene.objects, nx, ny, (o) => !erased.has(o.id));
     if (!hit) return;
     erased.add(hit.id);
     store.localApply([{ t: 'remove', id: hit.id }]);
@@ -374,7 +391,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
   const handleDoubleClick = (e: React.MouseEvent) => {
     if (!canUse('select') || activeTool !== 'select') return;
     const norm = toNorm(e, true);
-    const hit = topmostHit(scene.objects, norm.x, norm.y, (o) => o.kind === 'callout' || o.kind === 'text');
+    const hit = topmostHit(useAnnotationStore.getState().scene.objects, norm.x, norm.y, (o) => o.kind === 'callout' || o.kind === 'text');
     if (!hit) return;
     e.preventDefault();
     if (hit.kind === 'callout') text.open(hit.x, hit.y, String(hit.n), hit.id);
@@ -406,7 +423,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
           const nextId = crypto.randomUUID();
           const current = useAnnotationStore.getState().scene.objects.find((o) => o.id === drag.id);
           const style = current && current.kind === 'stroke'
-            ? { tool: current.tool, color: current.color, width: current.width }
+            ? { tool: current.tool, color: current.color, width: current.width, ...(current.fade ? { fade: true as const } : {}) }
             : { tool: 'pen' as const, color, width: strokeWidth };
           store.localApply([{ t: 'add', obj: { id: nextId, kind: 'stroke', ...style, points: [norm.x, norm.y] } }]);
           dragRef.current = { mode: 'stroke', id: nextId, lastPx: drag.lastPx, pointCount: 1 };

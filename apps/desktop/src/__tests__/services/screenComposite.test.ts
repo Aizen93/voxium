@@ -28,10 +28,14 @@ function mockCtx() {
   };
 }
 
+function mockSurface() {
+  const canvas = { width: 0, height: 0 };
+  const ctx = { drawImage: vi.fn(), fillRect: vi.fn(), fillStyle: '', imageSmoothingEnabled: true };
+  return { canvas, ctx };
+}
+
 function mockScratch() {
-  const canvas = { width: 0, height: 0 } as unknown as ScratchCanvas['canvas'];
-  const ctx = { drawImage: vi.fn(), clearRect: vi.fn(), imageSmoothingEnabled: true };
-  return { canvas, ctx } as ScratchCanvas & { ctx: typeof ctx };
+  return { a: mockSurface(), b: mockSurface() } as unknown as ScratchCanvas & { a: ReturnType<typeof mockSurface>; b: ReturnType<typeof mockSurface> };
 }
 
 const video = { videoWidth: 1920, videoHeight: 1080 };
@@ -98,20 +102,52 @@ describe('renderCompositeFrame', () => {
     expect(canvas.width).toBe(1920);
   });
 
-  it('a pixelate mask downsamples the region into ≥24 px blocks and paints it back unsmoothed, clipped', () => {
+  // mask('a') at 1920×1080: padded dst/src = (479, 269, 962, 272). The 32 px
+  // lattice covering it, clamped to the source: x 448..1472 (1024 = 32 blocks),
+  // y 256..544 (288 = 9 blocks).
+  const CELLS = { x: 448, y: 256, w: 1024, h: 288, blocksW: 32, blocksH: 9 };
+
+  it('a pixelate mask paints TRUE block means (a chain of 2× halvings), lattice-anchored, over a black backstop', () => {
     const ctx = mockCtx();
     const scratch = mockScratch();
     renderCompositeFrame(ctx, video, canvas, [mask('a', { style: 'pixelate' })], noImage, scratch);
-    // Frame, then (inside save/clip/restore) the upscaled block grid — no black box
-    expect(ctx.calls).toEqual(['drawImage', 'save', 'clip', 'drawImage', 'restore']);
-    const region = { w: 0.5 * 1920 + 2, h: 0.25 * 1080 + 2 };
-    expect(scratch.canvas.width).toBe(Math.ceil(region.w / PIXELATE_BLOCK_SRC_PX));
-    expect(scratch.canvas.height).toBe(Math.ceil(region.h / PIXELATE_BLOCK_SRC_PX));
-    expect(scratch.ctx.imageSmoothingEnabled).toBe(false);
-    // Sampled from the video at the padded region, drawn back over the same region
-    expect(scratch.ctx.drawImage.mock.calls[0].slice(1, 5)).toEqual([0.25 * 1920 - 1, 0.25 * 1080 - 1, region.w, region.h]);
-    expect(ctx.drawImage.mock.calls[1].slice(5, 9)).toEqual([0.25 * 1920 - 1, 0.25 * 1080 - 1, region.w, region.h]);
+    // Frame, then inside save/clip: the opaque backstop FIRST, then the blocks
+    expect(ctx.calls).toEqual(['drawImage', 'save', 'clip', 'fillRect', 'drawImage', 'restore']);
+    // Five halvings ping-pong a→b→a→b→a, each pre-filled black (edge cells can
+    // only darken) and drawn with smoothing ON (bilinear 2× = exact box mean)
+    expect(scratch.a.ctx.drawImage).toHaveBeenCalledTimes(3);
+    expect(scratch.b.ctx.drawImage).toHaveBeenCalledTimes(2);
+    expect(scratch.a.ctx.fillRect).toHaveBeenCalledTimes(3);
+    expect(scratch.a.ctx.imageSmoothingEnabled).toBe(true);
+    // First halving samples the SOURCE-ALIGNED cell range, not the mask rect
+    expect(scratch.a.ctx.drawImage.mock.calls[0].slice(1, 5)).toEqual([CELLS.x, CELLS.y, CELLS.w, CELLS.h]);
+    // The final surface is one pixel per 32 px block
+    expect(scratch.a.canvas.width).toBe(CELLS.blocksW);
+    expect(scratch.a.canvas.height).toBe(CELLS.blocksH);
+    // Painted back at the lattice's own position, unsmoothed, clipped to the mask
+    const up = ctx.drawImage.mock.calls[1] as unknown as number[];
+    expect(up.slice(1, 5)).toEqual([0, 0, CELLS.blocksW, CELLS.blocksH]);
+    expect(up.slice(5, 9)).toEqual([CELLS.x, CELLS.y, CELLS.w, CELLS.h]);
     expect(ctx.imageSmoothingEnabled).toBe(false);
+    // The backstop covers the (padded) mask rect
+    expect(ctx.fillRect.mock.calls[0]).toEqual([479, 269, 962, 272]);
+    expect(ctx.fillStyle).toBe('#000000');
+  });
+
+  it('the lattice is anchored to the SOURCE grid: a nudge within a cell samples the very same cells, and every range is grid-aligned', () => {
+    // Two positions inside the same 32 px cells (padded x: 459 and 464 both
+    // live in cell 14; the right edges both round up to 1440)
+    const s1 = mockScratch();
+    renderCompositeFrame(mockCtx(), video, canvas, [mask('a', { style: 'pixelate', x: 460 / 1920 })], noImage, s1);
+    const s2 = mockScratch();
+    renderCompositeFrame(mockCtx(), video, canvas, [mask('a', { style: 'pixelate', x: 465 / 1920 })], noImage, s2);
+    expect(s2.a.ctx.drawImage.mock.calls[0].slice(1, 5)).toEqual(s1.a.ctx.drawImage.mock.calls[0].slice(1, 5));
+    // A larger move may add or drop whole cells, but the grid never shifts:
+    // starts and spans stay multiples of the block size
+    const s3 = mockScratch();
+    renderCompositeFrame(mockCtx(), video, canvas, [mask('a', { style: 'pixelate', x: 0.25 + 5 / 1920 })], noImage, s3);
+    const [, x0, y0, w0, h0] = s3.a.ctx.drawImage.mock.calls[0] as unknown as number[];
+    for (const v of [x0, y0, w0, h0]) expect(v % PIXELATE_BLOCK_SRC_PX).toBe(0);
   });
 
   it('a blur mask paints the pixelated pass first, then a blurred pass over it — never a translucent edge alone', () => {
@@ -119,7 +155,7 @@ describe('renderCompositeFrame', () => {
     const filters: string[] = [];
     Object.defineProperty(ctx, 'filter', { get: () => filters[filters.length - 1] ?? 'none', set: (v: string) => { filters.push(v); } });
     renderCompositeFrame(ctx, video, canvas, [mask('a', { style: 'blur' })], noImage, mockScratch());
-    expect(ctx.calls).toEqual(['drawImage', 'save', 'clip', 'drawImage', 'drawImage', 'restore']);
+    expect(ctx.calls).toEqual(['drawImage', 'save', 'clip', 'fillRect', 'drawImage', 'drawImage', 'restore']);
     expect(filters[0]).toMatch(/^blur\(\d+px\)$/);
     expect(filters[filters.length - 1]).toBe('none');
   });
@@ -131,7 +167,7 @@ describe('renderCompositeFrame', () => {
     expect(ctx.fillStyle).toBe('#000000');
 
     const failing = mockScratch();
-    failing.ctx.drawImage.mockImplementation(() => { throw new Error('tainted'); });
+    failing.a.ctx.drawImage.mockImplementation(() => { throw new Error('tainted'); });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const ctx2 = mockCtx();
     renderCompositeFrame(ctx2, video, canvas, [mask('a', { style: 'pixelate' })], noImage, failing);
@@ -145,6 +181,13 @@ describe('renderCompositeFrame', () => {
     const img = { fake: 'image' } as unknown as CanvasImageSource;
     renderCompositeFrame(ctx, video, canvas, [mask('a', { style: 'blur', src: 'data:image/webp;base64,AA==' }), mask('b')], () => img, mockScratch());
     expect(ctx.calls).toEqual(['drawImage', 'drawImage', 'fillRect']);
+  });
+
+  it('an UNDECODED cover image on a styled mask is black — the fallback must be in the safe direction', () => {
+    const ctx = mockCtx();
+    renderCompositeFrame(ctx, video, canvas, [mask('a', { style: 'pixelate', src: 'data:image/webp;base64,AA==' })], noImage, mockScratch());
+    expect(ctx.calls).toEqual(['drawImage', 'fillRect']);
+    expect(ctx.fillStyle).toBe('#000000');
   });
 
   it('with no masks, only the raw frame is drawn (compositor about to be torn down)', () => {

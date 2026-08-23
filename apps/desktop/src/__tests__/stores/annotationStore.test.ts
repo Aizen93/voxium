@@ -717,6 +717,9 @@ describe('annotationStore — colour and text size', () => {
     expect(useAnnotationStore.getState().maskStyle).toBe('blur');
     expect(socketEmit).not.toHaveBeenCalled(); // masks never touch the wire
     expect(localStorage.getItem('vox:annotations:prefs')).toBeNull(); // and the style is not persisted
+    // The safe default is per SHARE: teardown puts Cover back
+    store.teardownSharerSession();
+    expect(useAnnotationStore.getState().maskStyle).toBe('cover');
   });
 
   it('setTextSize clamps, persists, and resizes a selected caption or badge', () => {

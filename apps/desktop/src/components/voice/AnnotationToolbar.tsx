@@ -124,9 +124,11 @@ export function AnnotationToolbar() {
         {tools.map((def) => toolButton(def))}
       </div>
 
-      {/* Privacy mask — separated: the one tool enforced at the source */}
+      {/* Privacy mask — separated: the one tool enforced at the source. The
+          "never leaves this device" promise is only true of Cover: with a
+          cosmetic style selected the tooltip says so instead. */}
       <div className="flex items-center gap-0.5 border-l border-vox-border pl-2">
-        {toolButton(MASK_TOOL_DEF, t('voice.annotations.maskPrivacyHint'))}
+        {toolButton(MASK_TOOL_DEF, shownMaskStyle === 'cover' ? t('voice.annotations.maskPrivacyHint') : t('voice.annotations.maskStyleCosmetic'))}
         {maskRelevant && (
           <div className="ml-1 flex items-center gap-0.5" data-testid="mask-style-picker">
             {MASK_STYLES.map(({ style, labelKey }) => (
@@ -144,6 +146,15 @@ export function AnnotationToolbar() {
                 {t(labelKey)}
               </button>
             ))}
+            {shownMaskStyle !== 'cover' && (
+              <span
+                className="ml-1 text-[10px] font-medium uppercase tracking-wide text-vox-accent-warning"
+                title={t('voice.annotations.maskStyleCosmetic')}
+                data-testid="mask-style-cosmetic-note"
+              >
+                {t('voice.annotations.maskStyleCosmeticShort')}
+              </span>
+            )}
           </div>
         )}
       </div>

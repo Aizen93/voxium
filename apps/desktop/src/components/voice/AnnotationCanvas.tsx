@@ -94,6 +94,7 @@ function drawScene(
       paintStyledMask(mask.style, {
         ctx, scratch: preview.scratch, scale,
         source: preview.video,
+        sourceSize: { w: preview.video.videoWidth, h: preview.video.videoHeight },
         dst: { x, y, w: bw, h: bh },
         src: { x: mask.x * preview.video.videoWidth, y: mask.y * preview.video.videoHeight, w: mask.w * preview.video.videoWidth, h: mask.h * preview.video.videoHeight },
       });
@@ -279,15 +280,25 @@ export function AnnotationCanvas({ videoRef }: AnnotationCanvasProps) {
     draw();
   }, [draw, redrawTick]);
 
-  // A pixelated/blurred preview samples the live video, so it must follow the
-  // frames while such a mask exists (the sharer would otherwise see a frozen
-  // sample). Cheap: only while editing with a styled mask present.
+  // Latest draw for the styled-mask interval below (assigned in a layout
+  // effect — never during render)
+  const drawRef = useRef(draw);
+  useLayoutEffect(() => {
+    drawRef.current = draw;
+  });
+
+  // A pixelated/blurred preview samples the live video, so it follows the
+  // frames at 15 fps for AS LONG AS such a mask exists — editing or not:
+  // viewers see live pixelation, and a sharer shown a frozen sample would be
+  // looking at a different picture than their audience. Costs are the
+  // sharer's own (this canvas only has masks for the sharer). The interval
+  // reads `draw` through a ref so a store touch does not recreate it.
   const hasStyledMask = masks.some((m) => !m.src && (m.style === 'pixelate' || m.style === 'blur'));
   useEffect(() => {
     if (!hasStyledMask) return;
-    const id = setInterval(draw, 1000 / 15);
+    const id = setInterval(() => drawRef.current(), 1000 / 15);
     return () => clearInterval(id);
-  }, [hasStyledMask, draw]);
+  }, [hasStyledMask]);
 
   useLiveScheduler(draw);
 

@@ -112,8 +112,10 @@ interface AnnotationState {
   setIsEditing: (editing: boolean) => void;
   setActiveTool: (tool: AnnotationEditorTool) => void;
   setInkMode: (mode: InkMode) => void;
-  /** The default for new objects — and, with a selection, that object's colour too. */
-  setColor: (color: string, opts?: { recent?: boolean }) => void;
+  /** The default for new objects — and, with a selection, that object's
+   *  colour too (unless `selection: false`: a live picker drag previews the
+   *  default only; the commit applies it). */
+  setColor: (color: string, opts?: { recent?: boolean; selection?: boolean }) => void;
   /** The default for new captions/badges — and, with one selected, its size too. */
   setTextSize: (size: number) => void;
   /** The default for new masks — and, with a mask selected, that mask's style too. */
@@ -560,10 +562,12 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     if (!channelId) return;
     const base = state.sceneChannelId === channelId ? state.scene : EMPTY_SCENE;
     const record = opts?.record !== false;
+    let next: AnnotationScene | null = null;
     if (record) {
       // Inverses are computed op by op against the scene each op sees, so a
       // batch of [add, update] undoes correctly; collected in REVERSE so the
-      // inverse list is already in application order.
+      // inverse list is already in application order. The last `working` IS
+      // the post-batch scene — no second reducer pass.
       const entry = openGesture ?? { forward: [], inverse: [], added: new Set<string>(), before: base.objects };
       let working = base;
       const inverses: AnnotationOp[][] = [];
@@ -575,8 +579,9 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
       entry.forward.push(...ops);
       entry.inverse.unshift(...inverses.reverse().flat());
       if (!openGesture) commitEntry(entry, working);
+      next = working;
     }
-    const next = applyAnnotationOps(base, ops);
+    next ??= applyAnnotationOps(base, ops);
     set({
       scene: next,
       sceneChannelId: channelId,
@@ -659,7 +664,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
   },
   setColor: (color, opts) => {
     const { selectedObjectId, scene, recentColors } = get();
-    const target = selectedObjectId ? scene.objects.find((o) => o.id === selectedObjectId) : undefined;
+    const target = selectedObjectId && opts?.selection !== false ? scene.objects.find((o) => o.id === selectedObjectId) : undefined;
     if (target && patchableKeysFor(target.kind).includes('color') && (target as { color?: string }).color !== color) {
       get().localApply([{ t: 'update', id: target.id, patch: { color } }]); // its own undo step
       get().flushOps();
@@ -721,7 +726,9 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     resetHistory();
     cancelVanishTimers();
     teardownComposite();
-    set({ isEditing: false, selectedObjectId: null, masks: [], activeTool: 'pen', canUndo: false, canRedo: false });
+    // maskStyle goes back to Cover with the share: the safe default is per
+    // SHARE, not per app start
+    set({ isEditing: false, selectedObjectId: null, masks: [], activeTool: 'pen', maskStyle: 'cover', canUndo: false, canRedo: false });
   },
 }));
 

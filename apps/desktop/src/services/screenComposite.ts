@@ -100,14 +100,19 @@ export function renderCompositeFrame(
     const y = mask.y * canvas.height - MASK_PAD_PX;
     const w = mask.w * canvas.width + MASK_PAD_PX * 2;
     const h = mask.h * canvas.height + MASK_PAD_PX * 2;
-    const img = mask.src ? getMaskImage(mask) : null;
-    if (img) {
-      ctx.drawImage(img, x, y, w, h);
+    if (mask.src) {
+      // A cover image wins over any style — and while it is not decoded
+      // (or decoded oversized) the mask is BLACK, never pixelated: the
+      // fallback must be in the safe direction
+      const img = getMaskImage(mask);
+      if (img) ctx.drawImage(img, x, y, w, h);
+      else { ctx.fillStyle = '#000000'; ctx.fillRect(x, y, w, h); }
     } else if (mask.style === 'pixelate' || mask.style === 'blur') {
       // The canvas is at source resolution: destination px = source px
       paintStyledMask(mask.style, {
         ctx, scratch, scale: 1,
         source: video as unknown as CanvasImageSource,
+        sourceSize: { w: canvas.width, h: canvas.height },
         dst: { x, y, w, h },
         src: { x, y, w, h },
       });

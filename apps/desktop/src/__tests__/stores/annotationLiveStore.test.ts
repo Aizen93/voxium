@@ -204,6 +204,23 @@ describe('annotationLiveStore — vanishing-ink clocks', () => {
     expect(useAnnotationLiveStore.getState().fading.size).toBe(0);
   });
 
+  it('rapid retouches of a live clock are coalesced (~100 ms granularity, no state churn per mousemove)', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.touchFading('s1');
+    const before = useAnnotationLiveStore.getState();
+    vi.advanceTimersByTime(50);
+    store.touchFading('s1'); // within the granularity window: nothing changes
+    expect(useAnnotationLiveStore.getState()).toBe(before);
+    vi.advanceTimersByTime(60);
+    store.touchFading('s1'); // past it: the clock restarts
+    expect(useAnnotationLiveStore.getState().fading.get('s1')!.at).toBe(Date.now());
+    // A hidden clock always restarts (the stroke reappears legitimately, e.g. redo)
+    store.prune(Date.now() + 10_000);
+    vi.advanceTimersByTime(10);
+    store.touchFading('s1');
+    expect(useAnnotationLiveStore.getState().fading.get('s1')!.hidden).toBe(false);
+  });
+
   it('prune flips an expired clock to hidden (the stroke stays invisible) and the loop goes idle', () => {
     const store = useAnnotationLiveStore.getState();
     store.touchFading('s1');

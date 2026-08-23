@@ -48,7 +48,9 @@ export function useAnnotationShortcuts(available: readonly ToolDef[]): void {
     if (!isEditing) return;
     const reserved = pttReservedCode({ voiceMode, pushToTalkKey });
     const byCode = new Map<string, AnnotationEditorTool>();
-    for (const def of [...available, MASK_TOOL_DEF]) {
+    // The mask key rides along only while any tool is offered at all — an
+    // empty list means this client has no editor, and no key should act
+    for (const def of available.length > 0 ? [...available, MASK_TOOL_DEF] : []) {
       if (def.code !== reserved) byCode.set(def.code, def.tool);
     }
 
