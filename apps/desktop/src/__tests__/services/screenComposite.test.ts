@@ -669,6 +669,34 @@ describe('source-change guard', () => {
     expect(isSourceHeld()).toBe(true);
   });
 
+  it('a hold raised while the producer handles are still stubs is re-asserted on attach', async () => {
+    const h = holdHandles(() => [mask('m')]);
+    const track = await prepareComposite({
+      rawTrack: h.rawTrack,
+      getMasks: h.getMasks,
+      onFatal: h.onFatal,
+      onRestoreFailed: h.onRestoreFailed,
+      onSourceResize: h.onSourceResize,
+      onSourceHold: h.onSourceHold,
+    });
+    expect(track).not.toBeNull();
+    setVideoSize(1920, 1080);
+    runFrame(); // canvas follows the source at its original size — no hold
+    expect(isSourceHeld()).toBe(false);
+
+    setVideoSize(1280, 720); // the source changes DURING the claim/produce window
+    runFrame();
+    expect(isSourceHeld()).toBe(true);
+    expect(h.pauseProducer).not.toHaveBeenCalled(); // only the stub was "paused"
+
+    attachCompositeProducerHandles({ replaceTrack: h.replaceTrack, pauseProducer: h.pauseProducer, resumeProducer: h.resumeProducer });
+    expect(h.pauseProducer).toHaveBeenCalled(); // the hold now actually gates RTP
+
+    resumeSourceHold();
+    expect(h.resumeProducer).toHaveBeenCalled();
+    expect(isSourceHeld()).toBe(false);
+  });
+
   it('only the explicit confirm resumes; the hold never expires by itself', async () => {
     await installHeld(() => [mask('m')]);
     setVideoSize(1280, 720);

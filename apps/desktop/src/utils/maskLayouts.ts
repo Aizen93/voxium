@@ -1,5 +1,4 @@
 import type { MaskRect } from '../stores/annotationStore';
-import type { MaskStyle } from './maskStyles';
 
 /**
  * Remembered mask layouts: sharing the same window twice should not mean
@@ -25,11 +24,16 @@ export interface MaskLayoutEntry {
 
 export const MASK_LAYOUTS_MAX = 12;
 /** Cover-image data URLs above this are dropped from the stored copy (the
- *  geometry and style are the value; a huge image is not worth the quota). */
+ *  geometry is the value; a huge image is not worth the quota). */
 export const MASK_LAYOUT_SRC_MAX = 100_000;
+/** Masks stored per entry — a real layout has a handful; a pathological
+ *  stored blob must not apply thousands. */
+export const MASK_LAYOUT_MASKS_MAX = 40;
+/** A remembered mask below this covers nothing (the editor discards creates
+ *  under 0.005) — storing it would make every "N masks" count a lie. */
+export const MASK_LAYOUT_MIN_DIM = 0.004;
 
 const STORAGE_PREFIX = 'vox:maskLayouts:';
-const STYLES: ReadonlySet<string> = new Set(['cover', 'pixelate', 'blur'] as MaskStyle[]);
 
 export function maskLayoutStorageKey(userId: string): string {
   return `${STORAGE_PREFIX}${userId}`;
@@ -45,14 +49,16 @@ export function sourceKeyFromSettings(settings: { displaySurface?: string; width
 const inRange = (v: unknown, min: number, max: number): v is number =>
   typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 
-/** One stored mask, or null if it cannot be trusted. */
+/** One stored mask, or null if it cannot be trusted. Deliberately does NOT
+ *  keep the mask STYLE: pixelate/blur are cosmetic (partially reversible) and
+ *  must be re-chosen per session — "Cover every session" applies to
+ *  remembered masks exactly as it does to the picker default. */
 function sanitizeMask(raw: unknown): MaskRect | null {
   if (!raw || typeof raw !== 'object') return null;
   const m = raw as Record<string, unknown>;
   if (typeof m.id !== 'string' || m.id.length === 0 || m.id.length > 64) return null;
-  if (!inRange(m.x, -0.1, 1.1) || !inRange(m.y, -0.1, 1.1) || !inRange(m.w, 0, 1.1) || !inRange(m.h, 0, 1.1)) return null;
+  if (!inRange(m.x, -0.1, 1.1) || !inRange(m.y, -0.1, 1.1) || !inRange(m.w, MASK_LAYOUT_MIN_DIM, 1.1) || !inRange(m.h, MASK_LAYOUT_MIN_DIM, 1.1)) return null;
   const mask: MaskRect = { id: m.id, x: m.x, y: m.y, w: m.w, h: m.h };
-  if (typeof m.style === 'string' && STYLES.has(m.style) && m.style !== 'cover') mask.style = m.style as MaskStyle;
   if (typeof m.src === 'string' && m.src.startsWith('data:image/') && m.src.length <= MASK_LAYOUT_SRC_MAX) mask.src = m.src;
   return mask;
 }
@@ -69,7 +75,7 @@ export function loadMaskLayouts(userId: string): MaskLayoutEntry[] {
       const e = item as Record<string, unknown>;
       if (typeof e.key !== 'string' || e.key.length === 0 || e.key.length > 128) continue;
       if (!Array.isArray(e.masks)) continue;
-      const masks = e.masks.map(sanitizeMask).filter((m): m is MaskRect => m !== null);
+      const masks = e.masks.map(sanitizeMask).filter((m): m is MaskRect => m !== null).slice(0, MASK_LAYOUT_MASKS_MAX);
       if (masks.length === 0) continue;
       entries.push({
         key: e.key,
@@ -107,7 +113,7 @@ export function upsertMaskLayout(layouts: readonly MaskLayoutEntry[], key: strin
   const rest = layouts.filter((e) => e.key !== key);
   if (masks.length === 0) return [...rest];
   const previous = findMaskLayout(layouts, key);
-  const stored = masks.map((m) => sanitizeMask(m)).filter((m): m is MaskRect => m !== null);
+  const stored = masks.map((m) => sanitizeMask(m)).filter((m): m is MaskRect => m !== null).slice(0, MASK_LAYOUT_MASKS_MAX);
   if (stored.length === 0) return [...rest];
   const next = [...rest, { ...(previous?.name ? { name: previous.name } : {}), key, masks: stored, lastUsed: now }];
   next.sort((a, b) => b.lastUsed - a.lastUsed);

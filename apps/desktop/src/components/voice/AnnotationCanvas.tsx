@@ -21,6 +21,8 @@ import { paintStyledMask, createScratchCanvas, type ScratchCanvas } from '../../
 
 interface AnnotationCanvasProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  /** Paint ONLY the privacy masks (pre-flight preview). */
+  masksOnly?: boolean;
 }
 
 // Decoded overlay images, keyed by cache id. Entries no longer referenced by
@@ -239,10 +241,15 @@ export function useLiveScheduler(draw: () => void): void {
   }, []);
 }
 
-export function AnnotationCanvas({ videoRef }: AnnotationCanvasProps) {
+const MASKS_ONLY_SCENE: AnnotationScene = { objects: [] };
+
+export function AnnotationCanvas({ videoRef, masksOnly = false }: AnnotationCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const scratchRef = useRef<ScratchCanvas | null | undefined>(undefined);
-  const scene = useAnnotationStore((s) => s.scene);
+  const liveScene = useAnnotationStore((s) => s.scene);
+  // The pre-flight preview is PRIVATE: with someone else live-sharing, their
+  // scene (and pointer) must not paint over the sharer's local capture.
+  const scene = masksOnly ? MASKS_ONLY_SCENE : liveScene;
   const masks = useAnnotationStore((s) => s.masks);
   const rect = useVideoContentRect(videoRef);
   const [redrawTick, setRedrawTick] = useState(0);
@@ -273,7 +280,7 @@ export function AnnotationCanvas({ videoRef }: AnnotationCanvasProps) {
     if (scratchRef.current === undefined) scratchRef.current = createScratchCanvas();
     const preview = videoRef.current ? { video: videoRef.current, scratch: scratchRef.current } : null;
     drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1), fading, now, preview);
-    if (pointer) drawLivePointer(ctx, pointer, now, rect.w, rect.h);
+    if (pointer && !masksOnly) drawLivePointer(ctx, pointer, now, rect.w, rect.h);
   }, [scene, masks, rect, videoRef]);
 
   useEffect(() => {

@@ -44,6 +44,11 @@ export interface ToolCapabilities {
   tools: ReadonlySet<AnnotationEditorTool>;
   /** Privacy masks (local-only compositing). */
   masks: boolean;
+  /** May the select tool touch SHARED SCENE objects (move, resize,
+   *  caption-edit)? false = mask-only surface: the pre-flight preview must
+   *  neither show nor emit anything about the channel's live scene (a drag
+   *  there would enqueue real ops toward the wire). Default true. */
+  sceneObjects?: boolean;
   /** Image overlays (the file picker). */
   images: boolean;
 }
@@ -337,7 +342,9 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         // `translate`, a v2 op: below wire version 2 strokes stay paint-only,
         // or the first drag would have the whole batch rejected.
         const v2 = useVoiceStore.getState().screenShareAnnotationsVersion >= 2;
-        const hitObj = topmostVisibleHit(store.scene.objects, norm.x, norm.y, (o) => SELECTABLE_KINDS.has(o.kind) && (v2 || o.kind !== 'stroke'));
+        const hitObj = capabilities.sceneObjects === false
+          ? undefined
+          : topmostVisibleHit(store.scene.objects, norm.x, norm.y, (o) => SELECTABLE_KINDS.has(o.kind) && (v2 || o.kind !== 'stroke'));
         if (hitObj) {
           store.setSelectedObjectId(hitObj.id);
           store.beginGesture(); // a move is one undo step however many updates it sends
@@ -390,6 +397,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
   /** Double-click a callout to retype its number, a caption to edit its text. */
   const handleDoubleClick = (e: React.MouseEvent) => {
     if (!canUse('select') || activeTool !== 'select') return;
+    if (capabilities.sceneObjects === false) return; // caption edit is a scene op
     const norm = toNorm(e, true);
     const hit = topmostHit(useAnnotationStore.getState().scene.objects, norm.x, norm.y, (o) => o.kind === 'callout' || o.kind === 'text');
     if (!hit) return;
@@ -496,6 +504,14 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     dragRef.current = null;
     if (!drag) return;
     const store = useAnnotationStore.getState();
+
+    // A mask resized down to nothing is a cover that covers nothing — yet it
+    // still counts in every "N masks" label and would be remembered by the
+    // layout store. Same discard as a degenerate create.
+    if (drag.mode === 'resize' && drag.isMask) {
+      const mask = useAnnotationStore.getState().masks.find((m) => m.id === drag.id);
+      if (mask && (mask.w < MIN_DRAG_NORM || mask.h < MIN_DRAG_NORM)) store.removeMask(drag.id);
+    }
 
     if (drag.mode === 'create') {
       // Discard degenerate click-without-drag boxes

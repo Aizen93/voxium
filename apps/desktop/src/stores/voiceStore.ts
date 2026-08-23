@@ -1123,6 +1123,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const socket = getSocket();
     const { localStream, activeChannelId, localUserId } = get();
 
+    // A pre-flight in progress dies with the voice session. The modal's own
+    // effect also cancels, but logout REPLACES the store state before React
+    // can run it — the capture tracks would never be stopped and the OS
+    // "sharing your screen" indicator would stay lit until app restart.
+    get().cancelPendingShare();
+
     // Stop screen sharing before leaving
     if (get().isScreenSharing) {
       get().stopScreenShare();
@@ -2104,6 +2110,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const { msSendTransport, msDevice } = get();
     if (!socket || !get().activeChannelId || !msSendTransport || !msDevice) {
       stream.getTracks().forEach((t) => t.stop());
+      set({ screenShareSourceKey: null }); // confirm stamped it; nothing went live
       shareMaskHooks?.clearPreflightMasks();
       return;
     }
@@ -2190,6 +2197,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
           resumeProducer: () => get().setScreenVideoProducerPaused(false),
         });
       }
+      // The pre-flight's onended went dead when confirm cleared pendingShare,
+      // and the handler below is not installed yet — a capture that ended
+      // during the produce round-trip would otherwise leave a "live" share
+      // with a dead track and no event left to fire.
+      if (videoTrack.readyState !== 'live') {
+        throw new Error('Screen capture ended during setup');
+      }
       videoTrack.onended = () => {
         get().stopScreenShare();
       };
@@ -2223,7 +2237,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // release the capture stream (clears the OS capture indicator), and
       // free the sharer slot on the server.
       const s = getSocket();
-      teardownComposite(); // defensive — masks can't exist pre-produce, but a stray loop must die
+      // With pre-flight masks the compositor session CAN already be live here
+      // (prepareComposite ran before produce) — kill its draw loop with the
+      // producers; the raw stream tracks are stopped below.
+      teardownComposite();
       const producers = new Map(get().msProducers);
       for (const producer of createdProducers) {
         if (s) s.emit('voice:producer:close', { producerId: producer.id });
@@ -2233,7 +2250,15 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       set({ msProducers: producers });
       stream?.getTracks().forEach((track) => track.stop());
       if (claimedSlot && s) s.emit('voice:screen_share:stop');
-      set({ screenStream: null, isScreenSharing: false });
+      // The stale key would make maskLayoutStore misread the NEXT pre-flight's
+      // cancel as a confirm; the masks would silently composite over the next
+      // share of anything (same rationale as cancelPendingShare).
+      set({ screenStream: null, isScreenSharing: false, screenShareSourceKey: null });
+      try {
+        shareMaskHooks?.clearPreflightMasks();
+      } catch (hookErr) {
+        console.warn('[Voice] Pre-flight mask cleanup failed:', hookErr);
+      }
       // A getDisplayMedia permission cancel is a deliberate user action — no toast
       const isUserCancel = err instanceof DOMException && err.name === 'NotAllowedError';
       if (!isUserCancel) {
@@ -2852,6 +2877,9 @@ onSocketReconnect(async () => {
     isScreenSharing: false,
     screenSharingUserId: null,
     remoteScreenStream: null,
+    screenShareFrozen: false,
+    // Stale key = maskLayoutStore misreads the next pre-flight cancel as a confirm
+    screenShareSourceKey: null,
   });
 
   // For DM calls, destroy stale P2P peers

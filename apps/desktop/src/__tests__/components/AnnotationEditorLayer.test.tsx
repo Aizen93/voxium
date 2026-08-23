@@ -325,6 +325,38 @@ describe('AnnotationEditorLayer — capabilities and gestures', () => {
     expect(useAnnotationStore.getState().canUndo).toBe(false);
   });
 
+  it('a mask resized down to nothing is discarded like a degenerate create', () => {
+    render(false, { tools: new Set(['select', 'mask']), masks: true, images: false });
+    act(() => {
+      useAnnotationStore.setState({ activeTool: 'select', masks: [{ id: 'm1', x: 0.2, y: 0.2, w: 0.3, h: 0.3 }] });
+    });
+    pointerDown(layer(), 280, 157); // select the mask
+    pointerUp(layer());
+    const handle = container.querySelector('.cursor-nwse-resize');
+    expect(handle).not.toBeNull();
+    pointerDown(handle!, 400, 225);  // grab the bottom-right handle
+    pointerMove(layer(), 162, 92);   // drag it (almost) onto the anchor corner
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().masks).toEqual([]);
+  });
+
+  it('sceneObjects:false — select cannot touch the live scene, but masks stay selectable', () => {
+    render(false, { tools: new Set(['select', 'mask']), masks: true, images: false, sceneObjects: false });
+    act(() => {
+      useAnnotationStore.getState().hydrate('chan-1', 1, {
+        objects: [{ id: 'their-box', kind: 'shape', shape: 'rect', color: '#ff0000', width: 0.004, x: 0.1, y: 0.1, w: 0.3, h: 0.3 }],
+      });
+      useAnnotationStore.setState({ activeTool: 'select', masks: [{ id: 'my-mask', x: 0.6, y: 0.6, w: 0.2, h: 0.2 }] });
+    });
+    pointerDown(layer(), 200, 112); // inside the live scene's shape
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().selectedObjectId).toBeNull(); // no gesture, no ops
+
+    pointerDown(layer(), 560, 315); // inside the pre-flight mask
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().selectedObjectId).toBe('my-mask');
+  });
+
   it('the mask tool is inert when the capabilities forbid masks, even if listed', () => {
     useAnnotationStore.setState({ activeTool: 'mask' });
     render(false, { tools: new Set(['mask']), masks: false, images: false });

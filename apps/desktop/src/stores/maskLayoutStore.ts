@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { useVoiceStore } from './voiceStore';
-import { useAnnotationStore } from './annotationStore';
+import { useAnnotationStore, type MaskRect } from './annotationStore';
 import {
   loadMaskLayouts, saveMaskLayouts, findMaskLayout, upsertMaskLayout,
 } from '../utils/maskLayouts';
@@ -41,6 +41,11 @@ interface MaskLayoutState {
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 /** Suppresses the save-on-edit subscription while auto-apply itself edits. */
 let applying = false;
+/** Last mask list seen while LIVE-sharing. The stop transition needs it: the
+ *  annotationStore lifecycle subscription runs first on the same voiceStore
+ *  update and has already wiped the masks by the time ours flushes the
+ *  debounced save — reading the store then would DELETE the layout. */
+let lastLiveMasks: readonly MaskRect[] = [];
 /** The layout was already applied for this capture (in the pre-flight) —
  *  the share-start transition must not apply it a second time. */
 let appliedThisCapture = false;
@@ -52,6 +57,7 @@ export function resetMaskLayoutModuleState(): void {
   }
   applying = false;
   appliedThisCapture = false;
+  lastLiveMasks = [];
 }
 
 export const useMaskLayoutStore = create<MaskLayoutState>((set, get) => ({
@@ -68,6 +74,15 @@ export const useMaskLayoutStore = create<MaskLayoutState>((set, get) => ({
     // removeMask one by one keeps the compositor transitions ordered
     for (const mask of annotations.masks.filter((m) => ids.has(m.id))) {
       useAnnotationStore.getState().removeMask(mask.id);
+    }
+    // Rejecting the remembered layout IS an edit to the memory — but in the
+    // pre-flight the save-on-edit subscription is (correctly) gated on a live
+    // share, so persist the rejection here or the exact masks the user just
+    // dismissed come back on every future share of this source.
+    const userId = useVoiceStore.getState().localUserId;
+    if (userId) {
+      const remaining = useAnnotationStore.getState().masks;
+      saveMaskLayouts(userId, upsertMaskLayout(loadMaskLayouts(userId), applied.key, remaining, Date.now()));
     }
   },
 }));
@@ -129,10 +144,31 @@ useVoiceStore.subscribe((state, prev) => {
     useMaskLayoutStore.setState({ appliedLayout: null });
   }
 
+  // Confirm went out but ACTIVATION FAILED (claim rejected, produce threw,
+  // compositor refused): the key is cleared with no share having started. The
+  // pendingShare-cleared edge above classified that update as a confirm, so
+  // the cancel-side reset never ran — run it now or the stale banner and the
+  // once-per-capture latch leak into the next capture.
+  if (!state.screenShareSourceKey && prev.screenShareSourceKey && !state.isScreenSharing && !prev.isScreenSharing) {
+    appliedThisCapture = false;
+    useMaskLayoutStore.setState({ appliedLayout: null });
+  }
+
   if (state.isScreenSharing && !prev.isScreenSharing) {
     if (!appliedThisCapture) applyLayoutForShare(state.screenShareSourceKey);
     appliedThisCapture = false; // consumed either way
+    lastLiveMasks = useAnnotationStore.getState().masks;
   } else if (!state.isScreenSharing && prev.isScreenSharing) {
+    // A debounced save may still be pending — it holds the last second of
+    // mask edits before the stop. Flush it with the last LIVE mask list (the
+    // store itself was already wiped by the annotationStore subscription).
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      if (prev.localUserId && prev.screenShareSourceKey) {
+        saveMaskLayouts(prev.localUserId, upsertMaskLayout(loadMaskLayouts(prev.localUserId), prev.screenShareSourceKey, lastLiveMasks, Date.now()));
+      }
+    }
     resetMaskLayoutModuleState();
     useMaskLayoutStore.setState({ appliedLayout: null });
   }
@@ -142,5 +178,6 @@ useVoiceStore.subscribe((state, prev) => {
 useAnnotationStore.subscribe((state, prev) => {
   if (state.masks === prev.masks || applying) return;
   if (!useVoiceStore.getState().isScreenSharing) return;
+  lastLiveMasks = state.masks;
   scheduleSave();
 });

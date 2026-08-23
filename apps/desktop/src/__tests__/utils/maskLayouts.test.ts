@@ -22,13 +22,15 @@ describe('maskLayouts', () => {
   it('round-trips entries per user — another account reads a different key', () => {
     saveMaskLayouts('alice', upsertMaskLayout([], 'window:1280x720', [mask('m1', { style: 'pixelate' })], 111));
     expect(loadMaskLayouts('alice')).toEqual([
-      { key: 'window:1280x720', masks: [{ id: 'm1', x: 0.1, y: 0.1, w: 0.3, h: 0.2, style: 'pixelate' }], lastUsed: 111 },
+      // The style is deliberately NOT stored — cosmetic covers must be
+      // re-chosen per session ("Cover every session")
+      { key: 'window:1280x720', masks: [{ id: 'm1', x: 0.1, y: 0.1, w: 0.3, h: 0.2 }], lastUsed: 111 },
     ]);
     expect(loadMaskLayouts('bob')).toEqual([]);
     expect(localStorage.getItem(maskLayoutStorageKey('alice'))).not.toBeNull();
   });
 
-  it('sanitizes on load: bad geometry drops the mask, bad style drops the style, oversized covers drop the src', () => {
+  it('sanitizes on load: bad geometry drops the mask, EVERY style is dropped, oversized covers drop the src', () => {
     localStorage.setItem(maskLayoutStorageKey('u'), JSON.stringify([
       {
         key: 'window:1x1',
@@ -52,7 +54,7 @@ describe('maskLayouts', () => {
     const [entry, ...rest] = loadMaskLayouts('u');
     expect(rest).toEqual([]);
     expect(entry.masks.map((m) => m.id)).toEqual(['ok', 'styled', 'bad-style', 'big-src', 'good-src', 'evil-src']);
-    expect(entry.masks.find((m) => m.id === 'styled')!.style).toBe('blur');
+    expect(entry.masks.find((m) => m.id === 'styled')!.style).toBeUndefined(); // never remembered
     expect(entry.masks.find((m) => m.id === 'bad-style')!.style).toBeUndefined();
     expect(entry.masks.find((m) => m.id === 'big-src')!.src).toBeUndefined();
     expect(entry.masks.find((m) => m.id === 'good-src')!.src).toBe('data:image/webp;base64,AAAA');

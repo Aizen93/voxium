@@ -144,7 +144,7 @@ vi.mock('../../stores/settingsStore', async () => {
   };
 });
 
-import { useVoiceStore, isMicProducer } from '../../stores/voiceStore';
+import { useVoiceStore, isMicProducer, registerShareMaskHooks } from '../../stores/voiceStore';
 import { getSocket } from '../../services/socket';
 import type { Producer, Consumer } from 'mediasoup-client/types';
 
@@ -292,6 +292,77 @@ describe('voiceStore', () => {
       useVoiceStore.setState({ pttActive: true, activeChannelId: 'ch-1' });
       useVoiceStore.getState().leaveChannel();
       expect(useVoiceStore.getState().pttActive).toBe(false);
+    });
+  });
+
+  describe('share pre-flight lifecycle', () => {
+    const noopHooks: Parameters<typeof registerShareMaskHooks>[0] = {
+      hasMasks: () => false,
+      preflightCompositeHandles: () => ({}) as never,
+      clearPreflightMasks: () => {},
+    };
+    const fakeShareStream = (stop: () => void) => ({
+      getTracks: () => [{ stop, readyState: 'live' }],
+      getVideoTracks: () => [],
+      getAudioTracks: () => [],
+    }) as unknown as MediaStream;
+
+    afterEach(() => {
+      registerShareMaskHooks(noopHooks);
+      vi.mocked(vi.mocked(getSocket)()!.emit).mockReset();
+      useVoiceStore.setState({
+        pendingShare: null, screenShareSourceKey: null, isScreenSharing: false,
+        screenStream: null, msSendTransport: null, msDevice: null,
+      });
+    });
+
+    it('cancelPendingShare stops the capture and drops the pre-flight masks', () => {
+      const stop = vi.fn();
+      const clear = vi.fn();
+      registerShareMaskHooks({ ...noopHooks, clearPreflightMasks: clear });
+      useVoiceStore.setState({ pendingShare: { stream: fakeShareStream(stop), sourceKey: 'window:1280x720', displaySurface: 'window' } });
+      useVoiceStore.getState().cancelPendingShare();
+      expect(useVoiceStore.getState().pendingShare).toBeNull();
+      expect(stop).toHaveBeenCalled();
+      expect(clear).toHaveBeenCalled();
+    });
+
+    it('leaveChannel abandons an open pre-flight — logout replaces the state before the modal effect can', () => {
+      const stop = vi.fn();
+      useVoiceStore.setState({
+        activeChannelId: 'chan-1',
+        pendingShare: { stream: fakeShareStream(stop), sourceKey: 'window:1280x720', displaySurface: 'window' },
+      });
+      useVoiceStore.getState().leaveChannel();
+      expect(useVoiceStore.getState().pendingShare).toBeNull();
+      expect(stop).toHaveBeenCalled(); // the OS capture indicator must go out
+    });
+
+    it('a rejected claim cleans up like a cancel: source key cleared, masks dropped, tracks stopped', async () => {
+      const stop = vi.fn();
+      const clear = vi.fn();
+      registerShareMaskHooks({ ...noopHooks, clearPreflightMasks: clear });
+      const socket = vi.mocked(getSocket)()!;
+      vi.mocked(socket.emit).mockImplementation(((event: string, ...args: unknown[]) => {
+        if (event === 'voice:screen_share:start') {
+          const cb = args[0];
+          if (typeof cb === 'function') (cb as (r: unknown) => void)({ ok: false, error: 'Someone else is already sharing in this channel' });
+        }
+        return socket;
+      }) as never);
+      useVoiceStore.setState({
+        activeChannelId: 'chan-1',
+        msSendTransport: {} as never,
+        msDevice: {} as never,
+        pendingShare: { stream: fakeShareStream(stop), sourceKey: 'window:1280x720', displaySurface: 'window' },
+      });
+      await useVoiceStore.getState().confirmPendingShare();
+      expect(useVoiceStore.getState().pendingShare).toBeNull();
+      // A stale key would make maskLayoutStore misread the NEXT pre-flight's cancel as a confirm
+      expect(useVoiceStore.getState().screenShareSourceKey).toBeNull();
+      expect(useVoiceStore.getState().isScreenSharing).toBe(false);
+      expect(clear).toHaveBeenCalled();
+      expect(stop).toHaveBeenCalled();
     });
   });
 

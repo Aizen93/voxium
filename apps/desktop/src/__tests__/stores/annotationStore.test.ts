@@ -14,6 +14,7 @@ const voiceMock = vi.hoisted(() => {
   type VoiceShape = {
     activeChannelId: string | null;
     screenSharingUserId: string | null;
+    localUserId: string | null;
     isScreenSharing: boolean;
     screenStream: { getVideoTracks: () => { readyState: string }[] } | null;
     screenShareAnnotationsVersion: number;
@@ -23,6 +24,7 @@ const voiceMock = vi.hoisted(() => {
   const base = (): VoiceShape => ({
     activeChannelId: 'chan-1',
     screenSharingUserId: null,
+    localUserId: 'me',
     isScreenSharing: false,
     screenStream: null,
     screenShareAnnotationsVersion: 2,
@@ -844,6 +846,29 @@ describe('annotationStore — screen-share lifecycle guard', () => {
     useAnnotationStore.getState().hydrate('chan-1', 5, { objects: [{ id: 'x', kind: 'stroke', tool: 'pen', color: '#ff0000', width: 0.004, points: [0, 0, 1, 1] }] });
     voiceMock.setState({ screenSharingUserId: 'user-b' });
     expect(useAnnotationStore.getState().scene.objects).toHaveLength(0);
+  });
+
+  it('does NOT wipe the pre-flight masks when the LOCAL user becomes the sharer (claim broadcast races the ack)', () => {
+    useAnnotationStore.getState().addMask({ id: 'pre1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+    compositeMock.teardownComposite.mockClear();
+    voiceMock.setState({ screenSharingUserId: 'me' }); // broadcast first, ack still in flight
+    expect(useAnnotationStore.getState().masks).toHaveLength(1);
+    expect(compositeMock.teardownComposite).not.toHaveBeenCalled();
+  });
+
+  it('multi-node ack-first ordering: the late broadcast must not tear down the live compositor', () => {
+    voiceMock.setState({ isScreenSharing: true, screenStream: { getVideoTracks: () => [{ readyState: 'live' }] } });
+    useAnnotationStore.getState().addMask({ id: 'pre1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+    compositeMock.teardownComposite.mockClear();
+    voiceMock.setState({ screenSharingUserId: 'me' }); // broadcast lands after we went live
+    expect(useAnnotationStore.getState().masks).toHaveLength(1);
+    expect(compositeMock.teardownComposite).not.toHaveBeenCalled();
+  });
+
+  it('someone ELSE starting a share still clears everything', () => {
+    useAnnotationStore.getState().addMask({ id: 'stray', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+    voiceMock.setState({ screenSharingUserId: 'other-user' });
+    expect(useAnnotationStore.getState().masks).toEqual([]);
   });
 
   it('tears down the sharer session (masks, editing, queue) when our own share ends', () => {

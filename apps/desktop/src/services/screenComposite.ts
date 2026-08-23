@@ -192,7 +192,19 @@ function startFrameLoop(s: ActiveSession): void {
         console.warn('[ScreenComposite] source-hold handler failed:', err);
       }
     }
-    const resized = renderCompositeFrame(s.ctx, s.video, s.canvas, masks, (m) => maskImageFor(s, m), s.scratch);
+    let resized: boolean;
+    try {
+      resized = renderCompositeFrame(s.ctx, s.video, s.canvas, masks, (m) => maskImageFor(s, m), s.scratch);
+    } catch (err) {
+      // Viewers hold the last MASKED frame (canvas keeps its pixels) — safe
+      // direction, but say so once instead of dying silently at frame rate.
+      const flagged = s as typeof s & { drawErrorLogged?: boolean };
+      if (!flagged.drawErrorLogged) {
+        flagged.drawErrorLogged = true;
+        console.error('[ScreenComposite] Frame draw failed — viewers hold the last masked frame:', err);
+      }
+      return;
+    }
     if (resized && masks.length === 0) {
       try {
         s.handles.onSourceResize?.();
@@ -350,6 +362,17 @@ export async function prepareComposite(preflight: PreflightCompositeHandles): Pr
 export function attachCompositeProducerHandles(producer: Pick<CompositeHandles, 'replaceTrack' | 'pauseProducer' | 'resumeProducer'>): void {
   if (!session) return;
   Object.assign(session.handles, producer);
+  // A source resize during the claim/produce window raised the hold against
+  // the pre-attach STUB pauseProducer (a no-op) — re-assert it here or a
+  // "held" share streams frames whose masks are normalized to the OLD
+  // geometry while the banner claims nothing ships until the sharer confirms.
+  if (session.sourceHold) {
+    try {
+      session.handles.pauseProducer();
+    } catch (err) {
+      console.warn('[ScreenComposite] Could not re-assert source hold on attach:', err);
+    }
+  }
 }
 
 /**

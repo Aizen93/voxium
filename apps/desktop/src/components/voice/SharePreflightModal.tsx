@@ -27,6 +27,10 @@ const PREFLIGHT_CAPABILITIES: ToolCapabilities = {
   tools: new Set(['select', 'mask']),
   masks: true,
   images: false,
+  // Another user may be LIVE-sharing while this pre-flight is open: their
+  // scene must not paint over the private preview, and select must not be
+  // able to drag their objects (a drag enqueues real ops toward the wire).
+  sceneObjects: false,
 };
 
 const MASK_STYLES: readonly { style: MaskStyle; labelKey: string }[] = [
@@ -161,7 +165,7 @@ export function SharePreflightModal() {
 
         <div className="relative flex min-h-0 flex-1 items-center justify-center bg-black" style={{ minHeight: 260 }}>
           <video ref={videoRef} autoPlay playsInline muted className="max-h-full max-w-full object-contain" />
-          <AnnotationCanvas videoRef={videoRef} />
+          <AnnotationCanvas videoRef={videoRef} masksOnly />
           <AnnotationEditorLayer videoRef={videoRef} capabilities={PREFLIGHT_CAPABILITIES} />
         </div>
 

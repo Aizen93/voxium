@@ -773,6 +773,15 @@ registerShareMaskHooks({
 // scene arrives via hydration/ops.
 useVoiceStore.subscribe((state, prevState) => {
   if (state.screenSharingUserId === prevState.screenSharingUserId) return;
+  // OUR OWN share starting: the server's claim broadcast races the claim ack
+  // (single-node the broadcast arrives first; multi-node either order), so
+  // this fires while activateScreenShare is still mid-flight. Clearing here
+  // would wipe the pre-flight masks BEFORE masksPreplaced is read — the raw
+  // track gets produced — or, in the ack-first ordering, tear down the live
+  // compositor under the producer. The pre-flight's masks and the compositor
+  // session must survive the local user going live; everything they own is
+  // torn down on the me→null transition when the share actually ends.
+  if (state.screenSharingUserId !== null && state.screenSharingUserId === state.localUserId) return;
   const annotations = useAnnotationStore.getState();
   if (prevState.isScreenSharing) annotations.teardownSharerSession();
   annotations.clearViewerScene();

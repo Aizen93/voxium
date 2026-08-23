@@ -2,6 +2,7 @@ import { useRef, useEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
+import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAuthStore } from '../../stores/authStore';
 import { Maximize, Minimize2, MonitorOff } from 'lucide-react';
 import { AnnotationCanvas } from './AnnotationCanvas';
@@ -20,6 +21,8 @@ export function ScreenShareFloating() {
   const localUserId = useAuthStore((s) => s.user?.id);
   const setViewMode = useVoiceStore((s) => s.setScreenShareViewMode);
   const stopScreenShare = useVoiceStore((s) => s.stopScreenShare);
+  const sourceChangeHold = useAnnotationStore((s) => s.sourceChangeHold);
+  const confirmSourceChange = useAnnotationStore((s) => s.confirmSourceChange);
 
   const isLocalSharing = screenSharingUserId === localUserId;
   const stream = isLocalSharing ? screenStream : remoteScreenStream;
@@ -162,7 +165,24 @@ export function ScreenShareFloating() {
 
       {/* Video + annotation overlay stage */}
       <div ref={stageRef} className="relative flex flex-1 items-center justify-center bg-black" style={{ height: size.h - 28 }}>
-        {isLocalSharing && screenShareFrozen && (
+        {isLocalSharing && sourceChangeHold && (
+          <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-center gap-2 bg-vox-accent-warning/90 px-2 py-0.5 text-[10px] font-medium text-black" data-testid="floating-source-change-banner">
+            <span className="truncate">
+              {t('voice.annotations.sourceChanged', {
+                from: `${sourceChangeHold.fromW}×${sourceChangeHold.fromH}`,
+                to: `${sourceChangeHold.toW}×${sourceChangeHold.toH}`,
+              })}
+            </span>
+            <button
+              onClick={confirmSourceChange}
+              className="shrink-0 rounded bg-black/20 px-1.5 font-semibold hover:bg-black/30"
+              data-testid="floating-source-change-resume"
+            >
+              {t('voice.annotations.sourceChangedResume')}
+            </button>
+          </div>
+        )}
+        {isLocalSharing && screenShareFrozen && !sourceChangeHold && (
           <div className="absolute inset-x-0 top-0 z-10 bg-vox-accent-danger/90 px-2 py-0.5 text-center text-[10px] text-white">
             {t('voice.annotations.sharePaused')}
           </div>
