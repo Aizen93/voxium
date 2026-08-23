@@ -1,8 +1,8 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail } from '../services/authService';
+import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, rateLimitConsent, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
@@ -101,6 +101,20 @@ authRouter.post('/refresh', rateLimitRefresh, async (req: Request, res: Response
   }
 });
 
+// Accept the Terms of Service and the Privacy Policy from an EXISTING account
+// (accounts created before consent was collected at signup — CNIL/GDPR).
+// Authenticated only, deliberately NOT behind requireConsent: this is the
+// route that clears that gate. Both flags must be the literal boolean true.
+authRouter.post('/consent', rateLimitConsent, authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { acceptTerms, acceptPrivacy } = req.body;
+    const result = await acceptConsent(req.user!.userId, { acceptTerms, acceptPrivacy });
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
 authRouter.get('/me', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await prisma.user.findUnique({
@@ -118,10 +132,11 @@ authRouter.get('/me', authenticate, async (req: Request, res: Response, next: Ne
         emailVerified: true,
         isSupporter: true, supporterTier: true,
         createdAt: true,
+        ...CONSENT_SELECT,
       },
     });
 
-    res.json({ success: true, data: user });
+    res.json({ success: true, data: user ? withConsentFlag(user) : user });
   } catch (err) {
     next(err);
   }

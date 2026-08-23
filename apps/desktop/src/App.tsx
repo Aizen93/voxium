@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
 import { LoginPage } from './pages/LoginPage';
@@ -8,6 +8,7 @@ import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { InvitePage } from './pages/InvitePage';
 import { VerifyEmailPage } from './pages/VerifyEmailPage';
 import { EmailVerificationPendingPage } from './pages/EmailVerificationPendingPage';
+import { ConsentPage } from './pages/ConsentPage';
 import { LandingPage } from './pages/LandingPage';
 import { TermsPage } from './pages/TermsPage';
 import { PrivacyPage } from './pages/PrivacyPage';
@@ -44,6 +45,14 @@ function SaveAndRedirect() {
 export function App({ onReady }: { onReady?: () => void }) {
   const { isAuthenticated, checkAuth, isLoading, user } = useAuthStore();
   const emailVerified = user?.emailVerified ?? false;
+  // Accounts created before consent was collected at signup must accept the
+  // Terms of Service and Privacy Policy before anything else (CNIL/GDPR); the
+  // server refuses every functional route and the socket until they do, so
+  // rendering the app here would only produce a wall of 403s.
+  const consentRequired = user?.consentRequired === true;
+  /** The authenticated app, or whichever gate the account is still behind. */
+  const gated = (app: ReactElement) =>
+    consentRequired ? <ConsentPage /> : emailVerified ? app : <EmailVerificationPendingPage />;
 
   useEffect(() => {
     checkAuth();
@@ -92,9 +101,7 @@ export function App({ onReady }: { onReady?: () => void }) {
             path="/invite/:code"
             element={
               isAuthenticated
-                ? emailVerified
-                  ? <InvitePage />
-                  : <EmailVerificationPendingPage />
+                ? gated(<InvitePage />)
                 : <SaveAndRedirect />
             }
           />
@@ -106,9 +113,7 @@ export function App({ onReady }: { onReady?: () => void }) {
             path="/"
             element={
               isAuthenticated
-                ? emailVerified
-                  ? <MainLayout />
-                  : <EmailVerificationPendingPage />
+                ? gated(<MainLayout />)
                 : isTauri
                   ? <Navigate to="/login" replace />
                   : <LandingPage />
@@ -118,9 +123,7 @@ export function App({ onReady }: { onReady?: () => void }) {
             path="/*"
             element={
               isAuthenticated
-                ? emailVerified
-                  ? <MainLayout />
-                  : <EmailVerificationPendingPage />
+                ? gated(<MainLayout />)
                 : <Navigate to="/login" replace />
             }
           />

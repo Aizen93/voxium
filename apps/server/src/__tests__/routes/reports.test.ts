@@ -10,6 +10,7 @@ vi.mock('../../middleware/auth', () => ({
     next();
   },
   requireVerifiedEmail: (_req: any, _res: any, next: any) => next(),
+  requireConsent: (_req: any, _res: any, next: any) => next(),
 }));
 
 vi.mock('../../middleware/rateLimiter', () => {

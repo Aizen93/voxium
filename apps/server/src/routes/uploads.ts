@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { rateLimitUpload, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
@@ -16,6 +16,7 @@ uploadRouter.post(
   '/presign/avatar',
   authenticate,
   requireVerifiedEmail,
+  requireConsent,
   rateLimitUpload,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -34,6 +35,7 @@ uploadRouter.post(
   '/presign/server-icon/:serverId',
   authenticate,
   requireVerifiedEmail,
+  requireConsent,
   rateLimitUpload,
   async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
     try {
@@ -58,6 +60,7 @@ uploadRouter.post(
   '/presign/attachment',
   authenticate,
   requireVerifiedEmail,
+  requireConsent,
   rateLimitUpload,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -152,6 +155,7 @@ uploadRouter.get(
   '/attachments/*path',
   authenticate,
   requireVerifiedEmail,
+  requireConsent,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const pathSegments = req.params.path;

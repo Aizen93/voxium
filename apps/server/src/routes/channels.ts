@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateChannelName, WS_EVENTS, Permissions, permissionsFromString, hasPermission, DEFAULT_EVERYONE_PERMISSIONS, type Channel } from '@voxium/shared';
@@ -13,7 +13,7 @@ import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 
 export const channelRouter = Router({ mergeParams: true });
 
-channelRouter.use(authenticate, requireVerifiedEmail);
+channelRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 /** User rooms per broadcast when the audience has to be enumerated. Bounds the
  *  size of a single adapter message on a large staff-gated server. */

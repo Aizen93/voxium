@@ -117,6 +117,13 @@
       "missingToken": "Missing verification token.",
       "failed": "Verification failed. The link may be invalid or expired."
     },
+    "consent": {
+      "title": "Before you continue",
+      "description": "Voxium needs you to accept the Terms of Service and the Privacy Policy to keep using your account.",
+      "submit": "Accept and continue",
+      "submitting": "Saving…",
+      "failed": "Could not save your acceptance. Please try again."
+    },
     "emailPending": {
       "title": "Verify your email",
       "description": "We sent a verification link to <1>{{email}}</1>. Check your inbox and click the link to activate your account.",

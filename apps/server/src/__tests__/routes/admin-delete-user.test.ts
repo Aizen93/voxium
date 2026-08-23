@@ -233,7 +233,7 @@ function mockUsers(users: Record<string, { role?: string; bannedAt?: Date | null
       id: where.id,
       bannedAt: null,
       tokenVersion: 0,
-      emailVerified: true,
+      emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       role: 'user',
       ...row,
     });

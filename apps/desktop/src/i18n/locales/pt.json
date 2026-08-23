@@ -116,6 +116,13 @@
       "missingToken": "Token de verificação não encontrado.",
       "failed": "A verificação falhou. O link pode ser inválido ou ter expirado."
     },
+    "consent": {
+      "title": "Antes de continuar",
+      "description": "O Voxium precisa que você aceite os Termos de serviço e a Política de privacidade para continuar usando sua conta.",
+      "submit": "Aceitar e continuar",
+      "submitting": "Salvando…",
+      "failed": "Não foi possível salvar sua aceitação. Tente novamente."
+    },
     "emailPending": {
       "title": "Verifique seu e-mail",
       "description": "Enviamos um link de verificação para <1>{{email}}</1>. Verifique sua caixa de entrada e clique no link para ativar sua conta.",

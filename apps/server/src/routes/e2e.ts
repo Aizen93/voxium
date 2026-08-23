@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import {
   rateLimitE2EDevice,
   rateLimitE2EKeys,
@@ -48,7 +48,7 @@ import { verifyEd25519Signature } from '../utils/e2eVerify';
 
 export const e2eRouter = Router();
 
-e2eRouter.use(authenticate, requireVerifiedEmail);
+e2eRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 interface RawPreKey {
   keyId?: unknown;

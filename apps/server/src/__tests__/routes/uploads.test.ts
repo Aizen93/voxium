@@ -12,6 +12,7 @@ vi.mock('../../middleware/auth', () => ({
     next();
   },
   requireVerifiedEmail: (_req: any, _res: any, next: any) => next(),
+  requireConsent: (_req: any, _res: any, next: any) => next(),
 }));
 
 // Mock rate limiters

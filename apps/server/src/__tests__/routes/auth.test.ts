@@ -137,6 +137,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitTOTP: passthroughMiddleware,
   rateLimitVerifyEmail: passthroughMiddleware,
   rateLimitResendVerification: passthroughMiddleware,
+  rateLimitConsent: passthroughMiddleware,
   rateLimitGeneral: passthroughMiddleware,
   rateLimitMessageSend: passthroughMiddleware,
   rateLimitUpload: passthroughMiddleware,
@@ -852,6 +853,8 @@ describe('GET /api/v1/auth/me', () => {
         isSupporter: false,
         supporterTier: null,
         createdAt: MOCK_USER.createdAt,
+        termsAcceptedAt: null,
+        privacyAcceptedAt: null,
       });
 
     const res = await request(app)
@@ -863,6 +866,10 @@ describe('GET /api/v1/auth/me', () => {
     expect(res.body.data.id).toBe(MOCK_USER.id);
     expect(res.body.data.username).toBe(MOCK_USER.username);
     expect(res.body.data.email).toBe(MOCK_USER.email);
+    // The client gates on this flag; the timestamps themselves stay server-side
+    expect(res.body.data.consentRequired).toBe(true);
+    expect(res.body.data).not.toHaveProperty('termsAcceptedAt');
+    expect(res.body.data).not.toHaveProperty('privacyAcceptedAt');
   });
 
   it('returns 401 without auth header', async () => {
@@ -1128,5 +1135,70 @@ describe('POST /api/v1/auth/login — TOTP flow', () => {
     // Should NOT have user or tokens
     expect(res.body.data).not.toHaveProperty('user');
     expect(res.body.data).not.toHaveProperty('accessToken');
+  });
+});
+
+// ─── POST /api/v1/auth/consent — existing accounts accept the documents ─────
+
+describe('POST /api/v1/auth/consent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrismaUser.updateMany = vi.fn().mockResolvedValue({ count: 1 });
+  });
+
+  function authAs(userId = MOCK_USER.id) {
+    // Auth middleware lookup: a pre-consent account
+    mockPrismaUser.findUnique.mockResolvedValueOnce({
+      bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: null, privacyAcceptedAt: null,
+    });
+    return generateAccessToken({ userId, username: MOCK_USER.username, tokenVersion: 0 });
+  }
+
+  it('records both acceptances and clears the gate', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/consent')
+      .set('Authorization', `Bearer ${authAs()}`)
+      .send({ acceptTerms: true, acceptPrivacy: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ consentRequired: false });
+    // Null-guarded writes: a FIRST acceptance is recorded, an existing
+    // timestamp is never moved forward (it is the accountability record)
+    expect(mockPrismaUser.updateMany).toHaveBeenCalledWith({
+      where: { id: MOCK_USER.id, termsAcceptedAt: null }, data: { termsAcceptedAt: expect.any(Date) },
+    });
+    expect(mockPrismaUser.updateMany).toHaveBeenCalledWith({
+      where: { id: MOCK_USER.id, privacyAcceptedAt: null }, data: { privacyAcceptedAt: expect.any(Date) },
+    });
+  });
+
+  it.each([
+    ['nothing', {}],
+    ['terms only', { acceptTerms: true }],
+    ['privacy only', { acceptPrivacy: true }],
+    ['a truthy string', { acceptTerms: 'yes', acceptPrivacy: 'yes' }],
+  ])('records nothing when given %s', async (_label, body) => {
+    const res = await request(app)
+      .post('/api/v1/auth/consent')
+      .set('Authorization', `Bearer ${authAs()}`)
+      .send(body);
+
+    expect(res.status).toBe(400);
+    expect(mockPrismaUser.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('is reachable by a pre-consent account — it is the route that clears the gate', async () => {
+    // Same auth row as above (consentRequired: true); a requireConsent on
+    // this route would lock legacy accounts out permanently
+    const res = await request(app)
+      .post('/api/v1/auth/consent')
+      .set('Authorization', `Bearer ${authAs()}`)
+      .send({ acceptTerms: true, acceptPrivacy: true });
+    expect(res.status).toBe(200);
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).post('/api/v1/auth/consent').send({ acceptTerms: true, acceptPrivacy: true });
+    expect(res.status).toBe(401);
   });
 });

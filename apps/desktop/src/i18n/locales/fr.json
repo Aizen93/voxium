@@ -116,6 +116,13 @@
       "missingToken": "Jeton de vérification manquant.",
       "failed": "La vérification a échoué. Le lien est peut-être invalide ou expiré."
     },
+    "consent": {
+      "title": "Avant de continuer",
+      "description": "Voxium a besoin que vous acceptiez les Conditions d'utilisation et la Politique de confidentialité pour continuer à utiliser votre compte.",
+      "submit": "Accepter et continuer",
+      "submitting": "Enregistrement…",
+      "failed": "Impossible d'enregistrer votre acceptation. Veuillez réessayer."
+    },
     "emailPending": {
       "title": "Vérifiez votre e-mail",
       "description": "Nous avons envoyé un lien de vérification à <1>{{email}}</1>. Vérifiez votre boîte de réception et cliquez sur le lien pour activer votre compte.",

@@ -54,6 +54,10 @@ interface AuthState {
   resetPassword: (token: string, password: string) => Promise<string>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<string>;
   resendVerification: () => Promise<void>;
+  /** Accept the Terms of Service and the Privacy Policy from an existing
+   *  account (one that predates consent-at-signup). Clears the gate the
+   *  server holds on every functional route and the socket, then connects. */
+  acceptConsent: (consent: RegistrationConsent) => Promise<void>;
   setupTOTP: () => Promise<{ secret: string; qrCodeDataUrl: string }>;
   enableTOTP: (code: string) => Promise<string[]>;
   disableTOTP: (code: string) => Promise<void>;
@@ -79,6 +83,13 @@ async function solveWithRetry(onProgress: (fraction: number) => void, signal: Ab
       onProgress(0);
     }
   }
+}
+
+/** Can this account hold a live session? The socket auth refuses BOTH an
+ *  unverified email and an account that has not accepted the legal
+ *  documents; connecting anyway only produces a reconnect loop. */
+function canConnect(user: { emailVerified: boolean; consentRequired?: boolean }): boolean {
+  return user.emailVerified && !user.consentRequired;
 }
 
 /** The in-flight registration's abort handle. Module scope, not store state:
@@ -112,7 +123,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       const { user, accessToken, refreshToken } = data.data;
       setTokens(accessToken, refreshToken, rememberMe);
-      if (user.emailVerified) {
+      if (canConnect(user)) {
         connectSocket(accessToken);
       }
       set({ user, isAuthenticated: true, isSubmitting: false });
@@ -136,7 +147,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (trustedDeviceToken) {
         localStorage.setItem('voxium_trusted_device', trustedDeviceToken);
       }
-      if (user.emailVerified) {
+      if (canConnect(user)) {
         connectSocket(accessToken);
       }
       set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true });
@@ -181,8 +192,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
       setTokens(accessToken, refreshToken, true);
 
-      // Don't connect socket until email is verified
-      if (user.emailVerified) {
+      // Don't connect socket until email is verified (consent was just given)
+      if (canConnect(user)) {
         connectSocket(accessToken);
       }
 
@@ -235,7 +246,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     try {
       const { data } = await api.get('/auth/me');
-      if (data.data.emailVerified) {
+      if (canConnect(data.data)) {
         connectSocket(token);
       }
       set({ user: data.data, isAuthenticated: true, isLoading: false });
@@ -301,6 +312,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       setTokens(data.data.accessToken, data.data.refreshToken);
     }
     return data.message;
+  },
+
+  acceptConsent: async (consent) => {
+    await api.post('/auth/consent', consent);
+    const user = get().user;
+    if (!user) return;
+    const updated = { ...user, consentRequired: false };
+    set({ user: updated });
+    const token = getAccessToken();
+    if (token && canConnect(updated)) connectSocket(token);
   },
 
   resendVerification: async () => {

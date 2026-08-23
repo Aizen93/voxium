@@ -165,6 +165,13 @@ function createMockSocket(userId = 'user-1') {
   return { socket, handlers, emitFn, toFn };
 }
 
+/** Extract the authentication middleware registered via io.use() */
+function getAuthMiddleware(): Function {
+  const useCalls = vi.mocked(mockIOInstance.use).mock.calls;
+  if (useCalls.length === 0) throw new Error('No auth middleware registered');
+  return useCalls[useCalls.length - 1][0];
+}
+
 /** Extract the 'connection' handler registered on the mock IO instance */
 function getConnectionHandler(): Function {
   const onCalls = vi.mocked(mockIOInstance.on).mock.calls;
@@ -188,7 +195,7 @@ describe('socketServer — DM presence broadcast on connect', () => {
       bannedAt: null,
       tokenVersion: 0,
       role: 'user',
-      emailVerified: true,
+      emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
     });
     mockPrisma.serverMember.findMany.mockResolvedValue([]);
     mockPrisma.channel.findMany.mockResolvedValue([]);
@@ -300,6 +307,44 @@ describe('socketServer — DM presence broadcast on connect', () => {
   });
 });
 
+describe('socketServer — auth middleware gates on consent (CNIL/GDPR)', () => {
+  const savedJwtSecret = process.env.JWT_SECRET;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-secret';
+    mockPrisma.ipBan.findUnique.mockResolvedValue(null);
+  });
+  afterEach(() => {
+    if (savedJwtSecret !== undefined) process.env.JWT_SECRET = savedJwtSecret; else delete process.env.JWT_SECRET;
+  });
+
+  async function handshake(userRow: Record<string, unknown>) {
+    mockPrisma.user.findUnique.mockResolvedValue(userRow);
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const { socket } = createMockSocket('user-1');
+    const next = vi.fn();
+    await getAuthMiddleware()(socket, next);
+    httpServer.close();
+    return next;
+  }
+
+  it('refuses a live session to an account that has not accepted the legal documents — the same gate as requireConsent on REST', async () => {
+    const next = await handshake({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: null, privacyAcceptedAt: null });
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Consent required' }));
+  });
+
+  it('admits an account that has accepted both', async () => {
+    const next = await handshake({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0) });
+    expect(next).toHaveBeenCalledWith();
+  });
+
+  it('still refuses an unverified email first', async () => {
+    const next = await handshake({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: false, termsAcceptedAt: null, privacyAcceptedAt: null });
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Email not verified' }));
+  });
+});
+
 describe('socketServer — DM presence broadcast on disconnect', () => {
   const savedJwtSecret = process.env.JWT_SECRET;
 
@@ -311,7 +356,7 @@ describe('socketServer — DM presence broadcast on disconnect', () => {
       bannedAt: null,
       tokenVersion: 0,
       role: 'user',
-      emailVerified: true,
+      emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
     });
     mockPrisma.serverMember.findMany.mockResolvedValue([]);
     mockPrisma.channel.findMany.mockResolvedValue([]);
@@ -496,7 +541,7 @@ describe('socketServer — voice:channel_users replay on connect', () => {
     vi.clearAllMocks();
     process.env.JWT_SECRET = 'test-secret';
     mockPrisma.user.findUnique.mockResolvedValue({
-      bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true,
+      bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
     });
     mockPrisma.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-1' }]);
     mockPrisma.channel.findMany.mockResolvedValue([

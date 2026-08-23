@@ -81,7 +81,7 @@ function mockAuthUser(overrides: Record<string, unknown> = {}) {
     bannedAt: null,
     tokenVersion: 0,
     role: 'user',
-    emailVerified: true,
+    emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
   };
   prismaMock.user.findUnique.mockResolvedValue({ ...defaults, ...overrides });
 }

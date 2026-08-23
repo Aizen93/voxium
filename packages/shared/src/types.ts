@@ -15,6 +15,11 @@ export interface User {
   role: UserRole;
   totpEnabled: boolean;
   emailVerified: boolean;
+  /** The account has not (yet) accepted the current Terms of Service and
+   *  Privacy Policy — true for accounts created before consent was collected
+   *  at signup. Every functional route and the socket refuse until it is
+   *  given (POST /auth/consent); the client shows the consent screen. */
+  consentRequired: boolean;
   isSupporter: boolean;
   supporterTier: SupporterTier;
   createdAt: string;
@@ -25,7 +30,7 @@ export type SupporterTier = 'first' | 'top' | null;
 export type UserStatus = 'online' | 'idle' | 'dnd' | 'offline';
 
 /** User without private fields — safe for broadcasting to other clients */
-export type PublicUser = Omit<User, 'email' | 'totpEnabled' | 'emailVerified'>;
+export type PublicUser = Omit<User, 'email' | 'totpEnabled' | 'emailVerified' | 'consentRequired'>;
 
 export interface UserProfile extends User {
   bio: string | null;

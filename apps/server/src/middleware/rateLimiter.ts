@@ -78,6 +78,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   resetPassword:  { keyPrefix: 'rl:reset',    points: 5,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Reset Password' },
   refresh:        { keyPrefix: 'rl:refresh',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Token Refresh' },
   changePassword: { keyPrefix: 'rl:chgpwd',   points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Change Password' },
+  consent:        { keyPrefix: 'rl:consent',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId',   label: 'Accept legal documents' },
   totp:           { keyPrefix: 'rl:totp',     points: 10,  duration: 60,  blockDuration: 300, keyType: 'userId', label: 'TOTP Management' },
   messageSend:    { keyPrefix: 'rl:msg',       points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Send' },
   upload:         { keyPrefix: 'rl:upload',    points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Upload' },
@@ -549,6 +550,7 @@ export const rateLimitForgotPassword = createMiddleware('forgotPassword', byIp);
 export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);
 export const rateLimitRefresh = createMiddleware('refresh', byIp);
 export const rateLimitChangePassword = createMiddleware('changePassword', byIp);
+export const rateLimitConsent = createMiddleware('consent', byUserId);
 export const rateLimitMessageSend = createMiddleware('messageSend', byUserId);
 export const rateLimitUpload = createMiddleware('upload', byUserId);
 export const rateLimitFriendRequest = createMiddleware('friendRequest', byUserId);

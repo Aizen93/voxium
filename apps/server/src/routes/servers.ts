@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateServerName, validateNickname, LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, permissionsToString } from '@voxium/shared';
@@ -23,7 +23,7 @@ import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 
 export const serverRouter = Router();
 
-serverRouter.use(authenticate, requireVerifiedEmail);
+serverRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // List servers the user is a member of
 serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {

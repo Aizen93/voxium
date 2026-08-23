@@ -10,6 +10,22 @@ import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, i
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } from '../utils/email';
 import { sanitizeText } from '../utils/sanitize';
 import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, consumeMailCap, normalizeIp } from '../middleware/rateLimiter';
+import { consentIsRequired } from '../middleware/auth';
+
+/**
+ * The consent SELECT fragment every user payload includes, and the mapping
+ * from the two stored timestamps to the single `consentRequired` flag the
+ * client acts on. The timestamps themselves are an accountability record, not
+ * something the client needs; they stay server-side.
+ */
+export const CONSENT_SELECT = { termsAcceptedAt: true, privacyAcceptedAt: true } as const;
+
+export function withConsentFlag<T extends { termsAcceptedAt: Date | null; privacyAcceptedAt: Date | null }>(
+  user: T,
+): Omit<T, 'termsAcceptedAt' | 'privacyAcceptedAt'> & { consentRequired: boolean } {
+  const { termsAcceptedAt, privacyAcceptedAt, ...rest } = user;
+  return { ...rest, consentRequired: consentIsRequired({ termsAcceptedAt, privacyAcceptedAt }) };
+}
 
 // Timing-equalization hash for login attempts against unknown emails (same
 // convention as requestPasswordReset): skipping bcrypt when the user doesn't
@@ -153,6 +169,7 @@ export async function registerUser(
         isSupporter: true, supporterTier: true,
         tokenVersion: true,
         createdAt: true,
+        ...CONSENT_SELECT,
       },
     });
   } catch (err) {
@@ -191,7 +208,7 @@ export async function registerUser(
   const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion });
   const { tokenVersion: _, ...safeUser } = user;
 
-  return { user: safeUser, ...tokens };
+  return { user: withConsentFlag(safeUser), ...tokens };
 }
 
 export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string, trustedDeviceToken?: string) {
@@ -230,6 +247,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
       bannedAt: true,
       banReason: true,
       createdAt: true,
+      ...CONSENT_SELECT,
     },
   });
 
@@ -289,7 +307,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
 
   const { password: _, tokenVersion: _tv, bannedAt: _ba, banReason: _br, ...safeUser } = user;
 
-  return { user: safeUser, ...tokens };
+  return { user: withConsentFlag(safeUser), ...tokens };
 }
 
 export async function verifyLoginTOTP(totpToken: string, code: string) {
@@ -322,6 +340,7 @@ export async function verifyLoginTOTP(totpToken: string, code: string) {
       isSupporter: true, supporterTier: true,
       tokenVersion: true,
       createdAt: true,
+      ...CONSENT_SELECT,
     },
   });
   if (!user) throw new UnauthorizedError('User not found');
@@ -336,7 +355,7 @@ export async function verifyLoginTOTP(totpToken: string, code: string) {
     { expiresIn: '30d' } as jwt.SignOptions,
   );
 
-  return { user: safeUser, ...tokens, trustedDeviceToken };
+  return { user: withConsentFlag(safeUser), ...tokens, trustedDeviceToken };
 }
 
 export function generateTokens(payload: AuthPayload, rememberMe = true) {
@@ -569,4 +588,23 @@ export async function resendVerificationEmail(userId: string) {
   });
 
   await sendVerificationEmail(user.email, rawToken);
+}
+
+/**
+ * Record acceptance of the Terms of Service and the Privacy Policy for an
+ * EXISTING account — the path for accounts that predate consent-at-signup
+ * (CNIL/GDPR). Both must be accepted in one go, as separate explicit `true`s;
+ * a partial acceptance records nothing, so the gate stays up. Idempotent: an
+ * already-consented account keeps its ORIGINAL timestamps, which are the
+ * accountability record of when consent was first given.
+ */
+export async function acceptConsent(userId: string, consent: RegistrationConsent): Promise<{ consentRequired: false }> {
+  if (consent.acceptTerms !== true) throw new BadRequestError('You must accept the Terms of Service');
+  if (consent.acceptPrivacy !== true) throw new BadRequestError('You must accept the Privacy Policy');
+  const now = new Date();
+  // updateMany with a null guard keeps the first acceptance: two concurrent
+  // POSTs cannot move an existing timestamp forward.
+  await prisma.user.updateMany({ where: { id: userId, termsAcceptedAt: null }, data: { termsAcceptedAt: now } });
+  await prisma.user.updateMany({ where: { id: userId, privacyAcceptedAt: null }, data: { privacyAcceptedAt: now } });
+  return { consentRequired: false };
 }

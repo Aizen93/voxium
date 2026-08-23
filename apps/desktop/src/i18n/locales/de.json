@@ -116,6 +116,13 @@
       "missingToken": "Bestätigungstoken fehlt.",
       "failed": "Verifizierung fehlgeschlagen. Der Link ist möglicherweise ungültig oder abgelaufen."
     },
+    "consent": {
+      "title": "Bevor es weitergeht",
+      "description": "Voxium benötigt deine Zustimmung zu den Nutzungsbedingungen und der Datenschutzerklärung, damit du dein Konto weiter nutzen kannst.",
+      "submit": "Akzeptieren und fortfahren",
+      "submitting": "Wird gespeichert…",
+      "failed": "Deine Zustimmung konnte nicht gespeichert werden. Bitte versuche es erneut."
+    },
     "emailPending": {
       "title": "E-Mail bestätigen",
       "description": "Wir haben einen Bestätigungslink an <1>{{email}}</1> gesendet. Überprüfe deinen Posteingang und klicke auf den Link, um dein Konto zu aktivieren.",

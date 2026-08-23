@@ -153,7 +153,7 @@ function mockUsers(users: Record<string, { role: string }>) {
       id: where.id,
       bannedAt: null,
       tokenVersion: 0,
-      emailVerified: true,
+      emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       ...row,
     });
   });

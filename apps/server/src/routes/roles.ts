@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import {
@@ -21,7 +21,7 @@ import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 
 export const roleRouter = Router({ mergeParams: true });
 
-roleRouter.use(authenticate, requireVerifiedEmail);
+roleRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // List all roles in a server
 roleRouter.get('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {

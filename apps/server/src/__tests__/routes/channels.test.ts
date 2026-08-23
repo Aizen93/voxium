@@ -155,7 +155,7 @@ function mockAuthUser(overrides: Record<string, unknown> = {}) {
     bannedAt: null,
     tokenVersion: 0,
     role: 'user',
-    emailVerified: true,
+    emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
   };
   prismaMock.user.findUnique.mockResolvedValue({ ...defaults, ...overrides });
 }
@@ -844,7 +844,7 @@ describe('Channel Routes', () => {
     it('DELETE: the creator can delete their secure channel (via the lifecycle helper)', async () => {
       const token = makeToken({ userId: 'creator-9' });
       prismaMock.user.findUnique.mockResolvedValue({
-        id: 'creator-9', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true,
+        id: 'creator-9', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
       prismaMock.channel.findFirst.mockResolvedValue(secureCh);
 
@@ -861,7 +861,7 @@ describe('Channel Routes', () => {
     it('DELETE: the server owner can delete-by-id (opaque moderation lever)', async () => {
       const token = makeToken({ userId: 'owner-7' });
       prismaMock.user.findUnique.mockResolvedValue({
-        id: 'owner-7', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true,
+        id: 'owner-7', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
       prismaMock.channel.findFirst.mockResolvedValue(secureCh);
 

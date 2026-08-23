@@ -2,7 +2,7 @@ import type { Server as HttpServer } from 'http';
 import { Server as SocketServer } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import jwt from 'jsonwebtoken';
-import type { AuthPayload } from '../middleware/auth';
+import { consentIsRequired, type AuthPayload } from '../middleware/auth';
 import { setUserOnline, setUserOffline, getRedisPubSub } from '../utils/redis';
 import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, getVoiceStateForServers, getScreenShareState } from './voiceHandler';
@@ -79,12 +79,15 @@ export function initSocketServer(httpServer: HttpServer) {
       // Check account ban, token version, and current role
       const user = await prisma.user.findUnique({
         where: { id: payload.userId },
-        select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true },
+        select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true, termsAcceptedAt: true, privacyAcceptedAt: true },
       });
       if (!user) return next(new Error('User not found'));
       if (user.bannedAt) return next(new Error('Account banned'));
       if (user.tokenVersion !== payload.tokenVersion) return next(new Error('Session invalidated'));
       if (!user.emailVerified) return next(new Error('Email not verified'));
+      // Same gate as requireConsent on REST: an account that has not accepted
+      // the legal documents gets no live session either.
+      if (consentIsRequired(user)) return next(new Error('Consent required'));
 
       // Check IP ban
       const ip = getSocketIp(socket);

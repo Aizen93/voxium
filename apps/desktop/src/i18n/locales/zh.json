@@ -116,6 +116,13 @@
       "missingToken": "缺少验证令牌。",
       "failed": "验证失败。链接可能无效或已过期。"
     },
+    "consent": {
+      "title": "继续之前",
+      "description": "要继续使用您的账户，Voxium 需要您接受服务条款和隐私政策。",
+      "submit": "接受并继续",
+      "submitting": "保存中…",
+      "failed": "无法保存您的同意，请重试。"
+    },
     "emailPending": {
       "title": "验证你的邮箱",
       "description": "我们已向 <1>{{email}}</1> 发送了验证链接。请检查收件箱并点击链接以激活你的账号。",

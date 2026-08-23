@@ -117,7 +117,7 @@ function createApp() {
 
 function mockAdminAuth(role = 'admin') {
   prismaMock.user.findUnique.mockResolvedValue({
-    id: 'admin-1', bannedAt: null, tokenVersion: 0, role, emailVerified: true,
+    id: 'admin-1', bannedAt: null, tokenVersion: 0, role, emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
   });
 }
 

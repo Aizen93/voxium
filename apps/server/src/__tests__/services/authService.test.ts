@@ -409,6 +409,22 @@ describe('authService — password-reset mail cap', () => {
 });
 
 describe('authService — loginUser', () => {
+  it('tells the client whether the account still has to accept the legal documents', async () => {
+    const bcrypt = await import('bcryptjs');
+    const password = await bcrypt.hash('ValidPass123', 4);
+    vi.mocked(prisma.ipBan.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ ...mockUser, password, termsAcceptedAt: null, privacyAcceptedAt: null } as any);
+    const legacy = await loginUser('test@example.com', 'ValidPass123');
+    expect((legacy as { user: { consentRequired: boolean } }).user.consentRequired).toBe(true);
+
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ ...mockUser, password, termsAcceptedAt: new Date(), privacyAcceptedAt: new Date() } as any);
+    const fresh = await loginUser('test@example.com', 'ValidPass123');
+    const user = (fresh as { user: Record<string, unknown> }).user;
+    expect(user.consentRequired).toBe(false);
+    // The timestamps are an accountability record, not a client field
+    expect(user).not.toHaveProperty('termsAcceptedAt');
+  });
+
 
   const mockUser = {
     id: 'user-1',

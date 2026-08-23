@@ -156,7 +156,7 @@ function mockSuperAdminUser() {
         bannedAt: null,
         tokenVersion: 0,
         role: 'superadmin',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
     }
     return Promise.resolve(null);
@@ -493,7 +493,7 @@ describe('Admin Infrastructure Server Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       const userToken = makeToken({ userId: 'user-1', username: 'regular' });

@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateChannelName, WS_EVENTS, Permissions, E2E_LIMITS, type Channel } from '@voxium/shared';
@@ -28,7 +28,7 @@ import {
  */
 export const secureChannelRouter = Router({ mergeParams: true });
 
-secureChannelRouter.use(authenticate, requireVerifiedEmail);
+secureChannelRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 /** Membership lookup used as the visibility gate by every :channelId route. */
 async function getSecureChannelForMemberOrThrow(channelId: string, serverId: string, userId: string) {

@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import crypto from 'crypto';
@@ -11,7 +11,7 @@ import { hasServerPermission } from '../utils/permissionCalculator';
 
 export const inviteRouter = Router();
 
-inviteRouter.use(authenticate, requireVerifiedEmail);
+inviteRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // Create an invite for a server
 inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
