@@ -780,6 +780,8 @@
       "spotlight": "スポットライト",
       "laser": "レーザーポインター",
       "eraser": "消しゴム",
+      "renumber": "マーカーを読み順に振り直す",
+      "calloutLimit": "番号付きマーカーは1回の共有につき最大{{max}}個です",
       "clearAll": "すべて消去",
       "color": "色",
       "width": "線の太さ",

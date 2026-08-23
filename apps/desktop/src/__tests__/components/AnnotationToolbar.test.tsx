@@ -146,8 +146,33 @@ describe('AnnotationToolbar', () => {
     expect(new Set(defs.map((d) => d.code)).size).toBe(defs.length);
     expect(new Set(defs.map((d) => d.keyLabel)).size).toBe(defs.length);
     expect(new Set(defs.map((d) => d.labelKey)).size).toBe(defs.length);
-    // Only implemented tools are offered; none of the v2 tools is yet
-    expect(availableToolDefs(1).map((d) => d.tool)).toEqual(availableToolDefs(2).map((d) => d.tool));
+    // v2 tools are offered only once the server advertised wire version 2
+    expect(availableToolDefs(2).map((d) => d.tool)).toContain('arrow');
+    expect(availableToolDefs(2).map((d) => d.tool)).toContain('callout');
+    expect(availableToolDefs(1).map((d) => d.tool)).not.toContain('arrow');
+    expect(availableToolDefs(1).map((d) => d.tool)).not.toContain('callout');
+  });
+
+  it('hides the v2 tools when the server only validates wire version 1', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    voiceState.screenShareAnnotationsVersion = 1;
+    try {
+      render(<AnnotationToolbar />);
+      expect(container.querySelector('[data-tool="arrow"]')).toBeNull();
+      expect(container.querySelector('[data-tool="pen"]')).not.toBeNull();
+    } finally {
+      voiceState.screenShareAnnotationsVersion = 2;
+    }
+  });
+
+  it('offers Renumber only while the scene has callouts', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    render(<AnnotationToolbar />);
+    expect(container.querySelector('[aria-label="voice.annotations.renumber"]')).toBeNull();
+    act(() => {
+      useAnnotationStore.setState({ scene: { objects: [{ id: 'c', kind: 'callout', color: '#ff3b30', size: 0.06, x: 0.1, y: 0.1, n: 1 }] } });
+    });
+    expect(container.querySelector('[aria-label="voice.annotations.renumber"]')).not.toBeNull();
   });
 
   it('the mask tool carries the privacy hint in its tooltip', () => {

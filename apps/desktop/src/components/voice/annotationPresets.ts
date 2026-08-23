@@ -57,7 +57,7 @@ export const MASK_TOOL_DEF: ToolDef = { tool: 'mask', labelKey: 'voice.annotatio
  * local echo).
  */
 export const IMPLEMENTED_TOOLS: ReadonlySet<AnnotationEditorTool> = new Set<AnnotationEditorTool>([
-  'select', 'pen', 'highlighter', 'rect', 'ellipse', 'text', 'image', 'mask',
+  'select', 'pen', 'highlighter', 'rect', 'ellipse', 'arrow', 'callout', 'text', 'image', 'mask',
 ]);
 
 export function availableToolDefs(annotationsVersion: number): ToolDef[] {

@@ -780,6 +780,8 @@
       "spotlight": "聚光灯",
       "laser": "激光笔",
       "eraser": "橡皮擦",
+      "renumber": "按阅读顺序重新编号",
+      "calloutLimit": "每次共享最多 {{max}} 个编号标注",
       "clearAll": "全部清除",
       "color": "颜色",
       "width": "线条粗细",

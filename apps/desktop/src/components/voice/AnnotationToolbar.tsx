@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { Undo2, Redo2, Trash2, PenLine, X } from 'lucide-react';
+import { Undo2, Redo2, Trash2, PenLine, X, ListOrdered } from 'lucide-react';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -32,6 +32,8 @@ export function AnnotationToolbar() {
   const canUndo = useAnnotationStore((s) => s.canUndo);
   const canRedo = useAnnotationStore((s) => s.canRedo);
   const clearAll = useAnnotationStore((s) => s.clearAll);
+  const renumberCallouts = useAnnotationStore((s) => s.renumberCallouts);
+  const hasCallouts = useAnnotationStore((s) => s.scene.objects.some((o) => o.kind === 'callout'));
   const annotationsVersion = useVoiceStore((s) => s.screenShareAnnotationsVersion);
   const voiceMode = useSettingsStore((s) => s.voiceMode);
   const pushToTalkKey = useSettingsStore((s) => s.pushToTalkKey);
@@ -136,6 +138,16 @@ export function AnnotationToolbar() {
       </div>
 
       <div className="ml-auto flex items-center gap-0.5">
+        {hasCallouts && (
+          <button
+            onClick={renumberCallouts}
+            className="rounded p-1.5 text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary"
+            title={t('voice.annotations.renumber')}
+            aria-label={t('voice.annotations.renumber')}
+          >
+            <ListOrdered size={15} />
+          </button>
+        )}
         {historyButton(undo, canUndo, 'voice.annotations.undo', 'Ctrl+Z', Undo2)}
         {historyButton(redo, canRedo, 'voice.annotations.redo', 'Ctrl+Shift+Z', Redo2)}
         <button

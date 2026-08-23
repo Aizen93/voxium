@@ -1,13 +1,14 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ANNOTATION_STROKE_MAX_POINTS, ANNOTATION_TEXT_MAX } from '@voxium/shared';
+import { ANNOTATION_STROKE_MAX_POINTS, ANNOTATION_TEXT_MAX, ANNOTATION_CALLOUT_MAX } from '@voxium/shared';
 import type { AnnotationObject } from '@voxium/shared';
 import { useAnnotationStore, type AnnotationEditorTool } from '../../stores/annotationStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
 import { useTextDraft } from '../../hooks/useTextDraft';
 import { isEditableTarget } from '../../hooks/useAnnotationShortcuts';
 import { pxToNorm } from '../../utils/annotationGeometry';
-import { normBox, clampBox, clampPos, objectBbox, hitTestBox, topmostHit, type Bbox } from '../../utils/annotationHit';
+import { normBox, clampBox, clampPos, clampTranslation, objectBbox, hitTestBox, topmostHit, type Bbox } from '../../utils/annotationHit';
+import { nextCalloutNumber } from '../../utils/annotationCallouts';
 import { toast } from '../../stores/toastStore';
 import { processOverlayImage } from '../../utils/imageProcessing';
 
@@ -32,7 +33,9 @@ export interface ToolCapabilities {
   images: boolean;
 }
 
-export const ALL_EDITOR_TOOLS: readonly AnnotationEditorTool[] = ['select', 'pen', 'highlighter', 'rect', 'ellipse', 'text', 'image', 'mask'];
+export const ALL_EDITOR_TOOLS: readonly AnnotationEditorTool[] = [
+  'select', 'pen', 'highlighter', 'rect', 'ellipse', 'arrow', 'callout', 'spotlight', 'text', 'image', 'laser', 'eraser', 'mask',
+];
 
 export const ALL_TOOL_CAPABILITIES: ToolCapabilities = {
   tools: new Set(ALL_EDITOR_TOOLS),
@@ -49,21 +52,33 @@ const MIN_DRAG_NORM = 0.005;
 /** px of pointer travel before a new stroke point is recorded */
 const MIN_STROKE_STEP_PX = 2;
 const TEXT_SIZE = 0.045;
+/** Callout badge diameter, in frame units. */
+const CALLOUT_SIZE = 0.06;
 const HIGHLIGHTER_WIDTH_FACTOR = 4;
 
-/** Kinds a plain click can select and drag. Strokes and arrows join this list
- *  with the eraser/stroke-editing work; until then they are paint only. */
-const SELECTABLE_KINDS: ReadonlySet<AnnotationObject['kind']> = new Set(['shape', 'image', 'text']);
+/** Kinds a plain click can select and drag. Strokes join this list with the
+ *  eraser/stroke-editing work; until then they are paint only. */
+const SELECTABLE_KINDS: ReadonlySet<AnnotationObject['kind']> = new Set(['shape', 'image', 'text', 'arrow', 'callout']);
+
+/** Kinds whose position is NOT a box corner: moved with `translate`, so the
+ *  geometry (stroke points, arrow endpoints, a badge centre) shifts as one. */
+const TRANSLATE_KINDS: ReadonlySet<AnnotationObject['kind']> = new Set(['stroke', 'arrow', 'callout']);
 
 type DragState =
   | { mode: 'stroke'; id: string; lastPx: { x: number; y: number }; pointCount: number }
   /** Two-point gestures: the object is created at pointerdown and reshaped
    *  from `start` to the current pointer on every move. `target` says what
-   *  the second point reshapes — a box (normalized, inverted drags allowed)
-   *  or a mask (same, local-only). */
-  | { mode: 'create'; id: string; target: 'box' | 'mask'; start: { x: number; y: number } }
+   *  the second point reshapes — a box (normalized, inverted drags allowed),
+   *  a mask (same, local-only), or an arrow's tip (direction kept). */
+  | { mode: 'create'; id: string; target: 'box' | 'mask' | 'arrow'; start: { x: number; y: number } }
+  /** Box-anchored kinds: the patch sets x/y from the grab offset. */
   | { mode: 'move'; id: string; isMask: boolean; grabOffset: { x: number; y: number } }
-  | { mode: 'resize'; id: string; isMask: boolean; anchor: { x: number; y: number } };
+  /** TRANSLATE_KINDS: each move ships the delta since the last one, clamped
+   *  so the object's box stays inside the wire bounds. */
+  | { mode: 'translate'; id: string; last: { x: number; y: number } }
+  | { mode: 'resize'; id: string; isMask: boolean; anchor: { x: number; y: number } }
+  /** Dragging one end of an arrow. */
+  | { mode: 'arrow-end'; id: string; end: 1 | 2 };
 
 export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABILITIES }: AnnotationEditorLayerProps) {
   const { t } = useTranslation();
@@ -89,8 +104,21 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
   useEffect(() => () => useAnnotationStore.getState().endGesture(), []);
 
   const text = useTextDraft((draft, value) => {
-    if (!value) return;
     const store = useAnnotationStore.getState();
+    if (draft.editingId) {
+      // Editing an existing object: a callout's number (a caption's text
+      // arrives with the stroke-editing work)
+      const target = store.scene.objects.find((o) => o.id === draft.editingId);
+      if (!target) return;
+      if (target.kind === 'callout') {
+        const n = Number.parseInt(value, 10);
+        if (!Number.isInteger(n) || n < 1 || n > ANNOTATION_CALLOUT_MAX || n === target.n) return;
+        store.localApply([{ t: 'update', id: target.id, patch: { n } }]);
+        store.flushOps();
+      }
+      return;
+    }
+    if (!value) return;
     store.localApply([{
       t: 'add',
       obj: { id: crypto.randomUUID(), kind: 'text', text: value, color: store.color, size: TEXT_SIZE, x: draft.x, y: draft.y },
@@ -196,6 +224,30 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         dragRef.current = { mode: 'create', id, target: 'box', start: norm };
         break;
       }
+      case 'arrow': {
+        store.beginGesture();
+        const id = crypto.randomUUID();
+        store.localApply([{
+          t: 'add',
+          // Shift at the start of the drag = heads at both ends
+          obj: { id, kind: 'arrow', color, width: strokeWidth, x1: norm.x, y1: norm.y, x2: norm.x, y2: norm.y, ...(e.shiftKey ? { heads: 'both' as const } : {}) },
+        }]);
+        dragRef.current = { mode: 'create', id, target: 'arrow', start: norm };
+        break;
+      }
+      case 'callout': {
+        const n = nextCalloutNumber(scene.objects);
+        if (n === null) {
+          toast.error(t('voice.annotations.calloutLimit', { max: ANNOTATION_CALLOUT_MAX }));
+          break;
+        }
+        const id = crypto.randomUUID();
+        // One add = one history entry; a click has no drag to bracket
+        store.localApply([{ t: 'add', obj: { id, kind: 'callout', color, size: CALLOUT_SIZE, x: norm.x, y: norm.y, n } }]);
+        store.flushOps();
+        store.setSelectedObjectId(id);
+        break;
+      }
       case 'mask': {
         if (!capabilities.masks) break;
         const id = crypto.randomUUID();
@@ -221,8 +273,12 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         if (hitObj) {
           store.setSelectedObjectId(hitObj.id);
           store.beginGesture(); // a move is one undo step however many updates it sends
-          const box = objectBbox(hitObj)!;
-          dragRef.current = { mode: 'move', id: hitObj.id, isMask: false, grabOffset: { x: norm.x - box.x, y: norm.y - box.y } };
+          if (TRANSLATE_KINDS.has(hitObj.kind)) {
+            dragRef.current = { mode: 'translate', id: hitObj.id, last: norm };
+          } else {
+            const box = objectBbox(hitObj)!;
+            dragRef.current = { mode: 'move', id: hitObj.id, isMask: false, grabOffset: { x: norm.x - box.x, y: norm.y - box.y } };
+          }
           break;
         }
         const hitMask = capabilities.masks ? [...masks].reverse().find((m) => hitTestBox(m, norm.x, norm.y)) : undefined;
@@ -243,6 +299,24 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     layerRef.current?.setPointerCapture(e.pointerId);
     if (!isMask) useAnnotationStore.getState().beginGesture();
     dragRef.current = { mode: 'resize', id, isMask, anchor };
+  };
+
+  const beginArrowEnd = (e: React.PointerEvent, id: string, end: 1 | 2) => {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    layerRef.current?.setPointerCapture(e.pointerId);
+    useAnnotationStore.getState().beginGesture();
+    dragRef.current = { mode: 'arrow-end', id, end };
+  };
+
+  /** Double-click a callout to retype its number. */
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    if (!canUse('select') || activeTool !== 'select') return;
+    const norm = toNorm(e, true);
+    const hit = topmostHit(scene.objects, norm.x, norm.y, (o) => o.kind === 'callout');
+    if (!hit || hit.kind !== 'callout') return;
+    e.preventDefault();
+    text.open(hit.x, hit.y, String(hit.n), hit.id);
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
@@ -276,9 +350,32 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
       }
       case 'create': {
         const norm = toNorm(e, true);
+        if (drag.target === 'arrow') {
+          store.localApply([{ t: 'update', id: drag.id, patch: { x2: clampPos(norm.x), y2: clampPos(norm.y) } }]);
+          break;
+        }
         const box = clampBox(normBox(drag.start.x, drag.start.y, norm.x, norm.y));
         if (drag.target === 'mask') store.updateMask(drag.id, box);
         else store.localApply([{ t: 'update', id: drag.id, patch: box }]);
+        break;
+      }
+      case 'translate': {
+        const norm = toNorm(e);
+        const obj = useAnnotationStore.getState().scene.objects.find((o) => o.id === drag.id);
+        const box = obj ? objectBbox(obj) : null;
+        if (!box) break;
+        // The server REJECTS a translate whose result leaves the wire bounds —
+        // clamp the delta to what the object's box can take
+        const { dx, dy } = clampTranslation(box, norm.x - drag.last.x, norm.y - drag.last.y);
+        if (dx === 0 && dy === 0) break;
+        drag.last = { x: drag.last.x + dx, y: drag.last.y + dy };
+        store.localApply([{ t: 'translate', id: drag.id, dx, dy }]);
+        break;
+      }
+      case 'arrow-end': {
+        const norm = toNorm(e, true);
+        const patch = drag.end === 1 ? { x1: norm.x, y1: norm.y } : { x2: norm.x, y2: norm.y };
+        store.localApply([{ t: 'update', id: drag.id, patch }]);
         break;
       }
       case 'move': {
@@ -314,6 +411,9 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         if (obj && obj.kind === 'shape' && (obj.w < MIN_DRAG_NORM || obj.h < MIN_DRAG_NORM)) {
           store.localApply([{ t: 'remove', id: drag.id }]);
         }
+        if (obj && obj.kind === 'arrow' && Math.hypot(obj.x2 - obj.x1, obj.y2 - obj.y1) < MIN_DRAG_NORM) {
+          store.localApply([{ t: 'remove', id: drag.id }]);
+        }
       }
     }
     // Closes the gesture opened on pointerdown (a no-op for mask drags, which
@@ -336,15 +436,18 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
 
   if (rect.w <= 0 || rect.h <= 0) return null;
 
-  // Selection chrome (outline + resize handle), in layer-local pixels
-  const selected: { box: Bbox; isMask: boolean; resizable: boolean } | null = (() => {
+  // Selection chrome (outline + handles), in layer-local pixels. Arrows get a
+  // handle per endpoint instead of a corner; captions and badges scale with
+  // their size setting rather than a handle.
+  const selected: { box: Bbox; isMask: boolean; resizable: boolean; arrow?: { x1: number; y1: number; x2: number; y2: number } } | null = (() => {
     if (!selectedObjectId) return null;
     const mask = masks.find((m) => m.id === selectedObjectId);
     if (mask) return { box: mask, isMask: true, resizable: true };
     const obj = scene.objects.find((o) => o.id === selectedObjectId);
     const box = obj ? objectBbox(obj) : null;
     if (!obj || !box) return null;
-    return { box, isMask: false, resizable: obj.kind !== 'text' };
+    if (obj.kind === 'arrow') return { box, isMask: false, resizable: false, arrow: { x1: obj.x1, y1: obj.y1, x2: obj.x2, y2: obj.y2 } };
+    return { box, isMask: false, resizable: obj.kind === 'shape' || obj.kind === 'image' };
   })();
 
   const cursor = activeTool === 'select' ? 'default' : activeTool === 'text' ? 'text' : 'crosshair';
@@ -359,6 +462,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
+      onDoubleClick={handleDoubleClick}
     >
       <input
         ref={fileInputRef}
@@ -395,6 +499,21 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
           )}
         </div>
       )}
+
+      {selected?.arrow && ([1, 2] as const).map((end) => {
+        const a = selected.arrow!;
+        const px = (end === 1 ? a.x1 : a.x2) * rect.w;
+        const py = (end === 1 ? a.y1 : a.y2) * rect.h;
+        return (
+          <div
+            key={end}
+            data-testid={`arrow-handle-${end}`}
+            className="absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 cursor-move rounded-full border border-white bg-vox-accent-primary"
+            style={{ left: px, top: py }}
+            onPointerDown={(e) => beginArrowEnd(e, selectedObjectId!, end)}
+          />
+        );
+      })}
 
       {text.draft && (
         <input

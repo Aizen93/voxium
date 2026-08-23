@@ -780,6 +780,8 @@
       "spotlight": "스포트라이트",
       "laser": "레이저 포인터",
       "eraser": "지우개",
+      "renumber": "읽기 순서대로 번호 다시 매기기",
+      "calloutLimit": "공유당 번호 표시는 최대 {{max}}개입니다",
       "clearAll": "모두 지우기",
       "color": "색상",
       "width": "선 굵기",

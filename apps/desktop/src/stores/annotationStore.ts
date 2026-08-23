@@ -11,6 +11,7 @@ import {
   type AnnotationScene,
 } from '@voxium/shared';
 import { inverseOf, addedIds, compactForward, entryBytes, type HistoryEntry } from '../utils/annotationHistory';
+import { renumberOps } from '../utils/annotationCallouts';
 import { getSocket } from '../services/socket';
 import { useVoiceStore } from './voiceStore';
 import { toast } from './toastStore';
@@ -91,6 +92,8 @@ interface AnnotationState {
   undo: () => void;
   redo: () => void;
   clearAll: () => void;
+  /** Re-sequence every callout 1..N in reading order, as one undo step. */
+  renumberCallouts: () => void;
   setIsEditing: (editing: boolean) => void;
   setActiveTool: (tool: AnnotationEditorTool) => void;
   setColor: (color: string) => void;
@@ -250,6 +253,10 @@ function enqueue(ops: AnnotationOp[]): void {
       pendingOps[pendingOps.length - 1] = { t: 'update', id: op.id, patch: { ...tail.patch, ...op.patch } };
     } else if (tail && op.t === 'append' && tail.t === 'append' && tail.id === op.id) {
       pendingOps[pendingOps.length - 1] = { t: 'append', id: op.id, points: [...tail.points, ...op.points] };
+    } else if (tail && op.t === 'translate' && tail.t === 'translate' && tail.id === op.id) {
+      // A drag is one translate per mousemove; the wire (and the 600/min ops
+      // bucket) only needs the sum
+      pendingOps[pendingOps.length - 1] = { t: 'translate', id: op.id, dx: tail.dx + op.dx, dy: tail.dy + op.dy };
     } else {
       pendingOps.push(op);
     }
@@ -524,6 +531,13 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     get().localApply([{ t: 'clear' }]);
     get().flushOps();
     set({ selectedObjectId: null });
+  },
+
+  renumberCallouts: () => {
+    const ops = renumberOps(get().scene.objects);
+    if (ops.length === 0) return;
+    get().localApply(ops); // one batch = one history entry
+    get().flushOps();
   },
 
   setIsEditing: (isEditing) => set({ isEditing, ...(isEditing ? {} : { selectedObjectId: null }) }),

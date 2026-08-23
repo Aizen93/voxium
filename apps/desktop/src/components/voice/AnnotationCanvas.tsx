@@ -5,6 +5,7 @@ import { useAnnotationStore, type MaskRect } from '../../stores/annotationStore'
 import { useAnnotationLiveStore, hasLiveActivity } from '../../stores/annotationLiveStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
 import { drawLivePointer } from '../../utils/annotationLiveDraw';
+import { drawArrow, drawCallout } from '../../utils/annotationDraw';
 
 /**
  * Render-only overlay for screen-share annotations. Positions itself over the
@@ -144,6 +145,14 @@ function drawScene(
         }
         break;
       }
+      case 'arrow':
+        drawArrow(ctx, obj, w, h);
+        break;
+      case 'callout':
+        drawCallout(ctx, obj, w, h);
+        break;
+      // No default on purpose: an object kind this client predates is skipped,
+      // never thrown on — that is what lets an old viewer follow a new sharer.
     }
   }
 

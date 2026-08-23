@@ -786,6 +786,8 @@
       "spotlight": "Spotlight",
       "laser": "Laser pointer",
       "eraser": "Eraser",
+      "renumber": "Renumber callouts in reading order",
+      "calloutLimit": "Up to {{max}} numbered callouts per share",
       "clearAll": "Clear all",
       "color": "Color",
       "width": "Stroke width",

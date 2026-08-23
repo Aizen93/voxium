@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { ANNOTATION_TEXT_MAX } from '@voxium/shared';
+import { ANNOTATION_TEXT_MAX, ANNOTATION_CALLOUT_MAX } from '@voxium/shared';
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
@@ -24,6 +24,10 @@ vi.mock('../../services/screenComposite', () => ({
   stopComposite: vi.fn(),
   teardownComposite: vi.fn(),
   isCompositing: () => false,
+}));
+const toastError = vi.hoisted(() => vi.fn());
+vi.mock('../../stores/toastStore', () => ({
+  toast: { error: toastError, success: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }));
 
 // jsdom has no layout: pin the video content rect the layer positions itself on.
@@ -68,6 +72,10 @@ function pointerDown(el: Element, x: number, y: number): boolean {
     cancelled = !el.dispatchEvent(ev);
   });
   return cancelled;
+}
+
+function pointerMove(el: Element, x: number, y: number) {
+  act(() => { el.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: x, clientY: y })); });
 }
 
 function pointerUp(el: Element) {
@@ -373,5 +381,136 @@ describe('AnnotationEditorLayer — capabilities and gestures', () => {
     expect((useAnnotationStore.getState().scene.objects[0] as { x: number }).x).toBeCloseTo(0.3);
     act(() => { useAnnotationStore.getState().undo(); });
     expect((useAnnotationStore.getState().scene.objects[0] as { x: number }).x).toBeCloseTo(0.1);
+  });
+});
+
+describe('AnnotationEditorLayer — arrows', () => {
+  beforeEach(() => { useAnnotationStore.setState({ activeTool: 'arrow', color: '#0a84ff', strokeWidth: 0.004 }); });
+
+  it('a drag creates an arrow from the press to the release point, as one undo step', () => {
+    render();
+    pointerDown(layer(), 80, 45);
+    pointerMove(layer(), 400, 45);
+    pointerMove(layer(), 720, 225);
+    pointerUp(layer());
+    const [arrow] = useAnnotationStore.getState().scene.objects;
+    expect(arrow).toMatchObject({ kind: 'arrow', color: '#0a84ff', width: 0.004, x1: 0.1, y1: 0.1, x2: 0.9, y2: 0.5 });
+    expect((arrow as { heads?: string }).heads).toBeUndefined();
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+
+  it('Shift at the start of the drag gives heads at both ends', () => {
+    render();
+    act(() => {
+      const ev = new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 80, clientY: 45, shiftKey: true });
+      Object.defineProperty(ev, 'pointerId', { value: 1 });
+      layer().dispatchEvent(ev);
+    });
+    pointerMove(layer(), 400, 225);
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ kind: 'arrow', heads: 'both' });
+  });
+
+  it('a click without a drag leaves no arrow and nothing to undo', () => {
+    render();
+    pointerDown(layer(), 80, 45);
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    expect(useAnnotationStore.getState().canUndo).toBe(false);
+  });
+
+  it('selecting an arrow shows an endpoint handle per end; dragging one reshapes that end only', () => {
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 'ar', kind: 'arrow', color: '#0a84ff', width: 0.004, x1: 0.1, y1: 0.1, x2: 0.5, y2: 0.5 } }]);
+    useAnnotationStore.setState({ activeTool: 'select' });
+    render();
+    pointerDown(layer(), 240, 135); // on the shaft (0.3, 0.3)
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().selectedObjectId).toBe('ar');
+    const handle2 = container.querySelector('[data-testid="arrow-handle-2"]')!;
+    expect(handle2).not.toBeNull();
+    expect((handle2 as HTMLElement).style.left).toBe('400px');
+    pointerDown(handle2, 400, 225);
+    pointerMove(layer(), 720, 405);
+    pointerUp(layer());
+    const arrow = useAnnotationStore.getState().scene.objects[0] as { x1: number; y1: number; x2: number; y2: number };
+    expect(arrow.x1).toBeCloseTo(0.1);
+    expect(arrow.y1).toBeCloseTo(0.1);
+    expect(arrow.x2).toBeCloseTo(0.9);
+    expect(arrow.y2).toBeCloseTo(0.9);
+  });
+
+  it('moving an arrow ships translate ops (not x/y patches), clamped at the wire edge, as one undo step', () => {
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 'ar', kind: 'arrow', color: '#0a84ff', width: 0.004, x1: 0.7, y1: 0.5, x2: 0.9, y2: 0.5 } }]);
+    useAnnotationStore.setState({ activeTool: 'select' });
+    render();
+    pointerDown(layer(), 640, 225); // on the shaft (0.8, 0.5)
+    pointerMove(layer(), 720, 225); // +0.1 → x2 would be 1.0
+    pointerMove(layer(), 800, 225); // +0.1 more → x2 would be 1.1, the edge
+    pointerMove(layer(), 1200, 225); // way past → clamped, nothing more moves
+    pointerUp(layer());
+    const arrow = useAnnotationStore.getState().scene.objects[0] as { x1: number; x2: number };
+    expect(arrow.x2).toBeCloseTo(1.1);
+    expect(arrow.x1).toBeCloseTo(0.9);
+    act(() => { useAnnotationStore.getState().undo(); });
+    const back = useAnnotationStore.getState().scene.objects[0] as { x1: number; x2: number };
+    expect(back.x1).toBeCloseTo(0.7);
+    expect(back.x2).toBeCloseTo(0.9);
+  });
+});
+
+describe('AnnotationEditorLayer — numbered callouts', () => {
+  beforeEach(() => { useAnnotationStore.setState({ activeTool: 'callout', color: '#ff3b30' }); });
+
+  it('each click places the next number and selects it', () => {
+    render();
+    pointerDown(layer(), 80, 45); pointerUp(layer());
+    pointerDown(layer(), 400, 225); pointerUp(layer());
+    const objects = useAnnotationStore.getState().scene.objects;
+    expect(objects.map((o) => (o as { n: number }).n)).toEqual([1, 2]);
+    expect(objects[1]).toMatchObject({ kind: 'callout', x: 0.5, y: 0.5, color: '#ff3b30' });
+    expect(useAnnotationStore.getState().selectedObjectId).toBe(objects[1].id);
+    // Each badge is its own undo step
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+  });
+
+  it('numbers are stable: deleting 2 of 3 makes the next badge 4, and Renumber re-sequences', () => {
+    render();
+    for (const x of [80, 240, 400]) { pointerDown(layer(), x, 45); pointerUp(layer()); }
+    const second = useAnnotationStore.getState().scene.objects[1];
+    act(() => { useAnnotationStore.getState().localApply([{ t: 'remove', id: second.id }]); });
+    pointerDown(layer(), 560, 45); pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects.map((o) => (o as { n: number }).n)).toEqual([1, 3, 4]);
+    act(() => { useAnnotationStore.getState().renumberCallouts(); });
+    expect(useAnnotationStore.getState().scene.objects.map((o) => (o as { n: number }).n)).toEqual([1, 2, 3]);
+    act(() => { useAnnotationStore.getState().undo(); }); // one step
+    expect(useAnnotationStore.getState().scene.objects.map((o) => (o as { n: number }).n)).toEqual([1, 3, 4]);
+  });
+
+  it('refuses the 100th badge with a toast', () => {
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 'max', kind: 'callout', color: '#ff3b30', size: 0.06, x: 0.1, y: 0.1, n: ANNOTATION_CALLOUT_MAX } }]);
+    render();
+    pointerDown(layer(), 400, 225); pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    expect(toastError).toHaveBeenCalledWith('voice.annotations.calloutLimit');
+  });
+
+  it('double-clicking a badge with the select tool opens a draft to retype its number', () => {
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 'c1', kind: 'callout', color: '#ff3b30', size: 0.06, x: 0.5, y: 0.5, n: 1 } }]);
+    useAnnotationStore.setState({ activeTool: 'select' });
+    render();
+    act(() => { layer().dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, clientX: 400, clientY: 225 })); });
+    const input = draftInput()!;
+    expect(input).not.toBeNull();
+    expect(input.value).toBe('1');
+    type(input, '12');
+    key(input, 'Enter');
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ n: 12 });
+    // Garbage or out-of-range leaves it alone
+    act(() => { layer().dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, clientX: 400, clientY: 225 })); });
+    type(draftInput()!, '500');
+    key(draftInput()!, 'Enter');
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ n: 12 });
   });
 });

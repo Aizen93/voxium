@@ -323,6 +323,18 @@ describe('annotationStore — op batching', () => {
     expect(socketEmit.mock.calls[0][1].ops.map((op: { obj: { id: string } }) => op.obj.id)).toEqual(['after']);
   });
 
+  it('consecutive translates of one object coalesce into a single summed op on the wire', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([stroke('s')]);
+    for (let i = 0; i < 10; i++) store.localApply([{ t: 'translate', id: 's', dx: 0.01, dy: -0.005 }]);
+    store.flushOps();
+    const ops = socketEmit.mock.calls[0][1].ops as AnnotationOp[];
+    const translates = ops.filter((op) => op.t === 'translate') as { dx: number; dy: number }[];
+    expect(translates).toHaveLength(1);
+    expect(translates[0].dx).toBeCloseTo(0.1);
+    expect(translates[0].dy).toBeCloseTo(-0.05);
+  });
+
   it('a restarted ack re-sends the FULL local scene (clear + adds) so viewers regain pre-loss objects', async () => {
     useAnnotationStore.getState().localApply([stroke('a'), stroke('b')]);
     useAnnotationStore.getState().flushOps();

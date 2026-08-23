@@ -780,6 +780,8 @@
       "spotlight": "Spotlight",
       "laser": "Laserpointer",
       "eraser": "Radierer",
+      "renumber": "Markierungen in Leserichtung neu nummerieren",
+      "calloutLimit": "Höchstens {{max}} nummerierte Markierungen pro Übertragung",
       "clearAll": "Alles löschen",
       "color": "Farbe",
       "width": "Strichstärke",
