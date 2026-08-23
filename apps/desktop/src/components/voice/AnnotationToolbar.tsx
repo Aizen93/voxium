@@ -4,7 +4,8 @@ import { useAnnotationStore } from '../../stores/annotationStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { pttReservedCode, shortcutFor } from '../../hooks/useAnnotationShortcuts';
-import { ANNOTATION_COLORS, ANNOTATION_WIDTHS, MASK_TOOL_DEF, availableToolDefs, type ToolDef } from './annotationPresets';
+import { ANNOTATION_COLORS, ANNOTATION_WIDTHS, ANNOTATION_TEXT_SIZES, MASK_TOOL_DEF, availableToolDefs, type ToolDef } from './annotationPresets';
+import { ColorPalettePopover } from './ColorPalettePopover';
 
 /**
  * The sharer's annotation toolbar, rendered under the ScreenShareViewer
@@ -35,6 +36,12 @@ export function AnnotationToolbar() {
   const renumberCallouts = useAnnotationStore((s) => s.renumberCallouts);
   const inkMode = useAnnotationStore((s) => s.inkMode);
   const setInkMode = useAnnotationStore((s) => s.setInkMode);
+  const textSize = useAnnotationStore((s) => s.textSize);
+  const setTextSize = useAnnotationStore((s) => s.setTextSize);
+  // The size segment shows while a caption/badge is being placed or is selected
+  const sizeRelevant = useAnnotationStore((s) =>
+    s.activeTool === 'text' || s.activeTool === 'callout'
+    || (s.selectedObjectId !== null && s.scene.objects.some((o) => o.id === s.selectedObjectId && (o.kind === 'text' || o.kind === 'callout'))));
   const hasCallouts = useAnnotationStore((s) => s.scene.objects.some((o) => o.kind === 'callout'));
   const annotationsVersion = useVoiceStore((s) => s.screenShareAnnotationsVersion);
   const voiceMode = useSettingsStore((s) => s.voiceMode);
@@ -120,7 +127,27 @@ export function AnnotationToolbar() {
             aria-pressed={color === c}
           />
         ))}
+        <ColorPalettePopover />
       </div>
+
+      {sizeRelevant && (
+        <div className="flex items-center gap-0.5 border-l border-vox-border pl-2" data-testid="text-size-picker">
+          {ANNOTATION_TEXT_SIZES.map(({ key, value }) => (
+            <button
+              key={key}
+              onClick={() => setTextSize(value)}
+              className={`rounded px-1.5 py-0.5 text-xs font-semibold transition-colors ${
+                textSize === value ? 'bg-vox-accent-primary/20 text-vox-accent-primary' : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary'
+              }`}
+              title={`${t('voice.annotations.textSize')} ${key}`}
+              aria-label={`${t('voice.annotations.textSize')} ${key}`}
+              aria-pressed={textSize === value}
+            >
+              {key}
+            </button>
+          ))}
+        </div>
+      )}
 
       {annotationsVersion >= 2 && (
         <div className="flex items-center gap-0.5 border-l border-vox-border pl-2">

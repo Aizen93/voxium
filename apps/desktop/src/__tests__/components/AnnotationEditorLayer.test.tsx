@@ -656,3 +656,39 @@ describe('AnnotationEditorLayer — vanishing ink', () => {
     expect((useAnnotationStore.getState().scene.objects[0] as { fade?: true }).fade).toBeUndefined();
   });
 });
+
+describe('AnnotationEditorLayer — text size', () => {
+  afterEach(() => { useAnnotationStore.getState().setTextSize(0.045); localStorage.removeItem('vox:annotations:prefs'); });
+
+  it('new captions and badges follow the text-size setting; the draft input is painted at that size', () => {
+    useAnnotationStore.getState().setTextSize(0.1);
+    useAnnotationStore.setState({ activeTool: 'text' });
+    render();
+    pointerDown(layer(), 200, 90);
+    pointerUp(layer());
+    expect(draftInput()!.style.fontSize).toBe('45px'); // 0.1 × 450
+    type(draftInput()!, 'big');
+    key(draftInput()!, 'Enter');
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ kind: 'text', size: 0.1 });
+
+    act(() => { useAnnotationStore.setState({ activeTool: 'callout' }); }); // re-render before the press
+    pointerDown(layer(), 400, 225); pointerUp(layer());
+    expect((useAnnotationStore.getState().scene.objects[1] as { size: number }).size).toBeCloseTo(0.1 * 4 / 3);
+  });
+
+  it('a selected caption has a resize handle that scales its size by the dragged height', () => {
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 't', kind: 'text', text: 'hello', color: '#ffffff', size: 0.045, x: 0.2, y: 0.2 } }]);
+    useAnnotationStore.setState({ activeTool: 'select' });
+    render();
+    pointerDown(layer(), 170, 95); pointerUp(layer()); // inside the caption's box
+    expect(useAnnotationStore.getState().selectedObjectId).toBe('t');
+    const handle = container.querySelector('.cursor-nwse-resize')!;
+    expect(handle).not.toBeNull();
+    pointerDown(handle, 200, 110);
+    pointerMove(layer(), 300, 135); // bottom at y=0.3 → height 0.1
+    pointerUp(layer());
+    expect((useAnnotationStore.getState().scene.objects[0] as { size: number }).size).toBeCloseTo(0.1);
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect((useAnnotationStore.getState().scene.objects[0] as { size: number }).size).toBe(0.045);
+  });
+});

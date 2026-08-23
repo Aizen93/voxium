@@ -11,6 +11,7 @@ import { isEditableTarget } from '../../hooks/useAnnotationShortcuts';
 import { pxToNorm } from '../../utils/annotationGeometry';
 import { normBox, clampBox, clampPos, clampTranslation, objectBbox, hitTestBox, topmostHit, type Bbox } from '../../utils/annotationHit';
 import { nextCalloutNumber } from '../../utils/annotationCallouts';
+import { clampTextSize } from '../../utils/annotationPrefs';
 import { toast } from '../../stores/toastStore';
 import { processOverlayImage } from '../../utils/imageProcessing';
 
@@ -53,9 +54,8 @@ interface AnnotationEditorLayerProps {
 const MIN_DRAG_NORM = 0.005;
 /** px of pointer travel before a new stroke point is recorded */
 const MIN_STROKE_STEP_PX = 2;
-const TEXT_SIZE = 0.045;
-/** Callout badge diameter, in frame units. */
-const CALLOUT_SIZE = 0.06;
+/** A badge is a little larger than the caption size it follows. */
+const CALLOUT_SIZE_FACTOR = 4 / 3;
 const HIGHLIGHTER_WIDTH_FACTOR = 4;
 
 /** Kinds a plain click can select and drag. Strokes join this list with the
@@ -96,6 +96,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
 
   const activeTool = useAnnotationStore((s) => s.activeTool);
   const inkMode = useAnnotationStore((s) => s.inkMode);
+  const textSize = useAnnotationStore((s) => s.textSize);
   const color = useAnnotationStore((s) => s.color);
   const strokeWidth = useAnnotationStore((s) => s.strokeWidth);
   const selectedObjectId = useAnnotationStore((s) => s.selectedObjectId);
@@ -138,7 +139,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     if (!value) return;
     store.localApply([{
       t: 'add',
-      obj: { id: crypto.randomUUID(), kind: 'text', text: value, color: store.color, size: TEXT_SIZE, x: draft.x, y: draft.y },
+      obj: { id: crypto.randomUUID(), kind: 'text', text: value, color: store.color, size: store.textSize, x: draft.x, y: draft.y },
     }]);
     store.flushOps();
   });
@@ -263,7 +264,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         }
         const id = crypto.randomUUID();
         // One add = one history entry; a click has no drag to bracket
-        store.localApply([{ t: 'add', obj: { id, kind: 'callout', color, size: CALLOUT_SIZE, x: norm.x, y: norm.y, n } }]);
+        store.localApply([{ t: 'add', obj: { id, kind: 'callout', color, size: clampTextSize(textSize * CALLOUT_SIZE_FACTOR), x: norm.x, y: norm.y, n } }]);
         store.flushOps();
         store.setSelectedObjectId(id);
         break;
@@ -426,6 +427,12 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
       }
       case 'resize': {
         const norm = toNorm(e);
+        const target = drag.isMask ? undefined : useAnnotationStore.getState().scene.objects.find((o) => o.id === drag.id);
+        if (target && target.kind === 'text') {
+          // A caption scales: its box height IS its size
+          store.localApply([{ t: 'update', id: drag.id, patch: { size: clampTextSize(norm.y - drag.anchor.y) } }]);
+          break;
+        }
         const box = clampBox(normBox(drag.anchor.x, drag.anchor.y, norm.x, norm.y));
         if (drag.isMask) store.updateMask(drag.id, box);
         else store.localApply([{ t: 'update', id: drag.id, patch: box }]);
@@ -490,7 +497,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     const box = obj ? objectBbox(obj) : null;
     if (!obj || !box) return null;
     if (obj.kind === 'arrow') return { box, isMask: false, resizable: false, arrow: { x1: obj.x1, y1: obj.y1, x2: obj.x2, y2: obj.y2 } };
-    return { box, isMask: false, resizable: obj.kind === 'shape' || obj.kind === 'image' || obj.kind === 'spotlight' };
+    return { box, isMask: false, resizable: obj.kind === 'shape' || obj.kind === 'image' || obj.kind === 'spotlight' || obj.kind === 'text' };
   })();
 
   const cursor = activeTool === 'select' ? 'default' : activeTool === 'text' ? 'text' : laserActive ? 'none' : 'crosshair';
@@ -572,7 +579,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
             top: text.draft.y * rect.h,
             minWidth: 160,
             // Same size and colour the committed caption is painted with
-            fontSize: Math.max(9, TEXT_SIZE * rect.h),
+            fontSize: Math.max(9, textSize * rect.h),
             color,
           }}
           onChange={(e) => text.setValue(e.target.value)}

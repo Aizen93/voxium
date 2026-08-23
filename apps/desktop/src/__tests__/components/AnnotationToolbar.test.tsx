@@ -187,6 +187,56 @@ describe('AnnotationToolbar', () => {
     }
   });
 
+  it('the palette popover offers presets, a native picker (normalized to #rrggbb) and recents', () => {
+    useAnnotationStore.setState({ isEditing: true, recentColors: [] });
+    render(<AnnotationToolbar />);
+    expect(document.querySelector('[data-testid="palette-popover"]')).toBeNull();
+    click(container.querySelector('[data-testid="palette-toggle"]'));
+    const popover = document.querySelector('[data-testid="palette-popover"]')!;
+    expect(popover).not.toBeNull();
+    expect(popover.querySelectorAll('button[aria-pressed]').length).toBeGreaterThanOrEqual(16);
+
+    // A preset that is not a quick swatch becomes a recent; the popover closes
+    click(popover.querySelector('[title="#bf5af2"]'));
+    expect(useAnnotationStore.getState().color).toBe('#bf5af2');
+    expect(useAnnotationStore.getState().recentColors).toEqual(['#bf5af2']);
+    expect(document.querySelector('[data-testid="palette-popover"]')).toBeNull();
+
+    click(container.querySelector('[data-testid="palette-toggle"]'));
+    const custom = document.querySelector('[data-testid="palette-custom"]') as HTMLInputElement;
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+      setter.call(custom, '#123456');
+      custom.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(useAnnotationStore.getState().color).toBe('#123456');
+    expect(useAnnotationStore.getState().recentColors).toEqual(['#123456', '#bf5af2']);
+    expect(document.querySelectorAll('[data-testid="palette-recents"] button')).toHaveLength(2);
+
+    // Escape closes it
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(document.querySelector('[data-testid="palette-popover"]')).toBeNull();
+    useAnnotationStore.setState({ recentColors: [] });
+    localStorage.removeItem('vox:annotations:prefs');
+  });
+
+  it('the text-size segment appears for the text/callout tools or a selected caption, and sets the size', () => {
+    useAnnotationStore.setState({ isEditing: true, activeTool: 'pen' });
+    render(<AnnotationToolbar />);
+    expect(container.querySelector('[data-testid="text-size-picker"]')).toBeNull();
+    act(() => { useAnnotationStore.getState().setActiveTool('text'); });
+    expect(container.querySelector('[data-testid="text-size-picker"]')).not.toBeNull();
+    click(container.querySelector('[aria-label="voice.annotations.textSize L"]'));
+    expect(useAnnotationStore.getState().textSize).toBe(0.07);
+    act(() => {
+      useAnnotationStore.getState().setActiveTool('select');
+      useAnnotationStore.setState({ scene: { objects: [{ id: 't', kind: 'text', text: 'x', color: '#ffffff', size: 0.045, x: 0, y: 0 }] }, selectedObjectId: 't' });
+    });
+    expect(container.querySelector('[data-testid="text-size-picker"]')).not.toBeNull();
+    useAnnotationStore.getState().setTextSize(0.045);
+    localStorage.removeItem('vox:annotations:prefs');
+  });
+
   it('offers Renumber only while the scene has callouts', () => {
     useAnnotationStore.setState({ isEditing: true });
     render(<AnnotationToolbar />);

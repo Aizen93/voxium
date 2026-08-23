@@ -19,6 +19,14 @@ export const ANNOTATION_WIDTHS: readonly { key: string; value: number; dot: numb
   { key: 'thick', value: 0.008, dot: 9 },
 ];
 
+/** Caption / badge sizes as a fraction of the frame height (wire cap 0.2). */
+export const ANNOTATION_TEXT_SIZES: readonly { key: string; value: number }[] = [
+  { key: 'S', value: 0.03 },
+  { key: 'M', value: 0.045 },
+  { key: 'L', value: 0.07 },
+  { key: 'XL', value: 0.1 },
+];
+
 export interface ToolDef {
   tool: AnnotationEditorTool;
   labelKey: string;

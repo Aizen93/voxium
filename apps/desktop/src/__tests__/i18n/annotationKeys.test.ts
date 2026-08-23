@@ -14,6 +14,7 @@ const SOURCES = [
   fileURLToPath(new URL('../../components/voice/AnnotationToolbar.tsx', import.meta.url)),
   // the labelKey table the toolbar and the shortcuts share
   fileURLToPath(new URL('../../components/voice/annotationPresets.ts', import.meta.url)),
+  fileURLToPath(new URL('../../components/voice/ColorPalettePopover.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/AnnotationEditorLayer.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareViewer.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareFloating.tsx', import.meta.url)),

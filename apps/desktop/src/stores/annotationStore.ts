@@ -14,7 +14,8 @@ import {
 } from '@voxium/shared';
 import { inverseOf, addedIds, compactForward, entryBytes, type HistoryEntry } from '../utils/annotationHistory';
 import { renumberOps } from '../utils/annotationCallouts';
-import { loadAnnotationPrefs, saveAnnotationPrefs, type InkMode } from '../utils/annotationPrefs';
+import { loadAnnotationPrefs, saveAnnotationPrefs, pushRecentColor, clampTextSize, type InkMode } from '../utils/annotationPrefs';
+import { patchableKeysFor } from '@voxium/shared';
 import { getSocket } from '../services/socket';
 import { useVoiceStore } from './voiceStore';
 import { toast } from './toastStore';
@@ -73,6 +74,10 @@ interface AnnotationState {
   masks: MaskRect[];
   /** Pen/highlighter strokes vanish ~3 s after they are finished. Device pref. */
   inkMode: InkMode;
+  /** Caption / badge size (fraction of frame height). Device pref. */
+  textSize: number;
+  /** Colours picked beyond the quick swatches, most recent first. Device pref. */
+  recentColors: string[];
   /** Renderable mirrors of the (module-level) undo/redo stacks. */
   canUndo: boolean;
   canRedo: boolean;
@@ -102,7 +107,10 @@ interface AnnotationState {
   setIsEditing: (editing: boolean) => void;
   setActiveTool: (tool: AnnotationEditorTool) => void;
   setInkMode: (mode: InkMode) => void;
-  setColor: (color: string) => void;
+  /** The default for new objects — and, with a selection, that object's colour too. */
+  setColor: (color: string, opts?: { recent?: boolean }) => void;
+  /** The default for new captions/badges — and, with one selected, its size too. */
+  setTextSize: (size: number) => void;
   setStrokeWidth: (width: number) => void;
   setSelectedObjectId: (id: string | null) => void;
   addMask: (mask: MaskRect) => void;
@@ -335,6 +343,10 @@ function resetHistory(): void {
   openGesture = null;
 }
 
+function persistPrefs(s: Pick<AnnotationState, 'inkMode' | 'textSize' | 'recentColors'>): void {
+  saveAnnotationPrefs({ inkMode: s.inkMode, textSize: s.textSize, recentColors: s.recentColors });
+}
+
 /**
  * Everything this module keeps OUTSIDE the zustand slice: the op queue, the
  * remote-batch buffer, the history. `resetAccountStores` replaces the slice
@@ -467,7 +479,10 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
   strokeWidth: 0.004,
   selectedObjectId: null,
   masks: [],
-  inkMode: loadAnnotationPrefs().inkMode,
+  ...(() => {
+    const prefs = loadAnnotationPrefs();
+    return { inkMode: prefs.inkMode, textSize: prefs.textSize, recentColors: prefs.recentColors };
+  })(),
   canUndo: false,
   canRedo: false,
 
@@ -632,9 +647,29 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
   setActiveTool: (activeTool) => set({ activeTool, selectedObjectId: null }),
   setInkMode: (inkMode) => {
     set({ inkMode });
-    saveAnnotationPrefs({ inkMode });
+    persistPrefs(get());
   },
-  setColor: (color) => set({ color }),
+  setColor: (color, opts) => {
+    const { selectedObjectId, scene, recentColors } = get();
+    const target = selectedObjectId ? scene.objects.find((o) => o.id === selectedObjectId) : undefined;
+    if (target && patchableKeysFor(target.kind).includes('color') && (target as { color?: string }).color !== color) {
+      get().localApply([{ t: 'update', id: target.id, patch: { color } }]); // its own undo step
+      get().flushOps();
+    }
+    set({ color, ...(opts?.recent ? { recentColors: pushRecentColor(recentColors, color) } : {}) });
+    if (opts?.recent) persistPrefs(get());
+  },
+  setTextSize: (raw) => {
+    const size = clampTextSize(raw);
+    const { selectedObjectId, scene } = get();
+    const target = selectedObjectId ? scene.objects.find((o) => o.id === selectedObjectId) : undefined;
+    if (target && (target.kind === 'text' || target.kind === 'callout') && target.size !== size) {
+      get().localApply([{ t: 'update', id: target.id, patch: { size } }]);
+      get().flushOps();
+    }
+    set({ textSize: size });
+    persistPrefs(get());
+  },
   setStrokeWidth: (strokeWidth) => set({ strokeWidth }),
   setSelectedObjectId: (selectedObjectId) => set({ selectedObjectId }),
 

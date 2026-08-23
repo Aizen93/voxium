@@ -633,14 +633,71 @@ describe('annotationStore — vanishing ink', () => {
   it('ink mode is a device preference: set, persisted, reloaded', () => {
     useAnnotationStore.getState().setInkMode('vanishing');
     expect(useAnnotationStore.getState().inkMode).toBe('vanishing');
-    expect(JSON.parse(localStorage.getItem('vox:annotations:prefs')!)).toEqual({ inkMode: 'vanishing' });
-    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'vanishing' });
+    expect(JSON.parse(localStorage.getItem('vox:annotations:prefs')!)).toMatchObject({ inkMode: 'vanishing' });
+    expect(loadAnnotationPrefs().inkMode).toBe('vanishing');
     localStorage.setItem('vox:annotations:prefs', '{"inkMode":"weird"}');
-    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent' });
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [] });
     localStorage.setItem('vox:annotations:prefs', 'not json');
-    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent' });
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [] });
     localStorage.removeItem('vox:annotations:prefs');
     useAnnotationStore.getState().setInkMode('persistent');
+  });
+});
+
+// ─── Colour and text size ───────────────────────────────────────────────────
+
+describe('annotationStore — colour and text size', () => {
+  const shape = (id: string): AnnotationOp => ({ t: 'add', obj: { id, kind: 'shape', shape: 'rect', color: '#00ff00', width: 0.004, x: 0.1, y: 0.1, w: 0.2, h: 0.2 } });
+  const caption = (id: string): AnnotationOp => ({ t: 'add', obj: { id, kind: 'text', text: 'hi', color: '#00ff00', size: 0.045, x: 0.1, y: 0.1 } });
+  const image = (id: string): AnnotationOp => ({ t: 'add', obj: { id, kind: 'image', src: 'data:image/webp;base64,AAAA', x: 0.1, y: 0.1, w: 0.2, h: 0.2 } });
+
+  afterEach(() => { localStorage.removeItem('vox:annotations:prefs'); });
+
+  it('setColor changes the default, and with a selection recolours that object as its own undo step', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([shape('s')]);
+    store.setColor('#0a84ff');
+    expect(useAnnotationStore.getState().color).toBe('#0a84ff');
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ color: '#00ff00' }); // nothing selected: untouched
+    store.setSelectedObjectId('s');
+    store.setColor('#ff3b30');
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ color: '#ff3b30' });
+    store.undo();
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ color: '#00ff00' });
+    expect(useAnnotationStore.getState().color).toBe('#ff3b30'); // the default keeps the pick
+  });
+
+  it('setColor leaves a selected object whose kind has no colour (an image) alone', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([image('i')]);
+    store.setSelectedObjectId('i');
+    store.setColor('#ff3b30');
+    expect(useAnnotationStore.getState().canUndo).toBe(true); // only the add
+    store.undo();
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+
+  it('recents: opt-in per pick, most recent first, de-duplicated, capped at 6, persisted', () => {
+    const store = useAnnotationStore.getState();
+    store.setColor('#111111'); // quick swatch: not a recent
+    expect(useAnnotationStore.getState().recentColors).toEqual([]);
+    for (const c of ['#aa0000', '#bb0000', '#cc0000', '#dd0000', '#ee0000', '#ff0001', '#aa0000', '#123456']) store.setColor(c, { recent: true });
+    expect(useAnnotationStore.getState().recentColors).toEqual(['#123456', '#aa0000', '#ff0001', '#ee0000', '#dd0000', '#cc0000']);
+    expect(loadAnnotationPrefs().recentColors).toEqual(['#123456', '#aa0000', '#ff0001', '#ee0000', '#dd0000', '#cc0000']);
+  });
+
+  it('setTextSize clamps, persists, and resizes a selected caption or badge', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([caption('t')]);
+    store.setTextSize(0.07);
+    expect(useAnnotationStore.getState().textSize).toBe(0.07);
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ size: 0.045 });
+    store.setSelectedObjectId('t');
+    store.setTextSize(5); // clamped to the wire cap
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ size: 0.2 });
+    expect(loadAnnotationPrefs().textSize).toBe(0.2);
+    store.undo();
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ size: 0.045 });
   });
 });
 
