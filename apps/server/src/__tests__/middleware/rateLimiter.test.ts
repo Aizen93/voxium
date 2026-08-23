@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 // Minimal Redis mock — getAllRateLimits and socketRateLimit never touch Redis,
 // so the client getters can simply throw if anything reaches for them.
@@ -216,5 +218,37 @@ describe('socketRateLimit', () => {
     const socket = {};
     expect(socketRateLimit(socket, 'strict', 1)).toBe(true);
     expect(socketRateLimit(socket, 'strict', 1)).toBe(false);
+  });
+});
+
+// ─── Middleware order on userId-keyed limiters ──────────────────────────────
+
+describe('userId-keyed limiters sit AFTER authenticate on every auth route', () => {
+  // byUserId falls back to req.ip when there is no req.user yet. A limiter
+  // listed before authenticate therefore keys on the address — one bucket
+  // for everyone behind a NAT — and the load test found it: the 11th account
+  // to accept the legal documents from one IP was refused, and the deletion
+  // bucket would have BLOCKED a whole office for 15 minutes on one person's
+  // typos. Read the route file rather than mount it: this is about the
+  // order of the argument list, which a request-level test cannot see.
+  const source = readFileSync(resolve(__dirname, '../../routes/auth.ts'), 'utf8');
+  const userKeyed = getAllRateLimits().filter((l) => l.keyType === 'userId').map((l) => l.name);
+  const middlewareFor = (name: string) => `rateLimit${name[0].toUpperCase()}${name.slice(1)}`;
+
+  it('covers the limiters this test is about', () => {
+    expect(userKeyed).toEqual(expect.arrayContaining(['consent', 'deleteAccount', 'resendVerification']));
+  });
+
+  it.each(userKeyed.map(middlewareFor).filter((mw) => source.includes(mw)))('%s comes after authenticate', (mw) => {
+    const routes = source
+      .split(/\r?\n/)
+      .filter((line) => /^authRouter\.[a-z]+\(/.test(line) && new RegExp(`\\b${mw}\\b`).test(line));
+    expect(routes.length, `${mw} is imported but mounted on no route`).toBeGreaterThan(0);
+    for (const line of routes) {
+      const auth = line.indexOf('authenticate');
+      const lim = line.indexOf(mw);
+      expect(auth, `${line.trim()} — no authenticate`).toBeGreaterThan(-1);
+      expect(auth, `${line.trim()} — limiter before authenticate`).toBeLessThan(lim);
+    }
   });
 });

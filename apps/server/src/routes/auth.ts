@@ -106,7 +106,9 @@ authRouter.post('/refresh', rateLimitRefresh, async (req: Request, res: Response
 // (accounts created before consent was collected at signup — CNIL/GDPR).
 // Authenticated only, deliberately NOT behind requireConsent: this is the
 // route that clears that gate. Both flags must be the literal boolean true.
-authRouter.post('/consent', rateLimitConsent, authenticate, async (req: Request, res: Response, next: NextFunction) => {
+// authenticate BEFORE the limiter: it is keyed by userId, and with no user
+// yet it falls back to the IP — one bucket for everyone behind a NAT.
+authRouter.post('/consent', authenticate, rateLimitConsent, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { acceptTerms, acceptPrivacy } = req.body;
     const result = await acceptConsent(req.user!.userId, { acceptTerms, acceptPrivacy });
@@ -122,7 +124,10 @@ authRouter.post('/consent', rateLimitConsent, authenticate, async (req: Request,
 // be able to leave. Re-authenticates with the password (+ TOTP when enabled)
 // so a stolen session cannot erase someone. 409 with the list when the
 // account still owns servers — transfer or delete those first.
-authRouter.delete('/account', rateLimitDeleteAccount, authenticate, async (req: Request, res: Response, next: NextFunction) => {
+// authenticate BEFORE the limiter, for the same reason as /consent — and here
+// the bucket BLOCKS for 15 minutes, so a shared-IP bucket would let one
+// person's typos lock a whole office out of deleting their accounts.
+authRouter.delete('/account', authenticate, rateLimitDeleteAccount, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { password, totpCode } = req.body ?? {};
     if (!password || typeof password !== 'string') {
