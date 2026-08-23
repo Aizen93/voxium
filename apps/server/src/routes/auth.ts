@@ -1,8 +1,9 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT } from '../services/authService';
+import { logAuditEvent } from '../utils/auditLog';
+import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, rateLimitConsent, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
@@ -110,6 +111,41 @@ authRouter.post('/consent', rateLimitConsent, authenticate, async (req: Request,
     const { acceptTerms, acceptPrivacy } = req.body;
     const result = await acceptConsent(req.user!.userId, { acceptTerms, acceptPrivacy });
     res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Self-service account deletion (GDPR right to erasure). Authenticated only —
+// deliberately NOT behind requireVerifiedEmail or requireConsent: an account
+// that never verified its email, or declines the legal documents, must still
+// be able to leave. Re-authenticates with the password (+ TOTP when enabled)
+// so a stolen session cannot erase someone. 409 with the list when the
+// account still owns servers — transfer or delete those first.
+authRouter.delete('/account', rateLimitDeleteAccount, authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { password, totpCode } = req.body ?? {};
+    if (!password || typeof password !== 'string') {
+      res.status(400).json({ success: false, error: 'Password is required' });
+      return;
+    }
+    try {
+      await deleteOwnAccount(req.user!.userId, password, typeof totpCode === 'string' ? totpCode : undefined);
+    } catch (err) {
+      if (err instanceof OwnedServersError) {
+        res.status(409).json({ success: false, error: err.message, data: { ownedServers: err.servers } });
+        return;
+      }
+      throw err;
+    }
+    logAuditEvent({
+      actorId: null,
+      action: 'user.delete',
+      targetType: 'user',
+      targetId: req.user!.userId,
+      metadata: { trigger: 'self' },
+    });
+    res.json({ success: true, message: 'Account deleted' });
   } catch (err) {
     next(err);
   }

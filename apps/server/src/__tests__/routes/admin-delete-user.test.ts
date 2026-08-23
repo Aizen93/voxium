@@ -111,7 +111,8 @@ vi.mock('../../utils/e2ePurge', () => ({
 // Socket.IO
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
-const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) }));
+const mockDisconnectSockets = vi.fn();
+const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]), disconnectSockets: mockDisconnectSockets }));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
@@ -225,7 +226,7 @@ function createApp() {
  * users[id] → row for prisma.user.findUnique — covers both the auth
  * middleware lookup (actor) and the route's target lookup.
  */
-function mockUsers(users: Record<string, { role?: string; bannedAt?: Date | null }>) {
+function mockUsers(users: Record<string, { role?: string; bannedAt?: Date | null; avatarUrl?: string | null }>) {
   prismaMock.user.findUnique.mockImplementation(({ where }: any) => {
     const row = users[where.id];
     if (!row) return Promise.resolve(null);
@@ -235,6 +236,10 @@ function mockUsers(users: Record<string, { role?: string; bannedAt?: Date | null
       tokenVersion: 0,
       emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       role: 'user',
+      avatarUrl: null,
+      // deleteUserAccount re-reads the account with its owned servers right
+      // before the delete; by then the route has transferred or deleted them
+      ownedServers: [],
       ...row,
     });
   });

@@ -155,6 +155,20 @@
       "failedToUploadAvatar": "アバターのアップロードに失敗しました",
       "failedToUpdateProfile": "プロフィールの更新に失敗しました"
     },
+    "deleteAccount": {
+      "title": "アカウントを削除",
+      "description": "アカウント、メッセージ、プロフィール、暗号化キーを完全に削除します。この操作は取り消せません。",
+      "open": "アカウントを削除…",
+      "warning": "アカウントに関連するすべてが削除されます。サーバーを所有している場合は、先に各サーバーの設定から譲渡または削除してください。",
+      "ownsServers": "まだ以下のサーバーを所有しています。譲渡または削除してから、もう一度お試しください：",
+      "password": "パスワード",
+      "totpCode": "二要素認証コード",
+      "typeToConfirm": "確認のため {{word}} と入力してください",
+      "confirmWord": "削除",
+      "confirm": "アカウントを完全に削除",
+      "deleting": "削除中…",
+      "failed": "アカウントを削除できませんでした。もう一度お試しください。"
+    },
     "security": {
       "changePassword": "パスワードを変更",
       "currentPassword": "現在のパスワード",

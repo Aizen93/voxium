@@ -11,6 +11,8 @@ import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } fro
 import { sanitizeText } from '../utils/sanitize';
 import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, consumeMailCap, normalizeIp } from '../middleware/rateLimiter';
 import { consentIsRequired } from '../middleware/auth';
+import { verifyTOTP } from './totpService';
+import { deleteUserAccount } from '../utils/accountDeletion';
 
 /**
  * The consent SELECT fragment every user payload includes, and the mapping
@@ -607,4 +609,54 @@ export async function acceptConsent(userId: string, consent: RegistrationConsent
   await prisma.user.updateMany({ where: { id: userId, termsAcceptedAt: null }, data: { termsAcceptedAt: now } });
   await prisma.user.updateMany({ where: { id: userId, privacyAcceptedAt: null }, data: { privacyAcceptedAt: now } });
   return { consentRequired: false };
+}
+
+/**
+ * Self-service account deletion (GDPR right to erasure; the Terms promise
+ * "you may delete your account at any time").
+ *
+ * Re-authenticates with the password — a stolen session must not be enough
+ * to erase someone — and, when TOTP is enabled, with a current code (or a
+ * backup code) as well, since the password alone is exactly what 2FA exists
+ * to distrust. Refuses while the account owns servers: `Server.owner` is
+ * onDelete: Restrict, and whether a community is handed to someone else or
+ * destroyed is the owner's call to make first (transfer or delete each in
+ * its settings). The refusal lists them so the client can say which.
+ */
+export async function deleteOwnAccount(
+  userId: string,
+  password: string,
+  totpCode?: string,
+): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, password: true, totpEnabled: true, ownedServers: { select: { id: true, name: true } } },
+  });
+  if (!user) throw new UnauthorizedError('User not found');
+
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) throw new BadRequestError('Password is incorrect');
+
+  if (user.totpEnabled) {
+    if (!totpCode || typeof totpCode !== 'string') throw new BadRequestError('Two-factor authentication code is required');
+    const ok = await verifyTOTP(userId, totpCode.replace(/\s+/g, ''));
+    if (!ok) throw new BadRequestError('Invalid two-factor authentication code');
+  }
+
+  if (user.ownedServers.length > 0) {
+    throw new OwnedServersError(user.ownedServers);
+  }
+
+  await deleteUserAccount(userId, { reason: 'Your account has been deleted', logPrefix: '[Auth]' });
+}
+
+/** 409 carrying the servers the account must transfer or delete first. */
+export class OwnedServersError extends ConflictError {
+  constructor(public readonly servers: Array<{ id: string; name: string }>) {
+    super('Transfer or delete the servers you own before deleting your account');
+    this.name = 'OwnedServersError';
+    // AppError pins every instance's prototype to AppError.prototype, which
+    // makes `instanceof` false for any deeper subclass — re-pin to ours.
+    Object.setPrototypeOf(this, OwnedServersError.prototype);
+  }
 }

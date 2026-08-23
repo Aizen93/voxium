@@ -111,6 +111,21 @@ vi.mock('../../routes/categories', () => ({ categoryRouter: Router() }));
 vi.mock('../../routes/search', () => ({ searchRouter: Router() }));
 vi.mock('../../routes/reports', () => ({ reportsRouter: Router() }));
 vi.mock('../../routes/stats', () => ({ statsRouter: Router() }));
+
+// Self-service deletion: the shared core and the TOTP check are mocked so the
+// route's own decisions (re-auth, owned-server refusal, audit row) are what
+// the tests observe.
+const { deleteUserAccountMock, verifyTOTPMock, logAuditEventMock } = vi.hoisted(() => ({
+  deleteUserAccountMock: vi.fn().mockResolvedValue(undefined),
+  verifyTOTPMock: vi.fn().mockResolvedValue(true),
+  logAuditEventMock: vi.fn(),
+}));
+vi.mock('../../utils/accountDeletion', () => ({ deleteUserAccount: (...a: unknown[]) => deleteUserAccountMock(...a) }));
+vi.mock('../../services/totpService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/totpService')>();
+  return { ...actual, verifyTOTP: (...a: unknown[]) => verifyTOTPMock(...a) };
+});
+vi.mock('../../utils/auditLog', () => ({ logAuditEvent: (...a: unknown[]) => logAuditEventMock(...a) }));
 vi.mock('../../routes/admin', () => ({ adminRouter: Router() }));
 vi.mock('../../routes/support', () => ({ supportRouter: Router() }));
 vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
@@ -138,6 +153,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitVerifyEmail: passthroughMiddleware,
   rateLimitResendVerification: passthroughMiddleware,
   rateLimitConsent: passthroughMiddleware,
+  rateLimitDeleteAccount: passthroughMiddleware,
   rateLimitGeneral: passthroughMiddleware,
   rateLimitMessageSend: passthroughMiddleware,
   rateLimitUpload: passthroughMiddleware,
@@ -1199,6 +1215,110 @@ describe('POST /api/v1/auth/consent', () => {
 
   it('requires authentication', async () => {
     const res = await request(app).post('/api/v1/auth/consent').send({ acceptTerms: true, acceptPrivacy: true });
+    expect(res.status).toBe(401);
+  });
+});
+
+// ─── DELETE /api/v1/auth/account — self-service erasure ─────────────────────
+
+describe('DELETE /api/v1/auth/account', () => {
+  const PASSWORD = 'ValidPass123';
+  let hash: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // mockReset, not clear: a test that is refused before the service lookup
+    // leaves its second queued row for the NEXT test's auth middleware
+    mockPrismaUser.findUnique.mockReset();
+    const bcrypt = await import('bcryptjs');
+    hash = await bcrypt.hash(PASSWORD, 4);
+  });
+
+  /** Auth lookup + the service's own lookup, in that order. */
+  function mockAccount(row: Record<string, unknown>) {
+    mockPrismaUser.findUnique
+      // authenticate(): a pre-consent, unverified account — deletion must
+      // still be reachable for it
+      .mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: false, termsAcceptedAt: null, privacyAcceptedAt: null })
+      .mockResolvedValueOnce({ id: MOCK_USER.id, password: hash, totpEnabled: false, ownedServers: [], ...row });
+    return generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username, tokenVersion: 0 });
+  }
+
+  it('deletes the account after re-authenticating with the password, and audits it as a self-deletion', async () => {
+    const token = mockAccount({});
+    const res = await request(app)
+      .delete('/api/v1/auth/account')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: PASSWORD });
+
+    expect(res.status).toBe(200);
+    expect(deleteUserAccountMock).toHaveBeenCalledWith(MOCK_USER.id, expect.objectContaining({ reason: expect.any(String) }));
+    expect(logAuditEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      actorId: null, action: 'user.delete', targetId: MOCK_USER.id, metadata: { trigger: 'self' },
+    }));
+  });
+
+  it('is reachable by an unverified, unconsented account — leaving must always be possible', async () => {
+    // mockAccount's auth row is exactly that account
+    const token = mockAccount({});
+    const res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({ password: PASSWORD });
+    expect(res.status).toBe(200);
+  });
+
+  it('refuses a wrong password — a stolen session is not enough to erase someone', async () => {
+    const token = mockAccount({});
+    const res = await request(app)
+      .delete('/api/v1/auth/account')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: 'not-it' });
+
+    expect(res.status).toBe(400);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+  });
+
+  it('requires the password at all', async () => {
+    const token = mockAccount({});
+    const res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({});
+    expect(res.status).toBe(400);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+  });
+
+  it('with TOTP enabled, requires a valid code on top of the password', async () => {
+    let token = mockAccount({ totpEnabled: true });
+    let res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({ password: PASSWORD });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Two-factor/);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+
+    verifyTOTPMock.mockResolvedValueOnce(false);
+    token = mockAccount({ totpEnabled: true });
+    res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({ password: PASSWORD, totpCode: '000000' });
+    expect(res.status).toBe(400);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+
+    verifyTOTPMock.mockResolvedValueOnce(true);
+    token = mockAccount({ totpEnabled: true });
+    res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({ password: PASSWORD, totpCode: '123 456' });
+    expect(res.status).toBe(200);
+    expect(verifyTOTPMock).toHaveBeenCalledWith(MOCK_USER.id, '123456');
+    expect(deleteUserAccountMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers 409 with the servers the account still owns — transfer or delete them first', async () => {
+    const token = mockAccount({ ownedServers: [{ id: 's-1', name: 'My Guild' }, { id: 's-2', name: 'Study group' }] });
+    const res = await request(app)
+      .delete('/api/v1/auth/account')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: PASSWORD });
+
+    expect(res.status).toBe(409);
+    expect(res.body.data.ownedServers).toEqual([{ id: 's-1', name: 'My Guild' }, { id: 's-2', name: 'Study group' }]);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+    expect(logAuditEventMock).not.toHaveBeenCalled();
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).delete('/api/v1/auth/account').send({ password: PASSWORD });
     expect(res.status).toBe(401);
   });
 });

@@ -107,8 +107,9 @@ export function PrivacyContent() {
             Your data is stored in a PostgreSQL database. Passwords are hashed using bcrypt and are never
             stored in plain text. We use JWT-based authentication with token versioning to allow session
             invalidation, and optional two-factor authentication whose secrets are encrypted at rest. File uploads
-            (avatars, server icons, message attachments) are stored in S3-compatible object storage; end-to-end
-            encrypted attachments are stored as opaque encrypted blobs.
+            (avatars, server icons, message attachments) are stored in S3-compatible object storage encrypted at
+            rest with keys managed by the storage provider (SSE-OMK, OVHcloud-managed keys); end-to-end encrypted
+            attachments are additionally stored as opaque blobs encrypted on your device.
           </p>
         </section>
 
@@ -119,7 +120,7 @@ export function PrivacyContent() {
             <li><strong className="text-vox-text-primary">Connection data</strong> (IP addresses) is deleted after 180 days without activity from that address</li>
             <li><strong className="text-vox-text-primary">Accounts whose email is never verified</strong> are deleted 7 days after registration</li>
             <li><strong className="text-vox-text-primary">Undelivered encryption key material</strong> is deleted after 30 days</li>
-            <li><strong className="text-vox-text-primary">Everything else</strong> is kept for as long as your account exists. When your account is deleted (see section 10), your profile, your messages, your devices' keys and your consent records are deleted with it</li>
+            <li><strong className="text-vox-text-primary">Everything else</strong> is kept for as long as your account exists. Deleting your account (Settings → Security) deletes your profile, your messages, your devices' keys and your consent records with it</li>
           </ul>
         </section>
 
@@ -158,7 +159,7 @@ export function PrivacyContent() {
           <ul className="list-disc list-inside space-y-1.5 ml-2">
             <li>Access the personal data we hold about you</li>
             <li>Correct inaccurate information in your profile</li>
-            <li>Have your account and associated data deleted — contact us at the address below and we will delete it</li>
+            <li>Delete your account and associated data yourself, at any time, from Settings → Security</li>
             <li>Export your data</li>
             <li>Object to processing based on our legitimate interest, and withdraw consent — withdrawing consent to this policy means closing your account, since the Service cannot operate without the data described here</li>
             <li>Lodge a complaint with your supervisory authority (in France, the CNIL)</li>

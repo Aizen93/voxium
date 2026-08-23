@@ -5,8 +5,7 @@ import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin
 import { rateLimitAdmin, normalizeIp } from '../middleware/rateLimiter';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { prisma } from '../utils/prisma';
-import { purgeE2EMaterial } from '../utils/e2ePurge';
-import { purgeSecureChannelStateForAccount } from '../utils/secureChannelLifecycle';
+import { deleteUserAccount } from '../utils/accountDeletion';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
@@ -523,21 +522,13 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
     const target = await prisma.user.findUnique({
       where: { id: targetId },
-      // avatarUrl so the blob goes with the row — the user-facing paths delete
-      // their S3 objects (servers.ts on server delete, messages.ts on message
-      // delete) and the admin path was the odd one out, leaking on every
-      // deletion until an operator ran the orphan sweep by hand.
-      select: { id: true, role: true, avatarUrl: true },
+      select: { id: true, role: true },
     });
     if (!target) throw new NotFoundError('User');
     if (target.role === 'superadmin') throw new ForbiddenError('Cannot delete a super admin');
     if (target.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can delete other admins');
 
-    // Fetch memberships and owned servers in parallel
-    const [memberships, ownedServers] = await Promise.all([
-      prisma.serverMember.findMany({ where: { userId: targetId }, select: { serverId: true } }),
-      prisma.server.findMany({ where: { ownerId: targetId }, select: { id: true, name: true } }),
-    ]);
+    const ownedServers = await prisma.server.findMany({ where: { ownerId: targetId }, select: { id: true, name: true } });
 
     // If user owns servers, require serverActions
     if (ownedServers.length > 0) {
@@ -648,9 +639,8 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
             });
           }
 
-          // Broadcast that the deleted user left this server
-          await broadcastMemberLeft(targetId, action.serverId);
-
+          // (member:left for the transferred server is broadcast by
+          // deleteUserAccount, which re-reads the surviving memberships.)
         } else {
           // action === 'delete' — clean up and delete the server (voice cleanup
           // fans out to every node; mediasoup objects are node-local)
@@ -669,45 +659,10 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
         }
       }
 
-      // Notify non-owned servers that user left
-      for (const { serverId } of memberships) {
-        if (!ownedServerIds.has(serverId)) {
-          await broadcastMemberLeft(targetId, serverId);
-        }
-      }
-
-      // Force logout then disconnect active socket (works across all nodes)
-      await forceLogoutUser(targetId, 'Your account has been deleted');
-
-      // Secure channels: the DB cascade would silently reap the rows, but the
-      // members deserve events (created channels vanish from their sidebars,
-      // membership lists refresh). Best-effort, before the delete.
-      await purgeSecureChannelStateForAccount(targetId);
-
-      // E2E key material has no FK to User (except the key backup), so it would
-      // otherwise outlive the account it belongs to. One transaction with the
-      // delete: purging a user who then survives strands every device they own.
-      await prisma.$transaction(async (tx) => {
-        await purgeE2EMaterial(targetId, tx);
-        // cascade only removes ServerMember records for transferred servers
-        await tx.user.delete({ where: { id: targetId } });
-      },
-        {
-          // Deleting a user cascades across ~36 relations (messages,
-          // reactions, reads, conversations, reports, tickets, themes…) plus
-          // six E2E deletes. Prisma's default 5s interactive budget is a
-          // deadline these statements never had before they shared a
-          // transaction, and blowing it on a heavy account would roll the
-          // whole deletion back — after the account's servers were already
-          // gone, since those are not part of this transaction.
-          timeout: 60_000,
-          maxWait: 10_000,
-        });
-
-      if (target.avatarUrl) {
-        await deleteFromS3(target.avatarUrl).catch((err) =>
-          console.warn('[Admin] Avatar cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
-      }
+      // Every owned server is now transferred or gone — the shared core takes
+      // it from here (member:left for the rest, sessions, secure channels,
+      // E2E purge + delete in one transaction, avatar blob after the row).
+      await deleteUserAccount(targetId, { reason: 'Your account has been deleted', logPrefix: '[Admin]' });
 
       logAuditEvent({
         actorId: req.user!.userId,
@@ -719,41 +674,8 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
       res.json({ success: true, message: 'User deleted' });
     } else {
-      // User owns no servers — proceed with original simple delete
-      const ownedServerIds = new Set<string>();
-
-      for (const { serverId } of memberships) {
-        if (!ownedServerIds.has(serverId)) {
-          await broadcastMemberLeft(targetId, serverId);
-        }
-      }
-
-      // Force logout then disconnect active socket (works across all nodes)
-      await forceLogoutUser(targetId, 'Your account has been deleted');
-
-      // Secure-channel cleanup (events for surviving members), before delete
-      await purgeSecureChannelStateForAccount(targetId);
-
-      await prisma.$transaction(async (tx) => {
-        await purgeE2EMaterial(targetId, tx);
-        await tx.user.delete({ where: { id: targetId } });
-      },
-        {
-          // Deleting a user cascades across ~36 relations (messages,
-          // reactions, reads, conversations, reports, tickets, themes…) plus
-          // six E2E deletes. Prisma's default 5s interactive budget is a
-          // deadline these statements never had before they shared a
-          // transaction, and blowing it on a heavy account would roll the
-          // whole deletion back — after the account's servers were already
-          // gone, since those are not part of this transaction.
-          timeout: 60_000,
-          maxWait: 10_000,
-        });
-
-      if (target.avatarUrl) {
-        await deleteFromS3(target.avatarUrl).catch((err) =>
-          console.warn('[Admin] Avatar cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
-      }
+      // User owns no servers — the shared core is the whole deletion
+      await deleteUserAccount(targetId, { reason: 'Your account has been deleted', logPrefix: '[Admin]' });
 
       logAuditEvent({
         actorId: req.user!.userId,

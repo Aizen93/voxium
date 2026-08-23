@@ -155,6 +155,20 @@
       "failedToUploadAvatar": "头像上传失败",
       "failedToUpdateProfile": "个人资料更新失败"
     },
+    "deleteAccount": {
+      "title": "删除账户",
+      "description": "永久删除您的账户、消息、个人资料和加密密钥。此操作无法撤销。",
+      "open": "删除我的账户…",
+      "warning": "与您账户相关的一切都将被删除。如果您拥有服务器，请先在各服务器的设置中转让或删除它们。",
+      "ownsServers": "您仍然拥有以下服务器。请转让或删除后重试：",
+      "password": "您的密码",
+      "totpCode": "双重认证验证码",
+      "typeToConfirm": "输入 {{word}} 以确认",
+      "confirmWord": "删除",
+      "confirm": "永久删除我的账户",
+      "deleting": "正在删除…",
+      "failed": "无法删除您的账户，请重试。"
+    },
     "security": {
       "changePassword": "修改密码",
       "currentPassword": "当前密码",

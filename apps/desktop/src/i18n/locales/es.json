@@ -155,6 +155,20 @@
       "failedToUploadAvatar": "No se pudo subir el avatar",
       "failedToUpdateProfile": "No se pudo actualizar el perfil"
     },
+    "deleteAccount": {
+      "title": "Eliminar cuenta",
+      "description": "Elimina permanentemente tu cuenta, tus mensajes, tu perfil y tus claves de cifrado. Esto no se puede deshacer.",
+      "open": "Eliminar mi cuenta…",
+      "warning": "Se eliminará todo lo vinculado a tu cuenta. Si eres propietario de servidores, transfiérelos o elimínalos primero, cada uno desde su configuración.",
+      "ownsServers": "Todavía eres propietario de estos servidores. Transfiérelos o elimínalos y vuelve a intentarlo:",
+      "password": "Tu contraseña",
+      "totpCode": "Código de autenticación en dos pasos",
+      "typeToConfirm": "Escribe {{word}} para confirmar",
+      "confirmWord": "ELIMINAR",
+      "confirm": "Eliminar mi cuenta permanentemente",
+      "deleting": "Eliminando…",
+      "failed": "No se pudo eliminar tu cuenta. Inténtalo de nuevo."
+    },
     "security": {
       "changePassword": "Cambiar contraseña",
       "currentPassword": "Contraseña actual",

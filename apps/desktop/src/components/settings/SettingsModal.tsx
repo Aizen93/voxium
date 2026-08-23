@@ -12,6 +12,7 @@ import { importTheme } from '../../services/themeEngine';
 import { ThemeEditor } from './ThemeEditor';
 import { ThemeBrowser } from './ThemeBrowser';
 import { E2EDevicesSection } from './E2EDevicesSection';
+import { DeleteAccountSection } from './DeleteAccountSection';
 import { api } from '../../services/api';
 import { SUPPORTED_LANGUAGES } from '../../i18n';
 import { getTranslatedError } from '../../utils/serverErrors';
@@ -608,6 +609,9 @@ function SecurityTab() {
           it has always been account-scoped — one device list, one account key,
           one backup (plan §4.5). */}
       <E2EDevicesSection />
+      {/* Last, and visually separate: the one action in here that cannot be
+          undone. */}
+      <DeleteAccountSection />
     </div>
   );
 }

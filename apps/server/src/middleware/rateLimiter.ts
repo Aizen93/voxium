@@ -79,6 +79,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   refresh:        { keyPrefix: 'rl:refresh',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Token Refresh' },
   changePassword: { keyPrefix: 'rl:chgpwd',   points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Change Password' },
   consent:        { keyPrefix: 'rl:consent',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId',   label: 'Accept legal documents' },
+  deleteAccount:  { keyPrefix: 'rl:delacct',  points: 5,   duration: 900, blockDuration: 900, keyType: 'userId', label: 'Delete own account' },
   totp:           { keyPrefix: 'rl:totp',     points: 10,  duration: 60,  blockDuration: 300, keyType: 'userId', label: 'TOTP Management' },
   messageSend:    { keyPrefix: 'rl:msg',       points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Send' },
   upload:         { keyPrefix: 'rl:upload',    points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Upload' },
@@ -551,6 +552,9 @@ export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);
 export const rateLimitRefresh = createMiddleware('refresh', byIp);
 export const rateLimitChangePassword = createMiddleware('changePassword', byIp);
 export const rateLimitConsent = createMiddleware('consent', byUserId);
+// Password guesses against the deletion endpoint are password guesses; keep
+// the budget as tight as the TOTP one.
+export const rateLimitDeleteAccount = createMiddleware('deleteAccount', byUserId);
 export const rateLimitMessageSend = createMiddleware('messageSend', byUserId);
 export const rateLimitUpload = createMiddleware('upload', byUserId);
 export const rateLimitFriendRequest = createMiddleware('friendRequest', byUserId);

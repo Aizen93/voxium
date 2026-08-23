@@ -126,6 +126,11 @@ export interface OutboundGroupSessionRecord {
 const VAULT_DB_PREFIX = 'voxium-e2e-v2-';
 const SUPERSEDED_DB_PREFIXES = ['voxium-e2e-'];
 
+/** The IndexedDB name of an account's vault on this device. */
+export function vaultDbName(userId: string, namespace?: string): string {
+  return `${VAULT_DB_PREFIX}${userId}${namespace ? `-${namespace}` : ''}`;
+}
+
 /** Best-effort removal of pre-cutover vaults. Never blocks opening the new one. */
 function dropSupersededVaults(userId: string, namespace?: string): void {
   const suffix = `${userId}${namespace ? `-${namespace}` : ''}`;
@@ -199,7 +204,7 @@ export class E2EVault {
 
   async open(): Promise<void> {
     if (this.db) return;
-    const name = `${VAULT_DB_PREFIX}${this.userId}${this.namespace ? `-${this.namespace}` : ''}`;
+    const name = vaultDbName(this.userId, this.namespace);
     // Anything under an older prefix belongs to key material the server no
     // longer has (the always-on cutover truncated it), so it can only produce
     // sessions that decrypt nothing. Dropped rather than left orphaned: it is

@@ -58,6 +58,7 @@ import {
   type OutboundGroupSessionRecord,
   type PickleKeyProvider,
   type PinnedIdentity,
+  vaultDbName,
 } from './vault';
 
 interface OneTimeKeyPair {
@@ -3093,4 +3094,21 @@ export function disposeE2EService(): void {
   activeService?.dispose();
   activeService = null;
   activeUserId = null;
+}
+
+/**
+ * Drop this device's local E2E state for an account that no longer exists.
+ * Logout deliberately KEEPS the vault (device keys persist like a trusted
+ * device), but after self-service deletion the server has purged every key
+ * this vault pairs with, so what remains is pickled key material and a
+ * plaintext cache with no owner. Best effort; the vault name is the one
+ * E2EVault.open() builds.
+ */
+export function forgetLocalE2EState(userId: string): void {
+  if (activeUserId === userId) disposeE2EService();
+  try {
+    indexedDB.deleteDatabase(vaultDbName(userId));
+  } catch (err) {
+    console.warn('e2e: could not drop the local vault of the deleted account:', errText(err));
+  }
 }

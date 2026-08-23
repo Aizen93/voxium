@@ -12,6 +12,7 @@ import { getTranslatedError } from '../utils/serverErrors';
 import type { User, RegistrationConsent } from '@voxium/shared';
 import { PowExpiredError, PowAbortedError } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../services/powSolver';
+import { forgetLocalE2EState } from '../services/e2e/e2eService';
 
 interface AuthState {
   user: User | null;
@@ -58,6 +59,11 @@ interface AuthState {
    *  account (one that predates consent-at-signup). Clears the gate the
    *  server holds on every functional route and the socket, then connects. */
   acceptConsent: (consent: RegistrationConsent) => Promise<void>;
+  /** Self-service erasure. Re-authenticates with the password (and the TOTP
+   *  code when 2FA is on); the server answers 409 with `ownedServers` while
+   *  the account still owns any. On success the session is gone server-side
+   *  already — this just cleans up locally. */
+  deleteAccount: (password: string, totpCode?: string) => Promise<void>;
   setupTOTP: () => Promise<{ secret: string; qrCodeDataUrl: string }>;
   enableTOTP: (code: string) => Promise<string[]>;
   disableTOTP: (code: string) => Promise<void>;
@@ -312,6 +318,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       setTokens(data.data.accessToken, data.data.refreshToken);
     }
     return data.message;
+  },
+
+  deleteAccount: async (password, totpCode) => {
+    const userId = get().user?.id;
+    await api.delete('/auth/account', { data: { password, ...(totpCode ? { totpCode } : {}) } });
+    // The server has purged the account and disconnected its sockets; what is
+    // left is this device's copy of it. Same cleanup as logout, plus the E2E
+    // vault logout deliberately keeps — every key it pairs with is gone.
+    get().logout();
+    if (userId) forgetLocalE2EState(userId);
+    localStorage.removeItem('voxium_trusted_device');
   },
 
   acceptConsent: async (consent) => {

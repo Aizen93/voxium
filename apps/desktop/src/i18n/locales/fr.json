@@ -155,6 +155,20 @@
       "failedToUploadAvatar": "Impossible de téléverser l'avatar",
       "failedToUpdateProfile": "Impossible de mettre à jour le profil"
     },
+    "deleteAccount": {
+      "title": "Supprimer le compte",
+      "description": "Supprime définitivement votre compte, vos messages, votre profil et vos clés de chiffrement. Cette action est irréversible.",
+      "open": "Supprimer mon compte…",
+      "warning": "Tout ce qui est lié à votre compte sera supprimé. Si vous possédez des serveurs, transférez-les ou supprimez-les d’abord, chacun depuis ses paramètres.",
+      "ownsServers": "Vous possédez encore ces serveurs. Transférez-les ou supprimez-les, puis réessayez :",
+      "password": "Votre mot de passe",
+      "totpCode": "Code d’authentification à deux facteurs",
+      "typeToConfirm": "Saisissez {{word}} pour confirmer",
+      "confirmWord": "SUPPRIMER",
+      "confirm": "Supprimer définitivement mon compte",
+      "deleting": "Suppression…",
+      "failed": "Impossible de supprimer votre compte. Veuillez réessayer."
+    },
     "security": {
       "changePassword": "Changer le mot de passe",
       "currentPassword": "Mot de passe actuel",

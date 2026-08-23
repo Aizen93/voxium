@@ -156,6 +156,20 @@
       "failedToUploadAvatar": "Failed to upload avatar",
       "failedToUpdateProfile": "Failed to update profile"
     },
+    "deleteAccount": {
+      "title": "Delete account",
+      "description": "Permanently delete your account, your messages, your profile and your encryption keys. This cannot be undone.",
+      "open": "Delete my account…",
+      "warning": "This deletes everything tied to your account. If you own servers, transfer or delete them first — each one from its own settings.",
+      "ownsServers": "You still own these servers. Transfer or delete them, then try again:",
+      "password": "Your password",
+      "totpCode": "Two-factor authentication code",
+      "typeToConfirm": "Type {{word}} to confirm",
+      "confirmWord": "DELETE",
+      "confirm": "Delete my account permanently",
+      "deleting": "Deleting…",
+      "failed": "Could not delete your account. Please try again."
+    },
     "security": {
       "changePassword": "Change Password",
       "currentPassword": "Current Password",

@@ -155,6 +155,20 @@
       "failedToUploadAvatar": "아바타 업로드에 실패했습니다",
       "failedToUpdateProfile": "프로필 업데이트에 실패했습니다"
     },
+    "deleteAccount": {
+      "title": "계정 삭제",
+      "description": "계정, 메시지, 프로필, 암호화 키를 영구적으로 삭제합니다. 되돌릴 수 없습니다.",
+      "open": "내 계정 삭제…",
+      "warning": "계정과 관련된 모든 것이 삭제됩니다. 서버를 소유하고 있다면 먼저 각 서버의 설정에서 양도하거나 삭제하세요.",
+      "ownsServers": "아직 다음 서버를 소유하고 있습니다. 양도하거나 삭제한 뒤 다시 시도하세요:",
+      "password": "비밀번호",
+      "totpCode": "2단계 인증 코드",
+      "typeToConfirm": "확인하려면 {{word}}을(를) 입력하세요",
+      "confirmWord": "삭제",
+      "confirm": "내 계정을 영구적으로 삭제",
+      "deleting": "삭제 중…",
+      "failed": "계정을 삭제하지 못했습니다. 다시 시도해 주세요."
+    },
     "security": {
       "changePassword": "비밀번호 변경",
       "currentPassword": "현재 비밀번호",

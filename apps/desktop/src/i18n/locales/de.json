@@ -155,6 +155,20 @@
       "failedToUploadAvatar": "Avatar konnte nicht hochgeladen werden",
       "failedToUpdateProfile": "Profil konnte nicht aktualisiert werden"
     },
+    "deleteAccount": {
+      "title": "Konto löschen",
+      "description": "Löscht dein Konto, deine Nachrichten, dein Profil und deine Verschlüsselungsschlüssel dauerhaft. Das lässt sich nicht rückgängig machen.",
+      "open": "Mein Konto löschen…",
+      "warning": "Alles, was zu deinem Konto gehört, wird gelöscht. Wenn du Server besitzt, übertrage oder lösche sie zuerst – jeden in seinen eigenen Einstellungen.",
+      "ownsServers": "Du besitzt noch diese Server. Übertrage oder lösche sie und versuche es dann erneut:",
+      "password": "Dein Passwort",
+      "totpCode": "Code der Zwei-Faktor-Authentifizierung",
+      "typeToConfirm": "Gib {{word}} ein, um zu bestätigen",
+      "confirmWord": "LÖSCHEN",
+      "confirm": "Mein Konto dauerhaft löschen",
+      "deleting": "Wird gelöscht…",
+      "failed": "Dein Konto konnte nicht gelöscht werden. Bitte versuche es erneut."
+    },
     "security": {
       "changePassword": "Passwort ändern",
       "currentPassword": "Aktuelles Passwort",
