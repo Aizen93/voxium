@@ -8,7 +8,7 @@ import { isFeatureEnabled } from '../utils/featureFlags';
 import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerRouters, getRouter } from '../mediasoup/mediasoupManager';
 import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { getRedis, NODE_ID, isNodeAlive, socketExistsInCluster } from '../utils/redis';
+import { getRedis, NODE_ID, isNodeAlive, socketExistsInCluster, liveNodeCounts, liveClusterSocketIds } from '../utils/redis';
 import { reapVoiceChannelMirror, reapDeadOwnerChannelMirror } from '../utils/voiceMirror';
 import { annotationKey, deleteAnnotationState, getAnnotationState } from '../utils/annotationState';
 import {
@@ -1573,29 +1573,61 @@ export function evictUserFromChannelVoice(
 export async function reapOrphanedRemoteParticipants(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
 ): Promise<void> {
+  // Candidates FIRST, liveness snapshot AFTER — the same ordering as the boot
+  // sweeps, for the same reason: a participant who joins between the two is
+  // absent from the candidate list rather than from the snapshot, which is
+  // the direction that never reaps someone alive.
+  const candidates: Array<{ channelId: string; uid: string; media: UserMediaState }> = [];
   for (const [channelId, users] of [...voiceChannelUsers]) {
     for (const [uid, media] of [...users.entries()]) {
       if (io.sockets.sockets.get(media.socketId)) continue; // local & alive
-      let exists: boolean;
+      candidates.push({ channelId, uid, media });
+    }
+  }
+  if (candidates.length === 0) return;
+
+  // ONE adapter snapshot for the whole sweep, and a REFUSED one when the
+  // adapter cannot see every live peer. The per-socket fetchSockets this used
+  // to do has the boot sweeps' trap: when a peer's Redis SUBSCRIBER connection
+  // is mid-reconnect while its heartbeat (data connection) is fresh, the
+  // adapter answers with local sockets only, silently — so every relayed
+  // participant that peer hosts read as dead and was evicted from its call.
+  // Skipping a tick costs nothing: a genuinely dead socket is still dead at
+  // the next one.
+  let live: Set<string> | null;
+  try {
+    const { peers } = await liveNodeCounts();
+    live = await liveClusterSocketIds(io, peers);
+  } catch (err) {
+    console.warn('[Voice] Cluster socket snapshot unusable — skipping this orphan sweep:', err instanceof Error ? err.message : err);
+    return;
+  }
+
+  for (const { channelId, uid, media } of candidates) {
+    let exists: boolean;
+    if (live) {
+      exists = live.has(media.socketId);
+    } else {
+      // Adapter without allRooms (a hand-rolled io): legacy per-socket path
       try {
         exists = await socketExistsInCluster(io, media.socketId);
       } catch (err) {
         console.warn('[Voice] Cluster socket lookup failed during orphan sweep:', err);
         continue;
       }
-      if (exists) continue;
-      console.warn(`[Voice] Reaping orphaned participant ${uid} from ${channelId} (socket ${media.socketId} gone cluster-wide)`);
-      const shim: VoiceSocket = {
-        id: media.socketId,
-        data: { userId: uid, voiceChannelId: channelId },
-        emit: (() => true) as VoiceSocket['emit'],
-        join: () => { /* dead socket */ },
-        leave: () => { /* dead socket */ },
-      };
-      leaveCurrentVoiceChannel(io, shim, uid);
-      shimHandlerTables.delete(media.socketId);
-      dropShim(media.socketId);
     }
+    if (exists) continue;
+    console.warn(`[Voice] Reaping orphaned participant ${uid} from ${channelId} (socket ${media.socketId} gone cluster-wide)`);
+    const shim: VoiceSocket = {
+      id: media.socketId,
+      data: { userId: uid, voiceChannelId: channelId },
+      emit: (() => true) as VoiceSocket['emit'],
+      join: () => { /* dead socket */ },
+      leave: () => { /* dead socket */ },
+    };
+    leaveCurrentVoiceChannel(io, shim, uid);
+    shimHandlerTables.delete(media.socketId);
+    dropShim(media.socketId);
   }
 }
 

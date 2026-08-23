@@ -114,6 +114,10 @@ vi.mock('../../utils/redis', () => ({
   NODE_ID: vi.fn().mockReturnValue('test-node-1'),
   isNodeAlive: vi.fn().mockResolvedValue(false),
   socketExistsInCluster: vi.fn().mockResolvedValue(false),
+  liveNodeCounts: vi.fn().mockResolvedValue({ total: 1, peers: 0 }),
+  // Mirrors the real contract: null when the io has no adapter snapshot
+  // (the test io has no of()), a Set when it does, a throw when it is partial
+  liveClusterSocketIds: vi.fn().mockResolvedValue(null),
 }));
 
 // Mock the relay layer — routing decisions are tested here; the relay transport
@@ -933,7 +937,7 @@ describe('voiceHandler — server-muted blocks self-unmute (voice:mute)', () => 
 
 import { hasChannelPermission } from '../../utils/permissionCalculator';
 import { createWebRtcTransport } from '../../mediasoup/mediasoupManager';
-import { isNodeAlive as redisIsNodeAlive, socketExistsInCluster as redisSocketExists } from '../../utils/redis';
+import { isNodeAlive as redisIsNodeAlive, socketExistsInCluster as redisSocketExists, liveNodeCounts as redisLiveNodeCounts, liveClusterSocketIds as redisLiveSocketIds } from '../../utils/redis';
 
 /** All transports created since the last vi.clearAllMocks(), in creation order:
  *  [A.send, A.recv, B.send, B.recv, ...] per join. */
@@ -1748,6 +1752,67 @@ describe('voiceHandler — reapOrphanedRemoteParticipants (HIGH-15)', () => {
     expect(io._emit).not.toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-orph-3', userId: 'orph-3' });
     // Clean up for other tests
     socket.data.voiceChannelId = 'ch-orph-3';
+    handlers.get('voice:leave')!();
+  });
+
+  // The per-socket fetchSockets had the boot sweeps' trap: a peer whose Redis
+  // SUBSCRIBER connection is mid-reconnect, heartbeat still fresh, is invisible
+  // to the adapter, which answers with LOCAL sockets only — so every relayed
+  // participant that peer hosted read as dead and was evicted from its call.
+  it("skips the whole sweep when the cluster snapshot is refused, rather than evicting a live peer's participants", async () => {
+    vi.mocked(redisLiveNodeCounts).mockResolvedValueOnce({ total: 2, peers: 1 });
+    vi.mocked(redisLiveSocketIds).mockRejectedValueOnce(new Error('adapter sees 1 server(s) but 1 peer heartbeat(s) are live'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('orph-4', 'sock-orph-4');
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-orph-4');
+    io._emit.mockClear();
+
+    await reapOrphanedRemoteParticipants(io as any);
+
+    expect(redisLiveSocketIds).toHaveBeenCalledWith(io, 1);
+    expect(io._emit).not.toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-orph-4', userId: 'orph-4' });
+    expect(redisSocketExists).not.toHaveBeenCalled(); // no per-socket fallback either
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('skipping this orphan sweep'), expect.anything());
+    warn.mockRestore();
+    socket.data.voiceChannelId = 'ch-orph-4';
+    handlers.get('voice:leave')!();
+  });
+
+  it('uses ONE snapshot for the whole sweep, reaping only sockets absent from it', async () => {
+    vi.mocked(redisLiveNodeCounts).mockResolvedValueOnce({ total: 2, peers: 1 });
+    vi.mocked(redisLiveSocketIds).mockResolvedValueOnce(new Set(['sock-orph-5b', 'user:orph-5b']));
+    const io = createMockIO();
+    const a = createMockSocket('orph-5a', 'sock-orph-5a');
+    const b = createMockSocket('orph-5b', 'sock-orph-5b');
+    handleVoiceEvents(io as any, a.socket as any);
+    handleVoiceEvents(io as any, b.socket as any);
+    await a.handlers.get('voice:join')!('ch-orph-5');
+    await b.handlers.get('voice:join')!('ch-orph-5');
+    io._emit.mockClear();
+
+    await reapOrphanedRemoteParticipants(io as any);
+
+    expect(redisLiveSocketIds).toHaveBeenCalledTimes(1);
+    expect(redisSocketExists).not.toHaveBeenCalled();
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-orph-5', userId: 'orph-5a' });
+    expect(io._emit).not.toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-orph-5', userId: 'orph-5b' });
+    b.socket.data.voiceChannelId = 'ch-orph-5';
+    b.handlers.get('voice:leave')!();
+  });
+
+  it('does not touch Redis at all when every participant is local', async () => {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket('orph-6', 'sock-orph-6');
+    io.sockets.sockets.set('sock-orph-6', socket);
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!('ch-orph-6');
+    vi.mocked(redisLiveNodeCounts).mockClear();
+
+    await reapOrphanedRemoteParticipants(io as any);
+
+    expect(redisLiveNodeCounts).not.toHaveBeenCalled();
     handlers.get('voice:leave')!();
   });
 });
