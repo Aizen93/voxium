@@ -30,7 +30,16 @@ function mockCtx() {
 
 function mockSurface() {
   const canvas = { width: 0, height: 0 };
-  const ctx = { drawImage: vi.fn(), fillRect: vi.fn(), fillStyle: '', imageSmoothingEnabled: true };
+  const calls: string[] = [];
+  const fills: string[] = [];
+  const ctx = {
+    calls,
+    fills,
+    drawImage: vi.fn((..._args: unknown[]) => { calls.push('drawImage'); }),
+    fillRect: vi.fn((..._args: unknown[]) => { calls.push('fillRect'); fills.push(String(ctx.fillStyle)); }),
+    fillStyle: '' as string,
+    imageSmoothingEnabled: true,
+  };
   return { canvas, ctx };
 }
 
@@ -117,7 +126,12 @@ describe('renderCompositeFrame', () => {
     // only darken) and drawn with smoothing ON (bilinear 2× = exact box mean)
     expect(scratch.a.ctx.drawImage).toHaveBeenCalledTimes(3);
     expect(scratch.b.ctx.drawImage).toHaveBeenCalledTimes(2);
-    expect(scratch.a.ctx.fillRect).toHaveBeenCalledTimes(3);
+    // Each surface is pre-filled BLACK, and always BEFORE its draw — that is
+    // what makes an edge cell darken instead of leak
+    expect(scratch.a.ctx.calls).toEqual(['fillRect', 'drawImage', 'fillRect', 'drawImage', 'fillRect', 'drawImage']);
+    expect(scratch.b.ctx.calls).toEqual(['fillRect', 'drawImage', 'fillRect', 'drawImage']);
+    expect(scratch.a.ctx.fills).toEqual(['#000000', '#000000', '#000000']);
+    expect(scratch.b.ctx.fills).toEqual(['#000000', '#000000']);
     expect(scratch.a.ctx.imageSmoothingEnabled).toBe(true);
     // First halving samples the SOURCE-ALIGNED cell range, not the mask rect
     expect(scratch.a.ctx.drawImage.mock.calls[0].slice(1, 5)).toEqual([CELLS.x, CELLS.y, CELLS.w, CELLS.h]);
@@ -132,6 +146,27 @@ describe('renderCompositeFrame', () => {
     // The backstop covers the (padded) mask rect
     expect(ctx.fillRect.mock.calls[0]).toEqual([479, 269, 962, 272]);
     expect(ctx.fillStyle).toBe('#000000');
+  });
+
+  it('a mask overhanging a non-multiple-of-32 source clamps its sample to real pixels; the rest is the black backstop', () => {
+    // Source 1000×700: the lattice rounds up to 1024×704, but sampling must
+    // stop at the source edge — the overhang darkens, never wraps or leaks
+    const smallVideo = { videoWidth: 1000, videoHeight: 700 };
+    const smallCanvas = { width: 1000, height: 700 };
+    const ctx = mockCtx();
+    const scratch = mockScratch();
+    // mask at x 0.9, w 0.2 of 1000 → padded src x 899, w 202 (ends at 1101, past the edge)
+    renderCompositeFrame(ctx, smallVideo, smallCanvas, [mask('a', { style: 'pixelate', x: 0.9, y: 0.5, w: 0.2, h: 0.2 })], noImage, scratch);
+    const first = scratch.a.ctx.drawImage.mock.calls[0] as unknown as number[];
+    // Cells x 896..1024 (the lattice), but the SAMPLE is clamped to 1000
+    expect(first.slice(1, 3)).toEqual([896, 320]); // padded y 349 floors to cell 320
+    expect(first[3]).toBe(1000 - 896); // sample width stops at the source edge
+    // …and lands proportionally in the half-size target so blocks stay aligned
+    expect(first[7]).toBeCloseTo((1000 - 896) / 2);
+    // The upscale still covers the full lattice span; the backstop covered the rest
+    const up = ctx.drawImage.mock.calls[1] as unknown as number[];
+    expect(up.slice(5, 7)).toEqual([896, 320]);
+    expect(ctx.calls).toEqual(['drawImage', 'save', 'clip', 'fillRect', 'drawImage', 'restore']);
   });
 
   it('the lattice is anchored to the SOURCE grid: a nudge within a cell samples the very same cells, and every range is grid-aligned', () => {

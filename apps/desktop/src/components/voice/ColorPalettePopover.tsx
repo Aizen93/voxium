@@ -34,10 +34,13 @@ export function ColorPalettePopover() {
   const place = () => {
     const r = buttonRef.current?.getBoundingClientRect();
     if (!r) return;
+    // Measured when already rendered (place runs from a layout effect and
+    // from resize while open); the estimate only covers the first paint
+    const height = popoverRef.current?.offsetHeight || 240;
     setPos({
       left: Math.max(8, Math.min(window.innerWidth - 8 - 232, r.left)),
       // Below the button, unless a short window would push it off-screen
-      top: Math.max(8, Math.min(window.innerHeight - 8 - 240, r.bottom + 6)),
+      top: Math.max(8, Math.min(window.innerHeight - 8 - height, r.bottom + 6)),
     });
   };
 

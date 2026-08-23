@@ -282,6 +282,23 @@ describe('AnnotationToolbar', () => {
     const note = container.querySelector('[data-testid="mask-style-cosmetic-note"]')!;
     expect(note).not.toBeNull();
     expect(note.textContent).toBe('voice.annotations.maskStyleCosmeticShort');
+
+    // The warning follows the LIVE masks, not the picker: with a pixelate
+    // mask on screen, flipping the default back to Cover or switching tools
+    // must not resurrect the privacy promise
+    act(() => {
+      useAnnotationStore.setState({ masks: [{ id: 'm1', x: 0.1, y: 0.1, w: 0.2, h: 0.2, style: 'pixelate' }] });
+      useAnnotationStore.getState().setMaskStyle('cover');
+    });
+    expect(container.querySelector('[data-tool="mask"]')!.getAttribute('title')).toContain('voice.annotations.maskStyleCosmetic');
+    expect(container.querySelector('[data-testid="mask-style-cosmetic-note"]')).not.toBeNull();
+    act(() => { useAnnotationStore.getState().setActiveTool('pen'); });
+    expect(container.querySelector('[data-testid="mask-style-cosmetic-note"]')).not.toBeNull();
+    // Removing the cosmetic mask restores the promise
+    act(() => { useAnnotationStore.setState({ masks: [] }); });
+    expect(container.querySelector('[data-testid="mask-style-cosmetic-note"]')).toBeNull();
+    act(() => { useAnnotationStore.getState().setActiveTool('mask'); });
+    expect(container.querySelector('[data-tool="mask"]')!.getAttribute('title')).toContain('voice.annotations.maskPrivacyHint');
     useAnnotationStore.setState({ maskStyle: 'cover' });
   });
 

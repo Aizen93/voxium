@@ -71,10 +71,13 @@ function blackBox(ctx: StyledMaskCtx, dst: MaskPaintArgs['dst']): void {
   ctx.fillRect(dst.x, dst.y, dst.w, dst.h);
 }
 
-/** Size a surface and pre-fill it black (resizing clears to transparent). */
+/** Size a surface and pre-fill it black. Assigning width/height reallocates
+ *  the backing store even for the same value — at 5 surfaces per mask per
+ *  frame that was megabytes of churn per second — so only resize on change;
+ *  the black fill alone fully overwrites stale content. */
 function prepare(s: ScratchSurface, w: number, h: number): void {
-  s.canvas.width = w;
-  s.canvas.height = h;
+  if (s.canvas.width !== w) s.canvas.width = w;
+  if (s.canvas.height !== h) s.canvas.height = h;
   s.ctx.imageSmoothingEnabled = true;
   s.ctx.fillStyle = '#000000';
   s.ctx.fillRect(0, 0, w, h);
@@ -159,6 +162,7 @@ export function paintStyledMask(style: MaskStyle, args: MaskPaintArgs): MaskStyl
       // translucent at its edges and the raw frame would show through.
       if (typeof ctx.filter !== 'string') {
         ctx.restore();
+        saved = false; // balanced — the catch must not restore a second time
         blackBox(ctx, dst);
         return 'cover';
       }

@@ -55,6 +55,11 @@ export function AnnotationToolbar() {
   });
   const maskRelevant = useAnnotationStore((s) => s.activeTool === 'mask') || selectedMaskStyle !== null;
   const shownMaskStyle = selectedMaskStyle ?? maskStyle;
+  // The honesty predicate follows what is ON SCREEN, not the default for the
+  // next mask: a live pixelate mask keeps shipping a low-pass of its region
+  // whatever the picker shows, and the warning must outlive the tool switch
+  const anyCosmeticMask = useAnnotationStore((s) => s.masks.some((m) => !m.src && (m.style ?? 'cover') !== 'cover'));
+  const cosmeticActive = shownMaskStyle !== 'cover' || anyCosmeticMask;
   // The size segment shows while a caption/badge is being placed or is selected
   const sizeRelevant = useAnnotationStore((s) =>
     s.activeTool === 'text' || s.activeTool === 'callout'
@@ -125,10 +130,11 @@ export function AnnotationToolbar() {
       </div>
 
       {/* Privacy mask — separated: the one tool enforced at the source. The
-          "never leaves this device" promise is only true of Cover: with a
-          cosmetic style selected the tooltip says so instead. */}
+          "never leaves this device" promise holds only while every live mask
+          is Cover AND the next one will be: otherwise the tooltip carries the
+          cosmetic warning instead. */}
       <div className="flex items-center gap-0.5 border-l border-vox-border pl-2">
-        {toolButton(MASK_TOOL_DEF, shownMaskStyle === 'cover' ? t('voice.annotations.maskPrivacyHint') : t('voice.annotations.maskStyleCosmetic'))}
+        {toolButton(MASK_TOOL_DEF, cosmeticActive ? t('voice.annotations.maskStyleCosmetic') : t('voice.annotations.maskPrivacyHint'))}
         {maskRelevant && (
           <div className="ml-1 flex items-center gap-0.5" data-testid="mask-style-picker">
             {MASK_STYLES.map(({ style, labelKey }) => (
@@ -146,16 +152,16 @@ export function AnnotationToolbar() {
                 {t(labelKey)}
               </button>
             ))}
-            {shownMaskStyle !== 'cover' && (
-              <span
-                className="ml-1 text-[10px] font-medium uppercase tracking-wide text-vox-accent-warning"
-                title={t('voice.annotations.maskStyleCosmetic')}
-                data-testid="mask-style-cosmetic-note"
-              >
-                {t('voice.annotations.maskStyleCosmeticShort')}
-              </span>
-            )}
           </div>
+        )}
+        {cosmeticActive && (
+          <span
+            className="ml-1 text-[10px] font-medium uppercase tracking-wide text-vox-accent-warning"
+            title={t('voice.annotations.maskStyleCosmetic')}
+            data-testid="mask-style-cosmetic-note"
+          >
+            {t('voice.annotations.maskStyleCosmeticShort')}
+          </span>
         )}
       </div>
 
