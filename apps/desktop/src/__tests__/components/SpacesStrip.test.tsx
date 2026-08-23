@@ -148,6 +148,20 @@ describe('SpacesStrip', () => {
     expect(tabByName('Server 1')!.textContent).toContain('7');
   });
 
+  it('keeps the unread badge inside the scrollable rail instead of clipping its top', () => {
+    // The badge hangs 4px above its 34px tab. The rail is overflow-x:auto,
+    // which forces overflow-y to auto too, so without vertical padding the
+    // rail clipped the badge's top edge — a "4" with its head cut off.
+    unread = { s1: 4 };
+    render();
+    const rail = strip().querySelector('[data-testid="spaces-rail"]')!;
+    expect(rail.className).toMatch(/\boverflow-x-auto\b/);
+    expect(rail.className).toMatch(/\bpy-1\b/);
+    const badge = tabByName('Server 1')!.querySelector('[data-testid="unread-badge"]')!;
+    expect(badge.textContent).toBe('4');
+    expect(badge.className.split(' ')).toContain('-top-1'); // the overhang the padding exists for
+  });
+
   it('opens the spaces menu from Find a space', () => {
     render();
     click(strip().querySelector('[data-testid="server-switcher-open"]')!);

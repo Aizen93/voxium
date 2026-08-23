@@ -194,7 +194,7 @@ export function SpacesStrip() {
           <img src="/logo.svg" alt="" className="h-6 w-6 rounded-[8px]" draggable={false} />
           {!activeServerId && <span className="text-[13px]">{t('dm.title')}</span>}
           {activeServerId && totalDMUnread > 0 && (
-            <span className="absolute -right-1 -top-1 flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-vox-accent-primary px-1 text-[9px] font-bold text-vox-on-accent ring-2 ring-vox-bg-primary">
+            <span className="absolute -right-1 -top-1 flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-vox-accent-primary px-1 text-[9px] font-bold text-vox-on-accent ring-2 ring-vox-bg-primary" data-testid="unread-badge">
               {totalDMUnread > 99 ? '99+' : totalDMUnread}
             </span>
           )}
@@ -204,7 +204,15 @@ export function SpacesStrip() {
 
         {/* Space tabs + overflow — this region's width decides how many fit */}
         <div ref={tabsAreaRef} className="flex min-w-0 flex-1 items-center gap-1.5">
-          <div className="rail-scroll flex min-w-0 items-center gap-1.5 overflow-x-auto">
+          {/* py-1: overflow-x:auto forces overflow-y to auto as well, so this box
+              clips anything outside the 34px tabs — and the unread badge hangs
+              4px above its tab. Four pixels of padding on each side keep the
+              badge inside the scrollable box; the 42px result still centres in
+              the 48px strip. */}
+          <div
+            className="rail-scroll flex min-w-0 items-center gap-1.5 overflow-x-auto py-1"
+            data-testid="spaces-rail"
+          >
             {visible.map((server) => {
               const active = activeServerId === server.id;
               const unread = serverUnreadCounts[server.id] || 0;
@@ -247,7 +255,7 @@ export function SpacesStrip() {
                   )}
                   {!active && live && <LiveBars />}
                   {!active && unread > 0 && (
-                    <span className="absolute -right-1 -top-1 flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-vox-accent-primary px-1 text-[9px] font-bold text-vox-on-accent ring-2 ring-vox-bg-primary">
+                    <span className="absolute -right-1 -top-1 flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-vox-accent-primary px-1 text-[9px] font-bold text-vox-on-accent ring-2 ring-vox-bg-primary" data-testid="unread-badge">
                       {unread > 99 ? '99+' : unread}
                     </span>
                   )}
