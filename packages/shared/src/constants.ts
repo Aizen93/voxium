@@ -115,6 +115,10 @@ export const ANNOTATION_BYTES_PER_MIN = 2_000_000;
 export const ANNOTATION_ACK_TIMEOUT_MS = 3_000;
 /** Undo/redo history depth on the sharer (entries, one per gesture). */
 export const ANNOTATION_HISTORY_MAX = 100;
+/** Serialized chars the history may retain across both stacks — one undone
+ *  `clear` holds every object it removed, images included, so an entry cap
+ *  alone could pin tens of MB next to a running screen compositor. */
+export const ANNOTATION_HISTORY_BYTES_MAX = 8_000_000;
 
 // ─── voice:annotation:live — the ephemeral sibling of :ops ───────────────────
 // Fire-and-forget, no Redis, no rev, no ack, no hydration. Each kind has its

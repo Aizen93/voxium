@@ -216,7 +216,9 @@ function isValidOp(op: unknown, v2: boolean): op is AnnotationOp {
   if (!op || typeof op !== 'object') return false;
   const o = op as Record<string, unknown>;
   switch (o.t) {
-    case 'add': return isValidObject(o.obj, v2);
+    case 'add':
+      return isValidObject(o.obj, v2)
+        && (o.at === undefined || (v2 && typeof o.at === 'number' && Number.isInteger(o.at) && o.at >= 0 && o.at <= ANNOTATION_MAX_OBJECTS));
     case 'append':
       // Same per-op point bound as 'add' — without it a single append sized to
       // the batch cap forces a full parse/spread/serialize cycle before the
@@ -260,7 +262,7 @@ function translatedObjectsWithinBounds(scene: AnnotationScene, ops: AnnotationOp
  * reducers keep it (spread-through), so scenes carry ownership from day one.
  */
 function stampOwner(ops: AnnotationOp[], userId: string): AnnotationOp[] {
-  return ops.map((op) => (op.t === 'add' ? { t: 'add', obj: { ...op.obj, by: userId } } : op));
+  return ops.map((op) => (op.t === 'add' ? { ...op, obj: { ...op.obj, by: userId } } : op));
 }
 
 function sceneWithinLimits(scene: AnnotationScene): boolean {
@@ -371,13 +373,13 @@ export function handleAnnotationEvents(
       } else if (!socket.rooms.has(`voice:${channelId}`)) {
         return;
       }
+      // To the whole voice room, sender excluded (it local-echoes, exactly
+      // like :ops) — a snapshot notice is seen by everyone in the share, not
+      // only the sharer.
+      socket.to(`voice:${channelId}`).emit('voice:annotation:live', { channelId, userId, ev });
     } catch (err) {
-      console.warn('[Annotations] live-event authorization failed:', err instanceof Error ? err.message : err);
-      return;
+      console.warn('[Annotations] live event dropped:', err instanceof Error ? err.message : err);
     }
-
-    // Sender excluded — it local-echoes, exactly like :ops.
-    socket.to(`voice:${channelId}`).emit('voice:annotation:live', { channelId, userId, ev });
   });
 
   socket.on('voice:annotation:ops', async (data, callback) => {

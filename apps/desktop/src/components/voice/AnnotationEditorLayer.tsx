@@ -80,6 +80,13 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
 
   const canUse = (tool: AnnotationEditorTool) => capabilities.tools.has(tool);
 
+  // A drag opens a gesture on pointerdown and closes it on pointerup. If the
+  // layer unmounts in between (panel collapse, view-mode toggle, the video
+  // rect going to zero) no pointerup ever arrives, and the gesture — which is
+  // store-level state — would swallow everything drawn afterwards into one
+  // undo step. Close it with the layer.
+  useEffect(() => () => useAnnotationStore.getState().endGesture(), []);
+
   const text = useTextDraft((draft, value) => {
     if (!value) return;
     const store = useAnnotationStore.getState();

@@ -127,14 +127,19 @@ describe('wire v2 — new object kinds', () => {
 // ─── Patches and translate ──────────────────────────────────────────────────
 
 describe('wire v2 — patches and translate', () => {
-  it('accepts width / n / x1..y2 patch keys within bounds', async () => {
+  it('accepts width / n / x1..y2 patch keys within bounds — and the reducer applies them', async () => {
     const { opsHandler } = setup();
+    seedRedis(SHARER, { rev: 1, sharerUserId: SHARER, scene: { objects: [stroke() as AnnotationObject, arrow() as AnnotationObject, callout() as AnnotationObject] } });
     const ack = await send(opsHandler, [
       { t: 'update', id: 'st1', patch: { width: 0.01 } },
       { t: 'update', id: 'c1', patch: { n: 7 } },
       { t: 'update', id: 'a1', patch: { x1: 0.3, y1: 0.3, x2: 0.9, y2: 0.9 } },
     ]);
     expect(ack.mock.calls[0][0].ok).toBe(true);
+    const scene = writtenScene();
+    expect(scene.objects.find((o) => o.id === 'st1')).toMatchObject({ width: 0.01 });
+    expect(scene.objects.find((o) => o.id === 'c1')).toMatchObject({ n: 7 });
+    expect(scene.objects.find((o) => o.id === 'a1')).toMatchObject({ x1: 0.3, y2: 0.9 });
     for (const bad of [{ width: 0.06 }, { n: 0 }, { x1: 1.2 }, { heads: 'both' }]) {
       expect((await send(opsHandler, [{ t: 'update', id: 'a1', patch: bad }])).mock.calls[0][0].ok).toBe(false);
     }
@@ -183,6 +188,33 @@ describe('wire v2 — patches and translate', () => {
     ]) {
       expect((await send(opsHandler, [bad])).mock.calls[0][0].ok).toBe(false);
     }
+  });
+});
+
+// ─── add.at (z-index insert) ────────────────────────────────────────────────
+
+describe('wire v2 — add at a z-index', () => {
+  it('the reducer inserts at `at`, appends for out-of-range, and v1 clients (no at) still append', () => {
+    const base = applyAnnotationOps({ objects: [] }, [{ t: 'add', obj: stroke({ id: 'a' }) as AnnotationObject }, { t: 'add', obj: stroke({ id: 'c' }) as AnnotationObject }]);
+    expect(applyAnnotationOps(base, [{ t: 'add', obj: stroke({ id: 'b' }) as AnnotationObject, at: 1 }]).objects.map((o) => o.id)).toEqual(['a', 'b', 'c']);
+    expect(applyAnnotationOps(base, [{ t: 'add', obj: stroke({ id: 'b' }) as AnnotationObject, at: 0 }]).objects.map((o) => o.id)).toEqual(['b', 'a', 'c']);
+    expect(applyAnnotationOps(base, [{ t: 'add', obj: stroke({ id: 'b' }) as AnnotationObject, at: 99 }]).objects.map((o) => o.id)).toEqual(['a', 'c', 'b']);
+    expect(applyAnnotationOps(base, [{ t: 'add', obj: stroke({ id: 'b' }) as AnnotationObject }]).objects.map((o) => o.id)).toEqual(['a', 'c', 'b']);
+    // A same-id re-add with `at` replaces AND re-positions
+    expect(applyAnnotationOps(base, [{ t: 'add', obj: stroke({ id: 'c' }) as AnnotationObject, at: 0 }]).objects.map((o) => o.id)).toEqual(['c', 'a']);
+  });
+
+  it('validates `at` as a non-negative integer up to the object cap, v2 only, and keeps it through ownership stamping', async () => {
+    const { opsHandler, toEmit } = setup();
+    expect((await send(opsHandler, [{ t: 'add', obj: stroke(), at: 0 }])).mock.calls[0][0].ok).toBe(true);
+    const broadcast = toEmit.mock.calls.find((c) => c[0] === 'voice:annotation:ops')![1] as { ops: AnnotationOp[] };
+    expect(broadcast.ops[0]).toEqual({ t: 'add', obj: { ...stroke(), by: SHARER }, at: 0 });
+    for (const at of [-1, 1.5, '0', 301]) {
+      expect((await send(opsHandler, [{ t: 'add', obj: stroke(), at }])).mock.calls[0][0].ok).toBe(false);
+    }
+    flags.annotations_v2 = false;
+    expect((await send(opsHandler, [{ t: 'add', obj: stroke(), at: 0 }])).mock.calls[0][0].ok).toBe(false);
+    expect((await send(opsHandler, [{ t: 'add', obj: stroke() }])).mock.calls[0][0].ok).toBe(true);
   });
 });
 

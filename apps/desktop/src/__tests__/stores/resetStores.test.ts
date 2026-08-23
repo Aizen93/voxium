@@ -204,6 +204,21 @@ describe('resetAccountStores (HIGH-14b)', () => {
     expect(live.snapshotNotice).toBeNull();
   });
 
+  it('clears the annotation history that lives OUTSIDE the zustand slice', () => {
+    // Module-level stacks are invisible to the setState(initial, true) loop;
+    // without an explicit reset the next account could undo this one's work
+    useVoiceStore.setState({ activeChannelId: 'ch-1' });
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 'h-1', kind: 'shape', shape: 'rect', color: '#00ff00', width: 0.004, x: 0.1, y: 0.1, w: 0.2, h: 0.2 } }]);
+    expect(useAnnotationStore.getState().canUndo).toBe(true);
+
+    resetAccountStores();
+
+    expect(useAnnotationStore.getState().canUndo).toBe(false);
+    useVoiceStore.setState({ activeChannelId: 'ch-1' });
+    useAnnotationStore.getState().undo(); // nothing left to undo: the stack itself is gone
+    expect(useAnnotationStore.getState()).toMatchObject({ canUndo: false, canRedo: false });
+  });
+
   it('store actions still work after a replace-reset', () => {
     populateAccountStores();
     resetAccountStores();

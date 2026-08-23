@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback, useLayoutEffect } from 'react';
 import { ANNOTATION_TEXT_MAX, ANNOTATION_TEXT_FORBIDDEN_RE } from '@voxium/shared';
 
 /** What the text tool is allowed to ship: trimmed, capped, and free of the
@@ -31,7 +31,9 @@ export function useTextDraft(onCommit: (draft: TextDraft, text: string) => void)
   const [draft, setDraftState] = useState<TextDraft | null>(null);
   const draftRef = useRef<TextDraft | null>(null);
   const onCommitRef = useRef(onCommit);
-  onCommitRef.current = onCommit;
+  useLayoutEffect(() => {
+    onCommitRef.current = onCommit;
+  });
 
   const set = useCallback((next: TextDraft | null) => {
     draftRef.current = next;

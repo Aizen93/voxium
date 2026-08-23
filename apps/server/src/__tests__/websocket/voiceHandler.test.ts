@@ -1614,6 +1614,26 @@ describe('voiceHandler — multi-node routing (HIGH-15)', () => {
     );
   });
 
+  it('a relayed screen_share:start ack carries the HOME node annotationsVersion, not the owner one', async () => {
+    // The owner answers the claim but this node validates the ops: during a
+    // rolling deploy the two can disagree, and the client must follow the
+    // node that will actually accept or reject what it draws.
+    mockRelay.getRemoteSession.mockReturnValue({ userId: 'mn-4b', channelId: 'ch-r', ownerNodeId: 'peer-node' });
+    const { socket, handlers } = createMockSocket('mn-4b', 'sock-mn-4b');
+    handleVoiceEvents(createMockIO() as any, socket as any);
+
+    const clientAck = vi.fn();
+    handlers.get('voice:screen_share:start')!(clientAck);
+    const relayedAck = mockRelay.relayVoiceEvent.mock.calls[0][4] as (r: unknown) => void;
+
+    relayedAck({ ok: true }); // an older owner: no version at all
+    expect(clientAck).toHaveBeenLastCalledWith({ ok: true, annotationsVersion: 2 });
+    relayedAck({ ok: true, annotationsVersion: 7 }); // a newer owner: overridden
+    expect(clientAck).toHaveBeenLastCalledWith({ ok: true, annotationsVersion: 2 });
+    relayedAck({ ok: false, error: 'Someone else is already sharing in this channel' }); // failures untouched
+    expect(clientAck).toHaveBeenLastCalledWith({ ok: false, error: 'Someone else is already sharing in this channel' });
+  });
+
   it('a LOCAL session always runs in place even if a stale remote session record exists', async () => {
     mockRelay.getRemoteSession.mockReturnValue({ userId: 'mn-5', channelId: 'ch-r', ownerNodeId: 'peer-node' });
     const { socket, handlers } = createMockSocket('mn-5', 'sock-mn-5');

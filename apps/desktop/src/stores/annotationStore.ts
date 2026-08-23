@@ -6,10 +6,11 @@ import {
   ANNOTATION_OPS_MAX,
   ANNOTATION_ACK_TIMEOUT_MS,
   ANNOTATION_HISTORY_MAX,
+  ANNOTATION_HISTORY_BYTES_MAX,
   type AnnotationOp,
   type AnnotationScene,
 } from '@voxium/shared';
-import { inverseOf, addedIds, compactForward, type HistoryEntry } from '../utils/annotationHistory';
+import { inverseOf, addedIds, compactForward, entryBytes, type HistoryEntry } from '../utils/annotationHistory';
 import { getSocket } from '../services/socket';
 import { useVoiceStore } from './voiceStore';
 import { toast } from './toastStore';
@@ -265,13 +266,22 @@ function resetQueue(): void {
 // accumulates while the editor holds a drag; everything else is committed as
 // its own entry. The store exposes only canUndo/canRedo for rendering.
 
-interface OpenGesture extends HistoryEntry {
+interface OpenGesture {
+  forward: AnnotationOp[];
+  inverse: AnnotationOp[];
   added: Set<string>;
 }
 
 let undoStack: HistoryEntry[] = [];
 let redoStack: HistoryEntry[] = [];
 let openGesture: OpenGesture | null = null;
+
+function historyBytes(): number {
+  let total = 0;
+  for (const e of undoStack) total += e.bytes;
+  for (const e of redoStack) total += e.bytes;
+  return total;
+}
 
 function commitEntry(entry: OpenGesture, sceneAfter: AnnotationScene): void {
   const forward = compactForward(entry.forward, entry.added, sceneAfter);
@@ -280,9 +290,12 @@ function commitEntry(entry: OpenGesture, sceneAfter: AnnotationScene): void {
   // click-shape discarded on pointerup): the scene is what it was, the
   // inverse would net to nothing — no entry, and no stale redo either.
   if (forward.length === 0) return;
-  undoStack.push({ forward, inverse: entry.inverse });
-  if (undoStack.length > ANNOTATION_HISTORY_MAX) undoStack.splice(0, undoStack.length - ANNOTATION_HISTORY_MAX);
+  undoStack.push({ forward, inverse: entry.inverse, bytes: entryBytes(forward, entry.inverse) });
   redoStack = []; // a fresh action forks the timeline
+  // Two bounds, oldest dropped first: entries, and bytes — an undone `clear`
+  // retains every object it removed, images included
+  if (undoStack.length > ANNOTATION_HISTORY_MAX) undoStack.splice(0, undoStack.length - ANNOTATION_HISTORY_MAX);
+  while (undoStack.length > 1 && historyBytes() > ANNOTATION_HISTORY_BYTES_MAX) undoStack.shift();
 }
 
 function syncHistoryFlags(set: (partial: Partial<AnnotationState>) => void): void {
@@ -293,6 +306,18 @@ function resetHistory(): void {
   undoStack = [];
   redoStack = [];
   openGesture = null;
+}
+
+/**
+ * Everything this module keeps OUTSIDE the zustand slice: the op queue, the
+ * remote-batch buffer, the history. `resetAccountStores` replaces the slice
+ * but cannot see these — and must not depend on the voiceStore subscription
+ * below happening to fire first.
+ */
+export function resetAnnotationModuleState(): void {
+  resetQueue();
+  recentRemoteOps = [];
+  resetHistory();
 }
 
 // ─── Mask → compositor sync ──────────────────────────────────────────────────
@@ -466,6 +491,9 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
 
   undo: () => {
     get().endGesture(); // a drag still in progress counts as done
+    // localApply is a silent no-op without a voice channel — the entry must
+    // not change stacks unless it is actually applied
+    if (!useVoiceStore.getState().activeChannelId) return;
     const entry = undoStack.pop();
     if (!entry) return;
     get().localApply(entry.inverse, { record: false });
@@ -477,6 +505,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
 
   redo: () => {
     get().endGesture();
+    if (!useVoiceStore.getState().activeChannelId) return;
     const entry = redoStack.pop();
     if (!entry) return;
     get().localApply(entry.forward, { record: false });

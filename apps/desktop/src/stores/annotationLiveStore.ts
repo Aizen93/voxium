@@ -95,6 +95,13 @@ function cancelPendingPointer(): void {
   }
 }
 
+/** Forget the throttle's clock too — a new share's first move must go out at
+ *  once, not be scheduled behind the previous share's last send. */
+export function resetAnnotationLiveModuleState(): void {
+  cancelPendingPointer();
+  lastPointerSentAt = 0;
+}
+
 const clampNorm = (v: number) => Math.min(1, Math.max(0, v));
 
 function pushPointer(prev: LivePointer | null, x: number, y: number, at: number): LivePointer {
@@ -146,10 +153,10 @@ export const useAnnotationLiveStore = create<AnnotationLiveState>((set, get) => 
       sendLive({ k: 'pointer', x: nx, y: ny });
       return;
     }
+    // Inside the window (sinceLast is finite here: the Infinity case returned above)
     pendingPointer = { x: nx, y: ny };
     if (!pointerTimer) {
-      const wait = Number.isFinite(sinceLast) ? Math.max(0, ANNOTATION_LIVE_POINTER_INTERVAL_MS - sinceLast) : 0;
-      pointerTimer = setTimeout(flushPendingPointer, wait);
+      pointerTimer = setTimeout(flushPendingPointer, Math.max(0, ANNOTATION_LIVE_POINTER_INTERVAL_MS - sinceLast));
     }
   },
 
@@ -185,7 +192,7 @@ export const useAnnotationLiveStore = create<AnnotationLiveState>((set, get) => 
   },
 
   clear: () => {
-    cancelPendingPointer();
+    resetAnnotationLiveModuleState();
     set({ pointer: null, reactions: [], snapshotNotice: null });
   },
 }));

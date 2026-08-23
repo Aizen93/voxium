@@ -28,15 +28,30 @@ describe('inverseOf — each op round-trips through the shared reducer', () => {
   it('a same-id re-add restores what it replaced', () => {
     const before = { objects: [stroke('a', [0, 0, 1, 1])] };
     const { restored, inverse } = roundTrip(before, { t: 'add', obj: stroke('a') });
-    expect(inverse).toEqual([{ t: 'add', obj: stroke('a', [0, 0, 1, 1]) }]);
+    expect(inverse).toEqual([{ t: 'add', obj: stroke('a', [0, 0, 1, 1]), at: 0 }]);
     expect(restored).toEqual(before);
   });
 
-  it('remove ↔ add(snapshot), and removing a missing id needs no inverse', () => {
-    const before = { objects: [shape('s')] };
-    const { restored } = roundTrip(before, { t: 'remove', id: 's' });
+  it('remove ↔ add(snapshot) AT THE SAME Z-INDEX, and removing a missing id needs no inverse', () => {
+    // Two objects: a under b. Undoing the removal of `a` must put it back
+    // UNDER b, not on top — a plain re-add would append and flip the order.
+    const before = { objects: [shape('a'), shape('b')] };
+    const { restored, inverse } = roundTrip(before, { t: 'remove', id: 'a' });
+    expect(inverse).toEqual([{ t: 'add', obj: shape('a'), at: 0 }]);
+    expect(restored.objects.map((o) => o.id)).toEqual(['a', 'b']);
     expect(restored).toEqual(before);
     expect(inverseOf({ t: 'remove', id: 'nope' }, before, new Set())).toEqual([]);
+  });
+
+  it('the same-id re-add and append inverses also restore z-order', () => {
+    const two = { objects: [stroke('a'), shape('b')] };
+    const readd = roundTrip(two, { t: 'add', obj: stroke('a', [0, 0, 1, 1]) });
+    expect(readd.restored).toEqual(two);
+    const appended = roundTrip(two, { t: 'append', id: 'a', points: [0.3, 0.3] });
+    expect(appended.restored).toEqual(two);
+    // `update` with an unset key falls back to the whole object — in place too
+    const unset = { objects: [{ ...image('i'), w: undefined } as unknown as AnnotationObject, shape('b')] };
+    expect(inverseOf({ t: 'update', id: 'i', patch: { w: 0.5 } }, unset, new Set())).toEqual([{ t: 'add', obj: unset.objects[0], at: 0 }]);
   });
 
   it('update ↔ update(previous values), only for the keys the patch touched', () => {
@@ -49,7 +64,7 @@ describe('inverseOf — each op round-trips through the shared reducer', () => {
   it('update of a key that was UNSET before falls back to restoring the object whole', () => {
     // There is no way to patch a key back to undefined on the wire
     const unset = { objects: [{ ...image('i'), w: undefined } as unknown as AnnotationObject] };
-    expect(inverseOf({ t: 'update', id: 'i', patch: { w: 0.5 } }, unset, new Set())).toEqual([{ t: 'add', obj: unset.objects[0] }]);
+    expect(inverseOf({ t: 'update', id: 'i', patch: { w: 0.5 } }, unset, new Set())).toEqual([{ t: 'add', obj: unset.objects[0], at: 0 }]);
   });
 
   it('update with only non-patchable keys for that kind needs no inverse (the reducer ignores it too)', () => {
@@ -69,7 +84,7 @@ describe('inverseOf — each op round-trips through the shared reducer', () => {
   it('append ↔ add(pre-append stroke) when the stroke was not added in this gesture', () => {
     const before = { objects: [stroke('a')] };
     const { restored, inverse } = roundTrip(before, { t: 'append', id: 'a', points: [0.3, 0.3] });
-    expect(inverse).toEqual([{ t: 'add', obj: stroke('a') }]);
+    expect(inverse).toEqual([{ t: 'add', obj: stroke('a'), at: 0 }]);
     expect(restored).toEqual(before);
   });
 

@@ -336,6 +336,22 @@ describe('AnnotationEditorLayer — capabilities and gestures', () => {
     expect(useAnnotationStore.getState().scene.objects).toEqual([]);
   });
 
+  it('unmounting mid-drag closes the open gesture (later actions are not swallowed into it)', () => {
+    useAnnotationStore.setState({ activeTool: 'pen' });
+    render();
+    pointerDown(layer(), 100, 100);
+    act(() => { layer().dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 140, clientY: 100 })); });
+    // The layer goes away before pointerup (panel collapse, view-mode toggle)
+    act(() => root.unmount());
+    root = createRoot(container);
+    expect(useAnnotationStore.getState().canUndo).toBe(true); // the stroke is a closed entry
+    // A later, separate action is its own entry — one undo leaves the stroke
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 'later', kind: 'shape', shape: 'rect', color: '#00ff00', width: 0.004, x: 0.5, y: 0.5, w: 0.1, h: 0.1 } }]);
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.kind)).toEqual(['stroke']);
+    act(() => { root.render(<AnnotationEditorLayer videoRef={videoRef} />); });
+  });
+
   it('a click-without-drag shape is discarded and leaves nothing to undo', () => {
     useAnnotationStore.setState({ activeTool: 'rect' });
     render();

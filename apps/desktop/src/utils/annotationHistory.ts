@@ -19,10 +19,24 @@ export interface HistoryEntry {
   forward: AnnotationOp[];
   /** What to apply on undo, already in application order. */
   inverse: AnnotationOp[];
+  /** Serialized size of both lists — what the byte budget counts. */
+  bytes: number;
+}
+
+/** Serialized size of an entry (objects shared between entries are counted
+ *  once per entry — a deliberate over-estimate that keeps the budget simple). */
+export function entryBytes(forward: AnnotationOp[], inverse: AnnotationOp[]): number {
+  return JSON.stringify(forward).length + JSON.stringify(inverse).length;
 }
 
 function findObject(scene: AnnotationScene, id: string): AnnotationObject | undefined {
   return scene.objects.find((o) => o.id === id);
+}
+
+/** Re-add an object at the z-index it had — `add` appends on top otherwise,
+ *  and "undo put it back above what was drawn over it" is not a restore. */
+function readdInPlace(scene: AnnotationScene, existing: AnnotationObject): AnnotationOp {
+  return { t: 'add', obj: existing, at: scene.objects.indexOf(existing) };
 }
 
 /**
@@ -36,13 +50,13 @@ export function inverseOf(op: AnnotationOp, scene: AnnotationScene, addedInGestu
     case 'add': {
       const existing = findObject(scene, op.obj.id);
       // Same-id re-add replaces — the inverse restores what was replaced
-      return existing ? [{ t: 'add', obj: existing }] : [{ t: 'remove', id: op.obj.id }];
+      return existing ? [readdInPlace(scene, existing)] : [{ t: 'remove', id: op.obj.id }];
     }
     case 'append': {
       if (addedInGesture.has(op.id)) return [];
       const existing = findObject(scene, op.id);
       // No truncate op on the wire: restore the pre-append object wholesale
-      return existing && existing.kind === 'stroke' ? [{ t: 'add', obj: existing }] : [];
+      return existing && existing.kind === 'stroke' ? [readdInPlace(scene, existing)] : [];
     }
     case 'update': {
       if (addedInGesture.has(op.id)) return [];
@@ -56,7 +70,7 @@ export function inverseOf(op: AnnotationOp, scene: AnnotationScene, addedInGestu
       for (const key of allowed) {
         if (op.patch[key] === undefined) continue;
         const prev = (existing as unknown as Record<string, unknown>)[key];
-        if (prev === undefined) return [{ t: 'add', obj: existing }];
+        if (prev === undefined) return [readdInPlace(scene, existing)];
         (previous as Record<string, unknown>)[key] = prev;
       }
       return Object.keys(previous).length > 0 ? [{ t: 'update', id: op.id, patch: previous }] : [];
@@ -67,7 +81,7 @@ export function inverseOf(op: AnnotationOp, scene: AnnotationScene, addedInGestu
     }
     case 'remove': {
       const existing = findObject(scene, op.id);
-      return existing ? [{ t: 'add', obj: existing }] : [];
+      return existing ? [readdInPlace(scene, existing)] : [];
     }
     case 'clear':
       return scene.objects.map((obj) => ({ t: 'add', obj }) as AnnotationOp);

@@ -23,9 +23,8 @@ import {
 } from '../../stores/annotationLiveStore';
 
 const initial = useAnnotationLiveStore.getState();
-// Each test gets its own clock base, strictly later than the previous one:
-// the send throttle's "last sent at" is module-level, so a shared fixed
-// system time would make a later test's first move look like a burst.
+// A fresh clock base per test keeps the fake timers deterministic; the
+// throttle's own clock is reset by clear() in beforeEach.
 let clockBase = Date.parse('2026-08-23T12:00:00Z');
 
 function sent() {
@@ -215,6 +214,14 @@ describe('annotationLiveStore — pruning and lifecycle', () => {
     expect(hasLiveActivity(useAnnotationLiveStore.getState())).toBe(false);
     useAnnotationLiveStore.getState().receive('s', { k: 'pointer', x: 0.1, y: 0.1 });
     expect(hasLiveActivity(useAnnotationLiveStore.getState())).toBe(true);
+  });
+
+  it('clear forgets the throttle clock: the next share sends its first move at once', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.pointTo(0.1, 0.1); // leading send
+    store.clear();           // share ends
+    store.pointTo(0.2, 0.2); // a new share, within the old window
+    expect(sent().map((m) => m.ev)).toEqual([{ k: 'pointer', x: 0.1, y: 0.1 }, { k: 'pointer', x: 0.2, y: 0.2 }]);
   });
 
   it('clear wipes everything and cancels a pending send', () => {

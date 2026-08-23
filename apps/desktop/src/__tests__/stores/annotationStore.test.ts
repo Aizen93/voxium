@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { applyAnnotationOps, ANNOTATION_BATCH_INTERVAL_MS, ANNOTATION_MAX_OPS_PER_BATCH, ANNOTATION_OPS_MAX, ANNOTATION_ACK_TIMEOUT_MS, ANNOTATION_HISTORY_MAX, type AnnotationOp } from '@voxium/shared';
+import { applyAnnotationOps, ANNOTATION_BATCH_INTERVAL_MS, ANNOTATION_MAX_OPS_PER_BATCH, ANNOTATION_OPS_MAX, ANNOTATION_ACK_TIMEOUT_MS, ANNOTATION_HISTORY_MAX, ANNOTATION_HISTORY_BYTES_MAX, type AnnotationOp } from '@voxium/shared';
 
 // ─── Mocks (before importing the store) ──────────────────────────────────────
 
@@ -474,6 +474,24 @@ describe('annotationStore — history', () => {
     expect(useAnnotationStore.getState().canUndo).toBe(false);
   });
 
+  it('history is ALSO bounded by bytes: an undone clear full of images evicts older entries', () => {
+    const store = useAnnotationStore.getState();
+    const big = (id: string): AnnotationOp => ({
+      t: 'add',
+      obj: { id, kind: 'image', src: `data:image/webp;base64,${'A'.repeat(Math.floor(ANNOTATION_HISTORY_BYTES_MAX / 3))}`, x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+    });
+    store.localApply([shape('first')]);
+    store.localApply([big('i1')]);
+    store.localApply([big('i2')]);
+    store.localApply([big('i3')]); // three entries of a third each — over budget with 'first'
+    // The oldest entries were evicted to stay under the budget; the newest always survives
+    let undone = 0;
+    while (useAnnotationStore.getState().canUndo) { store.undo(); undone++; }
+    expect(undone).toBeLessThan(4);
+    expect(undone).toBeGreaterThanOrEqual(1);
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toContain('first');
+  });
+
   it('remote ops and hydration never enter the history; teardown and clearViewerScene empty it', () => {
     const store = useAnnotationStore.getState();
     store.applyRemoteOps('chan-1', 1, [shape('remote')]);
@@ -491,13 +509,31 @@ describe('annotationStore — history', () => {
     expect(useAnnotationStore.getState()).toMatchObject({ canUndo: false, canRedo: false });
   });
 
-  it('undo/redo flush immediately and drop the selection', () => {
+  it('undo/redo outside a voice channel leave the stacks untouched (localApply would silently no-op)', () => {
     const store = useAnnotationStore.getState();
     store.localApply([shape('a')]);
-    store.setSelectedObjectId('a');
-    vi.clearAllMocks();
+    voiceMock.setState({ activeChannelId: null });
     store.undo();
+    expect(useAnnotationStore.getState()).toMatchObject({ canUndo: true, canRedo: false });
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    voiceMock.setState({ activeChannelId: 'chan-1' });
+    store.undo();
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(0);
+    voiceMock.setState({ activeChannelId: null });
+    store.redo();
+    expect(useAnnotationStore.getState()).toMatchObject({ canUndo: false, canRedo: true });
+  });
+
+  it('undo/redo flush immediately and drop the selection', async () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([shape('a')]);
+    await drainWire(); // the add is on the wire before the undo
+    vi.clearAllMocks();
+    store.setSelectedObjectId('a');
+    store.undo();
+    // No batch interval elapsed: the inverse shipped on its own, at once
     expect(socketEmit).toHaveBeenCalledTimes(1);
+    expect(socketEmit.mock.calls[0][1].ops).toEqual([{ t: 'remove', id: 'a' }]);
     expect(useAnnotationStore.getState().selectedObjectId).toBeNull();
   });
 });

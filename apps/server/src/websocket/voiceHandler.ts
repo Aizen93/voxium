@@ -1270,6 +1270,13 @@ const ROUTED_VOICE_EVENTS = [
 /** Events whose LAST argument is a client ACK callback (forwarded cross-node). */
 const ACK_VOICE_EVENTS = new Set<string>(['voice:transport:connect', 'voice:produce', 'voice:screen_share:start']);
 
+/** The annotation wire version THIS node validates, stamped onto a successful
+ *  share-claim ack (see the relay dispatch below and the local handler). */
+function withLocalAnnotationsVersion(response: unknown): unknown {
+  if (!response || typeof response !== 'object' || (response as { ok?: unknown }).ok !== true) return response;
+  return { ...(response as object), annotationsVersion: isFeatureEnabled('annotations_v2') ? 2 : 1 };
+}
+
 export function handleVoiceEvents(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   socket: Socket<ClientToServerEvents, ServerToClientEvents>
@@ -1372,7 +1379,15 @@ export function handleVoiceEvents(
         if (!socketRateLimit(socket, 'voice:relay', 600)) return;
         let ack: ((response: unknown) => void) | undefined;
         if (ACK_VOICE_EVENTS.has(event) && typeof args[args.length - 1] === 'function') {
-          ack = args.pop() as (response: unknown) => void;
+          const clientAck = args.pop() as (response: unknown) => void;
+          // The OWNER answers the share claim, but annotation ops are validated
+          // on the sharer's HOME node (annotationHandler runs on this socket's
+          // node, relay-free). During a rolling deploy the two can run
+          // different code, so the wire version this client may use is THIS
+          // node's — stamp it over whatever the owner said.
+          ack = event === 'voice:screen_share:start'
+            ? (response) => clientAck(withLocalAnnotationsVersion(response))
+            : clientAck;
         }
         void relayVoiceEvent(session.ownerNodeId, event, socket, args, ack);
         if (event === 'voice:leave') clearRemoteSession(socket.id);

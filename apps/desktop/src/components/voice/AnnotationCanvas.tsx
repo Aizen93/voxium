@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import { ANNOTATION_IMAGE_MAX_DECODED_EDGE } from '@voxium/shared';
 import type { AnnotationScene } from '@voxium/shared';
 import { useAnnotationStore, type MaskRect } from '../../stores/annotationStore';
@@ -161,7 +161,9 @@ function drawScene(
  */
 export function useLiveScheduler(draw: () => void): void {
   const drawRef = useRef(draw);
-  drawRef.current = draw;
+  useLayoutEffect(() => {
+    drawRef.current = draw;
+  });
 
   useEffect(() => {
     let handle = 0;

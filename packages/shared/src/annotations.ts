@@ -153,7 +153,10 @@ export interface AnnotationPatch {
 }
 
 export type AnnotationOp =
-  | { t: 'add'; obj: AnnotationObject }
+  /** `at`: insert at this z-index instead of on top (v2). Undo uses it to put
+   *  a removed object back UNDER what was drawn over it. Out-of-range values
+   *  clamp to the end; clients that predate it simply append. */
+  | { t: 'add'; obj: AnnotationObject; at?: number }
   | { t: 'append'; id: string; points: number[] }
   | { t: 'update'; id: string; patch: AnnotationPatch }
   /** Move an object by a normalized delta — the only way to move a stroke
@@ -174,7 +177,8 @@ export type AnnotationLiveEvent =
   | { k: 'pointer-off' }
   /** Index into ANNOTATION_REACTIONS. */
   | { k: 'reaction'; e: number }
-  /** "{name} took a snapshot" — a courtesy to the sharer, not a control. */
+  /** "{name} took a snapshot" — seen by everyone in the share; a courtesy,
+   *  not a control (a viewer can always photograph their monitor). */
   | { k: 'snapshot' };
 
 export type AnnotationLiveKind = AnnotationLiveEvent['k'];
@@ -234,7 +238,11 @@ export function applyAnnotationOps(scene: AnnotationScene, ops: AnnotationOp[]):
         const withoutDup = objects.some((o) => o.id === op.obj.id)
           ? objects.filter((o) => o.id !== op.obj.id)
           : objects;
-        objects = [...withoutDup, op.obj];
+        if (typeof op.at === 'number' && Number.isInteger(op.at) && op.at >= 0 && op.at < withoutDup.length) {
+          objects = [...withoutDup.slice(0, op.at), op.obj, ...withoutDup.slice(op.at)];
+        } else {
+          objects = [...withoutDup, op.obj];
+        }
         break;
       }
       case 'append': {

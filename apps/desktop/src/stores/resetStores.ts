@@ -6,8 +6,8 @@ import { useSupportStore } from './supportStore';
 import { useAnnouncementStore } from './announcementStore';
 import { useVoiceStore } from './voiceStore';
 import { useE2EStore } from './e2eStore';
-import { useAnnotationStore } from './annotationStore';
-import { useAnnotationLiveStore } from './annotationLiveStore';
+import { useAnnotationStore, resetAnnotationModuleState } from './annotationStore';
+import { useAnnotationLiveStore, resetAnnotationLiveModuleState } from './annotationLiveStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
 import { stopE2EDeviceListWatch } from './e2eStore';
 
@@ -58,6 +58,11 @@ export function resetAccountStores(): void {
 
   useVoiceStore.setState({ selfMute, selfDeaf });
   useAnnouncementStore.setState({ dismissedIds });
+
+  // Module-level annotation state (op queue, history stacks, pointer
+  // throttle) lives outside the slices the loop above replaced
+  resetAnnotationModuleState();
+  resetAnnotationLiveModuleState();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).
