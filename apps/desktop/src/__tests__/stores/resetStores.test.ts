@@ -86,6 +86,7 @@ import { useAnnouncementStore } from '../../stores/announcementStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAnnotationStore } from '../../stores/annotationStore';
+import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import type { Server, ServerMember, Conversation, Friendship, Message } from '@voxium/shared';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -134,6 +135,11 @@ function populateAccountStores() {
     sceneChannelId: 'ch-1',
     isEditing: true,
     masks: [{ id: 'm-1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 }],
+  });
+  useAnnotationLiveStore.setState({
+    pointer: { x: 0.5, y: 0.5, at: 1, trail: [] },
+    reactions: [{ id: 'r1', userId: 'u-2', e: 0, at: 1 }],
+    snapshotNotice: { userId: 'u-2', at: 1 },
   });
 }
 
@@ -190,6 +196,12 @@ describe('resetAccountStores (HIGH-14b)', () => {
     expect(annotations.sceneChannelId).toBeNull();
     expect(annotations.isEditing).toBe(false);
     expect(annotations.masks).toEqual([]);
+
+    // annotationLiveStore
+    const live = useAnnotationLiveStore.getState();
+    expect(live.pointer).toBeNull();
+    expect(live.reactions).toEqual([]);
+    expect(live.snapshotNotice).toBeNull();
   });
 
   it('store actions still work after a replace-reset', () => {

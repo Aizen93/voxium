@@ -106,6 +106,25 @@ describe('AnnotationToolbar', () => {
     expect(state.selectedObjectId).toBeNull();
   });
 
+  it('undo/redo buttons follow canUndo/canRedo and call the store actions', () => {
+    const undo = vi.fn();
+    const redo = vi.fn();
+    useAnnotationStore.setState({ isEditing: true, canUndo: false, canRedo: false, undo, redo });
+    render(<AnnotationToolbar />);
+    const undoBtn = container.querySelector('[aria-label="voice.annotations.undo"]') as HTMLButtonElement;
+    const redoBtn = container.querySelector('[aria-label="voice.annotations.redo"]') as HTMLButtonElement;
+    expect(undoBtn.disabled).toBe(true);
+    expect(redoBtn.disabled).toBe(true);
+
+    act(() => { useAnnotationStore.setState({ canUndo: true, canRedo: true }); });
+    expect(undoBtn.disabled).toBe(false);
+    expect(redoBtn.disabled).toBe(false);
+    click(undoBtn);
+    click(redoBtn);
+    expect(undo).toHaveBeenCalledTimes(1);
+    expect(redo).toHaveBeenCalledTimes(1);
+  });
+
   it('the mask tool carries the privacy hint in its tooltip', () => {
     useAnnotationStore.setState({ isEditing: true });
     render(<AnnotationToolbar />);

@@ -166,9 +166,11 @@ describe('annotationHandler — authorization', () => {
   it('accepts the active sharer: applies ops, persists with TTL, broadcasts to voice:{id} excluding sender', async () => {
     const { socket, opsHandler, toEmit } = setup();
     seedRedis(SHARER, null);
-    const obj = stroke();
-    const ack = await send(opsHandler, [{ t: 'add', obj }]);
+    const sent = stroke();
+    const ack = await send(opsHandler, [{ t: 'add', obj: sent }]);
 
+    // Stored AND broadcast objects carry the server-stamped owner
+    const obj = { ...sent, by: SHARER };
     expect(writtenState()).toBe(
       JSON.stringify({ rev: 1, sharerUserId: SHARER, scene: { objects: [obj] } }),
     );
@@ -434,7 +436,7 @@ describe('annotationHandler — scene-restart snapshot', () => {
       channelId: CHANNEL,
       sharingUserId: SHARER,
       rev: 1,
-      scene: { objects: [obj] },
+      scene: { objects: [{ ...obj, by: SHARER }] },
       restarted: true,
     });
   });
@@ -549,7 +551,7 @@ describe('annotationHandler — concurrent scene writes', () => {
     expect(mockRedis.eval).toHaveBeenCalledTimes(2);
     // The winner's object survives, ours is added, and the rev follows theirs
     expect(writtenState(1)).toBe(
-      JSON.stringify({ rev: 2, sharerUserId: SHARER, scene: { objects: [theirs, mine] } }),
+      JSON.stringify({ rev: 2, sharerUserId: SHARER, scene: { objects: [theirs, { ...mine, by: SHARER }] } }),
     );
     expect(toEmit).toHaveBeenCalledWith('voice:annotation:ops', expect.objectContaining({ rev: 2 }));
     // Contention is invisible to the sharer — no error, no spurious restart
@@ -592,7 +594,7 @@ describe('annotationHandler — concurrent scene writes', () => {
     // Their objects are gone; the counter continues rather than going backwards
     // under viewers who already hydrated the discarded scene.
     expect(writtenState()).toBe(
-      JSON.stringify({ rev: 8, sharerUserId: SHARER, scene: { objects: [mine] } }),
+      JSON.stringify({ rev: 8, sharerUserId: SHARER, scene: { objects: [{ ...mine, by: SHARER }] } }),
     );
     // A fresh scene from the server's perspective — the sharer must re-send
     expect(ack).toHaveBeenCalledWith({ ok: true, restarted: true });
@@ -614,7 +616,7 @@ describe('annotationHandler — concurrent scene writes', () => {
 
     expect(casExpectedRev()).toBe('9');
     expect(writtenState()).toBe(
-      JSON.stringify({ rev: 10, sharerUserId: SHARER, scene: { objects: [mine] } }),
+      JSON.stringify({ rev: 10, sharerUserId: SHARER, scene: { objects: [{ ...mine, by: SHARER }] } }),
     );
     expect(ack).toHaveBeenCalledWith({ ok: true, restarted: true });
     warn.mockRestore();

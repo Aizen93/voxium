@@ -93,7 +93,7 @@ export function connectSocket(token: string): VoxSocket {
       'pong:latency', 'ping:latency',
       'voice:speaking', 'dm:voice:speaking',
       'voice:signal', 'dm:voice:signal',
-      'voice:annotation:ops',
+      'voice:annotation:ops', 'voice:annotation:live',
     ]);
 
     socket.onAny((event: string, ...args: unknown[]) => {

@@ -1,22 +1,47 @@
-import { useRef, useState, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ANNOTATION_STROKE_MAX_POINTS, ANNOTATION_TEXT_MAX, ANNOTATION_TEXT_FORBIDDEN_RE } from '@voxium/shared';
+import { ANNOTATION_STROKE_MAX_POINTS, ANNOTATION_TEXT_MAX } from '@voxium/shared';
 import type { AnnotationObject } from '@voxium/shared';
-import { useAnnotationStore } from '../../stores/annotationStore';
+import { useAnnotationStore, type AnnotationEditorTool } from '../../stores/annotationStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
+import { useTextDraft } from '../../hooks/useTextDraft';
 import { pxToNorm } from '../../utils/annotationGeometry';
+import { normBox, clampBox, clampPos, objectBbox, hitTestBox, topmostHit, type Bbox } from '../../utils/annotationHit';
 import { toast } from '../../stores/toastStore';
 import { processOverlayImage } from '../../utils/imageProcessing';
+
+export { sanitizeAnnotationText } from '../../hooks/useTextDraft';
 
 /**
  * The sharer's input surface: an absolutely positioned layer over the video
  * content rect that turns pointer gestures into annotation ops (broadcast) or
- * mask edits (local-only). Rendered only for the local sharer while editing —
- * AnnotationCanvas below it does all the painting.
+ * mask edits (local-only). AnnotationCanvas below it does all the painting.
+ *
+ * The layer never decides WHO it is for — `capabilities` does. The sharer
+ * passes everything; the pre-share preview passes masks only; a viewer with
+ * drawing rights would pass a handful of marking tools. Anything outside the
+ * set is ignored at pointerdown, so a stale activeTool cannot leak through.
  */
+
+export interface ToolCapabilities {
+  tools: ReadonlySet<AnnotationEditorTool>;
+  /** Privacy masks (local-only compositing). */
+  masks: boolean;
+  /** Image overlays (the file picker). */
+  images: boolean;
+}
+
+export const ALL_EDITOR_TOOLS: readonly AnnotationEditorTool[] = ['select', 'pen', 'highlighter', 'rect', 'ellipse', 'text', 'image', 'mask'];
+
+export const ALL_TOOL_CAPABILITIES: ToolCapabilities = {
+  tools: new Set(ALL_EDITOR_TOOLS),
+  masks: true,
+  images: true,
+};
 
 interface AnnotationEditorLayerProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  capabilities?: ToolCapabilities;
 }
 
 const MIN_DRAG_NORM = 0.005;
@@ -25,68 +50,21 @@ const MIN_STROKE_STEP_PX = 2;
 const TEXT_SIZE = 0.045;
 const HIGHLIGHTER_WIDTH_FACTOR = 4;
 
-interface Bbox { x: number; y: number; w: number; h: number }
-
-/** Normalize a possibly-inverted drag box (dragging up/left). */
-function normBox(x1: number, y1: number, x2: number, y2: number): Bbox {
-  return {
-    x: Math.min(x1, x2),
-    y: Math.min(y1, y2),
-    w: Math.abs(x2 - x1),
-    h: Math.abs(y2 - y1),
-  };
-}
-
-// Every emitted geometry MUST fit the server's wire bounds ([-0.1, 1.1] per
-// coordinate, spans ≤ 1.1) — one out-of-range value rejects the WHOLE batch
-// while the local echo already applied it, silently desyncing every viewer.
-const clampPos = (v: number) => Math.min(1.1, Math.max(-0.1, v));
-const clampSpan = (v: number) => Math.min(1.1, Math.max(0, v));
-function clampBox(b: Bbox): Bbox {
-  return { x: clampPos(b.x), y: clampPos(b.y), w: clampSpan(b.w), h: clampSpan(b.h) };
-}
-
-function objectBbox(obj: AnnotationObject): Bbox | null {
-  switch (obj.kind) {
-    case 'shape':
-    case 'image':
-      return normBox(obj.x, obj.y, obj.x + obj.w, obj.y + obj.h);
-    case 'text': {
-      // Rough monospace-ish estimate — good enough for hit-testing/handles
-      const h = obj.size;
-      const w = Math.max(0.02, obj.text.length * obj.size * 0.55);
-      return { x: obj.x, y: obj.y, w, h };
-    }
-    default:
-      return null; // strokes are not selectable
-  }
-}
-
-function hitTest(box: Bbox | null, nx: number, ny: number): boolean {
-  if (!box) return false;
-  const pad = 0.008;
-  return nx >= box.x - pad && nx <= box.x + box.w + pad && ny >= box.y - pad && ny <= box.y + box.h + pad;
-}
-
-interface TextDraft { x: number; y: number; value: string }
-
-/** What the text tool is allowed to ship: trimmed, capped, and free of the
- *  control/bidi/zero-width characters the server rejects the WHOLE batch for
- *  (the local echo would already show a caption the viewers never get). */
-export function sanitizeAnnotationText(raw: string): string {
-  return raw
-    .replace(new RegExp(ANNOTATION_TEXT_FORBIDDEN_RE.source, 'g'), '')
-    .trim()
-    .slice(0, ANNOTATION_TEXT_MAX);
-}
+/** Kinds a plain click can select and drag. Strokes and arrows join this list
+ *  with the eraser/stroke-editing work; until then they are paint only. */
+const SELECTABLE_KINDS: ReadonlySet<AnnotationObject['kind']> = new Set(['shape', 'image', 'text']);
 
 type DragState =
   | { mode: 'stroke'; id: string; lastPx: { x: number; y: number }; pointCount: number }
-  | { mode: 'create-box'; id: string; isMask: boolean; startNorm: { x: number; y: number } }
+  /** Two-point gestures: the object is created at pointerdown and reshaped
+   *  from `start` to the current pointer on every move. `target` says what
+   *  the second point reshapes — a box (normalized, inverted drags allowed)
+   *  or a mask (same, local-only). */
+  | { mode: 'create'; id: string; target: 'box' | 'mask'; start: { x: number; y: number } }
   | { mode: 'move'; id: string; isMask: boolean; grabOffset: { x: number; y: number } }
   | { mode: 'resize'; id: string; isMask: boolean; anchor: { x: number; y: number } };
 
-export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) {
+export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABILITIES }: AnnotationEditorLayerProps) {
   const { t } = useTranslation();
   const layerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -100,17 +78,17 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
   const scene = useAnnotationStore((s) => s.scene);
   const masks = useAnnotationStore((s) => s.masks);
 
-  // The draft lives in state (it renders) AND in a ref (it commits): the commit
-  // runs from pointer, key and blur handlers that can fire back-to-back for
-  // one gesture (Enter unmounts the input, which blurs it), so it must be
-  // idempotent — and it must never run inside a setState updater, which
-  // StrictMode invokes twice and would add the caption twice.
-  const [textDraft, setTextDraftState] = useState<TextDraft | null>(null);
-  const textDraftRef = useRef<TextDraft | null>(null);
-  const setTextDraft = useCallback((draft: TextDraft | null) => {
-    textDraftRef.current = draft;
-    setTextDraftState(draft);
-  }, []);
+  const canUse = (tool: AnnotationEditorTool) => capabilities.tools.has(tool);
+
+  const text = useTextDraft((draft, value) => {
+    if (!value) return;
+    const store = useAnnotationStore.getState();
+    store.localApply([{
+      t: 'add',
+      obj: { id: crypto.randomUUID(), kind: 'text', text: value, color: store.color, size: TEXT_SIZE, x: draft.x, y: draft.y },
+    }]);
+    store.flushOps();
+  });
 
   /** Pointer event → normalized frame coords. */
   const toNorm = useCallback((e: { clientX: number; clientY: number }, clampToFrame = false) => {
@@ -120,30 +98,17 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
     return pxToNorm(e.clientX - box.left, e.clientY - box.top, { x: 0, y: 0, w: box.width, h: box.height }, clampToFrame);
   }, []);
 
-  const commitTextDraft = useCallback(() => {
-    const draft = textDraftRef.current;
-    if (!draft) return;
-    setTextDraft(null);
-    const text = sanitizeAnnotationText(draft.value);
-    if (!text) return;
-    const store = useAnnotationStore.getState();
-    store.localApply([{
-      t: 'add',
-      obj: { id: crypto.randomUUID(), kind: 'text', text, color: store.color, size: TEXT_SIZE, x: draft.x, y: draft.y },
-    }]);
-    store.flushOps();
-  }, [setTextDraft]);
-
   // The image tool is a file dialog, not a canvas gesture. Reset the tool
   // immediately after opening the picker: cancelling the dialog fires no
   // 'change' event, and since re-clicking the same tool doesn't re-trigger
   // this effect, the toolbar would otherwise wedge on an inert 'image' tool.
+  const imagesAllowed = capabilities.images && capabilities.tools.has('image');
   useEffect(() => {
     if (activeTool === 'image') {
-      fileInputRef.current?.click();
+      if (imagesAllowed) fileInputRef.current?.click();
       useAnnotationStore.getState().setActiveTool('select');
     }
-  }, [activeTool]);
+  }, [activeTool, imagesAllowed]);
 
   const handleImagePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -185,16 +150,18 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
     // An open caption is finished by the next press anywhere on the layer,
     // whatever the tool — decided here, not left to the input's blur, whose
     // timing against this handler is the browser's business (see below).
-    if (textDraftRef.current) {
-      commitTextDraft();
+    if (text.draftRef.current) {
+      text.commit();
       if (activeTool === 'text') return;
     }
 
+    if (!canUse(activeTool)) return;
     layerRef.current?.setPointerCapture(e.pointerId);
 
     switch (activeTool) {
       case 'pen':
       case 'highlighter': {
+        store.beginGesture(); // the whole stroke is ONE undo step
         const id = crypto.randomUUID();
         store.localApply([{
           t: 'add',
@@ -212,18 +179,20 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
       }
       case 'rect':
       case 'ellipse': {
+        store.beginGesture();
         const id = crypto.randomUUID();
         store.localApply([{
           t: 'add',
           obj: { id, kind: 'shape', shape: activeTool, color, width: strokeWidth, x: norm.x, y: norm.y, w: 0, h: 0, fill: false },
         }]);
-        dragRef.current = { mode: 'create-box', id, isMask: false, startNorm: norm };
+        dragRef.current = { mode: 'create', id, target: 'box', start: norm };
         break;
       }
       case 'mask': {
+        if (!capabilities.masks) break;
         const id = crypto.randomUUID();
         store.addMask({ id, x: norm.x, y: norm.y, w: 0, h: 0 });
-        dragRef.current = { mode: 'create-box', id, isMask: true, startNorm: norm };
+        dragRef.current = { mode: 'create', id, target: 'mask', start: norm };
         break;
       }
       case 'text': {
@@ -235,20 +204,20 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
         // a single character could be typed. Cancelling pointerdown is the
         // spec'd way to suppress that mousedown (click still fires).
         e.preventDefault();
-        setTextDraft({ x: norm.x, y: norm.y, value: '' });
+        text.open(norm.x, norm.y);
         break;
       }
       case 'select': {
         // Annotations first (drawn on top), then masks
-        const objects = [...scene.objects].reverse();
-        const hitObj = objects.find((o) => hitTest(objectBbox(o), norm.x, norm.y));
+        const hitObj = topmostHit(scene.objects, norm.x, norm.y, (o) => SELECTABLE_KINDS.has(o.kind));
         if (hitObj) {
           store.setSelectedObjectId(hitObj.id);
+          store.beginGesture(); // a move is one undo step however many updates it sends
           const box = objectBbox(hitObj)!;
           dragRef.current = { mode: 'move', id: hitObj.id, isMask: false, grabOffset: { x: norm.x - box.x, y: norm.y - box.y } };
           break;
         }
-        const hitMask = [...masks].reverse().find((m) => hitTest(m, norm.x, norm.y));
+        const hitMask = capabilities.masks ? [...masks].reverse().find((m) => hitTestBox(m, norm.x, norm.y)) : undefined;
         if (hitMask) {
           store.setSelectedObjectId(hitMask.id);
           dragRef.current = { mode: 'move', id: hitMask.id, isMask: true, grabOffset: { x: norm.x - hitMask.x, y: norm.y - hitMask.y } };
@@ -264,6 +233,7 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
     e.stopPropagation();
     if (e.button !== 0) return;
     layerRef.current?.setPointerCapture(e.pointerId);
+    if (!isMask) useAnnotationStore.getState().beginGesture();
     dragRef.current = { mode: 'resize', id, isMask, anchor };
   };
 
@@ -296,10 +266,10 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
         }
         break;
       }
-      case 'create-box': {
+      case 'create': {
         const norm = toNorm(e, true);
-        const box = clampBox(normBox(drag.startNorm.x, drag.startNorm.y, norm.x, norm.y));
-        if (drag.isMask) store.updateMask(drag.id, box);
+        const box = clampBox(normBox(drag.start.x, drag.start.y, norm.x, norm.y));
+        if (drag.target === 'mask') store.updateMask(drag.id, box);
         else store.localApply([{ t: 'update', id: drag.id, patch: box }]);
         break;
       }
@@ -326,9 +296,9 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
     if (!drag) return;
     const store = useAnnotationStore.getState();
 
-    if (drag.mode === 'create-box') {
+    if (drag.mode === 'create') {
       // Discard degenerate click-without-drag boxes
-      if (drag.isMask) {
+      if (drag.target === 'mask') {
         const mask = useAnnotationStore.getState().masks.find((m) => m.id === drag.id);
         if (mask && (mask.w < MIN_DRAG_NORM || mask.h < MIN_DRAG_NORM)) store.removeMask(drag.id);
       } else {
@@ -338,6 +308,9 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
         }
       }
     }
+    // Closes the gesture opened on pointerdown (a no-op for mask drags, which
+    // never open one — masks are local and have no history)
+    store.endGesture();
     store.flushOps();
   };
 
@@ -352,7 +325,7 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
       if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
       const store = useAnnotationStore.getState();
       if (e.key === 'Escape') {
-        setTextDraft(null);
+        text.cancel();
         store.setSelectedObjectId(null);
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && store.selectedObjectId) {
         const id = store.selectedObjectId;
@@ -367,7 +340,7 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [setTextDraft]);
+  }, [text.cancel]);
 
   if (rect.w <= 0 || rect.h <= 0) return null;
 
@@ -404,7 +377,7 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
       />
 
       {/* Mask affordance while editing: dashed outline so black boxes are grabbable */}
-      {masks.map((m) => (
+      {capabilities.masks && masks.map((m) => (
         <div
           key={m.id}
           className="pointer-events-none absolute border border-dashed border-white/40"
@@ -431,28 +404,28 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
         </div>
       )}
 
-      {textDraft && (
+      {text.draft && (
         <input
           autoFocus
           data-testid="annotation-text-draft"
-          value={textDraft.value}
+          value={text.draft.value}
           maxLength={ANNOTATION_TEXT_MAX}
           placeholder={t('voice.annotations.addTextPlaceholder')}
           className="absolute rounded border border-vox-accent-primary bg-black/70 px-1.5 py-0.5 font-semibold outline-none"
           style={{
-            left: textDraft.x * rect.w,
-            top: textDraft.y * rect.h,
+            left: text.draft.x * rect.w,
+            top: text.draft.y * rect.h,
             minWidth: 160,
             // Same size and colour the committed caption is painted with
             fontSize: Math.max(9, TEXT_SIZE * rect.h),
             color,
           }}
-          onChange={(e) => setTextDraft({ ...textDraft, value: e.target.value })}
+          onChange={(e) => text.setValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') commitTextDraft();
-            if (e.key === 'Escape') setTextDraft(null);
+            if (e.key === 'Enter') text.commit();
+            if (e.key === 'Escape') text.cancel();
           }}
-          onBlur={commitTextDraft}
+          onBlur={text.commit}
           onPointerDown={(e) => e.stopPropagation()}
         />
       )}

@@ -13,9 +13,19 @@ import {
   ANNOTATION_MAX_SCENE_POINTS,
   ANNOTATION_RATE_PER_MIN,
   ANNOTATION_BYTES_PER_MIN,
+  ANNOTATION_CALLOUT_MAX,
+  ANNOTATION_LIVE_MAX,
+  ANNOTATION_LIVE_POINTER_RATE_PER_MIN,
+  ANNOTATION_LIVE_REACTION_RATE_PER_MIN,
+  ANNOTATION_LIVE_SNAPSHOT_RATE_PER_MIN,
+  ANNOTATION_REACTIONS,
 } from '@voxium/shared';
-import type { ServerToClientEvents, ClientToServerEvents, AnnotationOp, AnnotationObject, AnnotationScene } from '@voxium/shared';
+import type {
+  ServerToClientEvents, ClientToServerEvents, AnnotationOp, AnnotationObject, AnnotationScene,
+  AnnotationLiveEvent, AnnotationLiveKind,
+} from '@voxium/shared';
 import { socketRateLimit } from '../middleware/rateLimiter';
+import { isFeatureEnabled } from '../utils/featureFlags';
 import { getRedis } from '../utils/redis';
 import { annotationKey, casAnnotationState, observedSceneRev, type StoredAnnotationState } from '../utils/annotationState';
 import { imageDimensions } from '../utils/imageHeader';
@@ -87,20 +97,44 @@ function isValidPoints(points: unknown): points is number[] {
     && points.every(isNormCoord);
 }
 
-function isValidObject(obj: unknown): obj is AnnotationObject {
+function isColor(v: unknown): v is string {
+  return typeof v === 'string' && COLOR_RE.test(v);
+}
+
+function isSize(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 0.2;
+}
+
+function isCalloutNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= ANNOTATION_CALLOUT_MAX;
+}
+
+/**
+ * Wire v2 (arrow, callout, spotlight, stroke.fade, translate, width/n patches)
+ * is validated only while the `annotations_v2` flag is on: with it off this
+ * node rejects v2 constructs exactly like unknown ones AND stops advertising
+ * version 2 on the share claim, so new clients hide the tools rather than
+ * drawing things the server will refuse.
+ */
+export function annotationsWireVersion(): 1 | 2 {
+  return isFeatureEnabled('annotations_v2') ? 2 : 1;
+}
+
+function isValidObject(obj: unknown, v2: boolean): obj is AnnotationObject {
   if (!obj || typeof obj !== 'object') return false;
   const o = obj as Record<string, unknown>;
   if (typeof o.id !== 'string' || !ID_RE.test(o.id)) return false;
   switch (o.kind) {
     case 'stroke':
       return (o.tool === 'pen' || o.tool === 'highlighter')
-        && typeof o.color === 'string' && COLOR_RE.test(o.color)
+        && isColor(o.color)
         && isStrokeWidth(o.width)
         && isValidPoints(o.points)
-        && (o.points as number[]).length <= ANNOTATION_STROKE_MAX_POINTS * 2;
+        && (o.points as number[]).length <= ANNOTATION_STROKE_MAX_POINTS * 2
+        && (o.fade === undefined || (v2 && o.fade === true));
     case 'shape':
       return (o.shape === 'rect' || o.shape === 'ellipse')
-        && typeof o.color === 'string' && COLOR_RE.test(o.color)
+        && isColor(o.color)
         && isStrokeWidth(o.width)
         && isNormCoord(o.x) && isNormCoord(o.y) && isNormCoord(o.w) && isNormCoord(o.h)
         && (o.fill === undefined || typeof o.fill === 'boolean');
@@ -108,8 +142,8 @@ function isValidObject(obj: unknown): obj is AnnotationObject {
       return typeof o.text === 'string'
         && o.text.length > 0 && o.text.length <= ANNOTATION_TEXT_MAX
         && !CONTROL_CHARS_RE.test(o.text)
-        && typeof o.color === 'string' && COLOR_RE.test(o.color)
-        && typeof o.size === 'number' && Number.isFinite(o.size) && o.size > 0 && o.size <= 0.2
+        && isColor(o.color)
+        && isSize(o.size)
         && isNormCoord(o.x) && isNormCoord(o.y);
     case 'image':
       return typeof o.src === 'string'
@@ -117,29 +151,54 @@ function isValidObject(obj: unknown): obj is AnnotationObject {
         && IMAGE_DATAURL_RE.test(o.src)
         && isNormCoord(o.x) && isNormCoord(o.y) && isNormCoord(o.w) && isNormCoord(o.h)
         && imageWithinDecodedBounds(o.src);
+    case 'arrow':
+      return v2
+        && isColor(o.color)
+        && isStrokeWidth(o.width)
+        && isNormCoord(o.x1) && isNormCoord(o.y1) && isNormCoord(o.x2) && isNormCoord(o.y2)
+        && (o.heads === undefined || o.heads === 'end' || o.heads === 'both');
+    case 'callout':
+      return v2
+        && isColor(o.color)
+        && isSize(o.size)
+        && isNormCoord(o.x) && isNormCoord(o.y)
+        && isCalloutNumber(o.n);
+    case 'spotlight':
+      return v2
+        && isNormCoord(o.x) && isNormCoord(o.y) && isNormCoord(o.w) && isNormCoord(o.h)
+        && (o.shape === undefined || o.shape === 'rect' || o.shape === 'ellipse');
     default:
       return false;
   }
 }
 
-function isValidPatch(patch: unknown): boolean {
+function isValidPatch(patch: unknown, v2: boolean): boolean {
   if (!patch || typeof patch !== 'object') return false;
   const p = patch as Record<string, unknown>;
   const keys = Object.keys(p);
-  if (keys.length === 0 || keys.length > 7) return false;
+  if (keys.length === 0 || keys.length > 8) return false;
   for (const key of keys) {
     switch (key) {
       case 'x': case 'y': case 'w': case 'h':
         if (!isNormCoord(p[key])) return false;
         break;
+      case 'x1': case 'y1': case 'x2': case 'y2':
+        if (!v2 || !isNormCoord(p[key])) return false;
+        break;
       case 'color':
-        if (typeof p.color !== 'string' || !COLOR_RE.test(p.color)) return false;
+        if (!isColor(p.color)) return false;
+        break;
+      case 'width':
+        if (!v2 || !isStrokeWidth(p.width)) return false;
+        break;
+      case 'n':
+        if (!v2 || !isCalloutNumber(p.n)) return false;
         break;
       case 'text':
         if (typeof p.text !== 'string' || p.text.length === 0 || p.text.length > ANNOTATION_TEXT_MAX || CONTROL_CHARS_RE.test(p.text)) return false;
         break;
       case 'size':
-        if (typeof p.size !== 'number' || !Number.isFinite(p.size) || p.size <= 0 || p.size > 0.2) return false;
+        if (!isSize(p.size)) return false;
         break;
       default:
         return false;
@@ -148,11 +207,16 @@ function isValidPatch(patch: unknown): boolean {
   return true;
 }
 
-function isValidOp(op: unknown): op is AnnotationOp {
+function isTranslateDelta(v: unknown): v is number {
+  // A delta can at most carry an object from one edge of the slack to the other
+  return typeof v === 'number' && Number.isFinite(v) && v >= -1.2 && v <= 1.2;
+}
+
+function isValidOp(op: unknown, v2: boolean): op is AnnotationOp {
   if (!op || typeof op !== 'object') return false;
   const o = op as Record<string, unknown>;
   switch (o.t) {
-    case 'add': return isValidObject(o.obj);
+    case 'add': return isValidObject(o.obj, v2);
     case 'append':
       // Same per-op point bound as 'add' — without it a single append sized to
       // the batch cap forces a full parse/spread/serialize cycle before the
@@ -160,11 +224,43 @@ function isValidOp(op: unknown): op is AnnotationOp {
       return typeof o.id === 'string' && ID_RE.test(o.id)
         && isValidPoints(o.points)
         && (o.points as number[]).length <= ANNOTATION_STROKE_MAX_POINTS * 2;
-    case 'update': return typeof o.id === 'string' && ID_RE.test(o.id) && isValidPatch(o.patch);
+    case 'update': return typeof o.id === 'string' && ID_RE.test(o.id) && isValidPatch(o.patch, v2);
+    case 'translate':
+      return v2 && typeof o.id === 'string' && ID_RE.test(o.id) && isTranslateDelta(o.dx) && isTranslateDelta(o.dy);
     case 'remove': return typeof o.id === 'string' && ID_RE.test(o.id);
     case 'clear': return true;
     default: return false;
   }
+}
+
+/**
+ * A translate is validated on its DELTA, so the resulting geometry has to be
+ * re-checked against the wire bounds after the reducer ran — otherwise a stroke
+ * could be walked off the frame one legal step at a time. The client clamps
+ * its deltas first; the server rejects rather than clamps.
+ */
+function geometryWithinBounds(obj: AnnotationObject): boolean {
+  switch (obj.kind) {
+    case 'stroke': return obj.points.every(isNormCoord);
+    case 'arrow': return isNormCoord(obj.x1) && isNormCoord(obj.y1) && isNormCoord(obj.x2) && isNormCoord(obj.y2);
+    default: return isNormCoord(obj.x) && isNormCoord(obj.y);
+  }
+}
+
+function translatedObjectsWithinBounds(scene: AnnotationScene, ops: AnnotationOp[]): boolean {
+  const moved = new Set<string>();
+  for (const op of ops) if (op.t === 'translate') moved.add(op.id);
+  if (moved.size === 0) return true;
+  return scene.objects.every((o) => !moved.has(o.id) || geometryWithinBounds(o));
+}
+
+/**
+ * `by` is the server's word, not the client's: strip whatever the sender put
+ * there and stamp the authenticated userId on every added object. Viewers'
+ * reducers keep it (spread-through), so scenes carry ownership from day one.
+ */
+function stampOwner(ops: AnnotationOp[], userId: string): AnnotationOp[] {
+  return ops.map((op) => (op.t === 'add' ? { t: 'add', obj: { ...op.obj, by: userId } } : op));
 }
 
 function sceneWithinLimits(scene: AnnotationScene): boolean {
@@ -198,11 +294,91 @@ function chargeByteBudget(socket: object, chars: number): boolean {
   return bucket.used <= ANNOTATION_BYTES_PER_MIN;
 }
 
+// ─── voice:annotation:live — the ephemeral sibling of :ops ───────────────────
+//
+// Fire-and-forget: no Redis write, no rev, no ack, no hydration. A late joiner
+// sees the next event; a lost one costs nothing (the laser fades on the
+// viewer's own clock). Authorization is decided PER KIND in one table so that
+// opening a kind to viewers later (viewer annotations) is a row change:
+//   sharer — only the active sharer (Redis voice:screen:{channelId}, cached
+//            per socket for a couple of seconds: 20 GETs/s per sharer is
+//            harmless but pointless, and a stale "still sharer" for ≤2 s after
+//            a handoff is too — the previous sharer's last dot fades anyway)
+//   member — anyone whose socket is in the voice:{channelId} room (relay
+//            shims join it adapter-wide, so this holds on the home node too)
+// Each kind has its OWN socketRateLimit bucket: a reaction burst must not be
+// able to starve the sharer's pointer, and none of them touches the :ops one.
+
+const LIVE_AUTH: Record<AnnotationLiveKind, { who: 'sharer' | 'member'; bucket: string; perMin: number }> = {
+  'pointer':     { who: 'sharer', bucket: 'voice:annotation:live:pointer',  perMin: ANNOTATION_LIVE_POINTER_RATE_PER_MIN },
+  'pointer-off': { who: 'sharer', bucket: 'voice:annotation:live:pointer',  perMin: ANNOTATION_LIVE_POINTER_RATE_PER_MIN },
+  'reaction':    { who: 'member', bucket: 'voice:annotation:live:reaction', perMin: ANNOTATION_LIVE_REACTION_RATE_PER_MIN },
+  'snapshot':    { who: 'member', bucket: 'voice:annotation:live:snapshot', perMin: ANNOTATION_LIVE_SNAPSHOT_RATE_PER_MIN },
+};
+
+/** How long a positive sharer check is trusted before Redis is asked again. */
+const SHARER_CACHE_MS = 2_000;
+const sharerCache = new WeakMap<object, { channelId: string; until: number }>();
+
+function isValidLiveEvent(ev: unknown): ev is AnnotationLiveEvent {
+  if (!ev || typeof ev !== 'object') return false;
+  const e = ev as Record<string, unknown>;
+  const keys = Object.keys(e);
+  switch (e.k) {
+    case 'pointer':
+      return keys.length === 3 && isNormCoord(e.x) && isNormCoord(e.y);
+    case 'pointer-off':
+      return keys.length === 1;
+    case 'reaction':
+      return keys.length === 2 && typeof e.e === 'number' && Number.isInteger(e.e) && e.e >= 0 && e.e < ANNOTATION_REACTIONS.length;
+    case 'snapshot':
+      return keys.length === 1;
+    default:
+      return false;
+  }
+}
+
+async function isActiveSharer(socket: object, channelId: string, userId: string): Promise<boolean> {
+  const now = Date.now();
+  const cached = sharerCache.get(socket);
+  if (cached && cached.channelId === channelId && now < cached.until) return true;
+  const sharer = await getRedis().get(`voice:screen:${channelId}`);
+  if (sharer !== userId) return false; // a miss is never cached — fail closed
+  sharerCache.set(socket, { channelId, until: now + SHARER_CACHE_MS });
+  return true;
+}
+
 export function handleAnnotationEvents(
   _io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   socket: Socket<ClientToServerEvents, ServerToClientEvents>,
 ): void {
   const userId = socket.data.userId as string;
+
+  socket.on('voice:annotation:live', async (data) => {
+    // No ack by design: nothing here is worth a round trip, and a rejected
+    // event is simply not seen. Shape first, cheapest checks first.
+    if (!data || typeof data !== 'object') return;
+    const { channelId, ev } = data as { channelId: unknown; ev: unknown };
+    if (typeof channelId !== 'string' || !channelId || channelId.length > 64) return;
+    if (!isValidLiveEvent(ev)) return;
+    if (JSON.stringify(ev).length > ANNOTATION_LIVE_MAX) return;
+    const rule = LIVE_AUTH[ev.k];
+    if (!socketRateLimit(socket, rule.bucket, rule.perMin)) return;
+
+    try {
+      if (rule.who === 'sharer') {
+        if (!(await isActiveSharer(socket, channelId, userId))) return;
+      } else if (!socket.rooms.has(`voice:${channelId}`)) {
+        return;
+      }
+    } catch (err) {
+      console.warn('[Annotations] live-event authorization failed:', err instanceof Error ? err.message : err);
+      return;
+    }
+
+    // Sender excluded — it local-echoes, exactly like :ops.
+    socket.to(`voice:${channelId}`).emit('voice:annotation:live', { channelId, userId, ev });
+  });
 
   socket.on('voice:annotation:ops', async (data, callback) => {
     const ack = (r: { ok: boolean; error?: string; restarted?: boolean }) => {
@@ -222,7 +398,9 @@ export function handleAnnotationEvents(
     // Charge BEFORE per-op validation: a flood of large malformed batches must
     // burn the sender's budget, not free CPU on image-header parsing.
     if (!chargeByteBudget(socket, opsChars)) return ack({ ok: false, error: 'Rate limited' });
-    if (!ops.every(isValidOp)) return ack({ ok: false, error: 'Invalid payload' });
+    const v2 = annotationsWireVersion() === 2;
+    if (!ops.every((op) => isValidOp(op, v2))) return ack({ ok: false, error: 'Invalid payload' });
+    const stampedOps = stampOwner(ops as AnnotationOp[], userId);
 
     try {
       const redis = getRedis();
@@ -278,7 +456,10 @@ export function handleAnnotationEvents(
           }
         }
 
-        scene = applyAnnotationOps(baseScene, ops as AnnotationOp[]);
+        scene = applyAnnotationOps(baseScene, stampedOps);
+        if (!translatedObjectsWithinBounds(scene, stampedOps)) {
+          return ack({ ok: false, error: 'Invalid payload' });
+        }
         next = { rev: observedRev + 1, sharerUserId: userId, scene };
         const serialized = JSON.stringify(next);
         if (!sceneWithinLimits(scene) || serialized.length > ANNOTATION_SCENE_MAX) {
@@ -296,12 +477,13 @@ export function handleAnnotationEvents(
         return ack({ ok: false, error: 'Scene is being modified concurrently' });
       }
 
-      // Sender excluded — the sharer local-echoes its own ops.
+      // Sender excluded — the sharer local-echoes its own ops. Viewers get the
+      // STAMPED ops, so their scenes carry the same `by` the stored one does.
       socket.to(`voice:${channelId}`).emit('voice:annotation:ops', {
         channelId,
         userId,
         rev: next.rev,
-        ops: ops as AnnotationOp[],
+        ops: stampedOps,
       });
       if (sceneRestarted) {
         // Tell the SHARER too (via the ack — it is excluded from the room

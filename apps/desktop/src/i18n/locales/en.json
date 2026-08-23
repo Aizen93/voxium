@@ -780,6 +780,7 @@
       "image": "Image overlay",
       "mask": "Privacy mask",
       "undo": "Undo",
+      "redo": "Redo",
       "clearAll": "Clear all",
       "color": "Color",
       "width": "Stroke width",

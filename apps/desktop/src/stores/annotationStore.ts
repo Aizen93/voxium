@@ -3,15 +3,19 @@ import {
   applyAnnotationOps,
   ANNOTATION_BATCH_INTERVAL_MS,
   ANNOTATION_MAX_OPS_PER_BATCH,
+  ANNOTATION_OPS_MAX,
   ANNOTATION_ACK_TIMEOUT_MS,
+  ANNOTATION_HISTORY_MAX,
   type AnnotationOp,
   type AnnotationScene,
 } from '@voxium/shared';
+import { inverseOf, addedIds, compactForward, type HistoryEntry } from '../utils/annotationHistory';
 import { getSocket } from '../services/socket';
 import { useVoiceStore } from './voiceStore';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { ensureComposite, stopComposite, teardownComposite, isCompositing } from '../services/screenComposite';
+import { useAnnotationLiveStore } from './annotationLiveStore';
 
 /**
  * Screen-share annotation state (both roles):
@@ -57,6 +61,9 @@ interface AnnotationState {
   strokeWidth: number;
   selectedObjectId: string | null;
   masks: MaskRect[];
+  /** Renderable mirrors of the (module-level) undo/redo stacks. */
+  canUndo: boolean;
+  canRedo: boolean;
 
   // Viewer path
   /** `restarted`: the server's rev counter began a new generation (scene key
@@ -67,9 +74,16 @@ interface AnnotationState {
   clearViewerScene: () => void;
 
   // Sharer path
-  localApply: (ops: AnnotationOp[]) => void;
+  /** Apply locally, enqueue for the wire, and (unless `record: false`) record
+   *  the inverse in the history — into the open gesture if there is one. */
+  localApply: (ops: AnnotationOp[], opts?: { record?: boolean }) => void;
   flushOps: () => void;
+  /** Bracket a drag so its many ops form ONE history entry. Nested begins
+   *  are absorbed; a begin while one is open just continues it. */
+  beginGesture: () => void;
+  endGesture: () => void;
   undo: () => void;
+  redo: () => void;
   clearAll: () => void;
   setIsEditing: (editing: boolean) => void;
   setActiveTool: (tool: AnnotationEditorTool) => void;
@@ -156,6 +170,40 @@ function sendBatchAcked(channelId: string, ops: AnnotationOp[]): Promise<void> {
   });
 }
 
+/**
+ * Take the next batch off the queue, bounded by BOTH server caps: op count
+ * (ANNOTATION_MAX_OPS_PER_BATCH) and serialized size (ANNOTATION_OPS_MAX).
+ * Sixty-four image adds are 23 MB against a 400K-char batch cap — chunking by
+ * count alone had every such batch rejected after the local echo already
+ * painted it. Reachable through a scene-restart resync and through undoing a
+ * clear, both of which re-send whole objects.
+ *
+ * A single op that cannot fit any batch is dropped here with the same toast a
+ * server rejection would show: sending it would only get it rejected.
+ */
+export function takeNextBatch(): AnnotationOp[] {
+  const batch: AnnotationOp[] = [];
+  let chars = 2; // "[]"
+  while (pendingOps.length > 0 && batch.length < ANNOTATION_MAX_OPS_PER_BATCH) {
+    const op = pendingOps[0];
+    const opChars = JSON.stringify(op).length + (batch.length > 0 ? 1 : 0); // + ","
+    if (chars + opChars > ANNOTATION_OPS_MAX) {
+      if (batch.length === 0) {
+        // Oversized on its own — never sendable
+        pendingOps.shift();
+        console.warn('[Annotations] Dropping an op larger than a whole batch');
+        toast.error(i18n.t('voice.annotations.sceneFull'));
+        continue;
+      }
+      break;
+    }
+    pendingOps.shift();
+    batch.push(op);
+    chars += opChars;
+  }
+  return batch;
+}
+
 async function doFlush(): Promise<void> {
   if (flushTimer) {
     clearTimeout(flushTimer);
@@ -170,7 +218,8 @@ async function doFlush(): Promise<void> {
         pendingOps = []; // left voice mid-draw — nothing to annotate anymore
         break;
       }
-      const chunk = pendingOps.splice(0, ANNOTATION_MAX_OPS_PER_BATCH);
+      const chunk = takeNextBatch();
+      if (chunk.length === 0) continue; // only oversized ops were dropped
       await sendBatchAcked(channelId, chunk);
     }
   } finally {
@@ -209,6 +258,41 @@ function resetQueue(): void {
   }
   // Unblock an in-flight drain so it observes the empty queue and exits
   activeSendSettle?.();
+}
+
+// ─── Undo/redo history (module-level: not renderable state) ──────────────────
+// Entries are per GESTURE (see utils/annotationHistory). `openGesture`
+// accumulates while the editor holds a drag; everything else is committed as
+// its own entry. The store exposes only canUndo/canRedo for rendering.
+
+interface OpenGesture extends HistoryEntry {
+  added: Set<string>;
+}
+
+let undoStack: HistoryEntry[] = [];
+let redoStack: HistoryEntry[] = [];
+let openGesture: OpenGesture | null = null;
+
+function commitEntry(entry: OpenGesture, sceneAfter: AnnotationScene): void {
+  const forward = compactForward(entry.forward, entry.added, sceneAfter);
+  // Compaction only ever drops ops on objects the gesture itself added, so an
+  // empty forward means every one of them is gone again (a degenerate
+  // click-shape discarded on pointerup): the scene is what it was, the
+  // inverse would net to nothing — no entry, and no stale redo either.
+  if (forward.length === 0) return;
+  undoStack.push({ forward, inverse: entry.inverse });
+  if (undoStack.length > ANNOTATION_HISTORY_MAX) undoStack.splice(0, undoStack.length - ANNOTATION_HISTORY_MAX);
+  redoStack = []; // a fresh action forks the timeline
+}
+
+function syncHistoryFlags(set: (partial: Partial<AnnotationState>) => void): void {
+  set({ canUndo: undoStack.length > 0, canRedo: redoStack.length > 0 });
+}
+
+function resetHistory(): void {
+  undoStack = [];
+  redoStack = [];
+  openGesture = null;
 }
 
 // ─── Mask → compositor sync ──────────────────────────────────────────────────
@@ -278,6 +362,8 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
   strokeWidth: 0.004,
   selectedObjectId: null,
   masks: [],
+  canUndo: false,
+  canRedo: false,
 
   hydrate: (channelId, rev, scene, restarted = false) => {
     // A restart snapshot opens a NEW rev generation: every buffered batch is
@@ -318,6 +404,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
   clearViewerScene: () => {
     resetQueue();
     recentRemoteOps = [];
+    resetHistory();
     set({
       scene: EMPTY_SCENE,
       rev: 0,
@@ -325,31 +412,78 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
       isEditing: false,
       selectedObjectId: null,
       masks: [],
+      canUndo: false,
+      canRedo: false,
     });
   },
 
-  localApply: (ops) => {
+  localApply: (ops, opts) => {
     const state = get();
     const channelId = useVoiceStore.getState().activeChannelId;
     if (!channelId) return;
+    const base = state.sceneChannelId === channelId ? state.scene : EMPTY_SCENE;
+    const record = opts?.record !== false;
+    if (record) {
+      // Inverses are computed op by op against the scene each op sees, so a
+      // batch of [add, update] undoes correctly; collected in REVERSE so the
+      // inverse list is already in application order.
+      const entry = openGesture ?? { forward: [], inverse: [], added: new Set<string>() };
+      let working = base;
+      const inverses: AnnotationOp[][] = [];
+      for (const op of ops) {
+        inverses.push(inverseOf(op, working, entry.added));
+        for (const id of addedIds([op])) entry.added.add(id);
+        working = applyAnnotationOps(working, [op]);
+      }
+      entry.forward.push(...ops);
+      entry.inverse.unshift(...inverses.reverse().flat());
+      if (!openGesture) commitEntry(entry, working);
+    }
     set({
-      scene: applyAnnotationOps(state.sceneChannelId === channelId ? state.scene : EMPTY_SCENE, ops),
+      scene: applyAnnotationOps(base, ops),
       sceneChannelId: channelId,
     });
     enqueue(ops);
     scheduleFlush();
+    if (record) syncHistoryFlags(set);
   },
 
   flushOps: () => {
     void doFlush();
   },
 
+  beginGesture: () => {
+    if (!openGesture) openGesture = { forward: [], inverse: [], added: new Set() };
+  },
+
+  endGesture: () => {
+    const entry = openGesture;
+    if (!entry) return;
+    openGesture = null;
+    commitEntry(entry, get().scene);
+    syncHistoryFlags(set);
+  },
+
   undo: () => {
-    const { scene } = get();
-    const last = scene.objects[scene.objects.length - 1];
-    if (!last) return;
-    get().localApply([{ t: 'remove', id: last.id }]);
+    get().endGesture(); // a drag still in progress counts as done
+    const entry = undoStack.pop();
+    if (!entry) return;
+    get().localApply(entry.inverse, { record: false });
+    redoStack.push(entry);
     get().flushOps();
+    set({ selectedObjectId: null });
+    syncHistoryFlags(set);
+  },
+
+  redo: () => {
+    get().endGesture();
+    const entry = redoStack.pop();
+    if (!entry) return;
+    get().localApply(entry.forward, { record: false });
+    undoStack.push(entry);
+    get().flushOps();
+    set({ selectedObjectId: null });
+    syncHistoryFlags(set);
   },
 
   clearAll: () => {
@@ -385,8 +519,9 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     // draw loop dies here too: this path also fires on teardowns that bypass
     // stopScreenShare (socket reconnect clears screen state directly).
     resetQueue();
+    resetHistory();
     teardownComposite();
-    set({ isEditing: false, selectedObjectId: null, masks: [], activeTool: 'pen' });
+    set({ isEditing: false, selectedObjectId: null, masks: [], activeTool: 'pen', canUndo: false, canRedo: false });
   },
 }));
 
@@ -401,4 +536,6 @@ useVoiceStore.subscribe((state, prevState) => {
   const annotations = useAnnotationStore.getState();
   if (prevState.isScreenSharing) annotations.teardownSharerSession();
   annotations.clearViewerScene();
+  // Ephemeral overlay state dies with the share too (pointer, reactions)
+  useAnnotationLiveStore.getState().clear();
 });

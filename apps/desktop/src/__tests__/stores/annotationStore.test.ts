@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ANNOTATION_BATCH_INTERVAL_MS, ANNOTATION_MAX_OPS_PER_BATCH, ANNOTATION_ACK_TIMEOUT_MS, type AnnotationOp } from '@voxium/shared';
+import { applyAnnotationOps, ANNOTATION_BATCH_INTERVAL_MS, ANNOTATION_MAX_OPS_PER_BATCH, ANNOTATION_OPS_MAX, ANNOTATION_ACK_TIMEOUT_MS, ANNOTATION_HISTORY_MAX, type AnnotationOp } from '@voxium/shared';
 
 // ─── Mocks (before importing the store) ──────────────────────────────────────
 
@@ -280,6 +280,49 @@ describe('annotationStore — op batching', () => {
     expect(toastError).toHaveBeenCalledWith('voice.annotations.syncError');
   });
 
+  it('chunks by SERIALIZED SIZE as well as count: big image adds go out in batches under ANNOTATION_OPS_MAX', async () => {
+    // 10 images of ~1/4 of the batch cap each: by count they would all fit one
+    // batch of 64; by bytes that batch is 2.5× the server's cap and rejected.
+    const quarter = Math.floor(ANNOTATION_OPS_MAX / 4) - 200;
+    const image = (id: string): AnnotationOp => ({
+      t: 'add',
+      obj: { id, kind: 'image', src: `data:image/webp;base64,${'A'.repeat(quarter)}`, x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+    });
+    const ops = Array.from({ length: 10 }, (_, i) => image(`img-${i}`));
+    useAnnotationStore.getState().localApply(ops);
+    useAnnotationStore.getState().flushOps();
+
+    const sentIds: string[] = [];
+    let batches = 0;
+    while (socketEmit.mock.calls.length > batches) {
+      const call = socketEmit.mock.calls[batches];
+      const batch = call[1].ops as AnnotationOp[];
+      expect(JSON.stringify(batch).length).toBeLessThanOrEqual(ANNOTATION_OPS_MAX);
+      expect(batch.length).toBeLessThanOrEqual(ANNOTATION_MAX_OPS_PER_BATCH);
+      sentIds.push(...batch.map((op) => (op as { obj: { id: string } }).obj.id));
+      batches++;
+      call[2]({ ok: true });
+      await Promise.resolve();
+    }
+    const perBatch = Math.floor((ANNOTATION_OPS_MAX - 2) / (JSON.stringify(ops[0]).length + 1));
+    expect(perBatch).toBeLessThan(10); // the premise: count alone would have sent them all at once
+    expect(batches).toBe(Math.ceil(10 / perBatch));
+    expect(sentIds).toEqual(ops.map((op) => (op as { obj: { id: string } }).obj.id)); // order preserved, nothing lost
+  });
+
+  it('an op too large for ANY batch is dropped with the sceneFull toast instead of being sent and rejected', async () => {
+    const huge: AnnotationOp = {
+      t: 'add',
+      obj: { id: 'huge', kind: 'image', src: `data:image/webp;base64,${'A'.repeat(ANNOTATION_OPS_MAX)}`, x: 0, y: 0, w: 0.1, h: 0.1 },
+    };
+    useAnnotationStore.getState().localApply([huge, stroke('after')]);
+    useAnnotationStore.getState().flushOps();
+    expect(toastError).toHaveBeenCalledWith('voice.annotations.sceneFull');
+    // The queue keeps draining past it
+    expect(socketEmit).toHaveBeenCalledTimes(1);
+    expect(socketEmit.mock.calls[0][1].ops.map((op: { obj: { id: string } }) => op.obj.id)).toEqual(['after']);
+  });
+
   it('a restarted ack re-sends the FULL local scene (clear + adds) so viewers regain pre-loss objects', async () => {
     useAnnotationStore.getState().localApply([stroke('a'), stroke('b')]);
     useAnnotationStore.getState().flushOps();
@@ -294,11 +337,178 @@ describe('annotationStore — op batching', () => {
   });
 });
 
+// ─── Sharer path: undo / redo history ───────────────────────────────────────
+
+describe('annotationStore — history', () => {
+  const shape = (id: string, x = 0.1): AnnotationOp => ({
+    t: 'add',
+    obj: { id, kind: 'shape', shape: 'rect', color: '#00ff00', width: 0.004, x, y: 0.1, w: 0.2, h: 0.2 },
+  });
+
+  /** Everything this client put on the wire so far, flattened. */
+  function wireOps(): AnnotationOp[] {
+    return socketEmit.mock.calls.filter((c) => c[0] === 'voice:annotation:ops').flatMap((c) => c[1].ops as AnnotationOp[]);
+  }
+
+  /** Ack every batch as it goes out until the queue is empty (batches are
+   *  serialized on their acks, so without this only the first one ships). */
+  const acked = new Set<number>();
+  async function drainWire() {
+    await vi.advanceTimersByTimeAsync(ANNOTATION_BATCH_INTERVAL_MS);
+    for (let i = 0; i < socketEmit.mock.calls.length; i++) {
+      if (acked.has(i)) continue;
+      acked.add(i);
+      socketEmit.mock.calls[i][2]?.({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(ANNOTATION_BATCH_INTERVAL_MS);
+    }
+  }
+  beforeEach(() => acked.clear());
+
+  /** A viewer that applies exactly what we sent, in order. */
+  async function viewerScene() {
+    await drainWire();
+    return applyAnnotationOps({ objects: [] }, wireOps());
+  }
+
+  it('starts with nothing to undo or redo', () => {
+    expect(useAnnotationStore.getState()).toMatchObject({ canUndo: false, canRedo: false });
+  });
+
+  it('undo reverts the last action, redo re-applies it, and the VIEWER converges on the same scene every step', async () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([shape('a')]);
+    store.localApply([shape('b')]);
+    store.localApply([{ t: 'update', id: 'a', patch: { x: 0.7 } }]);
+    expect(useAnnotationStore.getState()).toMatchObject({ canUndo: true, canRedo: false });
+
+    store.undo();
+    let scene = useAnnotationStore.getState().scene;
+    expect(scene.objects.find((o) => o.id === 'a')).toMatchObject({ x: 0.1 });
+    expect(useAnnotationStore.getState()).toMatchObject({ canUndo: true, canRedo: true });
+
+    store.undo();
+    scene = useAnnotationStore.getState().scene;
+    expect(scene.objects.map((o) => o.id)).toEqual(['a']);
+
+    store.redo();
+    scene = useAnnotationStore.getState().scene;
+    expect(scene.objects.map((o) => o.id)).toEqual(['a', 'b']);
+
+    store.redo();
+    expect(useAnnotationStore.getState().scene.objects.find((o) => o.id === 'a')).toMatchObject({ x: 0.7 });
+    expect(useAnnotationStore.getState()).toMatchObject({ canUndo: true, canRedo: false });
+
+    expect(await viewerScene()).toEqual(useAnnotationStore.getState().scene);
+  });
+
+  it('a gesture collapses a whole stroke (add + appends) into ONE undo step and one redo add', async () => {
+    const store = useAnnotationStore.getState();
+    store.beginGesture();
+    store.localApply([stroke('s')]);
+    for (let i = 0; i < 5; i++) store.localApply([{ t: 'append', id: 's', points: [0.3 + i / 100, 0.3] }]);
+    store.endGesture();
+
+    store.undo();
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    expect(useAnnotationStore.getState().canUndo).toBe(false);
+    // ...and the wire saw a single remove for it
+    await drainWire();
+    const removes = wireOps().filter((op) => op.t === 'remove');
+    expect(removes).toEqual([{ t: 'remove', id: 's' }]);
+
+    store.redo();
+    const redone = useAnnotationStore.getState().scene.objects[0] as { points: number[] };
+    expect(redone.points).toHaveLength(4 + 10);
+    expect(await viewerScene()).toEqual(useAnnotationStore.getState().scene);
+    // The redo shipped ONE add of the finished stroke, not the appends again
+    const addsOfS = wireOps().filter((op) => op.t === 'add' && op.obj.id === 's');
+    expect(addsOfS).toHaveLength(2); // original + redo
+  });
+
+  it('a fresh action after undo discards the redo branch', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([shape('a')]);
+    store.undo();
+    expect(useAnnotationStore.getState().canRedo).toBe(true);
+    store.localApply([shape('b')]);
+    expect(useAnnotationStore.getState().canRedo).toBe(false);
+    store.redo(); // no-op
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['b']);
+  });
+
+  it('undo of clearAll brings every object back (byte-chunked on the wire)', async () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([shape('a'), shape('b'), stroke('s')]);
+    store.clearAll();
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    store.undo();
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['a', 'b', 's']);
+    expect(await viewerScene()).toEqual(useAnnotationStore.getState().scene);
+  });
+
+  it('a degenerate gesture (object added then discarded) leaves no history entry', () => {
+    const store = useAnnotationStore.getState();
+    store.beginGesture();
+    store.localApply([shape('tmp')]);
+    store.localApply([{ t: 'remove', id: 'tmp' }]);
+    store.endGesture();
+    expect(useAnnotationStore.getState().canUndo).toBe(false);
+  });
+
+  it('undo mid-drag ends the open gesture first', () => {
+    const store = useAnnotationStore.getState();
+    store.beginGesture();
+    store.localApply([stroke('s')]);
+    store.undo(); // no endGesture call
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+
+  it('history is capped at ANNOTATION_HISTORY_MAX entries (oldest dropped)', () => {
+    const store = useAnnotationStore.getState();
+    for (let i = 0; i < ANNOTATION_HISTORY_MAX + 5; i++) store.localApply([shape(`o${i}`)]);
+    for (let i = 0; i < ANNOTATION_HISTORY_MAX + 5; i++) store.undo();
+    // The five oldest adds could not be undone
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['o0', 'o1', 'o2', 'o3', 'o4']);
+    expect(useAnnotationStore.getState().canUndo).toBe(false);
+  });
+
+  it('remote ops and hydration never enter the history; teardown and clearViewerScene empty it', () => {
+    const store = useAnnotationStore.getState();
+    store.applyRemoteOps('chan-1', 1, [shape('remote')]);
+    store.hydrate('chan-1', 2, { objects: [] });
+    expect(useAnnotationStore.getState().canUndo).toBe(false);
+
+    store.localApply([shape('a')]);
+    expect(useAnnotationStore.getState().canUndo).toBe(true);
+    store.teardownSharerSession();
+    expect(useAnnotationStore.getState()).toMatchObject({ canUndo: false, canRedo: false });
+
+    store.localApply([shape('b')]);
+    store.undo();
+    store.clearViewerScene();
+    expect(useAnnotationStore.getState()).toMatchObject({ canUndo: false, canRedo: false });
+  });
+
+  it('undo/redo flush immediately and drop the selection', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([shape('a')]);
+    store.setSelectedObjectId('a');
+    vi.clearAllMocks();
+    store.undo();
+    expect(socketEmit).toHaveBeenCalledTimes(1);
+    expect(useAnnotationStore.getState().selectedObjectId).toBeNull();
+  });
+});
+
 // ─── Sharer path: editing actions ───────────────────────────────────────────
 
 describe('annotationStore — editing actions', () => {
-  it('undo removes the most recent object and flushes immediately', async () => {
-    useAnnotationStore.getState().localApply([stroke('first'), stroke('second')]);
+  it('undo reverts the most recent ACTION and flushes immediately', async () => {
+    // Two separate actions (one localApply call = one history entry)
+    useAnnotationStore.getState().localApply([stroke('first')]);
+    useAnnotationStore.getState().localApply([stroke('second')]);
     useAnnotationStore.getState().flushOps();
     socketEmit.mock.calls[0][2]({ ok: true }); // free the drain loop
     await Promise.resolve();

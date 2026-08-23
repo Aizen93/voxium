@@ -188,6 +188,11 @@ interface VoiceState {
    *  sharer's own preview keeps playing the raw capture, so without this flag
    *  they would never know viewers see a frozen frame. */
   screenShareFrozen: boolean;
+  /** The annotation wire version the server advertised on our share claim
+   *  (1 when absent — an older server, or the annotations_v2 flag off). The
+   *  toolbar hides v2 tools below 2 so nothing we draw gets rejected after
+   *  the local echo painted it. Only meaningful while isScreenSharing. */
+  screenShareAnnotationsVersion: number;
 
   // ─── DM Call State ─────────────────────────────────────────────────
   dmCallConversationId: string | null;
@@ -868,6 +873,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   remoteScreenStream: null,
   screenShareViewMode: 'inline',
   screenShareFrozen: false,
+  screenShareAnnotationsVersion: 1,
 
   // DM call state
   dmCallConversationId: null,
@@ -1998,12 +2004,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
       // Claim the sharer slot BEFORE producing — the server authorizes
       // screen-video/screen-audio producers only for the active sharer.
-      const startResponse = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      const startResponse = await new Promise<{ ok: boolean; error?: string; annotationsVersion?: number }>((resolve) => {
         const timeout = setTimeout(
           () => resolve({ ok: false, error: 'Server did not respond' }),
           5000,
         );
-        socket.emit('voice:screen_share:start', (response: { ok: boolean; error?: string }) => {
+        socket.emit('voice:screen_share:start', (response: { ok: boolean; error?: string; annotationsVersion?: number }) => {
           clearTimeout(timeout);
           resolve(response ?? { ok: false, error: 'No response from server' });
         });
@@ -2070,6 +2076,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       set({
         screenStream: stream,
         isScreenSharing: true,
+        screenShareAnnotationsVersion: typeof startResponse.annotationsVersion === 'number' ? startResponse.annotationsVersion : 1,
       });
     } catch (err) {
       console.warn('[Voice] Screen share cancelled or failed:', err);
@@ -2150,6 +2157,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       isScreenSharing: false,
       screenSharingUserId: null,
       screenShareFrozen: false,
+      screenShareAnnotationsVersion: 1,
     });
   },
 

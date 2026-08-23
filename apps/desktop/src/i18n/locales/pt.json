@@ -774,6 +774,7 @@
       "image": "Imagem sobreposta",
       "mask": "Máscara de privacidade",
       "undo": "Desfazer",
+      "redo": "Refazer",
       "clearAll": "Limpar tudo",
       "color": "Cor",
       "width": "Espessura do traço",

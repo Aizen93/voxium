@@ -774,6 +774,7 @@
       "image": "Image en superposition",
       "mask": "Masque de confidentialité",
       "undo": "Annuler",
+      "redo": "Rétablir",
       "clearAll": "Tout effacer",
       "color": "Couleur",
       "width": "Épaisseur du trait",

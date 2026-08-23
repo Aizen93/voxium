@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import {
   MousePointer2, Pencil, Highlighter, Square, Circle, Type, ImagePlus,
-  ShieldOff, Undo2, Trash2, PenLine, X,
+  ShieldOff, Undo2, Redo2, Trash2, PenLine, X,
 } from 'lucide-react';
 import { useAnnotationStore, type AnnotationEditorTool } from '../../stores/annotationStore';
 
@@ -40,6 +40,9 @@ export function AnnotationToolbar() {
   const setColor = useAnnotationStore((s) => s.setColor);
   const setStrokeWidth = useAnnotationStore((s) => s.setStrokeWidth);
   const undo = useAnnotationStore((s) => s.undo);
+  const redo = useAnnotationStore((s) => s.redo);
+  const canUndo = useAnnotationStore((s) => s.canUndo);
+  const canRedo = useAnnotationStore((s) => s.canRedo);
   const clearAll = useAnnotationStore((s) => s.clearAll);
 
   if (!isEditing) {
@@ -120,11 +123,21 @@ export function AnnotationToolbar() {
       <div className="ml-auto flex items-center gap-0.5">
         <button
           onClick={undo}
-          className="rounded p-1.5 text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary"
+          disabled={!canUndo}
+          className="rounded p-1.5 text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
           title={t('voice.annotations.undo')}
           aria-label={t('voice.annotations.undo')}
         >
           <Undo2 size={15} />
+        </button>
+        <button
+          onClick={redo}
+          disabled={!canRedo}
+          className="rounded p-1.5 text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
+          title={t('voice.annotations.redo')}
+          aria-label={t('voice.annotations.redo')}
+        >
+          <Redo2 size={15} />
         </button>
         <button
           onClick={clearAll}

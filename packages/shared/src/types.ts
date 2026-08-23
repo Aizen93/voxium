@@ -1,4 +1,4 @@
-import type { AnnotationOp, AnnotationScene } from './annotations.js';
+import type { AnnotationOp, AnnotationScene, AnnotationLiveEvent } from './annotations.js';
 
 // ─── User ────────────────────────────────────────────────────────────────────
 
@@ -395,6 +395,10 @@ export interface ServerToClientEvents {
   // new generation's baseline — a viewer must drop everything it buffered from
   // the previous generation rather than replay it over the snapshot.
   'voice:annotation:state': (data: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene; restarted?: boolean }) => void;
+  // Ephemeral: never persisted, never hydrated, no rev. A late joiner simply
+  // sees the next one; a lost one costs nothing (pointers fade on the
+  // viewer's own clock). Sender excluded — it local-echoes.
+  'voice:annotation:live': (data: { channelId: string; userId: string; ev: AnnotationLiveEvent }) => void;
   'announcement:new': (announcement: Announcement) => void;
   'announcement:init': (data: { announcements: Announcement[] }) => void;
   'admin:metrics': (data: AdminMetricsSnapshot) => void;
@@ -449,12 +453,20 @@ export interface ClientToServerEvents {
   'voice:server_mute': (data: { userId: string; muted: boolean }) => void;
   'voice:server_deafen': (data: { userId: string; deafened: boolean }) => void;
   'voice:force_move': (data: { userId: string; targetChannelId: string }) => void;
-  'voice:screen_share:start': (callback?: (response: { ok: boolean; error?: string }) => void) => void;
+  // annotationsVersion: the wire version this server VALIDATES (absent = 1).
+  // New clients hide the v2 tools when it is missing or 1, so a sharer on a
+  // not-yet-deployed server never ships ops that get rejected after the local
+  // echo already drew them.
+  'voice:screen_share:start': (callback?: (response: { ok: boolean; error?: string; annotationsVersion?: number }) => void) => void;
   'voice:screen_share:stop': () => void;
   // restarted: the authoritative scene was rebuilt from empty for this batch
   // (fresh share, Redis loss, TTL expiry, corrupt state) — the sharer's client
   // re-sends its full local scene so viewers regain pre-loss objects
   'voice:annotation:ops': (data: { channelId: string; ops: AnnotationOp[] }, callback?: (response: { ok: boolean; error?: string; restarted?: boolean }) => void) => void;
+  // Ephemeral sibling of :ops — see ServerToClientEvents. Authorization is per
+  // kind: pointer = active sharer; reaction / snapshot = anyone in the voice
+  // channel. No callback by design.
+  'voice:annotation:live': (data: { channelId: string; ev: AnnotationLiveEvent }) => void;
   'admin:subscribe_metrics': () => void;
   'admin:unsubscribe_metrics': () => void;
   'admin:subscribe_reports': () => void;

@@ -774,6 +774,7 @@
       "image": "Bild-Overlay",
       "mask": "Datenschutzmaske",
       "undo": "Rückgängig",
+      "redo": "Wiederholen",
       "clearAll": "Alles löschen",
       "color": "Farbe",
       "width": "Strichstärke",

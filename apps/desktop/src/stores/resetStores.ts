@@ -7,6 +7,7 @@ import { useAnnouncementStore } from './announcementStore';
 import { useVoiceStore } from './voiceStore';
 import { useE2EStore } from './e2eStore';
 import { useAnnotationStore } from './annotationStore';
+import { useAnnotationLiveStore } from './annotationLiveStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
 import { stopE2EDeviceListWatch } from './e2eStore';
 
@@ -30,6 +31,7 @@ const ACCOUNT_STORES = [
   useVoiceStore,
   useE2EStore,
   useAnnotationStore,
+  useAnnotationLiveStore,
 ] as const;
 
 // Captured at module import — before any user interaction — so this is each

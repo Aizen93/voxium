@@ -38,11 +38,12 @@ import { initNotifications, notify } from '../../services/notifications';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
 import { useAnnotationStore } from '../../stores/annotationStore';
+import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
   MemberRole, Role, Announcement, SupportMessageData, SupportTicketStatus,
-  ReactionGroup, AnnotationOp, AnnotationScene,
+  ReactionGroup, AnnotationOp, AnnotationScene, AnnotationLiveEvent,
 } from '@voxium/shared';
 
 /**
@@ -577,6 +578,14 @@ export function MainLayout() {
         if (useVoiceStore.getState().activeChannelId !== channelId) return;
         useAnnotationStore.getState().hydrate(channelId, rev, scene, restarted === true);
       },
+      voiceAnnotationLive: ({ channelId, userId, ev }: { channelId: string; userId: string; ev: AnnotationLiveEvent }) => {
+        const voiceState = useVoiceStore.getState();
+        if (voiceState.activeChannelId !== channelId) return;
+        // The pointer is the sharer's alone — the server enforces it, and this
+        // guard drops a stray dot from a sharer that just handed off.
+        if ((ev.k === 'pointer' || ev.k === 'pointer-off') && voiceState.screenSharingUserId !== userId) return;
+        useAnnotationLiveStore.getState().receive(userId, ev);
+      },
       memberRoleUpdated: ({ serverId, userId, role }: { serverId: string; userId: string; role: MemberRole }) => {
         useServerStore.getState().handleMemberRoleUpdated(serverId, userId, role);
       },
@@ -717,6 +726,7 @@ export function MainLayout() {
       ['voice:screen_share:state', handlers.voiceScreenShareState],
       ['voice:annotation:ops', handlers.voiceAnnotationOps],
       ['voice:annotation:state', handlers.voiceAnnotationState],
+      ['voice:annotation:live', handlers.voiceAnnotationLive],
       ['member:joined', handlers.memberJoined],
       ['member:left', handlers.memberLeft],
       ['channel:created', handlers.channelCreated],

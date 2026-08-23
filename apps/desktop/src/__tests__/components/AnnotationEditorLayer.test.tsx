@@ -32,7 +32,7 @@ vi.mock('../../hooks/useVideoContentRect', () => ({
   useVideoContentRect: () => RECT,
 }));
 
-import { AnnotationEditorLayer, sanitizeAnnotationText } from '../../components/voice/AnnotationEditorLayer';
+import { AnnotationEditorLayer, sanitizeAnnotationText, type ToolCapabilities } from '../../components/voice/AnnotationEditorLayer';
 import { useAnnotationStore } from '../../stores/annotationStore';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -43,9 +43,9 @@ let container: HTMLDivElement;
 let root: Root;
 const videoRef = { current: null as HTMLVideoElement | null };
 
-function render(strict = false) {
+function render(strict = false, capabilities?: ToolCapabilities) {
   act(() => {
-    const el = <AnnotationEditorLayer videoRef={videoRef} />;
+    const el = <AnnotationEditorLayer videoRef={videoRef} capabilities={capabilities} />;
     root.render(strict ? <StrictMode>{el}</StrictMode> : el);
   });
 }
@@ -116,6 +116,9 @@ function textObjects() {
 }
 
 beforeEach(() => {
+  // The undo/redo stacks are module-level: reset them with the scene, or a
+  // previous test's caption commits would still be undoable here
+  useAnnotationStore.getState().clearViewerScene();
   useAnnotationStore.setState({ ...initialState, isEditing: true, activeTool: 'text', scene: { objects: [] } }, true);
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -281,5 +284,78 @@ describe('AnnotationEditorLayer — text tool', () => {
     expect(sanitizeAnnotationText('  hi\u0000there\u007F \u200F\u2060\uFEFF ')).toBe('hithere');
     expect(sanitizeAnnotationText('x'.repeat(ANNOTATION_TEXT_MAX + 50))).toHaveLength(ANNOTATION_TEXT_MAX);
     expect(sanitizeAnnotationText('\u202E\u202E')).toBe('');
+  });
+});
+
+describe('AnnotationEditorLayer — capabilities and gestures', () => {
+  const MASKS_ONLY: ToolCapabilities = { tools: new Set(['select', 'mask']), masks: true, images: false };
+
+  it('ignores a press with a tool outside the capability set (a stale activeTool cannot leak)', () => {
+    useAnnotationStore.setState({ activeTool: 'pen' });
+    render(false, MASKS_ONLY);
+    pointerDown(layer(), 100, 100);
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+
+  it('a masks-only layer still draws masks and renders their outlines', () => {
+    useAnnotationStore.setState({ activeTool: 'mask' });
+    render(false, MASKS_ONLY);
+    pointerDown(layer(), 100, 100);
+    act(() => {
+      const ev = new MouseEvent('pointermove', { bubbles: true, clientX: 300, clientY: 250 });
+      layer().dispatchEvent(ev);
+    });
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().masks).toHaveLength(1);
+    expect(useAnnotationStore.getState().masks[0]).toMatchObject({ x: 0.125, y: 0.2222222222222222 });
+    expect(container.querySelectorAll('.border-dashed')).toHaveLength(1);
+    // Masks never touch the history
+    expect(useAnnotationStore.getState().canUndo).toBe(false);
+  });
+
+  it('the mask tool is inert when the capabilities forbid masks, even if listed', () => {
+    useAnnotationStore.setState({ activeTool: 'mask' });
+    render(false, { tools: new Set(['mask']), masks: false, images: false });
+    pointerDown(layer(), 100, 100);
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().masks).toEqual([]);
+  });
+
+  it('a pen drag is ONE history entry (gesture bracketed on pointerdown/up)', () => {
+    useAnnotationStore.setState({ activeTool: 'pen' });
+    render();
+    pointerDown(layer(), 100, 100);
+    for (let i = 1; i <= 5; i++) {
+      act(() => { layer().dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 100 + i * 10, clientY: 100 })); });
+    }
+    pointerUp(layer());
+    const stroke = useAnnotationStore.getState().scene.objects[0] as { points: number[] };
+    expect(stroke.points).toHaveLength(12);
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+
+  it('a click-without-drag shape is discarded and leaves nothing to undo', () => {
+    useAnnotationStore.setState({ activeTool: 'rect' });
+    render();
+    pointerDown(layer(), 100, 100);
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    expect(useAnnotationStore.getState().canUndo).toBe(false);
+  });
+
+  it('selecting and moving a shape is one undo step', () => {
+    useAnnotationStore.setState({ activeTool: 'select' });
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 'r', kind: 'shape', shape: 'rect', color: '#00ff00', width: 0.004, x: 0.1, y: 0.1, w: 0.2, h: 0.2 } }]);
+    render();
+    pointerDown(layer(), 160, 90); // inside the rect (0.2, 0.2)
+    for (let i = 1; i <= 4; i++) {
+      act(() => { layer().dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 160 + i * 40, clientY: 90 })); });
+    }
+    pointerUp(layer());
+    expect((useAnnotationStore.getState().scene.objects[0] as { x: number }).x).toBeCloseTo(0.3);
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect((useAnnotationStore.getState().scene.objects[0] as { x: number }).x).toBeCloseTo(0.1);
   });
 });

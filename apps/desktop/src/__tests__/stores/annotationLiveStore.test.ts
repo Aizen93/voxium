@@ -1,0 +1,231 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { ANNOTATION_LIVE_POINTER_INTERVAL_MS, ANNOTATION_LIVE_POINTER_FADE_MS, ANNOTATION_REACTIONS } from '@voxium/shared';
+
+const socketEmit = vi.hoisted(() => vi.fn());
+const socketRef = vi.hoisted(() => ({ current: { emit: socketEmit } as { emit: typeof socketEmit } | null }));
+vi.mock('../../services/socket', () => ({
+  getSocket: () => socketRef.current,
+}));
+
+const voiceMock = vi.hoisted(() => ({
+  state: { activeChannelId: 'chan-1' as string | null, localUserId: 'me' as string | null },
+  getState() { return this.state; },
+  subscribe: () => () => {},
+}));
+vi.mock('../../stores/voiceStore', () => ({ useVoiceStore: voiceMock }));
+
+import {
+  useAnnotationLiveStore,
+  hasLiveActivity,
+  LIVE_POINTER_TRAIL_MAX,
+  LIVE_REACTIONS_MAX_IN_FLIGHT,
+  LIVE_REACTION_TTL_MS,
+} from '../../stores/annotationLiveStore';
+
+const initial = useAnnotationLiveStore.getState();
+// Each test gets its own clock base, strictly later than the previous one:
+// the send throttle's "last sent at" is module-level, so a shared fixed
+// system time would make a later test's first move look like a burst.
+let clockBase = Date.parse('2026-08-23T12:00:00Z');
+
+function sent() {
+  return socketEmit.mock.calls.filter((c) => c[0] === 'voice:annotation:live').map((c) => c[1]);
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  clockBase += 60_000;
+  vi.setSystemTime(new Date(clockBase));
+  vi.clearAllMocks();
+  socketRef.current = { emit: socketEmit };
+  voiceMock.state = { activeChannelId: 'chan-1', localUserId: 'me' };
+  useAnnotationLiveStore.getState().clear();
+  useAnnotationLiveStore.setState(initial, true);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('annotationLiveStore — receiving', () => {
+  it('a remote pointer records position, local time and a capped trail', () => {
+    const store = useAnnotationLiveStore.getState();
+    for (let i = 0; i <= LIVE_POINTER_TRAIL_MAX + 3; i++) {
+      store.receive('sharer', { k: 'pointer', x: i / 20, y: 0.5 });
+      vi.advanceTimersByTime(10);
+    }
+    const p = useAnnotationLiveStore.getState().pointer!;
+    expect(p.x).toBeCloseTo((LIVE_POINTER_TRAIL_MAX + 3) / 20);
+    expect(p.at).toBe(Date.now() - 10); // stamped on receipt, on the LOCAL clock
+    expect(p.trail).toHaveLength(LIVE_POINTER_TRAIL_MAX);
+    // Oldest dropped first, newest last
+    expect(p.trail[p.trail.length - 1].x).toBeCloseTo((LIVE_POINTER_TRAIL_MAX + 2) / 20);
+  });
+
+  it('pointer-off clears the dot', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.receive('sharer', { k: 'pointer', x: 0.1, y: 0.1 });
+    store.receive('sharer', { k: 'pointer-off' });
+    expect(useAnnotationLiveStore.getState().pointer).toBeNull();
+  });
+
+  it('reactions are appended with the sender and capped in flight (oldest dropped)', () => {
+    const store = useAnnotationLiveStore.getState();
+    for (let i = 0; i < LIVE_REACTIONS_MAX_IN_FLIGHT + 5; i++) {
+      store.receive(`u${i}`, { k: 'reaction', e: i % ANNOTATION_REACTIONS.length });
+    }
+    const reactions = useAnnotationLiveStore.getState().reactions;
+    expect(reactions).toHaveLength(LIVE_REACTIONS_MAX_IN_FLIGHT);
+    expect(reactions[0].userId).toBe('u5');
+    expect(new Set(reactions.map((r) => r.id)).size).toBe(LIVE_REACTIONS_MAX_IN_FLIGHT);
+  });
+
+  it('an out-of-range reaction index is ignored even if the server let it through', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.receive('u1', { k: 'reaction', e: ANNOTATION_REACTIONS.length });
+    store.receive('u1', { k: 'reaction', e: -1 });
+    expect(useAnnotationLiveStore.getState().reactions).toEqual([]);
+  });
+
+  it('a snapshot notice records who and when', () => {
+    useAnnotationLiveStore.getState().receive('u7', { k: 'snapshot' });
+    expect(useAnnotationLiveStore.getState().snapshotNotice).toEqual({ userId: 'u7', at: Date.now() });
+  });
+});
+
+describe('annotationLiveStore — sharer pointer send throttle', () => {
+  it('sends the first position at once and local-echoes it', () => {
+    useAnnotationLiveStore.getState().pointTo(0.3, 0.4);
+    expect(sent()).toEqual([{ channelId: 'chan-1', ev: { k: 'pointer', x: 0.3, y: 0.4 } }]);
+    expect(useAnnotationLiveStore.getState().pointer).toMatchObject({ x: 0.3, y: 0.4 });
+  });
+
+  it('coalesces a burst to one send per interval and ALWAYS sends the last position', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.pointTo(0.1, 0.1);          // leading send
+    for (let i = 2; i <= 6; i++) {    // 5 moves inside the window
+      vi.advanceTimersByTime(5);
+      store.pointTo(i / 10, i / 10);
+    }
+    expect(sent()).toHaveLength(1);
+    // Local echo is immediate regardless
+    expect(useAnnotationLiveStore.getState().pointer).toMatchObject({ x: 0.6, y: 0.6 });
+    vi.advanceTimersByTime(ANNOTATION_LIVE_POINTER_INTERVAL_MS);
+    expect(sent()).toHaveLength(2);
+    expect(sent()[1].ev).toEqual({ k: 'pointer', x: 0.6, y: 0.6 });
+  });
+
+  it('keeps to ≤ one send per interval under a 60 Hz move stream', () => {
+    const store = useAnnotationLiveStore.getState();
+    for (let i = 0; i < 60; i++) {
+      store.pointTo(i / 60, 0.5);
+      vi.advanceTimersByTime(16);
+    }
+    vi.advanceTimersByTime(ANNOTATION_LIVE_POINTER_INTERVAL_MS);
+    const total = 60 * 16;
+    expect(sent().length).toBeLessThanOrEqual(Math.ceil(total / ANNOTATION_LIVE_POINTER_INTERVAL_MS) + 1);
+    expect(sent().length).toBeGreaterThan(10);
+  });
+
+  it('clamps the position to the frame before sending', () => {
+    useAnnotationLiveStore.getState().pointTo(-0.4, 1.7);
+    expect(sent()[0].ev).toEqual({ k: 'pointer', x: 0, y: 1 });
+  });
+
+  it('pointerOff cancels a pending trailing send and sends pointer-off once', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.pointTo(0.1, 0.1);
+    vi.advanceTimersByTime(5);
+    store.pointTo(0.2, 0.2); // pending
+    store.pointerOff();
+    vi.advanceTimersByTime(ANNOTATION_LIVE_POINTER_INTERVAL_MS * 2);
+    expect(sent().map((m) => m.ev)).toEqual([{ k: 'pointer', x: 0.1, y: 0.1 }, { k: 'pointer-off' }]);
+    expect(useAnnotationLiveStore.getState().pointer).toBeNull();
+  });
+
+  it('pointerOff with nothing live sends nothing (tool switches are frequent)', () => {
+    useAnnotationLiveStore.getState().pointerOff();
+    expect(sent()).toEqual([]);
+  });
+
+  it('a wall clock stepping BACKWARDS does not stall the pointer (NTP correction)', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.pointTo(0.1, 0.1);
+    vi.setSystemTime(new Date(Date.now() - 3_600_000)); // clock jumps back an hour
+    store.pointTo(0.2, 0.2);
+    expect(sent()).toHaveLength(2); // treated as an elapsed window, sent at once
+    vi.advanceTimersByTime(5);
+    store.pointTo(0.3, 0.3);
+    vi.advanceTimersByTime(ANNOTATION_LIVE_POINTER_INTERVAL_MS);
+    expect(sent()).toHaveLength(3); // and the trailing send still fires within one interval
+  });
+
+  it('sends nothing without a voice channel or a socket, but still local-echoes', () => {
+    voiceMock.state = { activeChannelId: null, localUserId: 'me' };
+    useAnnotationLiveStore.getState().pointTo(0.5, 0.5);
+    voiceMock.state = { activeChannelId: 'chan-1', localUserId: 'me' };
+    socketRef.current = null;
+    vi.advanceTimersByTime(ANNOTATION_LIVE_POINTER_INTERVAL_MS);
+    useAnnotationLiveStore.getState().pointTo(0.6, 0.6);
+    expect(sent()).toEqual([]);
+    expect(useAnnotationLiveStore.getState().pointer).toMatchObject({ x: 0.6, y: 0.6 });
+  });
+});
+
+describe('annotationLiveStore — reactions and notices from this client', () => {
+  it('react local-echoes under our own id and sends the index', () => {
+    useAnnotationLiveStore.getState().react(3);
+    expect(useAnnotationLiveStore.getState().reactions).toEqual([expect.objectContaining({ userId: 'me', e: 3 })]);
+    expect(sent()).toEqual([{ channelId: 'chan-1', ev: { k: 'reaction', e: 3 } }]);
+  });
+
+  it('react refuses an index outside the allowlist', () => {
+    useAnnotationLiveStore.getState().react(ANNOTATION_REACTIONS.length);
+    expect(sent()).toEqual([]);
+    expect(useAnnotationLiveStore.getState().reactions).toEqual([]);
+  });
+
+  it('notifySnapshot sends the courtesy event', () => {
+    useAnnotationLiveStore.getState().notifySnapshot();
+    expect(sent()).toEqual([{ channelId: 'chan-1', ev: { k: 'snapshot' } }]);
+  });
+});
+
+describe('annotationLiveStore — pruning and lifecycle', () => {
+  it('prune drops a faded pointer, expired reactions and an old notice — and is a no-op otherwise', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.receive('s', { k: 'pointer', x: 0.1, y: 0.1 });
+    store.receive('u1', { k: 'reaction', e: 0 });
+    store.receive('u2', { k: 'snapshot' });
+    const before = useAnnotationLiveStore.getState();
+    store.prune(Date.now() + 10);
+    expect(useAnnotationLiveStore.getState()).toBe(before); // untouched reference: no re-render
+
+    store.prune(Date.now() + ANNOTATION_LIVE_POINTER_FADE_MS + 1);
+    expect(useAnnotationLiveStore.getState().pointer).toBeNull();
+    expect(useAnnotationLiveStore.getState().reactions).toHaveLength(1);
+
+    store.prune(Date.now() + LIVE_REACTION_TTL_MS + 1);
+    expect(useAnnotationLiveStore.getState().reactions).toEqual([]);
+    store.prune(Date.now() + 4_001);
+    expect(useAnnotationLiveStore.getState().snapshotNotice).toBeNull();
+  });
+
+  it('hasLiveActivity answers whether the scheduler still has work', () => {
+    expect(hasLiveActivity(useAnnotationLiveStore.getState())).toBe(false);
+    useAnnotationLiveStore.getState().receive('s', { k: 'pointer', x: 0.1, y: 0.1 });
+    expect(hasLiveActivity(useAnnotationLiveStore.getState())).toBe(true);
+  });
+
+  it('clear wipes everything and cancels a pending send', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.pointTo(0.1, 0.1);
+    vi.advanceTimersByTime(5);
+    store.pointTo(0.2, 0.2);
+    store.receive('u1', { k: 'reaction', e: 0 });
+    store.clear();
+    vi.advanceTimersByTime(ANNOTATION_LIVE_POINTER_INTERVAL_MS * 2);
+    expect(sent()).toHaveLength(1);
+    expect(useAnnotationLiveStore.getState()).toMatchObject({ pointer: null, reactions: [], snapshotNotice: null });
+  });
+});

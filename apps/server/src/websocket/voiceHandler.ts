@@ -1179,8 +1179,8 @@ export function createVoiceHandlers(
   // The client claims the sharer slot BEFORE producing (the server derives
   // screen producer authorization from the active sharer), so start must ACK —
   // the client needs to know whether it may proceed.
-  on('voice:screen_share:start', (callback?: (response: { ok: boolean; error?: string }) => void) => {
-    const ack = (response: { ok: boolean; error?: string }) => {
+  on('voice:screen_share:start', (callback?: (response: { ok: boolean; error?: string; annotationsVersion?: number }) => void) => {
+    const ack = (response: { ok: boolean; error?: string; annotationsVersion?: number }) => {
       if (typeof callback === 'function') callback(response);
     };
     if (!socketRateLimit(socket, 'voice:screen_share', 10)) { ack({ ok: false, error: 'Rate limited' }); return; }
@@ -1204,7 +1204,13 @@ export function createVoiceHandlers(
     // Same-user re-claim must preserve the in-progress annotation scene
     mirrorScreenShare(channelId, userId, currentSharer === userId);
     io.to(`channel:${channelId}`).emit('voice:screen_share:start', { channelId, userId });
-    ack({ ok: true });
+    // The annotation wire version THIS cluster validates — the sharer's client
+    // hides the v2 tools when it is missing or 1 (old server, or the
+    // annotations_v2 flag turned off), so nothing it draws gets rejected
+    // after the local echo already painted it.
+    // (Inline rather than imported from annotationHandler: several suites mock
+    // that module down to handleAnnotationEvents.)
+    ack({ ok: true, annotationsVersion: isFeatureEnabled('annotations_v2') ? 2 : 1 });
   });
 
   on('voice:screen_share:stop', () => {

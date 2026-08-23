@@ -1113,7 +1113,9 @@ describe('voiceHandler — screen share slot protocol (HIGH-1)', () => {
 
     const ack = vi.fn();
     handlers.get('voice:screen_share:start')!(ack);
-    expect(ack).toHaveBeenCalledWith({ ok: true });
+    // annotationsVersion advertises the wire version this cluster validates
+    // (feature flags are mocked enabled here, so v2)
+    expect(ack).toHaveBeenCalledWith({ ok: true, annotationsVersion: 2 });
     expect(io.to).toHaveBeenCalledWith('channel:ch-ss-1');
     expect(io._emit).toHaveBeenCalledWith('voice:screen_share:start', { channelId: 'ch-ss-1', userId: 'ss-1' });
   });
@@ -1142,7 +1144,23 @@ describe('voiceHandler — screen share slot protocol (HIGH-1)', () => {
     handlers.get('voice:screen_share:start')!(vi.fn());
     const ack2 = vi.fn();
     handlers.get('voice:screen_share:start')!(ack2);
-    expect(ack2).toHaveBeenCalledWith({ ok: true });
+    expect(ack2).toHaveBeenCalledWith({ ok: true, annotationsVersion: 2 });
+  });
+
+  it('start advertises annotationsVersion 1 while the annotations_v2 flag is off', async () => {
+    const { isFeatureEnabled } = await import('../../utils/featureFlags');
+    vi.mocked(isFeatureEnabled).mockImplementation((name: string) => name !== 'annotations_v2');
+    try {
+      const { socket, handlers } = createMockSocket('ss-3b', 'sock-ss-3b');
+      handleVoiceEvents(createMockIO() as any, socket as any);
+      socket.data.voiceChannelId = 'ch-ss-3b';
+      const ack = vi.fn();
+      handlers.get('voice:screen_share:start')!(ack);
+      expect(ack).toHaveBeenCalledWith({ ok: true, annotationsVersion: 1 });
+    } finally {
+      vi.mocked(isFeatureEnabled).mockReset();
+      vi.mocked(isFeatureEnabled).mockReturnValue(true);
+    }
   });
 
   it('start acks ok:false when not in a voice channel', () => {
@@ -1196,7 +1214,7 @@ describe('voiceHandler — screen share slot protocol (HIGH-1)', () => {
     // Second share: previously hit the producer cap and never acked → client hang
     const startAck = vi.fn();
     handlers.get('voice:screen_share:start')!(startAck);
-    expect(startAck).toHaveBeenCalledWith({ ok: true });
+    expect(startAck).toHaveBeenCalledWith({ ok: true, annotationsVersion: 2 });
 
     const videoAck = vi.fn();
     await handlers.get('voice:produce')!({ kind: 'video', rtpParameters: {} }, videoAck);
@@ -1270,7 +1288,7 @@ describe('voiceHandler — screen-share annotation lifecycle', () => {
     // in-progress scene and its rev counter MUST survive
     const ack = vi.fn();
     handlers.get('voice:screen_share:start')!(ack);
-    expect(ack).toHaveBeenCalledWith({ ok: true });
+    expect(ack).toHaveBeenCalledWith({ ok: true, annotationsVersion: 2 });
     expect(mockVoiceRedis.del).not.toHaveBeenCalledWith('voice:annotations:ch-ann-6');
   });
 

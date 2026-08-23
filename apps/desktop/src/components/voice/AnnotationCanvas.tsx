@@ -1,8 +1,10 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import { ANNOTATION_IMAGE_MAX_DECODED_EDGE } from '@voxium/shared';
 import type { AnnotationScene } from '@voxium/shared';
 import { useAnnotationStore, type MaskRect } from '../../stores/annotationStore';
+import { useAnnotationLiveStore, hasLiveActivity } from '../../stores/annotationLiveStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
+import { drawLivePointer } from '../../utils/annotationLiveDraw';
 
 /**
  * Render-only overlay for screen-share annotations. Positions itself over the
@@ -150,6 +152,47 @@ function drawScene(
   }
 }
 
+/**
+ * Drive a requestAnimationFrame loop ONLY while the live store holds
+ * something time-dependent (a pointer still fading, reactions in flight).
+ * The loop prunes expired items, redraws, and stops itself on the first idle
+ * frame — no viewer ever runs a permanent loop for an overlay that is usually
+ * static. A fresh event while idle starts it again via the subscription.
+ */
+export function useLiveScheduler(draw: () => void): void {
+  const drawRef = useRef(draw);
+  drawRef.current = draw;
+
+  useEffect(() => {
+    let handle = 0;
+    let running = false;
+    const tick = () => {
+      const live = useAnnotationLiveStore.getState();
+      live.prune(Date.now());
+      drawRef.current();
+      if (hasLiveActivity(useAnnotationLiveStore.getState())) {
+        handle = requestAnimationFrame(tick);
+      } else {
+        running = false;
+      }
+    };
+    const start = () => {
+      if (running) return;
+      running = true;
+      handle = requestAnimationFrame(tick);
+    };
+    const unsubscribe = useAnnotationLiveStore.subscribe((state) => {
+      if (hasLiveActivity(state)) start();
+    });
+    if (hasLiveActivity(useAnnotationLiveStore.getState())) start();
+    return () => {
+      unsubscribe();
+      cancelAnimationFrame(handle);
+      running = false;
+    };
+  }, []);
+}
+
 export function AnnotationCanvas({ videoRef }: AnnotationCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const scene = useAnnotationStore((s) => s.scene);
@@ -163,17 +206,31 @@ export function AnnotationCanvas({ videoRef }: AnnotationCanvasProps) {
   // unmount is safe — the next mount's draw repopulates from the scene.
   useEffect(() => () => imageCache.clear(), []);
 
-  useEffect(() => {
+  // One draw routine for both triggers: scene/mask/rect changes (effect
+  // below) and the live scheduler (time-driven frames). It is cheap enough to
+  // repaint the whole scene per frame for the handful of seconds a pointer
+  // is visible — and far simpler than a second, layered canvas.
+  const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || rect.w <= 0 || rect.h <= 0) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.round(rect.w * dpr));
-    canvas.height = Math.max(1, Math.round(rect.h * dpr));
+    const width = Math.max(1, Math.round(rect.w * dpr));
+    const height = Math.max(1, Math.round(rect.h * dpr));
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1));
-  }, [scene, masks, rect, redrawTick]);
+    const { pointer } = useAnnotationLiveStore.getState();
+    if (pointer) drawLivePointer(ctx, pointer, Date.now(), rect.w, rect.h);
+  }, [scene, masks, rect]);
+
+  useEffect(() => {
+    draw();
+  }, [draw, redrawTick]);
+
+  useLiveScheduler(draw);
 
   if (rect.w <= 0 || rect.h <= 0) return null;
 

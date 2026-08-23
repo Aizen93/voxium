@@ -113,6 +113,30 @@ export const ANNOTATION_BYTES_PER_MIN = 2_000_000;
 /** Client-side wait for a batch ack before sending the next chunk (keeps the
  *  server's read-modify-write single-writer without wedging the queue). */
 export const ANNOTATION_ACK_TIMEOUT_MS = 3_000;
+/** Undo/redo history depth on the sharer (entries, one per gesture). */
+export const ANNOTATION_HISTORY_MAX = 100;
+
+// ─── voice:annotation:live — the ephemeral sibling of :ops ───────────────────
+// Fire-and-forget, no Redis, no rev, no ack, no hydration. Each kind has its
+// own socketRateLimit bucket so a reaction burst cannot starve the sharer's
+// pointer, and none of them shares the :ops bucket.
+
+/** Laser pointer: 20 Hz is 1200/min; the rest is headroom for pointer-off. */
+export const ANNOTATION_LIVE_POINTER_RATE_PER_MIN = 1500;
+/** Client-side throttle for pointer moves (ms). */
+export const ANNOTATION_LIVE_POINTER_INTERVAL_MS = 50;
+/** Reactions per socket per minute. */
+export const ANNOTATION_LIVE_REACTION_RATE_PER_MIN = 10;
+/** Snapshot notices per socket per minute. */
+export const ANNOTATION_LIVE_SNAPSHOT_RATE_PER_MIN = 5;
+/** Serialized chars of one live event — a pointer is ~60. */
+export const ANNOTATION_LIVE_MAX = 256;
+/** The only emoji a reaction may carry — the wire sends an INDEX into this
+ *  list, never a string, so no arbitrary Unicode crosses it. Order is wire
+ *  format: append only. */
+export const ANNOTATION_REACTIONS = ['👍', '❤️', '😂', '🎉', '👀', '🔥', '👏', '🤔'] as const;
+/** How long a viewer keeps painting a laser dot after the last update. */
+export const ANNOTATION_LIVE_POINTER_FADE_MS = 700;
 
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
 export type ThemePatternType = (typeof THEME_PATTERN_TYPES)[number];
@@ -219,6 +243,7 @@ export const WS_EVENTS = {
   VOICE_SCREEN_SHARE_STATE: 'voice:screen_share:state',
   VOICE_ANNOTATION_OPS: 'voice:annotation:ops',
   VOICE_ANNOTATION_STATE: 'voice:annotation:state',
+  VOICE_ANNOTATION_LIVE: 'voice:annotation:live',
   ADMIN_METRICS: 'admin:metrics',
   ADMIN_SUBSCRIBE_METRICS: 'admin:subscribe_metrics',
   ADMIN_UNSUBSCRIBE_METRICS: 'admin:unsubscribe_metrics',
