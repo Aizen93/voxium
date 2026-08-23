@@ -16,6 +16,7 @@ const voiceMock = vi.hoisted(() => {
     screenSharingUserId: string | null;
     isScreenSharing: boolean;
     screenStream: { getVideoTracks: () => { readyState: string }[] } | null;
+    screenShareAnnotationsVersion: number;
     replaceScreenVideoTrack: (track: unknown) => Promise<void>;
     setScreenVideoProducerPaused: (paused: boolean) => void;
   };
@@ -24,6 +25,7 @@ const voiceMock = vi.hoisted(() => {
     screenSharingUserId: null,
     isScreenSharing: false,
     screenStream: null,
+    screenShareAnnotationsVersion: 2,
     replaceScreenVideoTrack: async () => {},
     setScreenVideoProducerPaused: vi.fn(),
   });
@@ -684,6 +686,23 @@ describe('annotationStore — colour and text size', () => {
     for (const c of ['#aa0000', '#bb0000', '#cc0000', '#dd0000', '#ee0000', '#ff0001', '#aa0000', '#123456']) store.setColor(c, { recent: true });
     expect(useAnnotationStore.getState().recentColors).toEqual(['#123456', '#aa0000', '#ff0001', '#ee0000', '#dd0000', '#cc0000']);
     expect(loadAnnotationPrefs().recentColors).toEqual(['#123456', '#aa0000', '#ff0001', '#ee0000', '#dd0000', '#cc0000']);
+  });
+
+  it('setStrokeWidth follows a selected stroke/shape/arrow on a v2 server only', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([stroke('s')]);
+    store.setSelectedObjectId('s');
+    store.setStrokeWidth(0.008);
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ width: 0.008 });
+    expect(useAnnotationStore.getState().strokeWidth).toBe(0.008);
+    store.undo();
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ width: 0.005 });
+
+    voiceMock.setState({ screenShareAnnotationsVersion: 1 });
+    store.setStrokeWidth(0.002);
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ width: 0.005 }); // `width` is a v2 patch key
+    expect(useAnnotationStore.getState().strokeWidth).toBe(0.002);
+    voiceMock.setState({ screenShareAnnotationsVersion: 2 });
   });
 
   it('setTextSize clamps, persists, and resizes a selected caption or badge', () => {

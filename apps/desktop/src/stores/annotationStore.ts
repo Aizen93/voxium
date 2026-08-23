@@ -670,7 +670,18 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     set({ textSize: size });
     persistPrefs(get());
   },
-  setStrokeWidth: (strokeWidth) => set({ strokeWidth }),
+  setStrokeWidth: (strokeWidth) => {
+    // With a stroke/shape/arrow selected, its width follows too (own undo
+    // step). `width` is a v2 patch key: never ship it to a v1 server.
+    const { selectedObjectId, scene } = get();
+    const v2 = useVoiceStore.getState().screenShareAnnotationsVersion >= 2;
+    const target = selectedObjectId && v2 ? scene.objects.find((o) => o.id === selectedObjectId) : undefined;
+    if (target && patchableKeysFor(target.kind).includes('width') && (target as { width?: number }).width !== strokeWidth) {
+      get().localApply([{ t: 'update', id: target.id, patch: { width: strokeWidth } }]);
+      get().flushOps();
+    }
+    set({ strokeWidth });
+  },
   setSelectedObjectId: (selectedObjectId) => set({ selectedObjectId }),
 
   addMask: (mask) => {

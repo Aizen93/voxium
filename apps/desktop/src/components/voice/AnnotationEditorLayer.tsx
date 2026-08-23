@@ -58,9 +58,8 @@ const MIN_STROKE_STEP_PX = 2;
 const CALLOUT_SIZE_FACTOR = 4 / 3;
 const HIGHLIGHTER_WIDTH_FACTOR = 4;
 
-/** Kinds a plain click can select and drag. Strokes join this list with the
- *  eraser/stroke-editing work; until then they are paint only. */
-const SELECTABLE_KINDS: ReadonlySet<AnnotationObject['kind']> = new Set(['shape', 'image', 'text', 'arrow', 'callout', 'spotlight']);
+/** Kinds a plain click can select and drag (strokes by their path). */
+const SELECTABLE_KINDS: ReadonlySet<AnnotationObject['kind']> = new Set(['stroke', 'shape', 'image', 'text', 'arrow', 'callout', 'spotlight']);
 
 /** Kinds whose position is NOT a box corner: moved with `translate`, so the
  *  geometry (stroke points, arrow endpoints, a badge centre) shifts as one. */
@@ -85,7 +84,9 @@ type DragState =
   | { mode: 'translate'; id: string; last: { x: number; y: number } }
   | { mode: 'resize'; id: string; isMask: boolean; anchor: { x: number; y: number } }
   /** Dragging one end of an arrow. */
-  | { mode: 'arrow-end'; id: string; end: 1 | 2 };
+  | { mode: 'arrow-end'; id: string; end: 1 | 2 }
+  /** The eraser: every object the pointer touches goes, all in one gesture. */
+  | { mode: 'erase'; erased: Set<string> };
 
 export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABILITIES }: AnnotationEditorLayerProps) {
   const { t } = useTranslation();
@@ -132,6 +133,12 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         const n = Number.parseInt(value, 10);
         if (!Number.isInteger(n) || n < 1 || n > ANNOTATION_CALLOUT_MAX || n === target.n) return;
         store.localApply([{ t: 'update', id: target.id, patch: { n } }]);
+        store.flushOps();
+      } else if (target.kind === 'text') {
+        // Emptied = deleted; otherwise a fresh text patch (one undo step)
+        if (!value) store.localApply([{ t: 'remove', id: target.id }]);
+        else if (value !== target.text) store.localApply([{ t: 'update', id: target.id, patch: { text: value } }]);
+        else return;
         store.flushOps();
       }
       return;
@@ -289,6 +296,16 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         dragRef.current = { mode: 'create', id, target: 'mask', start: norm };
         break;
       }
+      case 'eraser': {
+        // Object eraser (not pixel): whatever the pointer touches is removed.
+        // Pixel-level stroke splitting would need stroke segmentation on the
+        // wire — out of scope by design.
+        store.beginGesture();
+        const erased = new Set<string>();
+        dragRef.current = { mode: 'erase', erased };
+        eraseAt(norm.x, norm.y, erased);
+        break;
+      }
       case 'text': {
         // The draft input mounts (and autofocuses) in React's commit right
         // after this handler — BEFORE the browser fires the compatibility
@@ -343,14 +360,25 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     dragRef.current = { mode: 'arrow-end', id, end };
   };
 
-  /** Double-click a callout to retype its number. */
+  /** Remove every object under the point that this erase gesture has not removed yet. */
+  const eraseAt = (nx: number, ny: number, erased: Set<string>) => {
+    const store = useAnnotationStore.getState();
+    const hit = topmostHit(store.scene.objects, nx, ny, (o) => !erased.has(o.id));
+    if (!hit) return;
+    erased.add(hit.id);
+    store.localApply([{ t: 'remove', id: hit.id }]);
+    if (store.selectedObjectId === hit.id) store.setSelectedObjectId(null);
+  };
+
+  /** Double-click a callout to retype its number, a caption to edit its text. */
   const handleDoubleClick = (e: React.MouseEvent) => {
     if (!canUse('select') || activeTool !== 'select') return;
     const norm = toNorm(e, true);
-    const hit = topmostHit(scene.objects, norm.x, norm.y, (o) => o.kind === 'callout');
-    if (!hit || hit.kind !== 'callout') return;
+    const hit = topmostHit(scene.objects, norm.x, norm.y, (o) => o.kind === 'callout' || o.kind === 'text');
+    if (!hit) return;
     e.preventDefault();
-    text.open(hit.x, hit.y, String(hit.n), hit.id);
+    if (hit.kind === 'callout') text.open(hit.x, hit.y, String(hit.n), hit.id);
+    else if (hit.kind === 'text') text.open(hit.x, hit.y, hit.text, hit.id);
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
@@ -416,6 +444,11 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         const norm = toNorm(e, true);
         const patch = drag.end === 1 ? { x1: norm.x, y1: norm.y } : { x2: norm.x, y2: norm.y };
         store.localApply([{ t: 'update', id: drag.id, patch }]);
+        break;
+      }
+      case 'erase': {
+        const norm = toNorm(e, true);
+        eraseAt(norm.x, norm.y, drag.erased);
         break;
       }
       case 'move': {
@@ -500,7 +533,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     return { box, isMask: false, resizable: obj.kind === 'shape' || obj.kind === 'image' || obj.kind === 'spotlight' || obj.kind === 'text' };
   })();
 
-  const cursor = activeTool === 'select' ? 'default' : activeTool === 'text' ? 'text' : laserActive ? 'none' : 'crosshair';
+  const cursor = activeTool === 'select' ? 'default' : activeTool === 'text' ? 'text' : laserActive ? 'none' : activeTool === 'eraser' ? 'cell' : 'crosshair';
 
   return (
     <div

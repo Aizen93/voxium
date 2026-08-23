@@ -692,3 +692,79 @@ describe('AnnotationEditorLayer — text size', () => {
     expect((useAnnotationStore.getState().scene.objects[0] as { size: number }).size).toBe(0.045);
   });
 });
+
+describe('AnnotationEditorLayer — eraser and stroke editing', () => {
+  const strokeAt = (id: string, y: number) => ({ t: 'add' as const, obj: { id, kind: 'stroke' as const, tool: 'pen' as const, color: '#ff0000', width: 0.01, points: [0.1, y, 0.9, y] } });
+
+  it('the eraser removes every object it sweeps over, as one undo step, and leaves the rest', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([strokeAt('top', 0.2), strokeAt('mid', 0.5), strokeAt('bottom', 0.8)]);
+    store.localApply([{ t: 'add', obj: { id: 'badge', kind: 'callout', color: '#ff3b30', size: 0.06, x: 0.5, y: 0.5, n: 1 } }]);
+    useAnnotationStore.setState({ activeTool: 'eraser' });
+    render();
+    expect(layer().style.cursor).toBe('cell');
+    pointerDown(layer(), 400, 85);   // on 'top' (y = 0.19)
+    pointerMove(layer(), 400, 150);  // empty
+    pointerMove(layer(), 400, 225);  // the badge sits over 'mid' — topmost goes first
+    pointerMove(layer(), 400, 226);  // now 'mid' is the topmost here
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['bottom']);
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['top', 'mid', 'bottom', 'badge']);
+  });
+
+  it('erasing a selected object drops the selection; a sweep over nothing is not an entry', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([strokeAt('s', 0.5)]);
+    store.setSelectedObjectId('s');
+    useAnnotationStore.setState({ activeTool: 'eraser' });
+    render();
+    pointerDown(layer(), 400, 45); pointerUp(layer()); // empty space
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]); // undid the ADD, not a no-op sweep
+    act(() => { useAnnotationStore.getState().redo(); });
+    pointerDown(layer(), 400, 225); pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    expect(useAnnotationStore.getState().selectedObjectId).toBeNull();
+  });
+
+  it('a stroke is selected along its path (not its box) and moves with translate, one undo step', () => {
+    const store = useAnnotationStore.getState();
+    // A square loop: the middle of its box is empty
+    store.localApply([{ t: 'add', obj: { id: 'loop', kind: 'stroke', tool: 'pen', color: '#ff0000', width: 0.01, points: [0.2, 0.2, 0.8, 0.2, 0.8, 0.8, 0.2, 0.8, 0.2, 0.2] } }]);
+    useAnnotationStore.setState({ activeTool: 'select' });
+    render();
+    pointerDown(layer(), 400, 225); pointerUp(layer()); // the hollow middle
+    expect(useAnnotationStore.getState().selectedObjectId).toBeNull();
+    pointerDown(layer(), 400, 90);                        // on the top edge
+    pointerMove(layer(), 400, 135);                       // +0.1 down
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().selectedObjectId).toBe('loop');
+    const moved = useAnnotationStore.getState().scene.objects[0] as { points: number[] };
+    expect(moved.points[1]).toBeCloseTo(0.3);
+    expect(moved.points[0]).toBeCloseTo(0.2);
+    expect(container.querySelector('.cursor-nwse-resize')).toBeNull(); // strokes have no corner handle
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect((useAnnotationStore.getState().scene.objects[0] as { points: number[] }).points[1]).toBeCloseTo(0.2);
+  });
+
+  it('double-clicking a caption edits its text; emptying it deletes it', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([{ t: 'add', obj: { id: 't', kind: 'text', text: 'hello', color: '#ffffff', size: 0.045, x: 0.2, y: 0.2 } }]);
+    useAnnotationStore.setState({ activeTool: 'select' });
+    render();
+    act(() => { layer().dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, clientX: 170, clientY: 95 })); });
+    expect(draftInput()!.value).toBe('hello');
+    type(draftInput()!, 'hello world');
+    key(draftInput()!, 'Enter');
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ text: 'hello world' });
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ text: 'hello' });
+
+    act(() => { layer().dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, clientX: 170, clientY: 95 })); });
+    type(draftInput()!, '   ');
+    key(draftInput()!, 'Enter');
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+});
