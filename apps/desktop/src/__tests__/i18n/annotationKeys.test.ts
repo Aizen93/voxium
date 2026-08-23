@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 
 const SOURCES = [
   fileURLToPath(new URL('../../components/voice/AnnotationToolbar.tsx', import.meta.url)),
+  // the labelKey table the toolbar and the shortcuts share
+  fileURLToPath(new URL('../../components/voice/annotationPresets.ts', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/AnnotationEditorLayer.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareViewer.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareFloating.tsx', import.meta.url)),
@@ -69,7 +71,8 @@ describe('screen-share annotation translation keys', () => {
     expect(keys.length).toBeGreaterThan(15);
     // One key from each surface, so a SOURCES entry that stops resolving
     // (renamed, moved) fails here instead of shrinking coverage in silence.
-    expect(keys).toContain('voice.annotations.mask');            // toolbar
+    expect(keys).toContain('voice.annotations.mask');            // presets (labelKey table)
+    expect(keys).toContain('voice.annotations.annotate');        // toolbar
     expect(keys).toContain('voice.annotations.addTextPlaceholder'); // editor layer
     expect(keys).toContain('voice.youAreSharing');               // viewer
     expect(keys).toContain('voice.screenShare');                 // floating panel

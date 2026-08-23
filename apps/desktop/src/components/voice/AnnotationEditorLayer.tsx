@@ -5,6 +5,7 @@ import type { AnnotationObject } from '@voxium/shared';
 import { useAnnotationStore, type AnnotationEditorTool } from '../../stores/annotationStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
 import { useTextDraft } from '../../hooks/useTextDraft';
+import { isEditableTarget } from '../../hooks/useAnnotationShortcuts';
 import { pxToNorm } from '../../utils/annotationGeometry';
 import { normBox, clampBox, clampPos, objectBbox, hitTestBox, topmostHit, type Bbox } from '../../utils/annotationHit';
 import { toast } from '../../stores/toastStore';
@@ -321,29 +322,13 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     store.flushOps();
   };
 
-  // Delete removes the selection; Escape cancels text entry / deselects
+  // Escape cancels an open caption. Selection keys (Delete, Escape-deselect)
+  // and every other shortcut live in useAnnotationShortcuts — one listener,
+  // one editable-target guard, one PTT rule.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      // Never react to typing in ANY editable surface — chat/bio textareas and
-      // contentEditable fields bubble Backspace to window too, and deleting a
-      // shared annotation because someone fixed a typo elsewhere is a footgun.
-      const target = e.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
-      const store = useAnnotationStore.getState();
-      if (e.key === 'Escape') {
-        text.cancel();
-        store.setSelectedObjectId(null);
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && store.selectedObjectId) {
-        const id = store.selectedObjectId;
-        if (store.masks.some((m) => m.id === id)) {
-          store.removeMask(id);
-        } else {
-          store.localApply([{ t: 'remove', id }]);
-          store.flushOps();
-        }
-        store.setSelectedObjectId(null);
-      }
+      if (e.key !== 'Escape' || isEditableTarget(e.target)) return;
+      text.cancel();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);

@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -7,6 +7,8 @@ import { Maximize, PictureInPicture2, MonitorOff } from 'lucide-react';
 import { AnnotationCanvas } from './AnnotationCanvas';
 import { AnnotationToolbar } from './AnnotationToolbar';
 import { AnnotationEditorLayer } from './AnnotationEditorLayer';
+import { availableToolDefs } from './annotationPresets';
+import { useAnnotationShortcuts } from '../../hooks/useAnnotationShortcuts';
 
 export function ScreenShareViewer() {
   const { t } = useTranslation();
@@ -17,8 +19,13 @@ export function ScreenShareViewer() {
   const setViewMode = useVoiceStore((s) => s.setScreenShareViewMode);
   const stopScreenShare = useVoiceStore((s) => s.stopScreenShare);
   const isEditing = useAnnotationStore((s) => s.isEditing);
+  const annotationsVersion = useVoiceStore((s) => s.screenShareAnnotationsVersion);
 
   const isLocalSharing = screenSharingUserId === localUserId;
+  // Keys follow the toolbar exactly: the same list, the same v2 gate. The
+  // hook is a no-op while not editing, so mounting it unconditionally is fine.
+  const shortcutTools = useMemo(() => (isLocalSharing ? availableToolDefs(annotationsVersion) : []), [isLocalSharing, annotationsVersion]);
+  useAnnotationShortcuts(shortcutTools);
   const stream = isLocalSharing ? screenStream : remoteScreenStream;
 
   // Find the sharer's display name

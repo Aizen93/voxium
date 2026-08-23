@@ -44,8 +44,13 @@ export type AnnotationEditorTool =
   | 'highlighter'
   | 'rect'
   | 'ellipse'
+  | 'arrow'
+  | 'callout'
+  | 'spotlight'
   | 'text'
   | 'image'
+  | 'laser'
+  | 'eraser'
   | 'mask';
 
 interface AnnotationState {

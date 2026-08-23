@@ -12,15 +12,20 @@ vi.mock('react-i18next', async (importOriginal) => {
 vi.mock('../../services/socket', () => ({
   getSocket: vi.fn().mockReturnValue({ emit: vi.fn() }),
 }));
+// The toolbar reads screenShareAnnotationsVersion through the hook form, so
+// the stand-in must be callable with a selector as well as expose getState.
+const voiceState = vi.hoisted(() => ({ activeChannelId: 'chan-1', screenSharingUserId: null as string | null, isScreenSharing: false, screenShareAnnotationsVersion: 2 }));
 vi.mock('../../stores/voiceStore', () => ({
-  useVoiceStore: {
-    getState: () => ({ activeChannelId: 'chan-1', screenSharingUserId: null, isScreenSharing: false }),
+  useVoiceStore: Object.assign((selector: (s: typeof voiceState) => unknown) => selector(voiceState), {
+    getState: () => voiceState,
     subscribe: () => () => {},
-  },
+  }),
 }));
 
 import { AnnotationToolbar } from '../../components/voice/AnnotationToolbar';
 import { useAnnotationStore } from '../../stores/annotationStore';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { TOOL_DEFS, MASK_TOOL_DEF, availableToolDefs } from '../../components/voice/annotationPresets';
 
 const initialState = useAnnotationStore.getState();
 
@@ -123,6 +128,26 @@ describe('AnnotationToolbar', () => {
     click(redoBtn);
     expect(undo).toHaveBeenCalledTimes(1);
     expect(redo).toHaveBeenCalledTimes(1);
+  });
+
+  it('tooltips carry the shortcut, and hide it for the key push-to-talk owns', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    useSettingsStore.setState({ voiceMode: 'push_to_talk', pushToTalkKey: 'KeyP' });
+    render(<AnnotationToolbar />);
+    expect(container.querySelector('[data-tool="rect"]')!.getAttribute('title')).toBe('voice.annotations.rectangle (R)');
+    expect(container.querySelector('[data-tool="rect"]')!.getAttribute('aria-keyshortcuts')).toBe('R');
+    expect(container.querySelector('[data-tool="pen"]')!.getAttribute('title')).toBe('voice.annotations.pen');
+    expect(container.querySelector('[aria-label="voice.annotations.undo"]')!.getAttribute('title')).toBe('voice.annotations.undo (Ctrl+Z)');
+    useSettingsStore.setState({ voiceMode: 'voice_activity' });
+  });
+
+  it('every tool definition has a unique key and label', () => {
+    const defs = [...TOOL_DEFS, MASK_TOOL_DEF];
+    expect(new Set(defs.map((d) => d.code)).size).toBe(defs.length);
+    expect(new Set(defs.map((d) => d.keyLabel)).size).toBe(defs.length);
+    expect(new Set(defs.map((d) => d.labelKey)).size).toBe(defs.length);
+    // Only implemented tools are offered; none of the v2 tools is yet
+    expect(availableToolDefs(1).map((d) => d.tool)).toEqual(availableToolDefs(2).map((d) => d.tool));
   });
 
   it('the mask tool carries the privacy hint in its tooltip', () => {
