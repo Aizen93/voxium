@@ -84,6 +84,12 @@ const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemp
 async function login(email: string): Promise<{ token: string; userId: string }> {
   const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD });
   const r = data.data || data;
+  // Accounts from runs before consent-at-signup existed are refused every
+  // functional route and the socket until they accept (CNIL/GDPR gate) —
+  // do what a real client does on its consent screen. Idempotent.
+  if (r.user?.consentRequired) {
+    await axios.post(`${API}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, h(r.accessToken));
+  }
   return { token: r.accessToken, userId: r.user.id };
 }
 
@@ -94,7 +100,10 @@ async function raiseRateLimits(token: string): Promise<void> {
 }
 
 async function resetRateLimits(token: string): Promise<void> {
-  for (const name of LIMITS_TO_RAISE) {
+  // 'admin' last — once it is reset, the remaining reset calls are throttled
+  // by the restored admin bucket and would be swallowed, leaving overrides up
+  const order = [...LIMITS_TO_RAISE.filter((n) => n !== 'admin' && n !== 'general'), 'general', 'admin'];
+  for (const name of order) {
     try { await axios.post(`${API}/admin/rate-limits/${name}/reset`, {}, h(token)); } catch { /* */ }
   }
 }

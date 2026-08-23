@@ -159,7 +159,15 @@ async function registerUser(api: string, username: string): Promise<string> {
         email: `${username}@multinode.test`,
         password: PASSWORD,
       });
-      return res.data.data.accessToken;
+      const token = res.data.data.accessToken;
+      // An account left over from a run before consent-at-signup existed has
+      // null acceptance timestamps, and the server refuses it everything —
+      // the socket handshake included — until it accepts, exactly as a real
+      // client would on its consent screen. Idempotent for one that already has.
+      if (res.data.data.user?.consentRequired) {
+        await axios.post(`${api}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, { headers: { Authorization: `Bearer ${token}` } });
+      }
+      return token;
     }
     throw err;
   }
