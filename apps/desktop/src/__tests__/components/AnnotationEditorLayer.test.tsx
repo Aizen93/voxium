@@ -38,6 +38,7 @@ vi.mock('../../hooks/useVideoContentRect', () => ({
 
 import { AnnotationEditorLayer, sanitizeAnnotationText, type ToolCapabilities } from '../../components/voice/AnnotationEditorLayer';
 import { useAnnotationStore } from '../../stores/annotationStore';
+import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -575,5 +576,57 @@ describe('AnnotationEditorLayer — spotlight', () => {
     expect(useAnnotationStore.getState().selectedObjectId).toBe('sp');
     expect((useAnnotationStore.getState().scene.objects[0] as { x: number }).x).toBeCloseTo(0.3);
     expect(container.querySelector('.cursor-nwse-resize')).not.toBeNull();
+  });
+});
+
+describe('AnnotationEditorLayer — laser pointer', () => {
+  beforeEach(() => {
+    useAnnotationLiveStore.getState().clear();
+    useAnnotationStore.setState({ activeTool: 'laser' });
+  });
+
+  it('hovering (no button) points the laser at the cursor, clamped to the frame, and hides the OS cursor', () => {
+    render();
+    expect(layer().style.cursor).toBe('none');
+    pointerMove(layer(), 400, 225);
+    expect(useAnnotationLiveStore.getState().pointer).toMatchObject({ x: 0.5, y: 0.5 });
+    pointerMove(layer(), -50, 900);
+    expect(useAnnotationLiveStore.getState().pointer).toMatchObject({ x: 0, y: 1 });
+    // Nothing enters the scene or the history
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    expect(useAnnotationStore.getState().canUndo).toBe(false);
+  });
+
+  it('leaving the stage turns the laser off', () => {
+    render();
+    pointerMove(layer(), 400, 225);
+    // React derives onPointerLeave from pointerout/pointerover pairs
+    act(() => { layer().dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })); });
+    expect(useAnnotationLiveStore.getState().pointer).toBeNull();
+  });
+
+  it('switching tools turns the laser off, and other tools never move it', () => {
+    render();
+    pointerMove(layer(), 400, 225);
+    act(() => { useAnnotationStore.getState().setActiveTool('pen'); });
+    expect(useAnnotationLiveStore.getState().pointer).toBeNull();
+    pointerMove(layer(), 100, 100);
+    expect(useAnnotationLiveStore.getState().pointer).toBeNull();
+    expect(layer().style.cursor).toBe('crosshair');
+  });
+
+  it('unmounting with the laser on turns it off', () => {
+    render();
+    pointerMove(layer(), 400, 225);
+    act(() => root.unmount());
+    expect(useAnnotationLiveStore.getState().pointer).toBeNull();
+    root = createRoot(container);
+  });
+
+  it('a press with the laser tool draws nothing', () => {
+    render();
+    pointerDown(layer(), 400, 225);
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
   });
 });

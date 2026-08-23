@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { ANNOTATION_STROKE_MAX_POINTS, ANNOTATION_TEXT_MAX, ANNOTATION_CALLOUT_MAX } from '@voxium/shared';
 import type { AnnotationObject } from '@voxium/shared';
 import { useAnnotationStore, type AnnotationEditorTool } from '../../stores/annotationStore';
+import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
 import { useTextDraft } from '../../hooks/useTextDraft';
 import { isEditableTarget } from '../../hooks/useAnnotationShortcuts';
@@ -107,6 +108,15 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
   // store-level state — would swallow everything drawn afterwards into one
   // undo step. Close it with the layer.
   useEffect(() => () => useAnnotationStore.getState().endGesture(), []);
+
+  // The laser follows the cursor whenever the tool is active (no button held)
+  // and goes out when the cursor leaves the stage, the tool changes, or the
+  // layer unmounts — a lost pointer-off only costs viewers a 700 ms fade.
+  const laserActive = activeTool === 'laser' && canUse('laser');
+  useEffect(() => {
+    if (!laserActive) return;
+    return () => useAnnotationLiveStore.getState().pointerOff();
+  }, [laserActive]);
 
   const text = useTextDraft((draft, value) => {
     const store = useAnnotationStore.getState();
@@ -339,7 +349,13 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
 
   const handlePointerMove = (e: React.PointerEvent) => {
     const drag = dragRef.current;
-    if (!drag) return;
+    if (!drag) {
+      if (laserActive) {
+        const norm = toNorm(e, true);
+        useAnnotationLiveStore.getState().pointTo(norm.x, norm.y);
+      }
+      return;
+    }
     const store = useAnnotationStore.getState();
 
     switch (drag.mode) {
@@ -472,7 +488,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     return { box, isMask: false, resizable: obj.kind === 'shape' || obj.kind === 'image' || obj.kind === 'spotlight' };
   })();
 
-  const cursor = activeTool === 'select' ? 'default' : activeTool === 'text' ? 'text' : 'crosshair';
+  const cursor = activeTool === 'select' ? 'default' : activeTool === 'text' ? 'text' : laserActive ? 'none' : 'crosshair';
 
   return (
     <div
@@ -484,6 +500,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
+      onPointerLeave={laserActive ? () => useAnnotationLiveStore.getState().pointerOff() : undefined}
       onDoubleClick={handleDoubleClick}
     >
       <input
