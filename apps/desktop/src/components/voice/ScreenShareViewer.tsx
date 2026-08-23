@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useAnnotationStore } from '../../stores/annotationStore';
+import { useMaskLayoutStore } from '../../stores/maskLayoutStore';
 import { Maximize, PictureInPicture2, MonitorOff } from 'lucide-react';
 import { AnnotationCanvas } from './AnnotationCanvas';
 import { AnnotationToolbar } from './AnnotationToolbar';
@@ -23,6 +24,9 @@ export function ScreenShareViewer() {
   const confirmSourceChange = useAnnotationStore((s) => s.confirmSourceChange);
   const setIsEditing = useAnnotationStore((s) => s.setIsEditing);
   const annotationsVersion = useVoiceStore((s) => s.screenShareAnnotationsVersion);
+  const appliedLayout = useMaskLayoutStore((s) => s.appliedLayout);
+  const keepApplied = useMaskLayoutStore((s) => s.keepApplied);
+  const startFresh = useMaskLayoutStore((s) => s.startFresh);
 
   const isLocalSharing = screenSharingUserId === localUserId;
   // Keys follow the toolbar exactly: the same list, the same v2 gate. The
@@ -99,6 +103,25 @@ export function ScreenShareViewer() {
           fullscreen — the Fullscreen API renders nothing outside the target. */}
       <div ref={stageRef} className="flex flex-1 flex-col min-h-0 bg-black">
         {isLocalSharing && <AnnotationToolbar />}
+        {isLocalSharing && appliedLayout && (
+          <div className="flex items-center justify-center gap-3 bg-vox-accent-info/90 px-3 py-1 text-xs font-medium text-white" data-testid="layout-applied-banner">
+            <span>{t('voice.annotations.layoutApplied', { count: appliedLayout.count })}</span>
+            <button
+              onClick={keepApplied}
+              className="rounded bg-black/20 px-2 py-0.5 font-semibold hover:bg-black/30"
+              data-testid="layout-keep"
+            >
+              {t('voice.annotations.layoutKeep')}
+            </button>
+            <button
+              onClick={startFresh}
+              className="rounded bg-black/20 px-2 py-0.5 font-semibold hover:bg-black/30"
+              data-testid="layout-fresh"
+            >
+              {t('voice.annotations.layoutFresh')}
+            </button>
+          </div>
+        )}
         {isLocalSharing && sourceChangeHold && (
           <div className="flex items-center justify-center gap-3 bg-vox-accent-warning/90 px-3 py-1 text-xs font-medium text-black" data-testid="source-change-banner">
             <span>

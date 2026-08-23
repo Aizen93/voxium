@@ -6,6 +6,7 @@ import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, g
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
 import { teardownComposite } from '../services/screenComposite';
+import { sourceKeyFromSettings } from '../utils/maskLayouts';
 import { optimizeOpusSDP } from '../services/sdpUtils';
 import i18n from '../i18n';
 import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared';
@@ -188,6 +189,10 @@ interface VoiceState {
    *  sharer's own preview keeps playing the raw capture, so without this flag
    *  they would never know viewers see a frozen frame. */
   screenShareFrozen: boolean;
+  /** The current share's source identity (`displaySurface:WxH` from the
+   *  capture track's settings) — the key remembered mask layouts live under.
+   *  Null while not sharing or when the settings gave no size. */
+  screenShareSourceKey: string | null;
   /** The annotation wire version the server advertised on our share claim
    *  (1 when absent — an older server, or the annotations_v2 flag off). The
    *  toolbar hides v2 tools below 2 so nothing we draw gets rejected after
@@ -873,6 +878,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   remoteScreenStream: null,
   screenShareViewMode: 'inline',
   screenShareFrozen: false,
+  screenShareSourceKey: null,
   screenShareAnnotationsVersion: 1,
 
   // DM call state
@@ -2076,6 +2082,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       set({
         screenStream: stream,
         isScreenSharing: true,
+        // The source identity for remembered mask layouts (displaySurface is
+        // not yet in TS's MediaTrackSettings everywhere)
+        screenShareSourceKey: sourceKeyFromSettings(videoTrack.getSettings() as { displaySurface?: string; width?: number; height?: number }),
         screenShareAnnotationsVersion: typeof startResponse.annotationsVersion === 'number' ? startResponse.annotationsVersion : 1,
       });
     } catch (err) {
@@ -2157,6 +2166,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       isScreenSharing: false,
       screenSharingUserId: null,
       screenShareFrozen: false,
+      screenShareSourceKey: null,
       screenShareAnnotationsVersion: 1,
     });
   },

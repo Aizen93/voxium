@@ -8,6 +8,7 @@ import { useVoiceStore } from './voiceStore';
 import { useE2EStore } from './e2eStore';
 import { useAnnotationStore, resetAnnotationModuleState } from './annotationStore';
 import { useAnnotationLiveStore, resetAnnotationLiveModuleState } from './annotationLiveStore';
+import { useMaskLayoutStore, resetMaskLayoutModuleState } from './maskLayoutStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
 import { stopE2EDeviceListWatch } from './e2eStore';
 
@@ -32,6 +33,10 @@ const ACCOUNT_STORES = [
   useE2EStore,
   useAnnotationStore,
   useAnnotationLiveStore,
+  // In-memory only: the on-disk layouts are keyed per user (another account
+  // reads a different key) and deliberately survive logout, like trusted
+  // devices and the E2E vault
+  useMaskLayoutStore,
 ] as const;
 
 // Captured at module import — before any user interaction — so this is each
@@ -60,9 +65,11 @@ export function resetAccountStores(): void {
   useAnnouncementStore.setState({ dismissedIds });
 
   // Module-level annotation state (op queue, history stacks, pointer
-  // throttle) lives outside the slices the loop above replaced
+  // throttle, the layout-save debounce) lives outside the slices the loop
+  // above replaced
   resetAnnotationModuleState();
   resetAnnotationLiveModuleState();
+  resetMaskLayoutModuleState();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).
