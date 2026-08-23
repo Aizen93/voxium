@@ -6,6 +6,7 @@ import { useAnnotationLiveStore, hasLiveActivity, fadeAlpha, type FadeClock } fr
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
 import { drawLivePointer } from '../../utils/annotationLiveDraw';
 import { drawArrow, drawCallout, drawSpotlight } from '../../utils/annotationDraw';
+import { paintStyledMask, createScratchCanvas, type ScratchCanvas } from '../../utils/maskStyles';
 
 /**
  * Render-only overlay for screen-share annotations. Positions itself over the
@@ -54,6 +55,12 @@ function cachedImage(id: string, src: string, usedIds: Set<string>, requestRedra
   return entry.loaded ? entry.img : null;
 }
 
+/** What the sharer's preview needs to paint a pixelate/blur mask the way viewers see it. */
+export interface MaskPreviewSource {
+  video: HTMLVideoElement;
+  scratch: ScratchCanvas | null;
+}
+
 function drawScene(
   ctx: CanvasRenderingContext2D,
   scene: AnnotationScene,
@@ -63,11 +70,15 @@ function drawScene(
   requestRedraw: () => void,
   fading: ReadonlyMap<string, FadeClock> = new Map(),
   now: number = Date.now(),
+  preview: MaskPreviewSource | null = null,
 ): void {
   ctx.clearRect(0, 0, w, h);
   const usedIds = new Set<string>();
 
-  // Masks under annotations — annotations must stay visible over a cover
+  // Masks under annotations — annotations must stay visible over a cover.
+  // The sharer previews the RAW capture, so masks are painted here exactly
+  // as viewers receive them baked into the video: cover image, black box,
+  // or the same pixelate/blur sampled from the preview video.
   for (const mask of masks) {
     const x = mask.x * w, y = mask.y * h, bw = mask.w * w, bh = mask.h * h;
     if (mask.src) {
@@ -78,6 +89,14 @@ function drawScene(
         ctx.fillStyle = '#000000';
         ctx.fillRect(x, y, bw, bh);
       }
+    } else if ((mask.style === 'pixelate' || mask.style === 'blur') && preview && preview.video.videoWidth > 0) {
+      const scale = preview.video.videoWidth / w;
+      paintStyledMask(mask.style, {
+        ctx, scratch: preview.scratch, scale,
+        source: preview.video,
+        dst: { x, y, w: bw, h: bh },
+        src: { x: mask.x * preview.video.videoWidth, y: mask.y * preview.video.videoHeight, w: mask.w * preview.video.videoWidth, h: mask.h * preview.video.videoHeight },
+      });
     } else {
       ctx.fillStyle = '#000000';
       ctx.fillRect(x, y, bw, bh);
@@ -221,6 +240,7 @@ export function useLiveScheduler(draw: () => void): void {
 
 export function AnnotationCanvas({ videoRef }: AnnotationCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scratchRef = useRef<ScratchCanvas | null | undefined>(undefined);
   const scene = useAnnotationStore((s) => s.scene);
   const masks = useAnnotationStore((s) => s.masks);
   const rect = useVideoContentRect(videoRef);
@@ -249,13 +269,25 @@ export function AnnotationCanvas({ videoRef }: AnnotationCanvasProps) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const now = Date.now();
     const { pointer, fading } = useAnnotationLiveStore.getState();
-    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1), fading, now);
+    if (scratchRef.current === undefined) scratchRef.current = createScratchCanvas();
+    const preview = videoRef.current ? { video: videoRef.current, scratch: scratchRef.current } : null;
+    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1), fading, now, preview);
     if (pointer) drawLivePointer(ctx, pointer, now, rect.w, rect.h);
-  }, [scene, masks, rect]);
+  }, [scene, masks, rect, videoRef]);
 
   useEffect(() => {
     draw();
   }, [draw, redrawTick]);
+
+  // A pixelated/blurred preview samples the live video, so it must follow the
+  // frames while such a mask exists (the sharer would otherwise see a frozen
+  // sample). Cheap: only while editing with a styled mask present.
+  const hasStyledMask = masks.some((m) => !m.src && (m.style === 'pixelate' || m.style === 'blur'));
+  useEffect(() => {
+    if (!hasStyledMask) return;
+    const id = setInterval(draw, 1000 / 15);
+    return () => clearInterval(id);
+  }, [hasStyledMask, draw]);
 
   useLiveScheduler(draw);
 

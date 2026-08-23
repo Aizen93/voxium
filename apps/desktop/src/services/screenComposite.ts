@@ -1,4 +1,5 @@
 import type { MaskRect } from '../stores/annotationStore';
+import { paintStyledMask, createScratchCanvas, type ScratchCanvas, type StyledMaskCtx } from '../utils/maskStyles';
 
 /**
  * Privacy-mask compositor for screen sharing.
@@ -51,6 +52,8 @@ interface ActiveSession {
    *  own track object (producer pause/replaceTrack must not affect the source). */
   sourceTrack: MediaStreamTrack;
   maskImages: Map<string, { src: string; img: HTMLImageElement; loaded: boolean }>;
+  /** Downsample target for pixelate/blur masks (one per session). */
+  scratch: ScratchCanvas | null;
   stopped: boolean;
   cancelFrameLoop: () => void;
 }
@@ -71,16 +74,18 @@ export function isCompositing(): boolean {
 
 /**
  * Pure per-frame render: raw frame first, then every mask. A mask whose cover
- * image has not decoded yet is painted BLACK — fail closed, never bare.
+ * image has not decoded yet is painted BLACK — fail closed, never bare; so is
+ * a pixelate/blur mask without a scratch canvas to downsample into.
  * Returns true when the canvas was resized to follow the source (caller
  * surfaces the "masks may misalign" hint).
  */
 export function renderCompositeFrame(
-  ctx: Pick<CanvasRenderingContext2D, 'drawImage' | 'fillRect'> & { fillStyle: string | CanvasGradient | CanvasPattern },
+  ctx: StyledMaskCtx,
   video: { videoWidth: number; videoHeight: number },
   canvas: { width: number; height: number },
   masks: MaskRect[],
   getMaskImage: (mask: MaskRect) => CanvasImageSource | null,
+  scratch: ScratchCanvas | null = null,
 ): boolean {
   let resized = false;
   if (video.videoWidth > 0 && video.videoHeight > 0
@@ -98,6 +103,14 @@ export function renderCompositeFrame(
     const img = mask.src ? getMaskImage(mask) : null;
     if (img) {
       ctx.drawImage(img, x, y, w, h);
+    } else if (mask.style === 'pixelate' || mask.style === 'blur') {
+      // The canvas is at source resolution: destination px = source px
+      paintStyledMask(mask.style, {
+        ctx, scratch, scale: 1,
+        source: video as unknown as CanvasImageSource,
+        dst: { x, y, w, h },
+        src: { x, y, w, h },
+      });
     } else {
       ctx.fillStyle = '#000000';
       ctx.fillRect(x, y, w, h);
@@ -133,7 +146,7 @@ function maskImageFor(s: ActiveSession, mask: MaskRect): CanvasImageSource | nul
 function startFrameLoop(s: ActiveSession): void {
   const drawOnce = () => {
     if (s.stopped) return;
-    const resized = renderCompositeFrame(s.ctx, s.video, s.canvas, s.handles.getMasks(), (m) => maskImageFor(s, m));
+    const resized = renderCompositeFrame(s.ctx, s.video, s.canvas, s.handles.getMasks(), (m) => maskImageFor(s, m), s.scratch);
     if (resized) {
       try {
         s.handles.onSourceResize?.();
@@ -234,13 +247,14 @@ export async function ensureComposite(handles: CompositeHandles): Promise<void> 
         compositeTrack,
         sourceTrack,
         maskImages: new Map(),
+        scratch: createScratchCanvas(),
         stopped: false,
         cancelFrameLoop: () => {},
       };
       s = created;
 
       // First masked frame BEFORE the swap
-      renderCompositeFrame(ctx, video, canvas, handles.getMasks(), (m) => maskImageFor(created, m));
+      renderCompositeFrame(ctx, video, canvas, handles.getMasks(), (m) => maskImageFor(created, m), created.scratch);
 
       await handles.replaceTrack(compositeTrack);
       if (gen !== generation) {

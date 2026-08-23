@@ -237,6 +237,27 @@ describe('AnnotationToolbar', () => {
     localStorage.removeItem('vox:annotations:prefs');
   });
 
+  it('the mask-style segment shows with the mask tool, labels blur/pixelate as cosmetic, and follows a selected mask', () => {
+    useAnnotationStore.setState({ isEditing: true, activeTool: 'pen' });
+    render(<AnnotationToolbar />);
+    expect(container.querySelector('[data-testid="mask-style-picker"]')).toBeNull();
+    act(() => { useAnnotationStore.getState().setActiveTool('mask'); });
+    const picker = container.querySelector('[data-testid="mask-style-picker"]')!;
+    expect(picker).not.toBeNull();
+    expect(picker.querySelector('[data-mask-style="cover"]')!.getAttribute('aria-pressed')).toBe('true');
+    expect(picker.querySelector('[data-mask-style="blur"]')!.getAttribute('title')).toContain('voice.annotations.maskStyleCosmetic');
+    expect(picker.querySelector('[data-mask-style="cover"]')!.getAttribute('title')).not.toContain('maskStyleCosmetic');
+    click(picker.querySelector('[data-mask-style="pixelate"]'));
+    expect(useAnnotationStore.getState().maskStyle).toBe('pixelate');
+
+    act(() => {
+      useAnnotationStore.getState().setActiveTool('select');
+      useAnnotationStore.setState({ masks: [{ id: 'm', x: 0.1, y: 0.1, w: 0.2, h: 0.2, style: 'blur' }], selectedObjectId: 'm' });
+    });
+    expect(container.querySelector('[data-mask-style="blur"]')!.getAttribute('aria-pressed')).toBe('true');
+    useAnnotationStore.setState({ maskStyle: 'cover' });
+  });
+
   it('offers Renumber only while the scene has callouts', () => {
     useAnnotationStore.setState({ isEditing: true });
     render(<AnnotationToolbar />);

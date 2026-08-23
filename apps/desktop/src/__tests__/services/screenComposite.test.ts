@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderCompositeFrame, ensureComposite, stopComposite, teardownComposite, type CompositeHandles } from '../../services/screenComposite';
 import type { MaskRect } from '../../stores/annotationStore';
+import { PIXELATE_BLOCK_SRC_PX, type ScratchCanvas } from '../../utils/maskStyles';
 
 /**
  * Pure-logic coverage of the privacy compositor's per-frame render. The DOM
@@ -16,8 +17,21 @@ function mockCtx() {
     calls,
     drawImage: vi.fn((..._args: unknown[]) => { calls.push('drawImage'); }),
     fillRect: vi.fn((..._args: unknown[]) => { calls.push('fillRect'); }),
+    save: vi.fn(() => { calls.push('save'); }),
+    restore: vi.fn(() => { calls.push('restore'); }),
+    beginPath: vi.fn(),
+    rect: vi.fn(),
+    clip: vi.fn(() => { calls.push('clip'); }),
     fillStyle: '' as string,
+    imageSmoothingEnabled: true,
+    filter: 'none' as string,
   };
+}
+
+function mockScratch() {
+  const canvas = { width: 0, height: 0 } as unknown as ScratchCanvas['canvas'];
+  const ctx = { drawImage: vi.fn(), clearRect: vi.fn(), imageSmoothingEnabled: true };
+  return { canvas, ctx } as ScratchCanvas & { ctx: typeof ctx };
 }
 
 const video = { videoWidth: 1920, videoHeight: 1080 };
@@ -82,6 +96,55 @@ describe('renderCompositeFrame', () => {
     expect(renderCompositeFrame(ctx, video, canvas, [], noImage)).toBe(false);
     expect(renderCompositeFrame(ctx, { videoWidth: 0, videoHeight: 0 }, canvas, [], noImage)).toBe(false);
     expect(canvas.width).toBe(1920);
+  });
+
+  it('a pixelate mask downsamples the region into ≥24 px blocks and paints it back unsmoothed, clipped', () => {
+    const ctx = mockCtx();
+    const scratch = mockScratch();
+    renderCompositeFrame(ctx, video, canvas, [mask('a', { style: 'pixelate' })], noImage, scratch);
+    // Frame, then (inside save/clip/restore) the upscaled block grid — no black box
+    expect(ctx.calls).toEqual(['drawImage', 'save', 'clip', 'drawImage', 'restore']);
+    const region = { w: 0.5 * 1920 + 2, h: 0.25 * 1080 + 2 };
+    expect(scratch.canvas.width).toBe(Math.ceil(region.w / PIXELATE_BLOCK_SRC_PX));
+    expect(scratch.canvas.height).toBe(Math.ceil(region.h / PIXELATE_BLOCK_SRC_PX));
+    expect(scratch.ctx.imageSmoothingEnabled).toBe(false);
+    // Sampled from the video at the padded region, drawn back over the same region
+    expect(scratch.ctx.drawImage.mock.calls[0].slice(1, 5)).toEqual([0.25 * 1920 - 1, 0.25 * 1080 - 1, region.w, region.h]);
+    expect(ctx.drawImage.mock.calls[1].slice(5, 9)).toEqual([0.25 * 1920 - 1, 0.25 * 1080 - 1, region.w, region.h]);
+    expect(ctx.imageSmoothingEnabled).toBe(false);
+  });
+
+  it('a blur mask paints the pixelated pass first, then a blurred pass over it — never a translucent edge alone', () => {
+    const ctx = mockCtx();
+    const filters: string[] = [];
+    Object.defineProperty(ctx, 'filter', { get: () => filters[filters.length - 1] ?? 'none', set: (v: string) => { filters.push(v); } });
+    renderCompositeFrame(ctx, video, canvas, [mask('a', { style: 'blur' })], noImage, mockScratch());
+    expect(ctx.calls).toEqual(['drawImage', 'save', 'clip', 'drawImage', 'drawImage', 'restore']);
+    expect(filters[0]).toMatch(/^blur\(\d+px\)$/);
+    expect(filters[filters.length - 1]).toBe('none');
+  });
+
+  it('fails CLOSED: a styled mask without a scratch canvas, or with a drawing failure, paints black', () => {
+    const ctx = mockCtx();
+    renderCompositeFrame(ctx, video, canvas, [mask('a', { style: 'blur' })], noImage, null);
+    expect(ctx.calls).toEqual(['drawImage', 'fillRect']);
+    expect(ctx.fillStyle).toBe('#000000');
+
+    const failing = mockScratch();
+    failing.ctx.drawImage.mockImplementation(() => { throw new Error('tainted'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const ctx2 = mockCtx();
+    renderCompositeFrame(ctx2, video, canvas, [mask('a', { style: 'pixelate' })], noImage, failing);
+    expect(ctx2.calls.at(-1)).toBe('fillRect');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('a cover image wins over a style; an absent style is the black box', () => {
+    const ctx = mockCtx();
+    const img = { fake: 'image' } as unknown as CanvasImageSource;
+    renderCompositeFrame(ctx, video, canvas, [mask('a', { style: 'blur', src: 'data:image/webp;base64,AA==' }), mask('b')], () => img, mockScratch());
+    expect(ctx.calls).toEqual(['drawImage', 'drawImage', 'fillRect']);
   });
 
   it('with no masks, only the raw frame is drawn (compositor about to be torn down)', () => {

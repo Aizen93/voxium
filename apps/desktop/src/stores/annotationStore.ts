@@ -15,6 +15,7 @@ import {
 import { inverseOf, addedIds, compactForward, entryBytes, type HistoryEntry } from '../utils/annotationHistory';
 import { renumberOps } from '../utils/annotationCallouts';
 import { loadAnnotationPrefs, saveAnnotationPrefs, pushRecentColor, clampTextSize, type InkMode } from '../utils/annotationPrefs';
+import type { MaskStyle } from '../utils/maskStyles';
 import { patchableKeysFor } from '@voxium/shared';
 import { getSocket } from '../services/socket';
 import { useVoiceStore } from './voiceStore';
@@ -41,6 +42,8 @@ export interface MaskRect {
   h: number;
   /** Optional cover-image data URL; plain black box when absent. Local-only. */
   src?: string;
+  /** Fill style; absent = 'cover' (black). Pixelate/blur are COSMETIC. Local-only. */
+  style?: MaskStyle;
 }
 
 export type AnnotationEditorTool =
@@ -78,6 +81,8 @@ interface AnnotationState {
   textSize: number;
   /** Colours picked beyond the quick swatches, most recent first. Device pref. */
   recentColors: string[];
+  /** Fill for NEW masks. Deliberately not persisted: Cover is the safe default every session. */
+  maskStyle: MaskStyle;
   /** Renderable mirrors of the (module-level) undo/redo stacks. */
   canUndo: boolean;
   canRedo: boolean;
@@ -111,6 +116,8 @@ interface AnnotationState {
   setColor: (color: string, opts?: { recent?: boolean }) => void;
   /** The default for new captions/badges — and, with one selected, its size too. */
   setTextSize: (size: number) => void;
+  /** The default for new masks — and, with a mask selected, that mask's style too. */
+  setMaskStyle: (style: MaskStyle) => void;
   setStrokeWidth: (width: number) => void;
   setSelectedObjectId: (id: string | null) => void;
   addMask: (mask: MaskRect) => void;
@@ -483,6 +490,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     const prefs = loadAnnotationPrefs();
     return { inkMode: prefs.inkMode, textSize: prefs.textSize, recentColors: prefs.recentColors };
   })(),
+  maskStyle: 'cover',
   canUndo: false,
   canRedo: false,
 
@@ -658,6 +666,11 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     }
     set({ color, ...(opts?.recent ? { recentColors: pushRecentColor(recentColors, color) } : {}) });
     if (opts?.recent) persistPrefs(get());
+  },
+  setMaskStyle: (maskStyle) => {
+    const { selectedObjectId, masks } = get();
+    if (selectedObjectId && masks.some((m) => m.id === selectedObjectId)) get().updateMask(selectedObjectId, { style: maskStyle });
+    set({ maskStyle });
   },
   setTextSize: (raw) => {
     const size = clampTextSize(raw);

@@ -292,7 +292,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
       case 'mask': {
         if (!capabilities.masks) break;
         const id = crypto.randomUUID();
-        store.addMask({ id, x: norm.x, y: norm.y, w: 0, h: 0 });
+        store.addMask({ id, x: norm.x, y: norm.y, w: 0, h: 0, ...(store.maskStyle !== 'cover' ? { style: store.maskStyle } : {}) });
         dragRef.current = { mode: 'create', id, target: 'mask', start: norm };
         break;
       }

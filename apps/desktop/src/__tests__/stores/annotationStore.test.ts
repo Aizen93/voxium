@@ -705,6 +705,20 @@ describe('annotationStore — colour and text size', () => {
     voiceMock.setState({ screenShareAnnotationsVersion: 2 });
   });
 
+  it('setMaskStyle sets the default for new masks and restyles a selected mask; Cover is the default every session', () => {
+    const store = useAnnotationStore.getState();
+    expect(useAnnotationStore.getState().maskStyle).toBe('cover');
+    store.addMask({ id: 'm', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+    store.setMaskStyle('pixelate');
+    expect(useAnnotationStore.getState().masks[0].style).toBeUndefined(); // nothing selected
+    store.setSelectedObjectId('m');
+    store.setMaskStyle('blur');
+    expect(useAnnotationStore.getState().masks[0].style).toBe('blur');
+    expect(useAnnotationStore.getState().maskStyle).toBe('blur');
+    expect(socketEmit).not.toHaveBeenCalled(); // masks never touch the wire
+    expect(localStorage.getItem('vox:annotations:prefs')).toBeNull(); // and the style is not persisted
+  });
+
   it('setTextSize clamps, persists, and resizes a selected caption or badge', () => {
     const store = useAnnotationStore.getState();
     store.localApply([caption('t')]);

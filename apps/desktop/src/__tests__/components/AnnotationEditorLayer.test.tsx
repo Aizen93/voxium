@@ -768,3 +768,17 @@ describe('AnnotationEditorLayer — eraser and stroke editing', () => {
     expect(useAnnotationStore.getState().scene.objects).toEqual([]);
   });
 });
+
+describe('AnnotationEditorLayer — mask styles', () => {
+  afterEach(() => { useAnnotationStore.setState({ maskStyle: 'cover' }); });
+
+  it('a new mask takes the current style; Cover leaves the field absent', () => {
+    useAnnotationStore.setState({ activeTool: 'mask', maskStyle: 'pixelate' });
+    render();
+    pointerDown(layer(), 100, 100); pointerMove(layer(), 300, 250); pointerUp(layer());
+    expect(useAnnotationStore.getState().masks[0].style).toBe('pixelate');
+    act(() => { useAnnotationStore.setState({ maskStyle: 'cover' }); });
+    pointerDown(layer(), 400, 100); pointerMove(layer(), 600, 250); pointerUp(layer());
+    expect(useAnnotationStore.getState().masks[1].style).toBeUndefined();
+  });
+});

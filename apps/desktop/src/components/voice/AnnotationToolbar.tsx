@@ -6,6 +6,13 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { pttReservedCode, shortcutFor } from '../../hooks/useAnnotationShortcuts';
 import { ANNOTATION_COLORS, ANNOTATION_WIDTHS, ANNOTATION_TEXT_SIZES, MASK_TOOL_DEF, availableToolDefs, type ToolDef } from './annotationPresets';
 import { ColorPalettePopover } from './ColorPalettePopover';
+import type { MaskStyle } from '../../utils/maskStyles';
+
+const MASK_STYLES: readonly { style: MaskStyle; labelKey: string }[] = [
+  { style: 'cover', labelKey: 'voice.annotations.maskStyleCover' },
+  { style: 'pixelate', labelKey: 'voice.annotations.maskStylePixelate' },
+  { style: 'blur', labelKey: 'voice.annotations.maskStyleBlur' },
+];
 
 /**
  * The sharer's annotation toolbar, rendered under the ScreenShareViewer
@@ -38,6 +45,16 @@ export function AnnotationToolbar() {
   const setInkMode = useAnnotationStore((s) => s.setInkMode);
   const textSize = useAnnotationStore((s) => s.textSize);
   const setTextSize = useAnnotationStore((s) => s.setTextSize);
+  const maskStyle = useAnnotationStore((s) => s.maskStyle);
+  const setMaskStyle = useAnnotationStore((s) => s.setMaskStyle);
+  // The style segment shows with the mask tool or a selected mask; it reflects
+  // the selected mask's style when there is one
+  const selectedMaskStyle = useAnnotationStore((s) => {
+    const m = s.selectedObjectId ? s.masks.find((x) => x.id === s.selectedObjectId) : undefined;
+    return m ? (m.style ?? 'cover') : null;
+  });
+  const maskRelevant = useAnnotationStore((s) => s.activeTool === 'mask') || selectedMaskStyle !== null;
+  const shownMaskStyle = selectedMaskStyle ?? maskStyle;
   // The size segment shows while a caption/badge is being placed or is selected
   const sizeRelevant = useAnnotationStore((s) =>
     s.activeTool === 'text' || s.activeTool === 'callout'
@@ -110,6 +127,25 @@ export function AnnotationToolbar() {
       {/* Privacy mask — separated: the one tool enforced at the source */}
       <div className="flex items-center gap-0.5 border-l border-vox-border pl-2">
         {toolButton(MASK_TOOL_DEF, t('voice.annotations.maskPrivacyHint'))}
+        {maskRelevant && (
+          <div className="ml-1 flex items-center gap-0.5" data-testid="mask-style-picker">
+            {MASK_STYLES.map(({ style, labelKey }) => (
+              <button
+                key={style}
+                onClick={() => setMaskStyle(style)}
+                className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
+                  shownMaskStyle === style ? 'bg-vox-accent-primary/20 text-vox-accent-primary' : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary'
+                }`}
+                title={style === 'cover' ? t(labelKey) : `${t(labelKey)} — ${t('voice.annotations.maskStyleCosmetic')}`}
+                aria-label={t(labelKey)}
+                aria-pressed={shownMaskStyle === style}
+                data-mask-style={style}
+              >
+                {t(labelKey)}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-1 border-l border-vox-border pl-2">
