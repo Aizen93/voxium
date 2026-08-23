@@ -1,12 +1,35 @@
-import type { AnnotationArrow, AnnotationCallout } from '@voxium/shared';
+import type { AnnotationArrow, AnnotationCallout, AnnotationSpotlight } from '@voxium/shared';
 
 /**
  * Painters for the v2 object kinds, kept pure (a canvas context in, drawing
  * calls out) so geometry can be asserted with a recording context.
  */
 
-type Ctx = Pick<CanvasRenderingContext2D, 'save' | 'restore' | 'beginPath' | 'moveTo' | 'lineTo' | 'closePath' | 'stroke' | 'fill' | 'arc' | 'fillText'>
+type Ctx = Pick<CanvasRenderingContext2D, 'save' | 'restore' | 'beginPath' | 'moveTo' | 'lineTo' | 'closePath' | 'stroke' | 'fill' | 'arc' | 'ellipse' | 'rect' | 'fillText'>
   & { strokeStyle: string | CanvasGradient | CanvasPattern; fillStyle: string | CanvasGradient | CanvasPattern; lineWidth: number; lineCap: CanvasLineCap; lineJoin: CanvasLineJoin; font: string; textAlign: CanvasTextAlign; textBaseline: CanvasTextBaseline };
+
+/** How dark the outside of a spotlight is. */
+export const SPOTLIGHT_DIM = 'rgba(0, 0, 0, 0.55)';
+
+/**
+ * Dim everything OUTSIDE the region: one fill of the whole frame with an
+ * even-odd path whose inner contour is the cut-out. No compositing modes, no
+ * second canvas — and drawn BEFORE every other annotation so they stay bright.
+ */
+export function drawSpotlight(ctx: Ctx, obj: AnnotationSpotlight, w: number, h: number): void {
+  const x = obj.x * w, y = obj.y * h, bw = obj.w * w, bh = obj.h * h;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, w, h);
+  if (obj.shape === 'ellipse') {
+    ctx.ellipse(x + bw / 2, y + bh / 2, Math.abs(bw / 2), Math.abs(bh / 2), 0, 0, Math.PI * 2);
+  } else {
+    ctx.rect(x, y, bw, bh);
+  }
+  ctx.fillStyle = SPOTLIGHT_DIM;
+  ctx.fill('evenodd');
+  ctx.restore();
+}
 
 /** Arrowhead length in px for a shaft of `widthPx`. */
 export function arrowHeadLength(widthPx: number): number {

@@ -8,6 +8,7 @@ import {
   ANNOTATION_HISTORY_MAX,
   ANNOTATION_HISTORY_BYTES_MAX,
   type AnnotationOp,
+  type AnnotationObject,
   type AnnotationScene,
 } from '@voxium/shared';
 import { inverseOf, addedIds, compactForward, entryBytes, type HistoryEntry } from '../utils/annotationHistory';
@@ -282,6 +283,10 @@ interface OpenGesture {
   forward: AnnotationOp[];
   inverse: AnnotationOp[];
   added: Set<string>;
+  /** The scene's objects when the gesture opened — a gesture that ends with
+   *  the very same objects in the same order (a replaced-then-restored
+   *  spotlight) changed nothing and records nothing. */
+  before: AnnotationObject[];
 }
 
 let undoStack: HistoryEntry[] = [];
@@ -295,7 +300,12 @@ function historyBytes(): number {
   return total;
 }
 
+function sameObjects(a: readonly AnnotationObject[], b: readonly AnnotationObject[]): boolean {
+  return a.length === b.length && a.every((o, i) => o === b[i]);
+}
+
 function commitEntry(entry: OpenGesture, sceneAfter: AnnotationScene): void {
+  if (sameObjects(entry.before, sceneAfter.objects)) return;
   const forward = compactForward(entry.forward, entry.added, sceneAfter);
   // Compaction only ever drops ops on objects the gesture itself added, so an
   // empty forward means every one of them is gone again (a degenerate
@@ -464,7 +474,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
       // Inverses are computed op by op against the scene each op sees, so a
       // batch of [add, update] undoes correctly; collected in REVERSE so the
       // inverse list is already in application order.
-      const entry = openGesture ?? { forward: [], inverse: [], added: new Set<string>() };
+      const entry = openGesture ?? { forward: [], inverse: [], added: new Set<string>(), before: base.objects };
       let working = base;
       const inverses: AnnotationOp[][] = [];
       for (const op of ops) {
@@ -490,7 +500,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
   },
 
   beginGesture: () => {
-    if (!openGesture) openGesture = { forward: [], inverse: [], added: new Set() };
+    if (!openGesture) openGesture = { forward: [], inverse: [], added: new Set(), before: get().scene.objects };
   },
 
   endGesture: () => {

@@ -5,7 +5,7 @@ import { useAnnotationStore, type MaskRect } from '../../stores/annotationStore'
 import { useAnnotationLiveStore, hasLiveActivity } from '../../stores/annotationLiveStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
 import { drawLivePointer } from '../../utils/annotationLiveDraw';
-import { drawArrow, drawCallout } from '../../utils/annotationDraw';
+import { drawArrow, drawCallout, drawSpotlight } from '../../utils/annotationDraw';
 
 /**
  * Render-only overlay for screen-share annotations. Positions itself over the
@@ -82,8 +82,16 @@ function drawScene(
     }
   }
 
+  // The spotlight dims the frame under every other annotation, wherever it
+  // sits in the scene order (the editor keeps at most one)
+  for (const obj of scene.objects) {
+    if (obj.kind === 'spotlight') drawSpotlight(ctx, obj, w, h);
+  }
+
   for (const obj of scene.objects) {
     switch (obj.kind) {
+      case 'spotlight':
+        break; // painted above
       case 'stroke': {
         if (obj.points.length < 4) break;
         ctx.save();

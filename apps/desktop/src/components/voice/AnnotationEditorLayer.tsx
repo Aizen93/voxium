@@ -58,7 +58,7 @@ const HIGHLIGHTER_WIDTH_FACTOR = 4;
 
 /** Kinds a plain click can select and drag. Strokes join this list with the
  *  eraser/stroke-editing work; until then they are paint only. */
-const SELECTABLE_KINDS: ReadonlySet<AnnotationObject['kind']> = new Set(['shape', 'image', 'text', 'arrow', 'callout']);
+const SELECTABLE_KINDS: ReadonlySet<AnnotationObject['kind']> = new Set(['shape', 'image', 'text', 'arrow', 'callout', 'spotlight']);
 
 /** Kinds whose position is NOT a box corner: moved with `translate`, so the
  *  geometry (stroke points, arrow endpoints, a badge centre) shifts as one. */
@@ -70,7 +70,12 @@ type DragState =
    *  from `start` to the current pointer on every move. `target` says what
    *  the second point reshapes — a box (normalized, inverted drags allowed),
    *  a mask (same, local-only), or an arrow's tip (direction kept). */
-  | { mode: 'create'; id: string; target: 'box' | 'mask' | 'arrow'; start: { x: number; y: number } }
+  | {
+      mode: 'create'; id: string; target: 'box' | 'mask' | 'arrow'; start: { x: number; y: number };
+      /** Objects this gesture replaced (the previous spotlight): put back if
+       *  the new one turns out degenerate, so a stray click costs nothing. */
+      replaced?: { obj: AnnotationObject; at: number }[];
+    }
   /** Box-anchored kinds: the patch sets x/y from the grab offset. */
   | { mode: 'move'; id: string; isMask: boolean; grabOffset: { x: number; y: number } }
   /** TRANSLATE_KINDS: each move ships the delta since the last one, clamped
@@ -248,6 +253,19 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         store.setSelectedObjectId(id);
         break;
       }
+      case 'spotlight': {
+        // One spotlight per scene: a new one replaces the old in the same
+        // gesture (one undo step). Shift at the start = elliptical cut-out.
+        store.beginGesture();
+        const id = crypto.randomUUID();
+        const replaced = scene.objects.map((obj, at) => ({ obj, at })).filter(({ obj }) => obj.kind === 'spotlight');
+        store.localApply([
+          ...replaced.map(({ obj }) => ({ t: 'remove' as const, id: obj.id })),
+          { t: 'add', obj: { id, kind: 'spotlight', x: norm.x, y: norm.y, w: 0, h: 0, ...(e.shiftKey ? { shape: 'ellipse' as const } : {}) } },
+        ]);
+        dragRef.current = { mode: 'create', id, target: 'box', start: norm, replaced };
+        break;
+      }
       case 'mask': {
         if (!capabilities.masks) break;
         const id = crypto.randomUUID();
@@ -408,8 +426,12 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
         if (mask && (mask.w < MIN_DRAG_NORM || mask.h < MIN_DRAG_NORM)) store.removeMask(drag.id);
       } else {
         const obj = useAnnotationStore.getState().scene.objects.find((o) => o.id === drag.id);
-        if (obj && obj.kind === 'shape' && (obj.w < MIN_DRAG_NORM || obj.h < MIN_DRAG_NORM)) {
-          store.localApply([{ t: 'remove', id: drag.id }]);
+        if (obj && (obj.kind === 'shape' || obj.kind === 'spotlight') && (obj.w < MIN_DRAG_NORM || obj.h < MIN_DRAG_NORM)) {
+          store.localApply([
+            { t: 'remove', id: drag.id },
+            // A stray click must not eat the spotlight it was about to replace
+            ...(drag.replaced ?? []).map(({ obj: prev, at }) => ({ t: 'add' as const, obj: prev, at })),
+          ]);
         }
         if (obj && obj.kind === 'arrow' && Math.hypot(obj.x2 - obj.x1, obj.y2 - obj.y1) < MIN_DRAG_NORM) {
           store.localApply([{ t: 'remove', id: drag.id }]);
@@ -447,7 +469,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     const box = obj ? objectBbox(obj) : null;
     if (!obj || !box) return null;
     if (obj.kind === 'arrow') return { box, isMask: false, resizable: false, arrow: { x1: obj.x1, y1: obj.y1, x2: obj.x2, y2: obj.y2 } };
-    return { box, isMask: false, resizable: obj.kind === 'shape' || obj.kind === 'image' };
+    return { box, isMask: false, resizable: obj.kind === 'shape' || obj.kind === 'image' || obj.kind === 'spotlight' };
   })();
 
   const cursor = activeTool === 'select' ? 'default' : activeTool === 'text' ? 'text' : 'crosshair';

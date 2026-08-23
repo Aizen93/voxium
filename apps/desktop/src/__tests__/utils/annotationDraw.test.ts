@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import type { AnnotationArrow, AnnotationCallout } from '@voxium/shared';
-import { drawArrow, drawCallout, arrowHeadLength, badgeTextColor, luminance } from '../../utils/annotationDraw';
+import type { AnnotationArrow, AnnotationCallout, AnnotationSpotlight } from '@voxium/shared';
+import { drawArrow, drawCallout, drawSpotlight, arrowHeadLength, badgeTextColor, luminance, SPOTLIGHT_DIM } from '../../utils/annotationDraw';
 
 function recordingContext() {
   const calls: Array<[string, unknown[]]> = [];
@@ -54,6 +54,28 @@ describe('drawArrow', () => {
     const { ctx, calls } = recordingContext();
     drawArrow(ctx, { ...arrow, x2: 0.1, y2: 0.5 }, 1000, 500);
     expect(calls).toEqual([]);
+  });
+});
+
+describe('drawSpotlight', () => {
+  const spot: AnnotationSpotlight = { id: 's', kind: 'spotlight', x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+
+  it('fills the whole frame with an even-odd path whose inner contour is the cut-out', () => {
+    const { ctx, calls, props } = recordingContext();
+    drawSpotlight(ctx, spot, 800, 400);
+    const rects = calls.filter(([n]) => n === 'rect').map(([, a]) => a);
+    expect(rects).toEqual([[0, 0, 800, 400], [200, 100, 400, 200]]);
+    expect(calls.filter(([n]) => n === 'fill').map(([, a]) => a)).toEqual([['evenodd']]);
+    expect(props.fillStyle).toEqual([SPOTLIGHT_DIM]);
+    expect(calls.filter(([n]) => n === 'ellipse')).toHaveLength(0);
+  });
+
+  it('an elliptical spotlight cuts an ellipse inscribed in its box', () => {
+    const { ctx, calls } = recordingContext();
+    drawSpotlight(ctx, { ...spot, shape: 'ellipse' }, 800, 400);
+    const [ellipse] = calls.filter(([n]) => n === 'ellipse').map(([, a]) => a as number[]);
+    expect(ellipse.slice(0, 4)).toEqual([400, 200, 200, 100]);
+    expect(calls.filter(([n]) => n === 'rect')).toHaveLength(1); // only the frame
   });
 });
 

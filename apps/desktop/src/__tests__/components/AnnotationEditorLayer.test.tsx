@@ -514,3 +514,66 @@ describe('AnnotationEditorLayer — numbered callouts', () => {
     expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ n: 12 });
   });
 });
+
+describe('AnnotationEditorLayer — spotlight', () => {
+  beforeEach(() => { useAnnotationStore.setState({ activeTool: 'spotlight' }); });
+
+  it('a drag creates a rectangular spotlight; Shift at the start makes it elliptical', () => {
+    render();
+    pointerDown(layer(), 160, 90);
+    pointerMove(layer(), 640, 360);
+    pointerUp(layer());
+    const [spot] = useAnnotationStore.getState().scene.objects;
+    expect(spot).toMatchObject({ kind: 'spotlight', x: 0.2, y: 0.2 });
+    expect((spot as { w: number }).w).toBeCloseTo(0.6);
+    expect((spot as { h: number }).h).toBeCloseTo(0.6);
+    expect((spot as { shape?: string }).shape).toBeUndefined();
+
+    act(() => {
+      const ev = new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 80, clientY: 45, shiftKey: true });
+      Object.defineProperty(ev, 'pointerId', { value: 1 });
+      layer().dispatchEvent(ev);
+    });
+    pointerMove(layer(), 400, 225);
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ kind: 'spotlight', shape: 'ellipse' });
+  });
+
+  it('there is ONE spotlight per scene: a new one replaces the old, and undo brings the old back in one step', () => {
+    render();
+    pointerDown(layer(), 80, 45); pointerMove(layer(), 240, 135); pointerUp(layer());
+    const first = useAnnotationStore.getState().scene.objects[0];
+    pointerDown(layer(), 400, 225); pointerMove(layer(), 720, 405); pointerUp(layer());
+    const objects = useAnnotationStore.getState().scene.objects;
+    expect(objects).toHaveLength(1);
+    expect(objects[0].id).not.toBe(first.id);
+    expect(objects[0]).toMatchObject({ x: 0.5, y: 0.5 });
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual([first.id]);
+  });
+
+  it('a click without a drag adds nothing and does not discard an existing spotlight', () => {
+    render();
+    pointerDown(layer(), 80, 45); pointerMove(layer(), 240, 135); pointerUp(layer());
+    pointerDown(layer(), 400, 225); pointerUp(layer());
+    // The replace-gesture removed the old one and then discarded the degenerate new one:
+    // that nets to "the old spotlight is gone" — so the gesture MUST restore it
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ x: 0.1, y: 0.1 });
+    // …and a gesture that changed nothing leaves no history entry
+    act(() => { useAnnotationStore.getState().undo(); });
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]); // that undo removed the ORIGINAL spotlight
+  });
+
+  it('is selectable, movable and resizable like a shape', () => {
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 'sp', kind: 'spotlight', x: 0.2, y: 0.2, w: 0.2, h: 0.2 } }]);
+    useAnnotationStore.setState({ activeTool: 'select' });
+    render();
+    pointerDown(layer(), 240, 135); // inside (0.3, 0.3)
+    pointerMove(layer(), 320, 135);
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().selectedObjectId).toBe('sp');
+    expect((useAnnotationStore.getState().scene.objects[0] as { x: number }).x).toBeCloseTo(0.3);
+    expect(container.querySelector('.cursor-nwse-resize')).not.toBeNull();
+  });
+});
