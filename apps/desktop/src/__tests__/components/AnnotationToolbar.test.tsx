@@ -20,6 +20,7 @@ vi.mock('../../stores/voiceStore', () => ({
     getState: () => voiceState,
     subscribe: () => () => {},
   }),
+  registerShareMaskHooks: vi.fn(),
 }));
 
 import { AnnotationToolbar } from '../../components/voice/AnnotationToolbar';

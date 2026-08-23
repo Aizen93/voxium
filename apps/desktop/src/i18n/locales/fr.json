@@ -762,6 +762,15 @@
     "dockToInline": "Ancrer dans la vue",
     "waitingForStream": "En attente du flux de partage d'écran...",
     "screenShare": "Partage d'écran",
+    "preflight": {
+      "title": "Préparez votre partage",
+      "subtitle": "Vous seul voyez cet aperçu. Couvrez ce qui est privé avant de passer en direct.",
+      "monitorNudge": "Vous partagez un écran entier — les notifications et toutes les autres fenêtres seront visibles. Couvrez ce qui est privé.",
+      "maskCount": "{{count}} masques",
+      "skipNextTime": "Ne plus afficher (l’avertissement plein écran reste)",
+      "cancel": "Annuler",
+      "goLive": "Passer en direct"
+    },
     "annotations": {
       "annotate": "Annoter",
       "done": "Terminé",

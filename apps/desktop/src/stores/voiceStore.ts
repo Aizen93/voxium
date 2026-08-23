@@ -5,8 +5,27 @@ import { getSocket, onSocketReconnect } from '../services/socket';
 import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused } from '../services/audioAnalyser';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
-import { teardownComposite } from '../services/screenComposite';
+import { teardownComposite, prepareComposite, attachCompositeProducerHandles } from '../services/screenComposite';
 import { sourceKeyFromSettings } from '../utils/maskLayouts';
+import { loadAnnotationPrefs } from '../utils/annotationPrefs';
+
+// ─── Mask hooks (registered by annotationStore — a direct import would be a
+// module cycle: annotationStore already imports this store at eval time) ─────
+
+export interface ShareMaskHooks {
+  /** Are any privacy masks placed right now? */
+  hasMasks: () => boolean;
+  /** The compositor callbacks (getMasks, onFatal, onSourceHold, …) the
+   *  pre-produce path should run with. */
+  preflightCompositeHandles: (rawTrack: MediaStreamTrack) => Parameters<typeof prepareComposite>[0];
+  /** A cancelled pre-flight leaves no masks behind. */
+  clearPreflightMasks: () => void;
+}
+
+let shareMaskHooks: ShareMaskHooks | null = null;
+export function registerShareMaskHooks(hooks: ShareMaskHooks): void {
+  shareMaskHooks = hooks;
+}
 import { optimizeOpusSDP } from '../services/sdpUtils';
 import i18n from '../i18n';
 import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared';
@@ -189,6 +208,10 @@ interface VoiceState {
    *  sharer's own preview keeps playing the raw capture, so without this flag
    *  they would never know viewers see a frozen frame. */
   screenShareFrozen: boolean;
+  /** A captured stream waiting in the pre-flight: masks are being placed on
+   *  a local preview and NOTHING has been claimed or produced — viewers do
+   *  not know a share is coming, and cancelling costs nothing. */
+  pendingShare: { stream: MediaStream; sourceKey: string | null; displaySurface: string } | null;
   /** The current share's source identity (`displaySurface:WxH` from the
    *  capture track's settings) — the key remembered mask layouts live under.
    *  Null while not sharing or when the settings gave no size. */
@@ -260,6 +283,12 @@ interface VoiceState {
 
   // ─── Screen Share Actions ────────────────────────────────────────
   startScreenShare: () => Promise<void>;
+  /** Go live from the pre-flight. */
+  confirmPendingShare: () => Promise<void>;
+  /** Abandon the pre-flight: stop the capture, drop its masks. */
+  cancelPendingShare: () => void;
+  /** Claim + produce (internal to the share flow; exposed for the pre-flight). */
+  activateScreenShare: (stream: MediaStream) => Promise<void>;
   stopScreenShare: () => void;
   setScreenSharingUser: (channelId: string, userId: string | null) => void;
   setScreenShareViewMode: (mode: 'inline' | 'floating') => void;
@@ -878,6 +907,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   remoteScreenStream: null,
   screenShareViewMode: 'inline',
   screenShareFrozen: false,
+  pendingShare: null,
   screenShareSourceKey: null,
   screenShareAnnotationsVersion: 1,
 
@@ -1985,8 +2015,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   startScreenShare: async () => {
     const socket = getSocket();
-    const { activeChannelId, msSendTransport, msDevice, isScreenSharing, screenStream } = get();
+    const { activeChannelId, msSendTransport, msDevice, isScreenSharing, screenStream, pendingShare } = get();
     if (!socket || !activeChannelId || !msSendTransport || !msDevice) return;
+    if (pendingShare) return; // a pre-flight is already open
 
     // If stale state says we're sharing but the stream is dead, clean up before proceeding
     if (isScreenSharing) {
@@ -2000,14 +2031,86 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     let stream: MediaStream | null = null;
-    const createdProducers: Producer[] = [];
-    let claimedSlot = false;
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: { ideal: 30 } },
         audio: true,
       });
+    } catch (err) {
+      // A getDisplayMedia permission cancel is a deliberate user action — no toast
+      const isUserCancel = err instanceof DOMException && err.name === 'NotAllowedError';
+      if (!isUserCancel) {
+        console.warn('[Voice] Screen capture failed:', err);
+        toast.error('Screen share failed — please try again');
+      }
+      return;
+    }
 
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) {
+      stream.getTracks().forEach((t) => t.stop());
+      toast.error('Screen share failed — please try again');
+      return;
+    }
+    const settings = videoTrack.getSettings() as { displaySurface?: string; width?: number; height?: number };
+    const sourceKey = sourceKeyFromSettings(settings);
+    const displaySurface = typeof settings.displaySurface === 'string' && settings.displaySurface ? settings.displaySurface : 'unknown';
+
+    // Masks are placed BEFORE the first frame leaves this machine: the
+    // pre-flight shows the capture locally (nothing claimed, nothing
+    // produced), applies the remembered layout, and only "Go live" starts
+    // the share — with the compositor already in front of the producer.
+    if (loadAnnotationPrefs().skipPreflight) {
+      if (displaySurface === 'monitor') {
+        // The one nudge that survives the skip: a whole screen shows
+        // notifications and every other window
+        toast.warning(i18n.t('voice.preflight.monitorNudge'));
+      }
+      set({ pendingShare: { stream, sourceKey, displaySurface } }); // the layout auto-apply keys off this
+      await get().confirmPendingShare();
+      return;
+    }
+
+    set({ pendingShare: { stream, sourceKey, displaySurface } });
+    // The OS "stop sharing" control ends the track mid-pre-flight
+    videoTrack.onended = () => {
+      if (get().pendingShare?.stream === stream) get().cancelPendingShare();
+    };
+  },
+
+  confirmPendingShare: async () => {
+    const pending = get().pendingShare;
+    if (!pending) return;
+    set({ pendingShare: null, screenShareSourceKey: pending.sourceKey });
+    await get().activateScreenShare(pending.stream);
+  },
+
+  cancelPendingShare: () => {
+    const pending = get().pendingShare;
+    if (!pending) return;
+    set({ pendingShare: null });
+    pending.stream.getTracks().forEach((t) => t.stop());
+    // Masks placed for a share that never happened would silently apply to
+    // the NEXT share of anything
+    try {
+      shareMaskHooks?.clearPreflightMasks();
+    } catch (err) {
+      console.warn('[Voice] Pre-flight mask cleanup failed:', err);
+    }
+  },
+
+  activateScreenShare: async (stream: MediaStream) => {
+    const socket = getSocket();
+    const { msSendTransport, msDevice } = get();
+    if (!socket || !get().activeChannelId || !msSendTransport || !msDevice) {
+      stream.getTracks().forEach((t) => t.stop());
+      shareMaskHooks?.clearPreflightMasks();
+      return;
+    }
+
+    const createdProducers: Producer[] = [];
+    let claimedSlot = false;
+    try {
       // Claim the sharer slot BEFORE producing — the server authorizes
       // screen-video/screen-audio producers only for the active sharer.
       const startResponse = await new Promise<{ ok: boolean; error?: string; annotationsVersion?: number }>((resolve) => {
@@ -2031,7 +2134,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
 
       const videoTrack = stream.getVideoTracks()[0];
-      if (!videoTrack || !msDevice.canProduce('video')) {
+      if (!videoTrack || videoTrack.readyState !== 'live' || !msDevice.canProduce('video')) {
         throw new Error('Cannot produce screen video');
       }
 
@@ -2039,6 +2142,22 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // desktop content. Without encodings the producer gets a default bitrate
       // far too low for 1080p, leaving viewers in permanent blur.
       videoTrack.contentHint = 'detail';
+
+      // Masks placed in the pre-flight: the producer is born with the
+      // COMPOSITED track — the raw track never becomes a producer track, so
+      // not one raw frame can ship ahead of the compositor. FAIL-CLOSED: if
+      // the compositor cannot start, there is no share.
+      let produceTrack: MediaStreamTrack = videoTrack;
+      const masksPreplaced = shareMaskHooks?.hasMasks() === true;
+      if (masksPreplaced) {
+        const composite = shareMaskHooks
+          ? await prepareComposite(shareMaskHooks.preflightCompositeHandles(videoTrack))
+          : null;
+        if (!composite) {
+          throw new Error('Privacy mask compositor failed to start');
+        }
+        produceTrack = composite;
+      }
       // stopTracks:false — mediasoup must NOT own the capture track's lifecycle:
       // its default replaceTrack() behavior STOPS the old track, which would
       // kill the raw capture the mask compositor reads from (stopScreenShare
@@ -2047,7 +2166,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // RTP at the sender WITHOUT disabling the shared raw track (a disabled
       // track delivers black frames to the compositor's source video).
       const videoProducer = await msSendTransport.produce({
-        track: videoTrack,
+        track: produceTrack,
         encodings: [{ maxBitrate: SCREEN_SHARE_MAX_BITRATE }],
         codecOptions: { videoGoogleStartBitrate: 1000 },
         stopTracks: false,
@@ -2060,6 +2179,16 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         const newProducers = new Map(get().msProducers);
         newProducers.set(videoProducer.id, videoProducer);
         set({ msProducers: newProducers });
+      }
+      if (masksPreplaced) {
+        // The compositor session was built before the producer existed — give
+        // it its real handles now (mask removal restores the raw track, the
+        // fail-closed and source-hold paths pause/resume RTP)
+        attachCompositeProducerHandles({
+          replaceTrack: (track) => get().replaceScreenVideoTrack(track),
+          pauseProducer: () => get().setScreenVideoProducerPaused(true),
+          resumeProducer: () => get().setScreenVideoProducerPaused(false),
+        });
       }
       videoTrack.onended = () => {
         get().stopScreenShare();
@@ -2082,9 +2211,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       set({
         screenStream: stream,
         isScreenSharing: true,
-        // The source identity for remembered mask layouts (displaySurface is
-        // not yet in TS's MediaTrackSettings everywhere)
-        screenShareSourceKey: sourceKeyFromSettings(videoTrack.getSettings() as { displaySurface?: string; width?: number; height?: number }),
+        // Set by confirmPendingShare for the pre-flight path; derived here
+        // for completeness (skip path passes through confirm too)
+        screenShareSourceKey: get().screenShareSourceKey
+          ?? sourceKeyFromSettings(videoTrack.getSettings() as { displaySurface?: string; width?: number; height?: number }),
         screenShareAnnotationsVersion: typeof startResponse.annotationsVersion === 'number' ? startResponse.annotationsVersion : 1,
       });
     } catch (err) {

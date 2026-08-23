@@ -39,6 +39,7 @@ import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
+import { SharePreflightModal } from '../voice/SharePreflightModal';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
@@ -936,6 +937,7 @@ export function MainLayout() {
         {activeServerId && <ErrorBoundary inline><MemberSidebar /></ErrorBoundary>}
         {isSettingsOpen && <SettingsModal />}
         <IncomingCallModal />
+        <SharePreflightModal />
         {showGlobalSearch && (() => {
           if (activeServerId) {
             return (

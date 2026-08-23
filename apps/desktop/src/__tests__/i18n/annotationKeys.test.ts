@@ -15,6 +15,7 @@ const SOURCES = [
   // the labelKey table the toolbar and the shortcuts share
   fileURLToPath(new URL('../../components/voice/annotationPresets.ts', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ColorPalettePopover.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/voice/SharePreflightModal.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/AnnotationEditorLayer.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareViewer.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareFloating.tsx', import.meta.url)),
@@ -78,6 +79,7 @@ describe('screen-share annotation translation keys', () => {
     expect(keys).toContain('voice.youAreSharing');               // viewer
     expect(keys).toContain('voice.screenShare');                 // floating panel
     expect(keys).toContain('voice.annotations.sceneFull');       // store toast
+    expect(keys).toContain('voice.preflight.goLive');             // pre-flight modal
     expect(locales.length).toBeGreaterThan(1);
   });
 

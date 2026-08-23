@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => {
     };
   }
   interface Mask { id: string; x: number; y: number; w: number; h: number; style?: string; src?: string }
-  const voice = observable(() => ({ isScreenSharing: false, localUserId: 'alice' as string | null, screenShareSourceKey: null as string | null }));
+  const voice = observable(() => ({ isScreenSharing: false, localUserId: 'alice' as string | null, screenShareSourceKey: null as string | null, pendingShare: null as { sourceKey: string | null } | null }));
   const ann = observable(() => ({ masks: [] as Mask[] }));
   const annotation = Object.assign(ann, {
     addMask: (m: Mask) => ann.setState({ masks: [...ann.getState().masks, m] }),
@@ -67,7 +67,7 @@ beforeEach(() => {
   localStorage.clear();
   resetMaskLayoutModuleState();
   // The subscriptions registered at import stay live: reset state, not wiring
-  mocks.voice.setState({ isScreenSharing: false, localUserId: 'alice', screenShareSourceKey: null });
+  mocks.voice.setState({ isScreenSharing: false, localUserId: 'alice', screenShareSourceKey: null, pendingShare: null });
   mocks.annotation.setState({ masks: [] });
   useMaskLayoutStore.setState({ appliedLayout: null });
 });
@@ -123,6 +123,44 @@ describe('maskLayoutStore — applying on share start', () => {
     useMaskLayoutStore.setState({ appliedLayout: { key: KEY, count: 1, ids: ['hand-made'] } });
     useMaskLayoutStore.getState().keepApplied();
     expect(useMaskLayoutStore.getState().appliedLayout).toBeNull();
+    expect(annotationMock.current.getState().masks).toHaveLength(1);
+  });
+});
+
+describe('maskLayoutStore — the pre-flight', () => {
+  it('applies when the pre-flight opens, and does NOT apply again when the share then starts', () => {
+    saveMaskLayouts('alice', upsertMaskLayout([], KEY, [mask('s1'), mask('s2')], 5));
+    voiceMock.current.setState({ pendingShare: { sourceKey: KEY } });
+    expect(annotationMock.current.getState().masks).toHaveLength(2);
+    expect(useMaskLayoutStore.getState().appliedLayout).toMatchObject({ count: 2 });
+
+    // Go live: confirm stamps the source key as it clears pendingShare
+    voiceMock.current.setState({ pendingShare: null, screenShareSourceKey: KEY });
+    voiceMock.current.setState({ isScreenSharing: true });
+    expect(annotationMock.current.getState().masks).toHaveLength(2); // not four
+    expect(useMaskLayoutStore.getState().appliedLayout).toMatchObject({ count: 2 }); // banner survives going live
+  });
+
+  it('a cancelled pre-flight (no source key stamped) drops the banner, and the NEXT capture applies again', () => {
+    saveMaskLayouts('alice', upsertMaskLayout([], KEY, [mask('s1')], 5));
+    voiceMock.current.setState({ pendingShare: { sourceKey: KEY } });
+    expect(useMaskLayoutStore.getState().appliedLayout).not.toBeNull();
+
+    voiceMock.current.setState({ pendingShare: null }); // cancel: no key stamped
+    expect(useMaskLayoutStore.getState().appliedLayout).toBeNull();
+
+    annotationMock.current.setState({ masks: [] }); // voiceStore's hook clears them in production
+    voiceMock.current.setState({ pendingShare: { sourceKey: KEY } });
+    expect(annotationMock.current.getState().masks).toHaveLength(1); // applied fresh
+  });
+
+  it('the skip-pre-flight path (share start with no earlier apply) still applies once', () => {
+    saveMaskLayouts('alice', upsertMaskLayout([], KEY, [mask('s1')], 5));
+    // skip path in production also opens pendingShare then confirms at once —
+    // the apply happens on the pendingShare edge
+    voiceMock.current.setState({ pendingShare: { sourceKey: KEY } });
+    voiceMock.current.setState({ pendingShare: null, screenShareSourceKey: KEY });
+    voiceMock.current.setState({ isScreenSharing: true });
     expect(annotationMock.current.getState().masks).toHaveLength(1);
   });
 });

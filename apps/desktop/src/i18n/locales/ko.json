@@ -762,6 +762,15 @@
     "dockToInline": "기본 화면에 고정",
     "waitingForStream": "화면 공유 스트림을 기다리는 중...",
     "screenShare": "화면 공유",
+    "preflight": {
+      "title": "공유 준비",
+      "subtitle": "이 미리보기는 본인만 볼 수 있습니다. 방송 전에 비공개 부분을 가리세요.",
+      "monitorNudge": "전체 화면을 공유하고 있습니다 — 알림과 다른 모든 창이 보입니다. 비공개 부분을 가리세요.",
+      "maskCount": "마스크 {{count}}개",
+      "skipNextTime": "다음부터 표시 안 함(전체 화면 경고는 유지)",
+      "cancel": "취소",
+      "goLive": "방송 시작"
+    },
     "annotations": {
       "annotate": "주석",
       "done": "완료",

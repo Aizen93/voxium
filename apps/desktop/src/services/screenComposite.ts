@@ -237,6 +237,122 @@ function destroySession(s: ActiveSession): void {
 }
 
 /**
+ * The shared session pipeline: clone the capture track (the producer's
+ * pause/replaceTrack must never be able to disable or stop the frames the
+ * compositor reads — mediasoup's defaults do both to the track object it
+ * holds), feed a hidden video, draw the first MASKED frame onto the capture
+ * canvas. Returns null when the share ended mid-setup (generation bumped);
+ * throws on real failures. Cleans up after itself on both.
+ */
+async function buildSession(handles: CompositeHandles, gen: number): Promise<ActiveSession | null> {
+  let video: HTMLVideoElement | null = null;
+  let sourceTrack: MediaStreamTrack | null = null;
+  try {
+    sourceTrack = handles.rawTrack.clone();
+    video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = new MediaStream([sourceTrack]);
+    await video.play();
+    if (gen !== generation) {
+      video.srcObject = null;
+      sourceTrack.stop();
+      return null;
+    }
+
+    const settings = handles.rawTrack.getSettings();
+    const width = settings.width || video.videoWidth || 1280;
+    const height = settings.height || video.videoHeight || 720;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('2D context unavailable');
+
+    const stream = canvas.captureStream(CAPTURE_FPS);
+    const compositeTrack = stream.getVideoTracks()[0];
+    if (!compositeTrack) throw new Error('captureStream produced no track');
+    if ('contentHint' in compositeTrack) compositeTrack.contentHint = 'detail';
+
+    const created: ActiveSession = {
+      handles,
+      sourceHold: false,
+      video,
+      canvas,
+      ctx,
+      compositeTrack,
+      sourceTrack,
+      maskImages: new Map(),
+      scratch: createScratchCanvas(),
+      stopped: false,
+      cancelFrameLoop: () => {},
+    };
+
+    // First masked frame before anything can consume the capture track
+    renderCompositeFrame(ctx, video, canvas, handles.getMasks(), (m) => maskImageFor(created, m), created.scratch);
+    return created;
+  } catch (err) {
+    if (video) video.srcObject = null;
+    sourceTrack?.stop();
+    throw err;
+  }
+}
+
+/** What the pre-flight can provide before any producer exists. */
+export type PreflightCompositeHandles = Omit<CompositeHandles, 'replaceTrack' | 'pauseProducer' | 'resumeProducer'>;
+
+/**
+ * PRE-PRODUCE mode, for a share whose masks were placed before it went live:
+ * build the session and return the composited track for the CALLER to
+ * produce — the raw track is never a producer track at all, so not one raw
+ * frame can ship ahead of the compositor. Producer handles do not exist yet;
+ * attachCompositeProducerHandles wires them in after the producer is created.
+ * Returns null on any failure — the caller must NOT fall back to the raw
+ * track (fail closed: no share is better than an unmasked one).
+ */
+export async function prepareComposite(preflight: PreflightCompositeHandles): Promise<MediaStreamTrack | null> {
+  let result: MediaStreamTrack | null = null;
+  transition = transition.then(async () => {
+    if (session) {
+      console.warn('[ScreenComposite] prepareComposite with a live session — refusing');
+      return;
+    }
+    if (preflight.rawTrack.readyState === 'ended') return;
+    const gen = generation;
+    const handles: CompositeHandles = {
+      ...preflight,
+      // Stubs until the producer exists. replaceTrack must throw — a
+      // stopComposite racing in before attach would otherwise believe it
+      // restored the raw track to a producer that was never told.
+      replaceTrack: async () => { throw new Error('no producer attached yet'); },
+      pauseProducer: () => {},
+      resumeProducer: () => {},
+    };
+    try {
+      const created = await buildSession(handles, gen);
+      if (!created) return; // share ended mid-setup
+      session = created;
+      startFrameLoop(created);
+      result = created.compositeTrack;
+    } catch (err) {
+      if (gen !== generation) return; // the race, not a failure
+      console.error('[ScreenComposite] Pre-produce setup failed:', err);
+      preflight.onFatal?.();
+    }
+  }).catch((err) => {
+    console.error('[ScreenComposite] prepareComposite failed:', err);
+  });
+  await transition;
+  return result;
+}
+
+/** The producer exists now: give the live session its real handles. */
+export function attachCompositeProducerHandles(producer: Pick<CompositeHandles, 'replaceTrack' | 'pauseProducer' | 'resumeProducer'>): void {
+  if (!session) return;
+  Object.assign(session.handles, producer);
+}
+
+/**
  * Start compositing if not already running. FAIL-CLOSED: the producer is
  * paused synchronously before any async setup, so no raw frame ships between
  * "a mask exists" and "the composited track is live". On any setup failure the
@@ -252,75 +368,27 @@ export async function ensureComposite(handles: CompositeHandles): Promise<void> 
     handles.pauseProducer();
     blockedHandles = handles;
 
-    let video: HTMLVideoElement | null = null;
-    let sourceTrack: MediaStreamTrack | null = null;
     let s: ActiveSession | null = null;
     try {
-      // Feed the compositor a CLONE: the producer's pause/replaceTrack must
-      // never be able to disable or stop the frames the compositor reads
-      // (mediasoup's defaults do both to the track object it holds).
-      sourceTrack = handles.rawTrack.clone();
-      video = document.createElement('video');
-      video.muted = true;
-      video.playsInline = true;
-      video.srcObject = new MediaStream([sourceTrack]);
-      await video.play();
-      if (gen !== generation) {
-        // Share ended while we were setting up
-        video.srcObject = null;
-        return;
-      }
-
-      const settings = handles.rawTrack.getSettings();
-      const width = settings.width || video.videoWidth || 1280;
-      const height = settings.height || video.videoHeight || 720;
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('2D context unavailable');
-
-      const stream = canvas.captureStream(CAPTURE_FPS);
-      const compositeTrack = stream.getVideoTracks()[0];
-      if (!compositeTrack) throw new Error('captureStream produced no track');
-      if ('contentHint' in compositeTrack) compositeTrack.contentHint = 'detail';
-
-      const created: ActiveSession = {
-        handles,
-        sourceHold: false,
-        video,
-        canvas,
-        ctx,
-        compositeTrack,
-        sourceTrack,
-        maskImages: new Map(),
-        scratch: createScratchCanvas(),
-        stopped: false,
-        cancelFrameLoop: () => {},
-      };
+      const created = await buildSession(handles, gen);
+      if (!created) return; // share ended while we were setting up
       s = created;
 
-      // First masked frame BEFORE the swap
-      renderCompositeFrame(ctx, video, canvas, handles.getMasks(), (m) => maskImageFor(created, m), created.scratch);
-
-      await handles.replaceTrack(compositeTrack);
+      await handles.replaceTrack(created.compositeTrack);
       if (gen !== generation) {
         // teardownComposite ran mid-replaceTrack — the share is over; don't
         // install a session nothing will ever tear down.
         destroySession(created);
+        s = null;
         return;
       }
 
-      session = created;
+      session = s;
       blockedHandles = null;
-      startFrameLoop(created);
+      startFrameLoop(s);
       handles.resumeProducer();
     } catch (err) {
       if (s) destroySession(s);
-      else {
-        if (video) video.srcObject = null;
-        sourceTrack?.stop();
-      }
       if (gen !== generation) {
         // The share ended mid-setup (teardownComposite bumped the generation)
         // — producers are closing and the "failure" is just the race; a fatal

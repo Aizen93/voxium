@@ -768,6 +768,15 @@
     "dockToInline": "Dock to inline",
     "waitingForStream": "Waiting for screen share stream...",
     "screenShare": "Screen Share",
+    "preflight": {
+      "title": "Prepare your share",
+      "subtitle": "Only you can see this preview. Cover anything private before going live.",
+      "monitorNudge": "You are sharing a whole screen — notifications and every other window will be visible. Cover anything private.",
+      "maskCount": "{{count}} masks",
+      "skipNextTime": "Do not show this again (the whole-screen warning stays)",
+      "cancel": "Cancel",
+      "goLive": "Go live"
+    },
     "annotations": {
       "annotate": "Annotate",
       "done": "Done",

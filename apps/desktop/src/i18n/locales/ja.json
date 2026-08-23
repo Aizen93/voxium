@@ -762,6 +762,15 @@
     "dockToInline": "メインビューに戻す",
     "waitingForStream": "画面共有ストリームを待機中...",
     "screenShare": "画面共有",
+    "preflight": {
+      "title": "共有の準備",
+      "subtitle": "このプレビューはあなたにしか見えません。配信前にプライベートな部分を隠してください。",
+      "monitorNudge": "画面全体を共有しています — 通知や他のすべてのウィンドウが見えます。プライベートな部分を隠してください。",
+      "maskCount": "マスク {{count}} 件",
+      "skipNextTime": "次回から表示しない（全画面の警告は残ります）",
+      "cancel": "キャンセル",
+      "goLive": "配信開始"
+    },
     "annotations": {
       "annotate": "注釈",
       "done": "完了",

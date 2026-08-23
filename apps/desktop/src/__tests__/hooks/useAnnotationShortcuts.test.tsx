@@ -10,6 +10,7 @@ vi.mock('../../stores/voiceStore', () => ({
     getState: () => ({ activeChannelId: 'chan-1', screenSharingUserId: 'me', isScreenSharing: true, screenStream: null }),
     subscribe: () => () => {},
   },
+  registerShareMaskHooks: vi.fn(),
 }));
 vi.mock('../../services/screenComposite', () => ({
   ensureComposite: vi.fn(), stopComposite: vi.fn(), teardownComposite: vi.fn(), isCompositing: () => false,

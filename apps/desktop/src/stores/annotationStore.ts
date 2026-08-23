@@ -18,7 +18,7 @@ import { loadAnnotationPrefs, saveAnnotationPrefs, pushRecentColor, clampTextSiz
 import type { MaskStyle } from '../utils/maskStyles';
 import { patchableKeysFor } from '@voxium/shared';
 import { getSocket } from '../services/socket';
-import { useVoiceStore } from './voiceStore';
+import { useVoiceStore, registerShareMaskHooks } from './voiceStore';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { ensureComposite, stopComposite, teardownComposite, isCompositing, resumeSourceHold } from '../services/screenComposite';
@@ -359,7 +359,9 @@ function resetHistory(): void {
 }
 
 function persistPrefs(s: Pick<AnnotationState, 'inkMode' | 'textSize' | 'recentColors'>): void {
-  saveAnnotationPrefs({ inkMode: s.inkMode, textSize: s.textSize, recentColors: s.recentColors });
+  // Merge over the stored copy: prefs this store does not own (skipPreflight
+  // belongs to the pre-flight modal) must survive every write from here
+  saveAnnotationPrefs({ ...loadAnnotationPrefs(), inkMode: s.inkMode, textSize: s.textSize, recentColors: s.recentColors });
 }
 
 /**
@@ -433,6 +435,32 @@ function trackFadeClocks(before: AnnotationScene, after: AnnotationScene, ops: A
 
 let lastMisalignToastAt = 0;
 
+/** The compositor lifecycle callbacks — one set for the mid-share ensure path
+ *  AND the pre-flight's pre-produce path, so holds, toasts and misalign hints
+ *  behave identically however the session was born. */
+function compositeLifecycleCallbacks(rawTrack: MediaStreamTrack) {
+  return {
+    rawTrack,
+    getMasks: () => useAnnotationStore.getState().masks,
+    onFatal: () => {
+      toast.error(i18n.t('voice.annotations.maskFailed'));
+    },
+    onRestoreFailed: () => {
+      toast.warning(i18n.t('voice.annotations.maskRestoreFailed'));
+    },
+    onSourceResize: () => {
+      const now = Date.now();
+      if (now - lastMisalignToastAt > 10_000) {
+        lastMisalignToastAt = now;
+        toast.warning(i18n.t('voice.annotations.masksMayMisalign'));
+      }
+    },
+    onSourceHold: (change: { fromW: number; fromH: number; toW: number; toH: number }) => {
+      useAnnotationStore.setState({ sourceChangeHold: change });
+    },
+  };
+}
+
 function syncCompositeToMasks(): void {
   const voice = useVoiceStore.getState();
   if (!voice.isScreenSharing || !voice.screenStream) return;
@@ -448,40 +476,10 @@ function syncCompositeToMasks(): void {
       useVoiceStore.getState().setScreenVideoProducerPaused(true);
     }
     void ensureComposite({
-      rawTrack,
-      getMasks: () => useAnnotationStore.getState().masks,
+      ...compositeLifecycleCallbacks(rawTrack),
       replaceTrack: (track) => useVoiceStore.getState().replaceScreenVideoTrack(track),
       pauseProducer: () => useVoiceStore.getState().setScreenVideoProducerPaused(true),
       resumeProducer: () => useVoiceStore.getState().setScreenVideoProducerPaused(false),
-      onFatal: () => {
-        // The producer is left PAUSED (viewers see a frozen frame, never the
-        // content under the mask) — the sharer must know why, and that
-        // removing the mask unfreezes the share.
-        toast.error(i18n.t('voice.annotations.maskFailed'));
-      },
-      onRestoreFailed: () => {
-        // Masks are gone and the share is still live — it is just still going
-        // out through the compositor. A warning, not an error: nothing the
-        // sharer must act on, but they should know why their CPU is busy.
-        toast.warning(i18n.t('voice.annotations.maskRestoreFailed'));
-      },
-      onSourceResize: () => {
-        // Source resolution changed with NO masks on screen (a passthrough
-        // session about to be torn down): nothing private is at stake — the
-        // annotations may just misalign. Debounced.
-        const now = Date.now();
-        if (now - lastMisalignToastAt > 10_000) {
-          lastMisalignToastAt = now;
-          toast.warning(i18n.t('voice.annotations.masksMayMisalign'));
-        }
-      },
-      onSourceHold: (change) => {
-        // Masks exist and the content under them moved: the compositor paused
-        // the producer BEFORE the first resized frame. Only the sharer's
-        // explicit confirm (confirmSourceChange) resumes — a privacy control
-        // must not expire on a timer.
-        useAnnotationStore.setState({ sourceChangeHold: change });
-      },
     });
   } else {
     void stopComposite();
@@ -756,6 +754,16 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     set({ isEditing: false, selectedObjectId: null, masks: [], activeTool: 'pen', maskStyle: 'cover', sourceChangeHold: null, canUndo: false, canRedo: false });
   },
 }));
+
+// The pre-flight lives in voiceStore, which cannot import this module (it
+// imports voiceStore at eval time — a cycle). It calls through these hooks:
+registerShareMaskHooks({
+  hasMasks: () => useAnnotationStore.getState().masks.length > 0,
+  preflightCompositeHandles: (rawTrack) => compositeLifecycleCallbacks(rawTrack),
+  clearPreflightMasks: () => {
+    useAnnotationStore.getState().clearMasks();
+  },
+});
 
 // ─── Cross-store lifecycle guard ─────────────────────────────────────────────
 // Every existing screen-share teardown path (stop, leave, reconnect, stale-

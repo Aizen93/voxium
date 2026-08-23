@@ -762,6 +762,15 @@
     "dockToInline": "Anclar a la vista",
     "waitingForStream": "Esperando la transmisión de pantalla...",
     "screenShare": "Compartir pantalla",
+    "preflight": {
+      "title": "Prepara tu pantalla compartida",
+      "subtitle": "Solo tú ves esta vista previa. Cubre lo privado antes de emitir.",
+      "monitorNudge": "Estás compartiendo una pantalla completa: las notificaciones y todas las demás ventanas serán visibles. Cubre lo privado.",
+      "maskCount": "{{count}} máscaras",
+      "skipNextTime": "No volver a mostrar (el aviso de pantalla completa se mantiene)",
+      "cancel": "Cancelar",
+      "goLive": "Emitir"
+    },
     "annotations": {
       "annotate": "Anotar",
       "done": "Listo",

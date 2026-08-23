@@ -26,10 +26,10 @@ describe('annotationPrefs', () => {
   });
 
   it('load validates every field and tolerates junk', () => {
-    saveAnnotationPrefs({ inkMode: 'vanishing', textSize: 0.07, recentColors: ['#ABC', 'nope', '#ff3b30', '#ff3b30'] });
-    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'vanishing', textSize: 0.07, recentColors: ['#aabbcc', '#ff3b30'] });
-    localStorage.setItem('vox:annotations:prefs', JSON.stringify({ textSize: 'big', recentColors: 'x' }));
-    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [] });
+    saveAnnotationPrefs({ inkMode: 'vanishing', textSize: 0.07, recentColors: ['#ABC', 'nope', '#ff3b30', '#ff3b30'], skipPreflight: true });
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'vanishing', textSize: 0.07, recentColors: ['#aabbcc', '#ff3b30'], skipPreflight: true });
+    localStorage.setItem('vox:annotations:prefs', JSON.stringify({ textSize: 'big', recentColors: 'x', skipPreflight: 'yes' }));
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [], skipPreflight: false });
     localStorage.removeItem('vox:annotations:prefs');
   });
 });

@@ -47,7 +47,7 @@ const voiceMock = vi.hoisted(() => {
     },
   };
 });
-vi.mock('../../stores/voiceStore', () => ({ useVoiceStore: voiceMock }));
+vi.mock('../../stores/voiceStore', () => ({ useVoiceStore: voiceMock, registerShareMaskHooks: vi.fn() }));
 
 const compositeMock = vi.hoisted(() => ({
   ensureComposite: vi.fn().mockResolvedValue(undefined),
@@ -640,9 +640,9 @@ describe('annotationStore — vanishing ink', () => {
     expect(JSON.parse(localStorage.getItem('vox:annotations:prefs')!)).toMatchObject({ inkMode: 'vanishing' });
     expect(loadAnnotationPrefs().inkMode).toBe('vanishing');
     localStorage.setItem('vox:annotations:prefs', '{"inkMode":"weird"}');
-    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [] });
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [], skipPreflight: false });
     localStorage.setItem('vox:annotations:prefs', 'not json');
-    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [] });
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [], skipPreflight: false });
     localStorage.removeItem('vox:annotations:prefs');
     useAnnotationStore.getState().setInkMode('persistent');
   });

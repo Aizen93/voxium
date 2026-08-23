@@ -41,6 +41,9 @@ interface MaskLayoutState {
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 /** Suppresses the save-on-edit subscription while auto-apply itself edits. */
 let applying = false;
+/** The layout was already applied for this capture (in the pre-flight) —
+ *  the share-start transition must not apply it a second time. */
+let appliedThisCapture = false;
 
 export function resetMaskLayoutModuleState(): void {
   if (saveTimer) {
@@ -48,6 +51,7 @@ export function resetMaskLayoutModuleState(): void {
     saveTimer = null;
   }
   applying = false;
+  appliedThisCapture = false;
 }
 
 export const useMaskLayoutStore = create<MaskLayoutState>((set, get) => ({
@@ -68,10 +72,9 @@ export const useMaskLayoutStore = create<MaskLayoutState>((set, get) => ({
   },
 }));
 
-function applyLayoutForShare(): void {
+function applyLayoutForShare(sourceKey: string | null): void {
   const voice = useVoiceStore.getState();
   const userId = voice.localUserId;
-  const sourceKey = voice.screenShareSourceKey;
   if (!userId || !sourceKey) return;
   const entry = findMaskLayout(loadMaskLayouts(userId), sourceKey);
   if (!entry || entry.masks.length === 0) return;
@@ -109,10 +112,26 @@ function scheduleSave(): void {
 
 // ─── Lifecycle wiring ────────────────────────────────────────────────────────
 
-// Share starts → apply the remembered layout; share ends → drop the banner.
+// The layout applies as early as its source is known: in the PRE-FLIGHT when
+// one opens (the modal shows the covers before anything ships), otherwise at
+// share start (the skip-pre-flight path). Never twice for one capture; a
+// cancelled pre-flight or an ended share clears the banner.
 useVoiceStore.subscribe((state, prev) => {
+  if (state.pendingShare && !prev.pendingShare) {
+    appliedThisCapture = true;
+    applyLayoutForShare(state.pendingShare.sourceKey);
+  } else if (!state.pendingShare && prev.pendingShare && !state.isScreenSharing && !state.screenShareSourceKey) {
+    // Pre-flight CANCELLED: confirmPendingShare stamps screenShareSourceKey in
+    // the very same update it clears pendingShare, so a missing key here can
+    // only be the cancel path (voiceStore clears the masks through the share
+    // hooks; the banner goes with them).
+    appliedThisCapture = false;
+    useMaskLayoutStore.setState({ appliedLayout: null });
+  }
+
   if (state.isScreenSharing && !prev.isScreenSharing) {
-    applyLayoutForShare();
+    if (!appliedThisCapture) applyLayoutForShare(state.screenShareSourceKey);
+    appliedThisCapture = false; // consumed either way
   } else if (!state.isScreenSharing && prev.isScreenSharing) {
     resetMaskLayoutModuleState();
     useMaskLayoutStore.setState({ appliedLayout: null });

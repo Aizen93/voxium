@@ -762,6 +762,15 @@
     "dockToInline": "In Ansicht andocken",
     "waitingForStream": "Warte auf den Bildschirmstream...",
     "screenShare": "Bildschirmübertragung",
+    "preflight": {
+      "title": "Bereite deine Übertragung vor",
+      "subtitle": "Nur du siehst diese Vorschau. Decke Privates ab, bevor du live gehst.",
+      "monitorNudge": "Du teilst einen ganzen Bildschirm — Benachrichtigungen und alle anderen Fenster sind sichtbar. Decke Privates ab.",
+      "maskCount": "{{count}} Masken",
+      "skipNextTime": "Nicht mehr anzeigen (die Ganzbildschirm-Warnung bleibt)",
+      "cancel": "Abbrechen",
+      "goLive": "Live gehen"
+    },
     "annotations": {
       "annotate": "Kommentieren",
       "done": "Fertig",

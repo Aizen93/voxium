@@ -467,6 +467,102 @@ describe('stopComposite — a mask added DURING the swap back', () => {
   });
 });
 
+// ─── Pre-produce mode (the pre-flight) ──────────────────────────────────────
+
+import { prepareComposite, attachCompositeProducerHandles, isCompositing as compositing } from '../../services/screenComposite';
+
+describe('prepareComposite / attachCompositeProducerHandles', () => {
+  beforeEach(async () => {
+    teardownComposite();
+    await stopComposite();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    installMediaPipeline();
+  });
+
+  afterEach(async () => {
+    teardownComposite();
+    await stopComposite();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function preflightHandles(masks: MaskRect[] = [mask('m1')]) {
+    const live = { masks };
+    return {
+      live,
+      rawTrack: fakeTrack('raw'),
+      getMasks: () => live.masks,
+      onFatal: vi.fn<() => void>(),
+      onRestoreFailed: vi.fn<() => void>(),
+    };
+  }
+
+  it('builds the session and returns the composited track WITHOUT any producer involvement', async () => {
+    const handles = preflightHandles();
+    const track = await prepareComposite(handles);
+    expect(track).not.toBeNull();
+    expect((track as { label?: string })?.label).toBe('composite');
+    expect(compositing()).toBe(true);
+    expect(handles.onFatal).not.toHaveBeenCalled();
+  });
+
+  it('after attach, removing the last mask restores the raw track through the attached handle', async () => {
+    const handles = preflightHandles();
+    await prepareComposite(handles);
+    const producer = {
+      replaceTrack: vi.fn(async (_t: MediaStreamTrack) => {}),
+      pauseProducer: vi.fn<() => void>(),
+      resumeProducer: vi.fn<() => void>(),
+    };
+    attachCompositeProducerHandles(producer);
+    handles.live.masks = [];
+    await stopComposite();
+    expect(producer.replaceTrack).toHaveBeenCalledWith(handles.rawTrack);
+    expect(compositing()).toBe(false);
+  });
+
+  it('a stop that races in BEFORE attach fails the restore and keeps the session (never bare frames)', async () => {
+    const handles = preflightHandles();
+    await prepareComposite(handles);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    handles.live.masks = [];
+    await stopComposite(); // stub replaceTrack throws → keep-composited path
+    errSpy.mockRestore();
+    expect(compositing()).toBe(true);
+    expect(handles.onRestoreFailed).toHaveBeenCalled();
+  });
+
+  it('returns null on setup failure (fail closed: the caller must not share) and reports it', async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const handles = preflightHandles();
+    const track = await prepareComposite(handles);
+    errSpy.mockRestore();
+    expect(track).toBeNull();
+    expect(compositing()).toBe(false);
+    expect(handles.onFatal).toHaveBeenCalled();
+  });
+
+  it('returns null when the share ended mid-setup or the track is already dead, without the fatal toast', async () => {
+    const handles = preflightHandles();
+    (handles.rawTrack as { readyState: string }).readyState = 'ended';
+    expect(await prepareComposite(handles)).toBeNull();
+    expect(handles.onFatal).not.toHaveBeenCalled();
+    expect(compositing()).toBe(false);
+  });
+
+  it('refuses while a session is already live (returns null, session untouched)', async () => {
+    const first = preflightHandles();
+    await prepareComposite(first);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const second = await prepareComposite(preflightHandles());
+    warn.mockRestore();
+    expect(second).toBeNull();
+    expect(compositing()).toBe(true);
+  });
+});
+
 // ─── Source-change guard (the hold) ─────────────────────────────────────────
 // Uses the same minimal media pipeline as the live-session suites, plus a
 // controllable requestAnimationFrame so each flush is one compositor frame,
