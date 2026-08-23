@@ -782,6 +782,7 @@
       "eraser": "消しゴム",
       "renumber": "マーカーを読み順に振り直す",
       "calloutLimit": "番号付きマーカーは1回の共有につき最大{{max}}個です",
+      "vanishingInk": "消えるインク — 数秒後にストロークが消えます",
       "clearAll": "すべて消去",
       "color": "色",
       "width": "線の太さ",

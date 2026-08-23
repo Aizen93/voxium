@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import {
   ANNOTATION_LIVE_POINTER_INTERVAL_MS,
   ANNOTATION_LIVE_POINTER_FADE_MS,
+  ANNOTATION_FADE_AFTER_MS,
   ANNOTATION_REACTIONS,
   type AnnotationLiveEvent,
 } from '@voxium/shared';
@@ -41,10 +42,21 @@ export const LIVE_REACTIONS_MAX_IN_FLIGHT = 30;
 /** A reaction is done rising (and dropped) after this. */
 export const LIVE_REACTION_TTL_MS = 2_500;
 
+/** A vanishing stroke's local clock: when it was last touched (added or
+ *  appended to) on THIS client, and whether it has already faded out — a
+ *  hidden entry keeps the stroke invisible if the sharer's remove is late,
+ *  without keeping the animation loop alive. */
+export interface FadeClock {
+  at: number;
+  hidden: boolean;
+}
+
 interface AnnotationLiveState {
   pointer: LivePointer | null;
   reactions: LiveReaction[];
   snapshotNotice: { userId: string; at: number } | null;
+  /** Vanishing-ink clocks by stroke id. */
+  fading: ReadonlyMap<string, FadeClock>;
 
   /** A remote event, already filtered by channel/sharer in the socket handler. */
   receive: (userId: string, ev: AnnotationLiveEvent) => void;
@@ -58,6 +70,10 @@ interface AnnotationLiveState {
   notifySnapshot: () => void;
   /** Drop expired reactions / a faded pointer. Called by the canvas scheduler. */
   prune: (now: number) => void;
+  /** A vanishing stroke was added or appended to — restart its clock. */
+  touchFading: (id: string, now?: number) => void;
+  /** The stroke is gone from the scene (removed, cleared). */
+  forgetFading: (ids: Iterable<string>) => void;
   clear: () => void;
 }
 
@@ -116,6 +132,7 @@ export const useAnnotationLiveStore = create<AnnotationLiveState>((set, get) => 
   pointer: null,
   reactions: [],
   snapshotNotice: null,
+  fading: new Map(),
 
   receive: (userId, ev) => {
     const now = Date.now();
@@ -183,21 +200,66 @@ export const useAnnotationLiveStore = create<AnnotationLiveState>((set, get) => 
     const pointerExpired = s.pointer !== null && now - s.pointer.at > ANNOTATION_LIVE_POINTER_FADE_MS;
     const liveReactions = s.reactions.filter((r) => now - r.at < LIVE_REACTION_TTL_MS);
     const noticeExpired = s.snapshotNotice !== null && now - s.snapshotNotice.at > 4_000;
-    if (!pointerExpired && liveReactions.length === s.reactions.length && !noticeExpired) return;
+    // A fully faded stroke flips to hidden (and stays in the map until the
+    // scene drops it) — the loop must not run for something already invisible
+    let fading: Map<string, FadeClock> | null = null;
+    for (const [id, clock] of s.fading) {
+      if (!clock.hidden && now - clock.at >= ANNOTATION_FADE_AFTER_MS) {
+        fading ??= new Map(s.fading);
+        fading.set(id, { at: clock.at, hidden: true });
+      }
+    }
+    if (!pointerExpired && liveReactions.length === s.reactions.length && !noticeExpired && !fading) return;
     set({
       ...(pointerExpired ? { pointer: null } : {}),
       ...(liveReactions.length !== s.reactions.length ? { reactions: liveReactions } : {}),
       ...(noticeExpired ? { snapshotNotice: null } : {}),
+      ...(fading ? { fading } : {}),
     });
+  },
+
+  touchFading: (id, now = Date.now()) => {
+    set((s) => {
+      const fading = new Map(s.fading);
+      fading.set(id, { at: now, hidden: false });
+      return { fading };
+    });
+  },
+
+  forgetFading: (ids) => {
+    const s = get();
+    let fading: Map<string, FadeClock> | null = null;
+    for (const id of ids) {
+      if (!s.fading.has(id)) continue;
+      fading ??= new Map(s.fading);
+      fading.delete(id);
+    }
+    if (fading) set({ fading });
   },
 
   clear: () => {
     resetAnnotationLiveModuleState();
-    set({ pointer: null, reactions: [], snapshotNotice: null });
+    set({ pointer: null, reactions: [], snapshotNotice: null, fading: new Map() });
   },
 }));
 
 /** True while anything here still needs time-driven redraws. */
-export function hasLiveActivity(state: Pick<AnnotationLiveState, 'pointer' | 'reactions' | 'snapshotNotice'>): boolean {
-  return state.pointer !== null || state.reactions.length > 0 || state.snapshotNotice !== null;
+export function hasLiveActivity(state: Pick<AnnotationLiveState, 'pointer' | 'reactions' | 'snapshotNotice' | 'fading'>): boolean {
+  if (state.pointer !== null || state.reactions.length > 0 || state.snapshotNotice !== null) return true;
+  for (const clock of state.fading.values()) if (!clock.hidden) return true;
+  return false;
+}
+
+/**
+ * Opacity for a vanishing stroke at `now`: 1 until the fade-out window, a
+ * linear ramp to 0 through it, and 0 (skip drawing) once it has vanished —
+ * whether or not the sharer's remove has arrived yet.
+ */
+export function fadeAlpha(clock: FadeClock | undefined, now: number, fadeAfterMs: number, fadeOutMs: number): number {
+  if (!clock) return 1;
+  if (clock.hidden) return 0;
+  const age = now - clock.at;
+  if (age >= fadeAfterMs) return 0;
+  const start = fadeAfterMs - fadeOutMs;
+  return age <= start ? 1 : (fadeAfterMs - age) / fadeOutMs;
 }

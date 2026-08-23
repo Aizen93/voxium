@@ -165,6 +165,28 @@ describe('AnnotationToolbar', () => {
     }
   });
 
+  it('the vanishing-ink toggle flips the device preference and is hidden below wire version 2', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    render(<AnnotationToolbar />);
+    const toggle = container.querySelector('[data-testid="ink-mode-toggle"]')!;
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    click(toggle);
+    expect(useAnnotationStore.getState().inkMode).toBe('vanishing');
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    click(toggle);
+    expect(useAnnotationStore.getState().inkMode).toBe('persistent');
+
+    voiceState.screenShareAnnotationsVersion = 1;
+    try {
+      act(() => { root.unmount(); });
+      root = createRoot(container);
+      render(<AnnotationToolbar />);
+      expect(container.querySelector('[data-testid="ink-mode-toggle"]')).toBeNull();
+    } finally {
+      voiceState.screenShareAnnotationsVersion = 2;
+    }
+  });
+
   it('offers Renumber only while the scene has callouts', () => {
     useAnnotationStore.setState({ isEditing: true });
     render(<AnnotationToolbar />);

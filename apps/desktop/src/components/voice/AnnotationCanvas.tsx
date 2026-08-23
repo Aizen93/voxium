@@ -1,8 +1,8 @@
 import { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
-import { ANNOTATION_IMAGE_MAX_DECODED_EDGE } from '@voxium/shared';
+import { ANNOTATION_IMAGE_MAX_DECODED_EDGE, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS } from '@voxium/shared';
 import type { AnnotationScene } from '@voxium/shared';
 import { useAnnotationStore, type MaskRect } from '../../stores/annotationStore';
-import { useAnnotationLiveStore, hasLiveActivity } from '../../stores/annotationLiveStore';
+import { useAnnotationLiveStore, hasLiveActivity, fadeAlpha, type FadeClock } from '../../stores/annotationLiveStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
 import { drawLivePointer } from '../../utils/annotationLiveDraw';
 import { drawArrow, drawCallout, drawSpotlight } from '../../utils/annotationDraw';
@@ -61,6 +61,8 @@ function drawScene(
   w: number,
   h: number,
   requestRedraw: () => void,
+  fading: ReadonlyMap<string, FadeClock> = new Map(),
+  now: number = Date.now(),
 ): void {
   ctx.clearRect(0, 0, w, h);
   const usedIds = new Set<string>();
@@ -94,9 +96,14 @@ function drawScene(
         break; // painted above
       case 'stroke': {
         if (obj.points.length < 4) break;
+        // Vanishing ink: fade on THIS client's clock, and skip once gone even
+        // if the sharer's remove has not arrived
+        const alpha = obj.fade ? fadeAlpha(fading.get(obj.id), now, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS) : 1;
+        if (alpha <= 0) break;
         ctx.save();
+        ctx.globalAlpha = alpha;
         if (obj.tool === 'highlighter') {
-          ctx.globalAlpha = 0.35;
+          ctx.globalAlpha = 0.35 * alpha;
           ctx.globalCompositeOperation = 'multiply';
         }
         ctx.strokeStyle = obj.color;
@@ -240,9 +247,10 @@ export function AnnotationCanvas({ videoRef }: AnnotationCanvasProps) {
     if (canvas.width !== width) canvas.width = width;
     if (canvas.height !== height) canvas.height = height;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1));
-    const { pointer } = useAnnotationLiveStore.getState();
-    if (pointer) drawLivePointer(ctx, pointer, Date.now(), rect.w, rect.h);
+    const now = Date.now();
+    const { pointer, fading } = useAnnotationLiveStore.getState();
+    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1), fading, now);
+    if (pointer) drawLivePointer(ctx, pointer, now, rect.w, rect.h);
   }, [scene, masks, rect]);
 
   useEffect(() => {

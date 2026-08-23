@@ -4,6 +4,7 @@ import { ANNOTATION_STROKE_MAX_POINTS, ANNOTATION_TEXT_MAX, ANNOTATION_CALLOUT_M
 import type { AnnotationObject } from '@voxium/shared';
 import { useAnnotationStore, type AnnotationEditorTool } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
+import { useVoiceStore } from '../../stores/voiceStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
 import { useTextDraft } from '../../hooks/useTextDraft';
 import { isEditableTarget } from '../../hooks/useAnnotationShortcuts';
@@ -94,6 +95,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
   const rect = useVideoContentRect(videoRef);
 
   const activeTool = useAnnotationStore((s) => s.activeTool);
+  const inkMode = useAnnotationStore((s) => s.inkMode);
   const color = useAnnotationStore((s) => s.color);
   const strokeWidth = useAnnotationStore((s) => s.strokeWidth);
   const selectedObjectId = useAnnotationStore((s) => s.selectedObjectId);
@@ -214,6 +216,8 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
       case 'highlighter': {
         store.beginGesture(); // the whole stroke is ONE undo step
         const id = crypto.randomUUID();
+        // `fade` is a v2 field: on a v1 server it would reject the whole batch
+        const vanishing = inkMode === 'vanishing' && useVoiceStore.getState().screenShareAnnotationsVersion >= 2;
         store.localApply([{
           t: 'add',
           obj: {
@@ -223,6 +227,7 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
             color,
             width: activeTool === 'highlighter' ? Math.min(0.05, strokeWidth * HIGHLIGHTER_WIDTH_FACTOR) : strokeWidth,
             points: [norm.x, norm.y],
+            ...(vanishing ? { fade: true as const } : {}),
           },
         }]);
         dragRef.current = { mode: 'stroke', id, lastPx: { x: e.clientX, y: e.clientY }, pointCount: 1 };

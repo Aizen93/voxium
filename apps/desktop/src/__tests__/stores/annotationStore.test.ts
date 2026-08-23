@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { applyAnnotationOps, ANNOTATION_BATCH_INTERVAL_MS, ANNOTATION_MAX_OPS_PER_BATCH, ANNOTATION_OPS_MAX, ANNOTATION_ACK_TIMEOUT_MS, ANNOTATION_HISTORY_MAX, ANNOTATION_HISTORY_BYTES_MAX, type AnnotationOp } from '@voxium/shared';
+import { applyAnnotationOps, ANNOTATION_BATCH_INTERVAL_MS, ANNOTATION_MAX_OPS_PER_BATCH, ANNOTATION_OPS_MAX, ANNOTATION_ACK_TIMEOUT_MS, ANNOTATION_HISTORY_MAX, ANNOTATION_HISTORY_BYTES_MAX, ANNOTATION_FADE_AFTER_MS, type AnnotationOp, type AnnotationObject } from '@voxium/shared';
 
 // ─── Mocks (before importing the store) ──────────────────────────────────────
 
@@ -65,6 +65,8 @@ vi.mock('../../i18n', () => ({
 }));
 
 import { useAnnotationStore } from '../../stores/annotationStore';
+import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
+import { loadAnnotationPrefs } from '../../utils/annotationPrefs';
 
 const initialState = useAnnotationStore.getState();
 
@@ -78,6 +80,7 @@ beforeEach(async () => {
   voiceMock._reset();
   useAnnotationStore.setState(initialState, true);
   useAnnotationStore.getState().clearViewerScene(); // also resets the module-level op queue
+  useAnnotationLiveStore.getState().clear();
   // resetQueue settles any drain left in flight by the previous test — one
   // microtask turn lets that loop observe the empty queue and exit
   await Promise.resolve();
@@ -547,6 +550,97 @@ describe('annotationStore — history', () => {
     expect(socketEmit).toHaveBeenCalledTimes(1);
     expect(socketEmit.mock.calls[0][1].ops).toEqual([{ t: 'remove', id: 'a' }]);
     expect(useAnnotationStore.getState().selectedObjectId).toBeNull();
+  });
+});
+
+// ─── Vanishing ink ──────────────────────────────────────────────────────────
+
+describe('annotationStore — vanishing ink', () => {
+  const vanishing = (id: string): AnnotationOp => ({ t: 'add', obj: { id, kind: 'stroke', tool: 'pen', color: '#ff0000', width: 0.005, points: [0.1, 0.1, 0.2, 0.2], fade: true } });
+
+  it('the sharer removes a finished vanishing stroke after ANNOTATION_FADE_AFTER_MS, not before, and ships the remove', async () => {
+    const store = useAnnotationStore.getState();
+    store.beginGesture();
+    store.localApply([vanishing('v')]);
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS * 2); // still drawing: no countdown yet
+    store.localApply([{ t: 'append', id: 'v', points: [0.3, 0.3] }]);
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    store.endGesture(); // finished: countdown starts
+    store.flushOps();
+    socketEmit.mock.calls[0][2]({ ok: true }); // batches serialize on their acks
+    await Promise.resolve();
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS - 1);
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    // Ack whatever is in flight so the queued remove reaches the wire
+    for (let i = 0; i < socketEmit.mock.calls.length; i++) {
+      socketEmit.mock.calls[i][2]?.({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    const last = socketEmit.mock.calls.at(-1)![1].ops as AnnotationOp[];
+    expect(last).toEqual([{ t: 'remove', id: 'v' }]);
+  });
+
+  it('the scheduled remove is not a history entry, and a stroke undone before its time is simply gone', () => {
+    const store = useAnnotationStore.getState();
+    store.beginGesture();
+    store.localApply([vanishing('v')]);
+    store.endGesture();
+    store.undo();
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS + 10);
+    expect(useAnnotationStore.getState().canRedo).toBe(true); // the timer did not touch the history
+    // Redo re-adds it outside a gesture: it is finished, so it vanishes again on schedule
+    store.redo();
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS);
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+
+  it('every client keeps a local clock: add/append touch it, remove/clear forget it, hydration starts it', () => {
+    const live = useAnnotationLiveStore.getState();
+    const store = useAnnotationStore.getState();
+    store.applyRemoteOps('chan-1', 1, [vanishing('r')]);
+    expect(useAnnotationLiveStore.getState().fading.get('r')).toEqual({ at: Date.now(), hidden: false });
+    vi.advanceTimersByTime(500);
+    store.applyRemoteOps('chan-1', 2, [{ t: 'append', id: 'r', points: [0.4, 0.4] }]);
+    expect(useAnnotationLiveStore.getState().fading.get('r')!.at).toBe(Date.now());
+    store.applyRemoteOps('chan-1', 3, [{ t: 'remove', id: 'r' }]);
+    expect(useAnnotationLiveStore.getState().fading.has('r')).toBe(false);
+
+    const objOf = (op: AnnotationOp) => (op as { obj: AnnotationObject }).obj;
+    store.hydrate('chan-1', 10, { objects: [objOf(vanishing('h')), objOf(stroke('plain'))] });
+    expect(useAnnotationLiveStore.getState().fading.has('h')).toBe(true);
+    expect(useAnnotationLiveStore.getState().fading.has('plain')).toBe(false);
+    store.applyRemoteOps('chan-1', 11, [{ t: 'clear' }]);
+    expect(useAnnotationLiveStore.getState().fading.size).toBe(0);
+    expect(live).toBeDefined();
+  });
+
+  it('teardown cancels pending countdowns', () => {
+    const store = useAnnotationStore.getState();
+    store.beginGesture();
+    store.localApply([vanishing('v')]);
+    store.endGesture();
+    store.teardownSharerSession();
+    socketEmit.mockClear();
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS + 10);
+    expect(socketEmit).not.toHaveBeenCalled();
+  });
+
+  it('ink mode is a device preference: set, persisted, reloaded', () => {
+    useAnnotationStore.getState().setInkMode('vanishing');
+    expect(useAnnotationStore.getState().inkMode).toBe('vanishing');
+    expect(JSON.parse(localStorage.getItem('vox:annotations:prefs')!)).toEqual({ inkMode: 'vanishing' });
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'vanishing' });
+    localStorage.setItem('vox:annotations:prefs', '{"inkMode":"weird"}');
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent' });
+    localStorage.setItem('vox:annotations:prefs', 'not json');
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent' });
+    localStorage.removeItem('vox:annotations:prefs');
+    useAnnotationStore.getState().setInkMode('persistent');
   });
 });
 

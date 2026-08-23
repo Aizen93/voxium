@@ -17,10 +17,12 @@ vi.mock('../../stores/voiceStore', () => ({ useVoiceStore: voiceMock }));
 import {
   useAnnotationLiveStore,
   hasLiveActivity,
+  fadeAlpha,
   LIVE_POINTER_TRAIL_MAX,
   LIVE_REACTIONS_MAX_IN_FLIGHT,
   LIVE_REACTION_TTL_MS,
 } from '../../stores/annotationLiveStore';
+import { ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS } from '@voxium/shared';
 
 const initial = useAnnotationLiveStore.getState();
 // A fresh clock base per test keeps the fake timers deterministic; the
@@ -187,6 +189,42 @@ describe('annotationLiveStore — reactions and notices from this client', () =>
   it('notifySnapshot sends the courtesy event', () => {
     useAnnotationLiveStore.getState().notifySnapshot();
     expect(sent()).toEqual([{ channelId: 'chan-1', ev: { k: 'snapshot' } }]);
+  });
+});
+
+describe('annotationLiveStore — vanishing-ink clocks', () => {
+  it('touchFading starts or restarts a stroke clock; forgetFading drops it', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.touchFading('s1');
+    expect(useAnnotationLiveStore.getState().fading.get('s1')).toEqual({ at: Date.now(), hidden: false });
+    vi.advanceTimersByTime(1000);
+    store.touchFading('s1'); // an append restarts the clock
+    expect(useAnnotationLiveStore.getState().fading.get('s1')!.at).toBe(Date.now());
+    store.forgetFading(['s1', 'never-there']);
+    expect(useAnnotationLiveStore.getState().fading.size).toBe(0);
+  });
+
+  it('prune flips an expired clock to hidden (the stroke stays invisible) and the loop goes idle', () => {
+    const store = useAnnotationLiveStore.getState();
+    store.touchFading('s1');
+    expect(hasLiveActivity(useAnnotationLiveStore.getState())).toBe(true);
+    store.prune(Date.now() + ANNOTATION_FADE_AFTER_MS - 1);
+    expect(useAnnotationLiveStore.getState().fading.get('s1')!.hidden).toBe(false);
+    store.prune(Date.now() + ANNOTATION_FADE_AFTER_MS);
+    expect(useAnnotationLiveStore.getState().fading.get('s1')).toEqual({ at: Date.now(), hidden: true });
+    expect(hasLiveActivity(useAnnotationLiveStore.getState())).toBe(false);
+    expect(useAnnotationLiveStore.getState().fading.size).toBe(1); // kept until the scene drops it
+  });
+
+  it('fadeAlpha: full, then a linear ramp over the fade-out window, then gone', () => {
+    const at = 10_000;
+    const clock = { at, hidden: false };
+    expect(fadeAlpha(clock, at, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS)).toBe(1);
+    expect(fadeAlpha(clock, at + ANNOTATION_FADE_AFTER_MS - ANNOTATION_FADE_OUT_MS, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS)).toBe(1);
+    expect(fadeAlpha(clock, at + ANNOTATION_FADE_AFTER_MS - ANNOTATION_FADE_OUT_MS / 2, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS)).toBeCloseTo(0.5);
+    expect(fadeAlpha(clock, at + ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS)).toBe(0);
+    expect(fadeAlpha({ at, hidden: true }, at, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS)).toBe(0);
+    expect(fadeAlpha(undefined, at, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS)).toBe(1); // no clock: not vanishing
   });
 });
 

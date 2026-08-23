@@ -782,6 +782,7 @@
       "eraser": "Borracha",
       "renumber": "Renumerar marcadores na ordem de leitura",
       "calloutLimit": "No máximo {{max}} marcadores numerados por partilha",
+      "vanishingInk": "Tinta efémera — os traços desaparecem após alguns segundos",
       "clearAll": "Limpar tudo",
       "color": "Cor",
       "width": "Espessura do traço",

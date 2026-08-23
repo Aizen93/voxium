@@ -142,6 +142,14 @@ export const ANNOTATION_REACTIONS = ['👍', '❤️', '😂', '🎉', '👀', '
 /** How long a viewer keeps painting a laser dot after the last update. */
 export const ANNOTATION_LIVE_POINTER_FADE_MS = 700;
 
+// ─── Vanishing ink ───────────────────────────────────────────────────────────
+// A stroke with `fade: true` is REMOVED by the sharer ANNOTATION_FADE_AFTER_MS
+// after it is finished (authoritative: late joiners and old clients see the
+// remove), and every client fades it on its OWN clock from the last append it
+// saw, over the final ANNOTATION_FADE_OUT_MS. No timestamp travels.
+export const ANNOTATION_FADE_AFTER_MS = 3_000;
+export const ANNOTATION_FADE_OUT_MS = 800;
+
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
 export type ThemePatternType = (typeof THEME_PATTERN_TYPES)[number];
 

@@ -7,12 +7,14 @@ import {
   ANNOTATION_ACK_TIMEOUT_MS,
   ANNOTATION_HISTORY_MAX,
   ANNOTATION_HISTORY_BYTES_MAX,
+  ANNOTATION_FADE_AFTER_MS,
   type AnnotationOp,
   type AnnotationObject,
   type AnnotationScene,
 } from '@voxium/shared';
 import { inverseOf, addedIds, compactForward, entryBytes, type HistoryEntry } from '../utils/annotationHistory';
 import { renumberOps } from '../utils/annotationCallouts';
+import { loadAnnotationPrefs, saveAnnotationPrefs, type InkMode } from '../utils/annotationPrefs';
 import { getSocket } from '../services/socket';
 import { useVoiceStore } from './voiceStore';
 import { toast } from './toastStore';
@@ -69,6 +71,8 @@ interface AnnotationState {
   strokeWidth: number;
   selectedObjectId: string | null;
   masks: MaskRect[];
+  /** Pen/highlighter strokes vanish ~3 s after they are finished. Device pref. */
+  inkMode: InkMode;
   /** Renderable mirrors of the (module-level) undo/redo stacks. */
   canUndo: boolean;
   canRedo: boolean;
@@ -97,6 +101,7 @@ interface AnnotationState {
   renumberCallouts: () => void;
   setIsEditing: (editing: boolean) => void;
   setActiveTool: (tool: AnnotationEditorTool) => void;
+  setInkMode: (mode: InkMode) => void;
   setColor: (color: string) => void;
   setStrokeWidth: (width: number) => void;
   setSelectedObjectId: (id: string | null) => void;
@@ -340,6 +345,59 @@ export function resetAnnotationModuleState(): void {
   resetQueue();
   recentRemoteOps = [];
   resetHistory();
+  cancelVanishTimers();
+}
+
+// ─── Vanishing ink ───────────────────────────────────────────────────────────
+// Two halves. The SHARER owns removal: ANNOTATION_FADE_AFTER_MS after a
+// vanishing stroke is finished it ships an authoritative `remove`, so late
+// joiners, old clients and the server's scene all drop it. EVERY client owns
+// its own fade: a local clock per stroke (annotationLiveStore.fading),
+// restarted by each append it sees, hides the stroke on time whether or not
+// that remove has arrived. No timestamp travels.
+
+const vanishTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleVanish(id: string): void {
+  const existing = vanishTimers.get(id);
+  if (existing) clearTimeout(existing);
+  vanishTimers.set(id, setTimeout(() => {
+    vanishTimers.delete(id);
+    const store = useAnnotationStore.getState();
+    if (!store.scene.objects.some((o) => o.id === id)) return; // already gone (undo, clear)
+    store.localApply([{ t: 'remove', id }], { record: false });
+    store.flushOps();
+  }, ANNOTATION_FADE_AFTER_MS));
+}
+
+function cancelVanishTimers(): void {
+  for (const timer of vanishTimers.values()) clearTimeout(timer);
+  vanishTimers.clear();
+}
+
+/** Keep the live store's fade clocks in step with a scene transition. */
+function trackFadeClocks(before: AnnotationScene, after: AnnotationScene, ops: AnnotationOp[]): void {
+  const live = useAnnotationLiveStore.getState();
+  const gone: string[] = [];
+  for (const op of ops) {
+    switch (op.t) {
+      case 'add':
+        if (op.obj.kind === 'stroke' && op.obj.fade) live.touchFading(op.obj.id);
+        break;
+      case 'append': {
+        const target = after.objects.find((o) => o.id === op.id);
+        if (target && target.kind === 'stroke' && target.fade) live.touchFading(op.id);
+        break;
+      }
+      case 'remove':
+        gone.push(op.id);
+        break;
+      case 'clear':
+        for (const o of before.objects) gone.push(o.id);
+        break;
+    }
+  }
+  if (gone.length > 0) live.forgetFading(gone);
 }
 
 // ─── Mask → compositor sync ──────────────────────────────────────────────────
@@ -409,6 +467,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
   strokeWidth: 0.004,
   selectedObjectId: null,
   masks: [],
+  inkMode: loadAnnotationPrefs().inkMode,
   canUndo: false,
   canRedo: false,
 
@@ -435,6 +494,11 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
       maxRev = Math.max(maxRev, batch.rev);
     }
     set({ scene: next, rev: maxRev, sceneChannelId: channelId });
+    // A late joiner's clock for every vanishing stroke starts now — it sees
+    // the stroke for up to ANNOTATION_FADE_AFTER_MS, then hides it locally
+    // whether or not the sharer's remove reaches it
+    const live = useAnnotationLiveStore.getState();
+    for (const obj of next.objects) if (obj.kind === 'stroke' && obj.fade) live.touchFading(obj.id);
   },
 
   applyRemoteOps: (channelId, rev, ops) => {
@@ -445,13 +509,16 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     // Stale or replayed batch (hydration snapshot already includes it)
     if (state.sceneChannelId === channelId && rev <= state.rev) return;
     const base = state.sceneChannelId === channelId ? state.scene : EMPTY_SCENE;
-    set({ scene: applyAnnotationOps(base, ops), rev, sceneChannelId: channelId });
+    const next = applyAnnotationOps(base, ops);
+    set({ scene: next, rev, sceneChannelId: channelId });
+    trackFadeClocks(base, next, ops);
   },
 
   clearViewerScene: () => {
     resetQueue();
     recentRemoteOps = [];
     resetHistory();
+    cancelVanishTimers();
     set({
       scene: EMPTY_SCENE,
       rev: 0,
@@ -486,12 +553,17 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
       entry.inverse.unshift(...inverses.reverse().flat());
       if (!openGesture) commitEntry(entry, working);
     }
+    const next = applyAnnotationOps(base, ops);
     set({
-      scene: applyAnnotationOps(base, ops),
+      scene: next,
       sceneChannelId: channelId,
     });
     enqueue(ops);
     scheduleFlush();
+    trackFadeClocks(base, next, ops);
+    // A vanishing stroke added outside a drag (a redo, a resync) is finished
+    // already — its removal is scheduled now; mid-drag ones wait for endGesture
+    if (!openGesture) for (const op of ops) if (op.t === 'add' && op.obj.kind === 'stroke' && op.obj.fade) scheduleVanish(op.obj.id);
     if (record) syncHistoryFlags(set);
   },
 
@@ -507,7 +579,13 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     const entry = openGesture;
     if (!entry) return;
     openGesture = null;
-    commitEntry(entry, get().scene);
+    const scene = get().scene;
+    commitEntry(entry, scene);
+    // The strokes this drag finished start their countdown now
+    for (const id of entry.added) {
+      const obj = scene.objects.find((o) => o.id === id);
+      if (obj && obj.kind === 'stroke' && obj.fade) scheduleVanish(id);
+    }
     syncHistoryFlags(set);
   },
 
@@ -552,6 +630,10 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
 
   setIsEditing: (isEditing) => set({ isEditing, ...(isEditing ? {} : { selectedObjectId: null }) }),
   setActiveTool: (activeTool) => set({ activeTool, selectedObjectId: null }),
+  setInkMode: (inkMode) => {
+    set({ inkMode });
+    saveAnnotationPrefs({ inkMode });
+  },
   setColor: (color) => set({ color }),
   setStrokeWidth: (strokeWidth) => set({ strokeWidth }),
   setSelectedObjectId: (selectedObjectId) => set({ selectedObjectId }),
@@ -578,6 +660,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     // stopScreenShare (socket reconnect clears screen state directly).
     resetQueue();
     resetHistory();
+    cancelVanishTimers();
     teardownComposite();
     set({ isEditing: false, selectedObjectId: null, masks: [], activeTool: 'pen', canUndo: false, canRedo: false });
   },

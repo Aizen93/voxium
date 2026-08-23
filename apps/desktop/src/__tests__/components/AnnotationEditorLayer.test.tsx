@@ -13,9 +13,10 @@ vi.mock('react-i18next', async (importOriginal) => {
 vi.mock('../../services/socket', () => ({
   getSocket: vi.fn().mockReturnValue({ emit: vi.fn() }),
 }));
+const voiceState = vi.hoisted(() => ({ activeChannelId: 'chan-1', screenSharingUserId: 'me', isScreenSharing: true, screenStream: null, screenShareAnnotationsVersion: 2 }));
 vi.mock('../../stores/voiceStore', () => ({
   useVoiceStore: {
-    getState: () => ({ activeChannelId: 'chan-1', screenSharingUserId: 'me', isScreenSharing: true, screenStream: null }),
+    getState: () => voiceState,
     subscribe: () => () => {},
   },
 }));
@@ -628,5 +629,30 @@ describe('AnnotationEditorLayer — laser pointer', () => {
     pointerDown(layer(), 400, 225);
     pointerUp(layer());
     expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+});
+
+describe('AnnotationEditorLayer — vanishing ink', () => {
+  afterEach(() => { useAnnotationStore.getState().setInkMode('persistent'); voiceState.screenShareAnnotationsVersion = 2; });
+
+  it('pen strokes carry fade: true while the ink mode is vanishing', () => {
+    useAnnotationStore.setState({ activeTool: 'pen' });
+    useAnnotationStore.getState().setInkMode('vanishing');
+    render();
+    pointerDown(layer(), 100, 100);
+    pointerMove(layer(), 200, 100);
+    pointerUp(layer());
+    expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ kind: 'stroke', fade: true });
+  });
+
+  it('…but never on a server that only validates wire version 1 (it would reject the whole batch)', () => {
+    useAnnotationStore.setState({ activeTool: 'highlighter' });
+    useAnnotationStore.getState().setInkMode('vanishing');
+    voiceState.screenShareAnnotationsVersion = 1;
+    render();
+    pointerDown(layer(), 100, 100);
+    pointerMove(layer(), 200, 100);
+    pointerUp(layer());
+    expect((useAnnotationStore.getState().scene.objects[0] as { fade?: true }).fade).toBeUndefined();
   });
 });

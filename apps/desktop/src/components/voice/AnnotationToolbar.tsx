@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { Undo2, Redo2, Trash2, PenLine, X, ListOrdered } from 'lucide-react';
+import { Undo2, Redo2, Trash2, PenLine, X, ListOrdered, Timer } from 'lucide-react';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -33,6 +33,8 @@ export function AnnotationToolbar() {
   const canRedo = useAnnotationStore((s) => s.canRedo);
   const clearAll = useAnnotationStore((s) => s.clearAll);
   const renumberCallouts = useAnnotationStore((s) => s.renumberCallouts);
+  const inkMode = useAnnotationStore((s) => s.inkMode);
+  const setInkMode = useAnnotationStore((s) => s.setInkMode);
   const hasCallouts = useAnnotationStore((s) => s.scene.objects.some((o) => o.kind === 'callout'));
   const annotationsVersion = useVoiceStore((s) => s.screenShareAnnotationsVersion);
   const voiceMode = useSettingsStore((s) => s.voiceMode);
@@ -119,6 +121,25 @@ export function AnnotationToolbar() {
           />
         ))}
       </div>
+
+      {annotationsVersion >= 2 && (
+        <div className="flex items-center gap-0.5 border-l border-vox-border pl-2">
+          <button
+            onClick={() => setInkMode(inkMode === 'vanishing' ? 'persistent' : 'vanishing')}
+            className={`rounded p-1.5 transition-colors ${
+              inkMode === 'vanishing'
+                ? 'bg-vox-accent-primary/20 text-vox-accent-primary'
+                : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary'
+            }`}
+            title={t('voice.annotations.vanishingInk')}
+            aria-label={t('voice.annotations.vanishingInk')}
+            aria-pressed={inkMode === 'vanishing'}
+            data-testid="ink-mode-toggle"
+          >
+            <Timer size={15} />
+          </button>
+        </div>
+      )}
 
       <div className="flex items-center gap-1 border-l border-vox-border pl-2">
         {ANNOTATION_WIDTHS.map(({ key, value, dot }) => (

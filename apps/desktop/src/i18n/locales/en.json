@@ -788,6 +788,7 @@
       "eraser": "Eraser",
       "renumber": "Renumber callouts in reading order",
       "calloutLimit": "Up to {{max}} numbered callouts per share",
+      "vanishingInk": "Vanishing ink — strokes fade after a few seconds",
       "clearAll": "Clear all",
       "color": "Color",
       "width": "Stroke width",

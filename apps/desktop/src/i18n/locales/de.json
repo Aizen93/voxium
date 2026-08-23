@@ -782,6 +782,7 @@
       "eraser": "Radierer",
       "renumber": "Markierungen in Leserichtung neu nummerieren",
       "calloutLimit": "Höchstens {{max}} nummerierte Markierungen pro Übertragung",
+      "vanishingInk": "Verblassende Tinte — Striche verschwinden nach ein paar Sekunden",
       "clearAll": "Alles löschen",
       "color": "Farbe",
       "width": "Strichstärke",
