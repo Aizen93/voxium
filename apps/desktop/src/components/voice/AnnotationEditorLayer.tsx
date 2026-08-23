@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ANNOTATION_STROKE_MAX_POINTS } from '@voxium/shared';
+import { ANNOTATION_STROKE_MAX_POINTS, ANNOTATION_TEXT_MAX, ANNOTATION_TEXT_FORBIDDEN_RE } from '@voxium/shared';
 import type { AnnotationObject } from '@voxium/shared';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useVideoContentRect } from '../../hooks/useVideoContentRect';
@@ -68,6 +68,18 @@ function hitTest(box: Bbox | null, nx: number, ny: number): boolean {
   return nx >= box.x - pad && nx <= box.x + box.w + pad && ny >= box.y - pad && ny <= box.y + box.h + pad;
 }
 
+interface TextDraft { x: number; y: number; value: string }
+
+/** What the text tool is allowed to ship: trimmed, capped, and free of the
+ *  control/bidi/zero-width characters the server rejects the WHOLE batch for
+ *  (the local echo would already show a caption the viewers never get). */
+export function sanitizeAnnotationText(raw: string): string {
+  return raw
+    .replace(new RegExp(ANNOTATION_TEXT_FORBIDDEN_RE.source, 'g'), '')
+    .trim()
+    .slice(0, ANNOTATION_TEXT_MAX);
+}
+
 type DragState =
   | { mode: 'stroke'; id: string; lastPx: { x: number; y: number }; pointCount: number }
   | { mode: 'create-box'; id: string; isMask: boolean; startNorm: { x: number; y: number } }
@@ -88,7 +100,17 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
   const scene = useAnnotationStore((s) => s.scene);
   const masks = useAnnotationStore((s) => s.masks);
 
-  const [textDraft, setTextDraft] = useState<{ x: number; y: number; value: string } | null>(null);
+  // The draft lives in state (it renders) AND in a ref (it commits): the commit
+  // runs from pointer, key and blur handlers that can fire back-to-back for
+  // one gesture (Enter unmounts the input, which blurs it), so it must be
+  // idempotent — and it must never run inside a setState updater, which
+  // StrictMode invokes twice and would add the caption twice.
+  const [textDraft, setTextDraftState] = useState<TextDraft | null>(null);
+  const textDraftRef = useRef<TextDraft | null>(null);
+  const setTextDraft = useCallback((draft: TextDraft | null) => {
+    textDraftRef.current = draft;
+    setTextDraftState(draft);
+  }, []);
 
   /** Pointer event → normalized frame coords. */
   const toNorm = useCallback((e: { clientX: number; clientY: number }, clampToFrame = false) => {
@@ -99,18 +121,18 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
   }, []);
 
   const commitTextDraft = useCallback(() => {
-    setTextDraft((draft) => {
-      if (draft && draft.value.trim()) {
-        const store = useAnnotationStore.getState();
-        store.localApply([{
-          t: 'add',
-          obj: { id: crypto.randomUUID(), kind: 'text', text: draft.value.trim().slice(0, 200), color: store.color, size: TEXT_SIZE, x: draft.x, y: draft.y },
-        }]);
-        store.flushOps();
-      }
-      return null;
-    });
-  }, []);
+    const draft = textDraftRef.current;
+    if (!draft) return;
+    setTextDraft(null);
+    const text = sanitizeAnnotationText(draft.value);
+    if (!text) return;
+    const store = useAnnotationStore.getState();
+    store.localApply([{
+      t: 'add',
+      obj: { id: crypto.randomUUID(), kind: 'text', text, color: store.color, size: TEXT_SIZE, x: draft.x, y: draft.y },
+    }]);
+    store.flushOps();
+  }, [setTextDraft]);
 
   // The image tool is a file dialog, not a canvas gesture. Reset the tool
   // immediately after opening the picker: cancelling the dialog fires no
@@ -159,6 +181,15 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
     if (e.button !== 0) return;
     const store = useAnnotationStore.getState();
     const norm = toNorm(e, true);
+
+    // An open caption is finished by the next press anywhere on the layer,
+    // whatever the tool — decided here, not left to the input's blur, whose
+    // timing against this handler is the browser's business (see below).
+    if (textDraftRef.current) {
+      commitTextDraft();
+      if (activeTool === 'text') return;
+    }
+
     layerRef.current?.setPointerCapture(e.pointerId);
 
     switch (activeTool) {
@@ -196,8 +227,15 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
         break;
       }
       case 'text': {
-        if (textDraft) commitTextDraft();
-        else setTextDraft({ x: norm.x, y: norm.y, value: '' });
+        // The draft input mounts (and autofocuses) in React's commit right
+        // after this handler — BEFORE the browser fires the compatibility
+        // mousedown for this same press. Its default action moves focus to
+        // the nearest focusable ancestor, and this layer has none, so the
+        // fresh input blurred to <body> and committed its empty draft before
+        // a single character could be typed. Cancelling pointerdown is the
+        // spec'd way to suppress that mousedown (click still fires).
+        e.preventDefault();
+        setTextDraft({ x: norm.x, y: norm.y, value: '' });
         break;
       }
       case 'select': {
@@ -329,7 +367,7 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [setTextDraft]);
 
   if (rect.w <= 0 || rect.h <= 0) return null;
 
@@ -396,11 +434,19 @@ export function AnnotationEditorLayer({ videoRef }: AnnotationEditorLayerProps) 
       {textDraft && (
         <input
           autoFocus
+          data-testid="annotation-text-draft"
           value={textDraft.value}
-          maxLength={200}
+          maxLength={ANNOTATION_TEXT_MAX}
           placeholder={t('voice.annotations.addTextPlaceholder')}
-          className="absolute rounded border border-vox-accent-primary bg-black/70 px-1.5 py-0.5 text-sm text-white outline-none"
-          style={{ left: textDraft.x * rect.w, top: textDraft.y * rect.h, minWidth: 160 }}
+          className="absolute rounded border border-vox-accent-primary bg-black/70 px-1.5 py-0.5 font-semibold outline-none"
+          style={{
+            left: textDraft.x * rect.w,
+            top: textDraft.y * rect.h,
+            minWidth: 160,
+            // Same size and colour the committed caption is painted with
+            fontSize: Math.max(9, TEXT_SIZE * rect.h),
+            color,
+          }}
           onChange={(e) => setTextDraft({ ...textDraft, value: e.target.value })}
           onKeyDown={(e) => {
             if (e.key === 'Enter') commitTextDraft();

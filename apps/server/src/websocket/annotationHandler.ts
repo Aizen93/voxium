@@ -7,6 +7,7 @@ import {
   ANNOTATION_MAX_OBJECTS,
   ANNOTATION_STROKE_MAX_POINTS,
   ANNOTATION_TEXT_MAX,
+  ANNOTATION_TEXT_FORBIDDEN_RE,
   ANNOTATION_IMAGE_DATAURL_MAX,
   ANNOTATION_IMAGE_MAX_DECODED_EDGE,
   ANNOTATION_MAX_SCENE_POINTS,
@@ -45,9 +46,9 @@ const ID_RE = /^[\w-]{1,40}$/;
 /** Text overlays are single-line captions rendered verbatim on every
  *  viewer's canvas: no control chars, and no bidi-override / zero-width /
  *  invisible format characters either (a U+202E override can make a caption
- *  visually read as something it is not: classic text spoofing). */
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/;
+ *  visually read as something it is not: classic text spoofing). The class is
+ *  shared with the editor, which strips the same set before committing. */
+const CONTROL_CHARS_RE = ANNOTATION_TEXT_FORBIDDEN_RE;
 
 /**
  * Byte length caps don't bound DECODED size — a few-KB "image bomb" can

@@ -83,6 +83,15 @@ export const ANNOTATION_MAX_OBJECTS = 300;
 export const ANNOTATION_STROKE_MAX_POINTS = 2_000;
 /** Max chars for a text overlay. */
 export const ANNOTATION_TEXT_MAX = 200;
+/** Characters a text overlay may never carry: control chars, and the
+ *  bidi-override / zero-width / invisible format characters that let a caption
+ *  visually read as something it is not (U+202E flips the rest of the line).
+ *  The server REJECTS the whole batch on a hit; the editor strips them before
+ *  committing so a pasted tab never desyncs the viewers. Non-global on
+ *  purpose (`.test()` on a /g regex mutates lastIndex) — build a /g copy to
+ *  strip. */
+// eslint-disable-next-line no-control-regex
+export const ANNOTATION_TEXT_FORBIDDEN_RE = /[\u0000-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/;
 /** Max chars for an image overlay data-URL (≈256KB decoded after base64 inflation). */
 export const ANNOTATION_IMAGE_DATAURL_MAX = 360_000;
 /** Client-side resize target for overlay images (px, longest edge). */
