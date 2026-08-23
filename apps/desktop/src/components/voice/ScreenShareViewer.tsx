@@ -19,6 +19,9 @@ export function ScreenShareViewer() {
   const setViewMode = useVoiceStore((s) => s.setScreenShareViewMode);
   const stopScreenShare = useVoiceStore((s) => s.stopScreenShare);
   const isEditing = useAnnotationStore((s) => s.isEditing);
+  const sourceChangeHold = useAnnotationStore((s) => s.sourceChangeHold);
+  const confirmSourceChange = useAnnotationStore((s) => s.confirmSourceChange);
+  const setIsEditing = useAnnotationStore((s) => s.setIsEditing);
   const annotationsVersion = useVoiceStore((s) => s.screenShareAnnotationsVersion);
 
   const isLocalSharing = screenSharingUserId === localUserId;
@@ -96,7 +99,30 @@ export function ScreenShareViewer() {
           fullscreen — the Fullscreen API renders nothing outside the target. */}
       <div ref={stageRef} className="flex flex-1 flex-col min-h-0 bg-black">
         {isLocalSharing && <AnnotationToolbar />}
-        {isLocalSharing && screenShareFrozen && (
+        {isLocalSharing && sourceChangeHold && (
+          <div className="flex items-center justify-center gap-3 bg-vox-accent-warning/90 px-3 py-1 text-xs font-medium text-black" data-testid="source-change-banner">
+            <span>
+              {t('voice.annotations.sourceChanged', {
+                from: `${sourceChangeHold.fromW}×${sourceChangeHold.fromH}`,
+                to: `${sourceChangeHold.toW}×${sourceChangeHold.toH}`,
+              })}
+            </span>
+            <button
+              onClick={() => { setIsEditing(true); useAnnotationStore.getState().setActiveTool('mask'); }}
+              className="rounded bg-black/20 px-2 py-0.5 font-semibold hover:bg-black/30"
+            >
+              {t('voice.annotations.sourceChangedEdit')}
+            </button>
+            <button
+              onClick={confirmSourceChange}
+              className="rounded bg-black/20 px-2 py-0.5 font-semibold hover:bg-black/30"
+              data-testid="source-change-resume"
+            >
+              {t('voice.annotations.sourceChangedResume')}
+            </button>
+          </div>
+        )}
+        {isLocalSharing && screenShareFrozen && !sourceChangeHold && (
           <div className="bg-vox-accent-danger/90 px-3 py-1 text-center text-xs font-medium text-white">
             {t('voice.annotations.sharePaused')}
           </div>

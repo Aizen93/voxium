@@ -21,7 +21,7 @@ import { getSocket } from '../services/socket';
 import { useVoiceStore } from './voiceStore';
 import { toast } from './toastStore';
 import i18n from '../i18n';
-import { ensureComposite, stopComposite, teardownComposite, isCompositing } from '../services/screenComposite';
+import { ensureComposite, stopComposite, teardownComposite, isCompositing, resumeSourceHold } from '../services/screenComposite';
 import { useAnnotationLiveStore } from './annotationLiveStore';
 
 /**
@@ -83,6 +83,10 @@ interface AnnotationState {
   recentColors: string[];
   /** Fill for NEW masks. Deliberately not persisted: Cover is the safe default every session. */
   maskStyle: MaskStyle;
+  /** The shared source changed size while masks exist: the producer is paused
+   *  and stays paused until the sharer confirms the covers are still right.
+   *  Holds the old/new size for the banner. */
+  sourceChangeHold: { fromW: number; fromH: number; toW: number; toH: number } | null;
   /** Renderable mirrors of the (module-level) undo/redo stacks. */
   canUndo: boolean;
   canRedo: boolean;
@@ -120,6 +124,8 @@ interface AnnotationState {
   setTextSize: (size: number) => void;
   /** The default for new masks — and, with a mask selected, that mask's style too. */
   setMaskStyle: (style: MaskStyle) => void;
+  /** "Masks are right — resume": the only way out of a source-change hold. */
+  confirmSourceChange: () => void;
   setStrokeWidth: (width: number) => void;
   setSelectedObjectId: (id: string | null) => void;
   addMask: (mask: MaskRect) => void;
@@ -460,14 +466,21 @@ function syncCompositeToMasks(): void {
         toast.warning(i18n.t('voice.annotations.maskRestoreFailed'));
       },
       onSourceResize: () => {
-        // Source resolution changed (window switch) — masks re-project but the
-        // content underneath moved. Debounced: live window-resizing fires this
-        // once per dimension step.
+        // Source resolution changed with NO masks on screen (a passthrough
+        // session about to be torn down): nothing private is at stake — the
+        // annotations may just misalign. Debounced.
         const now = Date.now();
         if (now - lastMisalignToastAt > 10_000) {
           lastMisalignToastAt = now;
           toast.warning(i18n.t('voice.annotations.masksMayMisalign'));
         }
+      },
+      onSourceHold: (change) => {
+        // Masks exist and the content under them moved: the compositor paused
+        // the producer BEFORE the first resized frame. Only the sharer's
+        // explicit confirm (confirmSourceChange) resumes — a privacy control
+        // must not expire on a timer.
+        useAnnotationStore.setState({ sourceChangeHold: change });
       },
     });
   } else {
@@ -493,6 +506,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     return { inkMode: prefs.inkMode, textSize: prefs.textSize, recentColors: prefs.recentColors };
   })(),
   maskStyle: 'cover',
+  sourceChangeHold: null,
   canUndo: false,
   canRedo: false,
 
@@ -551,6 +565,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
       isEditing: false,
       selectedObjectId: null,
       masks: [],
+      sourceChangeHold: null,
       canUndo: false,
       canRedo: false,
     });
@@ -672,6 +687,11 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     set({ color, ...(opts?.recent ? { recentColors: pushRecentColor(recentColors, color) } : {}) });
     if (opts?.recent) persistPrefs(get());
   },
+  confirmSourceChange: () => {
+    resumeSourceHold();
+    set({ sourceChangeHold: null });
+  },
+
   setMaskStyle: (maskStyle) => {
     const { selectedObjectId, masks } = get();
     if (selectedObjectId && masks.some((m) => m.id === selectedObjectId)) get().updateMask(selectedObjectId, { style: maskStyle });
@@ -710,11 +730,16 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     masks: s.masks.map((m) => (m.id === id ? { ...m, ...patch } : m)),
   })),
   removeMask: (id) => {
-    set((s) => ({ masks: s.masks.filter((m) => m.id !== id) }));
+    set((s) => {
+      const masks = s.masks.filter((m) => m.id !== id);
+      // With the last mask gone the compositor resumes the producer itself —
+      // the banner must not outlive the hold
+      return { masks, ...(masks.length === 0 ? { sourceChangeHold: null } : {}) };
+    });
     syncCompositeToMasks();
   },
   clearMasks: () => {
-    set({ masks: [] });
+    set({ masks: [], sourceChangeHold: null });
     syncCompositeToMasks();
   },
 
@@ -727,8 +752,8 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     cancelVanishTimers();
     teardownComposite();
     // maskStyle goes back to Cover with the share: the safe default is per
-    // SHARE, not per app start
-    set({ isEditing: false, selectedObjectId: null, masks: [], activeTool: 'pen', maskStyle: 'cover', canUndo: false, canRedo: false });
+    // SHARE, not per app start; a pending source-hold dies with the session
+    set({ isEditing: false, selectedObjectId: null, masks: [], activeTool: 'pen', maskStyle: 'cover', sourceChangeHold: null, canUndo: false, canRedo: false });
   },
 }));
 

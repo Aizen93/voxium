@@ -54,6 +54,8 @@ const compositeMock = vi.hoisted(() => ({
   stopComposite: vi.fn().mockResolvedValue(undefined),
   teardownComposite: vi.fn(),
   isCompositing: vi.fn().mockReturnValue(false),
+  resumeSourceHold: vi.fn(),
+  isSourceHeld: vi.fn().mockReturnValue(false),
 }));
 vi.mock('../../services/screenComposite', () => compositeMock);
 
@@ -734,6 +736,49 @@ describe('annotationStore — colour and text size', () => {
     expect(loadAnnotationPrefs().textSize).toBe(0.2);
     store.undo();
     expect(useAnnotationStore.getState().scene.objects[0]).toMatchObject({ size: 0.045 });
+  });
+});
+
+// ─── Source-change hold (store side) ────────────────────────────────────────
+
+describe('annotationStore — source-change hold', () => {
+  it('confirmSourceChange resumes the compositor hold and clears the banner state', () => {
+    useAnnotationStore.setState({ sourceChangeHold: { fromW: 1920, fromH: 1080, toW: 1280, toH: 720 } });
+    useAnnotationStore.getState().confirmSourceChange();
+    expect(compositeMock.resumeSourceHold).toHaveBeenCalledTimes(1);
+    expect(useAnnotationStore.getState().sourceChangeHold).toBeNull();
+  });
+
+  it('the banner dies with the masks, the share, and the viewer scene', () => {
+    const hold = { fromW: 1, fromH: 1, toW: 2, toH: 2 };
+    const store = useAnnotationStore.getState();
+    store.addMask({ id: 'm', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+    useAnnotationStore.setState({ sourceChangeHold: hold });
+    store.removeMask('m'); // last mask gone → compositor resumes itself
+    expect(useAnnotationStore.getState().sourceChangeHold).toBeNull();
+
+    store.addMask({ id: 'm2', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+    useAnnotationStore.setState({ sourceChangeHold: hold });
+    store.clearMasks();
+    expect(useAnnotationStore.getState().sourceChangeHold).toBeNull();
+
+    useAnnotationStore.setState({ sourceChangeHold: hold });
+    store.teardownSharerSession();
+    expect(useAnnotationStore.getState().sourceChangeHold).toBeNull();
+
+    useAnnotationStore.setState({ sourceChangeHold: hold });
+    store.clearViewerScene();
+    expect(useAnnotationStore.getState().sourceChangeHold).toBeNull();
+  });
+
+  it('removing ONE of several masks keeps the hold (something is still covered)', () => {
+    const hold = { fromW: 1, fromH: 1, toW: 2, toH: 2 };
+    const store = useAnnotationStore.getState();
+    store.addMask({ id: 'a', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+    store.addMask({ id: 'b', x: 0.5, y: 0.5, w: 0.2, h: 0.2 });
+    useAnnotationStore.setState({ sourceChangeHold: hold });
+    store.removeMask('a');
+    expect(useAnnotationStore.getState().sourceChangeHold).toEqual(hold);
   });
 });
 

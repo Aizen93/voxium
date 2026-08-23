@@ -36,6 +36,11 @@ export interface CompositeHandles {
   onRestoreFailed?: () => void;
   /** Source resolution changed mid-share (window switch) — masks may misalign. */
   onSourceResize?: () => void;
+  /** The source changed size WHILE MASKS EXIST: the producer was paused
+   *  synchronously before the resized frame was drawn, and stays paused until
+   *  the sharer confirms the masks still cover the right pixels
+   *  (resumeSourceHold). A privacy control must not expire on a timer. */
+  onSourceHold?: (change: { fromW: number; fromH: number; toW: number; toH: number }) => void;
 }
 
 const CAPTURE_FPS = 30;
@@ -44,6 +49,9 @@ const MASK_PAD_PX = 1;
 
 interface ActiveSession {
   handles: CompositeHandles;
+  /** Producer paused for a source-size change; cleared only by an explicit
+   *  resumeSourceHold (or the session ending). */
+  sourceHold: boolean;
   video: HTMLVideoElement;
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
@@ -70,6 +78,21 @@ let generation = 0;
 
 export function isCompositing(): boolean {
   return session !== null;
+}
+
+export function isSourceHeld(): boolean {
+  return session?.sourceHold === true;
+}
+
+/**
+ * The sharer confirmed the masks still cover the right pixels after a source
+ * resize. Only an explicit human action lands here — never a timer.
+ */
+export function resumeSourceHold(): void {
+  const s = session;
+  if (!s || !s.sourceHold) return;
+  s.sourceHold = false;
+  s.handles.resumeProducer();
 }
 
 /**
@@ -151,8 +174,26 @@ function maskImageFor(s: ActiveSession, mask: MaskRect): CanvasImageSource | nul
 function startFrameLoop(s: ActiveSession): void {
   const drawOnce = () => {
     if (s.stopped) return;
-    const resized = renderCompositeFrame(s.ctx, s.video, s.canvas, s.handles.getMasks(), (m) => maskImageFor(s, m), s.scratch);
-    if (resized) {
+    // Detect the size change BEFORE drawing: with masks present the producer
+    // is paused ahead of the first frame at the new geometry — the content
+    // under the masks has moved, and not one such frame may ship until the
+    // sharer confirms the covers are still right. Without masks nothing
+    // private is at stake and the resize only warrants the misalign hint.
+    const masks = s.handles.getMasks();
+    const willResize = s.video.videoWidth > 0 && s.video.videoHeight > 0
+      && (s.canvas.width !== s.video.videoWidth || s.canvas.height !== s.video.videoHeight);
+    if (willResize && masks.length > 0 && !s.sourceHold) {
+      s.sourceHold = true;
+      const change = { fromW: s.canvas.width, fromH: s.canvas.height, toW: s.video.videoWidth, toH: s.video.videoHeight };
+      try {
+        s.handles.pauseProducer();
+        s.handles.onSourceHold?.(change);
+      } catch (err) {
+        console.warn('[ScreenComposite] source-hold handler failed:', err);
+      }
+    }
+    const resized = renderCompositeFrame(s.ctx, s.video, s.canvas, masks, (m) => maskImageFor(s, m), s.scratch);
+    if (resized && masks.length === 0) {
       try {
         s.handles.onSourceResize?.();
       } catch (err) {
@@ -246,6 +287,7 @@ export async function ensureComposite(handles: CompositeHandles): Promise<void> 
 
       const created: ActiveSession = {
         handles,
+        sourceHold: false,
         video,
         canvas,
         ctx,
@@ -319,6 +361,13 @@ export async function stopComposite(): Promise<void> {
     // ensureComposite will see it and no-op.
     if (s.handles.getMasks().length > 0) return;
 
+    // Every mask is gone: a pending source-hold protects nothing any more —
+    // but the producer is still paused from it, and every path out of here
+    // (raw track restored, or the keep-composited fallback) must resume it,
+    // or the share stays frozen with nothing left to protect.
+    const wasHeld = s.sourceHold;
+    s.sourceHold = false;
+
     if (s.handles.rawTrack.readyState === 'live') {
       try {
         await s.handles.replaceTrack(s.handles.rawTrack);
@@ -337,6 +386,7 @@ export async function stopComposite(): Promise<void> {
         // and a toast would be pure noise.
         if (session !== s) return;
         console.error('[ScreenComposite] Restoring the raw track failed — staying composited:', err);
+        if (wasHeld) s.handles.resumeProducer(); // passthrough shows the right picture; unfreeze
         s.handles.onRestoreFailed?.();
         return;
       }
@@ -352,6 +402,7 @@ export async function stopComposite(): Promise<void> {
         blockedHandles = s.handles;
       } else {
         blockedHandles = null;
+        if (wasHeld) s.handles.resumeProducer(); // the hold's pause must not outlive the masks
       }
     }
     destroySession(s);

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderCompositeFrame, ensureComposite, stopComposite, teardownComposite, type CompositeHandles } from '../../services/screenComposite';
 import type { MaskRect } from '../../stores/annotationStore';
 import { PIXELATE_BLOCK_SRC_PX, type ScratchCanvas } from '../../utils/maskStyles';
@@ -464,5 +464,183 @@ describe('stopComposite — a mask added DURING the swap back', () => {
     await stopComposite();
 
     expect(handles.pauseProducer).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Source-change guard (the hold) ─────────────────────────────────────────
+// Uses the same minimal media pipeline as the live-session suites, plus a
+// controllable requestAnimationFrame so each flush is one compositor frame,
+// and a captured <video> whose intrinsic size the test can change.
+
+import { isSourceHeld, resumeSourceHold } from '../../services/screenComposite';
+
+describe('source-change guard', () => {
+  let rafQueue: FrameRequestCallback[] = [];
+  const runFrame = () => {
+    const batch = rafQueue;
+    rafQueue = [];
+    batch.forEach((cb) => cb(0));
+  };
+
+  let order: string[];
+  let capturedVideo: HTMLVideoElement | null;
+
+  const setVideoSize = (w: number, h: number) => {
+    Object.defineProperty(capturedVideo!, 'videoWidth', { value: w, configurable: true });
+    Object.defineProperty(capturedVideo!, 'videoHeight', { value: h, configurable: true });
+  };
+
+  function holdHandles(masks: () => MaskRect[]) {
+    // getSettings must agree with the video's intrinsic size, as it does in
+    // production — otherwise the very first frame reads as a resize
+    const rawTrack = Object.assign(fakeTrack('raw'), { getSettings: () => ({ width: 1920, height: 1080 }) });
+    return {
+      rawTrack,
+      getMasks: masks,
+      replaceTrack: vi.fn(async (_track: MediaStreamTrack) => {}),
+      pauseProducer: vi.fn(() => { order.push('paused'); }),
+      resumeProducer: vi.fn(() => { order.push('resumed'); }),
+      onFatal: vi.fn<() => void>(),
+      onRestoreFailed: vi.fn<() => void>(),
+      onSourceResize: vi.fn(() => { order.push('resizeToast'); }),
+      onSourceHold: vi.fn((change: { fromW: number; fromH: number; toW: number; toH: number }) => {
+        order.push(`hold:${change.fromW}x${change.fromH}->${change.toW}x${change.toH}`);
+      }),
+    } satisfies CompositeHandles;
+  }
+
+  beforeEach(async () => {
+    teardownComposite();
+    await stopComposite();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    order = [];
+    capturedVideo = null;
+    rafQueue = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { rafQueue.push(cb); return rafQueue.length; });
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+    vi.stubGlobal('MediaStream', class { constructor(public tracks: unknown[]) {} });
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      drawImage: vi.fn(() => { order.push('frameDrawn'); }),
+      fillRect: vi.fn(), fillStyle: '', save: vi.fn(), restore: vi.fn(),
+      beginPath: vi.fn(), rect: vi.fn(), clip: vi.fn(), imageSmoothingEnabled: true,
+    } as unknown as CanvasRenderingContext2D);
+    (HTMLCanvasElement.prototype as unknown as { captureStream: () => MediaStream }).captureStream =
+      () => ({ getVideoTracks: () => [fakeTrack('composite')] }) as unknown as MediaStream;
+    const origCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(((tag: string) => {
+      const el = origCreate(tag);
+      if (tag === 'video') capturedVideo = el as HTMLVideoElement;
+      return el;
+    }) as typeof document.createElement);
+  });
+
+  afterEach(async () => {
+    teardownComposite();
+    await stopComposite();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  async function installHeld(masks: () => MaskRect[]) {
+    const handles = holdHandles(masks);
+    await ensureComposite(handles);
+    expect(handles.onFatal).not.toHaveBeenCalled();
+    setVideoSize(1920, 1080);
+    runFrame(); // canvas follows the source at its original size — no hold
+    expect(isSourceHeld()).toBe(false);
+    order.length = 0;
+    return handles;
+  }
+
+  it('a source resize with masks pauses the producer BEFORE the resized frame is drawn, and holds', async () => {
+    await installHeld(() => [mask('m')]);
+    setVideoSize(1280, 720); // window switch
+    runFrame();
+    expect(order[0]).toBe('paused');                        // pause first…
+    expect(order[1]).toBe('hold:1920x1080->1280x720');      // …announce…
+    expect(order.indexOf('frameDrawn')).toBeGreaterThan(1); // …THEN the resized frame is drawn (masked)
+    expect(isSourceHeld()).toBe(true);
+    expect(order).not.toContain('resizeToast'); // the misalign toast is the no-mask path
+
+    // Further frames and even a second resize keep the single hold
+    order.length = 0;
+    runFrame();
+    setVideoSize(800, 600);
+    runFrame();
+    expect(order.filter((x) => x === 'paused')).toHaveLength(0);
+    expect(isSourceHeld()).toBe(true);
+  });
+
+  it('only the explicit confirm resumes; the hold never expires by itself', async () => {
+    await installHeld(() => [mask('m')]);
+    setVideoSize(1280, 720);
+    runFrame();
+    for (let i = 0; i < 50; i++) runFrame(); // ~50 frames later, still held
+    expect(isSourceHeld()).toBe(true);
+
+    resumeSourceHold();
+    expect(order.at(-1)).toBe('resumed');
+    expect(isSourceHeld()).toBe(false);
+    resumeSourceHold(); // idempotent
+    expect(order.filter((x) => x === 'resumed')).toHaveLength(1);
+  });
+
+  it('removing every mask while held resumes the producer with the raw-track restore (nothing left to protect)', async () => {
+    const masks: MaskRect[] = [mask('m')];
+    const handles = await installHeld(() => masks);
+    setVideoSize(1280, 720);
+    runFrame();
+    expect(isSourceHeld()).toBe(true);
+
+    masks.length = 0;
+    await stopComposite();
+    expect(handles.replaceTrack).toHaveBeenLastCalledWith(handles.rawTrack);
+    expect(order.at(-1)).toBe('resumed');
+    expect(isSourceHeld()).toBe(false);
+  });
+
+  it('a failed raw-track restore while held still resumes (passthrough shows the right picture)', async () => {
+    const masks: MaskRect[] = [mask('m')];
+    const handles = await installHeld(() => masks);
+    setVideoSize(1280, 720);
+    runFrame();
+    vi.mocked(handles.replaceTrack).mockRejectedValueOnce(new Error('busy'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    masks.length = 0;
+    await stopComposite();
+    errSpy.mockRestore();
+    expect(order.at(-1)).toBe('resumed');
+    expect(handles.onRestoreFailed).toHaveBeenCalled();
+  });
+
+  it('a resize with NO masks only fires the misalign hint — no pause, no hold', async () => {
+    // Passthrough state: restore fails once, the session stays with 0 masks
+    const masks: MaskRect[] = [mask('m')];
+    const handles = await installHeld(() => masks);
+    vi.mocked(handles.replaceTrack).mockRejectedValueOnce(new Error('busy'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    masks.length = 0;
+    await stopComposite();
+    errSpy.mockRestore();
+    order.length = 0;
+
+    setVideoSize(1280, 720);
+    runFrame();
+    expect(order).toContain('resizeToast');
+    expect(order).not.toContain('paused');
+    expect(isSourceHeld()).toBe(false);
+  });
+
+  it('teardown mid-hold clears it without resuming (the share is over)', async () => {
+    await installHeld(() => [mask('m')]);
+    setVideoSize(1280, 720);
+    runFrame();
+    expect(isSourceHeld()).toBe(true);
+    order.length = 0;
+    teardownComposite();
+    expect(isSourceHeld()).toBe(false);
+    expect(order).not.toContain('resumed');
   });
 });
