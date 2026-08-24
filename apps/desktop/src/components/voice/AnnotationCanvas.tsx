@@ -197,9 +197,17 @@ export function drawScene(
         }
         break;
       }
-      case 'arrow':
+      case 'arrow': {
+        // Vanishing arrows fade exactly like vanishing strokes — on THIS
+        // client's clock, hidden even if the sharer's remove never arrives
+        const alpha = obj.fade ? fadeAlpha(fading.get(obj.id), now, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS) : 1;
+        if (alpha <= 0) break;
+        ctx.save();
+        ctx.globalAlpha = alpha;
         drawArrow(ctx, obj, w, h);
+        ctx.restore();
         break;
+      }
       case 'callout':
         drawCallout(ctx, obj, w, h);
         break;

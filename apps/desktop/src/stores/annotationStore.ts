@@ -414,11 +414,20 @@ function trackFadeClocks(before: AnnotationScene, after: AnnotationScene, ops: A
   for (const op of ops) {
     switch (op.t) {
       case 'add':
-        if (op.obj.kind === 'stroke' && op.obj.fade) live.touchFading(op.obj.id);
+        if ((op.obj.kind === 'stroke' || op.obj.kind === 'arrow') && op.obj.fade) live.touchFading(op.obj.id);
         break;
       case 'append': {
         const target = after.objects.find((o) => o.id === op.id);
         if (target && target.kind === 'stroke' && target.fade) live.touchFading(op.id);
+        break;
+      }
+      case 'update':
+      case 'translate': {
+        // Editing or moving a fading object restarts its clock — the last
+        // touch is what the vanish countdown runs from, like a stroke's
+        // last append
+        const target = after.objects.find((o) => o.id === op.id);
+        if (target && (target.kind === 'stroke' || target.kind === 'arrow') && target.fade) live.touchFading(op.id);
         break;
       }
       case 'remove':
@@ -610,7 +619,20 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     trackFadeClocks(base, next, ops);
     // A vanishing stroke added outside a drag (a redo, a resync) is finished
     // already — its removal is scheduled now; mid-drag ones wait for endGesture
-    if (!openGesture) for (const op of ops) if (op.t === 'add' && op.obj.kind === 'stroke' && op.obj.fade) scheduleVanish(op.obj.id);
+    if (!openGesture) {
+      for (const op of ops) {
+        if (op.t === 'add' && (op.obj.kind === 'stroke' || op.obj.kind === 'arrow') && op.obj.fade) {
+          scheduleVanish(op.obj.id);
+        } else if (op.t === 'update' || op.t === 'translate') {
+          // Editing a fading object restarts BOTH clocks: the client fade
+          // (trackFadeClocks above) and the authoritative remove — otherwise
+          // the alpha pops back to 1 and the object still vanishes on the
+          // original schedule
+          const touched = next.objects.find((o) => o.id === op.id);
+          if (touched && (touched.kind === 'stroke' || touched.kind === 'arrow') && touched.fade) scheduleVanish(op.id);
+        }
+      }
+    }
     if (record) syncHistoryFlags(set);
   },
 
@@ -628,10 +650,16 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     openGesture = null;
     const scene = get().scene;
     commitEntry(entry, scene);
-    // The strokes this drag finished start their countdown now
-    for (const id of entry.added) {
+    // Everything this drag finished OR touched starts a fresh countdown —
+    // a move-gesture on a fading object restarted the client fade clocks,
+    // so the authoritative remove must restart with them
+    const touched = new Set<string>(entry.added);
+    for (const op of entry.forward) {
+      if (op.t === 'update' || op.t === 'translate' || op.t === 'append') touched.add(op.id);
+    }
+    for (const id of touched) {
       const obj = scene.objects.find((o) => o.id === id);
-      if (obj && obj.kind === 'stroke' && obj.fade) scheduleVanish(id);
+      if (obj && (obj.kind === 'stroke' || obj.kind === 'arrow') && obj.fade) scheduleVanish(id);
     }
     syncHistoryFlags(set);
   },

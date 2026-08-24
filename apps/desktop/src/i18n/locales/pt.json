@@ -813,7 +813,7 @@
       "eraser": "Borracha",
       "renumber": "Renumerar marcadores na ordem de leitura",
       "calloutLimit": "No máximo {{max}} marcadores numerados por partilha",
-      "vanishingInk": "Tinta efémera — os traços desaparecem após alguns segundos",
+      "vanishingInk": "Tinta efêmera — traços e setas desaparecem após alguns segundos",
       "moreColors": "Mais cores",
       "customColor": "Cor personalizada",
       "recentColors": "Recentes",

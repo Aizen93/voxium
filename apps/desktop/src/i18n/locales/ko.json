@@ -813,7 +813,7 @@
       "eraser": "지우개",
       "renumber": "읽기 순서대로 번호 다시 매기기",
       "calloutLimit": "공유당 번호 표시는 최대 {{max}}개입니다",
-      "vanishingInk": "사라지는 잉크 — 몇 초 후 획이 사라집니다",
+      "vanishingInk": "사라지는 잉크 — 선과 화살표가 몇 초 후 사라집니다",
       "moreColors": "더 많은 색상",
       "customColor": "사용자 색상",
       "recentColors": "최근",

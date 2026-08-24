@@ -156,7 +156,8 @@ function isValidObject(obj: unknown, v2: boolean): obj is AnnotationObject {
         && isColor(o.color)
         && isStrokeWidth(o.width)
         && isNormCoord(o.x1) && isNormCoord(o.y1) && isNormCoord(o.x2) && isNormCoord(o.y2)
-        && (o.heads === undefined || o.heads === 'end' || o.heads === 'both');
+        && (o.heads === undefined || o.heads === 'end' || o.heads === 'both')
+        && (o.fade === undefined || o.fade === true);
     case 'callout':
       return v2
         && isColor(o.color)

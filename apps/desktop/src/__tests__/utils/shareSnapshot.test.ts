@@ -23,7 +23,7 @@ function recordingCtx(name: string) {
     imageSmoothingEnabled: true,
     globalAlpha: 1,
   };
-  for (const op of ['clearRect', 'fillRect', 'drawImage', 'save', 'restore', 'beginPath', 'rect', 'clip', 'moveTo', 'lineTo', 'stroke', 'fill', 'ellipse', 'fillText', 'setTransform']) {
+  for (const op of ['clearRect', 'fillRect', 'drawImage', 'save', 'restore', 'beginPath', 'rect', 'clip', 'moveTo', 'lineTo', 'stroke', 'fill', 'ellipse', 'fillText', 'setTransform', 'closePath', 'arc', 'translate', 'rotate', 'quadraticCurveTo']) {
     ctx[op] = (...args: unknown[]) => calls.push({ canvas: name, op, args });
   }
   return ctx as unknown as CanvasRenderingContext2D;
@@ -87,6 +87,20 @@ describe('composeSnapshotCanvas', () => {
 
   it('refuses a frameless video', () => {
     expect(composeSnapshotCanvas(fakeVideo(0, 0), EMPTY_SCENE, [], new Map())).toBeNull();
+  });
+});
+
+describe('vanishing arrows in drawScene', () => {
+  it('a fully faded vanishing arrow is skipped on this client\'s clock; a fresh one draws', () => {
+    const arrow = { id: 'va', kind: 'arrow', color: '#ff0000', width: 0.005, x1: 0.1, y1: 0.1, x2: 0.5, y2: 0.5, fade: true };
+    const scene = { objects: [arrow] } as unknown as AnnotationScene;
+    const expired = new Map([['va', { at: 0, hidden: false }]]);
+    drawScene(recordingCtx('faded'), scene, [], 800, 450, () => {}, expired, 999_999, null, false);
+    expect(calls.filter((c) => c.canvas === 'faded' && c.op === 'stroke')).toHaveLength(0);
+
+    const fresh = new Map([['va', { at: 999_000, hidden: false }]]);
+    drawScene(recordingCtx('fresh'), scene, [], 800, 450, () => {}, fresh, 999_100, null, false);
+    expect(calls.filter((c) => c.canvas === 'fresh' && c.op === 'stroke').length).toBeGreaterThan(0);
   });
 });
 

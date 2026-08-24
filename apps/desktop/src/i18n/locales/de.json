@@ -813,7 +813,7 @@
       "eraser": "Radierer",
       "renumber": "Markierungen in Leserichtung neu nummerieren",
       "calloutLimit": "Höchstens {{max}} nummerierte Markierungen pro Übertragung",
-      "vanishingInk": "Verblassende Tinte — Striche verschwinden nach ein paar Sekunden",
+      "vanishingInk": "Verschwindende Tinte — Striche und Pfeile verblassen nach wenigen Sekunden",
       "moreColors": "Mehr Farben",
       "customColor": "Eigene Farbe",
       "recentColors": "Zuletzt",

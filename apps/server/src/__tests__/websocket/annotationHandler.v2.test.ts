@@ -118,6 +118,13 @@ describe('wire v2 — new object kinds', () => {
     expect((await send(opsHandler, [{ t: 'add', obj: stroke({ fade: 1 }) }])).mock.calls[0][0].ok).toBe(false);
   });
 
+  it('accepts arrow.fade === true and nothing else (vanishing arrows)', async () => {
+    const { opsHandler } = setup();
+    expect((await send(opsHandler, [{ t: 'add', obj: arrow({ fade: true }) }])).mock.calls[0][0].ok).toBe(true);
+    expect((await send(opsHandler, [{ t: 'add', obj: arrow({ fade: false }) }])).mock.calls[0][0].ok).toBe(false);
+    expect((await send(opsHandler, [{ t: 'add', obj: arrow({ fade: 1 }) }])).mock.calls[0][0].ok).toBe(false);
+  });
+
   it('still rejects unknown kinds', async () => {
     const { opsHandler } = setup();
     expect((await send(opsHandler, [{ t: 'add', obj: { id: 'x', kind: 'sticker', x: 0, y: 0 } }])).mock.calls[0][0].ok).toBe(false);

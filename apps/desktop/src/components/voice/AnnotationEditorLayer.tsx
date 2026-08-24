@@ -274,10 +274,13 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
       case 'arrow': {
         store.beginGesture();
         const id = crypto.randomUUID();
+        // Vanishing ink covers arrows exactly like pen strokes (the arrow
+        // tool itself is v2-only, so the version check is belt only)
+        const vanishing = inkMode === 'vanishing' && useVoiceStore.getState().screenShareAnnotationsVersion >= 2;
         store.localApply([{
           t: 'add',
           // Shift at the start of the drag = heads at both ends
-          obj: { id, kind: 'arrow', color, width: strokeWidth, x1: norm.x, y1: norm.y, x2: norm.x, y2: norm.y, ...(e.shiftKey ? { heads: 'both' as const } : {}) },
+          obj: { id, kind: 'arrow', color, width: strokeWidth, x1: norm.x, y1: norm.y, x2: norm.x, y2: norm.y, ...(e.shiftKey ? { heads: 'both' as const } : {}), ...(vanishing ? { fade: true as const } : {}) },
         }]);
         dragRef.current = { mode: 'create', id, target: 'arrow', start: norm };
         break;

@@ -92,6 +92,9 @@ export interface AnnotationArrow extends AnnotationBase {
   x2: number;
   y2: number;
   heads?: 'end' | 'both';
+  /** Vanishing ink, exactly like `AnnotationStroke.fade`: the sharer removes
+   *  it ~3 s after the gesture ends, every client fades on its OWN clock. */
+  fade?: true;
 }
 
 /** A numbered badge — ①②③ — for walkthroughs. */

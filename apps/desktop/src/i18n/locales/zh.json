@@ -813,7 +813,7 @@
       "eraser": "橡皮擦",
       "renumber": "按阅读顺序重新编号",
       "calloutLimit": "每次共享最多 {{max}} 个编号标注",
-      "vanishingInk": "消失墨水 — 笔画几秒后淡出",
+      "vanishingInk": "消失墨水 — 笔迹和箭头几秒后淡出",
       "moreColors": "更多颜色",
       "customColor": "自定义颜色",
       "recentColors": "最近使用",

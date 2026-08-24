@@ -592,6 +592,55 @@ describe('annotationStore — vanishing ink', () => {
     expect(last).toEqual([{ t: 'remove', id: 'v' }]);
   });
 
+  const vanishingArrow = (id: string): AnnotationOp => ({ t: 'add', obj: { id, kind: 'arrow', color: '#ff0000', width: 0.005, x1: 0.1, y1: 0.1, x2: 0.3, y2: 0.3, fade: true } });
+
+  it('vanishing covers arrows: the gesture end schedules the authoritative remove', () => {
+    const store = useAnnotationStore.getState();
+    store.beginGesture();
+    store.localApply([vanishingArrow('va')]);
+    store.endGesture();
+    expect(useAnnotationLiveStore.getState().fading.has('va')).toBe(true); // client clock ticking
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS - 1);
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]); // the sharer removed it
+  });
+
+  it('moving a fading arrow restarts BOTH clocks — the client fade AND the authoritative remove', () => {
+    const store = useAnnotationStore.getState();
+    store.beginGesture();
+    store.localApply([vanishingArrow('vm')]);
+    store.endGesture();
+    const clockBefore = useAnnotationLiveStore.getState().fading.get('vm')!.at;
+
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS - 500); // 500ms from vanishing…
+    store.localApply([{ t: 'translate', id: 'vm', dx: 0.05, dy: 0.05 }]); // …and the sharer moves it
+    expect(useAnnotationLiveStore.getState().fading.get('vm')!.at).toBeGreaterThan(clockBefore);
+
+    // The ORIGINAL deadline passes without a removal (the countdown restarted)
+    vi.advanceTimersByTime(600);
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    // …and the fresh deadline removes it
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS);
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+
+  it('a move GESTURE on a fading object also restarts the authoritative remove', () => {
+    const store = useAnnotationStore.getState();
+    store.beginGesture();
+    store.localApply([vanishing('vg')]);
+    store.endGesture();
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS - 500);
+    // A select-tool drag is bracketed by a gesture and ADDS nothing
+    store.beginGesture();
+    store.localApply([{ t: 'translate', id: 'vg', dx: 0.02, dy: 0.02 }]);
+    store.endGesture();
+    vi.advanceTimersByTime(600); // past the original deadline
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+    vi.advanceTimersByTime(ANNOTATION_FADE_AFTER_MS);
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+  });
+
   it('the scheduled remove is not a history entry, and a stroke undone before its time is simply gone', () => {
     const store = useAnnotationStore.getState();
     store.beginGesture();

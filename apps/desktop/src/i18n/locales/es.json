@@ -813,7 +813,7 @@
       "eraser": "Borrador",
       "renumber": "Renumerar marcadores en orden de lectura",
       "calloutLimit": "Máximo {{max}} marcadores numerados por pantalla compartida",
-      "vanishingInk": "Tinta efímera — los trazos se desvanecen en unos segundos",
+      "vanishingInk": "Tinta efímera: los trazos y las flechas se desvanecen tras unos segundos",
       "moreColors": "Más colores",
       "customColor": "Color personalizado",
       "recentColors": "Recientes",
