@@ -654,6 +654,7 @@ export function MainLayout() {
               remoteScreenStream: null,
               screenShareFrozen: false,
               screenShareSourceKey: null,
+              shareKind: 'screen',
               secureVoiceActive: false,
               secureVoicePeerIssues: {},
             });

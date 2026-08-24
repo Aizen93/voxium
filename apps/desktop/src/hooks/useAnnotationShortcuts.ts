@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useAnnotationStore, type AnnotationEditorTool } from '../stores/annotationStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { ANNOTATION_COLORS, ANNOTATION_WIDTHS, MASK_TOOL_DEF, type ToolDef } from '../components/voice/annotationPresets';
+import { useVoiceStore } from '../stores/voiceStore';
 
 /**
  * Keyboard control of the annotation editor, active only while the sharer is
@@ -50,7 +51,8 @@ export function useAnnotationShortcuts(available: readonly ToolDef[]): void {
     const byCode = new Map<string, AnnotationEditorTool>();
     // The mask key rides along only while any tool is offered at all — an
     // empty list means this client has no editor, and no key should act
-    for (const def of available.length > 0 ? [...available, MASK_TOOL_DEF] : []) {
+    const maskAvailable = useVoiceStore.getState().shareKind !== 'whiteboard';
+    for (const def of available.length > 0 ? (maskAvailable ? [...available, MASK_TOOL_DEF] : available) : []) {
       if (def.code !== reserved) byCode.set(def.code, def.tool);
     }
 

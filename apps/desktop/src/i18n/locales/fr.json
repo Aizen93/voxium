@@ -746,6 +746,7 @@
     "serverMuted": "Votre micro a été coupé par le serveur",
     "moderatorRestricted": "Un modérateur a restreint votre audio",
     "shareScreen": "Partager l'écran",
+    "shareWhiteboard": "Partager un tableau blanc",
     "stopSharing": "Arrêter le partage",
     "someoneSharing": "Quelqu'un partage déjà son écran",
     "disconnect": "Déconnecter",

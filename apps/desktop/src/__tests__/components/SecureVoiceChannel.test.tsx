@@ -79,7 +79,9 @@ vi.mock('../../stores/voiceStore', () => {
   const useVoiceStore = <T,>(sel?: (s: ReturnType<typeof state>) => T) =>
     sel ? sel(state()) : state();
   useVoiceStore.getState = state;
-  return { useVoiceStore };
+  // annotationStore (pulled in via VoicePanel) subscribes at module scope
+  useVoiceStore.subscribe = () => () => {};
+  return { useVoiceStore, registerShareMaskHooks: vi.fn() };
 });
 
 vi.mock('../../stores/chatStore', () => {

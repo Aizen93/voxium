@@ -59,6 +59,7 @@ export function AnnotationToolbar() {
   // next mask: a live pixelate mask keeps shipping a low-pass of its region
   // whatever the picker shows, and the warning must outlive the tool switch
   const anyCosmeticMask = useAnnotationStore((s) => s.masks.some((m) => !m.src && (m.style ?? 'cover') !== 'cover'));
+  const shareKind = useVoiceStore((s) => s.shareKind);
   const cosmeticActive = shownMaskStyle !== 'cover' || anyCosmeticMask;
   // The size segment shows while a caption/badge is being placed or is selected
   const sizeRelevant = useAnnotationStore((s) =>
@@ -132,7 +133,9 @@ export function AnnotationToolbar() {
       {/* Privacy mask — separated: the one tool enforced at the source. The
           "never leaves this device" promise holds only while every live mask
           is Cover AND the next one will be: otherwise the tooltip carries the
-          cosmetic warning instead. */}
+          cosmetic warning instead. Hidden entirely on a whiteboard — a board
+          has nothing to cover. */}
+      {shareKind !== 'whiteboard' && (
       <div className="flex items-center gap-0.5 border-l border-vox-border pl-2">
         {toolButton(MASK_TOOL_DEF, cosmeticActive ? t('voice.annotations.maskStyleCosmetic') : t('voice.annotations.maskPrivacyHint'))}
         {maskRelevant && (
@@ -164,6 +167,7 @@ export function AnnotationToolbar() {
           </span>
         )}
       </div>
+      )}
 
       <div className="flex items-center gap-1 border-l border-vox-border pl-2">
         {ANNOTATION_COLORS.map((c, i) => (

@@ -14,7 +14,7 @@ vi.mock('../../services/socket', () => ({
 }));
 // The toolbar reads screenShareAnnotationsVersion through the hook form, so
 // the stand-in must be callable with a selector as well as expose getState.
-const voiceState = vi.hoisted(() => ({ activeChannelId: 'chan-1', screenSharingUserId: null as string | null, isScreenSharing: false, screenShareAnnotationsVersion: 2 }));
+const voiceState = vi.hoisted(() => ({ activeChannelId: 'chan-1', screenSharingUserId: null as string | null, isScreenSharing: false, screenShareAnnotationsVersion: 2, shareKind: 'screen' as 'screen' | 'whiteboard' }));
 vi.mock('../../stores/voiceStore', () => ({
   useVoiceStore: Object.assign((selector: (s: typeof voiceState) => unknown) => selector(voiceState), {
     getState: () => voiceState,
@@ -46,6 +46,7 @@ function click(el: Element | null) {
 }
 
 beforeEach(() => {
+  voiceState.shareKind = 'screen'; // a failed test must not leak whiteboard mode
   useAnnotationStore.setState(initialState, true);
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -68,6 +69,16 @@ describe('AnnotationToolbar', () => {
     expect(useAnnotationStore.getState().isEditing).toBe(true);
     expect(container.querySelector('[data-testid="annotation-toolbar"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="annotation-toolbar-collapsed"]')).toBeNull();
+  });
+
+  it('hides the entire mask section on a whiteboard — a board has nothing to cover', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    voiceState.shareKind = 'whiteboard';
+    render(<AnnotationToolbar />);
+    expect(container.querySelector('[aria-label="voice.annotations.mask"]')).toBeNull();
+    expect(container.querySelector('[data-testid="mask-style-picker"]')).toBeNull();
+    // …while the drawing tools stay
+    expect(container.querySelector('[aria-label="voice.annotations.pen"]')).not.toBeNull();
   });
 
   it('selects tools and reflects the active one via aria-pressed', () => {

@@ -7,13 +7,20 @@ import { useMaskLayoutStore } from '../../stores/maskLayoutStore';
 import { Maximize, PictureInPicture2, MonitorOff } from 'lucide-react';
 import { AnnotationCanvas } from './AnnotationCanvas';
 import { AnnotationToolbar } from './AnnotationToolbar';
-import { AnnotationEditorLayer } from './AnnotationEditorLayer';
+import { AnnotationEditorLayer, ALL_EDITOR_TOOLS, type ToolCapabilities } from './AnnotationEditorLayer';
 import { availableToolDefs } from './annotationPresets';
 import { useAnnotationShortcuts } from '../../hooks/useAnnotationShortcuts';
 import { useStageZoom, ZoomPill, MagnifierLens } from './StageZoom';
 import { ReactionStrip, ReactionOverlay } from './Reactions';
 import { SnapshotMenu } from './SnapshotMenu';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
+
+// A board has nothing to cover — every tool but the privacy mask
+const WHITEBOARD_CAPABILITIES: ToolCapabilities = {
+  tools: new Set(ALL_EDITOR_TOOLS),
+  masks: false,
+  images: true,
+};
 
 export function ScreenShareViewer() {
   const { t } = useTranslation();
@@ -30,6 +37,7 @@ export function ScreenShareViewer() {
   const annotationsVersion = useVoiceStore((s) => s.screenShareAnnotationsVersion);
   const appliedLayout = useMaskLayoutStore((s) => s.appliedLayout);
   const snapshotNotice = useAnnotationLiveStore((s) => s.snapshotNotice);
+  const shareKind = useVoiceStore((s) => s.shareKind);
   const keepApplied = useMaskLayoutStore((s) => s.keepApplied);
   const startFresh = useMaskLayoutStore((s) => s.startFresh);
 
@@ -183,7 +191,9 @@ export function ScreenShareViewer() {
                   className="max-h-full max-w-full object-contain"
                 />
                 <AnnotationCanvas videoRef={videoRef} />
-                {isLocalSharing && isEditing && <AnnotationEditorLayer videoRef={videoRef} />}
+                {isLocalSharing && isEditing && (
+                  <AnnotationEditorLayer videoRef={videoRef} capabilities={shareKind === 'whiteboard' ? WHITEBOARD_CAPABILITIES : undefined} />
+                )}
               </div>
               <ZoomPill zoom={zoom} onReset={resetZoom} />
               <MagnifierLens videoRef={videoRef} stageRef={zoomStageRef} disabled={zoom.scale > 1 || (isLocalSharing && isEditing)} />

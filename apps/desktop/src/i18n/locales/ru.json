@@ -746,6 +746,7 @@
     "serverMuted": "Микрофон отключён на сервере",
     "moderatorRestricted": "Модератор ограничил ваше аудио",
     "shareScreen": "Демонстрация экрана",
+    "shareWhiteboard": "Поделиться доской",
     "stopSharing": "Остановить демонстрацию",
     "someoneSharing": "Кто-то уже демонстрирует экран",
     "disconnect": "Отключиться",

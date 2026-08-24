@@ -752,6 +752,7 @@
     "serverMuted": "You are server muted",
     "moderatorRestricted": "A moderator has restricted your audio",
     "shareScreen": "Share Screen",
+    "shareWhiteboard": "Share whiteboard",
     "stopSharing": "Stop Sharing",
     "someoneSharing": "Someone is already sharing",
     "disconnect": "Disconnect",

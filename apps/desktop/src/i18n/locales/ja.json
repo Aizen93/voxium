@@ -746,6 +746,7 @@
     "serverMuted": "サーバーによりミュートされています",
     "moderatorRestricted": "モデレーターがオーディオを制限しています",
     "shareScreen": "画面共有",
+    "shareWhiteboard": "ホワイトボードを共有",
     "stopSharing": "共有を停止",
     "someoneSharing": "他のユーザーが画面を共有中です",
     "disconnect": "切断",

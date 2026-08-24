@@ -746,6 +746,7 @@
     "serverMuted": "你已被服务器静音",
     "moderatorRestricted": "管理员已限制你的音频",
     "shareScreen": "共享屏幕",
+    "shareWhiteboard": "共享白板",
     "stopSharing": "停止共享",
     "someoneSharing": "其他人正在共享屏幕",
     "disconnect": "断开连接",

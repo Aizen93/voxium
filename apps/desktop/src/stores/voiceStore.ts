@@ -7,6 +7,7 @@ import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
 import { teardownComposite, prepareComposite, attachCompositeProducerHandles } from '../services/screenComposite';
 import { sourceKeyFromSettings } from '../utils/maskLayouts';
+import { createWhiteboardStream, WHITEBOARD_WIDTH, WHITEBOARD_HEIGHT } from '../utils/whiteboard';
 import { loadAnnotationPrefs } from '../utils/annotationPrefs';
 
 // ─── Mask hooks (registered by annotationStore — a direct import would be a
@@ -220,6 +221,9 @@ interface VoiceState {
    *  capture track's settings) — the key remembered mask layouts live under.
    *  Null while not sharing or when the settings gave no size. */
   screenShareSourceKey: string | null;
+  /** What the local share is showing — the toolbar hides the mask tool on a
+   *  whiteboard (there is nothing to cover). */
+  shareKind: 'screen' | 'whiteboard';
   /** The annotation wire version the server advertised on our share claim
    *  (1 when absent — an older server, or the annotations_v2 flag off). The
    *  toolbar hides v2 tools below 2 so nothing we draw gets rejected after
@@ -287,12 +291,14 @@ interface VoiceState {
 
   // ─── Screen Share Actions ────────────────────────────────────────
   startScreenShare: () => Promise<void>;
+  /** Whiteboard v1: a canvas IS a screen — the injected-track start path. */
+  startWhiteboardShare: () => Promise<void>;
   /** Go live from the pre-flight. */
   confirmPendingShare: () => Promise<void>;
   /** Abandon the pre-flight: stop the capture, drop its masks. */
   cancelPendingShare: () => void;
   /** Claim + produce (internal to the share flow; exposed for the pre-flight). */
-  activateScreenShare: (stream: MediaStream) => Promise<void>;
+  activateScreenShare: (stream: MediaStream, kind?: 'screen' | 'whiteboard') => Promise<void>;
   stopScreenShare: () => void;
   setScreenSharingUser: (channelId: string, userId: string | null) => void;
   setScreenShareViewMode: (mode: 'inline' | 'floating') => void;
@@ -913,6 +919,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   screenShareFrozen: false,
   pendingShare: null,
   screenShareSourceKey: null,
+  shareKind: 'screen',
   screenShareAnnotationsVersion: 1,
 
   // DM call state
@@ -1329,7 +1336,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
               if (staleScreenStream) {
                 staleScreenStream.getTracks().forEach((t) => t.stop());
               }
-              set({ screenStream: null, isScreenSharing: false, screenSharingUserId: null, screenShareFrozen: false, screenShareSourceKey: null });
+              set({ screenStream: null, isScreenSharing: false, screenSharingUserId: null, screenShareFrozen: false, screenShareSourceKey: null, shareKind: 'screen' });
               get().cleanupSFU();
               // Secure voice: a transport restart is a SESSION restart — the
               // full join path re-begins with a fresh key + epoch (IV-reuse
@@ -2088,6 +2095,27 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     };
   },
 
+  startWhiteboardShare: async () => {
+    const socket = getSocket();
+    const { activeChannelId, msSendTransport, msDevice, isScreenSharing, pendingShare, secureVoiceActive } = get();
+    if (!socket || !activeChannelId || !msSendTransport || !msDevice) return;
+    if (pendingShare || shareActivationInFlight || isScreenSharing) return;
+    // Secure voice is audio-only (spec §21) — the UI hides the button; this
+    // is the belt (the server would refuse the producer anyway)
+    if (secureVoiceActive) return;
+    const board = createWhiteboardStream();
+    if (!board) {
+      toast.error('Screen share failed — please try again');
+      return;
+    }
+    // A fixed source key that can never collide with a remembered SCREEN
+    // layout ('unknown:1920x1080' is a real getSettings shape for captures
+    // without displaySurface). No layout can ever be saved under it — the
+    // mask tool is hidden on a whiteboard.
+    set({ screenShareSourceKey: `whiteboard:${WHITEBOARD_WIDTH}x${WHITEBOARD_HEIGHT}` });
+    await get().activateScreenShare(board.stream, 'whiteboard');
+  },
+
   confirmPendingShare: async () => {
     const pending = get().pendingShare;
     if (!pending) return;
@@ -2109,7 +2137,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
   },
 
-  activateScreenShare: async (stream: MediaStream) => {
+  activateScreenShare: async (stream: MediaStream, kind: 'screen' | 'whiteboard' = 'screen') => {
     const socket = getSocket();
     const { msSendTransport, msDevice } = get();
     if (!socket || !get().activeChannelId || !msSendTransport || !msDevice) {
@@ -2241,6 +2269,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         screenShareSourceKey: get().screenShareSourceKey
           ?? sourceKeyFromSettings(videoTrack.getSettings() as { displaySurface?: string; width?: number; height?: number }),
         screenShareAnnotationsVersion: typeof startResponse.annotationsVersion === 'number' ? startResponse.annotationsVersion : 1,
+        shareKind: kind,
       });
     } catch (err) {
       console.warn('[Voice] Screen share cancelled or failed:', err);
@@ -2264,7 +2293,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // The stale key would make maskLayoutStore misread the NEXT pre-flight's
       // cancel as a confirm; the masks would silently composite over the next
       // share of anything (same rationale as cancelPendingShare).
-      set({ screenStream: null, isScreenSharing: false, screenShareSourceKey: null });
+      set({ screenStream: null, isScreenSharing: false, screenShareSourceKey: null, shareKind: 'screen' });
       try {
         shareMaskHooks?.clearPreflightMasks();
       } catch (hookErr) {
@@ -2336,6 +2365,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       screenShareFrozen: false,
       screenShareSourceKey: null,
       screenShareAnnotationsVersion: 1,
+      shareKind: 'screen',
     });
   },
 
@@ -2893,6 +2923,7 @@ onSocketReconnect(async () => {
     screenShareFrozen: false,
     // Stale key = maskLayoutStore misreads the next pre-flight cancel as a confirm
     screenShareSourceKey: null,
+    shareKind: 'screen',
   });
 
   // For DM calls, destroy stale P2P peers

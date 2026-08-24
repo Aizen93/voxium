@@ -1,9 +1,10 @@
 import { useTranslation } from 'react-i18next';
+import { useAnnotationStore } from '../../stores/annotationStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { ConnectionQuality } from './ConnectionQuality';
-import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff, Lock, ShieldAlert } from 'lucide-react';
+import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff, Lock, ShieldAlert, Presentation } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export function VoicePanel() {
@@ -11,7 +12,7 @@ export function VoicePanel() {
   const {
     activeChannelId, channelUsers, selfMute, selfDeaf,
     toggleMute, toggleDeaf, leaveChannel, latency,
-    isScreenSharing, screenSharingUserId, startScreenShare, stopScreenShare,
+    isScreenSharing, screenSharingUserId, startScreenShare, startWhiteboardShare, stopScreenShare,
   } = useVoiceStore();
   const secureVoicePeerIssues = useVoiceStore((s) => s.secureVoicePeerIssues);
   const secureVoiceActive = useVoiceStore((s) => s.secureVoiceActive);
@@ -157,6 +158,33 @@ export function VoicePanel() {
             aria-label={isScreenSharing ? t('voice.stopSharing') : otherSharing ? t('voice.someoneSharing') : t('voice.shareScreen')}
           >
             {isScreenSharing ? <MonitorOff size={16} /> : <Monitor size={16} />}
+          </button>
+          )}
+
+          {/* Whiteboard — a canvas IS a screen (item 11); hidden while any
+              share is live (stopping goes through the share button) and in
+              secure voice with the whole share section */}
+          {!isSecureVoice && !isScreenSharing && (
+          <button
+            onClick={async () => {
+              await startWhiteboardShare();
+              // A blank board with a closed toolbar is a dead end — open it
+              if (useVoiceStore.getState().isScreenSharing) {
+                useAnnotationStore.getState().setIsEditing(true);
+              }
+            }}
+            disabled={!!otherSharing}
+            className={clsx(
+              'rounded-md p-1.5 transition-colors',
+              otherSharing
+                ? 'bg-vox-bg-hover text-vox-text-muted cursor-not-allowed opacity-50'
+                : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
+            )}
+            title={otherSharing ? t('voice.someoneSharing') : t('voice.shareWhiteboard')}
+            aria-label={otherSharing ? t('voice.someoneSharing') : t('voice.shareWhiteboard')}
+            data-testid="share-whiteboard"
+          >
+            <Presentation size={16} />
           </button>
           )}
         </div>

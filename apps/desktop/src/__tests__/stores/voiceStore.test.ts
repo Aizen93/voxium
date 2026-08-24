@@ -28,6 +28,14 @@ vi.mock('../../services/sdpUtils', () => ({
   optimizeOpusSDP: vi.fn((sdp: string) => sdp),
 }));
 
+const whiteboardMock = vi.hoisted(() => ({ createWhiteboardStream: vi.fn() }));
+vi.mock('../../utils/whiteboard', () => ({
+  ...whiteboardMock,
+  WHITEBOARD_WIDTH: 1920,
+  WHITEBOARD_HEIGHT: 1080,
+  WHITEBOARD_FPS: 5,
+}));
+
 // callCrypto is dynamically imported by voiceStore's send/receive chains —
 // vi.mock intercepts dynamic imports too. Default behavior (set in beforeEach):
 // encrypt tags the signal into a fake envelope, decrypt passes payloads through
@@ -401,6 +409,80 @@ describe('voiceStore', () => {
       expect(producer.close).toHaveBeenCalled(); // the half-created producer is rolled back
       expect(vi.mocked(socket.emit)).toHaveBeenCalledWith('voice:screen_share:stop'); // slot freed
       expect(useVoiceStore.getState().screenShareSourceKey).toBeNull();
+    });
+  });
+
+  describe('startWhiteboardShare', () => {
+    const boardTrack = () => ({
+      readyState: 'live' as const,
+      kind: 'video',
+      getSettings: () => ({}),
+      contentHint: '',
+      onended: null as null | (() => void),
+      stop: vi.fn(),
+    });
+    const boardStream = (track: ReturnType<typeof boardTrack>) => ({
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+      getAudioTracks: () => [],
+    }) as unknown as MediaStream;
+
+    afterEach(() => {
+      whiteboardMock.createWhiteboardStream.mockReset();
+      vi.mocked(vi.mocked(getSocket)()!.emit).mockReset();
+      useVoiceStore.getState().stopScreenShare();
+      useVoiceStore.setState({
+        isScreenSharing: false, screenStream: null, screenShareSourceKey: null,
+        shareKind: 'screen', msSendTransport: null, msDevice: null, secureVoiceActive: false,
+        msProducers: new Map(),
+      });
+    });
+
+    it('produces from the injected canvas track — getDisplayMedia is never touched', async () => {
+      const gdm = vi.fn();
+      Object.defineProperty(navigator, 'mediaDevices', { value: { getDisplayMedia: gdm }, configurable: true });
+      const socket = vi.mocked(getSocket)()!;
+      vi.mocked(socket.emit).mockImplementation(((event: string, ...args: unknown[]) => {
+        if (event === 'voice:screen_share:start') {
+          const cb = args[0];
+          if (typeof cb === 'function') (cb as (r: unknown) => void)({ ok: true, annotationsVersion: 2 });
+        }
+        return socket;
+      }) as never);
+      const track = boardTrack();
+      whiteboardMock.createWhiteboardStream.mockReturnValue({ stream: boardStream(track), canvas: {} });
+      const producer = { id: 'wb-1', closed: false, close: vi.fn(), appData: { type: 'screen-video' } };
+      const produce = vi.fn(async () => producer);
+      useVoiceStore.setState({
+        activeChannelId: 'chan-1',
+        msSendTransport: { produce } as never,
+        msDevice: { canProduce: () => true } as never,
+      });
+
+      await useVoiceStore.getState().startWhiteboardShare();
+
+      expect(gdm).not.toHaveBeenCalled();
+      expect(produce).toHaveBeenCalledWith(expect.objectContaining({ track }));
+      const state = useVoiceStore.getState();
+      expect(state.isScreenSharing).toBe(true);
+      expect(state.shareKind).toBe('whiteboard');
+      // A key no SCREEN layout can ever collide with ('unknown:1920x1080' is
+      // a real getSettings shape) — and nothing can save under it either
+      expect(state.screenShareSourceKey).toBe('whiteboard:1920x1080');
+    });
+
+    it('refuses in secure voice (audio-only, spec 21): nothing claimed, no board even built', async () => {
+      const socket = vi.mocked(getSocket)()!;
+      useVoiceStore.setState({
+        activeChannelId: 'chan-1',
+        msSendTransport: {} as never,
+        msDevice: {} as never,
+        secureVoiceActive: true,
+      });
+      await useVoiceStore.getState().startWhiteboardShare();
+      expect(whiteboardMock.createWhiteboardStream).not.toHaveBeenCalled();
+      expect(vi.mocked(socket.emit)).not.toHaveBeenCalledWith('voice:screen_share:start', expect.anything());
+      expect(useVoiceStore.getState().shareKind).toBe('screen');
     });
   });
 
