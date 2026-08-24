@@ -63,7 +63,7 @@ export interface MaskPreviewSource {
   scratch: ScratchCanvas | null;
 }
 
-function drawScene(
+export function drawScene(
   ctx: CanvasRenderingContext2D,
   scene: AnnotationScene,
   masks: MaskRect[],

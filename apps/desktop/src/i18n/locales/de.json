@@ -762,6 +762,18 @@
     "dockToInline": "In Ansicht andocken",
     "waitingForStream": "Warte auf den Bildschirmstream...",
     "screenShare": "Bildschirmübertragung",
+    "snapshot": {
+      "button": "Schnappschuss aufnehmen",
+      "caption": "Schnappschuss von {{name}}s Übertragung",
+      "copy": "Bild kopieren",
+      "copied": "Kopiert",
+      "save": "Speichern…",
+      "sendTo": "In Kanal senden",
+      "sent": "Schnappschuss gesendet",
+      "failed": "Schnappschuss fehlgeschlagen",
+      "notice": "{{name}} hat einen Schnappschuss aufgenommen",
+      "noChannels": "Keine Kanäle verfügbar"
+    },
     "reactions": {
       "send": "Mit {{emoji}} reagieren",
       "hide": "Reaktionen ausblenden",

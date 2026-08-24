@@ -762,6 +762,18 @@
     "dockToInline": "メインビューに戻す",
     "waitingForStream": "画面共有ストリームを待機中...",
     "screenShare": "画面共有",
+    "snapshot": {
+      "button": "スナップショットを撮る",
+      "caption": "{{name}} の画面共有のスナップショット",
+      "copy": "画像をコピー",
+      "copied": "コピーしました",
+      "save": "保存…",
+      "sendTo": "チャンネルに送信",
+      "sent": "スナップショットを送信しました",
+      "failed": "スナップショットに失敗しました",
+      "notice": "{{name}} がスナップショットを撮りました",
+      "noChannels": "利用できるチャンネルがありません"
+    },
     "reactions": {
       "send": "{{emoji}} でリアクション",
       "hide": "リアクションを非表示",

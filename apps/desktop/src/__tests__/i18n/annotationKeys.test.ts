@@ -18,6 +18,7 @@ const SOURCES = [
   fileURLToPath(new URL('../../components/voice/SharePreflightModal.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/StageZoom.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/Reactions.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/voice/SnapshotMenu.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/AnnotationEditorLayer.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareViewer.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareFloating.tsx', import.meta.url)),

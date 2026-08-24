@@ -762,6 +762,18 @@
     "dockToInline": "Anclar a la vista",
     "waitingForStream": "Esperando la transmisión de pantalla...",
     "screenShare": "Compartir pantalla",
+    "snapshot": {
+      "button": "Tomar captura",
+      "caption": "Captura de la pantalla compartida de {{name}}",
+      "copy": "Copiar imagen",
+      "copied": "Copiado",
+      "save": "Guardar…",
+      "sendTo": "Enviar a un canal",
+      "sent": "Captura enviada",
+      "failed": "Error en la captura",
+      "notice": "{{name}} tomó una captura",
+      "noChannels": "No hay canales disponibles"
+    },
     "reactions": {
       "send": "Reaccionar {{emoji}}",
       "hide": "Ocultar reacciones",

@@ -768,6 +768,18 @@
     "dockToInline": "Dock to inline",
     "waitingForStream": "Waiting for screen share stream...",
     "screenShare": "Screen Share",
+    "snapshot": {
+      "button": "Take snapshot",
+      "caption": "Snapshot of {{name}}'s share",
+      "copy": "Copy image",
+      "copied": "Copied",
+      "save": "Save…",
+      "sendTo": "Send to channel",
+      "sent": "Snapshot sent",
+      "failed": "Snapshot failed",
+      "notice": "{{name}} took a snapshot",
+      "noChannels": "No channels available"
+    },
     "reactions": {
       "send": "React {{emoji}}",
       "hide": "Hide reactions",

@@ -12,6 +12,8 @@ import { availableToolDefs } from './annotationPresets';
 import { useAnnotationShortcuts } from '../../hooks/useAnnotationShortcuts';
 import { useStageZoom, ZoomPill, MagnifierLens } from './StageZoom';
 import { ReactionStrip, ReactionOverlay } from './Reactions';
+import { SnapshotMenu } from './SnapshotMenu';
+import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 
 export function ScreenShareViewer() {
   const { t } = useTranslation();
@@ -27,6 +29,7 @@ export function ScreenShareViewer() {
   const setIsEditing = useAnnotationStore((s) => s.setIsEditing);
   const annotationsVersion = useVoiceStore((s) => s.screenShareAnnotationsVersion);
   const appliedLayout = useMaskLayoutStore((s) => s.appliedLayout);
+  const snapshotNotice = useAnnotationLiveStore((s) => s.snapshotNotice);
   const keepApplied = useMaskLayoutStore((s) => s.keepApplied);
   const startFresh = useMaskLayoutStore((s) => s.startFresh);
 
@@ -78,6 +81,7 @@ export function ScreenShareViewer() {
           {isLocalSharing ? t('voice.youAreSharing') : t('voice.userIsSharing', { name: sharerName })}
         </span>
         <div className="flex items-center gap-1">
+          {stream && <SnapshotMenu videoRef={videoRef} sharerName={sharerName} />}
           <button
             onClick={handleFullscreen}
             className="rounded p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
@@ -186,6 +190,13 @@ export function ScreenShareViewer() {
               {/* Reactions are UI, not content: siblings of the zoom surface so they never scale */}
               <ReactionOverlay />
               <ReactionStrip />
+              {isLocalSharing && snapshotNotice && (
+                <div className="absolute left-2 top-2 z-20 rounded bg-black/70 px-2 py-1 text-xs text-white" data-testid="snapshot-notice">
+                  {t('voice.snapshot.notice', {
+                    name: users.find((u) => u.id === snapshotNotice.userId)?.displayName || t('voice.someone'),
+                  })}
+                </div>
+              )}
             </>
           ) : (
             <p className="text-vox-text-muted text-sm">{t('voice.waitingForStream')}</p>

@@ -762,6 +762,18 @@
     "dockToInline": "停靠到主视图",
     "waitingForStream": "正在等待屏幕共享流...",
     "screenShare": "屏幕共享",
+    "snapshot": {
+      "button": "拍摄快照",
+      "caption": "{{name}} 的共享快照",
+      "copy": "复制图片",
+      "copied": "已复制",
+      "save": "保存…",
+      "sendTo": "发送到频道",
+      "sent": "快照已发送",
+      "failed": "快照失败",
+      "notice": "{{name}} 拍摄了快照",
+      "noChannels": "没有可用的频道"
+    },
     "reactions": {
       "send": "发送 {{emoji}} 反应",
       "hide": "隐藏反应",
