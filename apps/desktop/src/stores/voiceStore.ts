@@ -28,6 +28,13 @@ let shareMaskHooks: ShareMaskHooks | null = null;
  *  isScreenSharing is still false, so a second pre-flight could otherwise
  *  confirm concurrently and its failure rollback would clobber the first. */
 let shareActivationInFlight = false;
+/** annotationStore's lifecycle guard reads this: sharer-id transitions during
+ *  the claim/produce window (another sharer's STOP broadcast landing while
+ *  our claim ack is in flight) must not wipe the pre-flight masks — that is
+ *  the third ordering of the same race that produced the raw track. */
+export function isShareActivationInFlight(): boolean {
+  return shareActivationInFlight;
+}
 export function registerShareMaskHooks(hooks: ShareMaskHooks): void {
   shareMaskHooks = hooks;
 }
@@ -2150,6 +2157,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const createdProducers: Producer[] = [];
     let claimedSlot = false;
     shareActivationInFlight = true;
+    // Read BEFORE the claim: the up-to-5s ack window is exactly where a
+    // concurrent sharer-stop broadcast used to wipe the pre-flight masks
+    // (the lifecycle guard now also keeps them while an activation is in
+    // flight — this pre-read is the belt for the produce decision).
+    const masksPreplaced = shareMaskHooks?.hasMasks() === true;
     try {
       // Claim the sharer slot BEFORE producing — the server authorizes
       // screen-video/screen-audio producers only for the active sharer.
@@ -2188,7 +2200,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // not one raw frame can ship ahead of the compositor. FAIL-CLOSED: if
       // the compositor cannot start, there is no share.
       let produceTrack: MediaStreamTrack = videoTrack;
-      const masksPreplaced = shareMaskHooks?.hasMasks() === true;
       if (masksPreplaced) {
         const composite = shareMaskHooks
           ? await prepareComposite(shareMaskHooks.preflightCompositeHandles(videoTrack))

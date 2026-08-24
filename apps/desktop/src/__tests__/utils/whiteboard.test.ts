@@ -17,6 +17,7 @@ function recordingCtx() {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers(); // the repaint interval must never leak between tests
   calls = [];
   ctxAvailable = true;
   captureAvailable = true;
@@ -29,7 +30,8 @@ beforeEach(() => {
         ...(captureAvailable && {
           captureStream: (...args: unknown[]) => {
             captureArgs = args;
-            return { getVideoTracks: () => [{ kind: 'video' }] };
+            const track = { kind: 'video', readyState: 'live' };
+            return { getVideoTracks: () => [track] };
           },
         }),
       });
@@ -43,6 +45,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -65,6 +68,20 @@ describe('createWhiteboardStream', () => {
   it('captures at 5 fps — a static board costs the encoder almost nothing', () => {
     createWhiteboardStream();
     expect(captureArgs).toEqual([WHITEBOARD_FPS]);
+  });
+
+  it('keeps repainting the identical board so keyframe requests always have a frame, and retires with the track', () => {
+    const board = createWhiteboardStream()!;
+    const paints = () => calls.filter((c) => c.op === 'fillRect').length;
+    const initial = paints();
+    expect(initial).toBeGreaterThan(0); // painted AFTER the capture attached
+    vi.advanceTimersByTime(2_100);
+    expect(paints()).toBe(initial * 3); // two repaints of the identical board
+
+    (board.stream.getVideoTracks()[0] as unknown as { readyState: string }).readyState = 'ended';
+    const settled = paints();
+    vi.advanceTimersByTime(5_000);
+    expect(paints()).toBe(settled); // the interval died with the track
   });
 
   it('fails closed when the environment cannot produce a canvas track', () => {

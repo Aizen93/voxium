@@ -56,6 +56,10 @@ export function resetAccountStores(): void {
   // a client-side logout→login.
   const { selfMute, selfDeaf } = useVoiceStore.getState();
   const { dismissedIds } = useAnnouncementStore.getState();
+  // annotationPrefs-backed fields: persistPrefs/setShowReactions write from
+  // STORE state, so reverting them would clobber localStorage with the
+  // module-load values on the first post-relogin change
+  const { inkMode, textSize, recentColors, showReactions } = useAnnotationStore.getState();
 
   ACCOUNT_STORES.forEach((store, i) => {
     (store.setState as (state: unknown, replace: true) => void)(initialStates[i], true);
@@ -63,6 +67,7 @@ export function resetAccountStores(): void {
 
   useVoiceStore.setState({ selfMute, selfDeaf });
   useAnnouncementStore.setState({ dismissedIds });
+  useAnnotationStore.setState({ inkMode, textSize, recentColors, showReactions });
 
   // Module-level annotation state (op queue, history stacks, pointer
   // throttle, the layout-save debounce) lives outside the slices the loop

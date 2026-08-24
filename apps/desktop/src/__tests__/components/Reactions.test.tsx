@@ -12,6 +12,7 @@ vi.mock('../../stores/voiceStore', () => ({
     subscribe: () => () => {},
   },
   registerShareMaskHooks: vi.fn(),
+  isShareActivationInFlight: () => false,
 }));
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();

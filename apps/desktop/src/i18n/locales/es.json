@@ -772,6 +772,7 @@
       "sendTo": "Enviar a un canal",
       "sent": "Captura enviada",
       "failed": "Error en la captura",
+      "holdBlocked": "La fuente cambió: confirma primero tus máscaras",
       "notice": "{{name}} tomó una captura",
       "noChannels": "No hay canales disponibles"
     },

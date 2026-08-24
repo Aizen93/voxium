@@ -115,7 +115,7 @@ describe('useStageZoom', () => {
     act(() => {
       const el = stage();
       el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 400, clientY: 225 }));
-      el.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 360, clientY: 200 }));
+      el.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, buttons: 1, clientX: 360, clientY: 200 }));
       el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
     });
     const after = surface().style.transform;
@@ -123,6 +123,43 @@ describe('useStageZoom', () => {
     const tx = Number(/translate\((-?[\d.]+)px/.exec(after)![1]);
     expect(tx).toBeLessThan(0); // …leftward
     expect(tx).toBeGreaterThanOrEqual(800 * (1 - 4)); // …and inside the bound
+  });
+});
+
+describe('useStageZoom robustness', () => {
+  it('a cancelled pan gesture (or a buttons-up move) stops panning — hover must not drag', () => {
+    render(true);
+    wheel(-2000, 0, 0);
+    const before = surface().style.transform;
+    act(() => {
+      const el = stage();
+      el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 400, clientY: 225 }));
+      el.dispatchEvent(new MouseEvent('pointercancel', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, buttons: 0, clientX: 100, clientY: 100 }));
+    });
+    expect(surface().style.transform).toBe(before);
+  });
+
+  it('a stage resize re-clamps the pan so the surface cannot sit outside the new bounds', () => {
+    let fire: (() => void) | null = null;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(cb: () => void) { fire = cb; }
+      observe() {}
+      disconnect() {}
+    });
+    render(true);
+    wheel(-2000, 800, 450); // zoom anchored bottom-right → large negative pan
+    const tx = () => Number(/translate\((-?[\d.]+)px/.exec(surface().style.transform)![1]);
+    const panned = tx();
+    expect(panned).toBeLessThan(-1000);
+    // the stage shrinks (fullscreen exit): 800x450 → 400x225
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 400, bottom: 225, width: 400, height: 225,
+      toJSON: () => ({}),
+    } as DOMRect);
+    act(() => { fire?.(); });
+    expect(tx()).toBeGreaterThanOrEqual(400 * (1 - 4)); // inside the NEW bound
+    vi.unstubAllGlobals();
   });
 });
 

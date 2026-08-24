@@ -14,6 +14,8 @@
 export const WHITEBOARD_WIDTH = 1920;
 export const WHITEBOARD_HEIGHT = 1080;
 export const WHITEBOARD_FPS = 5;
+/** How often the (identical) board is repainted to keep the capture fed. */
+export const WHITEBOARD_REPAINT_MS = 1_000;
 
 const DOT_SPACING = 40;
 const DOT_RADIUS = 1.5;
@@ -38,26 +40,46 @@ export function createWhiteboardStream(): { stream: MediaStream; canvas: HTMLCan
   const bg = styles.getPropertyValue('--color-vox-bg-secondary').trim() || FALLBACK_BG;
   const dot = styles.getPropertyValue('--color-vox-border').trim() || FALLBACK_DOT;
 
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = dot;
-  for (let y = DOT_SPACING; y < canvas.height; y += DOT_SPACING) {
-    for (let x = DOT_SPACING; x < canvas.width; x += DOT_SPACING) {
-      ctx.beginPath();
-      ctx.arc(x, y, DOT_RADIUS, 0, Math.PI * 2);
-      ctx.fill();
+  const paint = () => {
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = dot;
+    for (let y = DOT_SPACING; y < canvas.height; y += DOT_SPACING) {
+      for (let x = DOT_SPACING; x < canvas.width; x += DOT_SPACING) {
+        ctx.beginPath();
+        ctx.arc(x, y, DOT_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
-  }
+  };
 
   const capture = (canvas as HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream }).captureStream;
   if (typeof capture !== 'function') {
     console.warn('[Whiteboard] canvas.captureStream unavailable');
     return null;
   }
+  // CAPTURE BEFORE PAINT: a canvas capture track only emits frames when the
+  // canvas is dirtied AFTER the capture starts — paint-then-capture can leave
+  // the track with zero frames, and a keyframe request (a late joiner's PLI)
+  // has no source frame to encode: the viewer stares at black forever.
   const stream = capture.call(canvas, WHITEBOARD_FPS);
-  if (!stream.getVideoTracks()[0]) {
+  const track = stream.getVideoTracks()[0];
+  if (!track) {
     console.warn('[Whiteboard] captureStream produced no video track');
     return null;
   }
+  paint();
+  // …and keep the capture FED: repaint the identical board once a second
+  // (dirty flag only — the encoder sees a zero-delta frame and sends next to
+  // nothing) so keyframe requests always have a frame to work from. The
+  // interval retires itself with the track (canvas tracks never fire
+  // 'ended' for a local stop, so poll readyState).
+  const repaint = setInterval(() => {
+    if (track.readyState !== 'live') {
+      clearInterval(repaint);
+      return;
+    }
+    paint();
+  }, WHITEBOARD_REPAINT_MS);
   return { stream, canvas };
 }

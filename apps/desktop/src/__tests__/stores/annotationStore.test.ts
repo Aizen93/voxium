@@ -51,7 +51,8 @@ const voiceMock = vi.hoisted(() => {
     },
   };
 });
-vi.mock('../../stores/voiceStore', () => ({ useVoiceStore: voiceMock, registerShareMaskHooks: vi.fn() }));
+const activationFlag = vi.hoisted(() => ({ inFlight: false }));
+vi.mock('../../stores/voiceStore', () => ({ useVoiceStore: voiceMock, registerShareMaskHooks: vi.fn(), isShareActivationInFlight: () => activationFlag.inFlight }));
 
 const compositeMock = vi.hoisted(() => ({
   ensureComposite: vi.fn().mockResolvedValue(undefined),
@@ -876,6 +877,21 @@ describe('annotationStore — screen-share lifecycle guard', () => {
 
     voiceMock.setState({ screenSharingUserId: null }); // and stops before we go live
     expect(useAnnotationStore.getState().masks).toHaveLength(1); // going live must still composite
+  });
+
+  it('masks survive a previous sharer STOP landing during the confirm→claim window', () => {
+    voiceMock.setState({ pendingShare: { sourceKey: 'k' } });
+    voiceMock.setState({ screenSharingUserId: 'user-b' }); // B shares while the pre-flight is open
+    useAnnotationStore.getState().addMask({ id: 'pre1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+
+    activationFlag.inFlight = true; // Go live: pendingShare cleared, claim ack in flight
+    voiceMock.setState({ pendingShare: null });
+    voiceMock.setState({ screenSharingUserId: null }); // B's stop broadcast lands mid-claim
+    expect(useAnnotationStore.getState().masks).toHaveLength(1); // the compositor is about to be built from these
+
+    activationFlag.inFlight = false; // control: without the flag the wipe still happens
+    voiceMock.setState({ screenSharingUserId: 'user-c' });
+    expect(useAnnotationStore.getState().masks).toEqual([]);
   });
 
   it('someone ELSE starting a share still clears everything', () => {

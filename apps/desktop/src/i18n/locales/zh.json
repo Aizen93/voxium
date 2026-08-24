@@ -772,6 +772,7 @@
       "sendTo": "发送到频道",
       "sent": "快照已发送",
       "failed": "快照失败",
+      "holdBlocked": "来源已更改 — 请先确认您的隐私遮罩",
       "notice": "{{name}} 拍摄了快照",
       "noChannels": "没有可用的频道"
     },

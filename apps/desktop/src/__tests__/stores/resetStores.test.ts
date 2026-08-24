@@ -204,6 +204,19 @@ describe('resetAccountStores (HIGH-14b)', () => {
     expect(live.snapshotNotice).toBeNull();
   });
 
+  it('annotation DEVICE prefs survive the reset — persist writes from store state', () => {
+    // persistPrefs/setShowReactions write these back to localStorage from the
+    // STORE, so reverting them to the module-load snapshot would clobber the
+    // stored prefs on the first post-relogin change (same rule as selfMute)
+    useAnnotationStore.setState({ inkMode: 'vanishing', textSize: 0.07, recentColors: ['#aabbcc'], showReactions: false });
+    resetAccountStores();
+    const s = useAnnotationStore.getState();
+    expect(s.inkMode).toBe('vanishing');
+    expect(s.textSize).toBe(0.07);
+    expect(s.recentColors).toEqual(['#aabbcc']);
+    expect(s.showReactions).toBe(false);
+  });
+
   it('clears the annotation history that lives OUTSIDE the zustand slice', () => {
     // Module-level stacks are invisible to the setState(initial, true) loop;
     // without an explicit reset the next account could undo this one's work

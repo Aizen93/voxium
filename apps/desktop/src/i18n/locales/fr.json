@@ -772,6 +772,7 @@
       "sendTo": "Envoyer dans un salon",
       "sent": "Capture envoyée",
       "failed": "Échec de la capture",
+      "holdBlocked": "La source a changé — confirmez d’abord vos masques",
       "notice": "{{name}} a pris une capture",
       "noChannels": "Aucun salon disponible"
     },

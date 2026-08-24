@@ -90,8 +90,18 @@ export function SnapshotMenu({
     const video = videoRef.current;
     if (!video) return;
     const voice = useVoiceStore.getState();
-    const isLocalSharing = voice.screenSharingUserId === voice.localUserId;
-    const { scene, masks } = useAnnotationStore.getState();
+    // isScreenSharing is the LOCAL truth for "my preview is the raw capture";
+    // the id comparison is only a fallback (fail toward masking — a stale or
+    // null localUserId must never classify the sharer as a viewer).
+    const isLocalSharing = voice.isScreenSharing || voice.screenSharingUserId === voice.localUserId;
+    const { scene, masks, sourceChangeHold } = useAnnotationStore.getState();
+    if (isLocalSharing && sourceChangeHold) {
+      // The hold exists because the masks may no longer cover the right
+      // pixels — the snapshot is an EXPORT path and must respect it exactly
+      // like the wire does (the producer is paused for the same reason).
+      toast.error(t('voice.snapshot.holdBlocked'));
+      return;
+    }
     // THE SHARER'S MASKS ARE BURNED IN — their preview video is the raw
     // capture. Viewers' streams already carry the masks; they pass [].
     const canvas = composeSnapshotCanvas(video, scene, isLocalSharing ? masks : [], useAnnotationLiveStore.getState().fading);
@@ -130,7 +140,9 @@ export function SnapshotMenu({
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `voxium-snapshot-${Date.now()}.webp`;
+      // toBlob falls back to PNG on webviews without a WebP encoder — the
+      // extension must follow the bytes, not the request
+      a.download = `voxium-snapshot-${Date.now()}.${blob.type === 'image/png' ? 'png' : 'webp'}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -168,21 +180,24 @@ export function SnapshotMenu({
     try {
       const blob = await encodeSnapshot(snapshot);
       if (!blob) throw new Error('encode over size cap');
-      const fileName = `voxium-snapshot-${Date.now()}.webp`;
+      // toBlob falls back to PNG on webviews without a WebP encoder — the
+      // presigned type must match the bytes or S3 rejects the PUT
+      const mimeType = blob.type === 'image/png' ? 'image/png' : 'image/webp';
+      const fileName = `voxium-snapshot-${Date.now()}.${mimeType === 'image/png' ? 'png' : 'webp'}`;
       const { data } = await api.post('/uploads/presign/attachment', {
         fileName,
         fileSize: blob.size,
-        mimeType: 'image/webp',
+        mimeType,
         channelId,
       });
       const { uploadUrl, key } = data.data as { uploadUrl: string; key: string };
-      const put = await fetch(uploadUrl, { method: 'PUT', body: blob, headers: { 'Content-Type': 'image/webp' } });
+      const put = await fetch(uploadUrl, { method: 'PUT', body: blob, headers: { 'Content-Type': mimeType } });
       if (!put.ok) throw new Error(`S3 snapshot upload failed: ${put.status}`);
       // The socket event is the sole source of truth for the message
       // appearing in the UI — no store append from here.
       await api.post(`/channels/${channelId}/messages`, {
         content: t('voice.snapshot.caption', { name: sharerName }),
-        attachments: [{ s3Key: key, fileName, fileSize: blob.size, mimeType: 'image/webp' }],
+        attachments: [{ s3Key: key, fileName, fileSize: blob.size, mimeType }],
       });
       toast.success(t('voice.snapshot.sent'));
       close();
@@ -229,7 +244,9 @@ export function SnapshotMenu({
             </button>
           ) : (
             <div className="mt-1 max-h-44 overflow-y-auto border-t border-vox-border pt-1" data-testid="snapshot-channel-list">
-              {channels === null ? null : channels.length === 0 ? (
+              {channels === null ? (
+                <p className="px-2 py-1 text-xs text-vox-text-muted">…</p>
+              ) : channels.length === 0 ? (
                 <p className="px-2 py-1 text-xs text-vox-text-muted">{t('voice.snapshot.noChannels')}</p>
               ) : (
                 channels.map((c) => (

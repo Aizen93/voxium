@@ -51,8 +51,7 @@ export function useAnnotationShortcuts(available: readonly ToolDef[]): void {
     const byCode = new Map<string, AnnotationEditorTool>();
     // The mask key rides along only while any tool is offered at all — an
     // empty list means this client has no editor, and no key should act
-    const maskAvailable = useVoiceStore.getState().shareKind !== 'whiteboard';
-    for (const def of available.length > 0 ? (maskAvailable ? [...available, MASK_TOOL_DEF] : available) : []) {
+    for (const def of available.length > 0 ? [...available, MASK_TOOL_DEF] : []) {
       if (def.code !== reserved) byCode.set(def.code, def.tool);
     }
 
@@ -97,6 +96,7 @@ export function useAnnotationShortcuts(available: readonly ToolDef[]): void {
       }
 
       const tool = byCode.get(e.code);
+      if (tool === 'mask' && useVoiceStore.getState().shareKind === 'whiteboard') return; // read LIVE — a board has nothing to cover
       if (tool) {
         e.preventDefault();
         store.setActiveTool(tool);

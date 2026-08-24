@@ -772,6 +772,7 @@
       "sendTo": "In Kanal senden",
       "sent": "Schnappschuss gesendet",
       "failed": "Schnappschuss fehlgeschlagen",
+      "holdBlocked": "Die Quelle hat sich geändert — bestätige zuerst deine Masken",
       "notice": "{{name}} hat einen Schnappschuss aufgenommen",
       "noChannels": "Keine Kanäle verfügbar"
     },

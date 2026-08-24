@@ -778,6 +778,7 @@
       "sendTo": "Send to channel",
       "sent": "Snapshot sent",
       "failed": "Snapshot failed",
+      "holdBlocked": "The source changed — confirm your privacy masks first",
       "notice": "{{name}} took a snapshot",
       "noChannels": "No channels available"
     },

@@ -19,7 +19,7 @@ vi.mock('../../stores/voiceStore', () => ({
     getState: () => voiceState,
     subscribe: () => () => {},
   },
-  registerShareMaskHooks: vi.fn(),
+  registerShareMaskHooks: vi.fn(), isShareActivationInFlight: () => false,
 }));
 vi.mock('../../services/screenComposite', () => ({
   ensureComposite: vi.fn(),

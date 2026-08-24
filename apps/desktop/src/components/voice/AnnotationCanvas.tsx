@@ -27,14 +27,20 @@ interface AnnotationCanvasProps {
 
 // Decoded overlay images, keyed by cache id. Entries no longer referenced by
 // the scene/masks are dropped after each draw, so the cache tracks the scene.
-const imageCache = new Map<string, { src: string; img: HTMLImageElement; loaded: boolean }>();
+const imageCache = new Map<string, { src: string; img: HTMLImageElement; loaded: boolean; requestRedraw: () => void }>();
 
 function cachedImage(id: string, src: string, usedIds: Set<string>, requestRedraw: () => void): HTMLImageElement | null {
   usedIds.add(id);
   let entry = imageCache.get(id);
+  if (entry && entry.src === src) {
+    // The latest requester wins the decode notification: a one-shot snapshot
+    // draw inserting an entry with a no-op must not leave the LIVE canvas
+    // unpainted when the image finally decodes.
+    entry.requestRedraw = requestRedraw;
+  }
   if (!entry || entry.src !== src) {
     const img = new Image();
-    entry = { src, img, loaded: false };
+    entry = { src, img, loaded: false, requestRedraw };
     imageCache.set(id, entry);
     img.onload = () => {
       // Server-side header validation is the primary bomb gate; this is the
@@ -46,8 +52,10 @@ function cachedImage(id: string, src: string, usedIds: Set<string>, requestRedra
         return;
       }
       const current = imageCache.get(id);
-      if (current) current.loaded = true;
-      requestRedraw();
+      if (current) {
+        current.loaded = true;
+        current.requestRedraw();
+      }
     };
     img.onerror = () => {
       console.warn('[Annotations] Overlay image failed to decode');

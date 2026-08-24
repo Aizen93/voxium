@@ -19,6 +19,7 @@ const voiceState = vi.hoisted(() => ({
 vi.mock('../../stores/voiceStore', () => ({
   useVoiceStore: { getState: () => voiceState, subscribe: () => () => {} },
   registerShareMaskHooks: vi.fn(),
+  isShareActivationInFlight: () => false,
 }));
 
 const apiMock = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
@@ -60,9 +61,10 @@ async function flush() {
 }
 
 beforeEach(() => {
-  useAnnotationStore.setState({ masks: [], scene: { objects: [] }, selectedObjectId: null });
+  useAnnotationStore.setState({ masks: [], scene: { objects: [] }, selectedObjectId: null, sourceChangeHold: null });
   voiceState.localUserId = 'viewer-1';
   voiceState.screenSharingUserId = 'sharer-1';
+  voiceState.isScreenSharing = false;
   socketEmit.mockClear();
   apiMock.get.mockReset();
   apiMock.post.mockReset();
@@ -98,6 +100,26 @@ describe('SnapshotMenu', () => {
     act(() => button().click());
     expect(snap.composeSnapshotCanvas).toHaveBeenCalledWith(videoRef.current, expect.anything(), masks, expect.anything());
     expect(socketEmit).not.toHaveBeenCalled();
+  });
+
+  it('the SHARER cannot snapshot during a source-change hold — the export path respects the pause', () => {
+    voiceState.localUserId = 'sharer-1'; // I am the sharer
+    useAnnotationStore.setState({ sourceChangeHold: { fromW: 1920, fromH: 1080, toW: 1280, toH: 720 } });
+    render();
+    act(() => button().click());
+    expect(menu()).toBeNull();
+    expect(snap.composeSnapshotCanvas).not.toHaveBeenCalled(); // no export of stale-mask geometry
+  });
+
+  it('a sharer with a stale/null localUserId still burns the masks — isScreenSharing is the truth', () => {
+    const masks = [{ id: 'm1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 }];
+    useAnnotationStore.setState({ masks });
+    voiceState.localUserId = null as never; // the id comparison would misclassify
+    voiceState.isScreenSharing = true;
+    render();
+    act(() => button().click());
+    expect(snap.composeSnapshotCanvas).toHaveBeenCalledWith(videoRef.current, expect.anything(), masks, expect.anything());
+    expect(socketEmit).not.toHaveBeenCalled(); // and tells nobody — they are the sharer
   });
 
   it('Send to channel: picker excludes secure and voice channels; the send reuses the attachment pipeline', async () => {

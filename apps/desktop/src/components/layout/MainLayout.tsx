@@ -548,7 +548,13 @@ export function MainLayout() {
         }
       },
       voiceScreenShareStop: ({ channelId, userId }: { channelId: string; userId: string }) => {
-        useVoiceStore.getState().setScreenSharingUser(channelId, null);
+        // Only the CURRENT sharer's stop clears the slot: cross-node ordering
+        // can deliver the previous sharer's stop AFTER the next sharer's
+        // start, and clearing then tears down a live share (and, for the
+        // local sharer, the compositor under the producer).
+        if (useVoiceStore.getState().screenSharingUserId === userId) {
+          useVoiceStore.getState().setScreenSharingUser(channelId, null);
+        }
         // Clear the screenSharing flag in channelUsers
         const users = useVoiceStore.getState().channelUsers.get(channelId);
         if (users) {

@@ -25,10 +25,10 @@ export function ScreenShareFloating() {
   const stopScreenShare = useVoiceStore((s) => s.stopScreenShare);
   const sourceChangeHold = useAnnotationStore((s) => s.sourceChangeHold);
   const confirmSourceChange = useAnnotationStore((s) => s.confirmSourceChange);
-  const { zoom, style: zoomStyle, handlers: zoomHandlers, reset: resetZoom } = useStageZoom(stageRef, true);
 
   const isLocalSharing = screenSharingUserId === localUserId;
   const stream = isLocalSharing ? screenStream : remoteScreenStream;
+  const { zoom, style: zoomStyle, handlers: zoomHandlers, reset: resetZoom } = useStageZoom(stageRef, !!stream);
 
   const [pos, setPos] = useState({ x: window.innerWidth - DEFAULT_WIDTH - 16, y: window.innerHeight - DEFAULT_HEIGHT - 80 });
   const [size, setSize] = useState({ w: DEFAULT_WIDTH, h: DEFAULT_HEIGHT });

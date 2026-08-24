@@ -199,7 +199,9 @@ export function ScreenShareViewer() {
               <MagnifierLens videoRef={videoRef} stageRef={zoomStageRef} disabled={zoom.scale > 1 || (isLocalSharing && isEditing)} />
               {/* Reactions are UI, not content: siblings of the zoom surface so they never scale */}
               <ReactionOverlay />
-              <ReactionStrip />
+              {/* Hidden while the sharer edits: the strip is z-above the
+                  editor layer and would eat strokes in the bottom-right */}
+              {!(isLocalSharing && isEditing) && <ReactionStrip />}
               {isLocalSharing && snapshotNotice && (
                 <div className="absolute left-2 top-2 z-20 rounded bg-black/70 px-2 py-1 text-xs text-white" data-testid="snapshot-notice">
                   {t('voice.snapshot.notice', {

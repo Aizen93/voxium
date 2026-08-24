@@ -81,7 +81,7 @@ vi.mock('../../stores/voiceStore', () => {
   useVoiceStore.getState = state;
   // annotationStore (pulled in via VoicePanel) subscribes at module scope
   useVoiceStore.subscribe = () => () => {};
-  return { useVoiceStore, registerShareMaskHooks: vi.fn() };
+  return { useVoiceStore, registerShareMaskHooks: vi.fn(), isShareActivationInFlight: () => false };
 });
 
 vi.mock('../../stores/chatStore', () => {

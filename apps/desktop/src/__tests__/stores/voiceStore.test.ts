@@ -373,6 +373,44 @@ describe('voiceStore', () => {
       expect(stop).toHaveBeenCalled();
     });
 
+    it('the produce decision is taken BEFORE the claim — a mask wipe landing mid-ack cannot cause a raw produce', async () => {
+      let masksNow = true;
+      const deadRaw = { readyState: 'ended' }; // prepareComposite refuses fast on an ended raw track
+      registerShareMaskHooks({
+        hasMasks: () => masksNow,
+        preflightCompositeHandles: () => ({ rawTrack: deadRaw, getMasks: () => [] }) as never,
+        clearPreflightMasks: vi.fn(),
+      });
+      const socket = vi.mocked(getSocket)()!;
+      vi.mocked(socket.emit).mockImplementation(((event: string, ...args: unknown[]) => {
+        if (event === 'voice:screen_share:start') {
+          masksNow = false; // the wipe lands while the ack is in flight
+          const cb = args[0];
+          if (typeof cb === 'function') (cb as (r: unknown) => void)({ ok: true, annotationsVersion: 2 });
+        }
+        return socket;
+      }) as never);
+      const track = { readyState: 'live', getSettings: () => ({ width: 100, height: 100 }), contentHint: '', onended: null as null | (() => void), stop: vi.fn() };
+      const produce = vi.fn();
+      useVoiceStore.setState({
+        activeChannelId: 'chan-1',
+        msSendTransport: { produce } as never,
+        msDevice: { canProduce: () => true } as never,
+        pendingShare: {
+          stream: { getTracks: () => [track], getVideoTracks: () => [track], getAudioTracks: () => [] } as never,
+          sourceKey: 'window:100x100',
+          displaySurface: 'window',
+        },
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await useVoiceStore.getState().confirmPendingShare();
+      warnSpy.mockRestore();
+      // FAIL CLOSED: the compositor path was attempted (and aborted here) —
+      // the RAW track was never handed to produce()
+      expect(produce).not.toHaveBeenCalled();
+      expect(useVoiceStore.getState().isScreenSharing).toBe(false);
+    });
+
     it('a capture that ends during the produce round-trip aborts instead of resurrecting a dead share', async () => {
       const socket = vi.mocked(getSocket)()!;
       vi.mocked(socket.emit).mockImplementation(((event: string, ...args: unknown[]) => {

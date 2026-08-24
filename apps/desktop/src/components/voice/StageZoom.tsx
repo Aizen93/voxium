@@ -3,8 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 import {
   IDENTITY_ZOOM, MAGNIFIER_SIZE, MAGNIFIER_ZOOM,
-  zoomAt, panBy, magnifierSourceRect, type ZoomState,
+  zoomAt, panBy, clampPan, magnifierSourceRect, type ZoomState,
 } from '../../utils/stageZoom';
+import { pttReservedCode } from '../../hooks/useAnnotationShortcuts';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { computeContentRect } from '../../utils/annotationGeometry';
 
 /**
@@ -24,6 +26,21 @@ export function useStageZoom(stageRef: React.RefObject<HTMLElement | null>, enab
   useEffect(() => {
     if (!enabled) setZoom(IDENTITY_ZOOM);
   }, [enabled]);
+
+  // The pan bounds depend on the CURRENT stage size — fullscreen exits and
+  // floating-panel resizes would otherwise leave the surface translated
+  // beyond the new bounds (a black stage until the next drag re-clamps).
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el || !enabled || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      setZoom((z) => (z.scale === 1 ? z : clampPan(z, rect.width, rect.height)));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [stageRef, enabled]);
 
   // Native listener: React's synthetic wheel is passive, so preventDefault()
   // (page scroll / browser pinch-zoom suppression) needs our own registration.
@@ -53,11 +70,20 @@ export function useStageZoom(stageRef: React.RefObject<HTMLElement | null>, enab
       const d = dragRef.current;
       const el = stageRef.current;
       if (!d || !el) return;
+      if (e.buttons === 0) {
+        // The release happened somewhere we never heard about (pointercancel
+        // swallowed, capture lost) — a hover must not keep panning
+        dragRef.current = null;
+        return;
+      }
       const rect = el.getBoundingClientRect();
       setZoom((z) => panBy(z, e.clientX - d.x, e.clientY - d.y, rect.width, rect.height));
       dragRef.current = { x: e.clientX, y: e.clientY };
     },
     onPointerUp: () => {
+      dragRef.current = null;
+    },
+    onPointerCancel: () => {
       dragRef.current = null;
     },
     onDoubleClick: () => setZoom(IDENTITY_ZOOM),
@@ -77,6 +103,9 @@ export function ZoomPill({ zoom, onReset }: { zoom: ZoomState; onReset: () => vo
     <div
       className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[11px] font-medium text-white"
       data-testid="zoom-pill"
+      // The stage's pan handler would setPointerCapture on this press and the
+      // retargeted click would never reach the reset button
+      onPointerDown={(e) => e.stopPropagation()}
     >
       {zoom.scale.toFixed(1)}×
       <button
@@ -125,6 +154,9 @@ export function MagnifierLens({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code !== 'KeyZ' || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
       if (isEditableTarget(e.target)) return;
+      // Push-to-talk wins, same rule as the annotation shortcuts
+      const settings = useSettingsStore.getState();
+      if (pttReservedCode(settings) === 'KeyZ') return;
       setHeld(true);
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -143,7 +175,7 @@ export function MagnifierLens({
 
   useEffect(() => {
     const stage = stageRef.current;
-    if (!stage) return;
+    if (!stage || disabled) return;
     const onMove = (e: PointerEvent) => {
       const rect = stage.getBoundingClientRect();
       posRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -158,8 +190,10 @@ export function MagnifierLens({
     return () => {
       stage.removeEventListener('pointermove', onMove);
       stage.removeEventListener('pointerleave', onLeave);
+      posRef.current = null;
+      setHovering(false);
     };
-  }, [stageRef]);
+  }, [stageRef, disabled]);
 
   const active = held && hovering && !disabled;
 

@@ -18,7 +18,7 @@ import { loadAnnotationPrefs, saveAnnotationPrefs, pushRecentColor, clampTextSiz
 import type { MaskStyle } from '../utils/maskStyles';
 import { patchableKeysFor } from '@voxium/shared';
 import { getSocket } from '../services/socket';
-import { useVoiceStore, registerShareMaskHooks } from './voiceStore';
+import { useVoiceStore, registerShareMaskHooks, isShareActivationInFlight } from './voiceStore';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { ensureComposite, stopComposite, teardownComposite, isCompositing, resumeSourceHold } from '../services/screenComposite';
@@ -800,8 +800,11 @@ useVoiceStore.subscribe((state, prevState) => {
   // ANOTHER user's share starting or stopping while our pre-flight is open
   // must not delete the masks being placed — the slot is unclaimed for the
   // whole pre-flight, so this is an ordinary race, and going live afterwards
-  // would read hasMasks() === false and produce the RAW track.
-  annotations.clearViewerScene({ keepMasks: state.pendingShare !== null });
+  // would read hasMasks() === false and produce the RAW track. The same holds
+  // through the confirm→claim window (pendingShare already null, the claim
+  // ack still in flight): a previous sharer's STOP broadcast landing there
+  // wiped the masks the compositor was about to be built from.
+  annotations.clearViewerScene({ keepMasks: state.pendingShare !== null || isShareActivationInFlight() });
   // Ephemeral overlay state dies with the share too (pointer, reactions)
   useAnnotationLiveStore.getState().clear();
 });

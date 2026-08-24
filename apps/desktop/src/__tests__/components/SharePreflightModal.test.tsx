@@ -17,7 +17,7 @@ vi.mock('../../stores/voiceStore', async () => {
     confirmPendingShare: vi.fn().mockResolvedValue(undefined),
     cancelPendingShare: vi.fn(),
   }));
-  return { useVoiceStore, registerShareMaskHooks: vi.fn() };
+  return { useVoiceStore, registerShareMaskHooks: vi.fn(), isShareActivationInFlight: () => false };
 });
 
 vi.mock('../../services/socket', () => ({
