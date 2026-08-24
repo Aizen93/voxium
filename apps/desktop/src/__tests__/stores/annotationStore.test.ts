@@ -564,6 +564,29 @@ describe('annotationStore — history', () => {
 
 // ─── Vanishing ink ──────────────────────────────────────────────────────────
 
+describe('annotationStore — z-order (reorder)', () => {
+  const ids = () => useAnnotationStore.getState().scene.objects.map((o) => o.id);
+
+  it('reorder ships as its own undo step; undo puts the object back at its ORIGINAL index', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([stroke('a'), stroke('b'), stroke('c')]);
+    store.localApply([{ t: 'reorder', id: 'a', at: 2 }]); // bring to front
+    expect(ids()).toEqual(['b', 'c', 'a']);
+    store.undo();
+    expect(ids()).toEqual(['a', 'b', 'c']);
+    store.redo();
+    expect(ids()).toEqual(['b', 'c', 'a']);
+  });
+
+  it('a reorder of an id that vanished before the click is a harmless no-op', () => {
+    const store = useAnnotationStore.getState();
+    store.localApply([stroke('only')]);
+    store.localApply([{ t: 'reorder', id: 'ghost', at: 0 }]);
+    expect(ids()).toEqual(['only']);
+    expect(useAnnotationStore.getState().canUndo).toBe(true); // the add, not the no-op
+  });
+});
+
 describe('annotationStore — vanishing ink', () => {
   const vanishing = (id: string): AnnotationOp => ({ t: 'add', obj: { id, kind: 'stroke', tool: 'pen', color: '#ff0000', width: 0.005, points: [0.1, 0.1, 0.2, 0.2], fade: true } });
 

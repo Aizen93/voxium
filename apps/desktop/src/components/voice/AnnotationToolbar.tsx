@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { Undo2, Redo2, Trash2, PenLine, X, ListOrdered, Timer } from 'lucide-react';
+import { Undo2, Redo2, Trash2, PenLine, X, ListOrdered, Timer, BringToFront, SendToBack, ArrowUp, ArrowDown } from 'lucide-react';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -60,6 +60,13 @@ export function AnnotationToolbar() {
   // whatever the picker shows, and the warning must outlive the tool switch
   const anyCosmeticMask = useAnnotationStore((s) => s.masks.some((m) => !m.src && (m.style ?? 'cover') !== 'cover'));
   const shareKind = useVoiceStore((s) => s.shareKind);
+  // Z-order controls: a selected SCENE object (never a mask; not the
+  // spotlight, which always paints first regardless of order), v2 only
+  const reorderableId = useAnnotationStore((s) => {
+    if (!s.selectedObjectId) return null;
+    const obj = s.scene.objects.find((o) => o.id === s.selectedObjectId);
+    return obj && obj.kind !== 'spotlight' ? obj.id : null;
+  });
   const cosmeticActive = shownMaskStyle !== 'cover' || anyCosmeticMask;
   // The size segment shows while a caption/badge is being placed or is selected
   const sizeRelevant = useAnnotationStore((s) =>
@@ -110,6 +117,33 @@ export function AnnotationToolbar() {
       </button>
     );
   };
+
+  const reorderSelected = (mode: 'front' | 'forward' | 'backward' | 'back') => {
+    const store = useAnnotationStore.getState();
+    const id = store.selectedObjectId;
+    if (!id) return;
+    const objects = store.scene.objects;
+    const from = objects.findIndex((o) => o.id === id);
+    if (from === -1) return;
+    const at = mode === 'front' ? objects.length - 1
+      : mode === 'back' ? 0
+        : mode === 'forward' ? Math.min(objects.length - 1, from + 1)
+          : Math.max(0, from - 1);
+    if (at === from) return;
+    store.localApply([{ t: 'reorder', id, at }]); // its own undo step
+  };
+
+  const zOrderButton = (mode: 'front' | 'forward' | 'backward' | 'back', labelKey: string, Icon: typeof Undo2) => (
+    <button
+      onClick={() => reorderSelected(mode)}
+      className="rounded p-1.5 text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary"
+      title={t(labelKey)}
+      aria-label={t(labelKey)}
+      data-z-order={mode}
+    >
+      <Icon size={15} />
+    </button>
+  );
 
   const historyButton = (onClick: () => void, enabled: boolean, labelKey: string, keyLabel: string, Icon: typeof Undo2) => (
     <button
@@ -252,6 +286,14 @@ export function AnnotationToolbar() {
           >
             <ListOrdered size={15} />
           </button>
+        )}
+        {annotationsVersion >= 2 && reorderableId && (
+          <div className="flex items-center gap-0.5 border-l border-vox-border pl-2" data-testid="z-order-controls">
+            {zOrderButton('back', 'voice.annotations.sendToBack', SendToBack)}
+            {zOrderButton('backward', 'voice.annotations.sendBackward', ArrowDown)}
+            {zOrderButton('forward', 'voice.annotations.bringForward', ArrowUp)}
+            {zOrderButton('front', 'voice.annotations.bringToFront', BringToFront)}
+          </div>
         )}
         {historyButton(undo, canUndo, 'voice.annotations.undo', 'Ctrl+Z', Undo2)}
         {historyButton(redo, canRedo, 'voice.annotations.redo', 'Ctrl+Shift+Z', Redo2)}

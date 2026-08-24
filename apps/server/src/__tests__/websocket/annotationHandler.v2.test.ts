@@ -125,6 +125,21 @@ describe('wire v2 — new object kinds', () => {
     expect((await send(opsHandler, [{ t: 'add', obj: arrow({ fade: 1 }) }])).mock.calls[0][0].ok).toBe(false);
   });
 
+  it('reorder: v2 validates id + a bounded integer index; the reducer moves, clamps, and no-ops unknown ids', async () => {
+    const scene = { objects: [stroke({ id: 'x1' }), stroke({ id: 'x2' }), stroke({ id: 'x3' })] } as never;
+    const ids = (s: { objects: { id: string }[] }) => s.objects.map((o) => o.id);
+    expect(ids(applyAnnotationOps(scene, [{ t: 'reorder', id: 'x1', at: 2 }]))).toEqual(['x2', 'x3', 'x1']);
+    expect(ids(applyAnnotationOps(scene, [{ t: 'reorder', id: 'x3', at: 0 }]))).toEqual(['x3', 'x1', 'x2']);
+    expect(ids(applyAnnotationOps(scene, [{ t: 'reorder', id: 'x1', at: 99 }]))).toEqual(['x2', 'x3', 'x1']); // clamped
+    expect(ids(applyAnnotationOps(scene, [{ t: 'reorder', id: 'zz', at: 0 }]))).toEqual(['x1', 'x2', 'x3']); // unknown id: no-op
+
+    const { opsHandler } = setup();
+    expect((await send(opsHandler, [{ t: 'add', obj: stroke() }, { t: 'reorder', id: 'st1', at: 0 }])).mock.calls[0][0].ok).toBe(true);
+    expect((await send(opsHandler, [{ t: 'reorder', id: 'st1', at: -1 }])).mock.calls[0][0].ok).toBe(false);
+    expect((await send(opsHandler, [{ t: 'reorder', id: 'st1', at: 1.5 }])).mock.calls[0][0].ok).toBe(false);
+    expect((await send(opsHandler, [{ t: 'reorder', id: 'st1' }])).mock.calls[0][0].ok).toBe(false);
+  });
+
   it('still rejects unknown kinds', async () => {
     const { opsHandler } = setup();
     expect((await send(opsHandler, [{ t: 'add', obj: { id: 'x', kind: 'sticker', x: 0, y: 0 } }])).mock.calls[0][0].ok).toBe(false);
@@ -277,6 +292,7 @@ describe('wire v2 — annotations_v2 flag off', () => {
       [{ t: 'update', id: 'st1', patch: { width: 0.01 } }],
       [{ t: 'update', id: 'c1', patch: { n: 2 } }],
       [{ t: 'update', id: 'a1', patch: { x1: 0.2 } }],
+      [{ t: 'reorder', id: 'st1', at: 0 }],
     ]) {
       expect((await send(opsHandler, bad)).mock.calls[0][0]).toEqual({ ok: false, error: 'Invalid payload' });
     }

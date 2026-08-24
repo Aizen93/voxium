@@ -165,6 +165,10 @@ export type AnnotationOp =
   /** Move an object by a normalized delta — the only way to move a stroke
    *  without re-sending its points. */
   | { t: 'translate'; id: string; dx: number; dy: number }
+  /** Move an object to z-index `at` (v2) — "bring to front" without
+   *  re-sending the object. Clamped; unknown ids are a no-op; v1 clients
+   *  skip it (their z-order diverges cosmetically until the next hydrate). */
+  | { t: 'reorder'; id: string; at: number }
   | { t: 'remove'; id: string }
   | { t: 'clear' };
 
@@ -270,6 +274,15 @@ export function applyAnnotationOps(scene: AnnotationScene, ops: AnnotationOp[]):
       }
       case 'translate': {
         objects = objects.map((o) => (o.id === op.id ? translateAnnotationObject(o, op.dx, op.dy) : o));
+        break;
+      }
+      case 'reorder': {
+        const from = objects.findIndex((o) => o.id === op.id);
+        if (from === -1) break;
+        const next = objects.slice();
+        const [moved] = next.splice(from, 1);
+        next.splice(Math.max(0, Math.min(op.at, next.length)), 0, moved);
+        objects = next;
         break;
       }
       case 'remove': {

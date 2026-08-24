@@ -79,6 +79,13 @@ export function inverseOf(op: AnnotationOp, scene: AnnotationScene, addedInGestu
       if (addedInGesture.has(op.id)) return [];
       return findObject(scene, op.id) ? [{ t: 'translate', id: op.id, dx: -op.dx, dy: -op.dy }] : [];
     }
+    case 'reorder': {
+      if (addedInGesture.has(op.id)) return [];
+      // `scene` is the PRE-op scene: the object's index there is where undo
+      // must put it back
+      const from = scene.objects.findIndex((o) => o.id === op.id);
+      return from === -1 ? [] : [{ t: 'reorder', id: op.id, at: from }];
+    }
     case 'remove': {
       const existing = findObject(scene, op.id);
       return existing ? [readdInPlace(scene, existing)] : [];

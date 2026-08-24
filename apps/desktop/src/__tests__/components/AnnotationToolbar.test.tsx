@@ -71,6 +71,44 @@ describe('AnnotationToolbar', () => {
     expect(container.querySelector('[data-testid="annotation-toolbar-collapsed"]')).toBeNull();
   });
 
+  it('z-order controls show for a selected scene object on v2, ship reorder ops, and hide for masks / spotlight / v1', () => {
+    useAnnotationStore.setState({ isEditing: true });
+    useAnnotationStore.getState().localApply([
+      { t: 'add', obj: { id: 'under', kind: 'shape', shape: 'rect', color: '#ff0000', width: 0.004, x: 0.1, y: 0.1, w: 0.2, h: 0.2 } },
+      { t: 'add', obj: { id: 'over', kind: 'image', src: 'data:image/webp;base64,AA', x: 0.1, y: 0.1, w: 0.2, h: 0.2 } },
+    ]);
+    useAnnotationStore.setState({ selectedObjectId: 'under' });
+    render(<AnnotationToolbar />);
+    const controls = container.querySelector('[data-testid="z-order-controls"]');
+    expect(controls).not.toBeNull();
+    click(controls!.querySelector('[data-z-order="front"]'));
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['over', 'under']);
+    click(controls!.querySelector('[data-z-order="back"]'));
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['under', 'over']);
+    click(controls!.querySelector('[data-z-order="forward"]'));
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['over', 'under']);
+    click(controls!.querySelector('[data-z-order="backward"]'));
+    expect(useAnnotationStore.getState().scene.objects.map((o) => o.id)).toEqual(['under', 'over']);
+
+    // A selected MASK gets no z-order (masks are not scene objects)
+    useAnnotationStore.setState({ masks: [{ id: 'm1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 }], selectedObjectId: 'm1' });
+    render(<AnnotationToolbar />);
+    expect(container.querySelector('[data-testid="z-order-controls"]')).toBeNull();
+
+    // The spotlight always paints first — reordering it is meaningless
+    useAnnotationStore.getState().localApply([{ t: 'add', obj: { id: 'sp', kind: 'spotlight', x: 0.2, y: 0.2, w: 0.3, h: 0.3 } }]);
+    useAnnotationStore.setState({ selectedObjectId: 'sp', masks: [] });
+    render(<AnnotationToolbar />);
+    expect(container.querySelector('[data-testid="z-order-controls"]')).toBeNull();
+
+    // Below wire v2 the op would be rejected — the controls hide
+    voiceState.screenShareAnnotationsVersion = 1;
+    useAnnotationStore.setState({ selectedObjectId: 'under' });
+    render(<AnnotationToolbar />);
+    expect(container.querySelector('[data-testid="z-order-controls"]')).toBeNull();
+    voiceState.screenShareAnnotationsVersion = 2;
+  });
+
   it('hides the entire mask section on a whiteboard — a board has nothing to cover', () => {
     useAnnotationStore.setState({ isEditing: true });
     voiceState.shareKind = 'whiteboard';
