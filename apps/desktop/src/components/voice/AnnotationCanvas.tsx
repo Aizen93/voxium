@@ -73,6 +73,7 @@ function drawScene(
   fading: ReadonlyMap<string, FadeClock> = new Map(),
   now: number = Date.now(),
   preview: MaskPreviewSource | null = null,
+  pruneCache = true,
 ): void {
   ctx.clearRect(0, 0, w, h);
   const usedIds = new Set<string>();
@@ -194,7 +195,7 @@ function drawScene(
   }
 
   for (const id of imageCache.keys()) {
-    if (!usedIds.has(id)) imageCache.delete(id);
+    if (pruneCache && !usedIds.has(id)) imageCache.delete(id);
   }
 }
 
@@ -205,13 +206,14 @@ function drawScene(
  * frame — no viewer ever runs a permanent loop for an overlay that is usually
  * static. A fresh event while idle starts it again via the subscription.
  */
-export function useLiveScheduler(draw: () => void): void {
+export function useLiveScheduler(draw: () => void, enabled = true): void {
   const drawRef = useRef(draw);
   useLayoutEffect(() => {
     drawRef.current = draw;
   });
 
   useEffect(() => {
+    if (!enabled) return; // a masks-only canvas paints nothing time-driven
     let handle = 0;
     let running = false;
     const tick = () => {
@@ -238,7 +240,7 @@ export function useLiveScheduler(draw: () => void): void {
       cancelAnimationFrame(handle);
       running = false;
     };
-  }, []);
+  }, [enabled]);
 }
 
 const MASKS_ONLY_SCENE: AnnotationScene = { objects: [] };
@@ -256,9 +258,15 @@ export function AnnotationCanvas({ videoRef, masksOnly = false }: AnnotationCanv
 
   // The cache is module-level (survives re-renders); without this, decoded
   // images from a share leak until the NEXT annotated share prunes them.
-  // Inline/floating render exactly one canvas at a time, so a full clear on
-  // unmount is safe — the next mount's draw repopulates from the scene.
-  useEffect(() => () => imageCache.clear(), []);
+  // Inline/floating render exactly one SCENE canvas at a time, so a full
+  // clear on unmount is safe — but a masks-only canvas (the pre-flight) can
+  // be mounted ALONGSIDE the live viewer, so it must neither clear the cache
+  // on unmount nor prune entries its empty scene never uses (the draw below
+  // passes pruneCache: false).
+  useEffect(() => {
+    if (masksOnly) return;
+    return () => imageCache.clear();
+  }, [masksOnly]);
 
   // One draw routine for both triggers: scene/mask/rect changes (effect
   // below) and the live scheduler (time-driven frames). It is cheap enough to
@@ -279,9 +287,9 @@ export function AnnotationCanvas({ videoRef, masksOnly = false }: AnnotationCanv
     const { pointer, fading } = useAnnotationLiveStore.getState();
     if (scratchRef.current === undefined) scratchRef.current = createScratchCanvas();
     const preview = videoRef.current ? { video: videoRef.current, scratch: scratchRef.current } : null;
-    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1), fading, now, preview);
+    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1), fading, now, preview, !masksOnly);
     if (pointer && !masksOnly) drawLivePointer(ctx, pointer, now, rect.w, rect.h);
-  }, [scene, masks, rect, videoRef]);
+  }, [scene, masks, rect, videoRef, masksOnly]);
 
   useEffect(() => {
     draw();
@@ -307,7 +315,7 @@ export function AnnotationCanvas({ videoRef, masksOnly = false }: AnnotationCanv
     return () => clearInterval(id);
   }, [hasStyledMask]);
 
-  useLiveScheduler(draw);
+  useLiveScheduler(draw, !masksOnly);
 
   if (rect.w <= 0 || rect.h <= 0) return null;
 

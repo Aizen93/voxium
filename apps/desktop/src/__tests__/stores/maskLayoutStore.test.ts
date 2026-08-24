@@ -189,8 +189,12 @@ describe('maskLayoutStore — failure and rejection paths', () => {
     voiceMock.current.setState({ pendingShare: { sourceKey: KEY } }); // applies + banner
     expect(annotationMock.current.getState().masks).toHaveLength(1);
 
+    // A hand-placed mask next to the applied one must survive the click —
+    // and must NOT be persisted (a later cancel leaves no trace)
+    annotationMock.current.addMask(mask('hand'));
+
     useMaskLayoutStore.getState().startFresh();
-    expect(annotationMock.current.getState().masks).toEqual([]);
+    expect(annotationMock.current.getState().masks.map((m) => m.id)).toEqual(['hand']);
     expect(useMaskLayoutStore.getState().appliedLayout).toBeNull();
     // The identical click on the LIVE banner deletes the entry via the save
     // subscription; the pre-flight (not sharing yet) must reach the same state

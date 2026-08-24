@@ -23,6 +23,10 @@ export interface ShareMaskHooks {
 }
 
 let shareMaskHooks: ShareMaskHooks | null = null;
+/** True from claim to produce-settled: the share button stays enabled while
+ *  isScreenSharing is still false, so a second pre-flight could otherwise
+ *  confirm concurrently and its failure rollback would clobber the first. */
+let shareActivationInFlight = false;
 export function registerShareMaskHooks(hooks: ShareMaskHooks): void {
   shareMaskHooks = hooks;
 }
@@ -1325,7 +1329,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
               if (staleScreenStream) {
                 staleScreenStream.getTracks().forEach((t) => t.stop());
               }
-              set({ screenStream: null, isScreenSharing: false, screenSharingUserId: null });
+              set({ screenStream: null, isScreenSharing: false, screenSharingUserId: null, screenShareFrozen: false, screenShareSourceKey: null });
               get().cleanupSFU();
               // Secure voice: a transport restart is a SESSION restart — the
               // full join path re-begins with a fresh key + epoch (IV-reuse
@@ -2023,7 +2027,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const socket = getSocket();
     const { activeChannelId, msSendTransport, msDevice, isScreenSharing, screenStream, pendingShare } = get();
     if (!socket || !activeChannelId || !msSendTransport || !msDevice) return;
-    if (pendingShare) return; // a pre-flight is already open
+    if (pendingShare || shareActivationInFlight) return; // a pre-flight or activation is already in progress
 
     // If stale state says we're sharing but the stream is dead, clean up before proceeding
     if (isScreenSharing) {
@@ -2117,6 +2121,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     const createdProducers: Producer[] = [];
     let claimedSlot = false;
+    shareActivationInFlight = true;
     try {
       // Claim the sharer slot BEFORE producing — the server authorizes
       // screen-video/screen-audio producers only for the active sharer.
@@ -2222,6 +2227,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         set({ msProducers: newProducers });
       }
 
+      // Second half of the ended-mid-setup window: onended may have run
+      // stopScreenShare during the audio produce await — the set below would
+      // resurrect a "live" share whose producer is already closed.
+      if (!get().activeChannelId || videoTrack.readyState !== 'live') {
+        throw new Error('Screen capture ended during setup');
+      }
       set({
         screenStream: stream,
         isScreenSharing: true,
@@ -2264,6 +2275,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       if (!isUserCancel) {
         toast.error('Screen share failed — please try again');
       }
+    } finally {
+      shareActivationInFlight = false;
     }
   },
 

@@ -364,6 +364,44 @@ describe('voiceStore', () => {
       expect(clear).toHaveBeenCalled();
       expect(stop).toHaveBeenCalled();
     });
+
+    it('a capture that ends during the produce round-trip aborts instead of resurrecting a dead share', async () => {
+      const socket = vi.mocked(getSocket)()!;
+      vi.mocked(socket.emit).mockImplementation(((event: string, ...args: unknown[]) => {
+        if (event === 'voice:screen_share:start') {
+          const cb = args[0];
+          if (typeof cb === 'function') (cb as (r: unknown) => void)({ ok: true, annotationsVersion: 2 });
+        }
+        return socket;
+      }) as never);
+      const track = {
+        readyState: 'live',
+        getSettings: () => ({ width: 100, height: 100, displaySurface: 'window' }),
+        contentHint: '',
+        onended: null as null | (() => void),
+        stop: vi.fn(),
+      };
+      const producer = { id: 'p1', closed: false, close: vi.fn(), appData: { type: 'screen-video' } };
+      const produce = vi.fn(async () => {
+        track.readyState = 'ended'; // the user hit the browser's Stop mid-produce
+        return producer;
+      });
+      useVoiceStore.setState({
+        activeChannelId: 'chan-1',
+        msSendTransport: { produce } as never,
+        msDevice: { canProduce: () => true } as never,
+        pendingShare: {
+          stream: { getTracks: () => [track], getVideoTracks: () => [track], getAudioTracks: () => [] } as never,
+          sourceKey: 'window:100x100',
+          displaySurface: 'window',
+        },
+      });
+      await useVoiceStore.getState().confirmPendingShare();
+      expect(useVoiceStore.getState().isScreenSharing).toBe(false);
+      expect(producer.close).toHaveBeenCalled(); // the half-created producer is rolled back
+      expect(vi.mocked(socket.emit)).toHaveBeenCalledWith('voice:screen_share:stop'); // slot freed
+      expect(useVoiceStore.getState().screenShareSourceKey).toBeNull();
+    });
   });
 
   describe('setLocalUserId', () => {

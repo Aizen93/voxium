@@ -78,11 +78,13 @@ export const useMaskLayoutStore = create<MaskLayoutState>((set, get) => ({
     // Rejecting the remembered layout IS an edit to the memory — but in the
     // pre-flight the save-on-edit subscription is (correctly) gated on a live
     // share, so persist the rejection here or the exact masks the user just
-    // dismissed come back on every future share of this source.
+    // dismissed come back on every future share of this source. Persist the
+    // DELETION only: hand-placed pre-flight masks stay unsaved (saves are
+    // gated on a live share precisely so a later cancel leaves no trace) —
+    // if this share goes live, the debounced save remembers them then.
     const userId = useVoiceStore.getState().localUserId;
     if (userId) {
-      const remaining = useAnnotationStore.getState().masks;
-      saveMaskLayouts(userId, upsertMaskLayout(loadMaskLayouts(userId), applied.key, remaining, Date.now()));
+      saveMaskLayouts(userId, upsertMaskLayout(loadMaskLayouts(userId), applied.key, [], Date.now()));
     }
   },
 }));

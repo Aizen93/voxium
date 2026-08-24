@@ -669,6 +669,38 @@ describe('source-change guard', () => {
     expect(isSourceHeld()).toBe(true);
   });
 
+  it('a throwing frame draw pauses the producer fail-closed; removing the masks resumes', async () => {
+    let boom = false;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      drawImage: vi.fn(() => { if (boom) throw new Error('lost context'); order.push('frameDrawn'); }),
+      fillRect: vi.fn(), fillStyle: '', save: vi.fn(), restore: vi.fn(),
+      beginPath: vi.fn(), rect: vi.fn(), clip: vi.fn(), imageSmoothingEnabled: true,
+    } as unknown as CanvasRenderingContext2D);
+    const live = { masks: [mask('m')] };
+    const handles = holdHandles(() => live.masks);
+    await ensureComposite(handles);
+    setVideoSize(1920, 1080);
+    runFrame();
+    expect(isSourceHeld()).toBe(false);
+    handles.pauseProducer.mockClear();
+    handles.resumeProducer.mockClear();
+
+    boom = true;
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    runFrame(); // the raw frame is on the canvas, the mask paint threw
+    errSpy.mockRestore();
+    expect(handles.pauseProducer).toHaveBeenCalled(); // captureStream samples the surface — gate RTP
+    expect(handles.onFatal).toHaveBeenCalledTimes(1);
+
+    runFrame(); // keeps throwing — still gated, no toast spam
+    expect(handles.onFatal).toHaveBeenCalledTimes(1);
+
+    live.masks = [];
+    boom = false;
+    await stopComposite(); // nothing left to protect
+    expect(handles.resumeProducer).toHaveBeenCalled();
+  });
+
   it('a hold raised while the producer handles are still stubs is re-asserted on attach', async () => {
     const h = holdHandles(() => [mask('m')]);
     const track = await prepareComposite({

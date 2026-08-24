@@ -97,7 +97,7 @@ interface AnnotationState {
    *  buffered from the previous generation. */
   hydrate: (channelId: string, rev: number, scene: AnnotationScene, restarted?: boolean) => void;
   applyRemoteOps: (channelId: string, rev: number, ops: AnnotationOp[]) => void;
-  clearViewerScene: () => void;
+  clearViewerScene: (opts?: { keepMasks?: boolean }) => void;
 
   // Sharer path
   /** Apply locally, enqueue for the wire, and (unless `record: false`) record
@@ -551,22 +551,25 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     trackFadeClocks(base, next, ops);
   },
 
-  clearViewerScene: () => {
+  clearViewerScene: (opts) => {
     resetQueue();
     recentRemoteOps = [];
     resetHistory();
     cancelVanishTimers();
-    set({
+    set((state) => ({
       scene: EMPTY_SCENE,
       rev: 0,
       sceneChannelId: null,
       isEditing: false,
       selectedObjectId: null,
-      masks: [],
+      // keepMasks: a pre-flight is a PRIVATE mask-editing session — masks
+      // being placed there belong to the UPCOMING share, not to whatever
+      // share just started or stopped in the channel
+      masks: opts?.keepMasks === true ? state.masks : [],
       sourceChangeHold: null,
       canUndo: false,
       canRedo: false,
-    });
+    }));
   },
 
   localApply: (ops, opts) => {
@@ -784,7 +787,11 @@ useVoiceStore.subscribe((state, prevState) => {
   if (state.screenSharingUserId !== null && state.screenSharingUserId === state.localUserId) return;
   const annotations = useAnnotationStore.getState();
   if (prevState.isScreenSharing) annotations.teardownSharerSession();
-  annotations.clearViewerScene();
+  // ANOTHER user's share starting or stopping while our pre-flight is open
+  // must not delete the masks being placed — the slot is unclaimed for the
+  // whole pre-flight, so this is an ordinary race, and going live afterwards
+  // would read hasMasks() === false and produce the RAW track.
+  annotations.clearViewerScene({ keepMasks: state.pendingShare !== null });
   // Ephemeral overlay state dies with the share too (pointer, reactions)
   useAnnotationLiveStore.getState().clear();
 });

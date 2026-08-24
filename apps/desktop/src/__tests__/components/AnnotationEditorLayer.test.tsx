@@ -355,6 +355,11 @@ describe('AnnotationEditorLayer — capabilities and gestures', () => {
     pointerDown(layer(), 560, 315); // inside the pre-flight mask
     pointerUp(layer());
     expect(useAnnotationStore.getState().selectedObjectId).toBe('my-mask');
+
+    // Even a programmatic/stale scene selection gets no chrome — its resize
+    // handle would beginGesture + localApply real ops toward the wire
+    act(() => { useAnnotationStore.setState({ selectedObjectId: 'their-box' }); });
+    expect(container.querySelector('.cursor-nwse-resize')).toBeNull();
   });
 
   it('the mask tool is inert when the capabilities forbid masks, even if listed', () => {

@@ -16,6 +16,7 @@ const voiceMock = vi.hoisted(() => {
     screenSharingUserId: string | null;
     localUserId: string | null;
     isScreenSharing: boolean;
+    pendingShare: { sourceKey: string | null } | null;
     screenStream: { getVideoTracks: () => { readyState: string }[] } | null;
     screenShareAnnotationsVersion: number;
     replaceScreenVideoTrack: (track: unknown) => Promise<void>;
@@ -26,6 +27,7 @@ const voiceMock = vi.hoisted(() => {
     screenSharingUserId: null,
     localUserId: 'me',
     isScreenSharing: false,
+    pendingShare: null,
     screenStream: null,
     screenShareAnnotationsVersion: 2,
     replaceScreenVideoTrack: async () => {},
@@ -863,6 +865,17 @@ describe('annotationStore — screen-share lifecycle guard', () => {
     voiceMock.setState({ screenSharingUserId: 'me' }); // broadcast lands after we went live
     expect(useAnnotationStore.getState().masks).toHaveLength(1);
     expect(compositeMock.teardownComposite).not.toHaveBeenCalled();
+  });
+
+  it('an OPEN PRE-FLIGHT keeps its masks when another user starts or stops sharing', () => {
+    voiceMock.setState({ pendingShare: { sourceKey: 'window:1280x720' } });
+    useAnnotationStore.getState().addMask({ id: 'pre1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+
+    voiceMock.setState({ screenSharingUserId: 'other-user' }); // their share starts
+    expect(useAnnotationStore.getState().masks).toHaveLength(1);
+
+    voiceMock.setState({ screenSharingUserId: null }); // and stops before we go live
+    expect(useAnnotationStore.getState().masks).toHaveLength(1); // going live must still composite
   });
 
   it('someone ELSE starting a share still clears everything', () => {

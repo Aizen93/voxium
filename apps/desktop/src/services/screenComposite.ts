@@ -52,6 +52,11 @@ interface ActiveSession {
   /** Producer paused for a source-size change; cleared only by an explicit
    *  resumeSourceHold (or the session ending). */
   sourceHold: boolean;
+  /** A frame draw threw (logged once). */
+  drawFailed: boolean;
+  /** The producer was paused fail-closed because draws are failing while
+   *  masks exist; released when the masks go (stopComposite resumes). */
+  drawFailPaused: boolean;
   video: HTMLVideoElement;
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
@@ -196,12 +201,25 @@ function startFrameLoop(s: ActiveSession): void {
     try {
       resized = renderCompositeFrame(s.ctx, s.video, s.canvas, masks, (m) => maskImageFor(s, m), s.scratch);
     } catch (err) {
-      // Viewers hold the last MASKED frame (canvas keeps its pixels) — safe
-      // direction, but say so once instead of dying silently at frame rate.
-      const flagged = s as typeof s & { drawErrorLogged?: boolean };
-      if (!flagged.drawErrorLogged) {
-        flagged.drawErrorLogged = true;
-        console.error('[ScreenComposite] Frame draw failed — viewers hold the last masked frame:', err);
+      // renderCompositeFrame paints the RAW frame first and the masks after —
+      // a throw mid-mask-loop leaves raw pixels on the captured canvas, and
+      // captureStream samples that surface on its own clock. FAIL CLOSED:
+      // pause RTP and tell the sharer. (Letting the loop die instead only
+      // ever froze ONE leaked frame because nothing re-armed it; a caught
+      // error that keeps the loop alive must gate the producer.)
+      if (!s.drawFailed) {
+        s.drawFailed = true;
+        console.error('[ScreenComposite] Frame draw failed:', err);
+      }
+      // Re-checked every frame: the first failure may predate the first mask.
+      if (masks.length > 0 && !s.drawFailPaused) {
+        s.drawFailPaused = true;
+        try {
+          s.handles.pauseProducer();
+          s.handles.onFatal?.();
+        } catch (hookErr) {
+          console.warn('[ScreenComposite] Fail-closed pause failed:', hookErr);
+        }
       }
       return;
     }
@@ -289,6 +307,8 @@ async function buildSession(handles: CompositeHandles, gen: number): Promise<Act
     const created: ActiveSession = {
       handles,
       sourceHold: false,
+      drawFailed: false,
+      drawFailPaused: false,
       video,
       canvas,
       ctx,
@@ -366,7 +386,7 @@ export function attachCompositeProducerHandles(producer: Pick<CompositeHandles, 
   // the pre-attach STUB pauseProducer (a no-op) — re-assert it here or a
   // "held" share streams frames whose masks are normalized to the OLD
   // geometry while the banner claims nothing ships until the sharer confirms.
-  if (session.sourceHold) {
+  if (session.sourceHold || session.drawFailPaused) {
     try {
       session.handles.pauseProducer();
     } catch (err) {
@@ -456,8 +476,9 @@ export async function stopComposite(): Promise<void> {
     // but the producer is still paused from it, and every path out of here
     // (raw track restored, or the keep-composited fallback) must resume it,
     // or the share stays frozen with nothing left to protect.
-    const wasHeld = s.sourceHold;
+    const wasHeld = s.sourceHold || s.drawFailPaused; // both pauses die with the masks
     s.sourceHold = false;
+    s.drawFailPaused = false;
 
     if (s.handles.rawTrack.readyState === 'live') {
       try {

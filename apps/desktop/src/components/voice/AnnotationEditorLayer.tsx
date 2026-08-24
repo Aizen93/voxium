@@ -559,6 +559,9 @@ export function AnnotationEditorLayer({ videoRef, capabilities = ALL_TOOL_CAPABI
     if (!selectedObjectId) return null;
     const mask = masks.find((m) => m.id === selectedObjectId);
     if (mask) return { box: mask, isMask: true, resizable: true };
+    // Mask-only surface: even a stale scene selection gets no chrome — its
+    // resize handle would beginGesture + localApply real ops toward the wire
+    if (capabilities.sceneObjects === false) return null;
     const obj = scene.objects.find((o) => o.id === selectedObjectId);
     const box = obj ? objectBbox(obj) : null;
     if (!obj || !box) return null;
