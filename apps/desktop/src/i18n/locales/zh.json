@@ -762,6 +762,9 @@
     "dockToInline": "停靠到主视图",
     "waitingForStream": "正在等待屏幕共享流...",
     "screenShare": "屏幕共享",
+    "zoom": {
+      "reset": "重置缩放"
+    },
     "preflight": {
       "title": "准备共享",
       "subtitle": "只有你能看到此预览。上线前请遮盖隐私内容。",

@@ -762,6 +762,9 @@
     "dockToInline": "Ancrer dans la vue",
     "waitingForStream": "En attente du flux de partage d'écran...",
     "screenShare": "Partage d'écran",
+    "zoom": {
+      "reset": "Réinitialiser le zoom"
+    },
     "preflight": {
       "title": "Préparez votre partage",
       "subtitle": "Vous seul voyez cet aperçu. Couvrez ce qui est privé avant de passer en direct.",

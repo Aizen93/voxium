@@ -762,6 +762,9 @@
     "dockToInline": "メインビューに戻す",
     "waitingForStream": "画面共有ストリームを待機中...",
     "screenShare": "画面共有",
+    "zoom": {
+      "reset": "ズームをリセット"
+    },
     "preflight": {
       "title": "共有の準備",
       "subtitle": "このプレビューはあなたにしか見えません。配信前にプライベートな部分を隠してください。",

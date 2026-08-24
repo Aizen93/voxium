@@ -10,6 +10,7 @@ import { AnnotationToolbar } from './AnnotationToolbar';
 import { AnnotationEditorLayer } from './AnnotationEditorLayer';
 import { availableToolDefs } from './annotationPresets';
 import { useAnnotationShortcuts } from '../../hooks/useAnnotationShortcuts';
+import { useStageZoom, ZoomPill, MagnifierLens } from './StageZoom';
 
 export function ScreenShareViewer() {
   const { t } = useTranslation();
@@ -29,11 +30,19 @@ export function ScreenShareViewer() {
   const startFresh = useMaskLayoutStore((s) => s.startFresh);
 
   const isLocalSharing = screenSharingUserId === localUserId;
+  const zoomStageRef = useRef<HTMLDivElement>(null);
   // Keys follow the toolbar exactly: the same list, the same v2 gate. The
   // hook is a no-op while not editing, so mounting it unconditionally is fine.
   const shortcutTools = useMemo(() => (isLocalSharing ? availableToolDefs(annotationsVersion) : []), [isLocalSharing, annotationsVersion]);
   useAnnotationShortcuts(shortcutTools);
   const stream = isLocalSharing ? screenStream : remoteScreenStream;
+  // Zoom is CLIENT-ONLY and disabled while the sharer edits — the editor maps
+  // pointer to normalized coords from an untransformed layer rect (disabling
+  // also RESETS, so the layer never mounts transformed).
+  const { zoom, style: zoomStyle, handlers: zoomHandlers, reset: resetZoom } = useStageZoom(
+    zoomStageRef,
+    !!stream && !(isLocalSharing && isEditing),
+  );
 
   // Find the sharer's display name
   const users = activeChannelId ? channelUsers.get(activeChannelId) || [] : [];
@@ -150,19 +159,29 @@ export function ScreenShareViewer() {
             {t('voice.annotations.sharePaused')}
           </div>
         )}
-        <div className="relative flex flex-1 items-center justify-center min-h-0">
+        <div
+          ref={zoomStageRef}
+          className="relative flex flex-1 items-center justify-center min-h-0 overflow-hidden"
+          {...zoomHandlers}
+        >
           {stream ? (
             <>
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                preload="none"
-                className="max-h-full max-w-full object-contain"
-              />
-              <AnnotationCanvas videoRef={videoRef} />
-              {isLocalSharing && isEditing && <AnnotationEditorLayer videoRef={videoRef} />}
+              {/* The transformed parent holds BOTH the video and the canvas,
+                  so the overlay stays registered to the pixels at any zoom */}
+              <div className="relative flex h-full w-full items-center justify-center" style={zoomStyle} data-testid="zoom-surface">
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  preload="none"
+                  className="max-h-full max-w-full object-contain"
+                />
+                <AnnotationCanvas videoRef={videoRef} />
+                {isLocalSharing && isEditing && <AnnotationEditorLayer videoRef={videoRef} />}
+              </div>
+              <ZoomPill zoom={zoom} onReset={resetZoom} />
+              <MagnifierLens videoRef={videoRef} stageRef={zoomStageRef} disabled={zoom.scale > 1 || (isLocalSharing && isEditing)} />
             </>
           ) : (
             <p className="text-vox-text-muted text-sm">{t('voice.waitingForStream')}</p>

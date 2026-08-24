@@ -762,6 +762,9 @@
     "dockToInline": "In Ansicht andocken",
     "waitingForStream": "Warte auf den Bildschirmstream...",
     "screenShare": "Bildschirmübertragung",
+    "zoom": {
+      "reset": "Zoom zurücksetzen"
+    },
     "preflight": {
       "title": "Bereite deine Übertragung vor",
       "subtitle": "Nur du siehst diese Vorschau. Decke Privates ab, bevor du live gehst.",

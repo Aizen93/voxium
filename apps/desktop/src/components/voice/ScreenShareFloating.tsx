@@ -6,6 +6,7 @@ import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAuthStore } from '../../stores/authStore';
 import { Maximize, Minimize2, MonitorOff } from 'lucide-react';
 import { AnnotationCanvas } from './AnnotationCanvas';
+import { useStageZoom, ZoomPill, MagnifierLens } from './StageZoom';
 
 const MIN_WIDTH = 240;
 const MIN_HEIGHT = 180;
@@ -23,6 +24,7 @@ export function ScreenShareFloating() {
   const stopScreenShare = useVoiceStore((s) => s.stopScreenShare);
   const sourceChangeHold = useAnnotationStore((s) => s.sourceChangeHold);
   const confirmSourceChange = useAnnotationStore((s) => s.confirmSourceChange);
+  const { zoom, style: zoomStyle, handlers: zoomHandlers, reset: resetZoom } = useStageZoom(stageRef, true);
 
   const isLocalSharing = screenSharingUserId === localUserId;
   const stream = isLocalSharing ? screenStream : remoteScreenStream;
@@ -189,14 +191,23 @@ export function ScreenShareFloating() {
         )}
         {stream ? (
           <>
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="max-h-full max-w-full object-contain"
-            />
-            <AnnotationCanvas videoRef={videoRef} />
+            <div
+              className="relative flex h-full w-full items-center justify-center"
+              style={zoomStyle}
+              data-testid="floating-zoom-surface"
+              {...zoomHandlers}
+            >
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="max-h-full max-w-full object-contain"
+              />
+              <AnnotationCanvas videoRef={videoRef} />
+            </div>
+            <ZoomPill zoom={zoom} onReset={resetZoom} />
+            <MagnifierLens videoRef={videoRef} stageRef={stageRef} disabled={zoom.scale > 1} />
           </>
         ) : (
           <p className="text-vox-text-muted text-xs">{t('voice.waitingForStream')}</p>

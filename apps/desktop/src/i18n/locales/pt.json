@@ -762,6 +762,9 @@
     "dockToInline": "Encaixar na visualização",
     "waitingForStream": "Aguardando a transmissão da tela...",
     "screenShare": "Compartilhamento de tela",
+    "zoom": {
+      "reset": "Redefinir zoom"
+    },
     "preflight": {
       "title": "Prepara a tua partilha",
       "subtitle": "Só tu vês esta pré-visualização. Cobre o que é privado antes de emitir.",

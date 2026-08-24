@@ -768,6 +768,9 @@
     "dockToInline": "Dock to inline",
     "waitingForStream": "Waiting for screen share stream...",
     "screenShare": "Screen Share",
+    "zoom": {
+      "reset": "Reset zoom"
+    },
     "preflight": {
       "title": "Prepare your share",
       "subtitle": "Only you can see this preview. Cover anything private before going live.",

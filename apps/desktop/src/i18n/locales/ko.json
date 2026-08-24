@@ -762,6 +762,9 @@
     "dockToInline": "기본 화면에 고정",
     "waitingForStream": "화면 공유 스트림을 기다리는 중...",
     "screenShare": "화면 공유",
+    "zoom": {
+      "reset": "확대/축소 초기화"
+    },
     "preflight": {
       "title": "공유 준비",
       "subtitle": "이 미리보기는 본인만 볼 수 있습니다. 방송 전에 비공개 부분을 가리세요.",
