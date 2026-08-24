@@ -786,7 +786,7 @@
     },
     "preflight": {
       "title": "Bereite deine Übertragung vor",
-      "subtitle": "Nur du siehst diese Vorschau. Decke Privates ab, bevor du live gehst.",
+      "subtitle": "Decke Privates ab und füge Notizen oder Bilder hinzu — nichts wird vor dem Livegang geteilt",
       "monitorNudge": "Du teilst einen ganzen Bildschirm — Benachrichtigungen und alle anderen Fenster sind sichtbar. Decke Privates ab.",
       "maskCount": "{{count}} Masken",
       "skipNextTime": "Nicht mehr anzeigen (die Ganzbildschirm-Warnung bleibt)",

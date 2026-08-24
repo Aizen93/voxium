@@ -786,7 +786,7 @@
     },
     "preflight": {
       "title": "Prepara a tua partilha",
-      "subtitle": "Só tu vês esta pré-visualização. Cobre o que é privado antes de emitir.",
+      "subtitle": "Cubra o que é privado e adicione notas ou imagens — nada é compartilhado até você entrar ao vivo",
       "monitorNudge": "Estás a partilhar um ecrã inteiro — as notificações e todas as outras janelas ficarão visíveis. Cobre o que é privado.",
       "maskCount": "{{count}} máscaras",
       "skipNextTime": "Não voltar a mostrar (o aviso de ecrã inteiro mantém-se)",

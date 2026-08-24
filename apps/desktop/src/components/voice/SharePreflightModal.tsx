@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { Monitor, MousePointer2, ShieldOff } from 'lucide-react';
+import { Monitor, MousePointer2, ShieldOff, Type, ImagePlus, Eraser } from 'lucide-react';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useMaskLayoutStore } from '../../stores/maskLayoutStore';
@@ -23,13 +23,24 @@ import type { MaskStyle } from '../../utils/maskStyles';
  * notifications and every other window are in frame.
  */
 
-const PREFLIGHT_CAPABILITIES: ToolCapabilities = {
+/** Nobody else is sharing: the scene is OURS to draft in. Text and images
+ *  land in the local scene and their ops QUEUE (doFlush refuses to ship while
+ *  we are not the live sharer) — going live flushes them as the share's first
+ *  batches, so viewers open on the prepared frame. */
+const DRAFT_CAPABILITIES: ToolCapabilities = {
+  tools: new Set(['select', 'mask', 'text', 'image', 'eraser']),
+  masks: true,
+  images: true,
+  sceneObjects: true,
+};
+
+/** Another user IS live-sharing: the store's scene is THEIRS (we are a
+ *  viewer), so drafting is disabled — masks only, their scene never painted
+ *  over the private preview, select unable to drag their objects. */
+const MASKS_ONLY_CAPABILITIES: ToolCapabilities = {
   tools: new Set(['select', 'mask']),
   masks: true,
   images: false,
-  // Another user may be LIVE-sharing while this pre-flight is open: their
-  // scene must not paint over the private preview, and select must not be
-  // able to drag their objects (a drag enqueues real ops toward the wire).
   sceneObjects: false,
 };
 
@@ -52,6 +63,8 @@ export function SharePreflightModal() {
   const maskCount = useAnnotationStore((s) => s.masks.length);
   const appliedLayout = useMaskLayoutStore((s) => s.appliedLayout);
   const startFresh = useMaskLayoutStore((s) => s.startFresh);
+  const otherSharing = useVoiceStore((s) => s.screenSharingUserId !== null);
+  const capabilities = otherSharing ? MASKS_ONLY_CAPABILITIES : DRAFT_CAPABILITIES;
   const videoRef = useRef<HTMLVideoElement>(null);
   const [skip, setSkip] = useState(() => loadAnnotationPrefs().skipPreflight);
   const [going, setGoing] = useState(false);
@@ -79,7 +92,20 @@ export function SharePreflightModal() {
       return;
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') cancelPendingShare();
+      if (e.key === 'Escape') {
+        cancelPendingShare();
+        return;
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const target = e.target as HTMLElement | null;
+        if (target && (target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+        const store = useAnnotationStore.getState();
+        const id = store.selectedObjectId;
+        if (!id) return;
+        if (store.masks.some((m) => m.id === id)) store.removeMask(id);
+        else if (store.scene.objects.some((o) => o.id === id)) store.localApply([{ t: 'remove', id }]);
+        store.setSelectedObjectId(null);
+      }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -102,7 +128,7 @@ export function SharePreflightModal() {
     }
   };
 
-  const toolButton = (tool: 'select' | 'mask', label: string, Icon: typeof MousePointer2) => (
+  const toolButton = (tool: 'select' | 'mask' | 'text' | 'image' | 'eraser', label: string, Icon: typeof MousePointer2) => (
     <button
       onClick={() => setActiveTool(tool)}
       className={`rounded p-1.5 transition-colors ${
@@ -144,6 +170,13 @@ export function SharePreflightModal() {
         <div className="flex items-center gap-2 border-b border-vox-border bg-vox-bg-secondary px-3 py-1.5">
           {toolButton('select', t('voice.annotations.select'), MousePointer2)}
           {toolButton('mask', t('voice.annotations.mask'), ShieldOff)}
+          {!otherSharing && (
+            <>
+              {toolButton('text', t('voice.annotations.text'), Type)}
+              {toolButton('image', t('voice.annotations.image'), ImagePlus)}
+              {toolButton('eraser', t('voice.annotations.eraser'), Eraser)}
+            </>
+          )}
           <div className="ml-2 flex items-center gap-0.5">
             {MASK_STYLES.map(({ style, labelKey }) => (
               <button
@@ -165,8 +198,8 @@ export function SharePreflightModal() {
 
         <div className="relative flex min-h-0 flex-1 items-center justify-center bg-black" style={{ minHeight: 260 }}>
           <video ref={videoRef} autoPlay playsInline muted className="max-h-full max-w-full object-contain" />
-          <AnnotationCanvas videoRef={videoRef} masksOnly />
-          <AnnotationEditorLayer videoRef={videoRef} capabilities={PREFLIGHT_CAPABILITIES} />
+          <AnnotationCanvas videoRef={videoRef} masksOnly={otherSharing} />
+          <AnnotationEditorLayer videoRef={videoRef} capabilities={capabilities} />
         </div>
 
         <div className="flex items-center justify-between gap-3 border-t border-vox-border px-4 py-3">

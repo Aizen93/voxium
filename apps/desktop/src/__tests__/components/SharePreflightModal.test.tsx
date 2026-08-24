@@ -138,6 +138,45 @@ describe('SharePreflightModal', () => {
     expect(useMaskLayoutStore.getState().appliedLayout).toBeNull();
   });
 
+  it('drafting tools show while NOBODY shares; Delete/Backspace removes the selected draft or mask', () => {
+    render();
+    openPreflight();
+    expect(modal()!.querySelector('[data-preflight-tool="text"]')).not.toBeNull();
+    expect(modal()!.querySelector('[data-preflight-tool="image"]')).not.toBeNull();
+    expect(modal()!.querySelector('[data-preflight-tool="eraser"]')).not.toBeNull();
+
+    act(() => {
+      useAnnotationStore.getState().localApply([
+        { t: 'add', obj: { id: 'note', kind: 'text', text: 'hi', color: '#ff0000', size: 0.05, x: 0.1, y: 0.1 } },
+      ]);
+      useAnnotationStore.setState({ selectedObjectId: 'note' });
+    });
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete' }));
+    });
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+
+    act(() => {
+      useAnnotationStore.getState().addMask({ id: 'm9', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+      useAnnotationStore.setState({ selectedObjectId: 'm9' });
+    });
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace' }));
+    });
+    expect(useAnnotationStore.getState().masks).toEqual([]);
+  });
+
+  it('degrades to masks-only while ANOTHER user is live-sharing (their scene is not ours to draft in)', () => {
+    voiceMock.useVoiceStore.setState({ screenSharingUserId: 'other-user' });
+    render();
+    openPreflight();
+    expect(modal()!.querySelector('[data-preflight-tool="mask"]')).not.toBeNull();
+    expect(modal()!.querySelector('[data-preflight-tool="text"]')).toBeNull();
+    expect(modal()!.querySelector('[data-preflight-tool="image"]')).toBeNull();
+    expect(modal()!.querySelector('[data-preflight-tool="eraser"]')).toBeNull();
+    voiceMock.useVoiceStore.setState({ screenSharingUserId: null });
+  });
+
   it('mask style picks set the default for the masks about to be drawn', () => {
     render();
     openPreflight();

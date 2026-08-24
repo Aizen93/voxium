@@ -786,7 +786,7 @@
     },
     "preflight": {
       "title": "Préparez votre partage",
-      "subtitle": "Vous seul voyez cet aperçu. Couvrez ce qui est privé avant de passer en direct.",
+      "subtitle": "Masquez ce qui est privé et ajoutez notes ou images — rien n'est partagé avant le direct",
       "monitorNudge": "Vous partagez un écran entier — les notifications et toutes les autres fenêtres seront visibles. Couvrez ce qui est privé.",
       "maskCount": "{{count}} masques",
       "skipNextTime": "Ne plus afficher (l’avertissement plein écran reste)",

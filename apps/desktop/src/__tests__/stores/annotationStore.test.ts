@@ -26,7 +26,9 @@ const voiceMock = vi.hoisted(() => {
     activeChannelId: 'chan-1',
     screenSharingUserId: null,
     localUserId: 'me',
-    isScreenSharing: false,
+    // The suite exercises the SHARER's op pipeline, and doFlush now refuses
+    // to ship while not live-sharing (pre-flight drafts queue instead)
+    isScreenSharing: true,
     pendingShare: null,
     screenStream: null,
     screenShareAnnotationsVersion: 2,
@@ -75,6 +77,11 @@ vi.mock('../../i18n', () => ({
 
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
+import { registerShareMaskHooks } from '../../stores/voiceStore';
+
+// Captured at import time — the module registers exactly once, and beforeEach
+// mock-clearing would empty the call list
+const preflightHooks = vi.mocked(registerShareMaskHooks).mock.calls[0][0];
 import { loadAnnotationPrefs } from '../../utils/annotationPrefs';
 
 const initialState = useAnnotationStore.getState();
@@ -564,6 +571,45 @@ describe('annotationStore — history', () => {
 
 // ─── Vanishing ink ──────────────────────────────────────────────────────────
 
+describe('annotationStore — pre-flight drafts', () => {
+  it('draft ops QUEUE while not sharing and ship as the first batches at the go-live edge', async () => {
+    voiceMock.setState({ isScreenSharing: false });
+    const store = useAnnotationStore.getState();
+    store.localApply([stroke('draft-1')]);
+    store.flushOps();
+    vi.advanceTimersByTime(ANNOTATION_BATCH_INTERVAL_MS * 3);
+    expect(socketEmit).not.toHaveBeenCalled(); // the wire only opens for the ACTIVE sharer
+
+    voiceMock.setState({ isScreenSharing: true }); // go live: the queue flushes
+    expect(socketEmit).toHaveBeenCalledTimes(1);
+    const ops = socketEmit.mock.calls[0][1].ops as AnnotationOp[];
+    expect(ops.some((op) => op.t === 'add' && op.obj.id === 'draft-1')).toBe(true);
+    socketEmit.mock.calls[0][2]({ ok: true });
+    await Promise.resolve();
+  });
+
+  it('clearPreflightMasks wipes drafts + queue when nobody shares, but NEVER a viewed share', () => {
+    const hooks = preflightHooks;
+    voiceMock.setState({ isScreenSharing: false, screenSharingUserId: null });
+    const store = useAnnotationStore.getState();
+    store.localApply([stroke('draft')]);
+    store.addMask({ id: 'm1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
+    hooks.clearPreflightMasks();
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    expect(useAnnotationStore.getState().masks).toEqual([]);
+    voiceMock.setState({ isScreenSharing: true }); // the queue died with the drafts
+    vi.advanceTimersByTime(ANNOTATION_BATCH_INTERVAL_MS * 2);
+    expect(socketEmit).not.toHaveBeenCalled();
+
+    // Viewer protection: cancelling our pre-flight while watching SOMEONE
+    // ELSE's share must not clear our copy of their scene
+    voiceMock.setState({ isScreenSharing: false, screenSharingUserId: 'other' });
+    useAnnotationStore.getState().applyRemoteOps('chan-1', 1, [stroke('theirs')]);
+    hooks.clearPreflightMasks();
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+  });
+});
+
 describe('annotationStore — z-order (reorder)', () => {
   const ids = () => useAnnotationStore.getState().scene.objects.map((o) => o.id);
 
@@ -941,7 +987,8 @@ describe('annotationStore — screen-share lifecycle guard', () => {
   });
 
   it('an OPEN PRE-FLIGHT keeps its masks when another user starts or stops sharing', () => {
-    voiceMock.setState({ pendingShare: { sourceKey: 'window:1280x720' } });
+    // A pre-flight can only exist while WE are not live-sharing
+    voiceMock.setState({ isScreenSharing: false, pendingShare: { sourceKey: 'window:1280x720' } });
     useAnnotationStore.getState().addMask({ id: 'pre1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
 
     voiceMock.setState({ screenSharingUserId: 'other-user' }); // their share starts
@@ -952,7 +999,8 @@ describe('annotationStore — screen-share lifecycle guard', () => {
   });
 
   it('masks survive a previous sharer STOP landing during the confirm→claim window', () => {
-    voiceMock.setState({ pendingShare: { sourceKey: 'k' } });
+    // The claim window precedes isScreenSharing by definition
+    voiceMock.setState({ isScreenSharing: false, pendingShare: { sourceKey: 'k' } });
     voiceMock.setState({ screenSharingUserId: 'user-b' }); // B shares while the pre-flight is open
     useAnnotationStore.getState().addMask({ id: 'pre1', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
 

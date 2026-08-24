@@ -254,9 +254,18 @@ async function doFlush(): Promise<void> {
   sending = true;
   try {
     while (pendingOps.length > 0) {
-      const channelId = useVoiceStore.getState().activeChannelId;
+      const voice = useVoiceStore.getState();
+      const channelId = voice.activeChannelId;
       if (!channelId) {
         pendingOps = []; // left voice mid-draw — nothing to annotate anymore
+        break;
+      }
+      if (!voice.isScreenSharing) {
+        // PRE-FLIGHT drafts (text/images placed before go-live): the server
+        // authorizes ops only for the ACTIVE sharer, so nothing may ship yet.
+        // Keep the queue — the isScreenSharing rising edge flushes it as the
+        // share's first batches. (A cancelled pre-flight clears it via
+        // clearPreflightMasks; a sharer change clears it via resetQueue.)
         break;
       }
       const chunk = takeNextBatch();
@@ -802,8 +811,24 @@ registerShareMaskHooks({
   hasMasks: () => useAnnotationStore.getState().masks.length > 0,
   preflightCompositeHandles: (rawTrack) => compositeLifecycleCallbacks(rawTrack),
   clearPreflightMasks: () => {
-    useAnnotationStore.getState().clearMasks();
+    const store = useAnnotationStore.getState();
+    store.clearMasks();
+    // Pre-flight DRAFTS (text/images placed before go-live) die with the
+    // pre-flight too — nothing may linger to flush into a LATER share. But
+    // never from under a share someone is running: our own live scene is
+    // never behind this hook, and while ANOTHER user shares, the store's
+    // scene is THEIR scene we are viewing (drafting is disabled then).
+    const voice = useVoiceStore.getState();
+    if (!voice.isScreenSharing && voice.screenSharingUserId === null) {
+      store.clearViewerScene();
+    }
   },
+});
+
+// Pre-flight drafts queue while nothing may ship; the moment OUR share goes
+// live they become its first batches.
+useVoiceStore.subscribe((state, prev) => {
+  if (state.isScreenSharing && !prev.isScreenSharing) useAnnotationStore.getState().flushOps();
 });
 
 // ─── Cross-store lifecycle guard ─────────────────────────────────────────────
