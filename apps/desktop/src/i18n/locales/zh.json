@@ -762,6 +762,11 @@
     "dockToInline": "停靠到主视图",
     "waitingForStream": "正在等待屏幕共享流...",
     "screenShare": "屏幕共享",
+    "reactions": {
+      "send": "发送 {{emoji}} 反应",
+      "hide": "隐藏反应",
+      "show": "显示反应"
+    },
     "zoom": {
       "reset": "重置缩放"
     },

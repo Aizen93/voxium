@@ -644,9 +644,9 @@ describe('annotationStore — vanishing ink', () => {
     expect(JSON.parse(localStorage.getItem('vox:annotations:prefs')!)).toMatchObject({ inkMode: 'vanishing' });
     expect(loadAnnotationPrefs().inkMode).toBe('vanishing');
     localStorage.setItem('vox:annotations:prefs', '{"inkMode":"weird"}');
-    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [], skipPreflight: false });
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [], skipPreflight: false, showReactions: true });
     localStorage.setItem('vox:annotations:prefs', 'not json');
-    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [], skipPreflight: false });
+    expect(loadAnnotationPrefs()).toEqual({ inkMode: 'persistent', textSize: 0.045, recentColors: [], skipPreflight: false, showReactions: true });
     localStorage.removeItem('vox:annotations:prefs');
     useAnnotationStore.getState().setInkMode('persistent');
   });

@@ -11,6 +11,7 @@ import { AnnotationEditorLayer } from './AnnotationEditorLayer';
 import { availableToolDefs } from './annotationPresets';
 import { useAnnotationShortcuts } from '../../hooks/useAnnotationShortcuts';
 import { useStageZoom, ZoomPill, MagnifierLens } from './StageZoom';
+import { ReactionStrip, ReactionOverlay } from './Reactions';
 
 export function ScreenShareViewer() {
   const { t } = useTranslation();
@@ -182,6 +183,9 @@ export function ScreenShareViewer() {
               </div>
               <ZoomPill zoom={zoom} onReset={resetZoom} />
               <MagnifierLens videoRef={videoRef} stageRef={zoomStageRef} disabled={zoom.scale > 1 || (isLocalSharing && isEditing)} />
+              {/* Reactions are UI, not content: siblings of the zoom surface so they never scale */}
+              <ReactionOverlay />
+              <ReactionStrip />
             </>
           ) : (
             <p className="text-vox-text-muted text-sm">{t('voice.waitingForStream')}</p>

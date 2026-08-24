@@ -762,6 +762,11 @@
     "dockToInline": "Anclar a la vista",
     "waitingForStream": "Esperando la transmisión de pantalla...",
     "screenShare": "Compartir pantalla",
+    "reactions": {
+      "send": "Reaccionar {{emoji}}",
+      "hide": "Ocultar reacciones",
+      "show": "Mostrar reacciones"
+    },
     "zoom": {
       "reset": "Restablecer zoom"
     },

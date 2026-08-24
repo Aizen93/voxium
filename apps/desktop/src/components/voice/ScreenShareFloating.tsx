@@ -7,6 +7,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { Maximize, Minimize2, MonitorOff } from 'lucide-react';
 import { AnnotationCanvas } from './AnnotationCanvas';
 import { useStageZoom, ZoomPill, MagnifierLens } from './StageZoom';
+import { ReactionOverlay } from './Reactions';
 
 const MIN_WIDTH = 240;
 const MIN_HEIGHT = 180;
@@ -208,6 +209,7 @@ export function ScreenShareFloating() {
             </div>
             <ZoomPill zoom={zoom} onReset={resetZoom} />
             <MagnifierLens videoRef={videoRef} stageRef={stageRef} disabled={zoom.scale > 1} />
+            <ReactionOverlay />
           </>
         ) : (
           <p className="text-vox-text-muted text-xs">{t('voice.waitingForStream')}</p>

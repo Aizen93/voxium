@@ -124,6 +124,9 @@ interface AnnotationState {
   setTextSize: (size: number) => void;
   /** The default for new masks — and, with a mask selected, that mask's style too. */
   setMaskStyle: (style: MaskStyle) => void;
+  /** Per-viewer visibility of floating reactions (device pref). */
+  showReactions: boolean;
+  setShowReactions: (show: boolean) => void;
   /** "Masks are right — resume": the only way out of a source-change hold. */
   confirmSourceChange: () => void;
   setStrokeWidth: (width: number) => void;
@@ -501,7 +504,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
   masks: [],
   ...(() => {
     const prefs = loadAnnotationPrefs();
-    return { inkMode: prefs.inkMode, textSize: prefs.textSize, recentColors: prefs.recentColors };
+    return { inkMode: prefs.inkMode, textSize: prefs.textSize, recentColors: prefs.recentColors, showReactions: prefs.showReactions };
   })(),
   maskStyle: 'cover',
   sourceChangeHold: null,
@@ -697,6 +700,13 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     const { selectedObjectId, masks } = get();
     if (selectedObjectId && masks.some((m) => m.id === selectedObjectId)) get().updateMask(selectedObjectId, { style: maskStyle });
     set({ maskStyle });
+  },
+
+  setShowReactions: (showReactions) => {
+    set({ showReactions });
+    // Direct merge-write (persistPrefs owns other fields): a partial save
+    // must never drop prefs this store does not own
+    saveAnnotationPrefs({ ...loadAnnotationPrefs(), showReactions });
   },
   setTextSize: (raw) => {
     const size = clampTextSize(raw);

@@ -762,6 +762,11 @@
     "dockToInline": "기본 화면에 고정",
     "waitingForStream": "화면 공유 스트림을 기다리는 중...",
     "screenShare": "화면 공유",
+    "reactions": {
+      "send": "{{emoji}} 반응 보내기",
+      "hide": "반응 숨기기",
+      "show": "반응 보기"
+    },
     "zoom": {
       "reset": "확대/축소 초기화"
     },

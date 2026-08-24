@@ -768,6 +768,11 @@
     "dockToInline": "Dock to inline",
     "waitingForStream": "Waiting for screen share stream...",
     "screenShare": "Screen Share",
+    "reactions": {
+      "send": "React {{emoji}}",
+      "hide": "Hide reactions",
+      "show": "Show reactions"
+    },
     "zoom": {
       "reset": "Reset zoom"
     },

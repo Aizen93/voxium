@@ -16,6 +16,8 @@ export interface AnnotationPrefs {
   /** Skip the pre-share mask check ("don't show this again"). The monitor
    *  nudge still shows as a toast — a whole screen is never quietly shared. */
   skipPreflight: boolean;
+  /** Floating reaction emoji over the share — per-viewer hide (item 12). */
+  showReactions: boolean;
 }
 
 const STORAGE_KEY = 'vox:annotations:prefs';
@@ -25,7 +27,7 @@ export const TEXT_SIZE_MIN = 0.012;
 export const TEXT_SIZE_MAX = 0.2;
 export const DEFAULT_TEXT_SIZE = 0.045;
 
-export const DEFAULT_ANNOTATION_PREFS: AnnotationPrefs = { inkMode: 'persistent', textSize: DEFAULT_TEXT_SIZE, recentColors: [], skipPreflight: false };
+export const DEFAULT_ANNOTATION_PREFS: AnnotationPrefs = { inkMode: 'persistent', textSize: DEFAULT_TEXT_SIZE, recentColors: [], skipPreflight: false, showReactions: true };
 
 const HEX6_RE = /^#[0-9a-f]{6}$/;
 
@@ -58,6 +60,7 @@ export function loadAnnotationPrefs(): AnnotationPrefs {
       textSize: typeof parsed.textSize === 'number' && Number.isFinite(parsed.textSize) ? clampTextSize(parsed.textSize) : DEFAULT_TEXT_SIZE,
       recentColors: [...new Set(recent)].slice(0, RECENT_COLORS_MAX),
       skipPreflight: parsed.skipPreflight === true,
+      showReactions: parsed.showReactions !== false,
     };
   } catch (err) {
     console.warn('[Annotations] Could not read editor preferences:', err instanceof Error ? err.message : err);

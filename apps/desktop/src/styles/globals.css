@@ -247,3 +247,25 @@
 .rail-scroll::-webkit-scrollbar {
   display: none;
 }
+
+/* Floating reaction emoji (item 12): rise 35% of the stage with horizontal
+   drift, fade out. Reduced motion gets a static fade in place. */
+@keyframes vox-reaction-rise {
+  0% { transform: translate(0, 0) scale(0.8); opacity: 0; }
+  12% { transform: translate(calc(var(--vox-reaction-drift, 0px) * 0.3), calc(var(--vox-reaction-rise, 160px) * -0.12)) scale(1); opacity: 1; }
+  100% { transform: translate(var(--vox-reaction-drift, 0px), calc(var(--vox-reaction-rise, 160px) * -1)) scale(1); opacity: 0; }
+}
+@keyframes vox-reaction-fade {
+  0% { opacity: 0; }
+  15% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.vox-reaction {
+  animation: vox-reaction-rise 2.5s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .vox-reaction {
+    animation-name: vox-reaction-fade;
+  }
+}

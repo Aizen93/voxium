@@ -762,6 +762,11 @@
     "dockToInline": "メインビューに戻す",
     "waitingForStream": "画面共有ストリームを待機中...",
     "screenShare": "画面共有",
+    "reactions": {
+      "send": "{{emoji}} でリアクション",
+      "hide": "リアクションを非表示",
+      "show": "リアクションを表示"
+    },
     "zoom": {
       "reset": "ズームをリセット"
     },
