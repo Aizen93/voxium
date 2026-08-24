@@ -608,6 +608,20 @@ describe('annotationStore — pre-flight drafts', () => {
     hooks.clearPreflightMasks();
     expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
   });
+
+  it('a STRANDED own claim (sharerId === me while not sharing) is OUR scene — the wipe runs', () => {
+    const hooks = preflightHooks;
+    // A lost claim ack: the broadcast stamped us as sharer, activation failed
+    voiceMock.setState({ isScreenSharing: false, screenSharingUserId: null });
+    const store = useAnnotationStore.getState();
+    store.localApply([stroke('stale-draft')]);
+    voiceMock.setState({ screenSharingUserId: 'me' }); // our own claim broadcast (guard keeps the scene)
+    hooks.clearPreflightMasks();
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]); // never flushes into a later share
+    voiceMock.setState({ isScreenSharing: true }); // a later share finds an empty queue
+    vi.advanceTimersByTime(ANNOTATION_BATCH_INTERVAL_MS * 2);
+    expect(socketEmit).not.toHaveBeenCalled();
+  });
 });
 
 describe('annotationStore — z-order (reorder)', () => {
@@ -738,8 +752,12 @@ describe('annotationStore — vanishing ink', () => {
     expect(useAnnotationLiveStore.getState().fading.has('r')).toBe(false);
 
     const objOf = (op: AnnotationOp) => (op as { obj: AnnotationObject }).obj;
-    store.hydrate('chan-1', 10, { objects: [objOf(vanishing('h')), objOf(stroke('plain'))] });
+    store.hydrate('chan-1', 10, { objects: [objOf(vanishing('h')), objOf(vanishingArrow('ha')), objOf(stroke('plain'))] });
     expect(useAnnotationLiveStore.getState().fading.has('h')).toBe(true);
+    // A late joiner's clock starts for vanishing ARROWS too — fadeAlpha with
+    // no clock is 1, which would make a lost remove permanent for exactly
+    // the client that needs the local countdown
+    expect(useAnnotationLiveStore.getState().fading.has('ha')).toBe(true);
     expect(useAnnotationLiveStore.getState().fading.has('plain')).toBe(false);
     store.applyRemoteOps('chan-1', 11, [{ t: 'clear' }]);
     expect(useAnnotationLiveStore.getState().fading.size).toBe(0);
@@ -952,7 +970,7 @@ describe('annotationStore — editing actions', () => {
 
 describe('annotationStore — screen-share lifecycle guard', () => {
   it('clears the scene when the sharer changes or the share ends', () => {
-    voiceMock.setState({ screenSharingUserId: 'sharer-1' });
+    voiceMock.setState({ isScreenSharing: false, screenSharingUserId: 'sharer-1' }); // the VIEWER path
     useAnnotationStore.getState().hydrate('chan-1', 5, { objects: [{ id: 'x', kind: 'stroke', tool: 'pen', color: '#ff0000', width: 0.004, points: [0, 0, 1, 1] }] });
 
     voiceMock.setState({ screenSharingUserId: null }); // share stopped
@@ -963,7 +981,7 @@ describe('annotationStore — screen-share lifecycle guard', () => {
   });
 
   it('a sharer handoff (A→B) also clears — the new share rebuilds via hydration', () => {
-    voiceMock.setState({ screenSharingUserId: 'user-a' });
+    voiceMock.setState({ isScreenSharing: false, screenSharingUserId: 'user-a' }); // the VIEWER path
     useAnnotationStore.getState().hydrate('chan-1', 5, { objects: [{ id: 'x', kind: 'stroke', tool: 'pen', color: '#ff0000', width: 0.004, points: [0, 0, 1, 1] }] });
     voiceMock.setState({ screenSharingUserId: 'user-b' });
     expect(useAnnotationStore.getState().scene.objects).toHaveLength(0);
@@ -1015,6 +1033,7 @@ describe('annotationStore — screen-share lifecycle guard', () => {
   });
 
   it('someone ELSE starting a share still clears everything', () => {
+    voiceMock.setState({ isScreenSharing: false }); // the VIEWER path
     useAnnotationStore.getState().addMask({ id: 'stray', x: 0.1, y: 0.1, w: 0.2, h: 0.2 });
     voiceMock.setState({ screenSharingUserId: 'other-user' });
     expect(useAnnotationStore.getState().masks).toEqual([]);

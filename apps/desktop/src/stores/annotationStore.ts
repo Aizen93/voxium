@@ -556,7 +556,7 @@ export const useAnnotationStore = create<AnnotationState>((set, get) => ({
     // the stroke for up to ANNOTATION_FADE_AFTER_MS, then hides it locally
     // whether or not the sharer's remove reaches it
     const live = useAnnotationLiveStore.getState();
-    for (const obj of next.objects) if (obj.kind === 'stroke' && obj.fade) live.touchFading(obj.id);
+    for (const obj of next.objects) if ((obj.kind === 'stroke' || obj.kind === 'arrow') && obj.fade) live.touchFading(obj.id);
   },
 
   applyRemoteOps: (channelId, rev, ops) => {
@@ -819,7 +819,10 @@ registerShareMaskHooks({
     // never behind this hook, and while ANOTHER user shares, the store's
     // scene is THEIR scene we are viewing (drafting is disabled then).
     const voice = useVoiceStore.getState();
-    if (!voice.isScreenSharing && voice.screenSharingUserId === null) {
+    // sharerId === OUR id while not sharing is a stranded/racing claim (a
+    // lost ack, a failure mid-activation) — the scene holds only OUR drafts
+    // then, and leaving them queued would flush them into a LATER share.
+    if (!voice.isScreenSharing && (voice.screenSharingUserId === null || voice.screenSharingUserId === voice.localUserId)) {
       store.clearViewerScene();
     }
   },

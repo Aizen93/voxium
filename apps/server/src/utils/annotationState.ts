@@ -50,6 +50,23 @@ export function deleteAnnotationState(channelId: string): void {
 }
 
 /**
+ * Seed a FRESH share's empty scene (rev 0) at claim time — a plain SET that
+ * replaces whatever the previous share left (fire-and-forget, like the
+ * delete it stands in for). Without the seed, the share's first ops batch
+ * finds no stored scene and takes the RESTART path: harmless when the local
+ * scene held one stroke, but a pre-flight full of image drafts would be
+ * re-sent WHOLESALE by the restart resync — double the bytes against the
+ * 2MB/min budget, deterministically dropping batches. If this write is lost,
+ * the fallback IS the restart path: correct, just redundant.
+ */
+export function initAnnotationState(channelId: string, sharerUserId: string): void {
+  const seed: StoredAnnotationState = { rev: 0, sharerUserId, scene: { objects: [] } };
+  getRedis()
+    .set(annotationKey(channelId), JSON.stringify(seed), { EX: ANNOTATION_STATE_TTL_SECONDS })
+    .catch((err) => console.warn('[Annotations] State init failed:', err));
+}
+
+/**
  * The rev `casAnnotationState` will read out of the stored value, derived the
  * SAME way its script derives it — a prefix match on the raw string, never
  * `JSON.parse`.

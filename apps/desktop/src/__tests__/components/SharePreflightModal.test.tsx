@@ -166,6 +166,61 @@ describe('SharePreflightModal', () => {
     expect(useAnnotationStore.getState().masks).toEqual([]);
   });
 
+  it('Escape while typing a caption cancels ONLY the draft; Escape with a selection deselects; Ctrl+Z restores a mis-delete', () => {
+    render();
+    openPreflight();
+
+    // Escape from inside an editable target must never reach cancelPendingShare
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(voiceMock.useVoiceStore.getState().cancelPendingShare).not.toHaveBeenCalled();
+    input.remove();
+
+    // With a selection, Escape deselects instead of abandoning the pre-flight
+    act(() => {
+      useAnnotationStore.getState().localApply([
+        { t: 'add', obj: { id: 'note', kind: 'text', text: 'hi', color: '#ff0000', size: 0.05, x: 0.1, y: 0.1 } },
+      ]);
+      useAnnotationStore.setState({ selectedObjectId: 'note' });
+    });
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(useAnnotationStore.getState().selectedObjectId).toBeNull();
+    expect(voiceMock.useVoiceStore.getState().cancelPendingShare).not.toHaveBeenCalled();
+
+    // A mis-deleted draft comes back with Ctrl+Z (the shortcut hook is
+    // isEditing-gated and inert here)
+    act(() => {
+      useAnnotationStore.setState({ selectedObjectId: 'note' });
+    });
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete' }));
+    });
+    expect(useAnnotationStore.getState().scene.objects).toEqual([]);
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true }));
+    });
+    expect(useAnnotationStore.getState().scene.objects).toHaveLength(1);
+
+    // …and a BARE Escape still abandons the pre-flight
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(voiceMock.useVoiceStore.getState().cancelPendingShare).toHaveBeenCalledTimes(1);
+  });
+
+  it('a STRANDED own claim (sharerId === me, not sharing) does not hide the drafting tools', () => {
+    voiceMock.useVoiceStore.setState({ screenSharingUserId: 'me' }); // our id, isScreenSharing false
+    render();
+    openPreflight();
+    expect(modal()!.querySelector('[data-preflight-tool="text"]')).not.toBeNull();
+    voiceMock.useVoiceStore.setState({ screenSharingUserId: null });
+  });
+
   it('degrades to masks-only while ANOTHER user is live-sharing (their scene is not ours to draft in)', () => {
     voiceMock.useVoiceStore.setState({ screenSharingUserId: 'other-user' });
     render();

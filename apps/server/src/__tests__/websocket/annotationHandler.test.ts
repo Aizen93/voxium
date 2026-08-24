@@ -190,6 +190,15 @@ describe('annotationHandler — authorization', () => {
     expect(ack).toHaveBeenCalledWith({ ok: true, restarted: true });
   });
 
+  it('a claim-time SEED (rev 0, empty, ours) makes the first batch a normal increment — no restart resync', async () => {
+    const { opsHandler, toEmit } = setup();
+    seedRedis(SHARER, { rev: 0, sharerUserId: SHARER, scene: { objects: [] } });
+    const ack = await send(opsHandler, [{ t: 'add', obj: stroke() }]);
+    expect(ack).toHaveBeenCalledWith({ ok: true }); // NOT restarted: drafts are never double-sent
+    expect(toEmit).toHaveBeenCalledWith('voice:annotation:ops', expect.objectContaining({ rev: 1 }));
+    expect(toEmit).not.toHaveBeenCalledWith('voice:annotation:state', expect.anything());
+  });
+
   it('increments rev from the stored scene', async () => {
     const { opsHandler, toEmit } = setup();
     seedRedis(SHARER, { rev: 5, sharerUserId: SHARER, scene: { objects: [stroke('old')] } });

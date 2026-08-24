@@ -2155,7 +2155,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     const createdProducers: Producer[] = [];
-    let claimedSlot = false;
     shareActivationInFlight = true;
     // Read BEFORE the claim: the up-to-5s ack window is exactly where a
     // concurrent sharer-stop broadcast used to wipe the pre-flight masks
@@ -2178,7 +2177,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       if (!startResponse.ok) {
         throw new Error(startResponse.error || 'Screen share rejected by server');
       }
-      claimedSlot = true;
 
       // Bail if we left voice while awaiting the slot claim
       if (!get().activeChannelId) {
@@ -2300,7 +2298,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
       set({ msProducers: producers });
       stream?.getTracks().forEach((track) => track.stop());
-      if (claimedSlot && s) s.emit('voice:screen_share:stop');
+      // Emitted even when the claim SEEMED to fail: a lost ack can leave the
+      // server believing we hold the slot (the stop handler no-ops for
+      // non-sharers), and the echoed stop broadcast is what clears a
+      // stranded sharer id — and with it any stale pre-flight drafts.
+      if (s) s.emit('voice:screen_share:stop');
       // The stale key would make maskLayoutStore misread the NEXT pre-flight's
       // cancel as a confirm; the masks would silently composite over the next
       // share of anything (same rationale as cancelPendingShare).

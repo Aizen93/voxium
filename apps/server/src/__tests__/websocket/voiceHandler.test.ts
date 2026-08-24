@@ -1263,15 +1263,21 @@ describe('voiceHandler — screen-share annotation lifecycle', () => {
     mockJoinablePrisma();
   });
 
-  it('share start AND stop both delete the annotation scene key (fresh share ⇒ fresh scene)', async () => {
+  it('share start SEEDS an empty rev-0 scene (never a restart resync of drafts); stop deletes it', async () => {
     const { socket, handlers } = createMockSocket('ann-1', 'sock-ann-1');
     handleVoiceEvents(createMockIO() as any, socket as any);
     await handlers.get('voice:join')!('ch-ann-1');
 
     handlers.get('voice:screen_share:start')!(vi.fn());
-    expect(mockVoiceRedis.del).toHaveBeenCalledWith('voice:annotations:ch-ann-1');
+    // A seed, NOT a bare delete: the share's first ops batch must find its
+    // own scene, or the restart path re-sends every pre-flight draft byte
+    expect(mockVoiceRedis.del).not.toHaveBeenCalledWith('voice:annotations:ch-ann-1');
+    expect(mockVoiceRedis.set).toHaveBeenCalledWith(
+      'voice:annotations:ch-ann-1',
+      JSON.stringify({ rev: 0, sharerUserId: 'ann-1', scene: { objects: [] } }),
+      expect.objectContaining({ EX: expect.any(Number) }),
+    );
 
-    mockVoiceRedis.del.mockClear();
     handlers.get('voice:screen_share:stop')!();
     expect(mockVoiceRedis.del).toHaveBeenCalledWith('voice:annotations:ch-ann-1');
   });

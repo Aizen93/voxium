@@ -23,6 +23,10 @@ interface AnnotationCanvasProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   /** Paint ONLY the privacy masks (pre-flight preview). */
   masksOnly?: boolean;
+  /** false = a SECONDARY canvas (the pre-flight) that may be mounted
+   *  alongside the live viewer: it must neither clear the module image cache
+   *  on unmount nor prune entries its own draw does not use. */
+  cacheOwner?: boolean;
 }
 
 // Decoded overlay images, keyed by cache id. Entries no longer referenced by
@@ -267,7 +271,7 @@ export function useLiveScheduler(draw: () => void, enabled = true): void {
 
 const MASKS_ONLY_SCENE: AnnotationScene = { objects: [] };
 
-export function AnnotationCanvas({ videoRef, masksOnly = false }: AnnotationCanvasProps) {
+export function AnnotationCanvas({ videoRef, masksOnly = false, cacheOwner = true }: AnnotationCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const scratchRef = useRef<ScratchCanvas | null | undefined>(undefined);
   const liveScene = useAnnotationStore((s) => s.scene);
@@ -286,9 +290,9 @@ export function AnnotationCanvas({ videoRef, masksOnly = false }: AnnotationCanv
   // on unmount nor prune entries its empty scene never uses (the draw below
   // passes pruneCache: false).
   useEffect(() => {
-    if (masksOnly) return;
+    if (!cacheOwner) return;
     return () => imageCache.clear();
-  }, [masksOnly]);
+  }, [cacheOwner]);
 
   // One draw routine for both triggers: scene/mask/rect changes (effect
   // below) and the live scheduler (time-driven frames). It is cheap enough to
@@ -309,9 +313,9 @@ export function AnnotationCanvas({ videoRef, masksOnly = false }: AnnotationCanv
     const { pointer, fading } = useAnnotationLiveStore.getState();
     if (scratchRef.current === undefined) scratchRef.current = createScratchCanvas();
     const preview = videoRef.current ? { video: videoRef.current, scratch: scratchRef.current } : null;
-    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1), fading, now, preview, !masksOnly);
+    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1), fading, now, preview, cacheOwner);
     if (pointer && !masksOnly) drawLivePointer(ctx, pointer, now, rect.w, rect.h);
-  }, [scene, masks, rect, videoRef, masksOnly]);
+  }, [scene, masks, rect, videoRef, masksOnly, cacheOwner]);
 
   useEffect(() => {
     draw();

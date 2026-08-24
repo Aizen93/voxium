@@ -138,6 +138,8 @@ describe('wire v2 — new object kinds', () => {
     expect((await send(opsHandler, [{ t: 'reorder', id: 'st1', at: -1 }])).mock.calls[0][0].ok).toBe(false);
     expect((await send(opsHandler, [{ t: 'reorder', id: 'st1', at: 1.5 }])).mock.calls[0][0].ok).toBe(false);
     expect((await send(opsHandler, [{ t: 'reorder', id: 'st1' }])).mock.calls[0][0].ok).toBe(false);
+    // Exact shape: extra keys would be relayed verbatim to every viewer
+    expect((await send(opsHandler, [{ t: 'reorder', id: 'st1', at: 0, junk: 'x' }])).mock.calls[0][0].ok).toBe(false);
   });
 
   it('still rejects unknown kinds', async () => {

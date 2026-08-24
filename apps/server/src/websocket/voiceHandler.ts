@@ -10,7 +10,7 @@ import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../me
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { getRedis, NODE_ID, isNodeAlive, socketExistsInCluster, liveNodeCounts, liveClusterSocketIds } from '../utils/redis';
 import { reapVoiceChannelMirror, reapDeadOwnerChannelMirror } from '../utils/voiceMirror';
-import { annotationKey, deleteAnnotationState, getAnnotationState } from '../utils/annotationState';
+import { annotationKey, deleteAnnotationState, getAnnotationState, initAnnotationState } from '../utils/annotationState';
 import {
   getRemoteSession, setRemoteSession, clearRemoteSession,
   relayVoiceEvent, resolveOrClaimChannelOwner, dropShim,
@@ -172,14 +172,19 @@ function mirrorScreenShare(channelId: string, userId: string | null, keepScene =
   } else {
     redis.del(`voice:screen:${channelId}`).catch((err) => console.warn('[Redis] Voice mirror failed:', err));
   }
-  // Fresh sharer ⇒ fresh annotation scene; cleared sharer ⇒ dead scene. This
-  // single choke point covers the start/stop handlers and sharer-leave — the
-  // annotation scene must never outlive (or predate) the share it belongs to.
-  // `keepScene` is the one exception: an idempotent SAME-USER re-claim (retry
-  // after a failed produce) continues the same share, and wiping the scene
-  // there would restart the rev counter at 1 while viewers still hold a higher
-  // rev — silently desyncing them for the rest of the share.
-  if (!keepScene) deleteAnnotationState(channelId);
+  // Fresh sharer ⇒ fresh EMPTY scene at rev 0 (a seed, not a bare delete:
+  // the share's first ops batch must find ITS OWN scene, or it takes the
+  // restart path and the resync re-sends every pre-flight draft byte —
+  // double the 2MB/min budget for image-heavy drafts). Cleared sharer ⇒ dead
+  // scene. This single choke point covers the start/stop handlers and
+  // sharer-leave — the annotation scene must never outlive (or predate) the
+  // share it belongs to. `keepScene` is the one exception: an idempotent
+  // SAME-USER re-claim (retry after a failed produce) continues the same
+  // share, and wiping there would restart the rev counter under viewers.
+  if (!keepScene) {
+    if (userId) initAnnotationState(channelId, userId);
+    else deleteAnnotationState(channelId);
+  }
 }
 
 

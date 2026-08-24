@@ -236,7 +236,10 @@ function isValidOp(op: unknown, v2: boolean): op is AnnotationOp {
       return v2 && typeof o.id === 'string' && ID_RE.test(o.id) && isTranslateDelta(o.dx) && isTranslateDelta(o.dy);
     case 'reorder':
       // Z-order move (v2). Unknown ids are a reducer no-op, like 'remove'.
-      return v2 && typeof o.id === 'string' && ID_RE.test(o.id)
+      // Exact shape: a brand-new op has no legacy clients to tolerate, and
+      // extra keys would be relayed verbatim to every viewer.
+      return v2 && Object.keys(o).length === 3
+        && typeof o.id === 'string' && ID_RE.test(o.id)
         && typeof o.at === 'number' && Number.isInteger(o.at) && o.at >= 0 && o.at <= ANNOTATION_MAX_OBJECTS;
     case 'remove': return typeof o.id === 'string' && ID_RE.test(o.id);
     case 'clear': return true;

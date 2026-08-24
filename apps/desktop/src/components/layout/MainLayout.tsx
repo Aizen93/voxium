@@ -581,8 +581,16 @@ export function MainLayout() {
         if (voiceState.screenSharingUserId !== userId) return;
         useAnnotationStore.getState().applyRemoteOps(channelId, rev, ops);
       },
-      voiceAnnotationState: ({ channelId, rev, scene, restarted }: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene; restarted?: boolean }) => {
-        if (useVoiceStore.getState().activeChannelId !== channelId) return;
+      voiceAnnotationState: ({ channelId, sharingUserId, rev, scene, restarted }: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene; restarted?: boolean }) => {
+        const voiceState = useVoiceStore.getState();
+        if (voiceState.activeChannelId !== channelId) return;
+        // Only the CURRENT sharer's snapshot may install a scene — mirrors the
+        // ops handler's guard. A cross-node straggler landing after the stop
+        // would otherwise resurrect the dead share's objects, and OUR next
+        // share's restart resync would re-send them stamped as ours. (The
+        // join/reconnect replay emits voice:screen_share:state first on the
+        // same socket, so the sharer id is always set before this arrives.)
+        if (voiceState.screenSharingUserId !== sharingUserId) return;
         useAnnotationStore.getState().hydrate(channelId, rev, scene, restarted === true);
       },
       voiceAnnotationLive: ({ channelId, userId, ev }: { channelId: string; userId: string; ev: AnnotationLiveEvent }) => {

@@ -366,6 +366,10 @@ describe('voiceStore', () => {
       });
       await useVoiceStore.getState().confirmPendingShare();
       expect(useVoiceStore.getState().pendingShare).toBeNull();
+      // The stop is emitted even though the claim seemed to fail: a lost ack
+      // can leave the server believing we hold the slot (its handler no-ops
+      // for non-sharers), and the echoed broadcast clears a stranded id
+      expect(vi.mocked(socket.emit)).toHaveBeenCalledWith('voice:screen_share:stop');
       // A stale key would make maskLayoutStore misread the NEXT pre-flight's cancel as a confirm
       expect(useVoiceStore.getState().screenShareSourceKey).toBeNull();
       expect(useVoiceStore.getState().isScreenSharing).toBe(false);

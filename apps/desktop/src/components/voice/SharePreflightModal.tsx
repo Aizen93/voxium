@@ -44,6 +44,9 @@ const MASKS_ONLY_CAPABILITIES: ToolCapabilities = {
   sceneObjects: false,
 };
 
+const isEditableTarget = (t: EventTarget | null): boolean =>
+  t instanceof HTMLElement && (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA');
+
 const MASK_STYLES: readonly { style: MaskStyle; labelKey: string }[] = [
   { style: 'cover', labelKey: 'voice.annotations.maskStyleCover' },
   { style: 'pixelate', labelKey: 'voice.annotations.maskStylePixelate' },
@@ -63,7 +66,9 @@ export function SharePreflightModal() {
   const maskCount = useAnnotationStore((s) => s.masks.length);
   const appliedLayout = useMaskLayoutStore((s) => s.appliedLayout);
   const startFresh = useMaskLayoutStore((s) => s.startFresh);
-  const otherSharing = useVoiceStore((s) => s.screenSharingUserId !== null);
+  // Our OWN id here means a stranded/racing claim, not someone else's share —
+  // counting it would hide the drafts behind the masks-only fallback
+  const otherSharing = useVoiceStore((s) => s.screenSharingUserId !== null && s.screenSharingUserId !== s.localUserId);
   const capabilities = otherSharing ? MASKS_ONLY_CAPABILITIES : DRAFT_CAPABILITIES;
   const videoRef = useRef<HTMLVideoElement>(null);
   const [skip, setSkip] = useState(() => loadAnnotationPrefs().skipPreflight);
@@ -92,13 +97,31 @@ export function SharePreflightModal() {
       return;
     }
     const onKey = (e: KeyboardEvent) => {
+      // The caption draft is a real <input> and owns its keys: ITS Escape
+      // cancels just the draft — this handler firing first would cancel the
+      // whole pre-flight (capture, masks and all) mid-typing.
+      if (isEditableTarget(e.target)) return;
       if (e.key === 'Escape') {
+        const store = useAnnotationStore.getState();
+        if (store.selectedObjectId) {
+          // Deselect first, like every other editing surface — only a bare
+          // Escape abandons the pre-flight
+          store.setSelectedObjectId(null);
+          return;
+        }
         cancelPendingShare();
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        // The full shortcut hook is isEditing-gated (live share only) — give
+        // drafts the one shortcut a mis-delete needs
+        e.preventDefault();
+        const store = useAnnotationStore.getState();
+        if (e.shiftKey) store.redo();
+        else store.undo();
+        return;
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        const target = e.target as HTMLElement | null;
-        if (target && (target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
         const store = useAnnotationStore.getState();
         const id = store.selectedObjectId;
         if (!id) return;
@@ -198,7 +221,7 @@ export function SharePreflightModal() {
 
         <div className="relative flex min-h-0 flex-1 items-center justify-center bg-black" style={{ minHeight: 260 }}>
           <video ref={videoRef} autoPlay playsInline muted className="max-h-full max-w-full object-contain" />
-          <AnnotationCanvas videoRef={videoRef} masksOnly={otherSharing} />
+          <AnnotationCanvas videoRef={videoRef} masksOnly={otherSharing} cacheOwner={false} />
           <AnnotationEditorLayer videoRef={videoRef} capabilities={capabilities} />
         </div>
 
