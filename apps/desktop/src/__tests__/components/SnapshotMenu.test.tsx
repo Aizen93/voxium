@@ -69,7 +69,7 @@ beforeEach(() => {
   apiMock.get.mockReset();
   apiMock.post.mockReset();
   snap.composeSnapshotCanvas.mockReset().mockReturnValue(fakeCanvas);
-  snap.encodeSnapshot.mockReset().mockResolvedValue({ size: 12_345 } as Blob);
+  snap.encodeSnapshot.mockReset().mockResolvedValue({ size: 12_345, type: 'image/webp' } as Blob);
   snap.encodeSnapshotPng.mockReset().mockResolvedValue({ size: 9_999 } as Blob);
   container = document.createElement('div');
   document.body.appendChild(container);

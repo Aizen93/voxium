@@ -142,7 +142,7 @@ export function SnapshotMenu({
       a.href = url;
       // toBlob falls back to PNG on webviews without a WebP encoder — the
       // extension must follow the bytes, not the request
-      a.download = `voxium-snapshot-${Date.now()}.${blob.type === 'image/png' ? 'png' : 'webp'}`;
+      a.download = `voxium-snapshot-${Date.now()}.${blob.type === 'image/webp' ? 'webp' : 'png'}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -182,8 +182,10 @@ export function SnapshotMenu({
       if (!blob) throw new Error('encode over size cap');
       // toBlob falls back to PNG on webviews without a WebP encoder — the
       // presigned type must match the bytes or S3 rejects the PUT
-      const mimeType = blob.type === 'image/png' ? 'image/png' : 'image/webp';
-      const fileName = `voxium-snapshot-${Date.now()}.${mimeType === 'image/png' ? 'png' : 'webp'}`;
+      // POSITIVE check: the spec's toBlob fallback is PNG, and any exotic
+      // type must not be recorded as WebP bytes it is not
+      const mimeType = blob.type === 'image/webp' ? 'image/webp' : 'image/png';
+      const fileName = `voxium-snapshot-${Date.now()}.${mimeType === 'image/webp' ? 'webp' : 'png'}`;
       const { data } = await api.post('/uploads/presign/attachment', {
         fileName,
         fileSize: blob.size,

@@ -85,9 +85,8 @@ export function ReactionStrip() {
     <div
       className="absolute bottom-2 right-2 z-20 flex items-center gap-0.5 rounded-full bg-black/60 px-1.5 py-0.5"
       data-testid="reaction-strip"
-      // The stage pans on pointer drag while zoomed — a press on the strip is
-      // a reaction, not a pan
-      onPointerDown={(e) => e.stopPropagation()}
+      data-stage-ui
+      // A double-click on an emoji must not reset the stage zoom
       onDoubleClick={(e) => e.stopPropagation()}
     >
       {ANNOTATION_REACTIONS.map((emoji, i) => (

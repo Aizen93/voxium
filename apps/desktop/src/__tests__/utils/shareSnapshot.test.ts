@@ -5,10 +5,12 @@ vi.mock('../../services/socket', () => ({ getSocket: () => null }));
 vi.mock('../../stores/voiceStore', () => ({
   useVoiceStore: { getState: () => ({ activeChannelId: null }), subscribe: () => () => {} },
   registerShareMaskHooks: vi.fn(),
+  isShareActivationInFlight: () => false,
 }));
 
 import { LIMITS, type AnnotationScene } from '@voxium/shared';
 import { composeSnapshotCanvas, encodeSnapshot, encodeSnapshotPng, SNAPSHOT_MAX_EDGE } from '../../utils/shareSnapshot';
+import { drawScene } from '../../components/voice/AnnotationCanvas';
 
 const EMPTY_SCENE: AnnotationScene = { objects: [] };
 
@@ -85,6 +87,40 @@ describe('composeSnapshotCanvas', () => {
 
   it('refuses a frameless video', () => {
     expect(composeSnapshotCanvas(fakeVideo(0, 0), EMPTY_SCENE, [], new Map())).toBeNull();
+  });
+});
+
+describe('image cache decode notifications', () => {
+  it('EVERY canvas drawing an undecoded image is notified on decode — a one-shot no-op draw cannot steal the slot', () => {
+    const images: { onload: (() => void) | null }[] = [];
+    vi.stubGlobal('Image', class {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 100;
+      naturalHeight = 100;
+      set src(_v: string) { /* decode is driven by the test */ }
+      constructor() { images.push(this); }
+    });
+    const imageScene = (id: string, src: string) =>
+      ({ objects: [{ id, kind: 'image', src, x: 0.1, y: 0.1, w: 0.2, h: 0.2 }] }) as unknown as AnnotationScene;
+
+    // Snapshot-style one-shot draw first (no-op callback, pruneCache off)…
+    const sceneA = imageScene('imgA', 'data:image/webp;base64,AA');
+    drawScene(recordingCtx('snap'), sceneA, [], 800, 450, () => {}, new Map(), 0, null, false);
+    // …then the LIVE canvas draws the same undecoded image
+    const live = vi.fn();
+    drawScene(recordingCtx('live'), sceneA, [], 800, 450, live, new Map(), 0, null, true);
+    images[0].onload!();
+    expect(live).toHaveBeenCalledTimes(1);
+
+    // Reverse order: live first, snapshot second — live is still notified
+    const sceneB = imageScene('imgB', 'data:image/webp;base64,BB');
+    const live2 = vi.fn();
+    drawScene(recordingCtx('live'), sceneB, [], 800, 450, live2, new Map(), 0, null, true);
+    drawScene(recordingCtx('snap'), sceneB, [], 800, 450, () => {}, new Map(), 0, null, false);
+    images[1].onload!();
+    expect(live2).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 });
 

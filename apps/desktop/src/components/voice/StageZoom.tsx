@@ -63,6 +63,10 @@ export function useStageZoom(stageRef: React.RefObject<HTMLElement | null>, enab
   const handlers = {
     onPointerDown: (e: React.PointerEvent) => {
       if (zoom.scale === 1 || e.button !== 0) return;
+      // Stage UI (pill, reaction strip) must neither start a pan nor be
+      // pointer-captured away from its own click — and stopPropagation there
+      // would also swallow document-level outside-click closers (SnapshotMenu)
+      if ((e.target as HTMLElement).closest?.('[data-stage-ui]')) return;
       dragRef.current = { x: e.clientX, y: e.clientY };
       (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     },
@@ -103,9 +107,7 @@ export function ZoomPill({ zoom, onReset }: { zoom: ZoomState; onReset: () => vo
     <div
       className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[11px] font-medium text-white"
       data-testid="zoom-pill"
-      // The stage's pan handler would setPointerCapture on this press and the
-      // retargeted click would never reach the reset button
-      onPointerDown={(e) => e.stopPropagation()}
+      data-stage-ui
     >
       {zoom.scale.toFixed(1)}×
       <button

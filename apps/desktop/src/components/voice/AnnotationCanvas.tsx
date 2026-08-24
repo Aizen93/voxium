@@ -27,20 +27,24 @@ interface AnnotationCanvasProps {
 
 // Decoded overlay images, keyed by cache id. Entries no longer referenced by
 // the scene/masks are dropped after each draw, so the cache tracks the scene.
-const imageCache = new Map<string, { src: string; img: HTMLImageElement; loaded: boolean; requestRedraw: () => void }>();
+const imageCache = new Map<string, { src: string; img: HTMLImageElement; loaded: boolean; notify: Set<() => void> }>();
+/** Decode-notification subscribers per entry — bounded; the set is one-shot
+ *  (cleared after firing), so a never-decoding image cannot accumulate a
+ *  closure per redraw forever. */
+const IMAGE_NOTIFY_MAX = 16;
 
 function cachedImage(id: string, src: string, usedIds: Set<string>, requestRedraw: () => void): HTMLImageElement | null {
   usedIds.add(id);
   let entry = imageCache.get(id);
-  if (entry && entry.src === src) {
-    // The latest requester wins the decode notification: a one-shot snapshot
-    // draw inserting an entry with a no-op must not leave the LIVE canvas
-    // unpainted when the image finally decodes.
-    entry.requestRedraw = requestRedraw;
+  if (entry && entry.src === src && !entry.loaded) {
+    // EVERY canvas drawing an undecoded image gets the decode notification —
+    // a single slot let one drawer steal it from another (a one-shot snapshot
+    // draw with a no-op, or the pre-flight canvas vs the live viewer canvas).
+    if (entry.notify.size < IMAGE_NOTIFY_MAX) entry.notify.add(requestRedraw);
   }
   if (!entry || entry.src !== src) {
     const img = new Image();
-    entry = { src, img, loaded: false, requestRedraw };
+    entry = { src, img, loaded: false, notify: new Set([requestRedraw]) };
     imageCache.set(id, entry);
     img.onload = () => {
       // Server-side header validation is the primary bomb gate; this is the
@@ -54,7 +58,9 @@ function cachedImage(id: string, src: string, usedIds: Set<string>, requestRedra
       const current = imageCache.get(id);
       if (current) {
         current.loaded = true;
-        current.requestRedraw();
+        const subscribers = [...current.notify];
+        current.notify.clear();
+        for (const notify of subscribers) notify();
       }
     };
     img.onerror = () => {
