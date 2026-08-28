@@ -40,6 +40,12 @@ export class ConflictError extends AppError {
   }
 }
 
+export class TooManyRequestsError extends AppError {
+  constructor(message = 'Too many requests. Please try again later.') {
+    super(message, 429);
+  }
+}
+
 /** Parse a date string query parameter, throwing BadRequestError if invalid. */
 export function parseDateParam(value: string, name = 'date'): Date {
   const date = new Date(value);

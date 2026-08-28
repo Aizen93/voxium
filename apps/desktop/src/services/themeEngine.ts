@@ -134,6 +134,42 @@ function injectSvgColorAndOpacity(svg: string, color: string, opacity: number): 
 }
 
 /**
+ * Build the inline style that scopes a theme to ONE subtree, so a preview can
+ * render in a theme the app is not currently wearing.
+ *
+ * Two namespaces have to be written, not one:
+ *  - `--vox-*`       — what themes.css authors and inline styles read directly.
+ *  - `--color-vox-*` — what every Tailwind `bg-vox-*`/`text-vox-*` utility
+ *    actually resolves. globals.css declares those at `:root` AS
+ *    `var(--vox-…)`, and a custom property's var() references are substituted
+ *    on the element that declares it — so descendants inherit the value the
+ *    ROOT theme resolved to. Re-pointing `--vox-chat` alone would change
+ *    nothing the utilities render.
+ *
+ * The v2 derived tokens (themes.css `:root` block) are rebuilt here for the
+ * same reason — they are color-mixes of the authored keys, already substituted
+ * against the root theme by the time they reach us.
+ */
+export function getThemeScopeStyle(colors: ThemeColors): CSSProperties {
+  const style: Record<string, string> = {};
+  const put = (key: string, value: string) => {
+    style[`--vox-${key}`] = value;
+    style[`--color-vox-${key}`] = value;
+  };
+
+  for (const key of THEME_COLOR_KEYS) put(key, colors[key] ?? '');
+
+  const accent = colors['accent-primary'] ?? '#000000';
+  const text = colors['text-primary'] ?? '#000000';
+  put('accent-tint', `color-mix(in oklab, ${accent} 12%, transparent)`);
+  put('accent-tint-strong', `color-mix(in oklab, ${accent} 19%, transparent)`);
+  put('border-strong', `color-mix(in oklab, ${text} 16%, transparent)`);
+  put('on-accent', '#ffffff');
+
+  return style as CSSProperties;
+}
+
+/**
  * Convert a ThemePattern to a React CSSProperties object for inline style use.
  * Used by the MiniPreview to render patterns without touching the document root.
  */

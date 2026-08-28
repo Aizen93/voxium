@@ -29,7 +29,6 @@
     "creating": "Creando...",
     "deleting": "Eliminando..."
   },
-
   "auth": {
     "login": {
       "title": "¡Bienvenido de nuevo!",
@@ -56,6 +55,15 @@
       "passwordPlaceholder": "Al menos 8 caracteres",
       "createAccount": "Crear cuenta",
       "creatingAccount": "Creando cuenta...",
+      "consentLegend": "Consentimiento",
+      "acceptTermsPrefix": "He leído y acepto los",
+      "termsOfService": "Términos del servicio",
+      "acceptPrivacyPrefix": "He leído y acepto la",
+      "privacyPolicy": "Política de privacidad",
+      "showPassword": "Mostrar contraseña",
+      "hidePassword": "Ocultar contraseña",
+      "consentRequired": "Acepta los Términos del servicio y la Política de privacidad para continuar",
+      "verifyingBrowser": "Verificando tu navegador…",
       "hasAccount": "¿Ya tienes una cuenta?",
       "signIn": "Iniciar sesión",
       "passwordWeak": "Contraseña débil",
@@ -108,6 +116,13 @@
       "missingToken": "Token de verificación no encontrado.",
       "failed": "La verificación falló. El enlace puede ser inválido o haber expirado."
     },
+    "consent": {
+      "title": "Antes de continuar",
+      "description": "Voxium necesita que aceptes los Términos del servicio y la Política de privacidad para seguir usando tu cuenta.",
+      "submit": "Aceptar y continuar",
+      "submitting": "Guardando…",
+      "failed": "No se pudo guardar tu aceptación. Inténtalo de nuevo."
+    },
     "emailPending": {
       "title": "Verifica tu correo electrónico",
       "description": "Enviamos un enlace de verificación a <1>{{email}}</1>. Revisa tu bandeja de entrada y haz clic en el enlace para activar tu cuenta.",
@@ -119,7 +134,6 @@
       "checkSpam": "¿No recibiste el correo? Revisa tu carpeta de spam o intenta reenviarlo."
     }
   },
-
   "settings": {
     "title": "Ajustes",
     "tabs": {
@@ -140,6 +154,20 @@
       "profileUpdated": "Perfil actualizado",
       "failedToUploadAvatar": "No se pudo subir el avatar",
       "failedToUpdateProfile": "No se pudo actualizar el perfil"
+    },
+    "deleteAccount": {
+      "title": "Eliminar cuenta",
+      "description": "Elimina permanentemente tu cuenta, tus mensajes, tu perfil y tus claves de cifrado. Esto no se puede deshacer.",
+      "open": "Eliminar mi cuenta…",
+      "warning": "Se eliminará todo lo vinculado a tu cuenta. Si eres propietario de servidores, transfiérelos o elimínalos primero, cada uno desde su configuración.",
+      "ownsServers": "Todavía eres propietario de estos servidores. Transfiérelos o elimínalos y vuelve a intentarlo:",
+      "password": "Tu contraseña",
+      "totpCode": "Código de autenticación en dos pasos",
+      "typeToConfirm": "Escribe {{word}} para confirmar",
+      "confirmWord": "ELIMINAR",
+      "confirm": "Eliminar mi cuenta permanentemente",
+      "deleting": "Eliminando…",
+      "failed": "No se pudo eliminar tu cuenta. Inténtalo de nuevo."
     },
     "security": {
       "changePassword": "Cambiar contraseña",
@@ -234,7 +262,6 @@
       "selectLanguage": "Seleccionar idioma"
     }
   },
-
   "serverSettings": {
     "title": "Ajustes del servidor",
     "tabs": {
@@ -310,30 +337,92 @@
       "failedToLoad": "No se pudieron cargar los límites del servidor"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "Ver canales", "description": "Permite a los miembros ver canales de texto y voz" },
-    "MANAGE_CHANNELS": { "name": "Gestionar canales", "description": "Permite a los miembros crear, editar y eliminar canales" },
-    "MANAGE_CATEGORIES": { "name": "Gestionar categorías", "description": "Permite a los miembros crear, editar y eliminar categorías" },
-    "MANAGE_SERVER": { "name": "Gestionar servidor", "description": "Permite a los miembros editar el nombre, ícono y ajustes del servidor" },
-    "MANAGE_ROLES": { "name": "Gestionar roles", "description": "Permite a los miembros crear, editar y eliminar roles inferiores al suyo" },
-    "CREATE_INVITES": { "name": "Crear invitaciones", "description": "Permite a los miembros crear enlaces de invitación al servidor" },
-    "KICK_MEMBERS": { "name": "Expulsar miembros", "description": "Permite a los miembros expulsar a otros miembros con roles inferiores" },
-    "MANAGE_NICKNAMES": { "name": "Gestionar apodos", "description": "Permite a los miembros cambiar los nombres de otros miembros" },
-    "CHANGE_NICKNAME": { "name": "Cambiar apodo", "description": "Permite a los miembros cambiar su propio nombre para mostrar" },
-    "SEND_MESSAGES": { "name": "Enviar mensajes", "description": "Permite a los miembros enviar mensajes en canales de texto" },
-    "MANAGE_MESSAGES": { "name": "Gestionar mensajes", "description": "Permite a los miembros eliminar mensajes de otros miembros" },
-    "ATTACH_FILES": { "name": "Adjuntar archivos", "description": "Permite a los miembros subir archivos adjuntos" },
-    "ADD_REACTIONS": { "name": "Agregar reacciones", "description": "Permite a los miembros agregar reacciones a los mensajes" },
-    "MENTION_EVERYONE": { "name": "Mencionar a todos", "description": "Permite a los miembros usar menciones @everyone" },
-    "CONNECT": { "name": "Conectar", "description": "Permite a los miembros unirse a canales de voz" },
-    "SPEAK": { "name": "Hablar", "description": "Permite a los miembros hablar en canales de voz" },
-    "MUTE_MEMBERS": { "name": "Silenciar miembros", "description": "Permite a los miembros silenciar a otros miembros en voz" },
-    "DEAFEN_MEMBERS": { "name": "Ensordecer miembros", "description": "Permite a los miembros ensordecer a otros miembros en voz" },
-    "MOVE_MEMBERS": { "name": "Mover miembros", "description": "Permite a los miembros mover a otros miembros entre canales de voz" },
-    "ADMINISTRATOR": { "name": "Administrador", "description": "Otorga todos los permisos y omite todos los reemplazos de canal" }
+    "VIEW_CHANNEL": {
+      "name": "Ver canales",
+      "description": "Permite a los miembros ver canales de texto y voz"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "Gestionar canales",
+      "description": "Permite a los miembros crear, editar y eliminar canales"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "Gestionar categorías",
+      "description": "Permite a los miembros crear, editar y eliminar categorías"
+    },
+    "MANAGE_SERVER": {
+      "name": "Gestionar servidor",
+      "description": "Permite a los miembros editar el nombre, ícono y ajustes del servidor"
+    },
+    "MANAGE_ROLES": {
+      "name": "Gestionar roles",
+      "description": "Permite a los miembros crear, editar y eliminar roles inferiores al suyo"
+    },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "Crear canales seguros",
+      "description": "Permite a los miembros crear canales cifrados de extremo a extremo solo por invitación"
+    },
+    "CREATE_INVITES": {
+      "name": "Crear invitaciones",
+      "description": "Permite a los miembros crear enlaces de invitación al servidor"
+    },
+    "KICK_MEMBERS": {
+      "name": "Expulsar miembros",
+      "description": "Permite a los miembros expulsar a otros miembros con roles inferiores"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "Gestionar apodos",
+      "description": "Permite a los miembros cambiar los nombres de otros miembros"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "Cambiar apodo",
+      "description": "Permite a los miembros cambiar su propio nombre para mostrar"
+    },
+    "SEND_MESSAGES": {
+      "name": "Enviar mensajes",
+      "description": "Permite a los miembros enviar mensajes en canales de texto"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "Gestionar mensajes",
+      "description": "Permite a los miembros eliminar mensajes de otros miembros"
+    },
+    "ATTACH_FILES": {
+      "name": "Adjuntar archivos",
+      "description": "Permite a los miembros subir archivos adjuntos"
+    },
+    "ADD_REACTIONS": {
+      "name": "Agregar reacciones",
+      "description": "Permite a los miembros agregar reacciones a los mensajes"
+    },
+    "MENTION_EVERYONE": {
+      "name": "Mencionar a todos",
+      "description": "Permite a los miembros usar menciones @everyone"
+    },
+    "CONNECT": {
+      "name": "Conectar",
+      "description": "Permite a los miembros unirse a canales de voz"
+    },
+    "SPEAK": {
+      "name": "Hablar",
+      "description": "Permite a los miembros hablar en canales de voz"
+    },
+    "MUTE_MEMBERS": {
+      "name": "Silenciar miembros",
+      "description": "Permite a los miembros silenciar a otros miembros en voz"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "Ensordecer miembros",
+      "description": "Permite a los miembros ensordecer a otros miembros en voz"
+    },
+    "MOVE_MEMBERS": {
+      "name": "Mover miembros",
+      "description": "Permite a los miembros mover a otros miembros entre canales de voz"
+    },
+    "ADMINISTRATOR": {
+      "name": "Administrador",
+      "description": "Otorga todos los permisos y omite todos los reemplazos de canal"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "General",
@@ -365,7 +454,6 @@
     "failedToUpdate": "Ha ocurrido un error",
     "failedToDelete": "Ha ocurrido un error"
   },
-
   "channelPermissions": {
     "title": "Permisos del canal",
     "roles": "Roles",
@@ -383,7 +471,6 @@
     "current": "Actual:",
     "clickToCycle": "Haz clic para cambiar."
   },
-
   "contextMenu": {
     "roles": "Roles",
     "voice": "Voz",
@@ -417,7 +504,6 @@
     "failedToSetNickname": "No se pudo establecer el apodo",
     "failedToClearNickname": "No se pudo borrar el apodo"
   },
-
   "userProfile": {
     "status": {
       "online": "En línea",
@@ -442,7 +528,6 @@
     "failedToDecline": "No se pudo rechazar la solicitud de amistad",
     "failedToRemove": "No se pudo eliminar al amigo"
   },
-
   "messageItem": {
     "todayAt": "Hoy a las {{time}}",
     "yesterdayAt": "Ayer a las {{time}}",
@@ -456,7 +541,6 @@
     "originalDeleted": "El mensaje original fue eliminado",
     "failedToToggleReaction": "No se pudo cambiar la reacción"
   },
-
   "messageInput": {
     "replyingTo": "Respondiendo a",
     "cancelReply": "Cancelar respuesta",
@@ -465,8 +549,15 @@
     "uploadFailed": "Error",
     "attachFile": "Adjuntar archivo"
   },
-
   "server": {
+    "pinnedSection": "Fijados",
+    "pinSpace": "Fijar espacio",
+    "unpinSpace": "Desfijar espacio",
+    "findSpace": "Buscar un espacio",
+    "liveNow": "En vivo ahora",
+    "allSpaces": "Todos los espacios",
+    "moreSpaces": "{{count}} espacios más",
+    "inVoiceCount": "{{count}} en voz",
     "create": {
       "createTitle": "Crear un servidor",
       "joinTitle": "Unirse a un servidor",
@@ -492,10 +583,15 @@
       "inviteCode": "Código de invitación",
       "generatingLink": "Generando enlace de invitación...",
       "failedToCreate": "No se pudo crear la invitación"
-    }
+    },
+    "switcherTitle": "Cambiar de servidor",
+    "switcherPlaceholder": "Ir a un servidor…",
+    "switcherEmpty": "Ningún servidor coincide con ese nombre.",
+    "switcherHint": "Escribe para filtrar · ↑↓ para moverte · Enter para abrir",
+    "createOrJoin": "Crear o unirse a un servidor"
   },
-
   "channel": {
+    "joinVoice": "Unirse a voz",
     "createChannel": "Crear canal",
     "deleteChannel": "Eliminar canal",
     "deleteCategory": "Eliminar categoría",
@@ -528,7 +624,6 @@
     "newChannelPlaceholder": "Nuevo canal {{type}}",
     "editPermissions": "Editar permisos"
   },
-
   "chat": {
     "messagePlaceholder": "Mensaje en #{{channel}}",
     "dmPlaceholder": "Mensaje a @{{user}}",
@@ -577,9 +672,10 @@
     "maxAttachments": "Máximo {{max}} archivos adjuntos por mensaje",
     "fileTypeNotAllowed": "{{name}}: tipo de archivo no permitido",
     "fileTooLarge": "{{name}} es demasiado grande (máx. {{max}} MB)",
-    "searchMessages": "Buscar mensajes (Ctrl+K)"
+    "searchMessages": "Buscar mensajes (Ctrl+K)",
+    "today": "Hoy",
+    "yesterday": "Ayer"
   },
-
   "dm": {
     "title": "Mensajes directos",
     "friends": "Amigos",
@@ -597,7 +693,6 @@
     "conversationStart": "Este es el inicio de tu historial de mensajes directos.",
     "welcomeMessage": "Selecciona una conversación de la barra lateral, o haz clic en un miembro de cualquier servidor para iniciar una nueva."
   },
-
   "friends": {
     "title": "Amigos",
     "tabs": {
@@ -606,10 +701,10 @@
       "pending": "Pendientes",
       "addFriend": "Agregar amigo"
     },
-    "onlineCount": "En línea — {{count}}",
-    "allCount": "Todos los amigos — {{count}}",
-    "incomingCount": "Recibidas — {{count}}",
-    "outgoingCount": "Enviadas — {{count}}",
+    "onlineCount": "En línea, {{count}}",
+    "allCount": "Todos los amigos, {{count}}",
+    "incomingCount": "Recibidas, {{count}}",
+    "outgoingCount": "Enviadas, {{count}}",
     "noOnline": "Ningún amigo está en línea en este momento.",
     "noFriends": "Aún no tienes amigos. ¡Intenta enviar una solicitud de amistad!",
     "noPending": "No hay solicitudes de amistad pendientes.",
@@ -630,7 +725,6 @@
     "failedToAccept": "No se pudo aceptar la solicitud de amistad",
     "failedToRemove": "No se pudo eliminar la amistad"
   },
-
   "members": {
     "owner": "Propietario",
     "adminsCount": "Administradores - {{count}}",
@@ -638,7 +732,6 @@
     "onlineCount": "En línea - {{count}}",
     "offlineCount": "Desconectados - {{count}}"
   },
-
   "voice": {
     "connected": "Voz conectada",
     "voiceChannel": "Canal de voz",
@@ -653,6 +746,7 @@
     "serverMuted": "Estás silenciado por el servidor",
     "moderatorRestricted": "Un moderador ha restringido tu audio",
     "shareScreen": "Compartir pantalla",
+    "shareWhiteboard": "Compartir pizarra",
     "stopSharing": "Dejar de compartir",
     "someoneSharing": "Alguien ya está compartiendo",
     "disconnect": "Desconectar",
@@ -660,9 +754,99 @@
     "incomingCall": "Llamada de voz entrante...",
     "accept": "Aceptar",
     "decline": "Rechazar",
-    "failedToAccept": "No se pudo aceptar la llamada"
+    "failedToAccept": "No se pudo aceptar la llamada",
+    "someone": "Alguien",
+    "youAreSharing": "Estás compartiendo tu pantalla",
+    "userIsSharing": "{{name}} está compartiendo su pantalla",
+    "fullscreen": "Pantalla completa",
+    "popOut": "Abrir en panel flotante",
+    "dockToInline": "Anclar a la vista",
+    "waitingForStream": "Esperando la transmisión de pantalla...",
+    "screenShare": "Compartir pantalla",
+    "snapshot": {
+      "button": "Tomar captura",
+      "caption": "Captura de la pantalla compartida de {{name}}",
+      "copy": "Copiar imagen",
+      "copied": "Copiado",
+      "save": "Guardar…",
+      "sendTo": "Enviar a un canal",
+      "sent": "Captura enviada",
+      "failed": "Error en la captura",
+      "holdBlocked": "La fuente cambió: confirma primero tus máscaras",
+      "notice": "{{name}} tomó una captura",
+      "noChannels": "No hay canales disponibles"
+    },
+    "reactions": {
+      "send": "Reaccionar {{emoji}}",
+      "hide": "Ocultar reacciones",
+      "show": "Mostrar reacciones"
+    },
+    "zoom": {
+      "reset": "Restablecer zoom"
+    },
+    "preflight": {
+      "title": "Prepara tu pantalla compartida",
+      "subtitle": "Cubre lo privado y añade notas o imágenes: no se comparte nada hasta que emitas",
+      "monitorNudge": "Estás compartiendo una pantalla completa: las notificaciones y todas las demás ventanas serán visibles. Cubre lo privado.",
+      "maskCount": "{{count}} máscaras",
+      "skipNextTime": "No volver a mostrar (el aviso de pantalla completa se mantiene)",
+      "cancel": "Cancelar",
+      "goLive": "Emitir"
+    },
+    "annotations": {
+      "annotate": "Anotar",
+      "done": "Listo",
+      "select": "Seleccionar",
+      "pen": "Lápiz",
+      "highlighter": "Resaltador",
+      "rectangle": "Rectángulo",
+      "ellipse": "Elipse",
+      "text": "Texto",
+      "image": "Imagen superpuesta",
+      "mask": "Máscara de privacidad",
+      "undo": "Deshacer",
+      "redo": "Rehacer",
+      "arrow": "Flecha",
+      "callout": "Marcador numerado",
+      "spotlight": "Foco",
+      "laser": "Puntero láser",
+      "eraser": "Borrador",
+      "renumber": "Renumerar marcadores en orden de lectura",
+      "calloutLimit": "Máximo {{max}} marcadores numerados por pantalla compartida",
+      "vanishingInk": "Tinta efímera: los trazos y las flechas se desvanecen tras unos segundos",
+      "bringToFront": "Traer al frente",
+      "bringForward": "Traer adelante",
+      "sendBackward": "Enviar atrás",
+      "sendToBack": "Enviar al fondo",
+      "moreColors": "Más colores",
+      "customColor": "Color personalizado",
+      "recentColors": "Recientes",
+      "textSize": "Tamaño del texto",
+      "maskStyleCover": "Cubrir",
+      "maskStylePixelate": "Pixelar",
+      "maskStyleBlur": "Difuminar",
+      "maskStyleCosmetic": "cosmético: queda mejor, pero el texto pixelado o difuminado a veces puede recuperarse, y el contenido en movimiento o que se desplaza aún más. Usa Cubrir para secretos.",
+      "maskStyleCosmeticShort": "Cosmético",
+      "sourceChanged": "Tu pantalla compartida cambió de tamaño ({{from}} → {{to}}): revisa tus máscaras. En pausa hasta que confirmes.",
+      "sourceChangedEdit": "Editar máscaras",
+      "sourceChangedResume": "Máscaras correctas: reanudar",
+      "layoutApplied": "Se aplicaron {{count}} máscaras de tu última pantalla compartida de esta fuente",
+      "layoutKeep": "Mantener",
+      "layoutFresh": "Empezar de cero",
+      "clearAll": "Borrar todo",
+      "color": "Color",
+      "width": "Grosor del trazo",
+      "addTextPlaceholder": "Escribe y pulsa Enter",
+      "sceneFull": "Límite de anotaciones alcanzado — elimina algunos elementos primero",
+      "imageTooLarge": "La imagen es demasiado grande incluso tras la compresión",
+      "maskPrivacyHint": "Oculto en el origen — los píxeles cubiertos nunca salen de este dispositivo",
+      "masksMayMisalign": "El contenido compartido cambió — comprueba que las máscaras siguen cubriendo lo previsto",
+      "maskFailed": "No se pudo aplicar la máscara de privacidad — tu pantalla compartida está en pausa hasta que quites la máscara",
+      "maskRestoreFailed": "Tu pantalla sigue transmitiéndose a través del compositor de máscaras — los espectadores ven la imagen correcta, solo consume CPU adicional. Reinicia la transmisión para solucionarlo.",
+      "sharePaused": "Los espectadores no pueden ver tu pantalla ahora mismo — se está aplicando una máscara de privacidad o su aplicación falló",
+      "syncError": "No se pudo compartir una anotación — tu vista puede diferir de la de los espectadores"
+    }
   },
-
   "attachment": {
     "expired": "Expirado",
     "fileExpired": "Archivo expirado",
@@ -672,7 +856,6 @@
     "loadingVideo": "Cargando vídeo...",
     "loadingAudio": "Cargando audio..."
   },
-
   "support": {
     "title": "Soporte",
     "open": "Abierto",
@@ -685,7 +868,6 @@
     "failedToSend": "No se pudo enviar el mensaje",
     "failedToReopen": "No se pudo reabrir el ticket"
   },
-
   "invite": {
     "youveBeenInvited": "¡Has sido invitado!",
     "loadingInvite": "Cargando invitación...",
@@ -695,7 +877,6 @@
     "joining": "Uniéndose...",
     "join": "Unirse a {{name}}"
   },
-
   "landing": {
     "nav": {
       "signIn": "Iniciar sesion",
@@ -713,43 +894,45 @@
     },
     "stats": {
       "title": "Creciendo juntos",
-      "subtitle": "Numeros reales de la comunidad Voxium — actualizados en tiempo real.",
+      "subtitle": "Numeros reales de la comunidad Voxium, actualizados en tiempo real.",
       "users": "Usuarios registrados",
       "servers": "Servidores creados",
       "messages": "Mensajes enviados"
     },
     "features": {
       "title": "Todo lo que necesitas",
-      "subtitle": "Voz, texto y comunidad — todo en un solo lugar, sin comprometer la privacidad ni el rendimiento.",
+      "subtitle": "Voz, texto y comunidad, todo en un solo lugar, sin comprometer la privacidad ni el rendimiento.",
       "voice": "Voz nitida como el cristal",
-      "voiceDesc": "Voz de servidor impulsada por SFU para mas de 25 usuarios por canal. Las llamadas DM van directas entre pares — sin intermediarios.",
+      "voiceDesc": "Voz de servidor impulsada por SFU para mas de 25 usuarios por canal. Las llamadas DM van directas entre pares, sin intermediarios.",
       "noiseSuppression": "Supresion de ruido con IA",
-      "noiseSuppressionDesc": "El filtro RNNoise impulsado por ML elimina el ruido de teclado, raton y fondo en tiempo real — solo se escucha tu voz.",
+      "noiseSuppressionDesc": "El filtro RNNoise impulsado por ML elimina el ruido de teclado, raton y fondo en tiempo real, solo se escucha tu voz.",
       "messaging": "Mensajeria en tiempo real",
-      "messagingDesc": "Entrega instantanea, reacciones, indicadores de escritura y mensajes directos — todo en tiempo real.",
+      "messagingDesc": "Entrega instantanea, reacciones, indicadores de escritura y mensajes directos, todo en tiempo real.",
       "privacy": "Privacidad ante todo",
-      "privacyDesc": "Sin anuncios, sin rastreo, sin recopilacion de datos. Tus conversaciones siguen siendo tuyas.",
+      "privacyDesc": "Sin anuncios, sin rastreo, sin recolección de datos. MD y canales privados cifrados de extremo a extremo.",
       "servers": "Servidores y comunidades",
-      "serversDesc": "Crea servidores, organiza canales, invita amigos — todo lo que necesitas para construir una comunidad.",
+      "serversDesc": "Crea servidores, organiza canales, invita amigos, todo lo que necesitas para construir una comunidad.",
       "calls": "Llamadas de voz directas",
-      "callsDesc": "Llamadas de voz 1 a 1 con WebRTC entre pares. Calidad cristalina, latencia cero.",
+      "callsDesc": "Llamadas de voz 1 a 1, de par a par, con señalización cifrada de extremo a extremo. Nítidas y sin latencia.",
       "fast": "Rapido y ligero",
       "fastDesc": "Construido con React 19, Vite y presencia respaldada por Redis. Agil en cualquier hardware."
     },
     "highlights": {
       "noAds": "Sin anuncios ni rastreo",
-      "openSource": "Codigo abierto y transparente",
-      "freeVoice": "Llamadas de voz gratis para siempre",
+      "sourceAvailable": "Código fuente público y transparente",
+      "e2eEncrypted": "MD y llamadas cifrados de extremo a extremo",
+      "freeForIndividuals": "Gratis para particulares",
       "noiseSuppression": "Supresion de ruido con IA",
       "selfHostable": "Autoalojable",
       "sfuVoice": "Voz SFU escalable"
     },
     "comparison": {
       "title": "Como se compara Voxium",
-      "subtitle": "Mira como Voxium se posiciona frente a las alternativas. Creemos que el software de comunicacion debe ser abierto, privado y propiedad de la comunidad.",
+      "subtitle": "Mira cómo se compara Voxium con las alternativas. Creemos que el software de comunicación debe ser privado, auditable y pertenecer a su comunidad.",
       "feature": "Caracteristica",
-      "footnote": "Comparacion basada en planes gratuitos de marzo de 2026. Las funciones marcadas como \"Planeado\" estan en la hoja de ruta.",
-      "openSource": "Codigo abierto",
+      "footnote": "Comparación basada en los planes gratuitos a agosto de 2026. Las funciones marcadas como «Planeado» están en la hoja de ruta.",
+      "sourceAvailable": "Código fuente auditable",
+      "encryptedChannels": "Canales cifrados solo por invitación",
       "selfHostable": "Autoalojable",
       "freeVoiceChat": "Chat de voz gratuito",
       "sfuVoice": "Voz SFU (25+ usuarios)",
@@ -776,7 +959,7 @@
     "showcase": {
       "title": "Hecho",
       "titleHighlight": "a tu medida",
-      "subtitle": "Personaliza cada detalle — desde los colores hasta los idiomas y los permisos.",
+      "subtitle": "Personaliza cada detalle, desde los colores hasta los idiomas y los permisos.",
       "themeLabel": "4 temas integrados + editor personalizado",
       "languageLabel": "11 idiomas con soporte RTL",
       "permissionLabel": "20 flags de permisos con anulaciones por canal",
@@ -784,11 +967,11 @@
       "permissionHint": "@everyone → Roles → Anulaciones por canal"
     },
     "why": {
-      "title": "\u00bfPor que Voxium?",
+      "title": "¿Por que Voxium?",
       "ownData": "Tus datos te pertenecen",
-      "ownDataDesc": "Autoaloja o usa nuestros servidores — de cualquier forma, tus datos son tuyos. Sin mineria de datos, sin venta.",
-      "openSource": "Codigo abierto",
-      "openSourceDesc": "Cada linea de codigo es publica. Auditalo, bifurcalo, contribuye. Transparencia total.",
+      "ownDataDesc": "Autoaloja o usa nuestros servidores, de cualquier forma, tus datos son tuyos. Sin mineria de datos, sin venta.",
+      "sourceAvailable": "Código fuente público",
+      "sourceAvailableDesc": "Cada línea de código es pública. Audítala, haz un fork, contribuye. Transparencia total.",
       "communityDriven": "Impulsado por la comunidad",
       "communityDrivenDesc": "Construido por la comunidad, para la comunidad. Las funciones las moldean quienes las usan.",
       "builtDifferent": "Construido diferente"
@@ -797,7 +980,7 @@
       "badge": "Impulsado por la comunidad",
       "title": "Financiado por la comunidad",
       "subtitle": "Sin anuncios. Sin recopilacion de datos. Sin condiciones. Voxium esta financiado enteramente por quienes lo usan.",
-      "openSource": "Codigo abierto",
+      "sourceAvailable": "Código fuente público",
       "youDecide": "Decide la hoja de ruta",
       "zeroAds": "Anuncios o rastreo",
       "sponsorGithub": "Patrocinar en GitHub",
@@ -805,13 +988,13 @@
       "supporterBadge": "Los colaboradores reciben una insignia especial en la app para mostrar su contribucion"
     },
     "cta": {
-      "title": "\u00bfListo para experimentar la comunicacion reinventada?",
+      "title": "¿Listo para experimentar la comunicacion reinventada?",
       "subtitle": "Unete a la revolucion de la comunicacion abierta. Sin tarjeta de credito. Sin suscripcion.",
-      "getStarted": "Comenzar — Es gratis",
+      "getStarted": "Comenzar, Es gratis",
       "downloadApp": "Descargar la app"
     },
     "footer": {
-      "tagline": "Comunicacion de voz y texto abierta y centrada en la privacidad.",
+      "tagline": "Comunicación por voz y texto con la privacidad primero.",
       "product": "Producto",
       "download": "Descargar",
       "changelog": "Registro de cambios",
@@ -822,24 +1005,21 @@
       "cookiePolicy": "Politica de cookies",
       "community": "Comunidad",
       "contributing": "Contribuir",
-      "copyright": "\u00a9 2026 Voxium. Todos los derechos reservados."
+      "copyright": "© 2026 Voxium. Todos los derechos reservados."
     }
   },
-
   "badges": {
     "staff": "Personal",
     "supporter": "Colaborador",
     "firstSupporter": "Primer colaborador",
-    "firstSupporterTooltip": "Primer colaborador — El primero en creer en Voxium",
+    "firstSupporterTooltip": "Primer colaborador, El primero en creer en Voxium",
     "topSupporter": "Mayor colaborador",
-    "topSupporterTooltip": "Mayor colaborador — El colaborador más generoso de Voxium"
+    "topSupporterTooltip": "Mayor colaborador, El colaborador más generoso de Voxium"
   },
-
   "connection": {
     "reconnecting": "Reconectando a Voxium...",
     "lost": "Conexión perdida. Intentando reconectar..."
   },
-
   "errorBoundary": {
     "title": "Algo salió mal",
     "tryAgain": "Intentar de nuevo",
@@ -849,7 +1029,6 @@
     "tryToRecover": "Intentar recuperar",
     "reloadPage": "Recargar página"
   },
-
   "serverErrors": {
     "invalidCredentials": "Credenciales no válidas",
     "usernameOrEmailTaken": "El nombre de usuario o correo electrónico ya está en uso",
@@ -936,5 +1115,185 @@
     "cannotBanSelf": "No puedes banearte a ti mismo",
     "cannotBanSuperAdmin": "No se puede banear a un superadministrador",
     "onlySuperAdminCanBan": "Solo los superadministradores pueden banear a otros administradores"
+  },
+  "e2e": {
+    "badgeTitle": "Cifrado de extremo a extremo — ver número de seguridad",
+    "encryptedMessage": "Mensaje cifrado",
+    "localSearchHint": "Buscando en los mensajes descifrados en este dispositivo — los resultados dependen de lo que este dispositivo haya recibido",
+    "decryptFailed": "No se puede descifrar este mensaje",
+    "attachmentFailed": "No se puede descifrar este archivo adjunto",
+    "downloadAttachment": "Descargar",
+    "safetyNumberTitle": "Número de seguridad",
+    "safetyNumberExplainer": "Compara este número con {{name}} por otro canal (en persona o en una llamada) para verificar que la conversación es segura. Cambia si alguno de los dos reinstala la aplicación o restablece sus claves de cifrado.",
+    "safetyNumberUnavailable": "Número de seguridad no disponible",
+    "verified": "Verificado",
+    "notVerified": "Aún sin verificar",
+    "markVerified": "Marcar como verificado",
+    "identityChangedWarning": "Las claves de seguridad de {{name}} han cambiado. Esto puede ocurrir tras una reinstalación — verifica el nuevo número de seguridad antes de confiar en esta conversación.",
+    "acceptNewIdentity": "Aceptar las nuevas claves",
+    "identityAccepted": "Nuevas claves aceptadas",
+    "perDeviceSafetyExplainer": "Cada dispositivo de {{name}} tiene su propio número de seguridad.",
+    "newDeviceBadgeTitle": "Nuevo dispositivo añadido — revisar dispositivos",
+    "newDeviceWarning": "{{name}} añadió un nuevo dispositivo. Revisa sus dispositivos para asegurarte de que es realmente esa persona.",
+    "reviewDevices": "Revisar dispositivos",
+    "devicesReviewed": "Dispositivos revisados",
+    "manageDevices": "Administrar dispositivos",
+    "deviceManagerTitle": "Tus dispositivos",
+    "deviceManagerExplainer": "Dispositivos registrados en tu cuenta. Revoca cualquier dispositivo que ya no uses o no reconozcas — los mensajes nuevos se recifrarán sin él de inmediato.",
+    "thisDevice": "Este dispositivo",
+    "deviceAdded": "Añadido el {{date}}",
+    "revokeDevice": "Revocar",
+    "revokeConfirm": "¿Revocar este dispositivo? Ya no podrá leer los mensajes nuevos, y cada conversación cifrada se volverá a cifrar.",
+    "revokeFailed": "No se pudo revocar el dispositivo",
+    "revoked": "Dispositivo revocado",
+    "ownDeviceBadgeTitle": "Se añadió un dispositivo a tu cuenta — revísalo",
+    "ownDeviceWarning": "Se añadió a tu cuenta un dispositivo que quizá no reconozcas ({{count}}). Puede leer tus conversaciones cifradas. Revócalo si no es tuyo.",
+    "ownDevicesReviewed": "Estos son mis dispositivos",
+    "ownDevicesLoadFailed": "No se pudieron cargar tus dispositivos. Esta lista puede estar incompleta: no la tomes como prueba de que no hay otro dispositivo registrado. Vuelve a abrir este panel para reintentar.",
+    "unrecognisedDevice": "nuevo",
+    "accountSafetyExplainer": "Compara este número con {{name}} por otro canal (en persona o en una llamada) para verificar tu cuenta. Es el mismo en todos los dispositivos que use cada uno, y solo cambia si se restablece una clave de cuenta.",
+    "markAccountVerified": "Marcar cuenta como verificada",
+    "advancedDevices": "Avanzado: detalles por dispositivo",
+    "crossSignedChip": "Verificado por la clave de la cuenta",
+    "unsignedChip": "No firmado por la clave de la cuenta de {{name}}",
+    "unsignedChipOwn": "No firmado por la clave de tu cuenta",
+    "approveDevice": "Aprobar este dispositivo",
+    "approveDeviceSuccess": "Dispositivo aprobado",
+    "approveDeviceFailed": "No se pudo aprobar el dispositivo",
+    "cannotApproveExplainer": "Este dispositivo aún no puede aprobar otros. Apruébalo desde un dispositivo que ya tenga acceso a la clave de tu cuenta.",
+    "accountSafetyNumberUnavailable": "Número de seguridad de la cuenta no disponible — mostrando solo números por dispositivo.",
+    "unsignedDeviceBadgeTitle": "Un dispositivo no está firmado con la clave de la cuenta — revísalo",
+    "unsignedDevicesWarning": "{{count}} dispositivo de {{name}} no está firmado con su clave de cuenta. Aun así puede leer los mensajes nuevos: trátalo como no verificado hasta que lo apruebe desde un dispositivo que ya use.",
+    "thisDeviceUnsignedBadgeTitle": "Este dispositivo aún no está aprobado: apruébalo desde otro dispositivo",
+    "masterConflictBadgeTitle": "La clave de tu cuenta no coincide con este dispositivo: revísalo",
+    "masterConflictExplainer": "Tu cuenta publica una clave que este dispositivo no creó ni puede reemplazar. Tus mensajes se siguen enviando, pero no podrás aprobar dispositivos nuevos hasta que restablezcas la identidad de la cuenta.",
+    "resetIdentityExplainer": "¿Perdiste el acceso a todos los dispositivos que podían aprobar? Crea una nueva identidad de cuenta. Hazlo solo como último recurso.",
+    "resetIdentityAction": "Restablecer identidad de la cuenta",
+    "resetIdentityConfirm": "Esto reemplaza la clave de tu cuenta. Todas tus conversaciones verán cambiar tu número de seguridad y tendrán que verificarte otra vez. Los demás dispositivos pierden su aprobación.",
+    "resetIdentitySuccess": "Identidad de la cuenta restablecida",
+    "resetIdentityFailed": "No se pudo restablecer la identidad de la cuenta",
+    "identityChangedBadgeTitle": "Las claves de seguridad de este contacto cambiaron: verifícalas antes de confiar",
+    "backupTitle": "Recuperación de la cuenta",
+    "backupExplainer": "Guarda una clave de recuperación ahora y podrás recuperar la clave de tu cuenta si pierdes todos tus dispositivos, sin que nadie tenga que verificarte de nuevo. No podemos leerla ni recuperarla por ti.",
+    "backupCreateAction": "Configurar la recuperación de la cuenta",
+    "backupCreateFailed": "No se pudo configurar la recuperación de la cuenta",
+    "backupSetUp": "La recuperación está configurada",
+    "backupUpdatedAt": "Clave de recuperación creada el {{date}}",
+    "backupReplaceAction": "Reemplazar la clave de recuperación",
+    "backupReplaceConfirm": "Esto crea una nueva clave de recuperación. La actual deja de funcionar de inmediato: donde la hayas guardado quedará inservible.",
+    "backupDeleteAction": "Desactivar la recuperación",
+    "backupDeleteConfirm": "¿Eliminar la copia? Tu clave de recuperación deja de funcionar de inmediato y, si pierdes todos tus dispositivos, tendrás que restablecer la identidad de tu cuenta: todos tus contactos tendrán que verificarte otra vez.",
+    "backupDeleted": "Recuperación de la cuenta desactivada",
+    "backupDeleteFailed": "No se pudo desactivar la recuperación de la cuenta",
+    "backupKeyTitle": "Tu clave de recuperación",
+    "backupKeyWarning": "Anótala ahora. Se muestra una sola vez: no podemos volver a mostrártela ni recuperarla por ti.",
+    "backupKeyLoss": "Sin ella, perder todos tus dispositivos implica restablecer la identidad de tu cuenta, y cada contacto tendrá que verificarte de nuevo.",
+    "backupKeyAcknowledge": "He guardado mi clave de recuperación en un lugar seguro",
+    "backupKeyDone": "Listo",
+    "backupCopyFailed": "No se pudo copiar la clave de recuperación",
+    "backupRestoreTitle": "Restaurar con la clave de recuperación",
+    "backupRestoreExplainer": "Esta cuenta tiene una clave de recuperación. Introdúcela para recuperar la clave de tu cuenta en este dispositivo: tu número de seguridad no cambia, así que ningún contacto tendrá que verificarte otra vez.",
+    "backupRestorePlaceholder": "ABCD-EFGH-JKLM-...",
+    "backupRestoreAction": "Restaurar",
+    "backupRestoreSuccess": "Clave de la cuenta restaurada: este dispositivo ya puede aprobar tus otros dispositivos",
+    "backupRestoreFailed": "Esa clave de recuperación no abrió la copia de seguridad de esta cuenta. Puede pertenecer a una identidad anterior.",
+    "backupNone": "En esta cuenta no se configuró ninguna clave de recuperación, así que no hay nada que restaurar.",
+    "backupPreferRestore": "Tienes una clave de recuperación: usarla arriba conserva tu identidad y nadie tendrá que verificarte de nuevo. Prueba eso primero.",
+    "backupRestoreMalformed": "Eso no parece una clave de recuperación. Revísala y vuelve a intentarlo.",
+    "peerNotReady": "{{name}} todavía no ha configurado Voxium en ningún dispositivo, así que no hay a dónde enviar un mensaje cifrado. Podrás escribirle cuando abra la aplicación.",
+    "peerNotReadyFallbackName": "Esta persona",
+    "linkCodeTitle": "Añadir este dispositivo a tu cuenta",
+    "linkCodeExplainer": "Abre Voxium en un dispositivo que ya uses, ve a tus dispositivos e introduce ahí este código. Hasta entonces, este dispositivo no puede leer tus mensajes cifrados.",
+    "linkCopyFailed": "No se pudo copiar el código de vinculación",
+    "linkTitle": "Vincular un dispositivo",
+    "linkExplainer": "Introduce el código que muestra el dispositivo que quieres añadir.",
+    "linkPlaceholder": "ABCD-2345-EFGH-6789",
+    "linkAction": "Continuar",
+    "linkUnknownCode": "Ningún dispositivo pendiente de aprobación muestra ese código. Compruébalo en el otro dispositivo e inténtalo de nuevo.",
+    "linkAmbiguousCode": "Más de un dispositivo muestra ese código. No apruebes ninguno: esto no puede ocurrir por casualidad. Elimina los dispositivos que no reconozcas y vuelve a vincular con un código nuevo.",
+    "linkKeysChanged": "Ese dispositivo ya no muestra el código que confirmaste. No se aprobó nada. Consigue un código nuevo en el dispositivo e inténtalo de nuevo; si vuelve a ocurrir, no lo apruebes.",
+    "linkLookupFailed": "No se pudo comprobar ese código ahora mismo. Inténtalo de nuevo.",
+    "linkConfirmTitle": "¿Aprobar este dispositivo?",
+    "linkConfirmDevice": "Dispositivo {{id}} · registrado el {{date}}",
+    "linkConfirmExplainer": "Al aprobarlo, este dispositivo recibe la clave de tu cuenta: podrá leer tus conversaciones cifradas y aprobar otros dispositivos. Continúa solo si es el dispositivo que tienes delante.",
+    "linkConfirmAction": "Aprobar dispositivo",
+    "devicesNotReady": "El cifrado aún se está configurando en este dispositivo, así que todavía no se pueden mostrar tus dispositivos. Vuelve en un momento.",
+    "identityAcceptFailed": "No se pudieron aceptar las nuevas claves",
+    "callLocked": "Llamada cifrada de extremo a extremo",
+    "callAbortIdentityChanged": "Llamada finalizada: las claves de seguridad de {{name}} cambiaron. Verifica su nuevo número de seguridad antes de volver a llamar.",
+    "callAbortPeerMustUpdate": "Llamada finalizada: la aplicación de {{name}} no puede hacer llamadas seguras. Pídele que actualice Voxium.",
+    "callAbortPeerNotE2E": "Llamada finalizada: {{name}} aún no ha configurado el cifrado, así que no se puede establecer una llamada segura.",
+    "callAbortSignalingFailed": "Llamada finalizada: falló el establecimiento de la llamada segura. Inténtalo de nuevo.",
+    "callNotReady": "Aún no se puede iniciar una llamada segura: el cifrado todavía se está configurando en este dispositivo. Inténtalo de nuevo en un momento."
+  },
+  "people": {
+    "title": "Personas",
+    "inVoice": "En voz",
+    "active": "Activos",
+    "away": "Ausentes",
+    "offline": "Desconectados",
+    "speaking": "Hablando",
+    "mutedStatus": "Silenciado",
+    "inVoiceStatus": "En voz",
+    "dnd": "No molestar",
+    "awayStatus": "Ausente",
+    "offlineStatus": "Desconectado"
+  },
+  "search": {
+    "placeholder": "Buscar mensajes…"
+  },
+  "secureVoice": {
+    "locked": "Canal de voz cifrado de extremo a extremo",
+    "unsupported": "La voz segura no está disponible en este dispositivo: requiere compatibilidad con medios cifrados.",
+    "cantJoin": "No se pudo iniciar la sesión de voz cifrada. Inténtalo de nuevo.",
+    "sessionFailed": "La voz cifrada falló: se te desconectó para evitar una llamada sin protección.",
+    "createHint": "Un canal de voz solo por invitación con audio cifrado de extremo a extremo: el servidor solo transmite sonido que no puede escuchar. El uso compartido de pantalla no está disponible.",
+    "peerIssues_one": "{{count}} miembro no puede recibir claves — no lo oirás hasta que se resuelva.",
+    "peerIssues_other": "{{count}} miembros no pueden recibir claves — no los oirás hasta que se resuelva."
+  },
+  "secureChannel": {
+    "sectionTitle": "Canales seguros",
+    "createTitle": "Crear canal seguro",
+    "createDescription": "Un canal cifrado de extremo a extremo, solo por invitación. Solo los miembros invitados pueden verlo — ni siquiera los administradores del servidor pueden leerlo.",
+    "namePlaceholder": "nombre-del-canal",
+    "inviteMembers": "Invitar miembros ({{count}}/{{max}})",
+    "searchMembers": "Buscar miembros…",
+    "noMembersFound": "No se encontraron miembros",
+    "create": "Crear",
+    "creating": "Creando…",
+    "created": "Canal seguro creado",
+    "failedToCreate": "No se pudo crear el canal seguro",
+    "memberCapReached": "Un canal seguro puede tener como máximo {{max}} miembros",
+    "members": "Miembros",
+    "membersCount": "Miembros ({{count}}/{{max}})",
+    "inviteMember": "Invitar a un miembro",
+    "memberInvited": "Miembro invitado",
+    "failedToInvite": "No se pudo invitar al miembro",
+    "memberRemoved": "Miembro eliminado",
+    "failedToRemove": "No se pudo eliminar al miembro",
+    "removeMember": "Eliminar miembro",
+    "failedToLoadMembers": "No se pudieron cargar los miembros",
+    "leave": "Salir del canal",
+    "left": "Saliste del canal",
+    "failedToLeave": "No se pudo salir del canal",
+    "membersNotReady": "{{names}} aún no puede(n) leer mensajes — no ha(n) configurado el cifrado",
+    "moderationTitle": "Canales seguros",
+    "moderationLoading": "Cargando…",
+    "moderationCount": "Este servidor tiene {{count}} canal(es) seguro(s). Sus nombres y contenidos solo son visibles para sus miembros.",
+    "moderationHint": "Los mensajes de los canales seguros no se pueden reportar: sus miembros lo resuelven entre ellos. Si un canal seguro debe desaparecer, un miembro puede copiar su id desde el menú contextual del canal y dártelo; pégalo aquí para eliminar el canal.",
+    "moderationDeletePlaceholder": "Id del canal dado por un miembro",
+    "copyId": "Copiar ID del canal",
+    "copyIdHint": "Dale este id a un administrador del servidor si este canal debe eliminarse",
+    "idCopied": "ID del canal copiado",
+    "idCopyFailed": "No se pudo copiar el ID del canal",
+    "moderationDelete": "Eliminar",
+    "moderationDeleted": "Canal seguro eliminado",
+    "moderationDeleteFailed": "No se pudo eliminar — verifica el id del canal",
+    "renameLabel": "Nombre del canal",
+    "rename": "Renombrar",
+    "renaming": "Renombrando…",
+    "renamed": "Canal renombrado",
+    "failedToRename": "No se pudo renombrar el canal",
+    "moderationNotSecure": "«{{name}}» es un canal normal — elimínalo desde la barra lateral"
   }
 }

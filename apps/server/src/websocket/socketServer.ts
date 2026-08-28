@@ -2,35 +2,46 @@ import type { Server as HttpServer } from 'http';
 import { Server as SocketServer } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import jwt from 'jsonwebtoken';
-import type { AuthPayload } from '../middleware/auth';
+import { consentIsRequired, type AuthPayload } from '../middleware/auth';
 import { setUserOnline, setUserOffline, getRedisPubSub } from '../utils/redis';
 import { prisma } from '../utils/prisma';
-import { handleVoiceEvents, getVoiceStateForServer, getScreenShareState } from './voiceHandler';
+import { handleVoiceEvents, getVoiceStateForServers, getScreenShareState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
-import { socketRateLimit } from '../middleware/rateLimiter';
+import { handleAnnotationEvents } from './annotationHandler';
+import { socketRateLimit, normalizeIp } from '../middleware/rateLimiter';
+import { trustsProxy, forwardedClientAddress } from '../utils/trustProxy';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { Permissions } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
-/** Strip IPv4-mapped IPv6 prefix (::ffff:1.2.3.4 → 1.2.3.4) */
-function normalizeIp(raw: string): string {
-  return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
-}
-
 /**
- * Get the real client IP. Only reads X-Forwarded-For in production
- * (where a trusted reverse proxy is expected), matching Express's
- * `trust proxy` setting. In other environments, uses the direct
- * socket address to prevent header spoofing.
+ * Get the real client IP. Reads X-Forwarded-For only when a trusted reverse
+ * proxy is expected — the SAME condition app.ts uses for Express's
+ * `trust proxy` (utils/trustProxy.ts), so the socket handshake and every REST
+ * control agree about who is calling. Otherwise uses the direct socket
+ * address to prevent header spoofing.
  */
-function getSocketIp(socket: { handshake: { address: string; headers: Record<string, string | string[] | undefined> } }): string | undefined {
-  if (process.env.NODE_ENV === 'production') {
-    const forwarded = socket.handshake.headers['x-forwarded-for'];
+export function getSocketIp(socket: { handshake: { address: string; headers: Record<string, string | string[] | undefined> } }): string | undefined {
+  if (trustsProxy()) {
+    const raw = socket.handshake.headers['x-forwarded-for'];
+    // The LAST hop, matching Express's `trust proxy: 1`, because that is the
+    // only entry a trusted proxy wrote (for the default hop count). nginx sets
+    // `X-Forwarded-For $proxy_add_x_forwarded_for`, which is
+    // "$http_x_forwarded_for, $remote_addr" — so the FIRST entry is whatever
+    // the client put in the header themselves. Reading it let a banned client
+    // pick the address the IpBan lookup queries, and made the socket surface
+    // disagree with every REST control about who is calling; the socket is the
+    // one surface that can evict an already-authenticated session.
+    //
+    // "Last" is really "TRUST_PROXY_HOPS-th from the right" — one nginx is
+    // the default; a load balancer in front of it makes it two. Both surfaces
+    // read the count from trustProxy.ts so they cannot disagree.
+    const forwarded = Array.isArray(raw) ? raw.join(',') : raw;
     if (typeof forwarded === 'string') {
-      const firstHop = forwarded.split(',')[0].trim();
-      if (firstHop) return normalizeIp(firstHop);
+      const client = forwardedClientAddress(forwarded);
+      if (client) return normalizeIp(client);
     }
   }
   return socket.handshake.address ? normalizeIp(socket.handshake.address) : undefined;
@@ -71,12 +82,15 @@ export function initSocketServer(httpServer: HttpServer) {
       // Check account ban, token version, and current role
       const user = await prisma.user.findUnique({
         where: { id: payload.userId },
-        select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true },
+        select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true, termsAcceptedAt: true, privacyAcceptedAt: true },
       });
       if (!user) return next(new Error('User not found'));
       if (user.bannedAt) return next(new Error('Account banned'));
       if (user.tokenVersion !== payload.tokenVersion) return next(new Error('Session invalidated'));
       if (!user.emailVerified) return next(new Error('Email not verified'));
+      // Same gate as requireConsent on REST: an account that has not accepted
+      // the legal documents gets no live session either.
+      if (consentIsRequired(user)) return next(new Error('Consent required'));
 
       // Check IP ban
       const ip = getSocketIp(socket);
@@ -228,6 +242,12 @@ export function initSocketServer(httpServer: HttpServer) {
     // ─── DM Voice events ─────────────────────────────────────────────
     handleDMVoiceEvents(io, socket);
 
+    // ─── Screen-share annotation events ──────────────────────────────
+    // Deliberately OUTSIDE the voice relay table: annotations touch no
+    // mediasoup state, so they run on the sharer's own node and authorize
+    // against the Redis screen-share mirror (see annotationHandler.ts).
+    handleAnnotationEvents(io, socket);
+
     // ─── Admin metrics subscription ──────────────────────────────────
     socket.on('admin:subscribe_metrics', () => {
       if (!socketRateLimit(socket, 'admin:subscribe_metrics', 10)) return;
@@ -288,7 +308,8 @@ export function initSocketServer(httpServer: HttpServer) {
             }),
           ]);
 
-          await prisma.user.update({ where: { id: userId }, data: { status: 'offline' } });
+          // updateMany with a status filter: no-op write skipped when already offline
+          await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'offline' } }, data: { status: 'offline' } });
 
           for (const m of membershipList) {
             socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
@@ -331,27 +352,25 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.join(`server:${m.serverId}`);
       }
 
-      // Auto-join text channel rooms the user can view
-      const allTextChannels = await prisma.channel.findMany({
-        where: { serverId: { in: memberships.map((m) => m.serverId) }, type: 'text' },
-        select: { id: true, serverId: true },
+      // Auto-join channel rooms the user can view. Includes VOICE channels:
+      // `channel:{id}` is the visibility boundary for real-time events, and voice
+      // presence (voice:user_joined/state/speaking/screen share) broadcasts there
+      // instead of server-wide so private voice channels don't leak occupancy.
+      // Visibility for ALL servers is computed in 4 batched queries (the old
+      // per-server loop made a deploy that reconnects thousands of clients a
+      // self-inflicted DB stampede).
+      const allChannels = await prisma.channel.findMany({
+        where: { serverId: { in: memberships.map((m) => m.serverId) } },
+        // `secure` is load-bearing: without it filterVisibleChannelsMulti
+        // treats secure channels as plaintext and joins every member's socket
+        select: { id: true, serverId: true, type: true, secure: true },
       });
-      // Group channels by server for efficient batch filtering
-      const channelsByServer = new Map<string, typeof allTextChannels>();
-      for (const ch of allTextChannels) {
-        const list = channelsByServer.get(ch.serverId) || [];
-        list.push(ch);
-        channelsByServer.set(ch.serverId, list);
-      }
-      const { filterVisibleChannels } = await import('../utils/permissionCalculator');
-      const textChannels: typeof allTextChannels = [];
-      for (const [serverId, channels] of channelsByServer) {
-        const visible = await filterVisibleChannels(userId, serverId, channels);
-        textChannels.push(...visible);
-      }
-      for (const ch of textChannels) {
+      const { filterVisibleChannelsMulti } = await import('../utils/permissionCalculator');
+      const visibleChannels = await filterVisibleChannelsMulti(userId, allChannels);
+      for (const ch of visibleChannels) {
         socket.join(`channel:${ch.id}`);
       }
+      const textChannels = visibleChannels.filter((ch) => ch.type === 'text');
 
       // Compute unread counts across all text channels in a single query.
       // Uses LATERAL JOIN with LIMIT 100 to cap per-channel scanning — the frontend
@@ -494,44 +513,57 @@ export function initSocketServer(httpServer: HttpServer) {
         socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
       }
 
-      // Broadcast online status to all DM conversation rooms
+      // Broadcast online status to all DM conversation rooms (reuses the
+      // conversation list fetched above — this was a duplicate query)
       try {
-        const dmConversations = await prisma.conversation.findMany({
-          where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
-          select: { id: true },
-        });
-        for (const c of dmConversations) {
+        for (const c of conversations) {
           socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
         }
       } catch (dmPresErr) {
         console.error(`[WS] Error broadcasting DM presence for ${userId}:`, dmPresErr);
       }
 
-      // Send existing voice channel users for all servers (reads from Redis for cross-node visibility)
-      // Only send for channels the user has VIEW_CHANNEL permission for
-      for (const m of memberships) {
-        const voiceState = await getVoiceStateForServer(m.serverId);
-        for (const { channelId, userIds, userStates } of voiceState) {
-          // Check VIEW_CHANNEL before revealing voice channel occupants
-          const canView = await hasChannelPermission(userId, channelId, m.serverId, Permissions.VIEW_CHANNEL);
-          if (!canView) continue;
+      // Send existing voice channel users for all servers (reads from Redis for
+      // cross-node visibility). One batched Redis read for ALL memberships; the
+      // VIEW_CHANNEL decision reuses the bulk visibility result computed above
+      // (the old loop did a per-membership Redis scan over every globally-active
+      // channel plus a multi-query permission check per voice channel).
+      const visibleChannelIds = new Set(visibleChannels.map((ch) => ch.id));
+      const voiceStates = (await getVoiceStateForServers(memberships.map((m) => m.serverId)))
+        .filter(({ channelId }) => visibleChannelIds.has(channelId));
 
-          const userInfos = await prisma.user.findMany({
-            where: { id: { in: userIds } },
-            select: { id: true, username: true, displayName: true, avatarUrl: true },
-          });
-          const voiceUsers = userInfos.map((u) => {
-            const state = userStates.get(u.id);
-            return {
-              ...u,
-              selfMute: state?.selfMute ?? false,
-              selfDeaf: state?.selfDeaf ?? false,
-              serverMuted: state?.serverMuted ?? false,
-              serverDeafened: state?.serverDeafened ?? false,
-              speaking: false,
-            };
-          });
-          socket.emit('voice:channel_users', { channelId, users: voiceUsers });
+      if (voiceStates.length > 0) {
+        // Single user-info query across all visible voice channels
+        const allVoiceUserIds = [...new Set(voiceStates.flatMap((v) => v.userIds))];
+        const userInfos = await prisma.user.findMany({
+          where: { id: { in: allVoiceUserIds } },
+          select: { id: true, username: true, displayName: true, avatarUrl: true },
+        });
+        const userInfoById = new Map(userInfos.map((u) => [u.id, u]));
+
+        for (const { channelId, serverId, userIds, userStates } of voiceStates) {
+          const voiceUsers = userIds
+            .map((uid) => userInfoById.get(uid))
+            .filter((u): u is NonNullable<typeof u> => !!u)
+            .map((u) => {
+              const state = userStates.get(u.id);
+              return {
+                ...u,
+                selfMute: state?.selfMute ?? false,
+                selfDeaf: state?.selfDeaf ?? false,
+                serverMuted: state?.serverMuted ?? false,
+                serverDeafened: state?.serverDeafened ?? false,
+                speaking: false,
+                // Same conditional-spread shape the voice:join replay uses —
+                // this list has to be indistinguishable from that one, because
+                // a secure-voice client feeds BOTH to onParticipantJoined and
+                // an entry missing these is excluded from keying for the rest
+                // of the call (spec §21).
+                ...(state?.e2eDeviceId && { deviceId: state.e2eDeviceId }),
+                ...(state?.e2eEpoch && { epoch: state.e2eEpoch }),
+              };
+            });
+          socket.emit('voice:channel_users', { channelId, serverId, users: voiceUsers });
 
           // Send screen share state if someone is sharing in this channel
           const sharingUserId = await getScreenShareState(channelId);
@@ -542,7 +574,9 @@ export function initSocketServer(httpServer: HttpServer) {
       }
 
       // Update DB status
-      await prisma.user.update({ where: { id: userId }, data: { status: 'online' } });
+      // updateMany with a status filter: reconnect churn / multi-device connects
+      // otherwise rewrite the same 'online' row on every socket (write amplification)
+      await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'online' } }, data: { status: 'online' } });
     } catch (err) {
       console.error(`[WS] Error during connection setup for ${userId}:`, err);
     }

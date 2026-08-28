@@ -1,0 +1,32 @@
+[package]
+name = "voxium-crypto-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Voxium E2E crypto engine v1 (olm1): thin wasm-bindgen marshalling layer over vodozemac. No crypto logic lives in this crate or in JS — all key derivation, ratcheting, and signature verification happen inside vodozemac."
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# SECURITY: pinned exactly. 0.10.0 ships the Feb-2026 defense-in-depth fixes
+# (fallible all-zero DH check, strict Ed25519 verification by default).
+# Bump only after reviewing the changelog + RustSec advisories (see
+# .github/workflows/crypto-deps-watch.yml).
+vodozemac = "=0.10.0"
+# E2E attachment file encryption (AES-256-GCM). RustCrypto, same family as
+# vodozemac's own internals; keeps file crypto out of JS entirely.
+aes-gcm = "0.10"
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+sha2 = "0.10"
+zeroize = "1"
+# wasm32-unknown-unknown has no OS entropy source; getrandom's "js" feature
+# routes vodozemac's RNG to the browser/runtime WebCrypto getRandomValues.
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true

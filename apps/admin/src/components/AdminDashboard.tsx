@@ -51,6 +51,7 @@ export function AdminDashboard() {
         <AdminStatCard label="Open Tickets" value={stats?.openTickets ?? 0} icon={LifeBuoy} color="text-vox-accent-info" />
       </div>
 
+
       {/* Real-time Metrics */}
       <div className="rounded-lg bg-vox-bg-secondary border border-vox-border p-4">
         <h3 className="text-sm font-semibold text-vox-text-primary mb-3 flex items-center gap-2">
@@ -135,14 +136,25 @@ export function AdminDashboard() {
               <div>
                 <p className="text-lg font-bold text-vox-text-primary">
                   {sfuStats.totalTransports}
-                  <span className="text-xs font-normal text-vox-text-muted"> / {sfuStats.portRange.total}</span>
+                  {!sfuStats.webRtcServer && (
+                    <span className="text-xs font-normal text-vox-text-muted"> / {sfuStats.portRange.total}</span>
+                  )}
                 </p>
-                <p className="text-xs text-vox-text-muted">Port Usage</p>
+                <p className="text-xs text-vox-text-muted">{sfuStats.webRtcServer ? 'Transports' : 'Port Usage'}</p>
               </div>
             </div>
 
-            {/* Port utilization bar */}
-            {(() => {
+            {/* WebRtcServer mode: every transport on a worker shares that worker's udp+tcp port,
+                so the port range does not bound the transport count — list the ports instead. */}
+            {sfuStats.webRtcServer && (
+              <div className="mb-4 text-xs text-vox-text-muted">
+                WebRtcServer ports (udp+tcp, one per worker): {sfuStats.webRtcServer.ports.join(', ') || 'none'}
+                <span className="ml-2 opacity-70">· configured MIN–MAX {sfuStats.portRange.min}–{sfuStats.portRange.max} (only these ports are used)</span>
+              </div>
+            )}
+
+            {/* Port utilization bar — per-transport listen mode only */}
+            {!sfuStats.webRtcServer && (() => {
               const used = sfuStats.totalTransports;
               const total = sfuStats.portRange.total;
               const pct = total > 0 ? Math.min((used / total) * 100, 100) : 0;

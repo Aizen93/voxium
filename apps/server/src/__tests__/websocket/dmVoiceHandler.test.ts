@@ -31,6 +31,7 @@ const mockRedis = vi.hoisted(() => {
     hGetAll: vi.fn().mockResolvedValue({}),
     hLen: vi.fn().mockResolvedValue(0),
     hDel: vi.fn().mockResolvedValue(1),
+    hExists: vi.fn().mockResolvedValue(0),
     set: vi.fn().mockResolvedValue('OK'),
     get: vi.fn().mockResolvedValue(null),
     del: vi.fn().mockResolvedValue(1),
@@ -40,12 +41,24 @@ const mockRedis = vi.hoisted(() => {
     sMembers: vi.fn().mockResolvedValue([]),
     eval: vi.fn().mockResolvedValue(null),
     expire: vi.fn().mockResolvedValue(1),
+    // eslint-disable-next-line require-yield
+    scanIterator: vi.fn().mockImplementation(async function* () { /* default: no keys */ }),
   };
 });
+
+const { mockLiveNodeCounts, mockSocketExists, mockLiveSocketIds } = vi.hoisted(() => ({
+  mockLiveNodeCounts: vi.fn().mockResolvedValue({ total: 1, peers: 0 }),
+  mockSocketExists: vi.fn().mockResolvedValue(false),
+  // null = adapter cannot answer, so the sweep uses the legacy per-socket path
+  mockLiveSocketIds: vi.fn().mockResolvedValue(null),
+}));
 
 vi.mock('../../utils/redis', () => ({
   getRedis: vi.fn().mockReturnValue(mockRedis),
   NODE_ID: vi.fn().mockReturnValue('test-node-1'),
+  liveNodeCounts: mockLiveNodeCounts,
+  socketExistsInCluster: mockSocketExists,
+  liveClusterSocketIds: mockLiveSocketIds,
 }));
 
 // Mock rate limiter — always allow by default
@@ -63,7 +76,7 @@ vi.mock('../../websocket/voiceHandler', () => ({
   leaveCurrentVoiceChannel: vi.fn(),
 }));
 
-import { handleDMVoiceEvents, leaveCurrentDMVoiceChannel, getActiveDMCallCount, getTotalDMVoiceUsers } from '../../websocket/dmVoiceHandler';
+import { handleDMVoiceEvents, leaveCurrentDMVoiceChannel, getActiveDMCallCount, getTotalDMVoiceUsers, clearDMVoiceState } from '../../websocket/dmVoiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -87,6 +100,7 @@ function resetRedis() {
 
   // Reset individual commands
   mockRedis.hSet.mockReset().mockResolvedValue(1);
+  mockRedis.hExists.mockReset().mockResolvedValue(0);
   mockRedis.hGet.mockReset().mockResolvedValue(null);
   mockRedis.hGetAll.mockReset().mockResolvedValue({});
   mockRedis.hLen.mockReset().mockResolvedValue(0);
@@ -100,6 +114,8 @@ function resetRedis() {
   mockRedis.sMembers.mockReset().mockResolvedValue([]);
   mockRedis.eval.mockReset().mockResolvedValue(null);
   mockRedis.expire.mockReset().mockResolvedValue(1);
+  // eslint-disable-next-line require-yield
+  mockRedis.scanIterator.mockReset().mockImplementation(async function* () { /* no keys */ });
 }
 
 function createMockSocket(userId = 'user-1', socketId = 'socket-1') {
@@ -121,14 +137,16 @@ function createMockSocket(userId = 'user-1', socketId = 'socket-1') {
 function createMockIO() {
   const emitFn = vi.fn();
   const fetchSocketsFn = vi.fn().mockResolvedValue([]);
+  const socketsLeaveFn = vi.fn();
   return {
     to: vi.fn().mockReturnValue({ emit: emitFn }),
-    in: vi.fn().mockReturnValue({ fetchSockets: fetchSocketsFn }),
+    in: vi.fn().mockReturnValue({ fetchSockets: fetchSocketsFn, socketsLeave: socketsLeaveFn }),
     sockets: {
       sockets: new Map(),
     },
     _emit: emitFn,
     _fetchSockets: fetchSocketsFn,
+    _socketsLeave: socketsLeaveFn,
   };
 }
 
@@ -254,7 +272,8 @@ describe('dmVoiceHandler — dm:voice:join', () => {
     expect(leaveCurrentVoiceChannel).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      'user-1'
+      'user-1',
+      { force: true }
     );
   });
 
@@ -336,6 +355,110 @@ describe('dmVoiceHandler — dm:voice:join', () => {
       'user-1',
       JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false })
     );
+  });
+
+  it('stores a valid deviceId (E2E call-signal routing) and echoes it on joined events', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({});
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' }),
+    });
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' });
+
+    expect(mockRedis._multiChain.hSet).toHaveBeenCalledWith(
+      'dm:voice:users:conv-1',
+      'user-1',
+      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' })
+    );
+    // The caller's own joined event carries the deviceId the peer will seal to
+    expect(socket.emit).toHaveBeenCalledWith('dm:voice:joined', expect.objectContaining({
+      user: expect.objectContaining({ id: 'user-1', deviceId: 'device-aaaa1111' }),
+    }));
+  });
+
+  it('STRIPS a malformed deviceId — shape-validated routing metadata, never trusted', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({});
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+    });
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false, deviceId: 'not a device id!!' });
+
+    expect(mockRedis._multiChain.hSet).toHaveBeenCalledWith(
+      'dm:voice:users:conv-1',
+      'user-1',
+      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false })
+    );
+  });
+
+  it('reconnect rebind preserves the deviceId in the Lua-updated state', async () => {
+    // User already in this call → the rebind path runs
+    mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall
+    mockRedis.eval.mockResolvedValueOnce(1); // rebind succeeds
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' }),
+    });
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser] as any);
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' });
+
+    const evalCall = mockRedis.eval.mock.calls[0];
+    const stateJson = (evalCall[1] as { arguments: string[] }).arguments[1];
+    expect(JSON.parse(stateJson)).toMatchObject({ socketId: 'socket-1', deviceId: 'device-aaaa1111' });
+    // The rejoin replay to this socket carries the peer's stored deviceId
+    expect(socket.emit).toHaveBeenCalledWith('dm:voice:joined', expect.objectContaining({
+      user: expect.objectContaining({ deviceId: 'device-aaaa1111' }),
+    }));
+  });
+
+  it('a rebind WITHOUT deviceId PRESERVES the stored one (transient E2E hiccup must not strand the peer)', async () => {
+    mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall
+    // updateDMVoiceUserSocket merge-read of the current state
+    mockRedis.hGet.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'old-socket', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' })
+    );
+    mockRedis.eval.mockResolvedValueOnce(1); // rebind succeeds
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' }),
+    });
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser] as any);
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false }); // no deviceId this time
+
+    const evalCall = mockRedis.eval.mock.calls[0];
+    const stateJson = (evalCall[1] as { arguments: string[] }).arguments[1];
+    // The stored routing hint survives — erasing it would make the peer's next
+    // replay read a deviceId-less state and abort the call as "peer must update"
+    expect(JSON.parse(stateJson)).toMatchObject({ socketId: 'socket-1', deviceId: 'device-aaaa1111' });
+  });
+
+  it('a rebind WITH a different deviceId overwrites (legitimate device change)', async () => {
+    mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall
+    mockRedis.eval.mockResolvedValueOnce(1);
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false, deviceId: 'device-bbbb2222' }),
+    });
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser] as any);
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1', { selfMute: false, selfDeaf: false, deviceId: 'device-bbbb2222' });
+
+    // No merge-read when a deviceId is supplied — the fresh value wins
+    expect(mockRedis.hGet).not.toHaveBeenCalled();
+    const evalCall = mockRedis.eval.mock.calls[0];
+    const stateJson = (evalCall[1] as { arguments: string[] }).arguments[1];
+    expect(JSON.parse(stateJson)).toMatchObject({ deviceId: 'device-bbbb2222' });
   });
 
   it('emits dm:voice:joined to room when second user joins', async () => {
@@ -488,6 +611,272 @@ describe('dmVoiceHandler — dm:voice:leave', () => {
   });
 });
 
+// ─── CRIT-1: socket-ownership guard on reconnect ─────────────────────────────
+
+describe('dmVoiceHandler — reconnect ownership (CRIT-1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+  });
+
+  it('stale socket does NOT end a call taken over by a newer socket', async () => {
+    const { socket, handlers } = createMockSocket('user-1', 'socket-STALE');
+    const io = createMockIO();
+    handleDMVoiceEvents(io as any, socket as any);
+
+    // User is registered as in conv-1, but the call is now owned by a newer socket.
+    mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall
+    mockRedis.hGet.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'socket-NEW', selfMute: false, selfDeaf: false }),
+    ); // ownership check: owner is the newer socket
+
+    const disconnect = handlers.get('disconnecting')!;
+    await disconnect();
+
+    // The live call must survive — no ended broadcast, no system message
+    expect(io._emit).not.toHaveBeenCalledWith('dm:voice:ended', expect.anything());
+    // The stale socket only detaches itself from the room
+    expect(socket.leave).toHaveBeenCalledWith('dm:voice:conv-1');
+  });
+
+  it('owning socket DOES end the call on disconnect', async () => {
+    const { socket, handlers } = createMockSocket('user-1', 'socket-1');
+    const io = createMockIO();
+    handleDMVoiceEvents(io as any, socket as any);
+
+    mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall
+    mockRedis.hGet.mockResolvedValueOnce(
+      JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+    ); // ownership check: this socket owns the call
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+      'user-2': JSON.stringify({ socketId: 'socket-2', selfMute: false, selfDeaf: false }),
+    });
+
+    const disconnect = handlers.get('disconnecting')!;
+    await disconnect();
+
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:ended', { conversationId: 'conv-1' });
+  });
+
+  it('rejoining the same call rebinds the socket without ending it', async () => {
+    const { socket, handlers } = createMockSocket('user-1', 'socket-NEW');
+    const io = createMockIO();
+    handleDMVoiceEvents(io as any, socket as any);
+
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall → already in conv-1
+    mockRedis.eval.mockResolvedValueOnce(1); // updateDMVoiceUserSocket → rebound
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-NEW', selfMute: false, selfDeaf: false }),
+      'user-2': JSON.stringify({ socketId: 'socket-2', selfMute: false, selfDeaf: false }),
+    });
+    vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser, mockUser2] as any);
+
+    const handler = handlers.get('dm:voice:join')!;
+    await handler('conv-1');
+
+    // Rebind path: socketId updated via Lua, room re-joined, participants rehydrated
+    expect(mockRedis.eval).toHaveBeenCalled();
+    expect(socket.join).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(socket.emit).toHaveBeenCalledWith('dm:voice:joined', expect.objectContaining({ conversationId: 'conv-1' }));
+    // Call is preserved (not ended) and not re-added as a fresh participant
+    expect(io._emit).not.toHaveBeenCalledWith('dm:voice:ended', expect.anything());
+  });
+
+  it('re-arms the unanswered-call timer when a caller reconnects mid-ring (1 participant)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { socket, handlers } = createMockSocket('user-1', 'socket-NEW');
+      const io = createMockIO();
+      handleDMVoiceEvents(io as any, socket as any);
+
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+      mockRedis.get.mockResolvedValueOnce('conv-1'); // getUserDMCall → same call
+      mockRedis.eval.mockResolvedValueOnce(1); // rebound
+      mockRedis.hGetAll.mockResolvedValueOnce({
+        'user-1': JSON.stringify({ socketId: 'socket-NEW', selfMute: false, selfDeaf: false }),
+      }); // still ringing: only the caller
+      vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser] as any);
+
+      await handlers.get('dm:voice:join')!('conv-1');
+
+      // A pending auto-cancel timer must exist so the still-ringing call still times out.
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does NOT arm a timer when reconnecting into an already-answered call (2 participants)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { socket, handlers } = createMockSocket('user-1', 'socket-NEW');
+      const io = createMockIO();
+      handleDMVoiceEvents(io as any, socket as any);
+
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+      mockRedis.get.mockResolvedValueOnce('conv-1');
+      mockRedis.eval.mockResolvedValueOnce(1);
+      mockRedis.hGetAll.mockResolvedValueOnce({
+        'user-1': JSON.stringify({ socketId: 'socket-NEW', selfMute: false, selfDeaf: false }),
+        'user-2': JSON.stringify({ socketId: 'socket-2', selfMute: false, selfDeaf: false }),
+      }); // answered: two participants
+      vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser, mockUser2] as any);
+
+      await handlers.get('dm:voice:join')!('conv-1');
+
+      // Answered call needs no auto-cancel timer.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ─── clearDMVoiceState boot cleanup ──────────────────────────────────────────
+
+describe('dmVoiceHandler — clearDMVoiceState (boot cleanup)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+  });
+
+  it('scans and deletes ALL dm:voice:* keys, including an orphaned call key not in the active set', async () => {
+    mockRedis.scanIterator.mockImplementation(async function* () {
+      yield ['dm:voice:active', 'dm:voice:users:conv-1'];
+      // An orphaned call key NOT reachable from the active set — the active-set-derived
+      // cleanup would have missed this; the SCAN-based cleanup must reap it.
+      yield ['dm:voice:call:user-1', 'dm:voice:call:orphan-user'];
+    });
+
+    await clearDMVoiceState();
+
+    expect(mockRedis.del).toHaveBeenCalledWith([
+      'dm:voice:active',
+      'dm:voice:users:conv-1',
+      'dm:voice:call:user-1',
+      'dm:voice:call:orphan-user',
+    ]);
+  });
+
+  it('is a no-op when there are no dm:voice keys', async () => {
+    await clearDMVoiceState();
+    expect(mockRedis.del).not.toHaveBeenCalled();
+  });
+});
+
+// ─── clearDMVoiceState multi-node scoped reap ────────────────────────────────
+
+describe('dmVoiceHandler — clearDMVoiceState (multi-node scoped reap)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+    mockLiveNodeCounts.mockResolvedValue({ total: 1, peers: 0 });
+    mockSocketExists.mockResolvedValue(false);
+    mockLiveSocketIds.mockResolvedValue(null);
+  });
+
+  it('with live peers: reaps ONLY participants whose socket is gone cluster-wide', async () => {
+    mockLiveNodeCounts.mockResolvedValue({ total: 2, peers: 1 });
+    mockRedis.sMembers.mockResolvedValue(['conv-9']);
+    mockRedis.hGetAll.mockImplementation((key: string) =>
+      Promise.resolve(key === 'dm:voice:users:conv-9' ? {
+        'u-dead': JSON.stringify({ socketId: 's-dead', selfMute: false, selfDeaf: false }),
+        'u-live': JSON.stringify({ socketId: 's-live', selfMute: false, selfDeaf: false }),
+      } : {}));
+    mockSocketExists.mockImplementation(async (_io: unknown, socketId: string) => socketId === 's-live');
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    // The crash ghost is removed atomically (Lua eval) and announced to the call room
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ arguments: ['u-dead', 'conv-9'] }),
+    );
+    expect(io.to).toHaveBeenCalledWith('dm:voice:conv-9');
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-9', userId: 'u-dead' });
+    // The peer count reaches the snapshot, which is what lets it refuse an
+    // adapter answer that could only have covered this node — without it a
+    // Redis pub/sub blip during a boot hangs up every live call in the cluster.
+    expect(mockLiveSocketIds).toHaveBeenCalledWith(io, 1);
+    // The live cross-node participant is untouched
+    expect(mockRedis.eval).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ arguments: ['u-live', 'conv-9'] }),
+    );
+    // And crucially: NO full wipe of dm:voice:* keys
+    expect(mockRedis.del).not.toHaveBeenCalledWith(expect.arrayContaining([expect.any(String)]));
+  });
+
+  it('with live peers: reaps orphaned dm:voice:call keys whose user is no longer in the call hash', async () => {
+    mockLiveNodeCounts.mockResolvedValue({ total: 2, peers: 1 });
+    mockRedis.sMembers.mockResolvedValue([]);
+    mockRedis.scanIterator.mockImplementation(async function* (opts: { MATCH?: string }) {
+      if (opts?.MATCH === 'dm:voice:call:*') yield ['dm:voice:call:u-orphan'];
+    });
+    mockRedis.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'dm:voice:call:u-orphan' ? 'conv-x' : null));
+    mockRedis.hExists.mockResolvedValue(0);
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    expect(mockRedis.del).toHaveBeenCalledWith('dm:voice:call:u-orphan');
+  });
+
+  it('falls back to the full wipe when this is the sole node, even with io provided', async () => {
+    mockLiveNodeCounts.mockResolvedValue({ total: 1, peers: 0 });
+    mockRedis.scanIterator.mockImplementation(async function* () {
+      yield ['dm:voice:active', 'dm:voice:users:conv-1'];
+    });
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    expect(mockRedis.del).toHaveBeenCalledWith(['dm:voice:active', 'dm:voice:users:conv-1']);
+  });
+
+  // The deferred retry of a refused boot sweep runs AFTER server.listen(). By
+  // then the corpse heartbeat it was waiting out has expired, so the node
+  // reads as sole — and the full wipe would hang up every call that started
+  // in the meantime. The retry must take the scoped path regardless.
+  it('allowFullWipe:false never full-wipes, even as the sole node — only socket-dead participants go', async () => {
+    mockLiveNodeCounts.mockResolvedValue({ total: 1, peers: 0 });
+    mockRedis.sMembers.mockResolvedValue(['conv-9']);
+    mockRedis.hGetAll.mockImplementation((key: string) =>
+      Promise.resolve(key === 'dm:voice:users:conv-9' ? {
+        'u-ghost': JSON.stringify({ socketId: 's-ghost', selfMute: false, selfDeaf: false }),
+        'u-live': JSON.stringify({ socketId: 's-live', selfMute: false, selfDeaf: false }),
+      } : {}));
+    // Sole node after listen(): the adapter's own room set IS the cluster's
+    mockLiveSocketIds.mockResolvedValue(new Set(['s-live', 'user:u-live']));
+    mockRedis.scanIterator.mockImplementation(async function* () {
+      yield ['dm:voice:active', 'dm:voice:users:conv-9', 'dm:voice:call:u-live'];
+    });
+
+    const io = createMockIO();
+    const result = await clearDMVoiceState(io as never, { allowFullWipe: false });
+
+    expect(result).toEqual({ skipped: false });
+    expect(mockLiveSocketIds).toHaveBeenCalledWith(io, 0);
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ arguments: ['u-ghost', 'conv-9'] }),
+    );
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-9', userId: 'u-ghost' });
+    expect(mockRedis.eval).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ arguments: ['u-live', 'conv-9'] }),
+    );
+    // The full wipe's signature is a single del of every scanned dm:voice:* key
+    expect(mockRedis.del).not.toHaveBeenCalledWith(expect.arrayContaining(['dm:voice:active']));
+  });
+});
+
 // ─── dm:voice:decline ───────────────────────────────────────────────────────
 
 describe('dmVoiceHandler — dm:voice:decline', () => {
@@ -578,9 +967,11 @@ describe('dmVoiceHandler — dm:voice:decline', () => {
     const handler = handlers.get('dm:voice:decline')!;
     await handler('conv-1');
 
-    // removeDMVoiceUser is called for each user in the call via Redis multi
-    expect(mockRedis._multiChain.hDel).toHaveBeenCalledWith('dm:voice:users:conv-1', 'user-2');
-    expect(mockRedis._multiChain.del).toHaveBeenCalledWith('dm:voice:call:user-2');
+    // removeDMVoiceUser is called for each user in the call via an atomic Lua script
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      { keys: ['dm:voice:users:conv-1', 'dm:voice:call:user-2', 'dm:voice:active'], arguments: ['user-2', 'conv-1'] },
+    );
   });
 
   it('participant can decline as user1Id', async () => {
@@ -966,6 +1357,32 @@ describe('dmVoiceHandler — dm:voice:signal', () => {
     expect(mockRedis.hGet).not.toHaveBeenCalled();
   });
 
+  it('rejects undefined/null/function signals WITHOUT throwing (latent stringify crash)', async () => {
+    // JSON.stringify(undefined | function) returns undefined — `.length` on it
+    // used to throw inside the async handler, an unhandled rejection any
+    // client could trigger with one malformed frame.
+    socket.data.dmCallConversationId = 'conv-1';
+    const handler = handlers.get('dm:voice:signal')!;
+    await expect(handler({ to: 'user-2', signal: undefined })).resolves.toBeUndefined();
+    await expect(handler({ to: 'user-2' })).resolves.toBeUndefined();
+    await expect(handler({ to: 'user-2', signal: null })).resolves.toBeUndefined();
+    await expect(handler({ to: 'user-2', signal: () => 'nope' })).resolves.toBeUndefined();
+    await expect(handler({ to: 'user-2', signal: 42 })).resolves.toBeUndefined();
+    expect(mockRedis.hGet).not.toHaveBeenCalled();
+  });
+
+  it('relays STRING signals (olm1 envelopes after the E2E cutover)', async () => {
+    socket.data.dmCallConversationId = 'conv-1';
+    mockRedis.hGet.mockResolvedValueOnce(JSON.stringify({ socketId: 'sock-2', selfMute: false, selfDeaf: false }));
+    const handler = handlers.get('dm:voice:signal')!;
+    const envelope = '{"v":1,"e":"olm1","t":0,"b":"Y2lwaGVydGV4dA"}';
+
+    await handler({ to: 'user-2', signal: envelope });
+
+    expect(io.to).toHaveBeenCalledWith('sock-2');
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:signal', { from: 'user-1', signal: envelope });
+  });
+
   it('rejects signal payload exceeding 64KB', async () => {
     socket.data.dmCallConversationId = 'conv-1';
     const handler = handlers.get('dm:voice:signal')!;
@@ -1137,21 +1554,24 @@ describe('dmVoiceHandler — leaveCurrentDMVoiceChannel', () => {
       'user-2': JSON.stringify({ socketId: 'socket-2', selfMute: false, selfDeaf: false }),
     });
 
-    const mockRemoteSocket = { leave: vi.fn() };
     const { socket } = createMockSocket();
     const io = createMockIO();
-    // io.in('user:user-2').fetchSockets() returns the remote socket
-    io.in.mockReturnValue({ fetchSockets: vi.fn().mockResolvedValue([mockRemoteSocket]) });
 
     await leaveCurrentDMVoiceChannel(io as any, socket as any, 'user-1');
 
-    // Should clean up user-2 via fetchSockets
+    // user-2's sockets leave the voice room via socketsLeave — adapter-wide
+    // and fire-and-forget. NEVER fetchSockets here: it waits for every
+    // cluster node's reply, so one dead peer node made this throw and the
+    // left/ended emits below never reached the remaining participant.
     expect(io.in).toHaveBeenCalledWith('user:user-2');
-    expect(mockRemoteSocket.leave).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(io._socketsLeave).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(io._fetchSockets).not.toHaveBeenCalled();
 
-    // Should remove user-2 from Redis (via multi)
-    expect(mockRedis._multiChain.hDel).toHaveBeenCalledWith('dm:voice:users:conv-1', 'user-2');
-    expect(mockRedis._multiChain.del).toHaveBeenCalledWith('dm:voice:call:user-2');
+    // Should remove user-2 from Redis (via the atomic Lua script)
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      { keys: ['dm:voice:users:conv-1', 'dm:voice:call:user-2', 'dm:voice:active'], arguments: ['user-2', 'conv-1'] },
+    );
   });
 
   it('creates a system message for call ended', async () => {
@@ -1285,18 +1705,18 @@ describe('dmVoiceHandler — rate limiting', () => {
     expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:decline', 10);
   });
 
-  it('dm:voice:mute uses rate limit of 30 per minute', async () => {
+  it('dm:voice:mute uses rate limit of 120 per minute (PTT presses emit mute/unmute pairs)', async () => {
     vi.mocked(socketRateLimit).mockReturnValueOnce(false);
     const handler = handlers.get('dm:voice:mute')!;
     await handler(true);
-    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:mute', 30);
+    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:mute', 120);
   });
 
-  it('dm:voice:deaf uses rate limit of 30 per minute', async () => {
+  it('dm:voice:deaf uses rate limit of 120 per minute', async () => {
     vi.mocked(socketRateLimit).mockReturnValueOnce(false);
     const handler = handlers.get('dm:voice:deaf')!;
     await handler(true);
-    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:deaf', 30);
+    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:deaf', 120);
   });
 
   it('dm:voice:speaking uses rate limit of 120 per minute', () => {
@@ -1311,5 +1731,93 @@ describe('dmVoiceHandler — rate limiting', () => {
     const handler = handlers.get('dm:voice:signal')!;
     await handler({ to: 'user-2', signal: {} });
     expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:signal', 300);
+  });
+});
+
+// ─── Batched boot sweep (F9) ────────────────────────────────────────────────
+
+describe('dmVoiceHandler — clearDMVoiceState uses ONE cluster snapshot', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+    mockLiveNodeCounts.mockResolvedValue({ total: 2, peers: 1 });
+    mockLiveSocketIds.mockResolvedValue(null);
+  });
+
+  function twoParticipants() {
+    mockRedis.sMembers.mockResolvedValue(['conv-9']);
+    mockRedis.hGetAll.mockImplementation((key: string) =>
+      Promise.resolve(key === 'dm:voice:users:conv-9' ? {
+        'u-dead': JSON.stringify({ socketId: 's-dead', selfMute: false, selfDeaf: false }),
+        'u-live': JSON.stringify({ socketId: 's-live', selfMute: false, selfDeaf: false }),
+      } : {}));
+  }
+
+  it('asks the adapter ONCE and never probes per socket', async () => {
+    // The old loop did a cluster-wide fetchSockets PER ENTRY, including every
+    // live socket on every peer — just to `continue`.
+    twoParticipants();
+    mockLiveSocketIds.mockResolvedValue(new Set(['s-live']));
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    expect(mockLiveSocketIds).toHaveBeenCalledTimes(1);
+    expect(mockSocketExists).not.toHaveBeenCalled();
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-9', userId: 'u-dead' });
+    expect(io._emit).not.toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-9', userId: 'u-live' });
+  });
+
+  it('reaps NOTHING when the snapshot times out — a partial answer would hang up live calls', async () => {
+    twoParticipants();
+    mockLiveSocketIds.mockRejectedValue(new Error('timeout reached while waiting for allRooms response'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const io = createMockIO();
+    await clearDMVoiceState(io as never);
+
+    expect(mockRedis.eval).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+describe('dmVoiceHandler — clearDMVoiceState snapshot ordering', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+    mockLiveNodeCounts.mockResolvedValue({ total: 2, peers: 1 });
+    mockLiveSocketIds.mockResolvedValue(null);
+  });
+
+  it('reads the call state BEFORE snapshotting liveness', async () => {
+    // Snapshot first and a call that starts between the two looks dead: absent
+    // from the snapshot, present in the hash, and hung up while it is live.
+    const order: string[] = [];
+    mockRedis.sMembers.mockImplementation(async () => { order.push('state'); return []; });
+    mockLiveSocketIds.mockImplementation(async () => { order.push('snapshot'); return new Set(); });
+
+    await clearDMVoiceState(createMockIO() as never);
+
+    expect(order).toEqual(['state', 'snapshot']);
+  });
+
+  it('still reaps orphaned reverse-keys when the snapshot fails', async () => {
+    // The dm:voice:call:* scan compares Redis against Redis and never consults
+    // socket liveness — a failed snapshot must not take it down too.
+    mockRedis.sMembers.mockResolvedValue([]);
+    mockLiveSocketIds.mockRejectedValue(new Error('timeout'));
+    mockRedis.scanIterator.mockImplementation(async function* () {
+      yield ['dm:voice:call:u-orphan'];
+    });
+    mockRedis.get.mockResolvedValue('conv-gone');
+    mockRedis.hExists.mockResolvedValue(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await clearDMVoiceState(createMockIO() as never);
+
+    expect(mockRedis.del).toHaveBeenCalledWith('dm:voice:call:u-orphan');
+    warn.mockRestore();
   });
 });

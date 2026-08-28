@@ -154,7 +154,7 @@ export function AdminDeleteUserModal({ userId, username, onSuccess, onCancel }: 
                       >
                         {row.server.members.map((m) => (
                           <option key={m.userId} value={m.userId}>
-                            {m.displayName} (@{m.username}) — {m.role}
+                            {m.displayName} (@{m.username}), {m.role}
                           </option>
                         ))}
                       </select>

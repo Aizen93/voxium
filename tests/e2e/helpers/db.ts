@@ -111,7 +111,77 @@ export async function expireVerificationToken(userId: string): Promise<void> {
   });
 }
 
+/**
+ * Everything the SERVER stores for a DM conversation between two users —
+ * used by the E2E smoke test to prove only ciphertext ever reaches the DB.
+ */
+export async function getConversationServerState(userAId: string, userBId: string) {
+  const db = getPrisma();
+  const [user1Id, user2Id] = userAId < userBId ? [userAId, userBId] : [userBId, userAId];
+  return db.conversation.findUnique({
+    where: { user1Id_user2Id: { user1Id, user2Id } },
+    include: {
+      messages: {
+        orderBy: { createdAt: 'asc' },
+        include: { attachments: true },
+      },
+    },
+  });
+}
+
+/** Registered E2E devices for a user, oldest first (multi-device assertions). */
+export async function getE2EDevices(userId: string) {
+  const db = getPrisma();
+  return db.e2EDevice.findMany({
+    where: { userId },
+    orderBy: { createdAt: 'asc' },
+    select: { deviceId: true, curve25519Key: true, ed25519Key: true, createdAt: true },
+  });
+}
+
+/** Undelivered key shares addressed to a device (fanout assertions). */
+export async function getE2EKeyShareCount(recipientUserId: string, recipientDeviceId?: string) {
+  const db = getPrisma();
+  return db.e2EKeyShare.count({
+    where: { recipientUserId, ...(recipientDeviceId ? { recipientDeviceId } : {}) },
+  });
+}
+
 /** Disconnect Prisma (call in afterAll or global teardown). */
+/** Server-side view of a channel's messages — proves what was actually stored. */
+export async function getChannelMessagesServerState(channelId: string) {
+  const db = getPrisma();
+  return db.message.findMany({
+    where: { channelId },
+    select: { id: true, content: true, encrypted: true, type: true },
+    orderBy: { createdAt: 'asc' },
+  });
+}
+
+/** Resolve a secure channel's id by server + name (the UI never exposes ids). */
+export async function findSecureChannelId(serverId: string, name: string): Promise<string | null> {
+  const db = getPrisma();
+  const row = await db.channel.findFirst({
+    where: { serverId, name, secure: true },
+    select: { id: true },
+  });
+  return row?.id ?? null;
+}
+
+/** A secure channel's row + membership as the server stores it. */
+export async function getSecureChannelServerState(channelId: string) {
+  const db = getPrisma();
+  return db.channel.findUnique({
+    where: { id: channelId },
+    select: {
+      id: true,
+      secure: true,
+      createdById: true,
+      members: { select: { userId: true, isCreator: true } },
+    },
+  });
+}
+
 export async function disconnectDb() {
   if (prisma) {
     await prisma.$disconnect();

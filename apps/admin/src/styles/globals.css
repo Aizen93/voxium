@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @theme {
-  /* Discord-inspired dark theme colors */
+  /* Dark theme colors */
   --color-vox-bg-primary: #1a1a2e;
   --color-vox-bg-secondary: #16213e;
   --color-vox-bg-tertiary: #0f3460;

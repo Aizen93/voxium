@@ -1,24 +1,63 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail } from '../services/authService';
+import { logAuditEvent } from '../utils/auditLog';
+import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
+import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
 
 export const authRouter = Router();
 
-authRouter.post('/register', rateLimitRegister, async (req: Request, res: Response, next: NextFunction) => {
+// Proof-of-work challenge for registration (anti-bot Phase 3). Stateless:
+// the challenge is HMAC-signed, so nothing is stored until redemption.
+// Difficulty adapts to how many registrations the caller's subnet already
+// made today — pressure raises the price instead of slamming the door.
+authRouter.get('/register-challenge', rateLimitPowChallenge, async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (!isFeatureEnabled('registration')) {
       res.status(403).json({ success: false, error: 'Registration is currently disabled' });
       return;
     }
-    const { username, email, password, displayName } = req.body;
+    const ip = normalizeIp(req.ip || req.socket.remoteAddress || 'unknown');
+    const pressure = await getSubnetRegistrationPressure(req);
+    res.json({ success: true, data: issueRegistrationChallenge(ip, pressure) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The daily/subnet buckets are charged ATOMICALLY here and refunded unless the
+// request actually creates an account — a failed attempt must not spend a real
+// user's or a whole /24's signup budget, but a read-then-charge-later split
+// would let a concurrent burst walk straight through the cap.
+// `registerAttempt` (per address) and `registerAttemptSubnet` (per /24, per
+// /48) are the never-refunded buckets that bound enumeration. Both are needed:
+// a 409 on a random username means the email exists, and an attacker who can
+// rotate addresses inside one range pays the per-address cap 254 times over.
+authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!isFeatureEnabled('registration')) {
+      res.status(403).json({ success: false, error: 'Registration is currently disabled' });
+      return;
+    }
+    const { username, email, password, displayName, pow, acceptTerms, acceptPrivacy } = req.body;
     if (!username || typeof username !== 'string') { res.status(400).json({ success: false, error: 'Username is required' }); return; }
     if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
     if (!password || typeof password !== 'string') { res.status(400).json({ success: false, error: 'Password is required' }); return; }
-    const result = await registerUser(username, email, password, displayName);
+    // Consent (CNIL/GDPR): both documents, each as its own explicit `true` —
+    // a truthy string or a missing field is not acceptance. Checked with the
+    // other cheap validations, BEFORE the proof-of-work is verified: a verify
+    // burns the challenge, and the client only refetches one on expiry.
+    if (acceptTerms !== true) { res.status(400).json({ success: false, error: 'You must accept the Terms of Service' }); return; }
+    if (acceptPrivacy !== true) { res.status(400).json({ success: false, error: 'You must accept the Privacy Policy' }); return; }
+
+    // Enforced HERE, server-side, so a script POSTing the API directly pays
+    // the same hash work as a browser — cadence and IP rotation don't help.
+    await verifyRegistrationPow(normalizeIp(req.ip || req.socket.remoteAddress || 'unknown'), pow);
+
+    const result = await registerUser(username, email, password, displayName, req.ip || req.socket.remoteAddress, { acceptTerms, acceptPrivacy });
 
     res.status(201).json({
       success: true,
@@ -63,6 +102,60 @@ authRouter.post('/refresh', rateLimitRefresh, async (req: Request, res: Response
   }
 });
 
+// Accept the Terms of Service and the Privacy Policy from an EXISTING account
+// (accounts created before consent was collected at signup — CNIL/GDPR).
+// Authenticated only, deliberately NOT behind requireConsent: this is the
+// route that clears that gate. Both flags must be the literal boolean true.
+// authenticate BEFORE the limiter: it is keyed by userId, and with no user
+// yet it falls back to the IP — one bucket for everyone behind a NAT.
+authRouter.post('/consent', authenticate, rateLimitConsent, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { acceptTerms, acceptPrivacy } = req.body;
+    const result = await acceptConsent(req.user!.userId, { acceptTerms, acceptPrivacy });
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Self-service account deletion (GDPR right to erasure). Authenticated only —
+// deliberately NOT behind requireVerifiedEmail or requireConsent: an account
+// that never verified its email, or declines the legal documents, must still
+// be able to leave. Re-authenticates with the password (+ TOTP when enabled)
+// so a stolen session cannot erase someone. 409 with the list when the
+// account still owns servers — transfer or delete those first.
+// authenticate BEFORE the limiter, for the same reason as /consent — and here
+// the bucket BLOCKS for 15 minutes, so a shared-IP bucket would let one
+// person's typos lock a whole office out of deleting their accounts.
+authRouter.delete('/account', authenticate, rateLimitDeleteAccount, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { password, totpCode } = req.body ?? {};
+    if (!password || typeof password !== 'string') {
+      res.status(400).json({ success: false, error: 'Password is required' });
+      return;
+    }
+    try {
+      await deleteOwnAccount(req.user!.userId, password, typeof totpCode === 'string' ? totpCode : undefined);
+    } catch (err) {
+      if (err instanceof OwnedServersError) {
+        res.status(409).json({ success: false, error: err.message, data: { ownedServers: err.servers } });
+        return;
+      }
+      throw err;
+    }
+    logAuditEvent({
+      actorId: null,
+      action: 'user.delete',
+      targetType: 'user',
+      targetId: req.user!.userId,
+      metadata: { trigger: 'self' },
+    });
+    res.json({ success: true, message: 'Account deleted' });
+  } catch (err) {
+    next(err);
+  }
+});
+
 authRouter.get('/me', authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await prisma.user.findUnique({
@@ -80,10 +173,11 @@ authRouter.get('/me', authenticate, async (req: Request, res: Response, next: Ne
         emailVerified: true,
         isSupporter: true, supporterTier: true,
         createdAt: true,
+        ...CONSENT_SELECT,
       },
     });
 
-    res.json({ success: true, data: user });
+    res.json({ success: true, data: user ? withConsentFlag(user) : user });
   } catch (err) {
     next(err);
   }

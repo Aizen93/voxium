@@ -1,3 +1,5 @@
+import type { AnnotationOp, AnnotationScene, AnnotationLiveEvent } from './annotations.js';
+
 // ─── User ────────────────────────────────────────────────────────────────────
 
 export type UserRole = 'user' | 'admin' | 'superadmin';
@@ -13,6 +15,11 @@ export interface User {
   role: UserRole;
   totpEnabled: boolean;
   emailVerified: boolean;
+  /** The account has not (yet) accepted the current Terms of Service and
+   *  Privacy Policy — true for accounts created before consent was collected
+   *  at signup. Every functional route and the socket refuse until it is
+   *  given (POST /auth/consent); the client shows the consent screen. */
+  consentRequired: boolean;
   isSupporter: boolean;
   supporterTier: SupporterTier;
   createdAt: string;
@@ -23,7 +30,7 @@ export type SupporterTier = 'first' | 'top' | null;
 export type UserStatus = 'online' | 'idle' | 'dnd' | 'offline';
 
 /** User without private fields — safe for broadcasting to other clients */
-export type PublicUser = Omit<User, 'email' | 'totpEnabled' | 'emailVerified'>;
+export type PublicUser = Omit<User, 'email' | 'totpEnabled' | 'emailVerified' | 'consentRequired'>;
 
 export interface UserProfile extends User {
   bio: string | null;
@@ -99,12 +106,29 @@ export interface Channel {
   categoryId: string | null;
   position: number;
   createdAt: string;
+  /** Invite-only E2E-encrypted channel. Only ever true on `type: 'text'`. */
+  secure?: boolean;
+  /** Creator (secure channels only) — the sole membership manager. */
+  createdById?: string | null;
 }
 
 export interface CreateChannelRequest {
   name: string;
   type: ChannelType;
   categoryId?: string;
+}
+
+/** One row of a secure channel's member list. */
+export interface SecureChannelMember {
+  userId: string;
+  isCreator: boolean;
+  addedAt: string;
+  user: {
+    id: string;
+    username: string;
+    displayName: string;
+    avatarUrl: string | null;
+  };
 }
 
 // ─── Message ─────────────────────────────────────────────────────────────────
@@ -127,6 +151,11 @@ export interface Attachment {
 export interface Message {
   id: string;
   content: string;
+  /** E2E DMs: content is a ciphertext envelope (client decrypts locally). */
+  encrypted?: boolean;
+  /** E2E DMs, client-side only: attachment metadata recovered from the
+   *  decrypted payload (real names/keys — never sent to the server). */
+  e2eAttachments?: import('./e2e.js').E2EAttachmentMeta[];
   type?: string;
   channelId: string | null;
   conversationId?: string | null;
@@ -134,6 +163,7 @@ export interface Message {
   replyTo?: {
     id: string;
     content: string;
+    encrypted?: boolean;
     author: MessageAuthor;
   } | null;
   author: MessageAuthor;
@@ -179,6 +209,14 @@ export interface VoiceUser {
   serverDeafened: boolean;
   speaking: boolean;
   screenSharing?: boolean;
+  /** E2E device this participant joined SECURE voice from — peers seal media
+   *  keys to exactly it (spec §21). Absent for plaintext channels. */
+  deviceId?: string;
+  /** This participant's SECURE voice session epoch. Peers echo it back as
+   *  `recipientEpoch` inside every sealed key so a key from one of their dead
+   *  sessions can never be installed in a later one (spec §21). The server
+   *  only shape-checks and relays it; the binding is cryptographic. */
+  epoch?: string;
 }
 
 // ─── mediasoup SFU ──────────────────────────────────────────────────────────
@@ -220,7 +258,11 @@ export interface Conversation {
   user1Id: string;
   user2Id: string;
   participant: MessageAuthor; // the OTHER user (populated at query time)
-  lastMessage: { content: string; createdAt: string; authorId: string } | null;
+  lastMessage: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string } | null;
+  /** E2E DMs: when this conversation started being encrypted. Always set —
+   *  conversations are born encrypted (docs/e2e-always-on-plan.md §4.2), so
+   *  this is status, never a flag to branch "is encryption on?" against. */
+  encryptedAt: string;
   createdAt: string;
 }
 
@@ -259,18 +301,28 @@ export interface ServerToClientEvents {
   'channel:created': (channel: Channel) => void;
   'channel:updated': (channel: Channel) => void;
   'channel:deleted': (data: { channelId: string; serverId: string }) => void;
+  'channel:members_updated': (data: { channelId: string; serverId: string; members: SecureChannelMember[] }) => void;
   'category:created': (category: Category) => void;
   'category:updated': (category: Category) => void;
   'category:deleted': (data: { categoryId: string; serverId: string }) => void;
   'member:joined': (data: { serverId: string; user: PublicUser }) => void;
   'member:left': (data: { serverId: string; userId: string }) => void;
   'presence:update': (data: { userId: string; status: UserStatus }) => void;
-  'voice:channel_users': (data: { channelId: string; users: VoiceUser[] }) => void;
-  'voice:user_joined': (data: { channelId: string; user: VoiceUser }) => void;
+  // serverId lets clients keep a channel→server map for cross-server voice
+  // presence (the spaces strip's "live" indicators). Removal events don't
+  // carry it — removing by channelId alone is always sufficient.
+  'voice:channel_users': (data: { channelId: string; serverId?: string; users: VoiceUser[] }) => void;
+  'voice:user_joined': (data: { channelId: string; serverId?: string; user: VoiceUser }) => void;
   'voice:user_left': (data: { channelId: string; userId: string }) => void;
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => void;
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;
   'voice:signal': (data: { from: string; signal: unknown }) => void;
+  // Secure voice channels (spec §21): an Olm-sealed media sender key relayed
+  // between two participants. The server never parses `envelope`;
+  // `fromDeviceId` is the sender's announced device (routing hint — the
+  // binding inside the envelope is what the receiver trusts).
+  'voice:e2e:key': (data: { channelId: string; from: string; fromDeviceId: string; envelope: string }) => void;
+  'voice:e2e:key_request': (data: { channelId: string; from: string }) => void;
   'voice:force_moved': (data: { channelId: string; userId: string; targetChannelId: string }) => void;
   'voice:error': (data: { message: string }) => void;
   'voice:transport_created': (data: {
@@ -309,7 +361,9 @@ export interface ServerToClientEvents {
   }) => void;
   'dm:unread:init': (data: { unreads: DMUnreadCount[] }) => void;
   'dm:voice:offer': (data: { conversationId: string; from: VoiceUser }) => void;
-  'dm:voice:joined': (data: { conversationId: string; user: VoiceUser }) => void;
+  // deviceId = the E2E device the participant answered from — peers seal call
+  // signals to exactly that device (docs/e2e-dm-spec.md §20)
+  'dm:voice:joined': (data: { conversationId: string; user: VoiceUser & { deviceId?: string } }) => void;
   'dm:voice:left': (data: { conversationId: string; userId: string }) => void;
   'dm:voice:state_update': (data: { conversationId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => void;
   'dm:voice:speaking': (data: { conversationId: string; userId: string; speaking: boolean }) => void;
@@ -332,6 +386,19 @@ export interface ServerToClientEvents {
   'voice:screen_share:start': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:stop': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:state': (data: { channelId: string; sharingUserId: string | null }) => void;
+  // rev = server-assigned monotonic counter per share session — late joiners
+  // drop ops with rev <= the snapshot's rev (snapshot and ops can arrive from
+  // different nodes with no cross-node ordering guarantee)
+  'voice:annotation:ops': (data: { channelId: string; userId: string; rev: number; ops: AnnotationOp[] }) => void;
+  // restarted: the server's rev counter started over (scene key lost to TTL
+  // expiry, Redis loss or a cleanup del mid-share) and this snapshot is the
+  // new generation's baseline — a viewer must drop everything it buffered from
+  // the previous generation rather than replay it over the snapshot.
+  'voice:annotation:state': (data: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene; restarted?: boolean }) => void;
+  // Ephemeral: never persisted, never hydrated, no rev. A late joiner simply
+  // sees the next one; a lost one costs nothing (pointers fade on the
+  // viewer's own clock). Sender excluded — it local-echoes.
+  'voice:annotation:live': (data: { channelId: string; userId: string; ev: AnnotationLiveEvent }) => void;
   'announcement:new': (announcement: Announcement) => void;
   'announcement:init': (data: { announcements: Announcement[] }) => void;
   'admin:metrics': (data: AdminMetricsSnapshot) => void;
@@ -349,17 +416,25 @@ export interface ServerToClientEvents {
 export interface ClientToServerEvents {
   'channel:join': (channelId: string) => void;
   'channel:leave': (channelId: string) => void;
-  'voice:join': (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => void;
+  // deviceId: the E2E device the client will seal/open media keys on; epoch:
+  // this join's media-session id, which peers echo back inside sealed keys so
+  // dead-session keys cannot be re-installed. Both are only honored for SECURE
+  // voice channels and shape-validated server-side (spec §21)
+  'voice:join': (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string; epoch?: string }) => void;
   'voice:leave': () => void;
   'voice:mute': (muted: boolean) => void;
   'voice:deaf': (deafened: boolean) => void;
   'voice:speaking': (speaking: boolean) => void;
   'voice:signal': (data: { to: string; signal: unknown }) => void;
+  // Secure voice channels: relay an Olm-sealed media key to one co-participant
+  'voice:e2e:key': (data: { to: string; envelope: string }) => void;
+  'voice:e2e:key_request': (data: { to: string }) => void;
   'voice:transport:connect': (data: { transportId: string; dtlsParameters: unknown }, callback: (response: { error?: string }) => void) => void;
   'voice:produce': (
     data: { kind: 'audio' | 'video'; rtpParameters: unknown; appData?: Record<string, unknown> },
-    callback: (response: { producerId: string }) => void,
+    callback: (response: { producerId?: string; error?: string }) => void,
   ) => void;
+  'voice:producer:close': (data: { producerId: string }) => void;
   'voice:consumer:resume': (data: { consumerId: string }) => void;
   'voice:rtp_capabilities': (data: { rtpCapabilities: unknown }) => void;
   'ping:latency': (timestamp: number) => void;
@@ -368,7 +443,7 @@ export interface ClientToServerEvents {
   'dm:join': (conversationId: string) => void;
   'dm:typing:start': (conversationId: string) => void;
   'dm:typing:stop': (conversationId: string) => void;
-  'dm:voice:join': (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => void;
+  'dm:voice:join': (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => void;
   'dm:voice:leave': (conversationId: string) => void;
   'dm:voice:mute': (muted: boolean) => void;
   'dm:voice:deaf': (deafened: boolean) => void;
@@ -378,8 +453,20 @@ export interface ClientToServerEvents {
   'voice:server_mute': (data: { userId: string; muted: boolean }) => void;
   'voice:server_deafen': (data: { userId: string; deafened: boolean }) => void;
   'voice:force_move': (data: { userId: string; targetChannelId: string }) => void;
-  'voice:screen_share:start': () => void;
+  // annotationsVersion: the wire version this server VALIDATES (absent = 1).
+  // New clients hide the v2 tools when it is missing or 1, so a sharer on a
+  // not-yet-deployed server never ships ops that get rejected after the local
+  // echo already drew them.
+  'voice:screen_share:start': (callback?: (response: { ok: boolean; error?: string; annotationsVersion?: number }) => void) => void;
   'voice:screen_share:stop': () => void;
+  // restarted: the authoritative scene was rebuilt from empty for this batch
+  // (fresh share, Redis loss, TTL expiry, corrupt state) — the sharer's client
+  // re-sends its full local scene so viewers regain pre-loss objects
+  'voice:annotation:ops': (data: { channelId: string; ops: AnnotationOp[] }, callback?: (response: { ok: boolean; error?: string; restarted?: boolean }) => void) => void;
+  // Ephemeral sibling of :ops — see ServerToClientEvents. Authorization is per
+  // kind: pointer = active sharer; reaction / snapshot = anyone in the voice
+  // channel. No callback by design.
+  'voice:annotation:live': (data: { channelId: string; ev: AnnotationLiveEvent }) => void;
   'admin:subscribe_metrics': () => void;
   'admin:unsubscribe_metrics': () => void;
   'admin:subscribe_reports': () => void;
@@ -483,6 +570,18 @@ export interface AdminUser {
   bannedAt: string | null;
   banReason: string | null;
   createdAt: string;
+  /** Present on the detail endpoint (abuse triage surfaces). */
+  emailVerified?: boolean;
+  emailVerifiedAt?: string | null;
+}
+
+/** One sighting of a user from an IP, as the admin detail endpoint returns it. */
+export interface AdminIpRecord {
+  ip: string;
+  /** How this IP was FIRST seen: 'register' | 'login' | 'socket'. */
+  kind: string;
+  country: string | null;
+  lastSeenAt: string;
 }
 
 export interface AdminServer {
@@ -558,6 +657,8 @@ export interface SfuStats {
   workers: SfuWorkerStats[];
   totalRouters: number;
   portRange: { min: number; max: number; total: number };
+  /** The udp+tcp ports the per-worker WebRtcServers listen on; null in the per-transport listen mode (MEDIASOUP_WEBRTC_SERVER=false), where portRange bounds the transport count. */
+  webRtcServer: { ports: number[] } | null;
 }
 
 export interface SfuMediaCounts {
@@ -645,6 +746,13 @@ export interface Report {
   reportedUsername: string;
   messageId: string | null;
   messageContent: string | null;
+  /**
+   * Where `messageContent` came from. 'server' = copied from the stored
+   * message. 'reporter' = supplied by the reporting client because the message
+   * is end-to-end encrypted — the server CANNOT verify it against the
+   * ciphertext, so moderators must treat it as an unverified claim.
+   */
+  contentSource: 'server' | 'reporter';
   channelId: string | null;
   conversationId: string | null;
   serverId: string | null;
@@ -734,6 +842,7 @@ export type AuditAction =
   | 'server.delete'
   | 'ip_ban.create' | 'ip_ban.delete'
   | 'storage.file_delete' | 'storage.cleanup_orphans'
+  | 'registration.hygiene_sweep'
   | 'announcement.create' | 'announcement.publish' | 'announcement.delete'
   | 'report.resolve' | 'report.dismiss'
   | 'support.claim' | 'support.close'
@@ -768,4 +877,14 @@ export interface AuditLogEntry {
   targetId: string | null;
   metadata: Record<string, unknown> | null;
   createdAt: string;
+}
+
+/**
+ * Consent flags a registration must carry. Two separate decisions, one per
+ * document (CNIL: no bundled or pre-ticked consent); the server refuses a
+ * registration without both and records when each was given.
+ */
+export interface RegistrationConsent {
+  acceptTerms: boolean;
+  acceptPrivacy: boolean;
 }

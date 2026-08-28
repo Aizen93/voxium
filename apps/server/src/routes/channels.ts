@@ -1,17 +1,86 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateChannelName, WS_EVENTS, Permissions, type Channel } from '@voxium/shared';
+import { validateChannelName, WS_EVENTS, Permissions, permissionsFromString, hasPermission, DEFAULT_EVERYONE_PERMISSIONS, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { hasServerPermission, filterVisibleChannels } from '../utils/permissionCalculator';
+import { hasServerPermission, hasChannelPermission, filterVisibleChannels, computeServerPermissions } from '../utils/permissionCalculator';
+import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
+import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 
 export const channelRouter = Router({ mergeParams: true });
 
-channelRouter.use(authenticate, requireVerifiedEmail);
+channelRouter.use(authenticate, requireVerifiedEmail, requireConsent);
+
+/** User rooms per broadcast when the audience has to be enumerated. Bounds the
+ *  size of a single adapter message on a large staff-gated server. */
+const ROOM_FANOUT_BATCH = 500;
+
+/**
+ * The rooms to announce a BRAND-NEW channel to. A new channel has no overrides
+ * yet, so visibility is exactly base VIEW_CHANNEL — no per-user recompute
+ * needed, and in the common case no enumeration either.
+ *
+ * Fast path: if @everyone already carries VIEW_CHANNEL (or ADMINISTRATOR),
+ * every member can see it and one server-wide op does the whole job — the
+ * O(1) behaviour MED-15 was careful to keep.
+ *
+ * Otherwise the audience is derived from roles: members holding a role with
+ * VIEW_CHANNEL or ADMINISTRATOR, plus the owner (who may hold no MemberRole
+ * rows at all). Addressed as `user:{id}` rooms, which are adapter-wide and so
+ * work across nodes — never `fetchSockets()`.
+ */
+async function visibilityRoomsForNewChannel(serverId: string): Promise<(string | string[])[]> {
+  const [everyoneRole, server] = await Promise.all([
+    prisma.role.findFirst({ where: { serverId, isDefault: true }, select: { id: true, permissions: true } }),
+    prisma.server.findUnique({ where: { id: serverId }, select: { ownerId: true } }),
+  ]);
+  const everyonePerms = everyoneRole
+    ? permissionsFromString(everyoneRole.permissions)
+    : DEFAULT_EVERYONE_PERMISSIONS;
+  const grantsView = (perms: bigint) =>
+    hasPermission(perms, Permissions.VIEW_CHANNEL) || hasPermission(perms, Permissions.ADMINISTRATOR);
+
+  if (grantsView(everyonePerms)) return [`server:${serverId}`];
+
+  const viewRoles = (await prisma.role.findMany({ where: { serverId }, select: { id: true, permissions: true } }))
+    .filter((r) => grantsView(permissionsFromString(r.permissions)))
+    .map((r) => r.id);
+  const holders = viewRoles.length > 0
+    ? await prisma.memberRole.findMany({
+        where: { serverId, roleId: { in: viewRoles } },
+        // distinct: a member holding several VIEW-granting roles would
+        // otherwise appear once per role, inflating the fan-out for nothing
+        distinct: ['userId'],
+        select: { userId: true },
+      })
+    : [];
+
+  const userIds = new Set(holders.map((h) => h.userId));
+  // The owner always sees everything here: this route cannot create a secure
+  // channel, and secure is the one case where the owner fast path is skipped.
+  if (server) userIds.add(server.ownerId);
+  // The creator is NOT added unconditionally. MANAGE_CHANNELS and VIEW_CHANNEL
+  // are independent bits, so a channel manager without a VIEW-granting role can
+  // create a channel they cannot see — and adding them would put a socket in
+  // `channel:{id}` for a channel `GET /servers/:id/channels` filters out for
+  // them, which is precisely the leak this function exists to close, just
+  // narrowed to one person. They are already in `holders` whenever they can
+  // actually view it; when they cannot, announcing it live and then omitting it
+  // from every subsequent fetch is the inconsistency, not the fix.
+
+  const rooms = [...userIds].map((id) => `user:${id}`);
+  // BroadcastOperator accepts an ARRAY of rooms and matches a socket in ANY of
+  // them, so each batch is one adapter op rather than one per user.
+  const batches: string[][] = [];
+  for (let i = 0; i < rooms.length; i += ROOM_FANOUT_BATCH) {
+    batches.push(rooms.slice(i, i + ROOM_FANOUT_BATCH));
+  }
+  return batches;
+}
 
 // Bulk reorder channels (with optional category reassignment)
 channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -26,13 +95,20 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
       throw new BadRequestError('order must be a non-empty array');
     }
 
-    // Validate all channel IDs belong to this server
+    // Validate all channel IDs belong to this server. Secure channels are
+    // excluded: they cannot be reordered/categorized by MANAGE_CHANNELS
+    // holders, and a secure id must fail exactly like a foreign id (no oracle)
     const channelIds = order.map((o: { id: string }) => o.id);
     const channels = await prisma.channel.findMany({
-      where: { id: { in: channelIds }, serverId },
-      select: { id: true },
+      where: { id: { in: channelIds }, serverId, secure: false },
+      select: { id: true, secure: true },
     });
-    if (channels.length !== channelIds.length) {
+    // A channel the caller cannot VIEW fails exactly like a foreign id: same
+    // error, no way to tell the two apart, and no reordering of channels they
+    // cannot see. Their own client only ever submits the visible ones, so this
+    // costs a legitimate reorder nothing.
+    const visible = await filterVisibleChannels(req.user!.userId, serverId, channels);
+    if (visible.length !== channelIds.length) {
       throw new BadRequestError('One or more channel IDs do not belong to this server');
     }
 
@@ -66,9 +142,14 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
     const updated = await prisma.channel.findMany({
       where: { id: { in: channelIds } },
     });
+    // To the channel's OWN room, not the server's. Since the create path was
+    // narrowed, `channel:{id}` IS the VIEW_CHANNEL audience — and a reorder
+    // that includes a staff-only channel would otherwise put its name on the
+    // wire for every connected member. The stock client drops it, which is not
+    // the same as it not being sent.
     const io = getIO();
     for (const ch of updated) {
-      io.to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED, ch as unknown as Channel);
+      io.to(`channel:${ch.id}`).emit(WS_EVENTS.CHANNEL_UPDATED, ch as unknown as Channel);
     }
 
     res.json({ success: true });
@@ -110,6 +191,15 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
     const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
     if (!canManage) throw new ForbiddenError('You do not have permission to create channels');
 
+    // No VIEW_CHANNEL check here, deliberately. A new channel has no overrides,
+    // so who can see it is decided entirely by base permissions — and a
+    // MANAGE_CHANNELS holder carries VIEW_CHANNEL in any sane role setup
+    // (@everyone has it by default), so the creator sees what they made for the
+    // same reason everyone else does. Creation confers no special status, and
+    // rejecting the create for a role that lacks VIEW would refuse work Discord
+    // allows, to protect against a role nobody builds. The management routes
+    // below DO require VIEW on their target — that is about not editing what
+    // you cannot see, which is a different question.
     const nameErr = validateChannelName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
@@ -137,32 +227,32 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
       data: { name, type, serverId, position: channelCount, categoryId: categoryId || null },
     });
 
-    getIO().to(`server:${serverId}`).emit('channel:created', channel as unknown as Channel);
-
-    // Auto-subscribe all server members' sockets to the new text channel room
-    // and seed ChannelRead so existing history doesn't show as unread
-    if (type === 'text') {
-      const socketsInServer = await getIO().in(`server:${serverId}`).fetchSockets();
-      for (const s of socketsInServer) {
-        s.join(`channel:${channel.id}`);
-      }
-
-      const members = await prisma.serverMember.findMany({
-        where: { serverId },
-        select: { userId: true },
-      });
-      if (members.length > 0) {
-        const now = new Date();
-        await prisma.channelRead.createMany({
-          data: members.map((m) => ({
-            userId: m.userId,
-            channelId: channel.id,
-            lastReadAt: now,
-          })),
-          skipDuplicates: true,
-        });
-      }
+    // Announce to — and subscribe — exactly the members who can VIEW the new
+    // channel, and nobody else. The old code did both server-wide on the
+    // premise that "a new channel has no overrides, so everyone can view it",
+    // but visibility is decided by BASE permissions (@everyone + the member's
+    // roles) BEFORE overrides matter. In the standard staff-only setup, where
+    // @everyone has no VIEW_CHANNEL, that put every connected member in the
+    // room: they received message:new, typing, reactions — and, since voice
+    // channels get the room too, voice presence and screen-share events —
+    // until they happened to reconnect. `channel:{id}` is supposed to BE the
+    // VIEW_CHANNEL boundary.
+    //
+    // The emit and the join must keep the SAME audience: narrowing one alone
+    // leaves clients showing a channel that never produces events, or vice
+    // versa.
+    for (const room of await visibilityRoomsForNewChannel(serverId)) {
+      getIO().to(room).emit('channel:created', channel as unknown as Channel);
+      // Voice channels get the room too — it carries voice presence events.
+      getIO().in(room).socketsJoin(`channel:${channel.id}`);
     }
+
+    // NOTE (MED-15): no per-member ChannelRead seeding here. A brand-new channel
+    // has zero messages, so the unread computation (COALESCE(last_read_at, epoch))
+    // yields 0 for everyone regardless — while seeding wrote one row per member,
+    // making channel creation in a 10k-member server a multi-second, lock-heavy
+    // operation. Rows are created lazily when a member first reads the channel;
+    // join-time seeding (which DOES guard against pre-existing history) stays.
 
     res.status(201).json({ success: true, data: channel });
   } catch (err) {
@@ -181,6 +271,14 @@ channelRouter.post('/:channelId/read', rateLimitMarkRead, async (req: Request<{ 
       select: { id: true },
     });
     if (!channel) throw new ForbiddenError('Not authorized');
+
+    // VIEW gate: without it, mark-read is a channel-existence oracle (and for
+    // secure channels an enumeration hole — non-members must see the same
+    // error as for a channel that does not exist)
+    const canView = await hasChannelPermission(
+      req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL,
+    );
+    if (!canView) throw new ForbiddenError('Not authorized');
 
     await prisma.channelRead.upsert({
       where: { userId_channelId: { userId: req.user!.userId, channelId } },
@@ -202,10 +300,19 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
     const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
     if (!canManage) throw new ForbiddenError('You do not have permission to update channels');
 
+    // Secure channels read as not-found: they are uncategorized by design, and
+    // their lifecycle events go through secureChannelLifecycle, never here
     const channel = await prisma.channel.findFirst({
-      where: { id: channelId, serverId },
+      where: { id: channelId, serverId, secure: false },
     });
     if (!channel) throw new NotFoundError('Channel');
+
+    // Managing a channel requires being able to SEE it. Answering 404 rather
+    // than 403 matches what this same caller gets for an id that does not
+    // exist, so the check adds no existence oracle of its own.
+    if (!await hasChannelPermission(req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+      throw new NotFoundError('Channel');
+    }
 
     const { categoryId } = req.body;
     if (categoryId === undefined) throw new BadRequestError('categoryId is required');
@@ -223,7 +330,8 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
       data: { categoryId },
     });
 
-    getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED, updated as unknown as Channel);
+    // The channel's own room is the VIEW_CHANNEL audience; see the reorder note.
+    getIO().to(`channel:${channelId}`).emit(WS_EVENTS.CHANNEL_UPDATED, updated as unknown as Channel);
 
     res.json({ success: true, data: updated });
   } catch (err) {
@@ -235,18 +343,64 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
 channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId, channelId } = req.params;
+    const userId = req.user!.userId;
 
-    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CHANNELS);
+    const [channel, canManage] = await Promise.all([
+      prisma.channel.findFirst({
+        where: { id: channelId, serverId },
+        select: { id: true, secure: true, createdById: true, server: { select: { ownerId: true } } },
+      }),
+      hasServerPermission(userId, serverId, Permissions.MANAGE_CHANNELS),
+    ]);
+
+    if (channel?.secure) {
+      // Secure channels: MANAGE_CHANNELS is NOT sufficient. Deletable by the
+      // creator, or — the single opaque-moderation lever — the server owner /
+      // an ADMINISTRATOR acting on a channel id learned from an abuse report.
+      // Content stays unreadable either way; deletion is the only power.
+      const isCreator = channel.createdById === userId;
+      const isOwner = channel.server.ownerId === userId;
+      let allowed = isCreator || isOwner;
+      if (!allowed) {
+        const perms = await computeServerPermissions(userId, serverId);
+        allowed = (perms & Permissions.ADMINISTRATOR) === Permissions.ADMINISTRATOR;
+      }
+      if (!allowed) {
+        // Opacity, matched to what THIS caller would see for a nonexistent id:
+        // without MANAGE_CHANNELS a nonexistent id gets the permission 403
+        // below, so a secure id must too — a 404 here would be an INVERTED
+        // oracle (404 ⇒ "a secure channel exists there").
+        throw canManage
+          ? new NotFoundError('Channel')
+          : new ForbiddenError('You do not have permission to delete channels');
+      }
+
+      await deleteSecureChannel(channelId);
+      res.json({ success: true, message: 'Channel deleted' });
+      return;
+    }
+
     if (!canManage) throw new ForbiddenError('You do not have permission to delete channels');
 
-    const channel = await prisma.channel.findFirst({
-      where: { id: channelId, serverId },
-    });
     if (!channel) throw new NotFoundError('Channel');
+
+    // Same prerequisite as every other management op, and the same 404 as a
+    // nonexistent id gives this caller. (The secure branch above returns
+    // earlier and keeps its own, deliberately inverted, opacity rules.)
+    if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+      throw new NotFoundError('Channel');
+    }
 
     await prisma.channel.delete({ where: { id: channelId } });
 
-    getIO().to(`server:${serverId}`).emit('channel:deleted', { channelId, serverId });
+    // Same audience as every other lifecycle event for this channel: the people
+    // who could see it. Nobody else has it in their sidebar to remove.
+    getIO().to(`channel:${channelId}`).emit('channel:deleted', { channelId, serverId });
+
+    // Live voice must die with the channel on every node — participants used
+    // to keep their transports (and the Redis mirror entry) until they left
+    // manually. (deleteSecureChannel does the same for the secure branch.)
+    await broadcastChannelVoiceCleanup(getIO(), channelId);
 
     res.json({ success: true, message: 'Channel deleted' });
   } catch (err) {

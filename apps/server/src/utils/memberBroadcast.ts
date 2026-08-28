@@ -1,6 +1,31 @@
 import { getIO } from '../websocket/socketServer';
 import { prisma } from './prisma';
+import { filterVisibleChannels } from './permissionCalculator';
 import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
+
+/**
+ * Join a user's active socket(s) to the server room and the `channel:{id}`
+ * rooms of every channel (text AND voice) they can VIEW. Channel rooms are the
+ * visibility boundary for real-time events — joining unfiltered would leak
+ * private-channel messages and voice presence to members without VIEW_CHANNEL.
+ */
+async function joinVisibleChannelRooms(userId: string, serverId: string): Promise<void> {
+  const io = getIO();
+  const channels = await prisma.channel.findMany({
+    where: { serverId },
+    // `secure` is load-bearing: filterVisibleChannels can only apply the
+    // membership-only rule to channels it can recognize as secure
+    select: { id: true, secure: true },
+  });
+  const visible = await filterVisibleChannels(userId, serverId, channels);
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
+  for (const s of sockets) {
+    s.join(`server:${serverId}`);
+    for (const ch of visible) {
+      s.join(`channel:${ch.id}`);
+    }
+  }
+}
 
 /**
  * After a user joins a server:
@@ -11,18 +36,7 @@ import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
 export async function broadcastMemberJoined(userId: string, serverId: string): Promise<void> {
   const io = getIO();
 
-  // Add the new member's socket(s) to the server room + all text channel rooms
-  const textChannels = await prisma.channel.findMany({
-    where: { serverId, type: 'text' },
-    select: { id: true },
-  });
-  const sockets = await io.in(`user:${userId}`).fetchSockets();
-  for (const s of sockets) {
-    s.join(`server:${serverId}`);
-    for (const ch of textChannels) {
-      s.join(`channel:${ch.id}`);
-    }
-  }
+  await joinVisibleChannelRooms(userId, serverId);
 
   // Fetch only the fields needed for the broadcast (no email)
   const joinedUser = await prisma.user.findUnique({
@@ -51,36 +65,27 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
  * to notify).
  */
 export async function joinServerRoom(userId: string, serverId: string): Promise<void> {
-  const io = getIO();
-  const textChannels = await prisma.channel.findMany({
-    where: { serverId, type: 'text' },
-    select: { id: true },
-  });
-  const sockets = await io.in(`user:${userId}`).fetchSockets();
-  for (const s of sockets) {
-    s.join(`server:${serverId}`);
-    for (const ch of textChannels) {
-      s.join(`channel:${ch.id}`);
-    }
-  }
+  await joinVisibleChannelRooms(userId, serverId);
 }
 
 /**
  * After a user leaves a server:
- * 1. Removes their socket(s) from the `server:<id>` room.
+ * 1. Removes their socket(s) from the `server:<id>` room and ALL of the
+ *    server's channel rooms (text and voice — no visibility filter needed,
+ *    a departed member must receive nothing).
  * 2. Broadcasts `member:left` to remaining members.
  */
 export async function broadcastMemberLeft(userId: string, serverId: string): Promise<void> {
   const io = getIO();
 
-  const textChannels = await prisma.channel.findMany({
-    where: { serverId, type: 'text' },
+  const channels = await prisma.channel.findMany({
+    where: { serverId },
     select: { id: true },
   });
   const sockets = await io.in(`user:${userId}`).fetchSockets();
   for (const s of sockets) {
     s.leave(`server:${serverId}`);
-    for (const ch of textChannels) {
+    for (const ch of channels) {
       s.leave(`channel:${ch.id}`);
     }
   }

@@ -57,6 +57,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return {
     rateLimitAdmin: passthrough,
+    normalizeIp: (ip: string) => ip,
   };
 });
 
@@ -150,7 +151,7 @@ function mockSuperAdminUser() {
         bannedAt: null,
         tokenVersion: 0,
         role: 'superadmin',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
     }
     return Promise.resolve(null);
@@ -165,7 +166,7 @@ function mockAdminUser() {
         bannedAt: null,
         tokenVersion: 0,
         role: 'admin',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
     }
     return Promise.resolve(null);
@@ -189,7 +190,7 @@ describe('Admin Badge Routes', () => {
       // Auth: superadmin user
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         // Target user lookup
         .mockResolvedValueOnce({
@@ -226,7 +227,7 @@ describe('Admin Badge Routes', () => {
     it('emits user:updated to DM conversation rooms', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', role: 'user', username: 'targetuser',
@@ -298,7 +299,7 @@ describe('Admin Badge Routes', () => {
     it('rejects modifying a superadmin', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'other-superadmin', role: 'superadmin', username: 'othersuperadmin',
@@ -317,7 +318,7 @@ describe('Admin Badge Routes', () => {
     it('rejects when user already has the same role', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', role: 'admin', username: 'targetuser',
@@ -336,7 +337,7 @@ describe('Admin Badge Routes', () => {
     it('returns 404 for non-existent user', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce(null);
 
@@ -365,7 +366,7 @@ describe('Admin Badge Routes', () => {
     it('broadcast errors do not crash the endpoint', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', role: 'user', username: 'targetuser',
@@ -404,7 +405,7 @@ describe('Admin Badge Routes', () => {
     it('grants supporter badge and emits user:updated with isSupporter and supporterTier', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', username: 'targetuser', isSupporter: false, supporterTier: null,
@@ -434,7 +435,7 @@ describe('Admin Badge Routes', () => {
     it('emits user:updated to DM conversation rooms', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', username: 'targetuser', isSupporter: false, supporterTier: null,
@@ -493,7 +494,7 @@ describe('Admin Badge Routes', () => {
     it('clears supporterTier when isSupporter is set to false', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', username: 'targetuser', isSupporter: true, supporterTier: 'first',
@@ -532,7 +533,7 @@ describe('Admin Badge Routes', () => {
     it('preserves existing supporterTier when not provided and isSupporter is true', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', username: 'targetuser', isSupporter: false, supporterTier: 'top',
@@ -561,7 +562,7 @@ describe('Admin Badge Routes', () => {
     it('returns 404 for non-existent user', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce(null);
 
@@ -577,7 +578,7 @@ describe('Admin Badge Routes', () => {
     it('broadcast errors do not crash the endpoint', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', username: 'targetuser', isSupporter: false, supporterTier: null,
@@ -611,7 +612,7 @@ describe('Admin Badge Routes', () => {
     it('emits to both server rooms and DM rooms simultaneously', async () => {
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true,
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', username: 'targetuser', isSupporter: false, supporterTier: null,
@@ -660,7 +661,7 @@ describe('Admin Badge Routes', () => {
       // supporter endpoint uses requireAdmin (not requireSuperAdmin)
       prismaMock.user.findUnique
         .mockResolvedValueOnce({
-          id: 'admin-1', bannedAt: null, tokenVersion: 0, role: 'admin', emailVerified: true,
+          id: 'admin-1', bannedAt: null, tokenVersion: 0, role: 'admin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({
           id: 'target-user', username: 'targetuser', isSupporter: false, supporterTier: null,

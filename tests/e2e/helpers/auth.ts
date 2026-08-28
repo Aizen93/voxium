@@ -25,6 +25,8 @@ export async function registerViaUI(
   await page.getByPlaceholder('Pick a username').fill(user.username);
   await page.getByPlaceholder('you@example.com').fill(user.email);
   await page.getByPlaceholder('At least 8 characters').fill(user.password);
+  await page.getByLabel(/Terms of Service/).check();
+  await page.getByLabel(/Privacy Policy/).check();
   await page.getByRole('button', { name: 'Create Account' }).click();
   // Unverified users land on the verification pending page
   await page.waitForURL('/', { timeout: 15_000 });
@@ -46,6 +48,8 @@ export async function registerViaUIUnverified(
   await page.getByPlaceholder('Pick a username').fill(user.username);
   await page.getByPlaceholder('you@example.com').fill(user.email);
   await page.getByPlaceholder('At least 8 characters').fill(user.password);
+  await page.getByLabel(/Terms of Service/).check();
+  await page.getByLabel(/Privacy Policy/).check();
   await page.getByRole('button', { name: 'Create Account' }).click();
   await page.waitForURL('/', { timeout: 15_000 });
 }

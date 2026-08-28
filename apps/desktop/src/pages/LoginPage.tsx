@@ -157,11 +157,17 @@ export function LoginPage() {
               className="animate-slide-up"
               style={{ animationDelay: '0.2s', animationFillMode: 'backwards' }}
             >
-              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
+              <label htmlFor="login-email" className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
                 {t('auth.login.email')}
               </label>
+              {/* autoComplete="username": the email IS the login identifier,
+                  and this is the token password managers key saved credentials
+                  on — so sign-in autofill lands here and nowhere else. */}
               <input
+                id="login-email"
+                name="email"
                 type="email"
+                autoComplete="username"
                 className="input transition-all duration-200 focus:shadow-[0_0_0_3px_rgba(91,91,247,0.15)]"
                 value={email}
                 onChange={(e) => { setEmail(e.target.value); clearError(); }}
@@ -175,12 +181,15 @@ export function LoginPage() {
               className="animate-slide-up"
               style={{ animationDelay: '0.25s', animationFillMode: 'backwards' }}
             >
-              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
+              <label htmlFor="login-password" className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
                 {t('auth.login.password')}
               </label>
               <div className="relative">
                 <input
+                  id="login-password"
+                  name="password"
                   type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
                   className="input pr-10 transition-all duration-200 focus:shadow-[0_0_0_3px_rgba(91,91,247,0.15)]"
                   value={password}
                   onChange={(e) => handlePasswordChange(e.target.value)}
@@ -205,6 +214,8 @@ export function LoginPage() {
             >
               <label className="flex items-center gap-2 cursor-pointer select-none">
                 <input
+                  id="login-remember"
+                  name="rememberMe"
                   type="checkbox"
                   checked={rememberMe}
                   onChange={(e) => setRememberMe(e.target.checked)}

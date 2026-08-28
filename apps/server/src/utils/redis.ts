@@ -66,6 +66,72 @@ export function getRedisConfigSub(): RedisClientType {
   return redisConfigSub;
 }
 
+// ─── Node liveness heartbeat (multi-node) ────────────────────────────────────
+// Each node maintains `node:alive:{NODE_ID}` with a short TTL. Peers use it to
+// decide whether another node's state (voice mirrors, etc.) is live or reapable.
+// Production runs multiple horizontally-scaled instances — boot/periodic cleanup
+// must NEVER assume it is the only node.
+
+export const NODE_HEARTBEAT_TTL_S = 30;
+const NODE_HEARTBEAT_INTERVAL_MS = 10_000;
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+function heartbeatKey(nodeId: string): string {
+  return `node:alive:${nodeId}`;
+}
+
+/** Start refreshing this node's liveness key. Call once, right after initRedis(). */
+export async function startNodeHeartbeat(): Promise<void> {
+  const redis = getRedis();
+  const key = heartbeatKey(NODE_ID());
+  await redis.set(key, String(Date.now()), { EX: NODE_HEARTBEAT_TTL_S });
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(() => {
+    redis.set(key, String(Date.now()), { EX: NODE_HEARTBEAT_TTL_S })
+      .catch((err) => console.warn('[Redis] Node heartbeat refresh failed:', err));
+  }, NODE_HEARTBEAT_INTERVAL_MS);
+  // Don't keep the process alive just for the heartbeat
+  heartbeatTimer.unref?.();
+}
+
+/** Stop the heartbeat and delete the liveness key (graceful shutdown) so peers
+ *  reap this node's state promptly instead of waiting out the TTL. */
+export async function stopNodeHeartbeat(): Promise<void> {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  await getRedis().del(heartbeatKey(NODE_ID()))
+    .catch((err) => console.warn('[Redis] Node heartbeat delete failed:', err));
+}
+
+/** True if the given node currently holds a live heartbeat. */
+export async function isNodeAlive(nodeId: string): Promise<boolean> {
+  return (await getRedis().exists(heartbeatKey(nodeId))) === 1;
+}
+
+/** How many nodes hold a live heartbeat, split by self vs peers. `total` may
+ *  exclude this node at boot, before `startNodeHeartbeat` has written its key —
+ *  which is why callers that need "is there anyone else" read `peers`. */
+export async function liveNodeCounts(): Promise<{ total: number; peers: number }> {
+  const redis = getRedis();
+  const self = heartbeatKey(NODE_ID());
+  let total = 0;
+  let peers = 0;
+  for await (const batch of redis.scanIterator({ MATCH: 'node:alive:*', COUNT: 100 })) {
+    for (const key of batch) {
+      total++;
+      if (key !== self) peers++;
+    }
+  }
+  return { total, peers };
+}
+
+/** True if any node OTHER than this one holds a live heartbeat. */
+export async function anyOtherNodeAlive(): Promise<boolean> {
+  return (await liveNodeCounts()).peers > 0;
+}
+
 // ─── Presence helpers (multi-node safe: 1 user → many sockets) ──────────────
 
 export async function setUserOnline(userId: string, socketId: string): Promise<void> {
@@ -109,21 +175,175 @@ export async function getUserSockets(userId: string): Promise<string[]> {
   return await redis.sMembers(`user:sockets:${userId}`);
 }
 
+/** Minimal structural view of Socket.IO used for cluster-wide socket existence checks. */
+export interface ClusterSocketLookup {
+  in: (room: string) => { fetchSockets: () => Promise<unknown[]> };
+  /** Adapter access for the batched liveness snapshot. Deliberately untyped
+   *  beyond "an object": `allRooms` lives on the Redis adapter subclass, not
+   *  on socket.io's base `Adapter`, so naming it here would make the real
+   *  `Server` fail to satisfy this interface. Narrowed at the call site. */
+  of?: (nsp: string) => { adapter: object };
+}
+
+/** True if the socket still exists ANYWHERE in the cluster (adapter-wide lookup).
+ *  ONE socket per call — use `liveClusterSocketIds` for a sweep. */
+export async function socketExistsInCluster(io: ClusterSocketLookup, socketId: string): Promise<boolean> {
+  const sockets = await io.in(socketId).fetchSockets();
+  return sockets.length > 0;
+}
+
 /**
- * Clear all presence state from Redis and reset DB user statuses to 'offline'.
- * Must be called on server startup to clean up stale state from previous runs
- * (e.g. crash, hot reload) where disconnect handlers never fired.
+ * Every live socket id in the cluster, in ONE adapter round trip.
+ *
+ * Every socket auto-joins a room named after its own id, so the adapter's
+ * room list IS the liveness set (it also contains the named rooms — all of
+ * which are prefixed `user:` / `server:` / `channel:` / `dm:` / `voice:`, so
+ * they cannot be mistaken for a socket id).
+ *
+ * Returns null when the adapter cannot answer at all, so the caller can fall
+ * back to the per-socket path. THROWS when the adapter is present but its
+ * answer would be PARTIAL — a partial answer looks like "those sockets are
+ * dead" and marks live users on a peer offline, so callers must skip the reap
+ * rather than act on it. There are two ways to get a partial answer and only
+ * one of them announces itself:
+ *
+ *  - the cluster request TIMES OUT — the adapter rejects, and that propagates;
+ *  - the adapter decides there is no cluster to ask. `@socket.io/redis-adapter`
+ *    resolves `allRooms()` with THIS NODE'S OWN rooms, silently and with no
+ *    error, whenever `PUBSUB NUMSUB` on its request channel reports <= 1
+ *    subscriber. That is indistinguishable from a complete answer, and at boot
+ *    — before `server.listen()` — this node's room set is EMPTY, so it reads as
+ *    "every socket in the cluster is dead". The callers would then mark every
+ *    connected user offline and hang up every live DM call in the cluster.
+ *
+ * `peerCount` is what the heartbeats say. The adapter must see at least this
+ * node PLUS every node that holds a heartbeat, or the two oracles disagree —
+ * the heartbeat lives on the data connection, `serverCount()` on the
+ * subscriber one, and a Redis failover or a reconnecting subscriber drops the
+ * latter while the former is still fresh. The comparison is against the peer
+ * count, not against "more than just me": `allRooms()` resolves as soon as
+ * `numSub - 1` replies arrive and never learns WHICH nodes answered, so on a
+ * 3-node cluster with one peer's subscriber down it returns the other peer's
+ * rooms plus our own and calls that complete — every socket on the silent peer
+ * reads as dead. Refusing costs one deferred boot sweep (a hard-killed peer's
+ * heartbeat lingers up to its TTL, which the caller's retry waits out);
+ * trusting it costs the cluster.
  */
-export async function clearPresenceState(db: { user: { updateMany: (args: { where: { status: string }; data: { status: string } }) => Promise<unknown> } }): Promise<void> {
+export async function liveClusterSocketIds(
+  io: ClusterSocketLookup,
+  peerCount = 0,
+): Promise<Set<string> | null> {
+  const adapter = io.of?.('/')?.adapter as {
+    allRooms?: () => Promise<Set<string>>;
+    serverCount?: () => Promise<number>;
+  } | undefined;
+  if (typeof adapter?.allRooms !== 'function') return null;
+
+  if (peerCount > 0 && typeof adapter.serverCount === 'function') {
+    const seen = await adapter.serverCount();
+    if (seen < peerCount + 1) {
+      throw new Error(
+        `adapter sees ${seen} server(s) but ${peerCount} peer heartbeat(s) are live — `
+        + 'the snapshot would be missing at least one live node\'s rooms',
+      );
+    }
+  }
+  return await adapter.allRooms();
+}
+
+/**
+ * Options shared by the boot/shutdown sweeps.
+ *
+ * `allowFullWipe` (default true) is what makes the sole-node branch safe to
+ * run: it assumes EVERY socket is dead, which is true exactly once — before
+ * `server.listen()`, or after shutdown has disconnected everything. A sweep
+ * that runs while this node is serving clients — the deferred retry of a
+ * refused boot sweep — must pass `false` and take the scoped path regardless
+ * of the peer count. With no peers alive the scoped path is still complete:
+ * `allRooms()` on a sole node returns this node's own rooms, and by then that
+ * IS the cluster's liveness set. The retry used to re-derive its mode from
+ * the heartbeats, and a sole node whose predecessor's corpse heartbeat had
+ * expired — the very case the retry exists for — wiped the presence and
+ * DM-call state of every client that had connected since listen().
+ */
+export interface SweepOptions {
+  allowFullWipe?: boolean;
+}
+
+/**
+ * Clear stale presence state from Redis and reset affected DB user statuses.
+ * Called on server startup (crash/redeploy leftovers) and shutdown.
+ *
+ * Multi-node aware: production runs multiple instances, so wiping ALL presence
+ * would mark every user on the peer nodes offline. When another node is alive
+ * (heartbeat present) and an `io` is provided, only sockets that no longer
+ * exist anywhere in the cluster are reaped. The full wipe is used only when
+ * this is the sole node (single-node semantics — every socket is dead anyway).
+ */
+export async function clearPresenceState(
+  db: { user: { updateMany: (args: { where: { status: string; id?: { in: string[] } }; data: { status: string } }) => Promise<unknown> } },
+  io?: ClusterSocketLookup,
+  { allowFullWipe = true }: SweepOptions = {},
+): Promise<{ skipped: boolean }> {
   const redis = getRedis();
-  // Collect all user IDs that Redis thinks are online
+
+  const { peers } = io ? await liveNodeCounts() : { peers: 0 };
+  if (io && (peers > 0 || !allowFullWipe)) {
+    // Scoped reap: drop only cluster-wide-dead sockets; peers' users stay online.
+    //
+    // ONE adapter snapshot, not one cluster round trip per entry. `socket:users`
+    // is the GLOBAL hash, so the old loop probed every LIVE socket on every peer
+    // too — just to `continue`. After a crash or redeploy that is tens of
+    // thousands of serial 2-round-trip lookups before server.listen(), and an
+    // unresponsive peer made each one sit out the adapter's full 5s timeout.
+    // ORDER MATTERS: read the candidate list FIRST, take the snapshot AFTER.
+    // The reverse leaves a window where a socket that connects between the two
+    // is absent from the snapshot but present in the hash — and gets reaped
+    // while its user is connected. Snapshotting last makes the liveness view
+    // strictly newer than every candidate in it, which is the safe direction.
+    const socketUsers = await redis.hGetAll('socket:users');
+
+    let live: Set<string> | null;
+    try {
+      live = await liveClusterSocketIds(io, peers);
+    } catch (err) {
+      // A partial snapshot — timed out, or an adapter that cannot see the
+      // cluster it is being asked about. Acting on it would mark live users on
+      // a peer offline, which is worse than leaving stale rows for the next
+      // boot to clear.
+      console.warn('[Presence] Cluster socket snapshot unusable — skipping the scoped reap:', err instanceof Error ? err.message : err);
+      return { skipped: true };
+    }
+
+    const fullyOffline: string[] = [];
+    for (const socketId of Object.keys(socketUsers)) {
+      if (live) {
+        if (live.has(socketId)) continue;
+      } else {
+        // Adapter without allRooms (a hand-rolled io): legacy per-socket path
+        try {
+          if (await socketExistsInCluster(io, socketId)) continue;
+        } catch (err) {
+          console.warn('[Presence] Cluster socket lookup failed, skipping reap for', socketId, err);
+          continue;
+        }
+      }
+      const result = await setUserOffline(socketId);
+      if (result?.fullyOffline) fullyOffline.push(result.userId);
+    }
+    if (fullyOffline.length > 0) {
+      await db.user.updateMany({ where: { status: 'online', id: { in: fullyOffline } }, data: { status: 'offline' } });
+      console.log(`[Presence] Reaped ${fullyOffline.length} stale user(s) (scoped, ${peers} peer(s) alive)`);
+    }
+    return { skipped: false };
+  }
+
+  // Sole node, before listen() or after shutdown: legacy full wipe.
   const staleUsers = await redis.sMembers('online_users');
-  // Delete per-user socket sets
   if (staleUsers.length > 0) {
     await redis.del(staleUsers.map((id) => `user:sockets:${id}`));
   }
-  // Clear global presence keys
   await redis.del(['online_users', 'socket:users']);
-  // Reset all 'online' users in DB to 'offline'
   await db.user.updateMany({ where: { status: 'online' }, data: { status: 'offline' } });
+  return { skipped: false };
 }

@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ChangeEvent, type DragEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
+import { useServerStore } from '../../stores/serverStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { MentionAutocomplete, getMentionQuery, handleMentionKeyDown } from './MentionAutocomplete';
 import { api } from '../../services/api';
-import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize } from '@voxium/shared';
+import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME } from '@voxium/shared';
 import type { ServerMember } from '@voxium/shared';
 import { PlusCircle, Smile, Send, X, FileText, Image, Film, Music, Upload } from 'lucide-react';
 
@@ -26,6 +27,9 @@ interface PendingFile {
   fileSize: number;
   mimeType: string;
   previewUrl?: string;
+  /** E2E conversations: per-file AES-GCM key + nonce, held locally until the
+   *  metas are sealed inside the message ciphertext at send time. */
+  e2e?: { key: string; iv: string };
 }
 
 function formatFileSize(bytes: number): string {
@@ -44,6 +48,16 @@ function getFileIcon(mimeType: string) {
 export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
   const { t } = useTranslation();
   const { sendMessage, sendDMMessage, replyingTo, clearReplyingTo } = useChatStore();
+  // Every DM is encrypted (plan §4.2), so "this is a DM" IS "encrypt this":
+  // attachment bytes are encrypted client-side before upload. Deliberately not
+  // gated on the conversation being in the store — a not-yet-loaded row must
+  // not silently downgrade a send the server would reject anyway.
+  const isEncryptedDM = !!conversationId;
+  // Secure channels get the same treatment, decided by the loaded channel list
+  const isSecureChannel = useServerStore(
+    (s) => !!channelId && s.channels.some((c) => c.id === channelId && c.secure === true)
+  );
+  const isEncrypted = isEncryptedDM || isSecureChannel;
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -132,25 +146,50 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
   const uploadFile = async (file: File, fileId: string) => {
     try {
+      // E2E conversations: encrypt the bytes in the WASM engine before they
+      // leave the client; the server sees an opaque octet-stream blob and the
+      // real name/type/size never appear in the presign request or S3 key.
+      let uploadBody: BodyInit = file;
+      let uploadMime = file.type;
+      let presignMeta = { fileName: file.name, fileSize: file.size, mimeType: file.type };
+      let e2e: { key: string; iv: string } | undefined;
+
+      if (isEncrypted) {
+        const { initEngine, encryptAttachment } = await import('../../services/e2e/engine');
+        await initEngine();
+        const encryptedFile = encryptAttachment(new Uint8Array(await file.arrayBuffer()));
+        const ciphertext = encryptedFile.takeCiphertext();
+        e2e = { key: encryptedFile.key, iv: encryptedFile.iv };
+        uploadBody = new Blob([ciphertext as BlobPart], { type: E2E_ATTACHMENT_MIME });
+        uploadMime = E2E_ATTACHMENT_MIME;
+        presignMeta = { fileName: E2E_ATTACHMENT_NAME, fileSize: ciphertext.length, mimeType: E2E_ATTACHMENT_MIME };
+      }
+
       const { data } = await api.post('/uploads/presign/attachment', {
-        fileName: file.name,
-        fileSize: file.size,
-        mimeType: file.type,
+        ...presignMeta,
         ...(channelId ? { channelId } : { conversationId }),
+        ...(isEncrypted && { encrypted: true }),
       });
 
       const { uploadUrl, key } = data.data;
 
-      await fetch(uploadUrl, {
+      const uploadRes = await fetch(uploadUrl, {
         method: 'PUT',
-        body: file,
-        headers: { 'Content-Type': file.type },
+        body: uploadBody,
+        headers: { 'Content-Type': uploadMime },
       });
+      // S3 can reject the PUT (expired presign, size/type mismatch) while fetch
+      // resolves fine — without this check the message would be sent with a
+      // permanently broken attachment key.
+      if (!uploadRes.ok) {
+        throw new Error(`S3 attachment upload failed: ${uploadRes.status}`);
+      }
 
       setPendingFiles((prev) =>
-        prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'uploaded' as const, s3Key: key } : pf))
+        prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'uploaded' as const, s3Key: key, e2e } : pf))
       );
-    } catch {
+    } catch (err) {
+      console.error('[Upload] Attachment upload failed:', err);
       setPendingFiles((prev) =>
         prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'error' as const } : pf))
       );
@@ -231,12 +270,35 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       mimeType: pf.mimeType,
     }));
 
+    // E2E: real metadata + file keys are sealed inside the message ciphertext
+    const e2eAttachments = isEncrypted
+      ? uploadedFiles
+          .filter((pf) => pf.e2e)
+          .map((pf) => ({
+            s3Key: pf.s3Key!,
+            fileName: pf.fileName,
+            fileSize: pf.fileSize,
+            mimeType: pf.mimeType,
+            key: pf.e2e!.key,
+            iv: pf.e2e!.iv,
+          }))
+      : undefined;
+
     setIsSending(true);
     try {
       if (conversationId) {
-        await sendDMMessage(conversationId, trimmed, attachments.length ? attachments : undefined);
+        await sendDMMessage(
+          conversationId,
+          trimmed,
+          e2eAttachments?.length ? e2eAttachments : undefined
+        );
       } else if (channelId) {
-        await sendMessage(channelId, trimmed, attachments.length ? attachments : undefined);
+        await sendMessage(
+          channelId,
+          trimmed,
+          isSecureChannel ? undefined : (attachments.length ? attachments : undefined),
+          isSecureChannel && e2eAttachments?.length ? e2eAttachments : undefined,
+        );
       }
       setContent('');
       // Reset textarea height to single row
@@ -322,7 +384,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
   return (
     <div
-      className="relative border-t border-vox-border px-4 py-3"
+      className="relative px-4 pb-4 pt-1"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -338,7 +400,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       )}
 
       {replyingTo && (
-        <div className="flex items-center justify-between rounded-t-xl border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2">
+        <div className="flex items-center justify-between rounded-t-2xl border border-b-0 border-vox-border bg-vox-bg-secondary px-4 py-2">
           <div className="min-w-0 flex-1 text-xs text-vox-text-secondary">
             <span className="text-vox-text-muted">{t('messageInput.replyingTo')} </span>
             <span className="font-semibold text-vox-text-primary">{replyingTo.author.displayName}</span>
@@ -359,7 +421,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
       {/* Pending file previews */}
       {pendingFiles.length > 0 && (
-        <div className={`flex gap-2 overflow-x-auto border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2 ${replyingTo ? '' : 'rounded-t-xl'}`}>
+        <div className={`flex gap-2 overflow-x-auto border border-b-0 border-vox-border bg-vox-bg-secondary px-3 py-2 ${replyingTo ? '' : 'rounded-t-2xl'}`}>
           {pendingFiles.map((pf) => {
             const FileIcon = getFileIcon(pf.mimeType);
             return (
@@ -411,17 +473,12 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         />
       )}
 
-      <div className={`flex items-end gap-2 bg-vox-bg-floating border border-vox-border px-3 py-2 ${
-        replyingTo || pendingFiles.length > 0 ? 'rounded-b-xl border-t-0' : 'rounded-xl'
+      {/* Single-row composer: attach | input | emoji | send. items-end keeps
+          the controls pinned to the bottom edge while Shift+Enter grows the
+          textarea upward. */}
+      <div className={`flex items-end gap-1 bg-vox-bg-floating border border-vox-border shadow-float px-2 py-1.5 ${
+        replyingTo || pendingFiles.length > 0 ? 'rounded-b-2xl border-t-0' : 'rounded-2xl'
       }`}>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
-          title={t('messageInput.attachFile')}
-          aria-label={t('messageInput.attachFile')}
-        >
-          <PlusCircle size={20} />
-        </button>
         <input
           ref={fileInputRef}
           type="file"
@@ -430,6 +487,15 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           onChange={handleFileSelect}
           accept={ALLOWED_ATTACHMENT_TYPES.join(',')}
         />
+
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary"
+          title={t('messageInput.attachFile')}
+          aria-label={t('messageInput.attachFile')}
+        >
+          <PlusCircle size={16} />
+        </button>
 
         <textarea
           ref={textareaRef}
@@ -451,7 +517,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           onClick={(e) => setCursorPos((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onKeyUp={(e) => setCursorPos((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           placeholder={conversationId ? `Message @${placeholderName}` : `Message #${channelName}`}
-          className="max-h-36 min-h-[24px] flex-1 resize-none bg-transparent text-sm text-vox-text-primary
+          className="max-h-36 min-w-0 flex-1 resize-none bg-transparent px-2 py-[4.5px] text-[14.5px] leading-relaxed text-vox-text-primary
                      placeholder:text-vox-text-muted focus:outline-none"
           rows={1}
           onInput={(e) => {
@@ -464,10 +530,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         <button
           ref={emojiBtnRef}
           onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-          className="mb-0.5 text-vox-text-muted hover:text-vox-text-primary transition-colors"
+          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary"
           aria-label={t('messageInput.emojiPicker')}
         >
-          <Smile size={20} />
+          <Smile size={16} />
         </button>
         {showEmojiPicker && (
           <EmojiPicker
@@ -479,17 +545,14 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
             onClose={() => setShowEmojiPicker(false)}
           />
         )}
-
-        {canSend && (
-          <button
-            onClick={handleSend}
-            disabled={isSending}
-            className="mb-0.5 text-vox-accent-primary hover:text-vox-accent-hover transition-colors disabled:opacity-50"
-            aria-label={t('messageInput.sendMessage')}
-          >
-            <Send size={20} />
-          </button>
-        )}
+        <button
+          onClick={handleSend}
+          disabled={isSending || !canSend}
+          className="ml-0.5 flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md bg-vox-accent-primary text-vox-on-accent transition-all hover:brightness-110 disabled:opacity-40 disabled:hover:brightness-100"
+          aria-label={t('messageInput.sendMessage')}
+        >
+          <Send size={14} />
+        </button>
       </div>
     </div>
   );

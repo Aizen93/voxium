@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
-import type { AdminUser, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
+import type { AdminUser, AdminIpRecord, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
 
 // Untyped socket interface for admin-specific events not in the shared event maps
 interface AdminSocket {
@@ -27,6 +27,18 @@ let supportTicketHandler: ((data: { total: number }) => void) | null = null;
 let supportMessageHandler: ((msg: SupportMessageData) => void) | null = null;
 let supportStatusHandler: ((data: { ticketId: string; status: string; claimedById?: string; claimedByUsername?: string }) => void) | null = null;
 let supportReconnectUnsub: (() => void) | null = null;
+
+/** What POST /admin/storage/cleanup-orphans answers. `skipped` is set when the
+ *  sweep REFUSED (nothing deleted) — the UI must not read that as success. */
+export interface OrphanCleanupResult {
+  found: number;
+  deleted: number;
+  scanned?: number;
+  withinGrace?: number;
+  notOurs?: number;
+  dryRun?: boolean;
+  skipped?: 'over-cap' | 'over-fraction' | null;
+}
 
 export interface OwnedServerInfo {
   id: string;
@@ -59,7 +71,7 @@ interface AdminState {
   usersSearch: string;
   usersFilter: string;
   usersSort: string;
-  selectedUser: (AdminUser & { ipRecords?: Array<{ ip: string; lastSeenAt: string }>; _count?: Record<string, number> }) | null;
+  selectedUser: (AdminUser & { ipRecords?: AdminIpRecord[]; _count?: Record<string, number> }) | null;
 
   // Servers
   servers: AdminServer[];
@@ -227,7 +239,7 @@ interface AdminState {
   fetchStorageFiles: (page?: number) => Promise<void>;
   setStorageFilter: (filter: string) => void;
   deleteStorageFile: (key: string) => Promise<void>;
-  cleanupOrphans: () => Promise<{ found: number; deleted: number }>;
+  cleanupOrphans: () => Promise<OrphanCleanupResult>;
 
   // Infrastructure Servers
   fetchInfraServers: () => Promise<void>;
@@ -431,6 +443,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         params: { page: p, limit: 12, search: state.usersSearch, filter: state.usersFilter, sort: state.usersSort },
       });
       set({ users: data.data, usersTotal: data.total, usersPage: p });
+    } catch (err) {
+      // Fetchers must not reject unhandled — surface and log instead
+      console.error('Failed to fetch users:', err);
+      toast.error('Failed to load users');
     } finally {
       set({ loading: false });
     }
@@ -494,6 +510,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         params: { page: p, limit: 12, search: state.serversSearch },
       });
       set({ servers: data.data, serversTotal: data.total, serversPage: p });
+    } catch (err) {
+      // Fetchers must not reject unhandled — surface and log instead
+      console.error('Failed to fetch servers:', err);
+      toast.error('Failed to load servers');
     } finally {
       set({ loading: false });
     }
@@ -917,7 +937,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   cleanupOrphans: async () => {
-    const { data } = await api.post('/admin/storage/cleanup-orphans');
+    const { data } = await api.post<{ data: OrphanCleanupResult }>('/admin/storage/cleanup-orphans');
     await Promise.all([get().fetchStorageStats(), get().fetchStorageFiles()]);
     return data.data;
   },

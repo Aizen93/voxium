@@ -5,8 +5,44 @@ import { getSocket, onSocketReconnect } from '../services/socket';
 import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused } from '../services/audioAnalyser';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
+import { teardownComposite, prepareComposite, attachCompositeProducerHandles } from '../services/screenComposite';
+import { sourceKeyFromSettings } from '../utils/maskLayouts';
+import { createWhiteboardStream, WHITEBOARD_WIDTH, WHITEBOARD_HEIGHT } from '../utils/whiteboard';
+import { loadAnnotationPrefs } from '../utils/annotationPrefs';
+
+// ─── Mask hooks (registered by annotationStore — a direct import would be a
+// module cycle: annotationStore already imports this store at eval time) ─────
+
+export interface ShareMaskHooks {
+  /** Are any privacy masks placed right now? */
+  hasMasks: () => boolean;
+  /** The compositor callbacks (getMasks, onFatal, onSourceHold, …) the
+   *  pre-produce path should run with. */
+  preflightCompositeHandles: (rawTrack: MediaStreamTrack) => Parameters<typeof prepareComposite>[0];
+  /** A cancelled pre-flight leaves no masks behind. */
+  clearPreflightMasks: () => void;
+}
+
+let shareMaskHooks: ShareMaskHooks | null = null;
+/** True from claim to produce-settled: the share button stays enabled while
+ *  isScreenSharing is still false, so a second pre-flight could otherwise
+ *  confirm concurrently and its failure rollback would clobber the first. */
+let shareActivationInFlight = false;
+/** annotationStore's lifecycle guard reads this: sharer-id transitions during
+ *  the claim/produce window (another sharer's STOP broadcast landing while
+ *  our claim ack is in flight) must not wipe the pre-flight masks — that is
+ *  the third ordering of the same race that produced the raw track. */
+export function isShareActivationInFlight(): boolean {
+  return shareActivationInFlight;
+}
+export function registerShareMaskHooks(hooks: ShareMaskHooks): void {
+  shareMaskHooks = hooks;
+}
 import { optimizeOpusSDP } from '../services/sdpUtils';
-import type { VoiceUser, TransportOptions } from '@voxium/shared';
+import i18n from '../i18n';
+import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared';
+import type { CallPeerDevice } from '../services/e2e/callCrypto';
+import { resolveStunUrl } from '../utils/stunUrl';
 
 /** Debug log — stripped in production builds by Vite tree-shaking */
 const debugLog = import.meta.env.DEV
@@ -54,21 +90,87 @@ const initialVoicePrefs = loadPersistedVoicePrefs();
 // Self-hosted STUN server (coturn in STUN-only mode) for NAT traversal.
 // STUN is a stateless UDP request/response (~100 bytes each way) that tells
 // each peer their own public IP:port — no media flows through it. Privacy-first.
-// Derives hostname from VITE_WS_URL so it points to the same Voxium server.
-const STUN_HOST = (() => {
-  try { return new URL(import.meta.env.VITE_WS_URL || 'http://localhost:3001').hostname; }
-  catch (err) { console.warn('[Voice] Failed to parse VITE_WS_URL for STUN host:', err); return 'localhost'; }
-})();
+// Derived from VITE_WS_URL (coturn lives on the edge box), or VITE_STUN_URL
+// when coturn has its own machine — see utils/stunUrl.ts.
 const ICE_SERVERS: RTCIceServer[] = [
-  { urls: `stun:${STUN_HOST}:3478` },
+  { urls: resolveStunUrl(import.meta.env) },
 ];
 
 const ICE_RESTART_DELAY_MS = 3000;
 const MAX_TRANSPORT_REJOIN_ATTEMPTS = 3;
 
+/** Wait until the E2E store reports ready (or errored / timed out). */
+async function waitForE2EReady(timeoutMs: number): Promise<void> {
+  const { useE2EStore } = await import('./e2eStore');
+  if (useE2EStore.getState().ready) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      unsub();
+      resolve();
+    }, timeoutMs);
+    const unsub = useE2EStore.subscribe((s) => {
+      if (s.ready || s.error) {
+        clearTimeout(timer);
+        unsub();
+        resolve();
+      }
+    });
+  });
+}
+
+/**
+ * The E2E device id this client would call from — announced on dm:voice:join
+ * so the peer seals call signals to exactly this device (spec §20). Dynamic
+ * imports per the resetStores eval-cycle rule.
+ *
+ * A call started right after app launch can race E2E initialization (WASM +
+ * vault open + first-run registration): reading `deviceId` before init lands
+ * throws, the join would go out without a device id, and the PEER would abort
+ * with a misleading "peer must update". Kick init (the store guards reentry)
+ * and wait briefly for readiness instead.
+ */
+async function resolveOwnCallDeviceId(): Promise<string | undefined> {
+  try {
+    const { getE2EService } = await import('../services/e2e/e2eService');
+    const { useAuthStore } = await import('./authStore');
+    const { useE2EStore } = await import('./e2eStore');
+    const me = useAuthStore.getState().user;
+    if (!me) return undefined;
+    if (!useE2EStore.getState().ready) {
+      useE2EStore.getState().initialize(me.id).catch((err) => {
+        console.warn('[DMVoice] E2E init kick failed (store records the error):', err);
+      });
+      await waitForE2EReady(10_000);
+    }
+    return getE2EService(me.id).deviceId || undefined;
+  } catch (err) {
+    console.warn('[DMVoice] Could not resolve E2E device id:', err);
+    return undefined;
+  }
+}
+
+// Screen-share video target bitrate. High enough for readable 1080p desktop
+// content; the server raises the viewer-side recv cap while a video consumer
+// is active (SCREEN_SHARE_RECV_MAX_BITRATE).
+const SCREEN_SHARE_MAX_BITRATE = 2_500_000;
+
 interface PeerConnection {
   pc: RTCPeerConnection;
   makingOffer: boolean;
+  /** ICE candidates that arrived before the remote description was set —
+   *  applied once it lands instead of being dropped (dropped candidates mean
+   *  slower or outright failed ICE on unlucky signaling order). */
+  pendingCandidates: RTCIceCandidateInit[];
+}
+
+/**
+ * True only for the MICROPHONE producer. Every mute/deafen/PTT path must use
+ * this filter — pausing by `kind === 'audio'` alone also pauses screen-share
+ * system audio, which must keep flowing for muted/PTT sharers.
+ */
+export function isMicProducer(producer: Producer): boolean {
+  return producer.kind === 'audio'
+    && (producer.appData as Record<string, unknown>)?.type === 'audio';
 }
 
 // ─── State Interface ─────────────────────────────────────────────────────────
@@ -91,13 +193,19 @@ interface VoiceState {
   activeChannelId: string | null;
   activeVoiceServerId: string | null;
   channelUsers: Map<string, VoiceUser[]>;
+  /** channelId → serverId, learned from presence events. channelUsers spans
+   *  ALL servers (sockets sit in every visible channel room), so this map is
+   *  what lets the spaces strip say "server X has a live room". */
+  channelServers: Map<string, string>;
 
   // mediasoup SFU state
   msDevice: Device | null;
   msSendTransport: Transport | null;
   msRecvTransport: Transport | null;
   msProducers: Map<string, Producer>;
-  msConsumers: Map<string, { consumer: Consumer; producerUserId: string }>;
+  // appType is the server-derived producer type ('audio' | 'screen-audio' | 'screen-video')
+  // — used to route cleanup precisely when a producer closes
+  msConsumers: Map<string, { consumer: Consumer; producerUserId: string; appType: string }>;
 
   // ─── Screen Share State ──────────────────────────────────────────
   screenStream: MediaStream | null;
@@ -105,11 +213,45 @@ interface VoiceState {
   screenSharingUserId: string | null;
   remoteScreenStream: MediaStream | null;
   screenShareViewMode: 'inline' | 'floating';
+  /** True while outgoing screen RTP is gated by the mask compositor (setup in
+   *  flight, or setup failed and the share is held frozen fail-closed). The
+   *  sharer's own preview keeps playing the raw capture, so without this flag
+   *  they would never know viewers see a frozen frame. */
+  screenShareFrozen: boolean;
+  /** A captured stream waiting in the pre-flight: masks are being placed on
+   *  a local preview and NOTHING has been claimed or produced — viewers do
+   *  not know a share is coming, and cancelling costs nothing. */
+  pendingShare: { stream: MediaStream; sourceKey: string | null; displaySurface: string } | null;
+  /** The current share's source identity (`displaySurface:WxH` from the
+   *  capture track's settings) — the key remembered mask layouts live under.
+   *  Null while not sharing or when the settings gave no size. */
+  screenShareSourceKey: string | null;
+  /** What the local share is showing — the toolbar hides the mask tool on a
+   *  whiteboard (there is nothing to cover). */
+  shareKind: 'screen' | 'whiteboard';
+  /** The annotation wire version the server advertised on our share claim
+   *  (1 when absent — an older server, or the annotations_v2 flag off). The
+   *  toolbar hides v2 tools below 2 so nothing we draw gets rejected after
+   *  the local echo painted it. Only meaningful while isScreenSharing. */
+  screenShareAnnotationsVersion: number;
 
   // ─── DM Call State ─────────────────────────────────────────────────
   dmCallConversationId: string | null;
   dmCallUsers: VoiceUser[];
   incomingCall: { conversationId: string; from: VoiceUser } | null;
+  /** The peer's E2E call device — every dm:voice:signal seals to exactly it. */
+  dmCallPeerDevice: CallPeerDevice | null;
+
+  // ─── Secure Voice State (spec §21) ─────────────────────────────────
+  /** Participants of the active secure voice channel we could not key
+   *  (failed vetting / identity change / un-updated client) — UI badge. */
+  secureVoicePeerIssues: Record<string, string>;
+  markSecureVoicePeerExcluded: (channelId: string, userId: string, kind: string) => void;
+  clearSecureVoicePeerIssue: (channelId: string, userId: string) => void;
+  /** True while the ACTIVE voice channel is a secure (E2E) one. Derived from
+   *  the live session, never from the viewed server's channel list — voice
+   *  outlives navigation, and the UI must keep showing the lock. */
+  secureVoiceActive: boolean;
 
   // ─── Shared Actions ────────────────────────────────────────────────
   setLocalUserId: (userId: string) => void;
@@ -121,10 +263,10 @@ interface VoiceState {
   destroyAllPeers: () => void;
 
   // ─── Server Voice Actions (SFU) ────────────────────────────────────
-  joinChannel: (channelId: string, serverId?: string) => Promise<void>;
+  joinChannel: (channelId: string, serverId?: string, opts?: { secure?: boolean; keepRetryCount?: boolean }) => Promise<void>;
   leaveChannel: () => void;
-  setChannelUsers: (channelId: string, users: VoiceUser[]) => void;
-  addUserToChannel: (channelId: string, user: VoiceUser) => void;
+  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string) => void;
+  addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => void;
   removeUserFromChannel: (channelId: string, userId: string) => void;
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => void;
   handleForceMove: (targetChannelId: string) => void;
@@ -154,17 +296,37 @@ interface VoiceState {
 
   // ─── Screen Share Actions ────────────────────────────────────────
   startScreenShare: () => Promise<void>;
+  /** Whiteboard v1: a canvas IS a screen — the injected-track start path. */
+  startWhiteboardShare: () => Promise<void>;
+  /** Go live from the pre-flight. */
+  confirmPendingShare: () => Promise<void>;
+  /** Abandon the pre-flight: stop the capture, drop its masks. */
+  cancelPendingShare: () => void;
+  /** Claim + produce (internal to the share flow; exposed for the pre-flight). */
+  activateScreenShare: (stream: MediaStream, kind?: 'screen' | 'whiteboard') => Promise<void>;
   stopScreenShare: () => void;
   setScreenSharingUser: (channelId: string, userId: string | null) => void;
   setScreenShareViewMode: (mode: 'inline' | 'floating') => void;
+  /** Swap the live screen-video producer's track (privacy-mask compositor —
+   *  no renegotiation; encodings preserved). Throws if no producer is live. */
+  replaceScreenVideoTrack: (track: MediaStreamTrack) => Promise<void>;
+  /** Fail-closed gate for the mask compositor: pause stops outgoing RTP on the
+   *  screen-video producer (mic/screen-audio untouched) while masks are being
+   *  set up, so no raw frame can ship under a mask. No-op without a producer. */
+  setScreenVideoProducerPaused: (paused: boolean) => void;
 
   // ─── DM Call Actions ───────────────────────────────────────────────
   joinDMCall: (conversationId: string) => Promise<void>;
   leaveDMCall: () => void;
+  /** Full local teardown WITHOUT notifying the server — for server-initiated
+   *  ends (dm:voice:ended), where echoing dm:voice:leave would be wrong. */
+  handleDMCallEnded: () => void;
+  /** Leave the call because of an E2E security condition, telling the user why. */
+  abortDMCall: (reason: DMCallAbortReason) => void;
   acceptCall: () => Promise<void>;
   declineCall: () => void;
   setIncomingCall: (data: { conversationId: string; from: VoiceUser } | null) => void;
-  addDMCallUser: (user: VoiceUser) => void;
+  addDMCallUser: (user: VoiceUser & { deviceId?: string }) => void;
   removeDMCallUser: (userId: string) => void;
   updateDMCallUserState: (userId: string, selfMute: boolean, selfDeaf: boolean) => void;
   setDMCallUserSpeaking: (userId: string, speaking: boolean) => void;
@@ -175,6 +337,38 @@ interface VoiceState {
 let latencyInterval: ReturnType<typeof setInterval> | null = null;
 let pongHandler: ((timestamp: number) => void) | null = null;
 let transportRejoinAttempts = 0;
+
+// ─── Secure voice (spec §21) module state ───────────────────────────────────
+// The frame-crypto session handle lives OUTSIDE zustand (crypto bookkeeping
+// must survive store snapshots/resets — the callCrypto rule). Non-null only
+// while the active channel is a secure voice channel.
+let secureVoiceFrames: import('../services/e2e/voiceFrameTransform').FrameCryptoSession | null = null;
+let secureVoiceChannelId: string | null = null;
+
+function activeSecureVoiceSession(channelId: string | null): import('../services/e2e/voiceFrameTransform').FrameCryptoSession | null {
+  return channelId && secureVoiceChannelId === channelId ? secureVoiceFrames : null;
+}
+
+/**
+ * End the secure-voice session (if any) — leave/cleanup/reconnect paths.
+ * Exported because teardowns that deliberately skip leaveChannel (the server
+ * already ejected us, so emitting voice:leave would be wrong) must still kill
+ * the crypto worker, zero the media key, and stop the membership poll.
+ */
+export function teardownSecureVoice(): void {
+  if (!secureVoiceChannelId) return;
+  const channelId = secureVoiceChannelId;
+  secureVoiceChannelId = null;
+  secureVoiceFrames = null;
+  void import('../services/e2e/secureVoiceKeys')
+    .then((m) => m.endSecureVoiceSession(channelId))
+    .catch((err) => console.warn('[SecureVoice] Session teardown failed:', err));
+}
+
+// Incremented on every join/leave (server voice AND DM calls). Guards the async
+// mic acquisition inside joins: a join superseded mid-getUserMedia must stop the
+// stream it acquired instead of leaking it (OS mic indicator stuck on forever).
+let voiceSessionGeneration = 0;
 
 // Track ICE restart timers per DM peer
 const iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -204,18 +398,146 @@ function applyOutputDevice(audio: HTMLAudioElement, deviceId: string) {
 
 type SignalEvent = 'voice:signal' | 'dm:voice:signal';
 
+export type DMCallAbortReason = 'identity-changed' | 'peer-must-update' | 'peer-not-e2e' | 'signaling-failed';
+
 /** Emit a signaling event on the socket with proper typing per event name. */
 function emitSignal(
   socket: ReturnType<typeof getSocket>,
   event: SignalEvent,
   data: { to: string; signal: unknown },
 ) {
-  if (!socket) return;
   if (event === 'dm:voice:signal') {
-    socket.emit('dm:voice:signal', data);
-  } else {
-    socket.emit('voice:signal', data);
+    // E2E cutover (spec §20): DM signals NEVER leave in plaintext. Sealed on
+    // the send chain to the pinned peer device; socket resolved at emit time.
+    sendDMSignalEncrypted(data.to, data.signal as E2ECallSignal);
+    return;
   }
+  if (!socket) return;
+  socket.emit('voice:signal', data);
+}
+
+// ─── E2E-authenticated DM call signaling (docs/e2e-dm-spec.md §20) ──────────
+// Every dm:voice:signal payload travels as a pairwise-Olm envelope sealed to
+// the ONE pinned peer device. The chains serialize the async crypto: wire
+// order must match signal generation order (sends) and socket arrival order
+// (receives — the strictly-increasing seq check depends on it).
+
+let dmSendChain: Promise<void> = Promise.resolve();
+let dmRecvChain: Promise<void> = Promise.resolve();
+// Inbound signals that arrive before dm:voice:joined pins the peer device (an
+// offer can beat the joined event across the relay) — buffered, flushed in
+// arrival order once the pin lands. Dropping them would deadlock the polite
+// side of glare.
+let prePinSignalQueue: Array<{ from: string; signal: unknown }> = [];
+// While true the pin is set but its begin/flush hasn't run yet — inbound
+// signals keep buffering so a live signal can't jump ahead of buffered ones.
+let dmPinFlushPending = false;
+const PRE_PIN_QUEUE_CAP = 32;
+
+function resetDMSignalChains() {
+  dmSendChain = Promise.resolve();
+  dmRecvChain = Promise.resolve();
+  prePinSignalQueue = [];
+  dmPinFlushPending = false;
+}
+
+function classifyCallCryptoError(
+  crypto: typeof import('../services/e2e/callCrypto'),
+  err: unknown,
+): DMCallAbortReason {
+  if (err instanceof crypto.E2EIdentityChangedError) return 'identity-changed';
+  if (err instanceof crypto.CallSecurityError) {
+    return err.kind === 'peer-not-e2e' ? 'peer-not-e2e' : 'peer-must-update';
+  }
+  return 'signaling-failed';
+}
+
+/** Seal one outbound DM call signal and emit it, preserving generation order. */
+function sendDMSignalEncrypted(to: string, signal: E2ECallSignal) {
+  dmSendChain = dmSendChain.then(async () => {
+    const state = useVoiceStore.getState();
+    const conversationId = state.dmCallConversationId;
+    const peer = state.dmCallPeerDevice;
+    if (!conversationId || !peer || peer.userId !== to) return; // call ended or stale target
+    const crypto = await import('../services/e2e/callCrypto');
+    let envelope: string;
+    try {
+      try {
+        envelope = await crypto.encryptCallSignal(conversationId, peer, signal);
+      } catch (err) {
+        // Security conditions abort immediately; transient failures (bundle
+        // claim hiccup, network) get exactly one retry
+        if (err instanceof crypto.CallSecurityError || err instanceof crypto.E2EIdentityChangedError) throw err;
+        debugLog('[DMVoice] Signal encrypt failed, retrying once:', err);
+        envelope = await crypto.encryptCallSignal(conversationId, peer, signal);
+      }
+    } catch (err) {
+      console.error('[DMVoice] Could not encrypt call signal — aborting call:', err);
+      useVoiceStore.getState().abortDMCall(classifyCallCryptoError(crypto, err));
+      return;
+    }
+    const now = useVoiceStore.getState();
+    // Re-pin swaps the peer object — stale sends for the old device are dropped
+    if (now.dmCallConversationId !== conversationId || now.dmCallPeerDevice !== peer) return;
+    getSocket()?.emit('dm:voice:signal', { to, signal: envelope });
+  }).catch((err) => {
+    console.error('[DMVoice] Call signal send chain error:', err);
+  });
+}
+
+/** Open one inbound envelope and drive the normal WebRTC signal handling. */
+function receiveDMSignalEncrypted(from: string, payload: unknown) {
+  dmRecvChain = dmRecvChain.then(async () => {
+    const state = useVoiceStore.getState();
+    const conversationId = state.dmCallConversationId;
+    const peer = state.dmCallPeerDevice;
+    if (!conversationId || !peer || peer.userId !== from) return;
+    const crypto = await import('../services/e2e/callCrypto');
+    let plain: E2ECallSignal | null;
+    try {
+      plain = await crypto.decryptCallSignal(conversationId, peer, payload);
+    } catch (err) {
+      console.error('[DMVoice] Inbound call signal failed security checks — aborting call:', err);
+      useVoiceStore.getState().abortDMCall(classifyCallCryptoError(crypto, err));
+      return;
+    }
+    if (plain === null) return; // droppable: replay, stale epoch, binding mismatch
+    const now = useVoiceStore.getState();
+    if (now.dmCallConversationId !== conversationId || now.dmCallPeerDevice !== peer) return;
+    handleSignalInternal('dm:voice:signal', '[DMVoice]', now.createDMPeer, from, plain, {
+      get: () => useVoiceStore.getState(),
+    });
+  }).catch((err) => {
+    console.error('[DMVoice] Call signal receive chain error:', err);
+  });
+}
+
+/**
+ * Pin the peer's call device and start a signaling session for it. The begin
+ * runs on the send chain (so it cannot race the first encrypt's auto-begin),
+ * then the pre-pin buffer flushes in arrival order.
+ */
+function pinDMCallPeer(conversationId: string, peer: CallPeerDevice) {
+  useVoiceStore.setState({ dmCallPeerDevice: peer });
+  dmPinFlushPending = true;
+  dmSendChain = dmSendChain.then(async () => {
+    const { beginCallSignaling, getCallPeerDevice } = await import('../services/e2e/callCrypto');
+    const current = getCallPeerDevice(conversationId);
+    // encryptCallSignal auto-begins on pin mismatch — don't reset an epoch a
+    // queued encrypt already started for this exact device
+    if (!current || current.userId !== peer.userId || current.deviceId !== peer.deviceId) {
+      beginCallSignaling(conversationId, peer);
+    }
+  }).catch((err) => {
+    console.error('[DMVoice] Failed to pin call peer device:', err);
+  }).finally(() => {
+    dmPinFlushPending = false;
+    const buffered = prePinSignalQueue.splice(0);
+    for (const b of buffered) {
+      if (b.from === peer.userId) receiveDMSignalEncrypted(b.from, b.signal);
+      else debugLog('[DMVoice] Discarding buffered signal from non-call-peer', b.from);
+    }
+  });
 }
 
 /** Acquire a mic audio stream using the user's preferred input device. */
@@ -274,7 +596,7 @@ function createPeerInternal(
   debugLog(`${logPrefix} Creating RTCPeerConnection to ${targetUserId} (initiator: ${initiator})`);
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  const peerConn: PeerConnection = { pc, makingOffer: false };
+  const peerConn: PeerConnection = { pc, makingOffer: false, pendingCandidates: [] };
 
   // Use the best available processed stream:
   // - DM P2P: suppressed stream (clean RNNoise pipeline: source → worklet → dest)
@@ -501,6 +823,17 @@ function handleSignalInternal(
 
   const { pc } = peerConn;
 
+  // Apply ICE candidates queued while the remote description was still unset
+  const flushPendingCandidates = () => {
+    if (peerConn!.pendingCandidates.length === 0) return;
+    const queued = peerConn!.pendingCandidates.splice(0);
+    debugLog(`${logPrefix} Flushing ${queued.length} queued ICE candidate(s) from ${from}`);
+    for (const candidate of queued) {
+      pc.addIceCandidate(new RTCIceCandidate(candidate))
+        .catch((err) => console.error(`${logPrefix} Error adding queued ICE candidate from ${from}:`, err));
+    }
+  };
+
   if (data.type === 'offer') {
     const offerCollision = peerConn.makingOffer || pc.signalingState !== 'stable';
     const isPolite = (localUserId ?? '') < from;
@@ -516,7 +849,10 @@ function handleSignalInternal(
       : pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }));
 
     acceptOffer
-      .then(() => pc.createAnswer())
+      .then(() => {
+        flushPendingCandidates();
+        return pc.createAnswer();
+      })
       .then((answer) => {
         if (answer.sdp) answer.sdp = optimizeOpusSDP(answer.sdp);
         return pc.setLocalDescription(answer);
@@ -538,8 +874,15 @@ function handleSignalInternal(
       return;
     }
     pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }))
+      .then(flushPendingCandidates)
       .catch((err) => console.error(`${logPrefix} Error handling answer from ${from}:`, err));
   } else if (data.type === 'ice-candidate' && data.candidate) {
+    // Candidates racing ahead of the offer/answer used to be dropped silently
+    // (the 'remote description' error was swallowed) — queue them instead
+    if (!pc.remoteDescription) {
+      peerConn.pendingCandidates.push(data.candidate);
+      return;
+    }
     pc.addIceCandidate(new RTCIceCandidate(data.candidate))
       .catch((err) => {
         if (!String(err).includes('remote description')) {
@@ -561,6 +904,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   localStream: null,
   latency: null,
   channelUsers: new Map(),
+  channelServers: new Map(),
   peers: new Map(),
   remoteAudios: new Map(),
 
@@ -577,19 +921,44 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   screenSharingUserId: null,
   remoteScreenStream: null,
   screenShareViewMode: 'inline',
+  screenShareFrozen: false,
+  pendingShare: null,
+  screenShareSourceKey: null,
+  shareKind: 'screen',
+  screenShareAnnotationsVersion: 1,
 
   // DM call state
   dmCallConversationId: null,
   dmCallUsers: [],
+  dmCallPeerDevice: null,
   incomingCall: null,
 
+  // Secure voice state
+  secureVoicePeerIssues: {},
+  secureVoiceActive: false,
+
   setLocalUserId: (userId: string) => set({ localUserId: userId }),
+
+  markSecureVoicePeerExcluded: (channelId: string, userId: string, kind: string) => {
+    if (get().activeChannelId !== channelId) return;
+    set((state) => ({ secureVoicePeerIssues: { ...state.secureVoicePeerIssues, [userId]: kind } }));
+  },
+
+  clearSecureVoicePeerIssue: (channelId: string, userId: string) => {
+    if (get().activeChannelId !== channelId) return;
+    set((state) => {
+      if (!(userId in state.secureVoicePeerIssues)) return state;
+      const next = { ...state.secureVoicePeerIssues };
+      delete next[userId];
+      return { secureVoicePeerIssues: next };
+    });
+  },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SERVER VOICE (SFU)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  joinChannel: async (channelId: string, serverId?: string) => {
+  joinChannel: async (channelId: string, serverId?: string, opts?: { secure?: boolean; keepRetryCount?: boolean }) => {
     const socket = getSocket();
     if (!socket) return;
 
@@ -602,13 +971,66 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       get().leaveChannel();
     }
 
-    transportRejoinAttempts = 0; // Reset retry counter on explicit join
+    // Captured BEFORE any await — every await below re-checks it so a
+    // concurrent leave/join supersedes this one (MED-9)
+    const generation = ++voiceSessionGeneration;
+    // Reset the retry counter on an EXPLICIT join only. The secure
+    // transport-failure path rejoins through here, and resetting would make
+    // MAX_TRANSPORT_REJOIN_ATTEMPTS unreachable — a permanently failing
+    // transport would loop forever, dragging every remaining participant
+    // through a rotation and a re-seal on each cycle.
+    if (!opts?.keepRetryCount) transportRejoinAttempts = 0;
+
+    // Resolve the channel record — the SECURE flag decides the whole join
+    // shape. Fail closed if it cannot be resolved: joining a secure channel
+    // as-if-plaintext would leak unencrypted frames (spec §21).
+    //
+    // Callers that ALREADY know the flag pass it: serverStore.channels holds
+    // only the VIEWED server's channels, and voice deliberately survives
+    // browsing elsewhere, so reconnect/transport-restart/force-move must never
+    // depend on it — the lookup would fail and strand a live call.
+    let secure: boolean;
+    if (typeof opts?.secure === 'boolean') {
+      secure = opts.secure;
+    } else {
+      try {
+        const { useServerStore } = await import('./serverStore');
+        const record = useServerStore.getState().channels.find((c) => c.id === channelId);
+        if (!record) {
+          console.error(`[Voice] Channel ${channelId} not in the store — refusing to join`);
+          toast.error('Could not join the voice channel — try again');
+          return;
+        }
+        secure = record.secure === true;
+      } catch (err) {
+        console.error('[Voice] Channel resolution failed — refusing to join:', err);
+        toast.error('Could not join the voice channel — try again');
+        return;
+      }
+      if (generation !== voiceSessionGeneration) return;
+    }
+
+    if (secure) {
+      const { isSecureVoiceSupported } = await import('../services/e2e/secureVoiceKeys');
+      if (!isSecureVoiceSupported()) {
+        toast.error(i18n.t('secureVoice.unsupported'));
+        return;
+      }
+      if (generation !== voiceSessionGeneration) return;
+    }
 
     const settings = useSettingsStore.getState();
     setNoiseGateThreshold(settings.noiseGateThreshold);
     setNoiseSuppression(settings.enableNoiseSuppression);
 
     const stream = await acquireAudioStream();
+
+    // Superseded while acquiring the mic (rapid channel switch / leave) —
+    // release the just-acquired stream or the OS records forever
+    if (generation !== voiceSessionGeneration) {
+      stream?.getTracks().forEach((track) => track.stop());
+      return;
+    }
 
     const { selfMute, selfDeaf } = get();
     const isPTT = settings.voiceMode === 'push_to_talk';
@@ -641,17 +1063,87 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     const effectiveMute = stream ? selfMute : true;
     const serverMute = isPTT ? true : effectiveMute;
-    set({ activeChannelId: channelId, activeVoiceServerId: serverId ?? null, localStream: stream, selfMute: effectiveMute });
+
+    // Secure channels: the E2E media session MUST exist before voice:join —
+    // key 0 is minted, the frame worker is live, and our deviceId is
+    // announced with the join. Any failure aborts (no plaintext fallback).
+    let joinDeviceId: string | undefined;
+    let joinEpoch: string | undefined;
+    if (secure) {
+      try {
+        // First-join-after-launch can race E2E init (the DM-call precedent)
+        const { useE2EStore } = await import('./e2eStore');
+        const { useAuthStore } = await import('./authStore');
+        const me = useAuthStore.getState().user;
+        if (me && !useE2EStore.getState().ready) {
+          useE2EStore.getState().initialize(me.id).catch((err) => {
+            console.warn('[SecureVoice] E2E init kick failed (store records the error):', err);
+          });
+          await waitForE2EReady(10_000);
+        }
+        const { beginSecureVoiceSession, endSecureVoiceSessionFor } = await import('../services/e2e/secureVoiceKeys');
+        const { frames, deviceId, epoch } = await beginSecureVoiceSession(channelId, {
+          isCurrent: () => generation === voiceSessionGeneration,
+        });
+        if (generation !== voiceSessionGeneration) {
+          // End the SESSION, not just the worker: begin() registered it with a
+          // live media key, and only the session teardown zeroes that key and
+          // stops the timers. Identity-scoped so a superseded join can never
+          // tear down a newer session registered under the same channel.
+          endSecureVoiceSessionFor(channelId, frames);
+          stream?.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        secureVoiceFrames = frames;
+        secureVoiceChannelId = channelId;
+        frames.onFatal(() => {
+          // Only the LIVE session may tear down the call: a worker error
+          // queued before teardown must not kick the user out of whatever
+          // channel they joined next.
+          if (secureVoiceFrames !== frames) return;
+          console.error('[SecureVoice] Frame-crypto failure — leaving voice (fail closed)');
+          toast.error(i18n.t('secureVoice.sessionFailed'));
+          get().leaveChannel();
+        });
+        joinDeviceId = deviceId;
+        joinEpoch = epoch;
+      } catch (err) {
+        // Only this join's own stream is safe to touch before the supersession
+        // check. The audio pipelines are module-level SINGLETONS shared by
+        // whatever call is now live: tearing them down here would close the
+        // WINNER's speaking-detection context — the very stream its producer
+        // was created from — leaving a connected-looking call transmitting
+        // silence with no detector left to resume it.
+        stream?.getTracks().forEach((track) => track.stop());
+        // Superseded by a newer join/leave — not a failure, and the winner owns
+        // the UI (and the audio pipelines) from here.
+        if (generation !== voiceSessionGeneration) return;
+        stopSpeakingDetection();
+        stopNoiseSuppression();
+        console.error('[SecureVoice] Could not start the E2E media session — join aborted:', err);
+        toast.error(i18n.t('secureVoice.cantJoin'));
+        return;
+      }
+    }
+
+    set({ activeChannelId: channelId, activeVoiceServerId: serverId ?? null, localStream: stream, selfMute: effectiveMute, secureVoicePeerIssues: {}, secureVoiceActive: secure });
 
     // Emit voice:join — server will respond with voice:transport_created
-    socket.emit('voice:join', channelId, { selfMute: serverMute, selfDeaf });
+    socket.emit('voice:join', channelId, { selfMute: serverMute, selfDeaf, ...(joinDeviceId && { deviceId: joinDeviceId }), ...(joinEpoch && { epoch: joinEpoch }) });
 
     get().startLatencyMeasurement();
   },
 
   leaveChannel: () => {
+    voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
     const socket = getSocket();
     const { localStream, activeChannelId, localUserId } = get();
+
+    // A pre-flight in progress dies with the voice session. The modal's own
+    // effect also cancels, but logout REPLACES the store state before React
+    // can run it — the capture tracks would never be stopped and the OS
+    // "sharing your screen" indicator would stay lit until app restart.
+    get().cancelPendingShare();
 
     // Stop screen sharing before leaving
     if (get().isScreenSharing) {
@@ -675,6 +1167,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // Clean up SFU resources
     get().cleanupSFU();
 
+    // Secure voice: the media keys die with the session (fresh key + epoch on
+    // any rejoin — the IV-reuse firewall, spec §21)
+    teardownSecureVoice();
+
     if (socket) {
       socket.emit('voice:leave');
     }
@@ -689,6 +1185,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       isScreenSharing: false,
       screenSharingUserId: null,
       remoteScreenStream: null,
+      secureVoicePeerIssues: {},
+      secureVoiceActive: false,
     });
   },
 
@@ -709,12 +1207,20 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // Bail if user left during async load
       if (!get().activeChannelId) { return; }
 
+      // Secure voice: the legacy Chromium transform path (createEncodedStreams)
+      // requires encodedInsertableStreams on the RTCPeerConnection. Harmless
+      // where the RTCRtpScriptTransform path is used instead.
+      const secureExtras = activeSecureVoiceSession(get().activeChannelId)
+        ? { additionalSettings: { encodedInsertableStreams: true } as RTCConfiguration }
+        : {};
+
       // 2. Create send transport
       const sendTransport = device.createSendTransport({
         id: data.sendTransport.id,
         iceParameters: data.sendTransport.iceParameters as IceParameters,
         iceCandidates: data.sendTransport.iceCandidates as IceCandidate[],
         dtlsParameters: data.sendTransport.dtlsParameters as DtlsParameters,
+        ...secureExtras,
       });
 
       sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -748,13 +1254,31 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
       sendTransport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
         const s = getSocket();
-        if (s) {
-          s.emit('voice:produce', { kind, rtpParameters, appData }, (response: { producerId: string }) => {
-            callback({ id: response.producerId });
-          });
-        } else {
+        if (!s) {
           errback(new Error('Socket not available'));
+          return;
         }
+        // The server ACKs every voice:produce path (success or error). The timeout
+        // is a second line of defense — without it, a lost ACK would hang produce()
+        // forever and wedge the whole send transport.
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          console.error('[Voice SFU] voice:produce ACK timed out');
+          errback(new Error('voice:produce ACK timeout'));
+        }, 10000);
+        s.emit('voice:produce', { kind, rtpParameters, appData }, (response: { producerId?: string; error?: string }) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          if (!response?.producerId) {
+            console.error('[Voice SFU] voice:produce rejected:', response?.error);
+            errback(new Error(response?.error || 'Producer creation failed'));
+          } else {
+            callback({ id: response.producerId });
+          }
+        });
       });
 
       // 3. Create recv transport
@@ -763,6 +1287,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         iceParameters: data.recvTransport.iceParameters as IceParameters,
         iceCandidates: data.recvTransport.iceCandidates as IceCandidate[],
         dtlsParameters: data.recvTransport.dtlsParameters as DtlsParameters,
+        ...secureExtras,
       });
 
       recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -810,7 +1335,21 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             if (currentChannelId && transportRejoinAttempts < MAX_TRANSPORT_REJOIN_ATTEMPTS) {
               transportRejoinAttempts++;
               toast.error(`Voice connection lost — reconnecting (attempt ${transportRejoinAttempts}/${MAX_TRANSPORT_REJOIN_ATTEMPTS})...`);
+              // Screen share cannot survive the rejoin — release the capture stream
+              // and clear state so the share button doesn't stay stuck "on"
+              const { screenStream: staleScreenStream } = get();
+              if (staleScreenStream) {
+                staleScreenStream.getTracks().forEach((t) => t.stop());
+              }
+              set({ screenStream: null, isScreenSharing: false, screenSharingUserId: null, screenShareFrozen: false, screenShareSourceKey: null, shareKind: 'screen' });
               get().cleanupSFU();
+              // Secure voice: a transport restart is a SESSION restart — the
+              // full join path re-begins with a fresh key + epoch (IV-reuse
+              // firewall). Plaintext channels keep the light re-emit.
+              if (activeSecureVoiceSession(currentChannelId)) {
+                void get().joinChannel(currentChannelId, currentServerId ?? undefined, { secure: true, keepRetryCount: true });
+                return;
+              }
               const s = getSocket();
               if (s) {
                 const { selfMute: m, selfDeaf: d } = get();
@@ -850,6 +1389,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       if (audioTrack && device.canProduce('audio')) {
         const voiceQuality = useSettingsStore.getState().voiceQuality;
         const maxBitrate = VOICE_QUALITY_BITRATE[voiceQuality];
+        // Secure voice: install the encrypt transform on the RTCRtpSender the
+        // moment it exists (before negotiation). If the attach fails, NOTHING
+        // may be produced — fail the whole join closed (spec §21).
+        const secureSession = activeSecureVoiceSession(get().activeChannelId);
+        let attachError: unknown = null;
+        let attachInvoked = false;
         const producer = await sendTransport.produce({
           track: audioTrack,
           codecOptions: {
@@ -860,7 +1405,25 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
           },
           encodings: [{ maxBitrate }],
           appData: { type: 'audio' },
+          ...(secureSession && {
+            onRtpSender: (rtpSender: RTCRtpSender) => {
+              attachInvoked = true;
+              try {
+                secureSession.attachSender(rtpSender);
+              } catch (err) {
+                attachError = err;
+              }
+            },
+          }),
         });
+
+        if (secureSession && (attachError !== null || !attachInvoked)) {
+          console.error('[SecureVoice] Encrypt transform attach failed — leaving voice:', attachError ?? 'onRtpSender never fired');
+          producer.close();
+          toast.error(i18n.t('secureVoice.sessionFailed'));
+          get().leaveChannel();
+          return;
+        }
 
         const newProducers = new Map(get().msProducers);
         newProducers.set(producer.id, producer);
@@ -883,25 +1446,78 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const { msRecvTransport, selfDeaf, activeChannelId } = get();
     if (!msRecvTransport || !activeChannelId) return;
 
+    // Secure voice is audio-only (spec §21) and every consumer MUST decrypt
+    // through the frame worker — a consumer without the transform would play
+    // ciphertext as audio. Defense in depth on top of the server rejection.
+    const secureSession = activeSecureVoiceSession(activeChannelId);
+    if (secureSession) {
+      const claimedType = (data.appData?.type as string) ?? 'audio';
+      if (data.kind !== 'audio' || claimedType !== 'audio') {
+        console.warn('[SecureVoice] Refusing non-audio consumer in a secure channel:', claimedType);
+        return;
+      }
+    }
+
     try {
+      let attachError: unknown = null;
+      let attachInvoked = false;
       const consumer = await msRecvTransport.consume({
         id: data.id,
         producerId: data.producerId,
         kind: data.kind,
         rtpParameters: data.rtpParameters as RtpParameters,
+        ...(secureSession && {
+          onRtpReceiver: (rtpReceiver: RTCRtpReceiver) => {
+            attachInvoked = true;
+            try {
+              secureSession.attachReceiver(rtpReceiver, data.producerUserId);
+            } catch (err) {
+              attachError = err;
+            }
+          },
+        }),
       });
 
+      if (secureSession && (attachError !== null || !attachInvoked)) {
+        console.error('[SecureVoice] Decrypt transform attach failed — dropping consumer:', attachError ?? 'onRtpReceiver never fired');
+        consumer.close();
+        return;
+      }
+
+      // Route by the server-derived appData.type, NOT by kind: screen audio
+      // arrives as kind 'audio' — treating it as mic audio would clobber the
+      // sharer's mic <audio> element and survive deafen incorrectly.
+      const appType = (data.appData?.type as string)
+        ?? (data.kind === 'video' ? 'screen-video' : 'audio');
+
       const newConsumers = new Map(get().msConsumers);
-      newConsumers.set(consumer.id, { consumer, producerUserId: data.producerUserId });
+      newConsumers.set(consumer.id, { consumer, producerUserId: data.producerUserId, appType });
       set({ msConsumers: newConsumers });
 
       const outputDeviceId = useSettingsStore.getState().audioOutputDeviceId;
 
-      if (data.kind === 'audio') {
-        // Create audio element for this consumer
+      if (appType === 'screen-video') {
+        // Screen share video track
+        const stream = new MediaStream([consumer.track]);
+        set({ remoteScreenStream: stream });
+
+        consumer.track.onended = () => {
+          set({ remoteScreenStream: null, screenSharingUserId: null });
+        };
+      } else {
+        // Mic audio or screen audio — separate element keys so they never collide
+        const audioKey = appType === 'screen-audio'
+          ? `${data.producerUserId}-screen`
+          : data.producerUserId;
         const container = getAudioContainer();
+        const oldAudio = get().remoteAudios.get(audioKey);
+        if (oldAudio) {
+          oldAudio.pause();
+          oldAudio.srcObject = null;
+          oldAudio.remove();
+        }
         const audio = document.createElement('audio');
-        audio.id = `vox-sfu-audio-${data.producerUserId}`;
+        audio.id = `vox-sfu-audio-${audioKey}`;
         audio.autoplay = true;
         audio.muted = selfDeaf;
         audio.srcObject = new MediaStream([consumer.track]);
@@ -909,43 +1525,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         applyOutputDevice(audio, outputDeviceId);
 
         const newAudios = new Map(get().remoteAudios);
-        newAudios.set(data.producerUserId, audio);
+        newAudios.set(audioKey, audio);
         set({ remoteAudios: newAudios });
 
         audio.play().catch((err) =>
-          console.warn('[Voice SFU] Audio autoplay blocked for', data.producerUserId, err)
+          console.warn('[Voice SFU] Audio autoplay blocked for', audioKey, err)
         );
-      } else if (data.kind === 'video') {
-        // Video consumer = screen share
-        const appType = data.appData?.type;
-        if (appType === 'screen-audio') {
-          // Screen share audio track
-          const container = getAudioContainer();
-          const screenAudioKey = `${data.producerUserId}-screen`;
-          const audio = document.createElement('audio');
-          audio.id = `vox-sfu-audio-${screenAudioKey}`;
-          audio.autoplay = true;
-          audio.muted = selfDeaf;
-          audio.srcObject = new MediaStream([consumer.track]);
-          container.appendChild(audio);
-          applyOutputDevice(audio, outputDeviceId);
-
-          const newAudios = new Map(get().remoteAudios);
-          newAudios.set(screenAudioKey, audio);
-          set({ remoteAudios: newAudios });
-
-          audio.play().catch((err) =>
-            console.warn('[Voice SFU] Screen audio autoplay blocked:', err)
-          );
-        } else {
-          // Screen share video track
-          const stream = new MediaStream([consumer.track]);
-          set({ remoteScreenStream: stream });
-
-          consumer.track.onended = () => {
-            set({ remoteScreenStream: null, screenSharingUserId: null });
-          };
-        }
       }
 
       // Resume the consumer on the server
@@ -974,7 +1559,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   handleProducerClosed: (data) => {
-    const { msConsumers, remoteAudios } = get();
+    const { msConsumers } = get();
     const entry = msConsumers.get(data.consumerId);
     if (!entry) return;
 
@@ -984,34 +1569,28 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     newConsumers.delete(data.consumerId);
     set({ msConsumers: newConsumers });
 
-    // Clean up audio element
-    const audio = remoteAudios.get(data.producerUserId);
-    if (audio) {
-      audio.pause();
-      audio.srcObject = null;
-      audio.remove();
-      const newAudios = new Map(remoteAudios);
-      newAudios.delete(data.producerUserId);
-      set({ remoteAudios: newAudios });
+    // Clean up ONLY the resource this specific consumer fed. Screen producers
+    // close on every share-stop — indiscriminately removing everything keyed by
+    // producerUserId would delete the sharer's MIC element and mute them for
+    // the rest of the call.
+    if (entry.appType === 'screen-video') {
+      set({ remoteScreenStream: null });
+    } else {
+      const audioKey = entry.appType === 'screen-audio'
+        ? `${data.producerUserId}-screen`
+        : data.producerUserId;
+      const audio = get().remoteAudios.get(audioKey);
+      if (audio) {
+        audio.pause();
+        audio.srcObject = null;
+        audio.remove();
+        const newAudios = new Map(get().remoteAudios);
+        newAudios.delete(audioKey);
+        set({ remoteAudios: newAudios });
+      }
     }
 
-    // Clean up screen audio if any
-    const screenAudio = remoteAudios.get(`${data.producerUserId}-screen`);
-    if (screenAudio) {
-      screenAudio.pause();
-      screenAudio.srcObject = null;
-      screenAudio.remove();
-      const newAudios = new Map(get().remoteAudios);
-      newAudios.delete(`${data.producerUserId}-screen`);
-      set({ remoteAudios: newAudios });
-    }
-
-    // Clear screen share state if this producer was the screen sharer
-    if (get().screenSharingUserId === data.producerUserId) {
-      set({ remoteScreenStream: null, screenSharingUserId: null });
-    }
-
-    debugLog('[Voice SFU] Producer closed, consumer removed:', data.consumerId);
+    debugLog('[Voice SFU] Producer closed, consumer removed:', data.consumerId, entry.appType);
   },
 
   cleanupSFU: () => {
@@ -1053,11 +1632,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   // ── Channel user state (unchanged) ─────────────────────────────────────
 
-  setChannelUsers: (channelId: string, users: VoiceUser[]) => {
+  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string) => {
     debugLog('[Voice] setChannelUsers:', channelId, users.length, 'users');
     set((state) => {
       const newMap = new Map(state.channelUsers);
       newMap.set(channelId, users);
+      const serverFix = serverId && state.channelServers.get(channelId) !== serverId
+        ? { channelServers: new Map(state.channelServers).set(channelId, serverId) }
+        : {};
       // If the screen sharer is no longer in the channel, clear the stale reference
       const sharerGone = state.screenSharingUserId
         && channelId === state.activeChannelId
@@ -1065,25 +1647,60 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const screenFix = sharerGone
         ? { screenSharingUserId: null, remoteScreenStream: null } as const
         : {};
-      return { channelUsers: newMap, ...screenFix };
+      return { channelUsers: newMap, ...serverFix, ...screenFix };
     });
     // No peer creation needed — SFU handles media routing via consumers
+
+    // Secure voice: the initial replay lists the occupants present at OUR
+    // join — vet each and seal our CURRENT key (no ratchet; spec §21).
+    if (activeSecureVoiceSession(channelId)) {
+      const selfId = get().localUserId;
+      void import('../services/e2e/secureVoiceKeys').then((m) => {
+        for (const u of users) {
+          if (u.id !== selfId) m.onParticipantJoined(channelId, u, { initialReplay: true });
+        }
+      }).catch((err) => console.error('[SecureVoice] Initial participant keying failed:', err));
+    }
   },
 
-  addUserToChannel: (channelId: string, user: VoiceUser) => {
+  addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => {
     debugLog('[Voice] addUserToChannel:', channelId, user.displayName);
 
     const existing = get().channelUsers.get(channelId) || [];
-    if (existing.some((u) => u.id === user.id)) return;
+    const listed = existing.find((u) => u.id === user.id);
+    // A duplicate announcement is only a duplicate if it announces the SAME
+    // E2E session. A peer that reconnected announces a new deviceId/epoch, and
+    // dropping that here would strand the secure session: their re-pin never
+    // runs, so every key they seal from now on fails the epoch binding and the
+    // pair goes permanently silent. (Ghost list entries survive a missed
+    // voice:user_left and an owner-node takeover, so this is reachable.)
+    if (listed && listed.deviceId === user.deviceId && listed.epoch === user.epoch) return;
 
     set((state) => {
       const newMap = new Map(state.channelUsers);
       const current = newMap.get(channelId) || [];
-      if (current.some((u) => u.id === user.id)) return state;
-      newMap.set(channelId, [...current, user]);
-      return { channelUsers: newMap };
+      const idx = current.findIndex((u) => u.id === user.id);
+      if (idx !== -1) {
+        const next = [...current];
+        next[idx] = user; // refresh the stale announcement
+        newMap.set(channelId, next);
+      } else {
+        newMap.set(channelId, [...current, user]);
+      }
+      const serverFix = serverId && state.channelServers.get(channelId) !== serverId
+        ? { channelServers: new Map(state.channelServers).set(channelId, serverId) }
+        : {};
+      return { channelUsers: newMap, ...serverFix };
     });
     // No peer creation needed — SFU creates consumers server-side
+
+    // Secure voice: a genuine ARRIVAL ratchets our key forward so the joiner
+    // never decrypts past audio (spec §21). Self echo is skipped.
+    if (user.id !== get().localUserId && activeSecureVoiceSession(channelId)) {
+      void import('../services/e2e/secureVoiceKeys')
+        .then((m) => m.onParticipantJoined(channelId, user, { initialReplay: false }))
+        .catch((err) => console.error('[SecureVoice] Arrival keying failed:', err));
+    }
   },
 
   removeUserFromChannel: (channelId: string, userId: string) => {
@@ -1104,10 +1721,24 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         : {};
       return { channelUsers: newMap, ...screenFix };
     });
+
+    // Secure voice: a departure means a FRESH key for everyone remaining —
+    // the leaver must not decrypt future audio (spec §21).
+    if (userId !== get().localUserId && activeSecureVoiceSession(channelId)) {
+      void import('../services/e2e/secureVoiceKeys')
+        .then((m) => m.onParticipantLeft(channelId, userId))
+        .catch((err) => console.error('[SecureVoice] Departure rotation failed:', err));
+    }
   },
 
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => {
     const { localUserId } = get();
+
+    // Capture the previous entry BEFORE updating the map — the un-deafen path
+    // below must distinguish a lifted server-deafen from a plain self-deafen.
+    const prevSelf = userId === localUserId
+      ? (get().channelUsers.get(channelId) || []).find((u) => u.id === userId)
+      : undefined;
 
     set((state) => {
       const newMap = new Map(state.channelUsers);
@@ -1121,17 +1752,27 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // If WE were server-muted/deafened, update local state + mute audio
     if (userId === localUserId) {
       if (serverMuted && !get().selfMute) {
-        // Force our local mute state on — pause producers
+        // Force our local mute state on — pause the mic producer
         for (const producer of get().msProducers.values()) {
-          if (producer.kind === 'audio') producer.pause();
+          if (isMicProducer(producer)) producer.pause();
         }
         set({ selfMute: true });
       }
       if (serverDeafened && !get().selfDeaf) {
-        // Force our local deaf state on — mute all remote audio
-        const remoteAudios = document.querySelectorAll<HTMLAudioElement>('audio[data-voice-remote]');
-        remoteAudios.forEach((a) => { a.muted = true; });
+        // Force our local deaf state on — mute all remote audio elements.
+        // Iterate the store's remoteAudios map (same as toggleDeaf); the old
+        // `audio[data-voice-remote]` selector matched nothing, so server-deafen
+        // was never enforced client-side.
+        get().remoteAudios.forEach((audio) => { audio.muted = true; });
         set({ selfDeaf: true });
+      }
+      if (!serverDeafened && prevSelf?.serverDeafened && get().selfDeaf) {
+        // The moderator lifted our server-deafen — restore hearing. The forced
+        // deafen muted every remote element and set selfDeaf, and toggleDeaf is
+        // blocked while serverDeafened, so without this symmetric release the
+        // user would stay silenced after being un-deafened.
+        get().remoteAudios.forEach((audio) => { audio.muted = false; });
+        set({ selfDeaf: false });
       }
     }
   },
@@ -1141,9 +1782,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     if (!activeChannelId || !activeVoiceServerId) return;
     // Leave current channel and join the target one
     get().leaveChannel();
-    // Small delay to let cleanup complete before rejoining
+    // Small delay to let cleanup complete before rejoining. The target is
+    // always plaintext — the server refuses force-move into (or out of) a
+    // secure channel — so state this rather than looking it up: the moved user
+    // may be browsing another server, whose channel list would not contain it.
     setTimeout(() => {
-      get().joinChannel(targetChannelId, activeVoiceServerId);
+      get().joinChannel(targetChannelId, activeVoiceServerId, { secure: false });
     }, 300);
   },
 
@@ -1205,10 +1849,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
     }
 
-    // Pause/resume mediasoup audio producer (server voice)
+    // Pause/resume the mediasoup MIC producer (server voice) — screen-share
+    // system audio is independent of mute
     if (activeChannelId) {
       for (const producer of msProducers.values()) {
-        if (producer.kind === 'audio') {
+        if (isMicProducer(producer)) {
           if (newMute) { producer.pause(); } else { producer.resume(); }
         }
       }
@@ -1251,16 +1896,18 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // Deafen implies mute — if deafening and not already muted, also mute
     const { selfMute, msProducers, localStream } = get();
     if (newDeaf && !selfMute) {
-      // Pause audio producers
+      // Pause the mic producer (screen audio unaffected)
       if (get().activeChannelId) {
         for (const producer of msProducers.values()) {
-          if (producer.kind === 'audio') producer.pause();
+          if (isMicProducer(producer)) producer.pause();
         }
       }
       if (localStream) {
         localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
       }
       set({ selfMute: true });
+      // Same as toggleMute: stop speaking detection so the indicator can't stick
+      setSpeakingDetectionPaused(true);
     }
 
     if (socket) {
@@ -1390,8 +2037,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   startScreenShare: async () => {
     const socket = getSocket();
-    const { activeChannelId, msSendTransport, msDevice, isScreenSharing, screenStream } = get();
+    const { activeChannelId, msSendTransport, msDevice, isScreenSharing, screenStream, pendingShare } = get();
     if (!socket || !activeChannelId || !msSendTransport || !msDevice) return;
+    if (pendingShare || shareActivationInFlight) return; // a pre-flight or activation is already in progress
 
     // If stale state says we're sharing but the stream is dead, clean up before proceeding
     if (isScreenSharing) {
@@ -1404,64 +2052,309 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
     }
 
+    let stream: MediaStream | null = null;
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 30 } },
         audio: true,
       });
+    } catch (err) {
+      // A getDisplayMedia permission cancel is a deliberate user action — no toast
+      const isUserCancel = err instanceof DOMException && err.name === 'NotAllowedError';
+      if (!isUserCancel) {
+        console.warn('[Voice] Screen capture failed:', err);
+        toast.error('Screen share failed — please try again');
+      }
+      return;
+    }
 
-      // Produce video track via SFU
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack && msDevice.canProduce('video')) {
-        const videoProducer = await msSendTransport.produce({
-          track: videoTrack,
-          appData: { type: 'screen-video' },
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) {
+      stream.getTracks().forEach((t) => t.stop());
+      toast.error('Screen share failed — please try again');
+      return;
+    }
+    const settings = videoTrack.getSettings() as { displaySurface?: string; width?: number; height?: number };
+    const sourceKey = sourceKeyFromSettings(settings);
+    const displaySurface = typeof settings.displaySurface === 'string' && settings.displaySurface ? settings.displaySurface : 'unknown';
+
+    // Masks are placed BEFORE the first frame leaves this machine: the
+    // pre-flight shows the capture locally (nothing claimed, nothing
+    // produced), applies the remembered layout, and only "Go live" starts
+    // the share — with the compositor already in front of the producer.
+    if (loadAnnotationPrefs().skipPreflight) {
+      if (displaySurface === 'monitor') {
+        // The one nudge that survives the skip: a whole screen shows
+        // notifications and every other window
+        toast.warning(i18n.t('voice.preflight.monitorNudge'));
+      }
+      set({ pendingShare: { stream, sourceKey, displaySurface } }); // the layout auto-apply keys off this
+      await get().confirmPendingShare();
+      return;
+    }
+
+    set({ pendingShare: { stream, sourceKey, displaySurface } });
+    // The OS "stop sharing" control ends the track mid-pre-flight
+    videoTrack.onended = () => {
+      if (get().pendingShare?.stream === stream) get().cancelPendingShare();
+    };
+  },
+
+  startWhiteboardShare: async () => {
+    const socket = getSocket();
+    const { activeChannelId, msSendTransport, msDevice, isScreenSharing, pendingShare, secureVoiceActive } = get();
+    if (!socket || !activeChannelId || !msSendTransport || !msDevice) return;
+    if (pendingShare || shareActivationInFlight || isScreenSharing) return;
+    // Secure voice is audio-only (spec §21) — the UI hides the button; this
+    // is the belt (the server would refuse the producer anyway)
+    if (secureVoiceActive) return;
+    const board = createWhiteboardStream();
+    if (!board) {
+      toast.error('Screen share failed — please try again');
+      return;
+    }
+    // A fixed source key that can never collide with a remembered SCREEN
+    // layout ('unknown:1920x1080' is a real getSettings shape for captures
+    // without displaySurface). No layout can ever be saved under it — the
+    // mask tool is hidden on a whiteboard.
+    set({ screenShareSourceKey: `whiteboard:${WHITEBOARD_WIDTH}x${WHITEBOARD_HEIGHT}` });
+    await get().activateScreenShare(board.stream, 'whiteboard');
+  },
+
+  confirmPendingShare: async () => {
+    const pending = get().pendingShare;
+    if (!pending) return;
+    set({ pendingShare: null, screenShareSourceKey: pending.sourceKey });
+    await get().activateScreenShare(pending.stream);
+  },
+
+  cancelPendingShare: () => {
+    const pending = get().pendingShare;
+    if (!pending) return;
+    set({ pendingShare: null });
+    pending.stream.getTracks().forEach((t) => t.stop());
+    // Masks placed for a share that never happened would silently apply to
+    // the NEXT share of anything
+    try {
+      shareMaskHooks?.clearPreflightMasks();
+    } catch (err) {
+      console.warn('[Voice] Pre-flight mask cleanup failed:', err);
+    }
+  },
+
+  activateScreenShare: async (stream: MediaStream, kind: 'screen' | 'whiteboard' = 'screen') => {
+    const socket = getSocket();
+    const { msSendTransport, msDevice } = get();
+    if (!socket || !get().activeChannelId || !msSendTransport || !msDevice) {
+      stream.getTracks().forEach((t) => t.stop());
+      set({ screenShareSourceKey: null }); // confirm stamped it; nothing went live
+      shareMaskHooks?.clearPreflightMasks();
+      return;
+    }
+
+    const createdProducers: Producer[] = [];
+    shareActivationInFlight = true;
+    // Read BEFORE the claim: the up-to-5s ack window is exactly where a
+    // concurrent sharer-stop broadcast used to wipe the pre-flight masks
+    // (the lifecycle guard now also keeps them while an activation is in
+    // flight — this pre-read is the belt for the produce decision).
+    const masksPreplaced = shareMaskHooks?.hasMasks() === true;
+    try {
+      // Claim the sharer slot BEFORE producing — the server authorizes
+      // screen-video/screen-audio producers only for the active sharer.
+      const startResponse = await new Promise<{ ok: boolean; error?: string; annotationsVersion?: number }>((resolve) => {
+        const timeout = setTimeout(
+          () => resolve({ ok: false, error: 'Server did not respond' }),
+          5000,
+        );
+        socket.emit('voice:screen_share:start', (response: { ok: boolean; error?: string; annotationsVersion?: number }) => {
+          clearTimeout(timeout);
+          resolve(response ?? { ok: false, error: 'No response from server' });
         });
+      });
+      if (!startResponse.ok) {
+        throw new Error(startResponse.error || 'Screen share rejected by server');
+      }
 
+      // Bail if we left voice while awaiting the slot claim
+      if (!get().activeChannelId) {
+        throw new Error('Left voice channel during screen share setup');
+      }
+
+      const videoTrack = stream.getVideoTracks()[0];
+      if (!videoTrack || videoTrack.readyState !== 'live' || !msDevice.canProduce('video')) {
+        throw new Error('Cannot produce screen video');
+      }
+
+      // 'detail' prioritizes resolution/sharpness over frame rate — right for
+      // desktop content. Without encodings the producer gets a default bitrate
+      // far too low for 1080p, leaving viewers in permanent blur.
+      videoTrack.contentHint = 'detail';
+
+      // Masks placed in the pre-flight: the producer is born with the
+      // COMPOSITED track — the raw track never becomes a producer track, so
+      // not one raw frame can ship ahead of the compositor. FAIL-CLOSED: if
+      // the compositor cannot start, there is no share.
+      let produceTrack: MediaStreamTrack = videoTrack;
+      if (masksPreplaced) {
+        const composite = shareMaskHooks
+          ? await prepareComposite(shareMaskHooks.preflightCompositeHandles(videoTrack))
+          : null;
+        if (!composite) {
+          throw new Error('Privacy mask compositor failed to start');
+        }
+        produceTrack = composite;
+      }
+      // stopTracks:false — mediasoup must NOT own the capture track's lifecycle:
+      // its default replaceTrack() behavior STOPS the old track, which would
+      // kill the raw capture the mask compositor reads from (stopScreenShare
+      // stops screenStream tracks explicitly). disableTrackOnPause:false +
+      // zeroRtpOnPause:true — the compositor's fail-closed pause must suppress
+      // RTP at the sender WITHOUT disabling the shared raw track (a disabled
+      // track delivers black frames to the compositor's source video).
+      const videoProducer = await msSendTransport.produce({
+        track: produceTrack,
+        encodings: [{ maxBitrate: SCREEN_SHARE_MAX_BITRATE }],
+        codecOptions: { videoGoogleStartBitrate: 1000 },
+        stopTracks: false,
+        disableTrackOnPause: false,
+        zeroRtpOnPause: true,
+        appData: { type: 'screen-video' },
+      });
+      createdProducers.push(videoProducer);
+      {
         const newProducers = new Map(get().msProducers);
         newProducers.set(videoProducer.id, videoProducer);
         set({ msProducers: newProducers });
-
-        videoTrack.onended = () => {
-          get().stopScreenShare();
-        };
       }
+      if (masksPreplaced) {
+        // The compositor session was built before the producer existed — give
+        // it its real handles now (mask removal restores the raw track, the
+        // fail-closed and source-hold paths pause/resume RTP)
+        attachCompositeProducerHandles({
+          replaceTrack: (track) => get().replaceScreenVideoTrack(track),
+          pauseProducer: () => get().setScreenVideoProducerPaused(true),
+          resumeProducer: () => get().setScreenVideoProducerPaused(false),
+        });
+      }
+      // The pre-flight's onended went dead when confirm cleared pendingShare,
+      // and the handler below is not installed yet — a capture that ended
+      // during the produce round-trip would otherwise leave a "live" share
+      // with a dead track and no event left to fire.
+      if (videoTrack.readyState !== 'live') {
+        throw new Error('Screen capture ended during setup');
+      }
+      videoTrack.onended = () => {
+        get().stopScreenShare();
+      };
 
-      // Produce audio track if available (system audio from getDisplayMedia)
+      // Produce system audio if available (never mute/silence-paused — it is
+      // independent of the mic; muted and PTT sharers still transmit game audio)
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack) {
         const audioProducer = await msSendTransport.produce({
           track: audioTrack,
           appData: { type: 'screen-audio' },
         });
-
+        createdProducers.push(audioProducer);
         const newProducers = new Map(get().msProducers);
         newProducers.set(audioProducer.id, audioProducer);
         set({ msProducers: newProducers });
       }
 
-      socket.emit('voice:screen_share:start');
-
+      // Second half of the ended-mid-setup window: onended may have run
+      // stopScreenShare during the audio produce await — the set below would
+      // resurrect a "live" share whose producer is already closed.
+      if (!get().activeChannelId || videoTrack.readyState !== 'live') {
+        throw new Error('Screen capture ended during setup');
+      }
       set({
         screenStream: stream,
         isScreenSharing: true,
+        // Set by confirmPendingShare for the pre-flight path; derived here
+        // for completeness (skip path passes through confirm too)
+        screenShareSourceKey: get().screenShareSourceKey
+          ?? sourceKeyFromSettings(videoTrack.getSettings() as { displaySurface?: string; width?: number; height?: number }),
+        screenShareAnnotationsVersion: typeof startResponse.annotationsVersion === 'number' ? startResponse.annotationsVersion : 1,
+        shareKind: kind,
       });
     } catch (err) {
       console.warn('[Voice] Screen share cancelled or failed:', err);
-      // Ensure state is clean even if getDisplayMedia was cancelled or produce failed mid-way
-      set({ screenStream: null, isScreenSharing: false });
+      // Roll back everything: close half-created producers on BOTH sides,
+      // release the capture stream (clears the OS capture indicator), and
+      // free the sharer slot on the server.
+      const s = getSocket();
+      // With pre-flight masks the compositor session CAN already be live here
+      // (prepareComposite ran before produce) — kill its draw loop with the
+      // producers; the raw stream tracks are stopped below.
+      teardownComposite();
+      const producers = new Map(get().msProducers);
+      for (const producer of createdProducers) {
+        if (s) s.emit('voice:producer:close', { producerId: producer.id });
+        if (!producer.closed) producer.close();
+        producers.delete(producer.id);
+      }
+      set({ msProducers: producers });
+      stream?.getTracks().forEach((track) => track.stop());
+      // Emitted even when the claim SEEMED to fail: a lost ack can leave the
+      // server believing we hold the slot (the stop handler no-ops for
+      // non-sharers), and the echoed stop broadcast is what clears a
+      // stranded sharer id — and with it any stale pre-flight drafts.
+      if (s) s.emit('voice:screen_share:stop');
+      // The stale key would make maskLayoutStore misread the NEXT pre-flight's
+      // cancel as a confirm; the masks would silently composite over the next
+      // share of anything (same rationale as cancelPendingShare).
+      set({ screenStream: null, isScreenSharing: false, screenShareSourceKey: null, shareKind: 'screen' });
+      try {
+        shareMaskHooks?.clearPreflightMasks();
+      } catch (hookErr) {
+        console.warn('[Voice] Pre-flight mask cleanup failed:', hookErr);
+      }
+      // A getDisplayMedia permission cancel is a deliberate user action — no toast
+      const isUserCancel = err instanceof DOMException && err.name === 'NotAllowedError';
+      if (!isUserCancel) {
+        toast.error('Screen share failed — please try again');
+      }
+    } finally {
+      shareActivationInFlight = false;
     }
+  },
+
+  replaceScreenVideoTrack: async (track: MediaStreamTrack) => {
+    const producer = [...get().msProducers.values()].find(
+      (p) => (p.appData as Record<string, unknown>)?.type === 'screen-video' && !p.closed,
+    );
+    if (!producer) throw new Error('No live screen-video producer to swap');
+    await producer.replaceTrack({ track });
+  },
+
+  setScreenVideoProducerPaused: (paused: boolean) => {
+    const producer = [...get().msProducers.values()].find(
+      (p) => (p.appData as Record<string, unknown>)?.type === 'screen-video' && !p.closed,
+    );
+    if (!producer) return;
+    if (paused && !producer.paused) producer.pause();
+    else if (!paused && producer.paused) producer.resume();
+    set({ screenShareFrozen: paused });
   },
 
   stopScreenShare: () => {
     const socket = getSocket();
     const { screenStream, msProducers } = get();
 
-    // Close screen-related producers
+    // Stop the mask compositor's draw loop FIRST — canvas capture tracks
+    // never end on their own, and a stopped share must not keep burning CPU.
+    teardownComposite();
+
+    // Close screen producers on BOTH sides. The server-side close
+    // (voice:producer:close) frees the producer immediately and notifies every
+    // viewer via producer_closed — without it, stopped-share producers leaked
+    // until leaving voice and the second share of a session hung the client.
     const newProducers = new Map(msProducers);
     for (const [id, producer] of msProducers.entries()) {
       const appType = (producer.appData as Record<string, unknown>)?.type;
       if (appType === 'screen-video' || appType === 'screen-audio') {
+        if (socket) socket.emit('voice:producer:close', { producerId: id });
         if (!producer.closed) producer.close();
         newProducers.delete(id);
       }
@@ -1480,6 +2373,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       screenStream: null,
       isScreenSharing: false,
       screenSharingUserId: null,
+      screenShareFrozen: false,
+      screenShareSourceKey: null,
+      screenShareAnnotationsVersion: 1,
+      shareKind: 'screen',
     });
   },
 
@@ -1516,17 +2413,26 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       get().leaveDMCall();
     }
 
+    const generation = ++voiceSessionGeneration;
+    resetDMSignalChains();
+
     const settings = useSettingsStore.getState();
     setNoiseGateThreshold(settings.noiseGateThreshold);
     setNoiseSuppression(settings.enableNoiseSuppression);
 
     const stream = await acquireAudioStream();
 
+    // Superseded while acquiring the mic — release it (see joinChannel)
+    if (generation !== voiceSessionGeneration) {
+      stream?.getTracks().forEach((track) => track.stop());
+      return;
+    }
+
     const { selfMute, selfDeaf } = get();
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      // Apply RNNoise noise suppression (Jitsi/Matrix pattern: clean isolated pipeline)
+      // Apply RNNoise noise suppression (clean isolated pipeline)
       const suppressedStream = await applyNoiseSuppression(stream);
       // Speaking detection taps into the suppressed stream (read-only side-chain)
       startSpeakingDetection(suppressedStream, 'dm');
@@ -1546,17 +2452,60 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({
       dmCallConversationId: conversationId,
       dmCallUsers: [],
+      dmCallPeerDevice: null,
       localStream: stream,
       selfMute: effectiveMute,
       incomingCall: null,
     });
 
-    socket.emit('dm:voice:join', conversationId, { selfMute: serverMute, selfDeaf });
+    // Announce which E2E device this call runs on, so the peer seals signals
+    // to exactly it (spec §20), and pre-warm the peer's device list so the
+    // first signal's vetting/bundle claim don't stack onto offer glare.
+    const deviceId = await resolveOwnCallDeviceId();
+    if (generation !== voiceSessionGeneration) return; // superseded during the readiness wait
+
+    if (!deviceId) {
+      // Calls are E2E-only (hard cutover): joining without a device id would
+      // just make the PEER abort with "peer must update". Fail fast on OUR
+      // side, with an honest message.
+      console.warn('[DMVoice] E2E device unavailable — refusing to start an unprotectable call');
+      get().handleDMCallEnded();
+      toast.error(i18n.t('e2e.callNotReady'));
+      return;
+    }
+
+    try {
+      const { getE2EService } = await import('../services/e2e/e2eService');
+      const { useAuthStore } = await import('./authStore');
+      const { useDMStore } = await import('./dmStore');
+      const me = useAuthStore.getState().user;
+      const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
+      if (me && conversation) {
+        void getE2EService(me.id).fetchDeviceList(conversation.participant.id, true).catch((err) => {
+          console.warn('[DMVoice] Device-list pre-warm failed (will retry at first signal):', err);
+        });
+      }
+    } catch (err) {
+      console.warn('[DMVoice] Device-list pre-warm setup failed:', err);
+    }
+
+    if (generation !== voiceSessionGeneration) return; // superseded during the async imports
+
+    socket.emit('dm:voice:join', conversationId, { selfMute: serverMute, selfDeaf, deviceId });
     get().startLatencyMeasurement();
   },
 
   leaveDMCall: () => {
     const socket = getSocket();
+    const { dmCallConversationId } = get();
+    if (socket && dmCallConversationId) {
+      socket.emit('dm:voice:leave', dmCallConversationId);
+    }
+    get().handleDMCallEnded();
+  },
+
+  handleDMCallEnded: () => {
+    voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
     const { localStream, dmCallConversationId } = get();
 
     get().stopLatencyMeasurement();
@@ -1570,17 +2519,49 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     get().destroyAllPeers();
 
-    if (socket && dmCallConversationId) {
-      socket.emit('dm:voice:leave', dmCallConversationId);
-    }
-
     set({
       dmCallConversationId: null,
       dmCallUsers: [],
+      dmCallPeerDevice: null,
       localStream: null,
       latency: null,
       pttActive: false,
     });
+
+    resetDMSignalChains();
+    if (dmCallConversationId) {
+      void import('../services/e2e/callCrypto')
+        .then(({ endCallSignaling }) => {
+          // Immediate re-dial of the SAME conversation: the new call's pin
+          // owns the signaling state now — don't end it from underneath.
+          if (useVoiceStore.getState().dmCallConversationId === dmCallConversationId) return;
+          endCallSignaling(dmCallConversationId);
+        })
+        .catch((err) => console.warn('[DMVoice] Failed to clear call signaling state:', err));
+    }
+  },
+
+  abortDMCall: (reason: DMCallAbortReason) => {
+    const conversationId = get().dmCallConversationId;
+    if (!conversationId) return;
+    console.warn('[DMVoice] Call aborted:', reason);
+    get().leaveDMCall();
+    void (async () => {
+      let name: string | null = null;
+      try {
+        const { useDMStore } = await import('./dmStore');
+        name = useDMStore.getState().conversations.find((c) => c.id === conversationId)?.participant.displayName ?? null;
+      } catch (err) {
+        console.warn('[DMVoice] Could not resolve peer name for abort toast:', err);
+      }
+      const key: Record<DMCallAbortReason, string> = {
+        'identity-changed': 'e2e.callAbortIdentityChanged',
+        'peer-must-update': 'e2e.callAbortPeerMustUpdate',
+        'peer-not-e2e': 'e2e.callAbortPeerNotE2E',
+        'signaling-failed': 'e2e.callAbortSignalingFailed',
+      };
+      toast.error(i18n.t(key[reason], { name: name ?? i18n.t('e2e.peerNotReadyFallbackName') }));
+    })();
   },
 
   acceptCall: async () => {
@@ -1598,8 +2579,31 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({ incomingCall: null });
   },
 
-  addDMCallUser: (user: VoiceUser) => {
-    const { dmCallUsers } = get();
+  addDMCallUser: (user: VoiceUser & { deviceId?: string }) => {
+    const { dmCallUsers, dmCallConversationId, localUserId } = get();
+
+    // Pin (or re-pin) the peer's E2E call device BEFORE any peer creation can
+    // emit a signal — every signal seals to exactly this device (spec §20).
+    // Runs even for already-listed users: a rejoin replay may carry a NEW
+    // device (peer reinstalled / switched devices mid-call).
+    if (dmCallConversationId && user.id !== localUserId) {
+      if (!user.deviceId) {
+        console.warn('[DMVoice] Peer joined without an E2E call device — aborting call');
+        get().abortDMCall('peer-must-update');
+        return;
+      }
+      const pinned = get().dmCallPeerDevice;
+      if (!pinned || pinned.userId !== user.id || pinned.deviceId !== user.deviceId) {
+        if (pinned) {
+          // Device changed mid-call: tear down the old peer and let the
+          // rejoiner's fresh offer re-glare against the new pin
+          debugLog('[DMVoice] Call peer device changed — re-pinning');
+          get().destroyPeer(user.id);
+        }
+        pinDMCallPeer(dmCallConversationId, { userId: user.id, deviceId: user.deviceId });
+      }
+    }
+
     if (dmCallUsers.some((u) => u.id === user.id)) return;
 
     set({ dmCallUsers: [...dmCallUsers, user] });
@@ -1648,7 +2652,23 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   handleDMSignal: (from: string, signal: unknown) => {
-    handleSignalInternal('dm:voice:signal', '[DMVoice]', get().createDMPeer, from, signal, { get });
+    const { dmCallConversationId, dmCallPeerDevice } = get();
+    if (!dmCallConversationId) return;
+    if (!dmCallPeerDevice || dmPinFlushPending) {
+      // Peer device not pinned yet (their signal beat the joined event) —
+      // buffer; pinDMCallPeer flushes in arrival order
+      if (prePinSignalQueue.length < PRE_PIN_QUEUE_CAP) {
+        prePinSignalQueue.push({ from, signal });
+      } else {
+        console.warn('[DMVoice] Pre-pin signal buffer full — dropping signal from', from);
+      }
+      return;
+    }
+    if (from !== dmCallPeerDevice.userId) {
+      debugLog('[DMVoice] Dropping DM signal from non-call-peer', from);
+      return;
+    }
+    receiveDMSignalEncrypted(from, signal);
   },
 }));
 
@@ -1861,10 +2881,10 @@ useSettingsStore.subscribe((state, prevState) => {
       if (activeChannelId) socket.emit('voice:mute', true);
       else socket.emit('dm:voice:mute', true);
     }
-    // Pause SFU audio producer
+    // Pause the SFU mic producer (screen audio unaffected)
     if (activeChannelId) {
       for (const producer of msProducers.values()) {
-        if (producer.kind === 'audio') producer.pause();
+        if (isMicProducer(producer)) producer.pause();
       }
     }
   } else {
@@ -1874,10 +2894,10 @@ useSettingsStore.subscribe((state, prevState) => {
         if (activeChannelId) socket.emit('voice:mute', false);
         else socket.emit('dm:voice:mute', false);
       }
-      // Resume SFU audio producer
+      // Resume the SFU mic producer
       if (activeChannelId) {
         for (const producer of msProducers.values()) {
-          if (producer.kind === 'audio') producer.resume();
+          if (isMicProducer(producer)) producer.resume();
         }
       }
     }
@@ -1911,6 +2931,10 @@ onSocketReconnect(async () => {
     isScreenSharing: false,
     screenSharingUserId: null,
     remoteScreenStream: null,
+    screenShareFrozen: false,
+    // Stale key = maskLayoutStore misreads the next pre-flight cancel as a confirm
+    screenShareSourceKey: null,
+    shareKind: 'screen',
   });
 
   // For DM calls, destroy stale P2P peers
@@ -1969,11 +2993,20 @@ onSocketReconnect(async () => {
 
   if (activeChannelId) {
     debugLog('[Voice SFU] Socket reconnected — re-joining voice channel', activeChannelId);
-    // Re-emit voice:join — server will send voice:transport_created to re-establish SFU
-    socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+    if (secureVoiceChannelId === activeChannelId) {
+      // Secure voice: a socket reconnect is a SESSION restart — the full join
+      // re-begins with a fresh key + epoch (IV-reuse firewall, spec §21)
+      const serverId = useVoiceStore.getState().activeVoiceServerId;
+      void useVoiceStore.getState().joinChannel(activeChannelId, serverId ?? undefined, { secure: true });
+    } else {
+      // Re-emit voice:join — server will send voice:transport_created to re-establish SFU
+      socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+    }
   } else if (dmCallConversationId) {
     debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
-    socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+    // deviceId must survive the rebind or the peer loses its sealing target
+    const deviceId = await resolveOwnCallDeviceId();
+    socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf, deviceId });
   }
 
   // Re-start latency measurement with new socket

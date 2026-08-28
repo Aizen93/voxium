@@ -1,14 +1,24 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Download, Save, ChevronDown, RotateCcw, Pipette, Layers } from 'lucide-react';
-import { THEME_COLOR_GROUPS, BUILT_IN_THEME_IDS, THEME_PATTERN_TYPES, THEME_PATTERN_AREAS, LIMITS } from '@voxium/shared';
+import { X, Download, Save, ChevronDown, RotateCcw, Pipette, Layers, Eye } from 'lucide-react';
+import {
+  THEME_COLOR_GROUPS,
+  BUILT_IN_THEME_IDS,
+  THEME_PATTERN_TYPES,
+  THEME_PATTERN_AREAS,
+  LIMITS,
+  allowsAlphaThemeColor,
+  isValidThemeColorValue,
+} from '@voxium/shared';
 import type { ThemeColors, ThemePatterns, ThemePattern, CommunityThemeData } from '@voxium/shared';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   getBuiltInThemeColors,
-  getPatternStyle,
   exportTheme,
 } from '../../services/themeEngine';
+import { AppShellMock, APP_SHELL_MOCK_WIDTH } from '../common/AppShellMock';
+import { useFullAppThemePreview } from '../../hooks/useFullAppThemePreview';
+import { ThemePreviewBar } from './ThemePreviewBar';
 import { toast } from '../../stores/toastStore';
 
 interface ThemeEditorProps {
@@ -70,6 +80,7 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
   const [tagsInput, setTagsInput] = useState(prefill?.tags.join(', ') ?? '');
   const [colors, setColors] = useState<ThemeColors>(() => {
     if (prefill) return { ...prefill.colors };
+    // New themes start from the Voxium brand theme.
     return getBuiltInThemeColors('dark');
   });
   const [patterns, setPatterns] = useState<ThemePatterns>(() => {
@@ -77,10 +88,15 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
     return {};
   });
   const [expandedGroup, setExpandedGroup] = useState<string>('Backgrounds');
+  const { previewName, previewing, startPreview, stopPreview, adoptPreview } = useFullAppThemePreview();
 
   const updateColor = useCallback((key: string, value: string) => {
     setColors((prev) => ({ ...prev, [key]: value }));
   }, []);
+
+  const handleFullPreview = useCallback(() => {
+    startPreview('editor', name.trim() || 'Untitled theme', colors, patterns);
+  }, [startPreview, name, colors, patterns]);
 
   const handleStartFrom = useCallback((themeId: string) => {
     const base = getBuiltInThemeColors(themeId);
@@ -109,6 +125,10 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
       version: editTheme ? editTheme.data.version + 1 : 1,
     };
 
+    // The store applies the saved theme itself — hand the app over instead of
+    // restoring the pre-preview theme on unmount and undoing the save.
+    adoptPreview();
+
     if (editTheme) {
       saveLocalTheme(editTheme.localId, data);
       setTheme(`custom:${editTheme.localId}`);
@@ -119,7 +139,7 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
       toast.success('Theme created');
     }
     onClose();
-  }, [name, description, tagsInput, colors, patterns, editTheme, saveLocalTheme, createLocalTheme, setTheme, onClose]);
+  }, [name, description, tagsInput, colors, patterns, editTheme, saveLocalTheme, createLocalTheme, setTheme, adoptPreview, onClose]);
 
   const handleExport = useCallback(() => {
     if (!name.trim()) {
@@ -137,22 +157,35 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
   }, [onClose]);
 
   return createPortal(
+    <>
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center"
-      style={{ backgroundColor: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }}
+      // Kept mounted (not unmounted) while previewing on the full app: every
+      // field in here is local state, and re-mounting would wipe the theme
+      // being authored the moment the user peeked at it.
+      //
+      // Hidden with `visibility`, not `display` — display:none CANCELS the
+      // mock's CSS animations, so coming back from a preview replayed the
+      // whole conversation fade-in from an empty chat panel.
+      style={{
+        visibility: previewing ? 'hidden' : 'visible',
+        pointerEvents: previewing ? 'none' : undefined,
+        backgroundColor: 'rgba(0,0,0,0.7)',
+        backdropFilter: 'blur(4px)',
+      }}
       onMouseDown={(e) => { if (e.target === e.currentTarget) handleClose(); }}
     >
       <div
         className="relative flex rounded-xl overflow-hidden shadow-2xl"
         style={{
-          width: 'min(1100px, 94vw)',
-          height: 'min(720px, 90vh)',
+          width: 'min(1480px, 96vw)',
+          height: 'min(880px, 93vh)',
           backgroundColor: 'var(--vox-bg-secondary)',
           border: '1px solid var(--vox-border)',
         }}
       >
         {/* ─── Left: Live Preview ─────────────────────────────────── */}
-        <div className="w-[380px] shrink-0 flex flex-col" style={{ borderRight: '1px solid var(--vox-border)' }}>
+        <div className="flex-1 min-w-0 flex flex-col" style={{ borderRight: '1px solid var(--vox-border)' }}>
           <div
             className="px-4 py-3 flex items-center gap-2 shrink-0"
             style={{ borderBottom: '1px solid var(--vox-border)', backgroundColor: 'var(--vox-bg-primary)' }}
@@ -161,14 +194,28 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
             <span className="text-xs font-semibold tracking-wide uppercase" style={{ color: 'var(--vox-text-secondary)' }}>
               Live Preview
             </span>
+            <button
+              onClick={handleFullPreview}
+              data-testid="theme-editor-preview-app"
+              className="ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all hover:scale-[1.02]"
+              style={{
+                backgroundColor: 'var(--vox-bg-floating)',
+                border: '1px solid var(--vox-border)',
+                color: 'var(--vox-text-secondary)',
+              }}
+              title="Apply these colors to the whole app until you stop"
+            >
+              <Eye size={12} />
+              Preview in app
+            </button>
           </div>
-          <div className="flex-1 p-4 flex items-center justify-center" style={{ backgroundColor: 'var(--vox-bg-primary)' }}>
-            <MiniPreview colors={colors} patterns={patterns} />
+          <div className="flex-1 min-h-0" style={{ backgroundColor: 'var(--vox-bg-primary)' }}>
+            <ScaledShellPreview colors={colors} patterns={patterns} />
           </div>
         </div>
 
         {/* ─── Right: Editor ──────────────────────────────────────── */}
-        <div className="flex-1 flex flex-col min-w-0">
+        <div className="w-[500px] shrink-0 flex flex-col min-w-0">
           {/* Header */}
           <div
             className="px-5 py-3 flex items-center justify-between shrink-0"
@@ -328,8 +375,96 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
           </div>
         </div>
       </div>
-    </div>,
+    </div>
+    {previewing && previewName && <ThemePreviewBar name={previewName} onStop={stopPreview} />}
+    </>,
     document.body,
+  );
+}
+
+// ─── Scaled shell preview ───────────────────────────────────────────────────
+
+/**
+ * The app-shell mock, laid out once at its design width and then scaled up to
+ * fill the preview panel.
+ *
+ * Scaling rather than reflowing is the point: the mock's type sizes are tuned
+ * as a miniature of the real shell, so letting it re-flow at every panel width
+ * would show the theme author a layout the app never actually has. A transform
+ * keeps the proportions exact and just makes them bigger.
+ *
+ * The one thing that DOES adapt is how tall the window is — a real app window
+ * can be any height, and matching the panel's aspect is what stops the preview
+ * from floating in a band of dead space.
+ */
+const MIN_MOCK_BODY = 320;
+const MAX_MOCK_BODY = 470;
+
+function ScaledShellPreview({ colors, patterns }: { colors: ThemeColors; patterns: ThemePatterns }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  const [bodyHeight, setBodyHeight] = useState(400);
+  const bodyHeightRef = useRef(400);
+
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    const inner = innerRef.current;
+    if (!box || !inner) return;
+
+    const measure = () => {
+      // offsetWidth/Height are layout dimensions — unaffected by the transform
+      // we are about to set, so this cannot feed back on itself.
+      const availW = box.clientWidth;
+      const availH = box.clientHeight;
+      const naturalH = inner.offsetHeight;
+      if (!availW || !availH || !naturalH) return;
+
+      // Everything above the panel row (title bar + spaces strip + borders),
+      // measured rather than hard-coded so the mock can grow a row without
+      // silently un-fitting itself here.
+      const chrome = naturalH - bodyHeightRef.current;
+      const target = Math.max(
+        MIN_MOCK_BODY,
+        Math.min(MAX_MOCK_BODY, Math.round((APP_SHELL_MOCK_WIDTH * availH) / availW) - chrome),
+      );
+      bodyHeightRef.current = target;
+      setBodyHeight(target);
+
+      // Capped: past ~1.9x the hairlines and 7px type start looking like a
+      // blown-up screenshot rather than the app.
+      setScale(Math.min(availW / APP_SHELL_MOCK_WIDTH, availH / (chrome + target), 1.9));
+    };
+
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(box);
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    // The padding lives on the outer box so `boxRef.clientWidth` is the space
+    // actually available — clientWidth includes padding, and measuring it
+    // would scale the mock right into the gutter it is supposed to keep.
+    <div className="h-full w-full overflow-hidden p-4">
+    <div ref={boxRef} className="flex h-full w-full items-center justify-center">
+      <div
+        ref={innerRef}
+        data-testid="theme-editor-shell-preview"
+        className="rounded-xl overflow-hidden shadow-2xl"
+        style={{
+          width: APP_SHELL_MOCK_WIDTH,
+          border: `1px solid ${colors.border}`,
+          transform: `scale(${scale})`,
+          transformOrigin: 'center center',
+        }}
+      >
+        <AppShellMock colors={colors} patterns={patterns} variant="full" bodyHeight={bodyHeight} />
+      </div>
+    </div>
+    </div>
   );
 }
 
@@ -421,10 +556,13 @@ function ColorPicker({
   const [textValue, setTextValue] = useState('');
   const [editing, setEditing] = useState(false);
   const hexValue = rgbaToHex(value);
-  const isRgba = colorKey === 'selection-bg' || colorKey === 'selection-text';
+  // Which keys may carry alpha is the marketplace's rule, not this component's
+  // — hard-coding a shorter list here is what let the editor flatten a
+  // translucent value the server would happily have taken.
+  const isRgba = allowsAlphaThemeColor(colorKey);
 
   return (
-    <div className="flex items-center gap-2 group">
+    <div className="flex items-center gap-2 group" data-color-key={colorKey}>
       {/* Swatch — click opens native picker */}
       <button
         onClick={() => inputRef.current?.click()}
@@ -464,10 +602,15 @@ function ColorPicker({
         onFocus={() => { setEditing(true); setTextValue(isRgba ? value : hexValue); }}
         onBlur={() => {
           setEditing(false);
-          if (isRgba || /^#[0-9a-fA-F]{6}$/.test(textValue)) onChange(textValue);
+          // Vet against the marketplace's own rule, so a typo is rejected here
+          // instead of surviving into a draft that only fails on publish.
+          if (isValidThemeColorValue(colorKey, textValue.trim())) onChange(textValue.trim());
         }}
         onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
         spellCheck={false}
+        // An rgba() value is wider than the field; the tooltip is how you read
+        // the alpha you are editing without widening every row for 7 keys.
+        title={isRgba ? value : hexValue}
         className="w-[72px] shrink-0 rounded px-1.5 py-0.5 text-[10px] font-mono outline-none transition-colors"
         style={{
           backgroundColor: 'var(--vox-bg-secondary)',
@@ -738,189 +881,6 @@ function PatternEditor({
           )}
         </>
       )}
-    </div>
-  );
-}
-
-// ─── Mini Preview ───────────────────────────────────────────────────────────
-
-function MiniPreview({ colors, patterns }: { colors: ThemeColors; patterns: ThemePatterns }) {
-  const c = colors;
-  const sidebarPattern = getPatternStyle(patterns.sidebar);
-  const channelPattern = getPatternStyle(patterns.channel);
-  const chatPattern = getPatternStyle(patterns.chat);
-
-  return (
-    <div
-      className="w-full rounded-lg overflow-hidden shadow-lg"
-      style={{
-        height: '100%',
-        maxHeight: 540,
-        display: 'flex',
-        border: `1px solid ${c.border}`,
-      }}
-    >
-      {/* Server sidebar strip */}
-      <div
-        className="w-[42px] shrink-0 flex flex-col items-center pt-3 gap-2"
-        style={{ backgroundColor: c.sidebar, ...sidebarPattern }}
-      >
-        {/* Server icons */}
-        <div className="w-7 h-7 rounded-xl" style={{ backgroundColor: c['accent-primary'], opacity: 0.9 }} />
-        <div className="w-5 h-[1px] rounded-full" style={{ backgroundColor: c.border }} />
-        <div className="w-7 h-7 rounded-xl" style={{ backgroundColor: c['bg-tertiary'] }} />
-        <div className="w-7 h-7 rounded-xl" style={{ backgroundColor: c['bg-tertiary'] }} />
-        <div className="w-7 h-7 rounded-xl" style={{ backgroundColor: c['bg-tertiary'] }} />
-      </div>
-
-      {/* Channel sidebar */}
-      <div
-        className="w-[110px] shrink-0 flex flex-col"
-        style={{ backgroundColor: c.channel, ...channelPattern }}
-      >
-        {/* Server name header */}
-        <div
-          className="px-3 py-2.5 flex items-center"
-          style={{ borderBottom: `1px solid ${c.border}` }}
-        >
-          <span className="text-[10px] font-bold truncate" style={{ color: c['text-primary'] }}>
-            My Server
-          </span>
-        </div>
-        {/* Channels */}
-        <div className="flex-1 px-2 py-2 space-y-0.5">
-          <div className="text-[8px] font-bold uppercase px-1 mb-1" style={{ color: c['text-muted'] }}>
-            text channels
-          </div>
-          <div
-            className="px-2 py-1 rounded text-[9px]"
-            style={{ backgroundColor: c['bg-active'], color: c['text-primary'] }}
-          >
-            # general
-          </div>
-          <div
-            className="px-2 py-1 rounded text-[9px]"
-            style={{ color: c['text-secondary'] }}
-          >
-            # random
-          </div>
-          <div
-            className="px-2 py-1 rounded text-[9px]"
-            style={{ color: c['text-muted'] }}
-          >
-            # links
-          </div>
-          <div className="text-[8px] font-bold uppercase px-1 mt-2 mb-1" style={{ color: c['text-muted'] }}>
-            voice
-          </div>
-          <div
-            className="px-2 py-1 rounded text-[9px] flex items-center gap-1"
-            style={{ color: c['text-secondary'] }}
-          >
-            <span style={{ color: c['voice-connected'], fontSize: 8 }}>&#9679;</span>
-            Lounge
-          </div>
-        </div>
-        {/* User panel */}
-        <div
-          className="px-2 py-2 flex items-center gap-1.5"
-          style={{ backgroundColor: c['bg-secondary'], borderTop: `1px solid ${c.border}` }}
-        >
-          <div className="w-5 h-5 rounded-full" style={{ backgroundColor: c['accent-primary'] }} />
-          <div className="flex-1 min-w-0">
-            <div className="text-[8px] font-medium truncate" style={{ color: c['text-primary'] }}>You</div>
-            <div className="text-[7px]" style={{ color: c['voice-connected'] }}>Online</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Chat area */}
-      <div className="flex-1 flex flex-col min-w-0" style={{ backgroundColor: c.chat, ...chatPattern }}>
-        {/* Channel header */}
-        <div
-          className="px-3 py-2 flex items-center"
-          style={{ borderBottom: `1px solid ${c.border}` }}
-        >
-          <span className="text-[10px] font-bold" style={{ color: c['text-primary'] }}># general</span>
-        </div>
-
-        {/* Messages */}
-        <div className="flex-1 px-3 py-2 space-y-3 overflow-hidden">
-          <PreviewMessage
-            colors={c}
-            avatar={c['accent-success']}
-            name="alice"
-            nameColor={c['accent-primary']}
-            text="Hey everyone! Check out this new theme"
-            time="12:34"
-          />
-          <PreviewMessage
-            colors={c}
-            avatar={c['accent-warning']}
-            name="bob"
-            nameColor={c['text-link']}
-            text="Looks great! Love the colors"
-            time="12:35"
-          />
-          <PreviewMessage
-            colors={c}
-            avatar={c['accent-danger']}
-            name="charlie"
-            nameColor={c['accent-info']}
-            text="The accent color really pops"
-            time="12:36"
-          />
-          <PreviewMessage
-            colors={c}
-            avatar={c['accent-info']}
-            name="alice"
-            nameColor={c['accent-primary']}
-            text="Thanks! I spent a while getting the contrast right"
-            time="12:37"
-          />
-        </div>
-
-        {/* Input area */}
-        <div className="px-3 py-2">
-          <div
-            className="rounded-lg px-3 py-2 flex items-center"
-            style={{ backgroundColor: c['bg-floating'], border: `1px solid ${c.border}` }}
-          >
-            <span className="text-[9px]" style={{ color: c['text-muted'] }}>
-              Message #general
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PreviewMessage({
-  colors,
-  avatar,
-  name,
-  nameColor,
-  text,
-  time,
-}: {
-  colors: ThemeColors;
-  avatar: string;
-  name: string;
-  nameColor: string;
-  text: string;
-  time: string;
-}) {
-  return (
-    <div className="flex gap-2">
-      <div className="w-6 h-6 rounded-full shrink-0 mt-0.5" style={{ backgroundColor: avatar }} />
-      <div className="min-w-0">
-        <div className="flex items-baseline gap-1.5">
-          <span className="text-[9px] font-bold" style={{ color: nameColor }}>{name}</span>
-          <span className="text-[7px]" style={{ color: colors['text-muted'] }}>{time}</span>
-        </div>
-        <p className="text-[9px] leading-snug" style={{ color: colors['text-primary'] }}>{text}</p>
-      </div>
     </div>
   );
 }

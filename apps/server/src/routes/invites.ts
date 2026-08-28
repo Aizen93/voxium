@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import crypto from 'crypto';
@@ -11,7 +11,7 @@ import { hasServerPermission } from '../utils/permissionCalculator';
 
 export const inviteRouter = Router();
 
-inviteRouter.use(authenticate, requireVerifiedEmail);
+inviteRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // Create an invite for a server
 inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -82,9 +82,11 @@ inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Res
     // Notify all members and add the joiner's socket(s) to the server room
     await broadcastMemberJoined(req.user!.userId, invite.serverId);
 
-    // Seed ChannelRead for all text channels so existing history doesn't show as unread
+    // Seed ChannelRead for all text channels so existing history doesn't show
+    // as unread. Secure channels excluded: a joiner is not a member of any,
+    // and seeding would leak their ids into the joiner's read rows.
     const textChannels = await prisma.channel.findMany({
-      where: { serverId: invite.serverId, type: 'text' },
+      where: { serverId: invite.serverId, type: 'text', secure: false },
       select: { id: true },
     });
     if (textChannels.length > 0) {

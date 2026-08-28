@@ -14,6 +14,7 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'ip_ban.delete': 'IP Ban Removed',
   'storage.file_delete': 'File Deleted',
   'storage.cleanup_orphans': 'Orphan Cleanup',
+  'registration.hygiene_sweep': 'Unverified Account Sweep',
   'announcement.create': 'Announcement Created',
   'announcement.publish': 'Announcement Published',
   'announcement.delete': 'Announcement Deleted',
@@ -38,6 +39,7 @@ const ACTION_COLORS: Record<string, string> = {
   'ip_ban.delete': 'bg-green-500/20 text-green-400',
   'storage.file_delete': 'bg-yellow-500/20 text-yellow-400',
   'storage.cleanup_orphans': 'bg-yellow-500/20 text-yellow-400',
+  'registration.hygiene_sweep': 'bg-yellow-500/20 text-yellow-400',
   'announcement.create': 'bg-purple-500/20 text-purple-400',
   'announcement.publish': 'bg-green-500/20 text-green-400',
   'announcement.delete': 'bg-red-500/20 text-red-400',
@@ -75,12 +77,38 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
     case 'ip_ban.create':
       return metadata.reason ? `Reason: ${metadata.reason}` : '';
     case 'storage.cleanup_orphans':
-      return `Found: ${metadata.found}, Deleted: ${metadata.deleted}`;
+      return metadata.skipped
+        ? `Found: ${metadata.found}, SKIPPED (${metadata.skipped})`
+        : `Found: ${metadata.found}, Deleted: ${metadata.deleted}`;
+    case 'registration.hygiene_sweep':
+      // The counts are the whole point of the row: this is the durable record
+      // of a destructive job nobody watches run.
+      return `${metadata.trigger}: ${metadata.deletedUsers} account(s), `
+        + `${metadata.deletedAvatars} avatar(s), ${metadata.deletedIpRecords} IP record(s) `
+        + `in ${metadata.durationMs}ms`;
     case 'feature_flag.update':
       return `${metadata.enabled ? 'Enabled' : 'Disabled'}`;
     default:
       return '';
   }
+}
+
+/** Actions a scheduled job can perform with no human actor. */
+const SYSTEM_ACTIONS = new Set<AuditAction>(['registration.hygiene_sweep']);
+
+/**
+ * Was this null-actor row written by the system rather than by an admin
+ * whose account has since been deleted? The action alone cannot say: the
+ * hygiene sweep is ALSO triggerable by hand, and that row carries the
+ * admin's id — which `AuditLog.actor` nulls out on account deletion. The
+ * row's own `trigger` decides; the action set is only the fallback for rows
+ * written before it was recorded.
+ */
+function isSystemActor(log: { action: AuditAction; metadata: Record<string, unknown> | null }): boolean {
+  if (!SYSTEM_ACTIONS.has(log.action)) return false;
+  const trigger = log.metadata?.trigger;
+  if (trigger === 'manual') return false;
+  return trigger === 'scheduled' || trigger === undefined;
 }
 
 const ALL_ACTIONS: AuditAction[] = [
@@ -93,6 +121,7 @@ const ALL_ACTIONS: AuditAction[] = [
   'support.claim', 'support.close',
   'ratelimit.update', 'ratelimit.reset', 'ratelimit.clear_user',
   'feature_flag.update', 'feature_flag.reset',
+  'registration.hygiene_sweep',
 ];
 
 export function AdminAuditLog() {
@@ -131,7 +160,17 @@ export function AdminAuditLog() {
     ),
     actor: (
       <span className="text-vox-text-primary font-medium">
-        {log.actorUsername || <span className="text-vox-text-muted italic">Deleted</span>}
+        {log.actorUsername || (
+          // A null actor means one of two very different things. A scheduled
+          // job has no actor by design (the column is nullable precisely so
+          // those stay auditable); an admin-initiated action whose account was
+          // later removed does. Rendering both as "Deleted" told an operator
+          // that a departed colleague ran the nightly sweep — and keying on
+          // the action alone told them the reverse for a manual run.
+          <span className="text-vox-text-muted italic">
+            {isSystemActor(log) ? 'System' : 'Deleted'}
+          </span>
+        )}
       </span>
     ),
     target: log.targetType ? (

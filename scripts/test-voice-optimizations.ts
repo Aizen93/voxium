@@ -12,6 +12,7 @@
  */
 
 import axios from 'axios';
+import { solveRegistrationPow } from '../packages/shared/src/pow';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 import { Chrome111 } from 'mediasoup-client/handlers/Chrome111';
@@ -106,11 +107,16 @@ function sleep(ms: number): Promise<void> {
 async function login(email: string): Promise<{ token: string; userId: string }> {
   const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD });
   const r = data.data || data;
+  // Accounts from runs before consent-at-signup are refused everything until
+  // they accept — do what a real client does on its consent screen.
+  if (r.user?.consentRequired) {
+    await axios.post(`${API}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, h(r.accessToken));
+  }
   return { token: r.accessToken, userId: r.user.id };
 }
 
 async function raiseRateLimits(token: string): Promise<void> {
-  for (const name of ['login', 'register', 'admin', 'general']) {
+  for (const name of ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'powChallenge', 'admin', 'general']) {
     try {
       await axios.put(`${API}/admin/rate-limits/${name}`, { points: 99999, duration: 60, blockDuration: 0 }, h(token));
     } catch { /* */ }
@@ -118,7 +124,10 @@ async function raiseRateLimits(token: string): Promise<void> {
 }
 
 async function resetRateLimits(token: string): Promise<void> {
-  for (const name of ['login', 'register', 'admin', 'general']) {
+  // 'admin' last — once it is reset, the remaining reset calls are throttled
+  // by the restored admin bucket and would be swallowed, leaving overrides up
+  const order = [...['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'powChallenge', 'admin', 'general'].filter((n) => n !== 'admin' && n !== 'general'), 'general', 'admin'];
+  for (const name of order) {
     try {
       await axios.post(`${API}/admin/rate-limits/${name}/reset`, {}, h(token));
     } catch { /* */ }
@@ -293,7 +302,12 @@ async function run() {
         const email = `${username}@test.local`;
         batch.push(
           (async () => {
-            try { await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD }); } catch { /* exists */ }
+            try {
+              // Proof-of-work + consent, the same path a browser takes
+              const { data: chal } = await axios.get(`${API}/auth/register-challenge`);
+              const pow = await solveRegistrationPow(chal.data);
+              await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow, acceptTerms: true, acceptPrivacy: true });
+            } catch { /* exists */ }
             const { token } = await login(email);
             try {
               const { data: inv } = await axios.post(`${API}/invites/servers/${target.serverId}`, {}, h(seed.token));

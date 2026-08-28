@@ -5,7 +5,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useLocalAudioLevel } from '../../hooks/useLocalAudioLevel';
 import { UserHoverTarget } from '../common/UserHoverTarget';
-import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Phone } from 'lucide-react';
+import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Phone, Lock } from 'lucide-react';
 import { clsx } from 'clsx';
 
 /**
@@ -23,6 +23,7 @@ export function DMVoicePanel() {
   const toggleMute = useVoiceStore((s) => s.toggleMute);
   const toggleDeaf = useVoiceStore((s) => s.toggleDeaf);
   const leaveDMCall = useVoiceStore((s) => s.leaveDMCall);
+  const dmCallPeerDevice = useVoiceStore((s) => s.dmCallPeerDevice);
   const { user } = useAuthStore();
   const localAudioLevel = useLocalAudioLevel();
 
@@ -45,17 +46,27 @@ export function DMVoicePanel() {
   };
 
   return (
-    <div data-testid="dm-voice-panel" className="border-t border-vox-border bg-vox-sidebar">
+    <div data-testid="dm-voice-panel" className="mx-1 mb-1 rounded-xl border border-vox-border bg-vox-bg-tertiary">
       {/* Call Header */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-vox-border">
+      <div className="flex items-center gap-2 px-3 py-2">
         <button
           onClick={handleNavigateToCall}
           className="flex min-w-0 flex-1 items-center gap-2 text-left hover:opacity-80 transition-opacity"
         >
           <Phone size={14} className="shrink-0 text-vox-voice-connected" />
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-semibold text-vox-voice-connected">
+            <p className="flex items-center gap-1 text-xs font-semibold text-vox-voice-connected">
               {waiting ? t('dm.calling') : t('dm.inACall')}
+              {dmCallPeerDevice && (
+                <span
+                  className="shrink-0"
+                  data-testid="dm-call-e2e-lock"
+                  title={t('e2e.callLocked')}
+                  aria-label={t('e2e.callLocked')}
+                >
+                  <Lock size={10} className="text-vox-voice-connected" />
+                </span>
+              )}
             </p>
             <p className="truncate text-[10px] text-vox-text-muted">
               {participantName}
@@ -110,7 +121,7 @@ export function DMVoicePanel() {
         <button
           onClick={toggleMute}
           className={clsx(
-            'rounded-full p-2 transition-colors',
+            'rounded-lg p-2 transition-colors',
             selfMute
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
@@ -124,7 +135,7 @@ export function DMVoicePanel() {
         <button
           onClick={toggleDeaf}
           className={clsx(
-            'rounded-full p-2 transition-colors',
+            'rounded-lg p-2 transition-colors',
             selfDeaf
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'

@@ -1,0 +1,266 @@
+// Daily S3 orphan sweep (05:00 local — offset from the 04:00 attachment
+// cleanup and the 04:30 registration hygiene so the three never contend).
+//
+// WHY A SWEEP AT ALL. Several delete paths drop the DB row without the blob:
+// the unverified-account sweep, the admin delete-user and delete-server
+// actions. Each is worth fixing at the source (and some now are), but a
+// backstop catches the ones nobody thought of — including an upload whose
+// message was never sent.
+//
+// WHY IT IS AGE-GATED, AND WHY THAT IS THE LOAD-BEARING PART. Uploading and
+// writing the DB row are separate, client-driven steps: the client presigns
+// and PUTs an attachment the moment the file is attached, and the
+// MessageAttachment row is only created when the message is SENT. Avatars and
+// server icons are the same shape (PUT, then a later PATCH). A user who
+// attaches a file and then types for ten minutes has a live object with no
+// row. An un-gated "delete everything unreferenced" sweep would delete it and
+// they would send a permanently broken attachment. The grace period has to
+// dominate any plausible compose window, so it is measured in DAYS.
+//
+// ORDER MATTERS TOO: LIST first, then read the DB. A row written while the
+// listing is in flight is then guaranteed to be seen; the reverse order (or
+// running them concurrently, as the admin endpoint originally did) leaves a
+// window even with the age gate.
+import { prisma } from './prisma';
+import { listAllS3Objects, deleteMultipleFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from './s3';
+import { getRedis } from './redis';
+import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
+
+let timeoutId: ReturnType<typeof setTimeout> | null = null;
+let stopped = true;
+
+const SWEEP_HOUR = 5;
+const SWEEP_MINUTE = 0;
+/** Objects younger than this are never touched — see the ordering note above. */
+export const ORPHAN_GRACE_DAYS = 7;
+const PAGE_SIZE = 1000;
+/** Only one node runs the sweep: production is multi-node and two concurrent
+ *  full-bucket destructive scans, from two different snapshots, is not a thing
+ *  we want. Same `SET NX EX` idiom as the registration spike alert. */
+const LOCK_KEY = 'lock:orphan-sweep';
+const LOCK_TTL_SECONDS = 3600;
+/**
+ * Blast-radius cap, not a performance knob.
+ *
+ * Every object this job deletes is one the DB said nothing points at. That
+ * makes `referencedKeys()` load-bearing in a way nothing else here is: a schema
+ * change that renames a column, a query that silently returns fewer rows, a new
+ * upload kind nobody added — any of those turn "delete the orphans" into
+ * "delete the bucket", and the age gate and shape whitelist do not help because
+ * live objects pass both. A ceiling turns that from an outage into a very loud
+ * log line and one night's worth of damage. A healthy bucket never comes close;
+ * anything that does is a bug worth stopping for.
+ */
+export const ORPHAN_MAX_DELETES_PER_RUN = 50_000;
+/**
+ * The proportional half of the same guard. An absolute ceiling protects no
+ * bucket smaller than itself — and this one is: attachment blobs are purged at
+ * 3 days by attachmentCleanup while the orphan grace is 7, so steady state is
+ * avatars + icons + a few days of attachments, far under 50k. Against that, a
+ * reference query that returns nothing would have deleted every live object
+ * and logged it like a healthy night. A sweep that finds more than this
+ * fraction of the bucket unreferenced is refused too, once the candidate count
+ * is past a floor that keeps a tiny or fresh bucket from tripping on ordinary
+ * churn. A first-ever sweep of a long-unswept bucket can legitimately be
+ * mostly orphans, which is what `force` on the admin endpoint is for — after a
+ * dry run, never on the scheduled path.
+ */
+export const ORPHAN_MAX_FRACTION = 0.25;
+export const ORPHAN_FRACTION_FLOOR = 200;
+
+export interface OrphanSweepResult {
+  scanned: number;
+  orphaned: number;
+  deleted: number;
+  /** Unreferenced but inside the grace window — an in-flight upload, most likely. */
+  tooYoung: number;
+  /** Unreferenced and old, but not shaped like anything this app writes. */
+  foreign: number;
+  /** `not-leader`: a peer holds the sweep lock. `over-cap`: more candidates than
+   *  ORPHAN_MAX_DELETES_PER_RUN. `over-fraction`: more than ORPHAN_MAX_FRACTION of
+   *  the bucket looked orphaned. In both refusal cases nothing was deleted. */
+  skipped?: 'not-leader' | 'over-cap' | 'over-fraction';
+}
+
+const EMPTY: OrphanSweepResult = { scanned: 0, orphaned: 0, deleted: 0, tooYoung: 0, foreign: 0 };
+
+export function startOrphanCleanup() {
+  if (!stopped) return;
+  stopped = false;
+  scheduleNext(false);
+}
+
+export function stopOrphanCleanup() {
+  stopped = true;
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+    timeoutId = null;
+  }
+}
+
+function scheduleNext(afterRun: boolean) {
+  if (stopped) return;
+  const delay = msUntilDailySlot(SWEEP_HOUR, SWEEP_MINUTE, afterRun);
+  console.log(`[OrphanSweep] Next sweep in ${Math.round(delay / 60000)} minutes`);
+  timeoutId = setTimeout(() => {
+    runScheduledOrphanCleanup()
+      .catch((err) => console.error('[OrphanSweep] Sweep failed:', err))
+      .finally(() => scheduleNext(true));
+  }, delay);
+  timeoutId.unref?.();
+}
+
+/** The scheduled entry point: claims the cluster lock, then sweeps.
+ *  `force` lifts the proportional bound only (never the absolute ceiling) and
+ *  is reachable from the admin endpoint alone — the scheduler never passes it. */
+export async function runScheduledOrphanCleanup(opts: { force?: boolean } = {}): Promise<OrphanSweepResult> {
+  const owner = lockToken();
+  let claimed: string | null;
+  try {
+    claimed = await getRedis().set(LOCK_KEY, owner, { NX: true, EX: LOCK_TTL_SECONDS });
+  } catch (err) {
+    // Fail CLOSED: without the lock we cannot tell whether a peer is already
+    // scanning, and a destructive sweep is not worth racing.
+    console.warn('[OrphanSweep] Could not claim the sweep lock — skipping this run:', err instanceof Error ? err.message : err);
+    return { ...EMPTY, skipped: 'not-leader' };
+  }
+  if (claimed === null) return { ...EMPTY, skipped: 'not-leader' };
+
+  try {
+    return await runOrphanCleanup({ force: opts.force });
+  } finally {
+    // Release rather than waiting out the TTL, so a sweep that fails early can
+    // be retried inside the hour instead of being locked out by its own corpse
+    // — but only if we STILL own it. A full-bucket scan can outrun a one-hour
+    // TTL, and a blind DEL would then hand the next runner's lock away while it
+    // is mid-scan.
+    await releaseLockIfOwned(getRedis(), LOCK_KEY, owner).catch((err) =>
+      console.warn('[OrphanSweep] Lock release failed (it expires on its own):', err instanceof Error ? err.message : err));
+  }
+}
+
+/**
+ * Delete S3 objects that nothing in the database references and that are older
+ * than the grace period. Exported for the admin endpoint and for tests.
+ *
+ * `dryRun` reports what WOULD go without deleting anything — the honest way to
+ * inspect a bucket before trusting the sweep with it.
+ */
+export async function runOrphanCleanup(
+  opts: { minAgeMs?: number; dryRun?: boolean; force?: boolean } = {},
+): Promise<OrphanSweepResult> {
+  const minAgeMs = opts.minAgeMs ?? ORPHAN_GRACE_DAYS * 24 * 60 * 60 * 1000;
+  const listedAt = Date.now();
+
+  // LIST first — anything written while this runs is caught by the DB reads
+  // that follow, so it can never be classified as an orphan.
+  const objects = await listAllS3Objects();
+  const referenced = await referencedKeys();
+
+  let tooYoung = 0;
+  let foreign = 0;
+  const orphanKeys: string[] = [];
+  for (const obj of objects) {
+    if (referenced.has(obj.key)) continue;
+    // Key-SHAPE whitelist on top of the reference check. The bucket may hold
+    // things this app never wrote — a staging deployment pointed at the same
+    // bucket, DB dumps, operator uploads — and none of those appear in our
+    // three columns either. Behind a manual admin button that was the
+    // operator's call to make; unattended and nightly it would be silent
+    // destruction of somebody else's data.
+    if (!VALID_S3_KEY_RE.test(obj.key) && !VALID_ATTACHMENT_KEY_RE.test(obj.key)) { foreign++; continue; }
+    // No timestamp = cannot prove it is old = do not touch it (NaN fails the
+    // comparison, which is the direction we want).
+    const age = obj.lastModified ? listedAt - Date.parse(obj.lastModified) : NaN;
+    if (!(age >= minAgeMs)) { tooYoung++; continue; }
+    orphanKeys.push(obj.key);
+  }
+
+  // Refuse the run rather than trimming it: if this many keys look orphaned,
+  // the likeliest explanation is that the reference query is wrong, and
+  // deleting "only" the first 50k of a bad answer is still deleting live data.
+  // The candidates are still reported, so an operator can see what it found.
+  // Two bounds, because the absolute one has no force below its own size: on
+  // a bucket of 20k objects a reference query that returns nothing yields 20k
+  // candidates, under the ceiling, and deletes everything.
+  const overCap = orphanKeys.length > ORPHAN_MAX_DELETES_PER_RUN;
+  const overFraction = !opts.force
+    && orphanKeys.length > ORPHAN_FRACTION_FLOOR
+    && orphanKeys.length > objects.length * ORPHAN_MAX_FRACTION;
+  const refused: OrphanSweepResult['skipped'] | undefined = overCap ? 'over-cap' : overFraction ? 'over-fraction' : undefined;
+  if (overCap) {
+    console.error(
+      `[OrphanSweep] REFUSING to delete: ${orphanKeys.length} candidates exceeds the ${ORPHAN_MAX_DELETES_PER_RUN} per-run ceiling. `
+      + 'That many unreferenced objects usually means the reference query is wrong, not that the bucket is that dirty. '
+      + 'Investigate with ?dryRun=1 before raising the cap.',
+    );
+  } else if (overFraction) {
+    console.error(
+      `[OrphanSweep] REFUSING to delete: ${orphanKeys.length} of ${objects.length} scanned objects (${Math.round(orphanKeys.length / objects.length * 100)}%) look orphaned, `
+      + `over the ${ORPHAN_MAX_FRACTION * 100}% bound. A healthy bucket is nowhere near this; a broken reference query is. `
+      + 'Inspect with ?dryRun=1, and if the bucket genuinely is that dirty, run the admin sweep once with ?force=1.',
+    );
+  }
+
+  let deleted = 0;
+  if (!opts.dryRun && !refused && orphanKeys.length > 0) {
+    // Batched (1000/call) rather than one DeleteObject per key — a bucket with
+    // 10k orphans was 10k sequential round trips inside one HTTP request. The
+    // return value is what S3 ACCEPTED: reporting the candidate count instead
+    // would log deleted=5000 every night while a missing s3:DeleteObject
+    // permission quietly moved nothing.
+    deleted = await deleteMultipleFromS3(orphanKeys);
+  }
+
+  const result: OrphanSweepResult = {
+    scanned: objects.length,
+    orphaned: orphanKeys.length,
+    deleted,
+    tooYoung,
+    foreign,
+  };
+  console.log(
+    `[OrphanSweep] scanned=${result.scanned} orphaned=${result.orphaned} deleted=${result.deleted} within-grace=${result.tooYoung} not-ours=${result.foreign}${opts.dryRun ? ' (dry run)' : ''}`
+  );
+  if (!opts.dryRun && !refused && deleted < orphanKeys.length) {
+    console.error(`[OrphanSweep] S3 refused ${orphanKeys.length - deleted} deletion(s) — check the bucket policy / IAM permissions`);
+  }
+  return refused ? { ...result, skipped: refused } : result;
+}
+
+/**
+ * Every S3 key the database still points at.
+ *
+ * This is an implicit WHITELIST of the three things that write to the bucket
+ * (avatars, server icons, message attachments — the only callers of
+ * `generatePresignedPutUrl`). A future upload kind that is not added here will
+ * be swept as an orphan once it passes the grace period.
+ */
+async function referencedKeys(): Promise<Set<string>> {
+  const keys = new Set<string>();
+
+  const [users, servers] = await Promise.all([
+    prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
+    prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
+  ]);
+  for (const u of users) if (u.avatarUrl) keys.add(u.avatarUrl);
+  for (const s of servers) if (s.iconUrl) keys.add(s.iconUrl);
+
+  // Attachments are the unbounded one — page by id cursor rather than reading
+  // the whole table into memory.
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await prisma.messageAttachment.findMany({
+      where: { expired: false },
+      select: { id: true, s3Key: true },
+      orderBy: { id: 'asc' },
+      take: PAGE_SIZE,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    for (const a of page) keys.add(a.s3Key);
+    if (page.length < PAGE_SIZE) break;
+    cursor = page[page.length - 1].id;
+  }
+
+  return keys;
+}

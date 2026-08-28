@@ -3,8 +3,8 @@ import { createPortal } from 'react-dom';
 import { X, Search, Download, Trash2, Eye, ChevronDown, Loader2 } from 'lucide-react';
 import type { CommunityTheme } from '@voxium/shared';
 import { useSettingsStore } from '../../stores/settingsStore';
-import type { ThemeId } from '../../stores/settingsStore';
-import { applyCustomThemeColors, clearCustomThemeColors, applyCustomPatterns } from '../../services/themeEngine';
+import { useFullAppThemePreview } from '../../hooks/useFullAppThemePreview';
+import { ThemePreviewBar } from './ThemePreviewBar';
 import { api } from '../../services/api';
 import { toast } from '../../stores/toastStore';
 
@@ -15,9 +15,14 @@ interface ThemeBrowserProps {
 type SortOption = 'newest' | 'popular' | 'name';
 
 export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
-  const { theme: activeTheme, customThemes, installCustomTheme, uninstallCustomTheme, setTheme } = useSettingsStore();
-  const prevThemeRef = useRef<ThemeId>(activeTheme);
-  const previewingRef = useRef(false);
+  const { customThemes, installCustomTheme, uninstallCustomTheme, setTheme } = useSettingsStore();
+  const {
+    previewKey: previewingId,
+    previewName: previewingName,
+    startPreview,
+    stopPreview,
+    adoptPreview,
+  } = useFullAppThemePreview();
 
   const [themes, setThemes] = useState<CommunityTheme[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,8 +32,6 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [total, setTotal] = useState(0);
-  const [previewingName, setPreviewingName] = useState<string | null>(null);
-  const [previewingId, setPreviewingId] = useState<string | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState(search);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -66,54 +69,9 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
     fetchThemes(1);
   }, [fetchThemes]);
 
-  // Restore theme on close if previewing
-  const restoreTheme = useCallback(() => {
-    if (!previewingRef.current) return;
-    previewingRef.current = false;
-    const prev = prevThemeRef.current;
-    if (prev.startsWith('custom:')) {
-      const localId = prev.slice(7);
-      const ct = customThemes.find((t) => t.localId === localId);
-      if (ct) {
-        applyCustomThemeColors(ct.data.colors);
-        applyCustomPatterns(ct.data.patterns);
-      } else {
-        clearCustomThemeColors();
-        document.documentElement.setAttribute('data-theme', 'dark');
-      }
-    } else {
-      clearCustomThemeColors();
-      document.documentElement.setAttribute('data-theme', prev);
-    }
-  }, [customThemes]);
-
-  useEffect(() => {
-    return () => {
-      restoreTheme();
-      const settingsEl = document.getElementById('vox-settings-modal');
-      if (settingsEl) settingsEl.style.display = '';
-    };
-  }, []);
-
   const handlePreview = useCallback((theme: CommunityTheme) => {
-    previewingRef.current = true;
-    setPreviewingName(theme.name);
-    setPreviewingId(theme.id);
-    // Hide settings modal so the user sees the full app
-    const settingsEl = document.getElementById('vox-settings-modal');
-    if (settingsEl) settingsEl.style.display = 'none';
-    applyCustomThemeColors(theme.colors);
-    applyCustomPatterns(theme.patterns);
-  }, []);
-
-  const handleStopPreview = useCallback(() => {
-    restoreTheme();
-    setPreviewingName(null);
-    setPreviewingId(null);
-    // Show settings modal again
-    const settingsEl = document.getElementById('vox-settings-modal');
-    if (settingsEl) settingsEl.style.display = '';
-  }, [restoreTheme]);
+    startPreview(theme.id, theme.name, theme.colors, theme.patterns);
+  }, [startPreview]);
 
   const handleInstall = useCallback(async (theme: CommunityTheme) => {
     const localId = installCustomTheme(theme.id, {
@@ -129,16 +87,12 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
     } catch (err) {
       console.warn('[Themes] Failed to notify install count:', err);
     }
-    // Apply as active theme
-    previewingRef.current = false;
-    prevThemeRef.current = `custom:${localId}`;
-    // Restore settings modal visibility since we're leaving preview
-    const settingsEl = document.getElementById('vox-settings-modal');
-    if (settingsEl) settingsEl.style.display = '';
-    setPreviewingName(null);
+    // The store now owns the applied theme — leave preview without restoring
+    // (a restore here would repaint the app in the theme we just replaced).
+    adoptPreview();
     setTheme(`custom:${localId}`);
     toast.success(`Installed "${theme.name}"`);
-  }, [installCustomTheme, setTheme]);
+  }, [installCustomTheme, setTheme, adoptPreview]);
 
   const handleUninstall = useCallback(async (theme: CommunityTheme) => {
     const installed = customThemes.find((t) => t.remoteId === theme.id);
@@ -149,7 +103,6 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
     } catch (err) {
       console.warn('[Themes] Failed to notify uninstall count:', err);
     }
-    prevThemeRef.current = useSettingsStore.getState().theme;
     toast.success(`Uninstalled "${theme.name}"`);
   }, [customThemes, uninstallCustomTheme]);
 
@@ -158,34 +111,13 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
   }, [customThemes]);
 
   const handleClose = useCallback(() => {
-    restoreTheme();
+    stopPreview();
     onClose();
-  }, [restoreTheme, onClose]);
+  }, [stopPreview, onClose]);
 
   // When previewing, collapse to a small bottom bar so the user sees the app
   if (previewingName) {
-    return createPortal(
-      <div
-        className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl"
-        style={{
-          backgroundColor: 'var(--vox-bg-floating)',
-          border: '1px solid var(--vox-border)',
-        }}
-      >
-        <Eye size={14} style={{ color: 'var(--vox-accent-primary)' }} />
-        <span className="text-xs font-medium" style={{ color: 'var(--vox-text-primary)' }}>
-          Previewing: <span className="font-bold">{previewingName}</span>
-        </span>
-        <button
-          onClick={handleStopPreview}
-          className="px-3 py-1 rounded-lg text-xs font-medium text-white"
-          style={{ backgroundColor: 'var(--vox-accent-primary)' }}
-        >
-          Stop Preview
-        </button>
-      </div>,
-      document.body,
-    );
+    return <ThemePreviewBar name={previewingName} onStop={stopPreview} />;
   }
 
   return createPortal(
@@ -312,7 +244,7 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
                     installed={isInstalled(theme.id)}
                     previewing={previewingId === theme.id}
                     onPreview={handlePreview}
-                    onStopPreview={handleStopPreview}
+                    onStopPreview={stopPreview}
                     onInstall={handleInstall}
                     onUninstall={handleUninstall}
                   />

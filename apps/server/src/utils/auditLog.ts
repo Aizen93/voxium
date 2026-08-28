@@ -3,7 +3,9 @@ import { prisma } from './prisma';
 import type { AuditAction } from '@voxium/shared';
 
 interface AuditEventParams {
-  actorId: string;
+  /** null for something the SERVER did on its own — a scheduled job has no
+   *  actor, and the column is nullable precisely so those are still auditable. */
+  actorId: string | null;
   action: AuditAction;
   targetType?: string;
   targetId?: string;

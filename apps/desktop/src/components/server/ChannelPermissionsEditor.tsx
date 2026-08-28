@@ -28,9 +28,11 @@ interface OverrideState {
 
 const CATEGORY_KEYS = ['general', 'membership', 'text', 'voice'] as const;
 
-// ADMINISTRATOR and special permissions are not valid channel overrides
+// ADMINISTRATOR (special) and CREATE_SECURE_CHANNELS are not valid channel
+// overrides — the server strips both from override masks, so offering them
+// here would render tri-states that silently do nothing
 const CHANNEL_PERMISSIONS = PERMISSION_LIST.filter(
-  (p) => p.category !== 'special',
+  (p) => p.category !== 'special' && p.key !== 'CREATE_SECURE_CHANNELS',
 );
 
 function getTriState(flag: bigint, override: OverrideState): TriState {

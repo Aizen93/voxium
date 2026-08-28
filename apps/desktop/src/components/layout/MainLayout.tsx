@@ -4,12 +4,13 @@ import { translateServerError } from '../../utils/serverErrors';
 import i18n from '../../i18n';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
-import { useVoiceStore } from '../../stores/voiceStore';
+import { useVoiceStore, teardownSecureVoice } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
+import { useE2EStore } from '../../stores/e2eStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { getSocket, getSocketGeneration, onConnectionStatusChange } from '../../services/socket';
-import { ServerSidebar } from '../server/ServerSidebar';
+import { SpacesStrip } from '../server/SpacesStrip';
 import { ChannelSidebar } from '../channel/ChannelSidebar';
 import { ChatArea } from '../chat/ChatArea';
 import { MemberSidebar } from '../server/MemberSidebar';
@@ -21,26 +22,46 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
 import { playJoinSound, playLeaveSound, playMessageSound, playMentionSound } from '../../services/notificationSounds';
 import { toast } from '../../stores/toastStore';
-import { stopSpeakingDetection, stopNoiseSuppression } from '../../services/audioAnalyser';
+import { stopSpeakingDetection } from '../../services/audioAnalyser';
+import { handleInboundKey, handleKeyRequest } from '../../services/e2e/secureVoiceKeys';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
 import { SupportTicketView } from '../dm/SupportTicketView';
 import { useSupportStore } from '../../stores/supportStore';
 import { SearchModal } from '../search/SearchModal';
+import { Search } from 'lucide-react';
+import { UserCard } from './UserCard';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
+import { useAnnotationStore } from '../../stores/annotationStore';
+import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
+import { SharePreflightModal } from '../voice/SharePreflightModal';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
   MemberRole, Role, Announcement, SupportMessageData, SupportTicketStatus,
-  ReactionGroup,
+  ReactionGroup, AnnotationOp, AnnotationScene, AnnotationLiveEvent,
 } from '@voxium/shared';
 
+/**
+ * Is the live voice call on this server? Uses activeVoiceServerId, falling back
+ * to the channel list only when it is absent: serverStore.channels holds ONLY
+ * the viewed server's channels, and voice deliberately survives navigating
+ * away — so a lookup there silently skips cleanup for every user who happens
+ * to be browsing elsewhere (leaving a kicked member's E2E session alive).
+ */
+function activeVoiceServerIs(serverId: string): boolean {
+  const { activeChannelId, activeVoiceServerId } = useVoiceStore.getState();
+  if (activeVoiceServerId) return activeVoiceServerId === serverId;
+  return useServerStore.getState().channels.find((c) => c.id === activeChannelId)?.serverId === serverId;
+}
+
 export function MainLayout() {
+  const { t } = useTranslation();
   const { fetchServers, activeServerId, channels } = useServerStore();
   const { user } = useAuthStore();
   const activeConversationId = useDMStore((s) => s.activeConversationId);
@@ -60,6 +81,14 @@ export function MainLayout() {
   useEffect(() => {
     if (user?.id) {
       useVoiceStore.getState().setLocalUserId(user.id);
+    }
+  }, [user?.id]);
+
+  // Initialize the E2E device (register keys / replenish prekeys) once per
+  // login. Non-blocking: DM E2E features light up when ready.
+  useEffect(() => {
+    if (user?.id) {
+      void useE2EStore.getState().initialize(user.id);
     }
   }, [user?.id]);
 
@@ -92,7 +121,8 @@ export function MainLayout() {
     const handleVisibilityChange = () => {
       if (document.hidden) return;
       const serverState = useServerStore.getState();
-      if (serverState.activeChannelId) {
+      // Only when actually in server view — activeChannelId survives switching to DMs
+      if (serverState.activeChannelId && serverState.activeServerId) {
         serverState.clearUnread(serverState.activeChannelId);
         serverState.markChannelRead(serverState.activeChannelId);
       }
@@ -120,10 +150,49 @@ export function MainLayout() {
     let markReadTimer: ReturnType<typeof setTimeout> | null = null;
     let markDMReadTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Desktop notifications show raw message content — swap the internal
+    // @[userId] mention markup for readable @DisplayName using the resolved
+    // mentions the server attached to the message.
+    const formatNotificationBody = (content: string, mentions?: Array<{ id: string; displayName?: string; username?: string }>): string => {
+      if (!content || !mentions?.length) return content;
+      return content.replace(/@\[([a-zA-Z0-9_-]+)\]/g, (match, id: string) => {
+        const m = mentions.find((u) => u.id === id);
+        return m ? `@${m.displayName || m.username || 'user'}` : match;
+      });
+    };
+
+    // "Viewing this server channel" requires BOTH the matching channelId AND being
+    // in server view (activeServerId set). activeChannelId survives switching to the
+    // DM/friends view — without the view check, a message for the last-viewed channel
+    // would append into the DM the user is reading (chatStore is shared) and falsely
+    // mark the channel read. Mirrors the !activeServerId guard the DM handlers use.
+    const isViewingChannel = (channelId: string | null | undefined): boolean => {
+      const serverState = useServerStore.getState();
+      return !!serverState.activeServerId && !!channelId && channelId === serverState.activeChannelId;
+    };
+
+    // Secure channels by the loaded channel list (the trustworthy signal), OR
+    // the message's own encrypted flag — the flag alone must never DOWNGRADE
+    // (that's channelCrypto's refusal rule) but it is always safe as a reason
+    // to decrypt-or-suppress, e.g. for servers whose channel list isn't loaded.
+    const isSecureChannelMessage = (message: Message): boolean => {
+      if (message.encrypted === true) return true;
+      return useServerStore
+        .getState()
+        .channels.some((c) => c.id === message.channelId && c.secure === true);
+    };
+
     // Store function references so cleanup actually works
     const handlers = {
-      messageNew: (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
-        if (message.channelId === useServerStore.getState().activeChannelId) {
+      messageNew: async (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
+        if (message.channelId && isSecureChannelMessage(message)) {
+          // Decrypt BEFORE the store and BEFORE any notification — ciphertext
+          // must never reach the DOM, and a desktop notification showing an
+          // envelope (or worse, trusting a forged plaintext row) is a leak.
+          const { decryptChannelMessageForDisplay } = await import('../../services/e2e/channelCrypto');
+          message = { ...(await decryptChannelMessageForDisplay(message)), serverId: message.serverId, serverName: message.serverName, channelName: message.channelName };
+        }
+        if (isViewingChannel(message.channelId)) {
           useChatStore.getState().addMessage(message);
           // Debounced mark-as-read so lastReadAt stays current while viewing
           // Capture serverId now — channels array may change if user switches servers before timer fires
@@ -139,7 +208,7 @@ export function MainLayout() {
         // Check if the current user is mentioned
         const isMentioned = !!(currentUser && message.mentions?.some((m) => m.id === currentUser.id));
 
-        const isActiveChannel = message.channelId === useServerStore.getState().activeChannelId;
+        const isActiveChannel = isViewingChannel(message.channelId);
 
         // If viewing this channel and not mentioned, no notification needed
         if (isActiveChannel && !isMentioned) return;
@@ -167,31 +236,37 @@ export function MainLayout() {
           const authorName = message.author?.displayName || message.author?.username || 'Someone';
           const serverName = message.serverName || 'Unknown Server';
           const channelName = message.channelName || 'unknown';
-          const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
+          const readable = formatNotificationBody(message.content, message.mentions);
+          const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
           const title = isMentioned
-            ? `${authorName} mentioned you in ${serverName} — #${channelName}`
-            : `${serverName} — #${channelName}`;
+            ? `${authorName} mentioned you in ${serverName}, #${channelName}`
+            : `${serverName}, #${channelName}`;
           void notify(title, `${authorName}: ${body}`, message.author?.avatarUrl);
         }
       },
-      messageUpdate: (message: Message) => {
-        if (message.channelId === useServerStore.getState().activeChannelId) {
+      messageUpdate: async (message: Message) => {
+        if (message.channelId && isSecureChannelMessage(message)) {
+          // A secure edit is a fresh ciphertext under the same id
+          const { decryptChannelMessageForDisplay } = await import('../../services/e2e/channelCrypto');
+          message = await decryptChannelMessageForDisplay(message);
+        }
+        if (isViewingChannel(message.channelId)) {
           useChatStore.getState().updateMessage(message);
         }
       },
       messageDelete: ({ messageId, channelId }: { messageId: string; channelId: string }) => {
-        if (channelId === useServerStore.getState().activeChannelId) {
+        if (isViewingChannel(channelId)) {
           useChatStore.getState().deleteMessage(messageId);
         }
       },
       typingStart: ({ channelId, userId, username }: { channelId: string; userId: string; username: string }) => {
         const currentUser = useAuthStore.getState().user;
-        if (userId !== currentUser?.id && channelId === useServerStore.getState().activeChannelId) {
+        if (userId !== currentUser?.id && isViewingChannel(channelId)) {
           useChatStore.getState().setTypingUser(userId, username);
         }
       },
       typingStop: ({ channelId, userId }: { channelId: string; userId: string }) => {
-        if (channelId === useServerStore.getState().activeChannelId) {
+        if (isViewingChannel(channelId)) {
           useChatStore.getState().removeTypingUser(userId);
         }
       },
@@ -200,11 +275,11 @@ export function MainLayout() {
         useDMStore.getState().updateParticipantStatus(userId, status);
         useFriendStore.getState().updateFriendStatus(userId, status);
       },
-      voiceChannelUsers: ({ channelId, users: voiceUsers }: { channelId: string; users: VoiceUser[] }) => {
-        useVoiceStore.getState().setChannelUsers(channelId, voiceUsers);
+      voiceChannelUsers: ({ channelId, serverId, users: voiceUsers }: { channelId: string; serverId?: string; users: VoiceUser[] }) => {
+        useVoiceStore.getState().setChannelUsers(channelId, voiceUsers, serverId);
       },
-      voiceUserJoined: ({ channelId, user: voiceUser }: { channelId: string; user: VoiceUser }) => {
-        useVoiceStore.getState().addUserToChannel(channelId, voiceUser);
+      voiceUserJoined: ({ channelId, serverId, user: voiceUser }: { channelId: string; serverId?: string; user: VoiceUser }) => {
+        useVoiceStore.getState().addUserToChannel(channelId, voiceUser, serverId);
         const currentUser = useAuthStore.getState().user;
         if (voiceUser.id === currentUser?.id) return;
         if (useVoiceStore.getState().activeChannelId !== channelId) return;
@@ -231,6 +306,15 @@ export function MainLayout() {
       voiceSignal: ({ from, signal }: { from: string; signal: unknown }) => {
         useVoiceStore.getState().handleSignal(from, signal);
       },
+      // Secure voice channels (spec §21): Olm-sealed media keys relayed
+      // between participants. secureVoiceKeys drops anything for a channel
+      // without an active session — no guard needed here.
+      voiceE2EKey: ({ channelId, from, fromDeviceId, envelope }: { channelId: string; from: string; fromDeviceId: string; envelope: string }) => {
+        handleInboundKey(channelId, from, fromDeviceId, envelope);
+      },
+      voiceE2EKeyRequest: ({ channelId, from }: { channelId: string; from: string }) => {
+        handleKeyRequest(channelId, from);
+      },
       voiceTransportCreated: (data: { routerRtpCapabilities: unknown; sendTransport: TransportOptions; recvTransport: TransportOptions }) => {
         useVoiceStore.getState().handleTransportCreated(data);
       },
@@ -254,6 +338,11 @@ export function MainLayout() {
       },
       channelDeleted: ({ channelId, serverId }: { channelId: string; serverId: string }) => {
         useServerStore.getState().removeChannel(channelId, serverId);
+      },
+      channelMembersUpdated: (payload: { channelId: string; serverId: string; members: unknown }) => {
+        // Secure channels only. Runtime-validated inside the store; rotation
+        // itself never depends on this event (per-send authoritative fetch).
+        useServerStore.getState().handleChannelMembersUpdated(payload);
       },
       categoryCreated: (category: Category) => {
         useServerStore.getState().addCategory(category);
@@ -281,16 +370,17 @@ export function MainLayout() {
         }
       },
       messageReactionUpdate: ({ messageId, channelId, reactions }: { messageId: string; channelId: string; reactions: ReactionGroup[] }) => {
-        if (channelId === useServerStore.getState().activeChannelId) {
+        if (isViewingChannel(channelId)) {
           useChatStore.getState().updateMessageReactions(messageId, reactions);
         }
       },
       unreadInit: ({ unreads }: { unreads: UnreadCount[] }) => {
         const store = useServerStore.getState();
         store.initUnreadCounts(unreads);
-        // If the user is already viewing a channel, clear its unread and mark as read
+        // If the user is actually VIEWING a channel (server view), clear its unread
+        // and mark as read — not when a stale activeChannelId lingers behind the DM view
         const activeChannelId = store.activeChannelId;
-        if (activeChannelId) {
+        if (activeChannelId && store.activeServerId) {
           store.clearUnread(activeChannelId);
           store.markChannelRead(activeChannelId);
         }
@@ -298,6 +388,13 @@ export function MainLayout() {
       dmMessageNew: async (message: Message) => {
         const dmStore = useDMStore.getState();
         const activeConvId = dmStore.activeConversationId;
+
+        // E2E DMs arrive as ciphertext — decrypt (or resolve from the local
+        // cache) before the message touches any store, preview, or notification
+        if (message.encrypted) {
+          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+          message = await decryptMessageForDisplay(message);
+        }
 
         // Update last message in conversation list
         if (message.conversationId) {
@@ -307,7 +404,9 @@ export function MainLayout() {
             await dmStore.fetchConversations();
           } else {
             dmStore.updateLastMessage(message.conversationId, {
+              id: message.id,
               content: message.content,
+              encrypted: message.encrypted,
               createdAt: message.createdAt,
               authorId: message.author?.id,
             });
@@ -329,13 +428,20 @@ export function MainLayout() {
             if (settings.enableNotificationSounds) playMessageSound();
             if (settings.enableDesktopNotifications) {
               const authorName = message.author?.displayName || message.author?.username || 'Someone';
-              const body = message.content?.length > 100 ? message.content.slice(0, 100) + '...' : message.content;
-              void notify(`DM — ${authorName}`, body, message.author?.avatarUrl);
+              const readable = formatNotificationBody(message.content, message.mentions);
+              const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
+              void notify(`DM, ${authorName}`, body, message.author?.avatarUrl);
             }
           }
         }
       },
-      dmMessageUpdate: (message: Message) => {
+      dmMessageUpdate: async (message: Message) => {
+        // E2E edits arrive as fresh ciphertext — decrypt before the store
+        // (the plaintext cache is versioned by editedAt)
+        if (message.encrypted) {
+          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+          message = await decryptMessageForDisplay(message);
+        }
         const activeConvId = useDMStore.getState().activeConversationId;
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().updateMessage(message);
@@ -400,27 +506,21 @@ export function MainLayout() {
         useVoiceStore.getState().setDMCallUserSpeaking(userId, speaking);
       },
       dmVoiceSignal: ({ from, signal }: { from: string; signal: unknown }) => {
-        if (!useVoiceStore.getState().dmCallConversationId) return;
-        useVoiceStore.getState().handleDMSignal(from, signal);
+        const voiceState = useVoiceStore.getState();
+        if (!voiceState.dmCallConversationId) return;
+        // Once the call peer's device is pinned, signals from anyone else are
+        // noise at best — drop before they reach the E2E decrypt path
+        if (voiceState.dmCallPeerDevice && from !== voiceState.dmCallPeerDevice.userId) return;
+        voiceState.handleDMSignal(from, signal);
       },
       dmVoiceEnded: ({ conversationId }: { conversationId: string }) => {
         const voiceState = useVoiceStore.getState();
         if (voiceState.dmCallConversationId === conversationId) {
-          // Inline cleanup instead of leaveDMCall() to avoid emitting dm:voice:leave
-          // back to the server (call was already ended server-side)
-          voiceState.stopLatencyMeasurement();
-          stopSpeakingDetection();
-          stopNoiseSuppression();
-          if (voiceState.localStream) {
-            voiceState.localStream.getTracks().forEach((track) => track.stop());
-          }
-          voiceState.destroyAllPeers();
-          useVoiceStore.setState({
-            dmCallConversationId: null,
-            dmCallUsers: [],
-            localStream: null,
-            latency: null,
-          });
+          // Full teardown without emitting dm:voice:leave back (the call was
+          // already ended server-side). Must go through the store action: an
+          // inline cleanup here once left the E2E device pin, signal chains,
+          // and callCrypto session state stale for the next call.
+          voiceState.handleDMCallEnded();
         }
         if (voiceState.incomingCall?.conversationId === conversationId) {
           voiceState.setIncomingCall(null);
@@ -448,7 +548,13 @@ export function MainLayout() {
         }
       },
       voiceScreenShareStop: ({ channelId, userId }: { channelId: string; userId: string }) => {
-        useVoiceStore.getState().setScreenSharingUser(channelId, null);
+        // Only the CURRENT sharer's stop clears the slot: cross-node ordering
+        // can deliver the previous sharer's stop AFTER the next sharer's
+        // start, and clearing then tears down a live share (and, for the
+        // local sharer, the compositor under the producer).
+        if (useVoiceStore.getState().screenSharingUserId === userId) {
+          useVoiceStore.getState().setScreenSharingUser(channelId, null);
+        }
         // Clear the screenSharing flag in channelUsers
         const users = useVoiceStore.getState().channelUsers.get(channelId);
         if (users) {
@@ -466,6 +572,34 @@ export function MainLayout() {
             useVoiceStore.getState().setChannelUsers(channelId, updated);
           }
         }
+      },
+      voiceAnnotationOps: ({ channelId, userId, rev, ops }: { channelId: string; userId: string; rev: number; ops: AnnotationOp[] }) => {
+        const voiceState = useVoiceStore.getState();
+        // Only the live voice channel's active sharer may paint our overlay —
+        // stray late batches after a stop/handoff are dropped here.
+        if (voiceState.activeChannelId !== channelId) return;
+        if (voiceState.screenSharingUserId !== userId) return;
+        useAnnotationStore.getState().applyRemoteOps(channelId, rev, ops);
+      },
+      voiceAnnotationState: ({ channelId, sharingUserId, rev, scene, restarted }: { channelId: string; sharingUserId: string; rev: number; scene: AnnotationScene; restarted?: boolean }) => {
+        const voiceState = useVoiceStore.getState();
+        if (voiceState.activeChannelId !== channelId) return;
+        // Only the CURRENT sharer's snapshot may install a scene — mirrors the
+        // ops handler's guard. A cross-node straggler landing after the stop
+        // would otherwise resurrect the dead share's objects, and OUR next
+        // share's restart resync would re-send them stamped as ours. (The
+        // join/reconnect replay emits voice:screen_share:state first on the
+        // same socket, so the sharer id is always set before this arrives.)
+        if (voiceState.screenSharingUserId !== sharingUserId) return;
+        useAnnotationStore.getState().hydrate(channelId, rev, scene, restarted === true);
+      },
+      voiceAnnotationLive: ({ channelId, userId, ev }: { channelId: string; userId: string; ev: AnnotationLiveEvent }) => {
+        const voiceState = useVoiceStore.getState();
+        if (voiceState.activeChannelId !== channelId) return;
+        // The pointer is the sharer's alone — the server enforces it, and this
+        // guard drops a stray dot from a sharer that just handed off.
+        if ((ev.k === 'pointer' || ev.k === 'pointer-off') && voiceState.screenSharingUserId !== userId) return;
+        useAnnotationLiveStore.getState().receive(userId, ev);
       },
       memberRoleUpdated: ({ serverId, userId, role }: { serverId: string; userId: string; role: MemberRole }) => {
         useServerStore.getState().handleMemberRoleUpdated(serverId, userId, role);
@@ -499,11 +633,8 @@ export function MainLayout() {
         // Leave voice if the active voice channel belongs to the kicked server
         const voiceState = useVoiceStore.getState();
         const serverState = useServerStore.getState();
-        if (voiceState.activeChannelId) {
-          const voiceChannel = serverState.channels.find((c) => c.id === voiceState.activeChannelId);
-          if (voiceChannel?.serverId === serverId) {
-            voiceState.leaveChannel();
-          }
+        if (voiceState.activeChannelId && activeVoiceServerIs(serverId)) {
+          voiceState.leaveChannel();
         }
         serverState.handleMemberKicked(serverId);
         toast.warning('You were kicked from the server');
@@ -515,15 +646,18 @@ export function MainLayout() {
         // Inline voice cleanup if in a voice channel on this server
         // (don't call leaveChannel() — it would emit voice:leave back to
         // the server, but the server already ejected us)
-        if (voiceState.activeChannelId) {
-          const voiceChannel = serverState.channels.find((c) => c.id === voiceState.activeChannelId);
-          if (voiceChannel?.serverId === serverId) {
+        if (voiceState.activeChannelId && activeVoiceServerIs(serverId)) {
+          {
             voiceState.stopLatencyMeasurement();
             stopSpeakingDetection();
             if (voiceState.localStream) {
               voiceState.localStream.getTracks().forEach((track) => track.stop());
             }
             voiceState.cleanupSFU();
+            // The E2E session is NOT part of cleanupSFU: without this the
+            // crypto worker, the media key and the membership poll outlive the
+            // deleted server entirely.
+            teardownSecureVoice();
             useVoiceStore.setState({
               activeChannelId: null,
               localStream: null,
@@ -532,6 +666,11 @@ export function MainLayout() {
               isScreenSharing: false,
               screenSharingUserId: null,
               remoteScreenStream: null,
+              screenShareFrozen: false,
+              screenShareSourceKey: null,
+              shareKind: 'screen',
+              secureVoiceActive: false,
+              secureVoicePeerIssues: {},
             });
           }
         }
@@ -593,6 +732,8 @@ export function MainLayout() {
       ['voice:state_update', handlers.voiceStateUpdate],
       ['voice:force_moved', handlers.voiceForceMove],
       ['voice:speaking', handlers.voiceSpeaking],
+      ['voice:e2e:key', handlers.voiceE2EKey],
+      ['voice:e2e:key_request', handlers.voiceE2EKeyRequest],
       ['voice:signal', handlers.voiceSignal],
       ['voice:transport_created', handlers.voiceTransportCreated],
       ['voice:new_consumer', handlers.voiceNewConsumer],
@@ -601,11 +742,15 @@ export function MainLayout() {
       ['voice:screen_share:start', handlers.voiceScreenShareStart],
       ['voice:screen_share:stop', handlers.voiceScreenShareStop],
       ['voice:screen_share:state', handlers.voiceScreenShareState],
+      ['voice:annotation:ops', handlers.voiceAnnotationOps],
+      ['voice:annotation:state', handlers.voiceAnnotationState],
+      ['voice:annotation:live', handlers.voiceAnnotationLive],
       ['member:joined', handlers.memberJoined],
       ['member:left', handlers.memberLeft],
       ['channel:created', handlers.channelCreated],
       ['channel:updated', handlers.channelUpdated],
       ['channel:deleted', handlers.channelDeleted],
+      ['channel:members_updated', handlers.channelMembersUpdated],
       ['category:created', handlers.categoryCreated],
       ['category:updated', handlers.categoryUpdated],
       ['category:deleted', handlers.categoryDeleted],
@@ -756,11 +901,32 @@ export function MainLayout() {
     <div className="flex h-full flex-col">
       <ConnectionBanner />
       <AnnouncementBanner />
-      <div className="flex flex-1 min-h-0">
-        <ServerSidebar />
-        {activeServerId ? <ChannelSidebar /> : <DMList />}
+      {/* 2026 shell: communities are tabs in the spaces strip along the top;
+          below it, panels float on the page background with 8px gutters. The
+          sidebar column (search, channels, user card) sits directly on the
+          page; chat and People are rounded panels. */}
+      <SpacesStrip />
+      <div className="flex flex-1 min-h-0 gap-2 bg-vox-bg-primary p-2 pt-0">
+        <div className="flex w-[248px] flex-none flex-col min-h-0">
+          <div className="px-1 pb-1 pt-2">
+            <button
+              onClick={() => setShowGlobalSearch(true)}
+              className="flex h-[34px] w-full items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-tertiary px-2.5 text-vox-text-muted transition-colors hover:border-vox-border-strong hover:text-vox-text-secondary"
+            >
+              <Search size={14} className="shrink-0" />
+              <span className="truncate text-[13px]">{t('search.placeholder')}</span>
+              <kbd className="ml-auto shrink-0 rounded-sm bg-vox-bg-hover px-1.5 py-0.5 font-mono text-[10px] text-vox-text-muted/80">
+                {navigator.platform.toUpperCase().includes('MAC') ? '⌘K' : 'Ctrl K'}
+              </kbd>
+            </button>
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col">
+            {activeServerId ? <ChannelSidebar /> : <DMList />}
+          </div>
+          <UserCard />
+        </div>
         <ErrorBoundary inline>
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="panel flex flex-1 flex-col bg-vox-chat">
           {activeServerId ? (
             screenSharingUserId && voiceActiveChannelId ? (
               screenShareViewMode === 'inline' ? (
@@ -788,6 +954,7 @@ export function MainLayout() {
         {activeServerId && <ErrorBoundary inline><MemberSidebar /></ErrorBoundary>}
         {isSettingsOpen && <SettingsModal />}
         <IncomingCallModal />
+        <SharePreflightModal />
         {showGlobalSearch && (() => {
           if (activeServerId) {
             return (

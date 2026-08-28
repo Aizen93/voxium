@@ -2,11 +2,30 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
-import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride } from '@voxium/shared';
+import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember } from '@voxium/shared';
+
+/** Module-level constant so selectors can default without a fresh reference. */
+export const NO_SECURE_MEMBERS: SecureChannelMember[] = [];
+
+const PINNED_KEY = 'voxium_pinned_spaces';
+
+/** Pin order IS display order in the spaces strip — first pinned, first shown. */
+function loadPinnedServers(): string[] {
+  try {
+    const raw = localStorage.getItem(PINNED_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((x): x is string => typeof x === 'string');
+    }
+  } catch { /* ignore corrupt storage */ }
+  return [];
+}
 
 interface ServerState {
   servers: Server[];
   activeServerId: string | null;
+  /** Device-level preference (localStorage), like collapsed categories. */
+  pinnedServerIds: string[];
   channels: Channel[];
   categories: Category[];
   activeChannelId: string | null;
@@ -17,6 +36,7 @@ interface ServerState {
   serverUnreadCounts: Record<string, number>;
 
   fetchServers: () => Promise<void>;
+  togglePinServer: (serverId: string) => void;
   setActiveServer: (serverId: string) => Promise<void>;
   setActiveChannel: (channelId: string) => void;
   createServer: (name: string) => Promise<Server>;
@@ -83,6 +103,19 @@ interface ServerState {
   setNickname: (serverId: string, nickname: string | null) => Promise<void>;
   setMemberNickname: (serverId: string, memberId: string, nickname: string | null) => Promise<void>;
   handleNicknameUpdated: (serverId: string, userId: string, nickname: string | null) => void;
+
+  // Secure channels (invite-only E2E-encrypted). All mutating actions rely on
+  // socket events for state — POST/DELETE responses never touch local state.
+  /** Member lists per secure channel, filled by fetch + members_updated events. */
+  secureChannelMembers: Record<string, SecureChannelMember[]>;
+  createSecureChannel: (serverId: string, name: string, memberIds: string[], type?: 'text' | 'voice') => Promise<Channel>;
+  renameSecureChannel: (serverId: string, channelId: string, name: string) => Promise<void>;
+  inviteSecureChannelMember: (serverId: string, channelId: string, userId: string) => Promise<void>;
+  removeSecureChannelMember: (serverId: string, channelId: string, userId: string) => Promise<void>;
+  leaveSecureChannel: (serverId: string, channelId: string, selfUserId: string) => Promise<void>;
+  fetchSecureChannelMembers: (serverId: string, channelId: string) => Promise<SecureChannelMember[]>;
+  fetchSecureChannelCount: (serverId: string) => Promise<number>;
+  handleChannelMembersUpdated: (payload: { channelId?: unknown; serverId?: unknown; members?: unknown }) => void;
 }
 
 // Dedup: prevent redundant mark-as-read API calls when multiple code paths
@@ -93,6 +126,19 @@ let _lastMarkedAt = 0;
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   activeServerId: null,
+  pinnedServerIds: loadPinnedServers(),
+
+  togglePinServer: (serverId: string) => {
+    set((state) => {
+      const pinnedServerIds = state.pinnedServerIds.includes(serverId)
+        ? state.pinnedServerIds.filter((id) => id !== serverId)
+        : [...state.pinnedServerIds, serverId];
+      try {
+        localStorage.setItem(PINNED_KEY, JSON.stringify(pinnedServerIds));
+      } catch { /* ignore storage errors */ }
+      return { pinnedServerIds };
+    });
+  },
   channels: [],
   categories: [],
   activeChannelId: null,
@@ -122,6 +168,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set({ activeServerId: serverId, isLoading: true });
     try {
       const { data } = await api.get(`/servers/${serverId}`);
+
+      // Staleness guard: the user may have switched to ANOTHER server (or to the
+      // DM view) while this request was in flight. Applying the response anyway
+      // would render server A's channels under server B's header.
+      if (get().activeServerId !== serverId) return;
+
       const channels = data.data.channels || [];
       const categories = data.data.categories || [];
       const roles = data.data.roles || [];
@@ -145,8 +197,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
       get().fetchMembers(serverId);
     } catch (err) {
       console.error('Failed to fetch server:', err);
-      toast.error('Failed to load server');
-      set({ isLoading: false });
+      // Only surface the failure if this server is still the one being viewed
+      if (get().activeServerId === serverId) {
+        toast.error('Failed to load server');
+        set({ isLoading: false });
+      }
     }
   },
 
@@ -302,10 +357,15 @@ export const useServerStore = create<ServerState>((set, get) => ({
   fetchMembers: async (serverId: string) => {
     try {
       const { data } = await api.get(`/servers/${serverId}/members`);
+      // Staleness guard — a slow response for the previous server must not
+      // overwrite the member list of the server now being viewed
+      if (get().activeServerId !== serverId) return;
       set({ members: data.data });
     } catch (err) {
       console.error('Failed to fetch members:', err);
-      toast.error('Failed to load members');
+      if (get().activeServerId === serverId) {
+        toast.error('Failed to load members');
+      }
     }
   },
 
@@ -530,6 +590,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
   fetchRoles: async (serverId: string) => {
     try {
       const { data } = await api.get(`/servers/${serverId}/roles`);
+      // Staleness guard — don't overwrite the currently-viewed server's roles
+      if (get().activeServerId !== serverId) return;
       set({ roles: data.data });
     } catch (err) {
       console.error('Failed to fetch roles:', err);
@@ -643,5 +705,77 @@ export const useServerStore = create<ServerState>((set, get) => ({
         m.userId === userId ? { ...m, nickname } : m
       ),
     }));
+  },
+
+  // ─── Secure channels ────────────────────────────────────────────────────────
+
+  secureChannelMembers: {},
+
+  createSecureChannel: async (serverId: string, name: string, memberIds: string[], type: 'text' | 'voice' = 'text') => {
+    const { data } = await api.post(`/servers/${serverId}/secure-channels`, { name, memberIds, type });
+    // Sidebar entry arrives via the member-scoped channel:created event
+    return data.data;
+  },
+
+  renameSecureChannel: async (serverId: string, channelId: string, name: string) => {
+    await api.patch(`/servers/${serverId}/secure-channels/${channelId}`, { name });
+  },
+
+  inviteSecureChannelMember: async (serverId: string, channelId: string, userId: string) => {
+    await api.post(`/servers/${serverId}/secure-channels/${channelId}/members`, { userId });
+  },
+
+  removeSecureChannelMember: async (serverId: string, channelId: string, userId: string) => {
+    await api.delete(`/servers/${serverId}/secure-channels/${channelId}/members/${userId}`);
+  },
+
+  leaveSecureChannel: async (serverId: string, channelId: string, selfUserId: string) => {
+    await api.delete(`/servers/${serverId}/secure-channels/${channelId}/members/${selfUserId}`);
+    // Our own channel:deleted event removes the sidebar entry; drop the cached
+    // member list now so a re-invite starts fresh
+    set((state) => {
+      const next = { ...state.secureChannelMembers };
+      delete next[channelId];
+      return { secureChannelMembers: next };
+    });
+  },
+
+  fetchSecureChannelMembers: async (serverId: string, channelId: string) => {
+    const { data } = await api.get(`/servers/${serverId}/secure-channels/${channelId}/members`);
+    const members = data.data as SecureChannelMember[];
+    set((state) => ({
+      secureChannelMembers: { ...state.secureChannelMembers, [channelId]: members },
+    }));
+    return members;
+  },
+
+  fetchSecureChannelCount: async (serverId: string) => {
+    const { data } = await api.get(`/servers/${serverId}/secure-channels/count`);
+    return data.data.count as number;
+  },
+
+  handleChannelMembersUpdated: (payload) => {
+    // Socket payloads are unauthenticated JSON as far as this client knows —
+    // validate shape before it can reach any component
+    if (typeof payload?.channelId !== 'string' || typeof payload?.serverId !== 'string') return;
+    if (!Array.isArray(payload.members)) return;
+    const members = (payload.members as unknown[]).filter(
+      (m): m is SecureChannelMember =>
+        !!m && typeof m === 'object' &&
+        typeof (m as SecureChannelMember).userId === 'string' &&
+        typeof (m as SecureChannelMember).isCreator === 'boolean',
+    );
+    const channelId = payload.channelId;
+    set((state) => ({
+      secureChannelMembers: { ...state.secureChannelMembers, [channelId]: members },
+    }));
+
+    // Secure VOICE channels: a membership change is the rotation HINT — the
+    // decision is confirmed against the authoritative endpoint inside
+    // confirmMembership, never trusted from this socket event (spec §21).
+    // No-op for channels without an active secure voice session.
+    void import('../services/e2e/secureVoiceKeys')
+      .then((m) => m.confirmMembership(channelId))
+      .catch((err) => console.warn('[SecureVoice] Membership confirmation failed:', err));
   },
 }));

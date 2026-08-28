@@ -160,11 +160,18 @@ test.describe('Email Verification', () => {
     // Click logout
     await page.getByRole('button', { name: 'Log out' }).click();
 
-    // Should redirect to login
-    await expect(page.getByText('Welcome back!')).toBeVisible({ timeout: 10_000 });
+    // The session ends: the pending-verification screen goes away and the
+    // stored tokens are gone. (On `/` a logged-out browser now gets the
+    // landing page — the desktop app is the one that redirects straight to
+    // /login — so asserting the login form HERE would only be testing which
+    // shell we happen to be running in.)
+    await expect(page.getByText('Verify your email')).toBeHidden({ timeout: 10_000 });
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('voxium_access_token')), { timeout: 10_000 })
+      .toBeNull();
 
-    // Tokens should be cleared
-    const token = await page.evaluate(() => localStorage.getItem('voxium_access_token'));
-    expect(token).toBeNull();
+    // ...and signing in again is reachable
+    await page.goto('/login');
+    await expect(page.getByText('Welcome back!')).toBeVisible({ timeout: 10_000 });
   });
 });

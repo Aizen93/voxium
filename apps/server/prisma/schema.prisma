@@ -11,6 +11,14 @@ datasource db {
 
 model User {
   id          String   @id @default(cuid())
+  // ALSO covered by a FUNCTIONAL unique index on lower(username), added in
+  // migration 20260820210000_username_case_insensitive_unique. Prisma cannot
+  // express expression indexes, so `users_username_lower_key` is invisible
+  // here and `prisma migrate dev` will read it as drift and offer to DROP it.
+  // Do not let it: that index is what actually enforces the case-insensitive
+  // rule registerUser only pre-checks (two concurrent 'Alice'/'alice' signups
+  // both pass the check, and every insensitive lookup afterwards — friend
+  // requests, member search — becomes nondeterministic between them).
   username    String   @unique
   email       String   @unique
   displayName String   @map("display_name")
@@ -22,8 +30,20 @@ model User {
   bannedAt    DateTime? @map("banned_at")
   banReason   String?  @map("ban_reason")
   emailVerified                 Boolean   @default(false) @map("email_verified")
+  emailVerifiedAt               DateTime? @map("email_verified_at")
   emailVerificationToken        String?   @unique @map("email_verification_token")
   emailVerificationTokenExpiresAt DateTime? @map("email_verification_token_expires_at")
+  /// Canonical form for DUPLICATE detection only (display email stays as
+  /// typed): lowercased, and for dot-insensitive providers (gmail) the dots
+  /// and +tag are stripped — one inbox, one account. Nullable only for
+  /// pre-migration rows whose canonical collided (keep-oldest wins the index).
+  emailCanonical                String?   @unique @map("email_canonical")
+  /// When the user accepted the Terms of Service / Privacy Policy at signup
+  /// (CNIL/GDPR accountability: consent must be provable, so the moment is
+  /// recorded, not just a boolean). Null only for accounts created before the
+  /// consent step existed.
+  termsAcceptedAt               DateTime? @map("terms_accepted_at")
+  privacyAcceptedAt             DateTime? @map("privacy_accepted_at")
   tokenVersion        Int       @default(0) @map("token_version")
   resetToken          String?   @unique @map("reset_token")
   resetTokenExpiresAt DateTime? @map("reset_token_expires_at")
@@ -58,6 +78,11 @@ model User {
   supportTicketsClaimed SupportTicket[]  @relation("SupportTicketClaimer")
   supportMessages       SupportMessage[] @relation("SupportMessageAuthor")
   communityThemes       CommunityTheme[]
+  e2eDevices            E2EDevice[]
+  e2eKeyBackup          E2EKeyBackup?
+  e2eMessageKeyBackups  E2EMessageKeyBackup[]
+  secureChannelsCreated Channel[]       @relation("SecureChannelCreator")
+  channelMemberships    ChannelMember[]
 
   @@map("users")
 }
@@ -73,7 +98,10 @@ model Server {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  owner      User           @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  // Restrict, NOT Cascade: deleting a user must never silently destroy every
+  // community they own. The admin delete-user flow transfers or explicitly
+  // deletes owned servers first; any other user.delete() now fails safe.
+  owner      User           @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Restrict)
   channels   Channel[]
   categories Category[]
   members    ServerMember[]
@@ -117,7 +145,7 @@ model InfraServer {
   name      String
   country   String
   city      String
-  provider  String   // OVH, AWS, Azure, GCP, Hetzner, etc.
+  provider  String   // Hosting provider label, free-form (e.g. AWS, Azure, GCP, Hetzner)
   latitude  Float
   longitude Float
   createdAt DateTime @default(now()) @map("created_at")
@@ -140,6 +168,7 @@ model ServerMember {
   memberRoles MemberRole[]
 
   @@id([userId, serverId])
+  @@index([serverId])
   @@map("server_members")
 }
 
@@ -208,6 +237,7 @@ model Category {
   server   Server    @relation(fields: [serverId], references: [id], onDelete: Cascade)
   channels Channel[]
 
+  @@index([serverId])
   @@map("categories")
 }
 
@@ -220,16 +250,44 @@ model Channel {
   serverId   String   @map("server_id")
   categoryId String?  @map("category_id")
   position   Int      @default(0)
+  // Secure channels: invite-only E2E-encrypted text channels. Visibility and
+  // permissions are membership-derived (ChannelMember rows), NOT role-derived —
+  // non-members (including the server owner and ADMINISTRATOR holders) get 0n.
+  secure      Boolean  @default(false)
+  createdById String?  @map("created_by_id")
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   server   Server       @relation(fields: [serverId], references: [id], onDelete: Cascade)
   category Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  // Cascade is the DB backstop only: app code deletes a creator's secure
+  // channels explicitly (events + S3 cleanup) before removing the user.
+  createdBy User?       @relation("SecureChannelCreator", fields: [createdById], references: [id], onDelete: Cascade)
   messages Message[]
   reads    ChannelRead[]
   permissionOverrides ChannelPermissionOverride[]
+  members  ChannelMember[]
 
+  @@index([serverId])
+  @@index([categoryId])
+  @@index([createdById])
   @@map("channels")
+}
+
+// Per-user membership of secure channels. Rows exist ONLY for channels with
+// secure = true; plaintext channels stay role/override-governed.
+model ChannelMember {
+  channelId String   @map("channel_id")
+  userId    String   @map("user_id")
+  isCreator Boolean  @default(false) @map("is_creator")
+  addedAt   DateTime @default(now()) @map("added_at")
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([channelId, userId])
+  @@index([userId])
+  @@map("channel_members")
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -237,6 +295,9 @@ model Channel {
 model Message {
   id             String    @id @default(cuid())
   content        String
+  // E2E DMs: when true, content is an opaque ciphertext envelope (see
+  // docs/e2e-dm-spec.md §6) — never sanitized, searched, or mention-resolved.
+  encrypted      Boolean   @default(false)
   type           String    @default("user")
   channelId      String?   @map("channel_id")
   conversationId String?   @map("conversation_id")
@@ -256,6 +317,12 @@ model Message {
 
   @@index([channelId, createdAt])
   @@index([conversationId, createdAt])
+  @@index([replyToId])
+  @@index([authorId])
+  @@index([createdAt])
+  // Trigram GIN index (pg_trgm) accelerating ILIKE '%q%' message search —
+  // without it every search scans the whole messages table (MED-14)
+  @@index([content(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("messages")
 }
 
@@ -293,6 +360,7 @@ model MessageReaction {
 
   @@unique([messageId, userId, emoji])
   @@index([messageId])
+  @@index([userId])
   @@map("message_reactions")
 }
 
@@ -307,6 +375,7 @@ model ChannelRead {
   channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
 
   @@id([userId, channelId])
+  @@index([channelId])
   @@map("channel_reads")
 }
 
@@ -316,6 +385,11 @@ model Conversation {
   id        String   @id @default(cuid())
   user1Id   String   @map("user1_id")
   user2Id   String   @map("user2_id")
+  // E2E DMs: conversations are BORN encrypted (docs/e2e-always-on-plan.md
+  // §4.2) — there is no toggle and no plaintext path. Non-nullable since the
+  // always-on cutover (migration 20260801140000_e2e_always_on); the server
+  // rejects plaintext user messages in every conversation.
+  encryptedAt DateTime @default(now()) @map("encrypted_at")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -325,6 +399,7 @@ model Conversation {
   reads    ConversationRead[]
 
   @@unique([user1Id, user2Id])
+  @@index([user2Id])
   @@map("conversations")
 }
 
@@ -337,6 +412,7 @@ model ConversationRead {
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@id([userId, conversationId])
+  @@index([conversationId])
   @@map("conversation_reads")
 }
 
@@ -370,6 +446,8 @@ model Invite {
   server  Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
   creator User   @relation(fields: [createdBy], references: [id], onDelete: Cascade)
 
+  @@index([serverId])
+  @@index([createdBy])
   @@map("invites")
 }
 
@@ -381,6 +459,10 @@ model IpRecord {
   ip          String
   countryCode String?  @map("country_code")
   country     String?
+  /// How this IP was FIRST seen for this user: 'register' | 'login' | 'socket'.
+  /// Never overwritten by later sightings — the registration IP is the
+  /// forensic anchor for bot attribution.
+  kind        String   @default("login")
   lastSeenAt  DateTime @default(now()) @map("last_seen_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -442,6 +524,7 @@ model Announcement {
 
   @@index([publishedAt])
   @@index([expiresAt])
+  @@index([createdById])
   @@map("announcements")
 }
 
@@ -456,6 +539,10 @@ model Report {
   reportedUserId  String    @map("reported_user_id")
   messageId       String?   @map("message_id")
   messageContent  String?   @map("message_content")
+  // "server" = content copied server-side (plaintext messages).
+  // "reporter" = decrypted plaintext supplied by the reporting client for E2E
+  // messages — the server cannot verify it against the ciphertext.
+  contentSource   String    @default("server") @map("content_source")
   channelId       String?   @map("channel_id")
   conversationId  String?   @map("conversation_id")
   serverId        String?   @map("server_id")
@@ -471,6 +558,9 @@ model Report {
 
   @@index([status])
   @@index([createdAt])
+  @@index([reporterId])
+  @@index([reportedUserId])
+  @@index([messageId])
   @@map("reports")
 }
 
@@ -533,5 +623,171 @@ model SupportMessage {
   author User          @relation("SupportMessageAuthor", fields: [authorId], references: [id], onDelete: Cascade)
 
   @@index([ticketId, createdAt])
+  @@index([authorId])
   @@map("support_messages")
+}
+
+// ─── E2E Encryption (DMs — docs/e2e-dm-spec.md) ──────────────────────────────
+
+model E2EDevice {
+  id                   String   @id @default(cuid())
+  userId               String   @map("user_id")
+  deviceId             String   @map("device_id") // client-generated, stable per install (E2E_DEVICE_ID_RE)
+  curve25519Key        String   @map("curve25519_key") // Olm identity key, unpadded base64
+  ed25519Key           String   @map("ed25519_key") // device signing key, unpadded base64
+  deviceSignature      String   @map("device_signature") // Ed25519 over the canonical device binding (spec §4)
+  /// Cross-signature by the account master key over the device-cross canonical
+  /// (spec §14). Null = device not (yet) approved from a device holding the
+  /// master secret; it still receives session keys but is flagged as unsigned.
+  masterSignature      String?  @map("master_signature")
+  fallbackKeyId        String?  @map("fallback_key_id")
+  fallbackKey          String?  @map("fallback_key")
+  fallbackKeySignature String?  @map("fallback_key_signature")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  oneTimeKeys E2EOneTimeKey[]
+
+  @@unique([userId, deviceId])
+  @@index([userId])
+  @@map("e2e_devices")
+}
+
+/// Monotonic version of a user's device list — bumped in the SAME transaction
+/// as any device add/revoke so peers can detect membership changes and rotate
+/// their outbound group session (spec §12).
+model E2EDeviceRegistry {
+  userId  String @id @map("user_id")
+  version Int    @default(0)
+
+  @@map("e2e_device_registry")
+}
+
+/// An account's encrypted key backup (spec §15): the cross-signing master
+/// secret sealed client-side under a 32-byte recovery key the user alone holds.
+/// `blob` is opaque AES-256-GCM ciphertext — the server stores and returns
+/// bytes, it can never decrypt them. Not escrow: no passphrase, no hint, no
+/// server-side recovery. One row per account (replacing is the normal case —
+/// a new recovery key invalidates the old blob).
+model E2EKeyBackup {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+  blob   String // opaque AES-256-GCM ciphertext, base64 — server never decrypts
+  // The one E2E table with a real FK, because it is the one row that is MEANT
+  // to outlive every device: no age sweep can ever reclaim it, so without a
+  // cascade a deleted account leaves its sealed master secret in the database
+  // forever. The other E2E tables are purged explicitly on delete (see
+  // utils/e2ePurge) — they predate this and adding FKs to them needs an
+  // orphan-cleanup migration on a live database.
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("e2e_key_backups")
+}
+
+/// An account's backed-up Megolm message keys (plan §4.4): one row per inbound
+/// session, sealed client-side under an account-level message-backup key that
+/// travels with the master secret. It exists so history follows the ACCOUNT — a
+/// newly linked device downloads these and can read messages it was never sent.
+///
+/// `blob` is opaque AES-256-GCM ciphertext with AAD binding conversationId ||
+/// sessionId; the server stores and returns bytes and can never decrypt them.
+/// `conversationId` is stored in the clear only because the server already
+/// knows which conversations the owner is in — it buys the client per-
+/// conversation restore without telling us anything new.
+model E2EMessageKeyBackup {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  conversationId String   @map("conversation_id")
+  sessionId      String   @map("session_id")
+  blob           String // opaque AES-256-GCM ciphertext, base64 — server never decrypts
+  /**
+   * Megolm ratchet index the stored key starts at. A device that joined a
+   * session late exports from a LATER index, so without comparing them a
+   * last-writer-wins upsert would let it overwrite an earlier device's key and
+   * permanently destroy the messages in between.
+   */
+  firstKnownIndex Int     @default(0) @map("first_known_index")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  // Same reasoning as E2EKeyBackup: these rows are MEANT to outlive every
+  // device, so no age sweep can reclaim them and purgeE2EMaterial has nothing
+  // to do here — without a cascade a deleted account would leave its whole
+  // sealed history-key set behind forever.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // One backup per session: re-uploading a session updates it in place rather
+  // than accumulating a row per device that ever held the key.
+  @@unique([userId, sessionId])
+  @@index([userId, conversationId])
+  @@map("e2e_message_key_backups")
+}
+
+/// A pending Megolm group-session key, encrypted pairwise with Olm for exactly
+/// one recipient device. `body` is an opaque olm1 envelope — the server never
+/// sees the session key. Claim-and-delete: Olm pre-key bodies are one-shot.
+model E2EKeyShare {
+  id                String   @id @default(cuid())
+  recipientUserId   String   @map("recipient_user_id")
+  recipientDeviceId String   @map("recipient_device_id")
+  senderUserId      String   @map("sender_user_id")
+  senderDeviceId    String   @map("sender_device_id")
+  conversationId    String   @map("conversation_id")
+  sessionId         String   @map("session_id")
+  body              String // olm1 envelope (JSON string)
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([recipientUserId, recipientDeviceId, createdAt])
+  // the retention sweep deletes by age across all recipients
+  @@index([createdAt])
+  @@index([senderUserId])
+  @@map("e2e_key_shares")
+}
+
+/// A user's account-level cross-signing master key (spec §14). The public half
+/// only — the private half never leaves a device unsealed. `signature` is the
+/// self-signature over the master canonical, proving possession; the server
+/// verifies it before storing and clients re-verify on every fetch.
+model E2EMasterKey {
+  userId    String   @id @map("user_id")
+  publicKey String   @map("public_key") // Ed25519, unpadded base64
+  signature String // Ed25519 self-signature over the master canonical
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("e2e_master_keys")
+}
+
+/// A pending master-secret handoff between two devices of the SAME account
+/// (device approval, spec §14). `body` is an opaque olm1 envelope — the server
+/// never sees the master secret. Claim-and-delete, like key shares.
+model E2EMasterTransfer {
+  id                String   @id @default(cuid())
+  userId            String   @map("user_id") // owner: both sender and recipient
+  recipientDeviceId String   @map("recipient_device_id")
+  senderDeviceId    String   @map("sender_device_id")
+  body              String // olm1 envelope (JSON string)
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([userId, recipientDeviceId, createdAt])
+  // the retention sweep deletes by age across all recipients
+  @@index([createdAt])
+  @@map("e2e_master_transfers")
+}
+
+model E2EOneTimeKey {
+  id        String   @id @default(cuid())
+  deviceId  String   @map("device_id")
+  keyId     String   @map("key_id") // vodozemac KeyId, unpadded base64
+  publicKey String   @map("public_key") // Curve25519, unpadded base64
+  signature String // Ed25519 over the canonical OTK binding (spec §4)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  device E2EDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, keyId])
+  @@index([deviceId, createdAt])
+  @@map("e2e_one_time_keys")
 }

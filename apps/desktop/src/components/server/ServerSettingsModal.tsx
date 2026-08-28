@@ -260,6 +260,11 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
         </div>
       )}
 
+      {/* Secure channels — the opaque moderation surface: a count, and a
+          delete-by-id lever fed by abuse reports. Deliberately NO listing —
+          non-members (owner included) must learn nothing beyond the number. */}
+      {isAdminOrOwner && <SecureChannelsSection serverId={serverId} />}
+
       {/* Danger Zone — owner only */}
       {isOwner && (
         <div className="mt-8 border-t border-vox-accent-danger/30 pt-6">
@@ -309,6 +314,80 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
         </div>
       )}
     </>
+  );
+}
+
+function SecureChannelsSection({ serverId }: { serverId: string }) {
+  const { t } = useTranslation();
+  const { fetchSecureChannelCount, deleteChannel } = useServerStore();
+  const [count, setCount] = useState<number | null>(null);
+  const [deleteId, setDeleteId] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchSecureChannelCount(serverId)
+      .then((n) => { if (!cancelled) setCount(n); })
+      .catch((err) => console.warn('[SecureChannel] Failed to fetch count:', err));
+    return () => { cancelled = true; };
+  }, [serverId, fetchSecureChannelCount]);
+
+  const handleDeleteById = async () => {
+    const id = deleteId.trim();
+    if (!id || deleting) return;
+    // This control is for SECURE channels reported for abuse. The server's
+    // generic DELETE route would happily delete a plaintext channel too (the
+    // caller has MANAGE_CHANNELS) — refuse ids that match a visible plaintext
+    // channel so a mispasted id cannot silently destroy #general.
+    const visible = useServerStore.getState().channels.find((c) => c.id === id);
+    if (visible && !visible.secure) {
+      toast.error(t('secureChannel.moderationNotSecure', { name: visible.name }));
+      return;
+    }
+    setDeleting(true);
+    try {
+      await deleteChannel(serverId, id);
+      toast.success(t('secureChannel.moderationDeleted'));
+      setDeleteId('');
+      setCount((c) => (c === null ? c : Math.max(0, c - 1)));
+    } catch (err) {
+      toast.error(getTranslatedError(err, t, 'secureChannel.moderationDeleteFailed'));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="mt-6 border-t border-vox-border pt-6">
+      <h3 className="flex items-center gap-1.5 text-sm font-semibold text-vox-text-primary">
+        <Lock size={14} />
+        {t('secureChannel.moderationTitle')}
+      </h3>
+      <p className="mt-0.5 text-xs text-vox-text-muted">
+        {count === null
+          ? t('secureChannel.moderationLoading')
+          : t('secureChannel.moderationCount', { count })}
+      </p>
+      <p className="mt-2 text-xs text-vox-text-muted">{t('secureChannel.moderationHint')}</p>
+      <div className="mt-2 flex gap-2">
+        <input
+          type="text"
+          value={deleteId}
+          onChange={(e) => setDeleteId(e.target.value)}
+          placeholder={t('secureChannel.moderationDeletePlaceholder')}
+          className="flex-1 rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-1.5 text-xs text-vox-text-primary focus:outline-none focus:border-vox-accent-danger"
+          data-testid="secure-moderation-delete-id"
+        />
+        <button
+          onClick={handleDeleteById}
+          disabled={!deleteId.trim() || deleting}
+          className="rounded-lg border border-vox-accent-danger/50 px-3 py-1.5 text-xs font-medium text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors disabled:opacity-50"
+          data-testid="secure-moderation-delete"
+        >
+          {deleting ? t('serverSettings.general.deleting') : t('secureChannel.moderationDelete')}
+        </button>
+      </div>
+    </div>
   );
 }
 

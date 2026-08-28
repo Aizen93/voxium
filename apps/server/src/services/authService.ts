@@ -4,14 +4,73 @@ import jwt from 'jsonwebtoken';
 import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
-import type { UserRole } from '@voxium/shared';
-import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from '../utils/errors';
-import { validateEmail, validatePassword, validateUsername } from '@voxium/shared';
-import { sendPasswordResetEmail, sendVerificationEmail } from '../utils/email';
+import type { UserRole, RegistrationConsent } from '@voxium/shared';
+import { BadRequestError, ConflictError, ForbiddenError, TooManyRequestsError, UnauthorizedError } from '../utils/errors';
+import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain, emailDomain, isCommonEmailProvider } from '@voxium/shared';
+import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } from '../utils/email';
 import { sanitizeText } from '../utils/sanitize';
+import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, consumeMailCap, normalizeIp } from '../middleware/rateLimiter';
+import { consentIsRequired } from '../middleware/auth';
+import { verifyTOTP } from './totpService';
+import { deleteUserAccount } from '../utils/accountDeletion';
 
-export async function registerUser(username: string, email: string, password: string, displayName?: string) {
+/**
+ * The consent SELECT fragment every user payload includes, and the mapping
+ * from the two stored timestamps to the single `consentRequired` flag the
+ * client acts on. The timestamps themselves are an accountability record, not
+ * something the client needs; they stay server-side.
+ */
+export const CONSENT_SELECT = { termsAcceptedAt: true, privacyAcceptedAt: true } as const;
+
+export function withConsentFlag<T extends { termsAcceptedAt: Date | null; privacyAcceptedAt: Date | null }>(
+  user: T,
+): Omit<T, 'termsAcceptedAt' | 'privacyAcceptedAt'> & { consentRequired: boolean } {
+  const { termsAcceptedAt, privacyAcceptedAt, ...rest } = user;
+  return { ...rest, consentRequired: consentIsRequired({ termsAcceptedAt, privacyAcceptedAt }) };
+}
+
+// Timing-equalization hash for login attempts against unknown emails (same
+// convention as requestPasswordReset): skipping bcrypt when the user doesn't
+// exist makes the response measurably faster, enumerating registered emails.
+// Generated EAGERLY at module load with the same cost factor as real password
+// hashes — lazy init would make the first unknown-email login pay hash+compare
+// (2× a real login's cost), itself a one-request timing signal.
+let timingEqualizerHash: string | null = null;
+const timingEqualizerReady = bcrypt.hash(crypto.randomBytes(16).toString('hex'), 12)
+  .then((hash) => { timingEqualizerHash = hash; })
+  .catch((err) => console.warn('[Auth] Timing-equalizer hash init failed (will retry lazily):', err));
+
+async function getTimingEqualizerHash(): Promise<string> {
+  if (!timingEqualizerHash) {
+    await timingEqualizerReady;
+    if (!timingEqualizerHash) {
+      timingEqualizerHash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), 12);
+    }
+  }
+  return timingEqualizerHash;
+}
+
+export async function registerUser(
+  username: string,
+  email: string,
+  password: string,
+  displayName?: string,
+  rawIp?: string,
+  consent?: RegistrationConsent,
+) {
+  // The route validates the flags and answers 400; this is the service's own
+  // guard so no other caller can mint an account without recorded consent.
+  if (!consent || consent.acceptTerms !== true || consent.acceptPrivacy !== true) {
+    throw new BadRequestError('You must accept the Terms of Service and the Privacy Policy');
+  }
+  const consentedAt = new Date();
+
   email = email.toLowerCase().trim();
+
+  // Same normalization the limiters use — ban matching, attribution and the
+  // daily/subnet budgets all have to agree on one spelling of the address, or
+  // the gate reads a key the consume never writes and silently stops applying.
+  const ip = rawIp ? normalizeIp(rawIp) : undefined;
 
   const usernameErr = validateUsername(username);
   if (usernameErr) throw new BadRequestError(usernameErr);
@@ -22,12 +81,54 @@ export async function registerUser(username: string, email: string, password: st
   const passwordErr = validatePassword(password);
   if (passwordErr) throw new BadRequestError(passwordErr);
 
+  // A banned IP must not mint fresh accounts — registration was the one auth
+  // surface IpBan did not cover (login checks it; sockets carry a JWT).
+  // Same message as the login path: an attacker learns nothing new here.
+  if (ip) {
+    const ipBan = await prisma.ipBan.findUnique({ where: { ip } });
+    if (ipBan) throw new ForbiddenError(ipBan.reason ? `Account banned: ${ipBan.reason}` : 'Your account has been banned');
+  }
+
+  // Disposable providers get the SAME generic conflict error as a duplicate:
+  // a distinct "domain blocked" message would hand bots an oracle for probing
+  // which domains pass.
+  if (isDisposableEmailDomain(email)) {
+    throw new ConflictError('Username or email already in use');
+  }
+
+  // Duplicate detection runs on the CANONICAL form: gmail ignores dots and
+  // +tags, so without this one inbox mints unlimited "unique" addresses
+  // (the dotted-gmail bot vector). The address of record stays as typed.
+  const emailCanonical = canonicalizeEmail(email);
+
+  // Username check is case-INSENSITIVE: lookups elsewhere (friend requests,
+  // member search) match insensitively, so allowing "Alice" alongside "alice"
+  // at signup would route the other account's requests to an impersonator.
   const existing = await prisma.user.findFirst({
-    where: { OR: [{ username }, { email }] },
+    where: {
+      OR: [
+        { username: { equals: username, mode: 'insensitive' } },
+        { email },
+        { emailCanonical },
+      ],
+    },
   });
 
   if (existing) {
     throw new ConflictError('Username or email already in use');
+  }
+
+  // NOVEL-DOMAIN daily cap: a $10 catch-all domain gives an attacker
+  // unlimited verifiable inboxes, which defeats both the disposable blocklist
+  // and the unverified-account TTL. Big consumer providers are exempt (gmail
+  // legitimately signs up unbounded users/day). Checked BEFORE create and
+  // counted only AFTER a successful create — a middleware-style blind consume
+  // would let an attacker burn a small company's domain budget with garbage
+  // attempts and lock its real employees out for the day.
+  const domain = emailDomain(email);
+  const domainCapped = !isCommonEmailProvider(domain);
+  if (domainCapped && (await getDomainRegistrationCount(domain)) >= domainRegistrationCap()) {
+    throw new TooManyRequestsError('Too many registrations from this email domain today — try again later');
   }
 
   const hashedPassword = await bcrypt.hash(password, 12);
@@ -36,48 +137,91 @@ export async function registerUser(username: string, email: string, password: st
   const rawVerifyToken = crypto.randomBytes(32).toString('hex');
   const hashedVerifyToken = crypto.createHash('sha256').update(rawVerifyToken).digest('hex');
 
-  const user = await prisma.user.create({
-    data: {
-      username,
-      email,
-      displayName: sanitizeText(displayName) || username,
-      password: hashedPassword,
-      emailVerificationToken: hashedVerifyToken,
-      emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
-    },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      email: true,
-      avatarUrl: true,
-      bio: true,
-      status: true,
-      role: true,
-      totpEnabled: true,
-      emailVerified: true,
-      isSupporter: true, supporterTier: true,
-      tokenVersion: true,
-      createdAt: true,
-    },
-  });
+  // The findFirst above is a FRIENDLY pre-check, not the enforcement — two
+  // concurrent signups both see it empty. The DB's unique indexes are what
+  // actually hold (username case-insensitively, email, emailCanonical), and
+  // their P2002 has to surface as the SAME generic conflict the pre-check
+  // raises: letting it escape turned an ordinary duplicate into a 500 and
+  // wrote the violated constraint's name into the logs.
+  let user;
+  try {
+    user = await prisma.user.create({
+      data: {
+        username,
+        email,
+        emailCanonical,
+        displayName: sanitizeText(displayName) || username,
+        password: hashedPassword,
+        emailVerificationToken: hashedVerifyToken,
+        emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+        termsAcceptedAt: consentedAt,
+        privacyAcceptedAt: consentedAt,
+      },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        email: true,
+        avatarUrl: true,
+        bio: true,
+        status: true,
+        role: true,
+        totpEnabled: true,
+        emailVerified: true,
+        isSupporter: true, supporterTier: true,
+        tokenVersion: true,
+        createdAt: true,
+        ...CONSENT_SELECT,
+      },
+    });
+  } catch (err) {
+    if ((err as { code?: string })?.code === 'P2002') {
+      throw new ConflictError('Username or email already in use');
+    }
+    throw err;
+  }
+
+  // Count the successful create against the domain budget (see the check
+  // above for why this is post-create, not a blind pre-consume). The per-IP
+  // and per-subnet budgets are charged atomically in the route middleware and
+  // refunded on any non-2xx — see `chargeRegistrationBudgets`.
+  if (domainCapped) await countDomainRegistration(domain);
+
+  // The REGISTRATION IP is the forensic anchor for abuse attribution — the
+  // one sighting that was previously never recorded. kind is set at create
+  // and never overwritten by later logins from the same address.
+  if (ip) {
+    const geo = geoip.lookup(ip);
+    const countryNames = new Intl.DisplayNames(['en'], { type: 'region' });
+    const geoFields = geo ? {
+      countryCode: geo.country || null,
+      country: (geo.country && countryNames.of(geo.country)) || geo.country || null,
+    } : {};
+    await prisma.ipRecord.create({
+      data: { userId: user.id, ip, kind: 'register', ...geoFields },
+    }).catch((err) => console.warn('[Auth] Registration IP record failed:', err));
+  }
 
   // Send verification email (fire-and-forget)
   sendVerificationEmail(user.email, rawVerifyToken).catch((err) => {
-    console.error('[Auth] Failed to send verification email:', err);
+    console.error('[Auth] Failed to send verification email:', describeEmailError(err));
   });
 
   const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion });
   const { tokenVersion: _, ...safeUser } = user;
 
-  return { user: safeUser, ...tokens };
+  return { user: withConsentFlag(safeUser), ...tokens };
 }
 
 export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string, trustedDeviceToken?: string) {
   email = email.toLowerCase().trim();
 
-  // Normalize IPv4-mapped IPv6 (::ffff:1.2.3.4 → 1.2.3.4) for consistent ban matching
-  const ip = rawIp?.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+  // The SAME normalization registerUser and every limiter use. This was the
+  // last private copy of the `::ffff:` strip: case-sensitive, blind to zone ids
+  // and to the hex IPv4-mapped form, so `::FFFF:1.2.3.4` reached ipBan as an
+  // IPv6 string that no ban row is ever written as. Two keyed controls that
+  // disagree about an address fail OPEN, and nothing on the happy path notices.
+  const ip = rawIp ? normalizeIp(rawIp) : undefined;
 
   // Check IP ban before anything else
   if (ip) {
@@ -105,10 +249,16 @@ export async function loginUser(email: string, password: string, rememberMe = tr
       bannedAt: true,
       banReason: true,
       createdAt: true,
+      ...CONSENT_SELECT,
     },
   });
 
-  if (!user) throw new UnauthorizedError('Invalid credentials');
+  if (!user) {
+    // Burn the same bcrypt cost as a real comparison so an unknown email is
+    // indistinguishable from a wrong password by response time
+    await bcrypt.compare(password, await getTimingEqualizerHash());
+    throw new UnauthorizedError('Invalid credentials');
+  }
 
   const validPassword = await bcrypt.compare(password, user.password);
   if (!validPassword) throw new UnauthorizedError('Invalid credentials');
@@ -159,7 +309,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
 
   const { password: _, tokenVersion: _tv, bannedAt: _ba, banReason: _br, ...safeUser } = user;
 
-  return { user: safeUser, ...tokens };
+  return { user: withConsentFlag(safeUser), ...tokens };
 }
 
 export async function verifyLoginTOTP(totpToken: string, code: string) {
@@ -192,6 +342,7 @@ export async function verifyLoginTOTP(totpToken: string, code: string) {
       isSupporter: true, supporterTier: true,
       tokenVersion: true,
       createdAt: true,
+      ...CONSENT_SELECT,
     },
   });
   if (!user) throw new UnauthorizedError('User not found');
@@ -206,7 +357,7 @@ export async function verifyLoginTOTP(totpToken: string, code: string) {
     { expiresIn: '30d' } as jwt.SignOptions,
   );
 
-  return { user: safeUser, ...tokens, trustedDeviceToken };
+  return { user: withConsentFlag(safeUser), ...tokens, trustedDeviceToken };
 }
 
 export function generateTokens(payload: AuthPayload, rememberMe = true) {
@@ -263,27 +414,58 @@ export async function requestPasswordReset(email: string) {
 
   const user = await prisma.user.findUnique({ where: { email } });
 
-  // Always do the expensive crypto work regardless of whether the user exists.
-  // This prevents timing side-channel attacks that could enumerate email addresses
-  // by measuring response time differences (crypto work vs early return).
+  // Generate the token regardless of whether the user exists, so the two
+  // branches do the same in-process work before answering.
   const rawToken = crypto.randomBytes(32).toString('hex');
   const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
 
-  if (!user) return; // Silent return - attacker sees same timing as a real reset
+  // Per-INBOX daily cap, mirroring the verification-mail cap: the 3/15min IP
+  // limiter is useless against distributed sources, and without this a botnet
+  // can drip password-reset mail at a victim's real address indefinitely.
+  // On cap: SILENT skip, never an error — this endpoint's response must stay
+  // identical for existing and unknown emails (enumeration safety), so the
+  // only honest option is to stop sending while answering the same way.
+  // The decision is made OUTSIDE consumeMailCap's fail-open try (it returns a
+  // boolean rather than throwing) — a `return` inside one has been benign so
+  // far only because it cannot throw.
+  //
+  // Charged on BOTH branches, keyed on the address as asked. The unknown-email
+  // branch used to return before this round trip while the known-email one
+  // paid it, which is a timing difference the wording defence cannot hide.
+  // Charging an inbox that does not exist costs nothing and sends nothing.
+  const underCap = await consumeMailCap('resetMail', canonicalizeEmail(email));
 
-  await prisma.user.update({
-    where: { id: user.id },
-    data: {
-      resetToken: hashedToken,
-      resetTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
-    },
-  });
+  if (!user) return; // Silent return — same response, same work, as a real reset
 
-  try {
-    await sendPasswordResetEmail(user.email, rawToken);
-  } catch (err) {
-    console.error('[Auth] Failed to send password reset email:', err);
+  if (!underCap) {
+    console.warn('[Auth] Password-reset mail cap reached for an inbox — skipping send');
+    return;
   }
+
+  // NOT awaited — neither the token write nor the send. Both branches above
+  // return after the same work (one lookup, one cap consume, two hashes);
+  // anything the known-email branch still awaited here — a DB UPDATE, let
+  // alone an unpooled SMTP transaction that can sit out a connect timeout —
+  // answered measurably later, and both branches return the identical body,
+  // so the CLOCK was the only oracle left. The write stays sequenced before
+  // the send (a link must not arrive before its token exists), and each step
+  // keeps its own error report; they just no longer sit on the response path.
+  void (async () => {
+    try {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          resetToken: hashedToken,
+          resetTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+        },
+      });
+    } catch (err) {
+      console.error('[Auth] Failed to store password reset token:', err instanceof Error ? err.message : err);
+      return; // no token in the DB — a link would be dead on arrival
+    }
+    await sendPasswordResetEmail(user.email, rawToken)
+      .catch((err) => console.error('[Auth] Failed to send password reset email:', describeEmailError(err)));
+  })();
 }
 
 export async function resetPassword(token: string, newPassword: string) {
@@ -371,6 +553,7 @@ export async function verifyEmail(token: string) {
     where: { id: user.id },
     data: {
       emailVerified: true,
+      emailVerifiedAt: new Date(),
       emailVerificationToken: null,
       emailVerificationTokenExpiresAt: null,
     },
@@ -385,6 +568,16 @@ export async function resendVerificationEmail(userId: string) {
   if (!user) throw new UnauthorizedError('User not found');
   if (user.emailVerified) throw new BadRequestError('Email already verified');
 
+  // Hard daily cap PER INBOX, keyed on the canonical form: the per-user
+  // limiter (3/5min) bounds the burst rate, but a bot that owns the account
+  // can keep bursting forever — turning us into a drip harasser of whoever
+  // really owns the address. 5 mails to one mailbox per day is the ceiling
+  // no matter which account, IP, or cadence asks. Fail open on store errors:
+  // a broken counter must not lock legitimate users out of verification.
+  if (!(await consumeMailCap('verifyMail', canonicalizeEmail(user.email)))) {
+    throw new BadRequestError('Too many verification emails requested — try again tomorrow');
+  }
+
   const rawToken = crypto.randomBytes(32).toString('hex');
   const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
 
@@ -397,4 +590,73 @@ export async function resendVerificationEmail(userId: string) {
   });
 
   await sendVerificationEmail(user.email, rawToken);
+}
+
+/**
+ * Record acceptance of the Terms of Service and the Privacy Policy for an
+ * EXISTING account — the path for accounts that predate consent-at-signup
+ * (CNIL/GDPR). Both must be accepted in one go, as separate explicit `true`s;
+ * a partial acceptance records nothing, so the gate stays up. Idempotent: an
+ * already-consented account keeps its ORIGINAL timestamps, which are the
+ * accountability record of when consent was first given.
+ */
+export async function acceptConsent(userId: string, consent: RegistrationConsent): Promise<{ consentRequired: false }> {
+  if (consent.acceptTerms !== true) throw new BadRequestError('You must accept the Terms of Service');
+  if (consent.acceptPrivacy !== true) throw new BadRequestError('You must accept the Privacy Policy');
+  const now = new Date();
+  // updateMany with a null guard keeps the first acceptance: two concurrent
+  // POSTs cannot move an existing timestamp forward.
+  await prisma.user.updateMany({ where: { id: userId, termsAcceptedAt: null }, data: { termsAcceptedAt: now } });
+  await prisma.user.updateMany({ where: { id: userId, privacyAcceptedAt: null }, data: { privacyAcceptedAt: now } });
+  return { consentRequired: false };
+}
+
+/**
+ * Self-service account deletion (GDPR right to erasure; the Terms promise
+ * "you may delete your account at any time").
+ *
+ * Re-authenticates with the password — a stolen session must not be enough
+ * to erase someone — and, when TOTP is enabled, with a current code (or a
+ * backup code) as well, since the password alone is exactly what 2FA exists
+ * to distrust. Refuses while the account owns servers: `Server.owner` is
+ * onDelete: Restrict, and whether a community is handed to someone else or
+ * destroyed is the owner's call to make first (transfer or delete each in
+ * its settings). The refusal lists them so the client can say which.
+ */
+export async function deleteOwnAccount(
+  userId: string,
+  password: string,
+  totpCode?: string,
+): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, password: true, totpEnabled: true, ownedServers: { select: { id: true, name: true } } },
+  });
+  if (!user) throw new UnauthorizedError('User not found');
+
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) throw new BadRequestError('Password is incorrect');
+
+  if (user.totpEnabled) {
+    if (!totpCode || typeof totpCode !== 'string') throw new BadRequestError('Two-factor authentication code is required');
+    const ok = await verifyTOTP(userId, totpCode.replace(/\s+/g, ''));
+    if (!ok) throw new BadRequestError('Invalid two-factor authentication code');
+  }
+
+  if (user.ownedServers.length > 0) {
+    throw new OwnedServersError(user.ownedServers);
+  }
+
+  await deleteUserAccount(userId, { reason: 'Your account has been deleted', logPrefix: '[Auth]' });
+}
+
+/** 409 carrying the servers the account must transfer or delete first. */
+export class OwnedServersError extends ConflictError {
+  constructor(public readonly servers: Array<{ id: string; name: string }>) {
+    super('Transfer or delete the servers you own before deleting your account');
+    this.name = 'OwnedServersError';
+    // AppError pins every instance's prototype to AppError.prototype, which
+    // makes `instanceof` false for any deeper subclass — re-pin to ours.
+    Object.setPrototypeOf(this, OwnedServersError.prototype);
+  }
 }

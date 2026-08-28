@@ -11,10 +11,13 @@ interface Props {
   type: 'message' | 'user';
   reportedUserId: string;
   messageId?: string;
+  /** E2E messages: the reporter's locally-decrypted plaintext — the server
+   *  only holds ciphertext, so this is what moderators will see. */
+  reportedContent?: string;
   onClose: () => void;
 }
 
-export function ReportModal({ type, reportedUserId, messageId, onClose }: Props) {
+export function ReportModal({ type, reportedUserId, messageId, reportedContent, onClose }: Props) {
   const { t } = useTranslation();
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -40,6 +43,7 @@ export function ReportModal({ type, reportedUserId, messageId, onClose }: Props)
         type,
         reportedUserId,
         ...(type === 'message' && messageId ? { messageId } : {}),
+        ...(type === 'message' && reportedContent ? { reportedContent } : {}),
         reason: reason.trim(),
       });
       toast.success(t('chat.report.submitted'));
@@ -112,7 +116,7 @@ export function ReportModal({ type, reportedUserId, messageId, onClose }: Props)
           <button
             onClick={handleSubmit}
             disabled={submitting || reason.trim().length < LIMITS.REPORT_REASON_MIN}
-            className="px-3 py-1.5 text-xs rounded-md bg-vox-accent-danger text-white hover:bg-vox-accent-danger/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="px-3 py-1.5 text-xs rounded-md bg-vox-accent-danger text-vox-on-accent hover:bg-vox-accent-danger/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {submitting ? t('chat.report.submitting') : t('chat.report.submitReport')}
           </button>

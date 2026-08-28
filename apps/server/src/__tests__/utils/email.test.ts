@@ -82,3 +82,42 @@ describe('utils/email — lazy initialization', () => {
     expect(typeof mod.sendPasswordResetEmail).toBe('function');
   });
 });
+
+describe('utils/email — describeEmailError', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('prefers machine codes for SMTP errors (message can embed the recipient address)', async () => {
+    const { describeEmailError } = await import('../../utils/email');
+
+    const smtpErr = Object.assign(
+      new Error('550 5.1.1 <victim@example.com>: Recipient address rejected'),
+      { code: 'EENVELOPE', responseCode: 550 },
+    );
+
+    const described = describeEmailError(smtpErr);
+    expect(described).toBe('EENVELOPE (SMTP 550)');
+    expect(described).not.toContain('victim@example.com');
+  });
+
+  it('uses the code alone when there is no responseCode', async () => {
+    const { describeEmailError } = await import('../../utils/email');
+
+    const connErr = Object.assign(new Error('connect ECONNREFUSED 10.0.0.5:587'), { code: 'ECONNECTION' });
+    expect(describeEmailError(connErr)).toBe('ECONNECTION');
+  });
+
+  it('falls back to the message for plain errors without a code', async () => {
+    const { describeEmailError } = await import('../../utils/email');
+
+    expect(describeEmailError(new Error('something broke'))).toBe('something broke');
+  });
+
+  it('stringifies non-Error values', async () => {
+    const { describeEmailError } = await import('../../utils/email');
+
+    expect(describeEmailError('timeout')).toBe('timeout');
+    expect(describeEmailError(undefined)).toBe('undefined');
+  });
+});

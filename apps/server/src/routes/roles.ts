@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import {
@@ -16,11 +16,12 @@ import type { Role, ChannelPermissionOverride, MemberRole } from '@voxium/shared
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitRoleManage } from '../middleware/rateLimiter';
-import { hasServerPermission, getHighestRolePosition, getEffectivePermissions } from '../utils/permissionCalculator';
+import { hasServerPermission, hasChannelPermission, getHighestRolePosition, getEffectivePermissions } from '../utils/permissionCalculator';
+import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 
 export const roleRouter = Router({ mergeParams: true });
 
-roleRouter.use(authenticate, requireVerifiedEmail);
+roleRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // List all roles in a server
 roleRouter.get('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -274,6 +275,14 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
       role: updated as unknown as Role,
     });
 
+    // Permission changes can grant/revoke VIEW_CHANNEL — re-sync live socket
+    // room membership so real-time events match the new visibility. Fire-and-
+    // forget: the util catches its own errors, and the response must not wait
+    // on a per-online-member permission sweep.
+    if (updateData.permissions !== undefined) {
+      void syncChannelVisibilityRooms(serverId);
+    }
+
     res.json({ success: true, data: updated });
   } catch (err) {
     next(err);
@@ -301,6 +310,9 @@ roleRouter.delete('/:roleId', rateLimitRoleManage, async (req: Request<{ serverI
     await prisma.role.delete({ where: { id: roleId } });
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_DELETED, { serverId, roleId });
+
+    // Deleting a role (and its cascade-deleted overrides) can change visibility
+    void syncChannelVisibilityRooms(serverId);
 
     res.json({ success: true, message: 'Role deleted' });
   } catch (err) {
@@ -411,6 +423,9 @@ roleRouter.patch(
         role: legacyRole,
       });
 
+      // The member's role set changed — re-sync their sockets' channel rooms
+      void syncChannelVisibilityRooms(serverId, { userId: memberId });
+
       res.json({ success: true, message: 'Roles updated' });
     } catch (err) {
       next(err);
@@ -431,7 +446,15 @@ roleRouter.get(
       if (!membership) throw new NotFoundError('Server');
 
       const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      if (!channel) throw new NotFoundError('Channel');
+      // Secure channels have no role overrides and must not be enumerable —
+      // same NotFound as a channel that does not exist. Regular channels
+      // additionally require VIEW_CHANNEL (a member who cannot see a channel
+      // must not read its override list either).
+      if (!channel || channel.secure) throw new NotFoundError('Channel');
+      const canView = await hasChannelPermission(
+        req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL,
+      );
+      if (!canView) throw new NotFoundError('Channel');
 
       const overrides = await prisma.channelPermissionOverride.findMany({
         where: { channelId },
@@ -457,7 +480,9 @@ roleRouter.put(
       if (!canManage) throw new ForbiddenError('You do not have permission to manage permissions');
 
       const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      if (!channel) throw new NotFoundError('Channel');
+      // Secure channels are membership-governed: role overrides do not apply
+      // and their existence must not leak — indistinguishable from not-found
+      if (!channel || channel.secure) throw new NotFoundError('Channel');
 
       const role = await prisma.role.findFirst({ where: { id: roleId, serverId } });
       if (!role) throw new NotFoundError('Role');
@@ -473,8 +498,13 @@ roleRouter.put(
         throw new BadRequestError('allow and deny must be strings (decimal bigint)');
       }
 
-      // Validate that allow and deny don't overlap, and strip ADMINISTRATOR (cannot be granted via channel overrides)
-      const CHANNEL_OVERRIDE_MASK = ALL_PERMISSIONS & ~Permissions.ADMINISTRATOR;
+      // Validate that allow and deny don't overlap, and strip the flags that
+      // cannot be granted via channel overrides: ADMINISTRATOR, and
+      // CREATE_SECURE_CHANNELS (server-level only — a channel-scoped grant of
+      // "may create secure channels" is meaningless and would just confuse
+      // effective-permission displays)
+      const CHANNEL_OVERRIDE_MASK =
+        ALL_PERMISSIONS & ~Permissions.ADMINISTRATOR & ~Permissions.CREATE_SECURE_CHANNELS;
       const allowBits = permissionsFromString(allow) & CHANNEL_OVERRIDE_MASK;
       const denyBits = permissionsFromString(deny) & CHANNEL_OVERRIDE_MASK;
       if ((allowBits & denyBits) !== 0n) {
@@ -519,6 +549,9 @@ roleRouter.put(
         overrides: allOverrides as unknown as ChannelPermissionOverride[],
       });
 
+      // Override may have granted/revoked VIEW_CHANNEL for this channel
+      void syncChannelVisibilityRooms(serverId, { channelId });
+
       res.json({ success: true, data: allOverrides });
     } catch (err) {
       next(err);
@@ -538,7 +571,8 @@ roleRouter.delete(
       if (!canManage) throw new ForbiddenError('You do not have permission to manage permissions');
 
       const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      if (!channel) throw new NotFoundError('Channel');
+      // Same opacity rule as the PUT: secure channels read as not-found
+      if (!channel || channel.secure) throw new NotFoundError('Channel');
 
       const role = await prisma.role.findFirst({ where: { id: roleId, serverId } });
       if (!role) throw new NotFoundError('Role');
@@ -562,6 +596,9 @@ roleRouter.delete(
         channelId,
         overrides: allOverrides as unknown as ChannelPermissionOverride[],
       });
+
+      // Removing an override may restore/revoke VIEW_CHANNEL for this channel
+      void syncChannelVisibilityRooms(serverId, { channelId });
 
       res.json({ success: true, message: 'Override removed' });
     } catch (err) {

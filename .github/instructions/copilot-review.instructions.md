@@ -4,7 +4,7 @@ This file provides context for Copilot when reviewing PRs. It documents architec
 
 ## Project Overview
 
-Voxium is a Discord alternative — real-time voice and text communication platform. Monorepo with pnpm workspaces:
+Voxium is a real-time voice and text communication platform. Monorepo with pnpm workspaces:
 
 - **`apps/server`** — Node.js/Express 5 backend + Socket.IO + mediasoup SFU
 - **`apps/desktop`** — React 19 + Vite + Tauri 2 desktop client

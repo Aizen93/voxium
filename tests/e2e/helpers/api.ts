@@ -1,3 +1,4 @@
+import { solveRegistrationPow } from '@voxium/shared';
 import type { APIRequestContext } from '@playwright/test';
 import { createClient } from 'redis';
 
@@ -8,9 +9,12 @@ export async function clearRateLimits() {
   const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
   try {
     await redis.connect();
+    // redis v5: scanIterator yields BATCHES of keys, not single keys
     const keysToDelete: string[] = [];
-    for await (const key of redis.scanIterator({ MATCH: 'rl:*', COUNT: 100 })) {
-      if (key !== 'rl:config') keysToDelete.push(key);
+    for await (const batch of redis.scanIterator({ MATCH: 'rl:*', COUNT: 100 })) {
+      for (const key of batch) {
+        if (key !== 'rl:config') keysToDelete.push(key);
+      }
     }
     if (keysToDelete.length > 0) {
       await redis.del(keysToDelete);
@@ -21,11 +25,26 @@ export async function clearRateLimits() {
 }
 
 /** Register a new user via the API. Auto-verifies email for testing. Returns access + refresh tokens. */
+
+/**
+ * Fetch and solve the registration proof-of-work (anti-bot Phase 3). Dev/test
+ * servers issue a tiny difficulty, so this costs microseconds while still
+ * exercising the exact production code path (challenge -> solve -> redeem).
+ */
+async function solveRegisterChallenge(request: APIRequestContext) {
+  const res = await request.get(`${API_URL}/auth/register-challenge`);
+  if (!res.ok()) throw new Error(`Challenge fetch failed (${res.status()})`);
+  const { data } = await res.json();
+  return solveRegistrationPow(data);
+}
+
 export async function registerUser(
   request: APIRequestContext,
   user: { username: string; email: string; password: string },
 ) {
-  const res = await request.post(`${API_URL}/auth/register`, { data: user });
+  const pow = await solveRegisterChallenge(request);
+  // Consent is required server-side, exactly as the form requires it
+  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow, acceptTerms: true, acceptPrivacy: true } });
   if (!res.ok()) {
     const body = await res.json().catch(() => ({}));
     throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);
@@ -44,7 +63,9 @@ export async function registerUserUnverified(
   request: APIRequestContext,
   user: { username: string; email: string; password: string },
 ) {
-  const res = await request.post(`${API_URL}/auth/register`, { data: user });
+  const pow = await solveRegisterChallenge(request);
+  // Consent is required server-side, exactly as the form requires it
+  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow, acceptTerms: true, acceptPrivacy: true } });
   if (!res.ok()) {
     const body = await res.json().catch(() => ({}));
     throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);

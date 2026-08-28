@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -17,6 +17,7 @@ import {
   BrainCircuit,
   Check,
   X,
+  Menu,
   Heart,
   Sparkles,
   Palette,
@@ -25,6 +26,7 @@ import {
 } from 'lucide-react';
 import { APP_VERSION } from '@voxium/shared';
 import { SoundWaveCanvas } from '../components/landing/SoundWaveCanvas';
+import { HeroAppMock } from '../components/landing/HeroAppMock';
 import { SUPPORTED_LANGUAGES } from '../i18n';
 
 /* ─── Animated SVG Illustrations ─── */
@@ -202,38 +204,205 @@ const DOWNLOAD_URLS = {
   releases: 'https://github.com/Aizen93/voxium/releases',
 };
 
+/* ─── Landing Design System ───
+ * Scoped `lp-*` classes: one continuous deep-indigo canvas with sections as
+ * floating rounded panels. Applies only while the landing page is mounted. */
+
+function LandingStyles() {
+  return (
+    <style>{`
+      html.landing-scroll { scroll-padding-top: 5.5rem; }
+
+      .lp-root { background: #0b0b1a; }
+
+      /* Full-bleed section: hairline separator, content constrained inside.
+         The 2026 layout is editorial (Linear/Arc), not boxed panels — sections
+         span the page and their content uses the width. */
+      .lp-section { position: relative; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+
+      /* Inner card: content tile inside a section */
+      .lp-card {
+        position: relative;
+        border-radius: 20px;
+        border: 1px solid rgba(148, 150, 255, 0.10);
+        background: rgba(21, 22, 48, 0.55);
+        transition: border-color 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease, background-color 0.3s ease;
+      }
+      .lp-card:hover {
+        border-color: rgba(139, 127, 255, 0.38);
+        transform: translateY(-4px);
+        box-shadow: 0 24px 56px -28px rgba(91, 91, 247, 0.4);
+        background: rgba(24, 25, 54, 0.7);
+      }
+      .lp-card--static:hover { transform: none; }
+      .lp-card--rose:hover {
+        border-color: rgba(236, 72, 153, 0.35);
+        box-shadow: 0 24px 56px -28px rgba(236, 72, 153, 0.35);
+      }
+
+      /* Product-window frame: padded bezel around app screenshots/mocks */
+      .lp-frame {
+        border-radius: 26px;
+        padding: 10px;
+        border: 1px solid rgba(148, 150, 255, 0.16);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.02));
+        box-shadow: 0 60px 140px -40px rgba(91, 91, 247, 0.4), 0 30px 70px -35px rgba(0, 0, 0, 0.9);
+      }
+      .lp-frame-inner {
+        border-radius: 17px;
+        overflow: hidden;
+        border: 1px solid rgba(148, 150, 255, 0.12);
+        background: #12122b;
+      }
+
+      /* Floating pill navbar */
+      .lp-nav {
+        border-radius: 18px;
+        border: 1px solid rgba(148, 150, 255, 0.12);
+        background: rgba(12, 12, 28, 0.72);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        box-shadow: 0 16px 48px -24px rgba(0, 0, 0, 0.7);
+      }
+
+      /* Scroll reveal (transition-based, for headers/blocks) */
+      .lp-reveal {
+        opacity: 0;
+        transform: translateY(28px);
+        transition: opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1), transform 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+        will-change: opacity, transform;
+      }
+      .lp-reveal.lp-in { opacity: 1; transform: none; }
+
+      /* Staggered card entrance (animation-based so hover transforms stay instant) */
+      .lp-card-hidden { opacity: 0; }
+      .lp-card-in { animation: lpCardIn 0.7s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+      @keyframes lpCardIn {
+        from { opacity: 0; transform: translateY(32px); }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .lp-reveal { transition: none; transform: none; opacity: 1; }
+        .lp-card-in { animation: none; }
+        .lp-card-hidden { opacity: 1; }
+        .lp-card:hover { transform: none; }
+      }
+    `}</style>
+  );
+}
+
+/** Reveals children with a smooth rise once scrolled into view */
+function Reveal({ children, delay = 0, className = '' }: { children: ReactNode; delay?: number; className?: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [inView, setInView] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setInView(true);
+          observer.disconnect();
+        }
+      },
+      { threshold: 0.15 },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      className={`lp-reveal ${inView ? 'lp-in' : ''} ${className}`}
+      style={delay ? { transitionDelay: `${delay}s` } : undefined}
+    >
+      {children}
+    </div>
+  );
+}
+
 /* ─── Section Components ─── */
 
 function Navbar() {
   const { t, i18n } = useTranslation();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const changeLanguage = (lang: string) => {
+    i18n.changeLanguage(lang);
+    localStorage.setItem('voxium_language', lang);
+  };
+
+  const languageOptions = SUPPORTED_LANGUAGES.map((lang) => (
+    <option key={lang.code} value={lang.code} className="bg-vox-bg-primary text-vox-text-primary">
+      {lang.nativeName}
+    </option>
+  ));
 
   return (
-    <nav className="fixed top-0 left-0 right-0 z-50 bg-vox-bg-primary/80 backdrop-blur-md border-b border-vox-border">
-      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-        <a href="#hero" className="flex items-center gap-2.5">
-          <img src="/logo.svg" alt="Voxium" className="h-9 w-9 rounded-lg" />
-          <span className="text-xl font-bold text-vox-text-primary">Voxium</span>
+    <nav className="fixed top-3 sm:top-4 left-0 right-0 z-50 px-3 sm:px-6">
+      <div className="lp-nav max-w-7xl mx-auto h-14 px-4 sm:px-5 flex items-center justify-between">
+        <a href="#hero" className="flex items-center gap-2.5" onClick={() => setMenuOpen(false)}>
+          <img src="/logo.svg" alt="Voxium" className="h-8 w-8 rounded-lg" />
+          <span className="text-lg font-bold tracking-tight text-vox-text-primary">Voxium</span>
         </a>
-        <div className="flex items-center gap-3">
+
+        {/* Desktop controls */}
+        <div className="hidden sm:flex items-center gap-3">
           <select
             value={i18n.language}
-            onChange={(e) => { i18n.changeLanguage(e.target.value); localStorage.setItem('voxium_language', e.target.value); }}
-            className="bg-transparent border border-vox-border rounded-md px-2 py-1 text-xs text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary cursor-pointer"
+            onChange={(e) => changeLanguage(e.target.value)}
+            className="bg-transparent border border-white/10 rounded-full px-2.5 py-1 text-xs text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary cursor-pointer"
           >
-            {SUPPORTED_LANGUAGES.map((lang) => (
-              <option key={lang.code} value={lang.code} className="bg-vox-bg-primary text-vox-text-primary">
-                {lang.nativeName}
-              </option>
-            ))}
+            {languageOptions}
           </select>
-          <Link to="/login" className="btn-ghost text-sm">
+          <Link to="/login" className="btn-ghost text-sm rounded-full">
             {t('landing.nav.signIn')}
           </Link>
-          <Link to="/register" className="btn-primary text-sm">
+          <Link to="/register" className="btn-primary text-sm rounded-full px-4 whitespace-nowrap">
             {t('landing.nav.getStarted')} <ArrowRight className="ml-1 h-4 w-4" />
           </Link>
         </div>
+
+        {/* Mobile burger toggle */}
+        <button
+          type="button"
+          className="sm:hidden flex items-center justify-center h-9 w-9 rounded-full border border-white/10 text-vox-text-primary hover:bg-white/[0.06] transition-colors"
+          aria-label="Menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((o) => !o)}
+        >
+          {menuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+        </button>
       </div>
+
+      {/* Mobile menu panel */}
+      {menuOpen && (
+        <div className="lp-nav sm:hidden max-w-7xl mx-auto mt-2 p-3 flex flex-col gap-2 animate-fade-in">
+          <select
+            value={i18n.language}
+            onChange={(e) => changeLanguage(e.target.value)}
+            className="w-full bg-transparent border border-white/10 rounded-xl px-3 py-2.5 text-sm text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary cursor-pointer"
+          >
+            {languageOptions}
+          </select>
+          <Link
+            to="/login"
+            className="btn-ghost text-sm rounded-xl w-full py-2.5"
+            onClick={() => setMenuOpen(false)}
+          >
+            {t('landing.nav.signIn')}
+          </Link>
+          <Link
+            to="/register"
+            className="btn-primary text-sm rounded-xl w-full py-2.5"
+            onClick={() => setMenuOpen(false)}
+          >
+            {t('landing.nav.getStarted')} <ArrowRight className="ml-1 h-4 w-4" />
+          </Link>
+        </div>
+      )}
     </nav>
   );
 }
@@ -244,43 +413,60 @@ function Hero() {
   return (
     <section
       id="hero"
-      className="relative min-h-screen flex items-center justify-center pt-16 overflow-hidden"
+      className="relative min-h-screen flex items-center justify-center overflow-hidden"
     >
-      {/* Background: solid fallback + WebGL sound waves (lower half) */}
-      <div className="absolute inset-0 bg-vox-bg-primary" />
+      {/* Background: solid fallback + WebGL sound waves */}
+      <div className="absolute inset-0 bg-[#0b0b1a]" />
       <SoundWaveCanvas className="absolute inset-0 w-full h-full" />
+      {/* Blend the hero into the page canvas below */}
+      <div className="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-b from-transparent to-[#0b0b1a]" />
 
-      <div className="relative z-10 max-w-7xl mx-auto px-6 py-24 flex flex-col lg:flex-row items-center gap-16">
-        {/* Text content */}
-        <div className="flex-1 text-center lg:text-left">
-          <div className="flex items-center justify-center lg:justify-start gap-4 mb-8 animate-fade-in">
-            <img src="/logo.svg" alt="" className="h-16 w-16 sm:h-20 sm:w-20 rounded-2xl" />
+      <div className="relative z-10 w-full max-w-7xl mx-auto px-6 lg:px-10 pt-32 pb-20">
+        <div className="grid grid-cols-1 lg:grid-cols-2 items-center gap-14 xl:gap-20">
+        {/* Copy column — left-aligned; the width belongs to the content now */}
+        <div className="max-w-xl">
+          <div className="inline-flex items-center gap-2 rounded-full border border-[#8d8df2]/25 bg-[#5b5bf7]/10 px-3.5 py-1.5 text-[13px] font-medium text-[#b9b8f5] animate-fade-in">
+            <Code2 className="h-3.5 w-3.5" />
+            {t('landing.highlights.sourceAvailable')}
           </div>
-          <h1 className="text-4xl sm:text-5xl md:text-7xl font-extrabold text-vox-text-primary leading-tight animate-fade-in">
+          <h1 className="mt-6 text-4xl sm:text-5xl xl:text-[62px] font-bold tracking-tight text-vox-text-primary leading-[1.06] animate-fade-in">
             {t('landing.hero.headlinePart1')}{' '}
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#5B21B6] to-[#3B82F6]">
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#8f7bff] via-[#5b5bf7] to-[#4a8df7]">
               {t('landing.hero.headlinePart2')}
             </span>
           </h1>
           <p
-            className="mt-6 text-lg sm:text-xl max-w-xl mx-auto lg:mx-0 animate-slide-up"
+            className="mt-6 text-lg sm:text-xl text-vox-text-secondary animate-slide-up"
             style={{ animationDelay: '0.1s', animationFillMode: 'backwards' }}
           >
             {t('landing.hero.subtitle')}
           </p>
 
+          {/* Primary action */}
+          <div
+            className="mt-8 flex flex-wrap items-center gap-3 animate-slide-up"
+            style={{ animationDelay: '0.15s', animationFillMode: 'backwards' }}
+          >
+            <Link
+              to="/register"
+              className="btn-primary rounded-full px-7 py-3 text-base hover:scale-[1.03] active:scale-[0.98] transition-all duration-200"
+            >
+              {t('landing.nav.getStarted')} <ArrowRight className="ml-1.5 h-4 w-4" />
+            </Link>
+          </div>
+
           {/* Download buttons */}
           <div
-            className="mt-8 flex flex-wrap gap-4 justify-center lg:justify-start animate-slide-up"
+            className="mt-4 flex flex-wrap gap-2.5 animate-slide-up"
             style={{ animationDelay: '0.2s', animationFillMode: 'backwards' }}
           >
             <a
               href={DOWNLOAD_URLS.windows}
               target="_blank"
               rel="noopener noreferrer"
-              className="group relative btn bg-vox-bg-tertiary/80 text-vox-text-primary border border-white/5 hover:border-[#0078D4]/50 hover:bg-[#0078D4]/15 hover:shadow-[0_0_20px_rgba(0,120,212,0.2)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
+              className="group relative btn rounded-full bg-white/[0.05] backdrop-blur-sm text-vox-text-primary border border-white/10 hover:border-[#0078D4]/50 hover:bg-[#0078D4]/15 hover:shadow-[0_0_24px_rgba(0,120,212,0.25)] hover:scale-[1.03] active:scale-[0.98] px-4 py-2 text-sm transition-all duration-200"
             >
-              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <svg className="mr-2 h-4 w-4 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/>
               </svg>
               {t('landing.hero.downloadWindows')}
@@ -289,9 +475,9 @@ function Hero() {
               href={DOWNLOAD_URLS.macos}
               target="_blank"
               rel="noopener noreferrer"
-              className="group relative btn bg-vox-bg-tertiary/80 text-vox-text-primary border border-white/5 hover:border-[#A2AAAD]/50 hover:bg-[#A2AAAD]/15 hover:shadow-[0_0_20px_rgba(162,170,173,0.15)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
+              className="group relative btn rounded-full bg-white/[0.05] backdrop-blur-sm text-vox-text-primary border border-white/10 hover:border-[#A2AAAD]/50 hover:bg-[#A2AAAD]/15 hover:shadow-[0_0_24px_rgba(162,170,173,0.2)] hover:scale-[1.03] active:scale-[0.98] px-4 py-2 text-sm transition-all duration-200"
             >
-              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <svg className="mr-2 h-4 w-4 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
               </svg>
               {t('landing.hero.downloadMac')}
@@ -300,193 +486,37 @@ function Hero() {
               href={DOWNLOAD_URLS.linux}
               target="_blank"
               rel="noopener noreferrer"
-              className="group relative btn bg-vox-bg-tertiary/80 text-vox-text-primary border border-white/5 hover:border-[#E95420]/50 hover:bg-[#E95420]/15 hover:shadow-[0_0_20px_rgba(233,84,32,0.15)] hover:scale-[1.03] active:scale-[0.98] px-5 py-3 text-base transition-all duration-200"
+              className="group relative btn rounded-full bg-white/[0.05] backdrop-blur-sm text-vox-text-primary border border-white/10 hover:border-[#E95420]/50 hover:bg-[#E95420]/15 hover:shadow-[0_0_24px_rgba(233,84,32,0.2)] hover:scale-[1.03] active:scale-[0.98] px-4 py-2 text-sm transition-all duration-200"
             >
-              <svg className="mr-2 h-5 w-5 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <svg className="mr-2 h-4 w-4 transition-transform duration-200 group-hover:-translate-y-0.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M17.61.455a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zM12.92.8C8.923.777 5.137 2.941 3.148 6.451a4.5 4.5 0 0 1 .26-.007 4.92 4.92 0 0 1 2.585.737A8.316 8.316 0 0 1 12.688 3.6 4.944 4.944 0 0 1 13.723.834 11.008 11.008 0 0 0 12.92.8zm9.226 4.994a4.915 4.915 0 0 1-1.918 2.246 8.36 8.36 0 0 1-.273 8.303 4.89 4.89 0 0 1 1.632 2.54 11.156 11.156 0 0 0 .559-13.089zM3.41 7.932A3.41 3.41 0 0 0 0 11.342a3.41 3.41 0 0 0 3.41 3.409 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zm2.027 7.866a4.908 4.908 0 0 1-2.915.358 11.1 11.1 0 0 0 7.991 6.698 11.234 11.234 0 0 0 2.422.249 4.879 4.879 0 0 1-.999-2.85 8.484 8.484 0 0 1-.836-.136 8.304 8.304 0 0 1-5.663-4.32zm11.405.928a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41z"/>
               </svg>
               {t('landing.hero.downloadLinux')}
             </a>
           </div>
 
-          <p
-            className="mt-4 text-sm text-vox-text-muted animate-slide-up"
-            style={{ animationDelay: '0.3s', animationFillMode: 'backwards' }}
-          >
-            {t('landing.hero.orLaunch')}{' '}
-            <Link to="/register" className="text-vox-accent-primary hover:underline">
-              {t('landing.hero.launchBrowser')}
-            </Link>
-          </p>
-
-		  {/* Waveform decoration */}
+          {/* Trust row */}
           <div
-            className="mt-6 flex justify-center lg:justify-start animate-slide-up"
-            style={{ animationDelay: '0.15s', animationFillMode: 'backwards' }}
+            className="mt-8 flex flex-wrap gap-x-5 gap-y-2 animate-slide-up"
+            style={{ animationDelay: '0.25s', animationFillMode: 'backwards' }}
           >
-            <WaveformSvg className="h-10 w-48 opacity-50" />
+            {[t('landing.highlights.noAds'), t('landing.highlights.selfHostable'), t('landing.highlights.freeForIndividuals')].map((h) => (
+              <span key={h} className="flex items-center gap-1.5 text-sm text-vox-text-muted">
+                <CheckCircle2 className="h-4 w-4 text-vox-accent-success shrink-0" />
+                {h}
+              </span>
+            ))}
           </div>
-
         </div>
 
-        {/* Animated Mock UI panel */}
+        {/* Animated Mock UI panel — the product window anchors the right column
+            and bleeds toward the viewport edge, Arc-style (the section clips it) */}
         <div
-          className="hidden md:block flex-1 max-w-md w-full animate-slide-up"
+          className="hidden md:block w-full animate-slide-up lg:scale-[1.06] lg:translate-x-6 xl:translate-x-10 origin-left"
           style={{ animationDelay: '0.3s', animationFillMode: 'backwards' }}
         >
-          <style>{`
-            @keyframes mockMsgIn {
-              0% { opacity: 0; transform: translateY(12px); }
-              100% { opacity: 1; transform: translateY(0); }
-            }
-            @keyframes mockReactionPop {
-              0% { transform: scale(0); opacity: 0; }
-              60% { transform: scale(1.3); }
-              100% { transform: scale(1); opacity: 1; }
-            }
-            @keyframes mockTypingDot {
-              0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
-              30% { opacity: 1; transform: translateY(-3px); }
-            }
-            @keyframes mockCursorBlink {
-              0%, 100% { opacity: 1; }
-              50% { opacity: 0; }
-            }
-            @keyframes mockSpeakRing {
-              0%, 100% { box-shadow: 0 0 0 0 rgba(62,186,104,0.5); }
-              50% { box-shadow: 0 0 0 3px rgba(62,186,104,0); }
-            }
-            @keyframes mockOnlinePulse {
-              0%, 100% { transform: scale(1); }
-              50% { transform: scale(1.3); }
-            }
-            @keyframes mockChannelGlow {
-              0%, 100% { background: #253356; }
-              50% { background: #2a3a60; }
-            }
-            .mock-msg-1 { animation: mockMsgIn 0.4s ease-out 0.8s backwards; }
-            .mock-msg-2 { animation: mockMsgIn 0.4s ease-out 1.8s backwards; }
-            .mock-msg-3 { animation: mockMsgIn 0.4s ease-out 4s backwards; }
-            .mock-reaction { animation: mockReactionPop 0.3s ease-out 3s backwards; }
-            .mock-typing-dot { animation: mockTypingDot 1.2s ease-in-out infinite; }
-            .mock-cursor { animation: mockCursorBlink 1s step-end infinite; }
-            .mock-speak-ring { animation: mockSpeakRing 1.5s ease-in-out infinite; }
-            .mock-speak-ring-d { animation: mockSpeakRing 1.5s ease-in-out 0.5s infinite; }
-            .mock-online { animation: mockOnlinePulse 2s ease-in-out infinite; }
-            .mock-online-d { animation: mockOnlinePulse 2s ease-in-out 1s infinite; }
-            .mock-ch-active { animation: mockChannelGlow 3s ease-in-out infinite; }
-          `}</style>
-          <div className="rounded-xl border border-vox-border bg-vox-bg-primary shadow-2xl overflow-hidden">
-            {/* Title bar */}
-            <div className="flex items-center gap-2 px-4 py-3 bg-vox-bg-secondary border-b border-vox-border">
-              <div className="h-3 w-3 rounded-full bg-vox-accent-danger" />
-              <div className="h-3 w-3 rounded-full bg-vox-accent-warning" />
-              <div className="h-3 w-3 rounded-full bg-vox-accent-success" />
-              <img src="/logo_static.svg" alt="" className="ml-2 h-4 w-4 rounded-sm" />
-              <span className="text-xs text-vox-text-muted">Voxium</span>
-            </div>
-            {/* Fake layout */}
-            <div className="flex" style={{ height: 296 }}>
-              {/* Server sidebar */}
-              <div className="w-14 bg-vox-sidebar border-r border-vox-border flex flex-col items-center py-3 gap-2">
-                <img src="/logo_static.svg" alt="" className="h-10 w-10 rounded-2xl" />
-                <div className="h-[1px] w-8 bg-vox-border" />
-                <div className="h-10 w-10 rounded-2xl bg-vox-bg-tertiary" />
-                <div className="h-10 w-10 rounded-2xl bg-vox-bg-tertiary" />
-              </div>
-              {/* Channels */}
-              <div className="w-36 bg-vox-channel border-r border-vox-border p-3 flex flex-col">
-                <div className="text-[10px] font-semibold text-vox-text-muted uppercase tracking-wide mb-1.5">Text</div>
-                <div className="space-y-0.5">
-                  <div className="text-xs text-vox-text-primary rounded px-2 py-1 mock-ch-active"># general</div>
-                  <div className="text-xs text-vox-text-secondary px-2 py-1"># music</div>
-                  <div className="text-xs text-vox-text-secondary px-2 py-1"># dev</div>
-                </div>
-                <div className="text-[10px] font-semibold text-vox-text-muted uppercase tracking-wide mt-3 mb-1.5">Voice</div>
-                <div className="space-y-0.5">
-                  <div className="text-xs text-vox-text-secondary px-2 py-1">Lounge</div>
-                  {/* Voice users */}
-                  <div className="flex items-center gap-1.5 px-3 py-0.5">
-                    <div className="h-4 w-4 rounded-full bg-vox-accent-success shrink-0 mock-speak-ring" />
-                    <span className="text-[10px] text-vox-accent-success">Alice</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 px-3 py-0.5">
-                    <div className="h-4 w-4 rounded-full bg-vox-accent-primary shrink-0 mock-speak-ring-d" />
-                    <span className="text-[10px] text-vox-text-secondary">Bob</span>
-                  </div>
-                </div>
-              </div>
-              {/* Chat area */}
-              <div className="flex-1 bg-vox-chat flex flex-col">
-                {/* Messages */}
-                <div className="flex-1 p-3 flex flex-col justify-end gap-2.5 overflow-hidden">
-                  {/* Alice's message */}
-                  <div className="mock-msg-1">
-                    <div className="flex items-start gap-2">
-                      <div className="relative shrink-0">
-                        <div className="h-6 w-6 rounded-full bg-vox-accent-success" />
-                        <div className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-vox-accent-success border-2 border-vox-chat mock-online" />
-                      </div>
-                      <div>
-                        <span className="text-[10px] font-semibold text-vox-accent-success">Alice</span>
-                        <span className="text-[9px] text-vox-text-muted ml-1.5">12:01</span>
-                        <p className="text-xs text-vox-text-primary leading-snug">Hey, welcome to Voxium!</p>
-                        {/* Reaction */}
-                        <div className="mock-reaction mt-1 inline-flex items-center gap-0.5 rounded-full bg-vox-bg-tertiary/60 border border-vox-border px-1.5 py-0.5">
-                          <span className="text-[10px]">👋</span>
-                          <span className="text-[9px] text-vox-text-muted">2</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  {/* Bob's message */}
-                  <div className="mock-msg-2">
-                    <div className="flex items-start gap-2">
-                      <div className="relative shrink-0">
-                        <div className="h-6 w-6 rounded-full bg-vox-accent-primary" />
-                        <div className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-vox-accent-success border-2 border-vox-chat mock-online-d" />
-                      </div>
-                      <div>
-                        <span className="text-[10px] font-semibold text-vox-accent-primary">Bob</span>
-                        <span className="text-[9px] text-vox-text-muted ml-1.5">12:02</span>
-                        <p className="text-xs text-vox-text-primary leading-snug">Voice quality is insane 🔥</p>
-                      </div>
-                    </div>
-                  </div>
-                  {/* Charlie's message */}
-                  <div className="mock-msg-3">
-                    <div className="flex items-start gap-2">
-                      <div className="relative shrink-0">
-                        <div className="h-6 w-6 rounded-full bg-vox-accent-warning" />
-                        <div className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-vox-accent-success border-2 border-vox-chat mock-online" />
-                      </div>
-                      <div>
-                        <span className="text-[10px] font-semibold text-vox-accent-warning">Charlie</span>
-                        <span className="text-[9px] text-vox-text-muted ml-1.5">12:03</span>
-                        <p className="text-xs text-vox-text-primary leading-snug">Noise suppression is magic 🚀</p>
-                      </div>
-                    </div>
-                  </div>
-                  {/* Typing indicator */}
-                  <div className="flex items-center gap-1.5 px-1 h-4">
-                    <div className="flex gap-0.5">
-                      <div className="h-1.5 w-1.5 rounded-full bg-vox-text-muted mock-typing-dot" />
-                      <div className="h-1.5 w-1.5 rounded-full bg-vox-text-muted mock-typing-dot" style={{ animationDelay: '0.15s' }} />
-                      <div className="h-1.5 w-1.5 rounded-full bg-vox-text-muted mock-typing-dot" style={{ animationDelay: '0.3s' }} />
-                    </div>
-                    <span className="text-[9px] text-vox-text-muted">Alice is typing...</span>
-                  </div>
-                </div>
-                {/* Message input */}
-                <div className="px-3 pb-2.5">
-                  <div className="flex items-center rounded-md bg-vox-bg-floating border border-vox-border px-2.5 py-1.5">
-                    <span className="text-[10px] text-vox-text-muted">Message #general</span>
-                    <div className="ml-0.5 w-[1px] h-3 bg-vox-text-muted mock-cursor" />
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <HeroAppMock />
+        </div>
         </div>
       </div>
     </section>
@@ -571,47 +601,33 @@ function StatsSection() {
   const messagesCount = useCountUp(visible && stats ? stats.messages : 0);
 
   const cards = [
-    { icon: Users, label: t('landing.stats.users'), value: usersCount, gradient: 'from-[#5B21B6] to-[#7C3AED]' },
-    { icon: Server, label: t('landing.stats.servers'), value: serversCount, gradient: 'from-[#3B82F6] to-[#60A5FA]' },
-    { icon: MessageSquare, label: t('landing.stats.messages'), value: messagesCount, gradient: 'from-[#5b5bf7] to-[#A78BFA]' },
+    { icon: Users, label: t('landing.stats.users'), value: usersCount },
+    { icon: Server, label: t('landing.stats.servers'), value: serversCount },
+    { icon: MessageSquare, label: t('landing.stats.messages'), value: messagesCount },
   ];
 
   return (
-    <section ref={sectionRef} className="relative bg-vox-bg-primary py-20 overflow-hidden">
-      {/* Subtle gradient backdrop */}
-      <div
-        className="absolute inset-0 opacity-10"
-        style={{ background: 'radial-gradient(ellipse at center, #5b5bf7 0%, transparent 70%)' }}
-      />
+    <section ref={sectionRef} className="relative border-y border-white/[0.06] bg-white/[0.015]">
+      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-[minmax(280px,1fr)_2fr] items-center gap-10 px-6 lg:px-10 py-12">
+        <div>
+          <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight text-vox-text-primary">
+            {t('landing.stats.title')}
+          </h2>
+          <p className="mt-2 text-sm text-vox-text-secondary max-w-xs">
+            {t('landing.stats.subtitle')}
+          </p>
+        </div>
 
-      <div className="relative z-10 max-w-5xl mx-auto px-6">
-        <h2 className="text-2xl sm:text-3xl font-bold text-vox-text-primary text-center mb-3">
-          {t('landing.stats.title')}
-        </h2>
-        <p className="text-vox-text-secondary text-center mb-12 max-w-lg mx-auto text-sm">
-          {t('landing.stats.subtitle')}
-        </p>
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.06]">
           {cards.map((card) => (
-            <div
-              key={card.label}
-              className="group relative rounded-xl border border-vox-border bg-vox-bg-secondary p-6 text-center hover:border-vox-accent-primary/40 transition-all duration-300"
-            >
-              {/* Icon */}
-              <div className={`h-12 w-12 rounded-lg bg-gradient-to-br ${card.gradient} bg-opacity-20 flex items-center justify-center mx-auto mb-4`}
-                style={{ background: `linear-gradient(135deg, ${card.gradient.includes('5B21B6') ? 'rgba(91,33,182,0.15)' : card.gradient.includes('3B82F6') ? 'rgba(59,130,246,0.15)' : 'rgba(91,91,247,0.15)'}, ${card.gradient.includes('7C3AED') ? 'rgba(124,58,237,0.15)' : card.gradient.includes('60A5FA') ? 'rgba(96,165,250,0.15)' : 'rgba(167,139,250,0.15)'})` }}
-              >
-                <card.icon className="h-6 w-6 text-vox-accent-primary" />
-              </div>
-
-              {/* Number */}
-              <div className="text-3xl sm:text-4xl font-extrabold text-vox-text-primary mb-1 tabular-nums">
+            <div key={card.label} className="px-0 py-5 sm:px-8 sm:py-2 first:sm:pl-0">
+              <div className="text-3xl sm:text-4xl font-bold tracking-tight text-vox-text-primary mb-1.5 tabular-nums">
                 {stats ? formatNumber(card.value) : '—'}
               </div>
-
-              {/* Label */}
-              <div className="text-sm text-vox-text-secondary">{card.label}</div>
+              <div className="flex items-center gap-1.5 text-sm text-vox-text-secondary">
+                <card.icon className="h-4 w-4 text-[#8f8aff]" />
+                {card.label}
+              </div>
             </div>
           ))}
         </div>
@@ -670,41 +686,50 @@ function Features() {
     };
   }, [currentLang]);
 
+  // Bento spans: rows of 4+2 / 2+2+2 / 3+3 on lg, pairs on md
+  const spans = [
+    'md:col-span-2 lg:col-span-4',
+    'lg:col-span-2',
+    'lg:col-span-2',
+    'lg:col-span-2',
+    'lg:col-span-2',
+    'lg:col-span-3',
+    'md:col-span-2 lg:col-span-3',
+  ];
+
   return (
-    <section className="relative bg-vox-bg-secondary py-24">
+    <section className="relative">
       {/* Particle separator at top */}
       <ParticlesSvg className="absolute top-0 left-0 w-full h-16" />
+      <div ref={sectionRef} className="max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
+        <Reveal>
+          <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary mb-4">
+            {t('landing.features.title')}
+          </h2>
+          <p className="text-vox-text-secondary mb-14 max-w-2xl">
+            {t('landing.features.subtitle')}
+          </p>
+        </Reveal>
 
-      <div ref={sectionRef} className="max-w-7xl mx-auto px-6">
-        <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary text-center mb-4">
-          {t('landing.features.title')}
-        </h2>
-        <p className="text-vox-text-secondary text-center mb-16 max-w-2xl mx-auto">
-          {t('landing.features.subtitle')}
-        </p>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4">
           {features.map((f, i) => (
             <div
               key={i}
               data-feature-card={i}
-              className={`group rounded-xl border border-vox-border bg-vox-bg-primary p-6
-                hover:border-vox-accent-primary/60 hover:-translate-y-2 hover:shadow-xl hover:shadow-vox-accent-primary/10
-                transition-all duration-300 cursor-default
-                ${i === features.length - 1 ? 'md:col-start-1 md:col-end-3 md:max-w-[calc(50%-12px)] md:justify-self-center lg:col-start-2 lg:col-end-3 lg:max-w-none' : ''}`}
-              style={{
-                opacity: visibleCards.has(i) ? 1 : 0,
-                transform: visibleCards.has(i) ? undefined : 'translateY(32px)',
-                transition: `opacity 0.5s ease-out ${i * 0.1}s, transform 0.5s ease-out ${i * 0.1}s, border-color 0.3s, box-shadow 0.3s`,
-              }}
+              className={`group lp-card p-6 cursor-default overflow-hidden ${spans[i]}
+                ${visibleCards.has(i) ? 'lp-card-in' : 'lp-card-hidden'}`}
+              style={{ animationDelay: `${i * 0.08}s` }}
             >
-              <div className="h-12 w-12 rounded-lg bg-gradient-to-br from-[#5B21B6]/20 to-[#3B82F6]/20 flex items-center justify-center mb-4 group-hover:from-[#5B21B6]/40 group-hover:to-[#3B82F6]/40 group-hover:scale-110 transition-all duration-300">
+              {i === 0 && (
+                <WaveformSvg className="absolute right-8 top-1/2 -translate-y-1/2 h-16 w-64 opacity-20 hidden lg:block" />
+              )}
+              <div className="relative h-12 w-12 rounded-xl bg-gradient-to-br from-[#5b5bf7]/15 to-[#4a8df7]/15 border border-white/[0.06] flex items-center justify-center mb-4 group-hover:from-[#5b5bf7]/30 group-hover:to-[#4a8df7]/30 group-hover:scale-110 transition-all duration-300">
                 <f.icon className="h-6 w-6 text-vox-accent-primary group-hover:scale-110 transition-transform duration-300" />
               </div>
-              <h3 className="text-lg font-semibold text-vox-text-primary mb-2 group-hover:text-vox-accent-primary transition-colors duration-300">
+              <h3 className="relative text-lg font-semibold text-vox-text-primary mb-2 group-hover:text-vox-accent-primary transition-colors duration-300">
                 {f.title}
               </h3>
-              <p className="text-sm text-vox-text-secondary leading-relaxed">
+              <p className="relative text-sm text-vox-text-secondary leading-relaxed">
                 {f.description}
               </p>
             </div>
@@ -764,13 +789,17 @@ function ThemeSwitcherCard() {
           <div className="h-2 w-2 rounded-full bg-green-400/70" />
           <span className="ml-1.5 text-[9px] font-medium" style={{ color: t.muted, transition: 'color 0.4s ease' }}>Voxium</span>
         </div>
-        <div className="flex flex-1 min-h-0">
-          {/* Mini sidebar */}
-          <div className="w-10 flex flex-col items-center py-2 gap-1.5" style={{ background: t.sidebar, borderRight: `1px solid ${t.border}`, transition: 'all 0.4s ease' }}>
-            <div className="h-6 w-6 rounded-lg" style={{ background: t.accent, opacity: 0.8, transition: 'background 0.4s ease' }} />
-            <div className="h-[1px] w-5" style={{ background: t.border, transition: 'background 0.4s ease' }} />
-            <div className="h-6 w-6 rounded-lg" style={{ background: t.border, transition: 'background 0.4s ease' }} />
+        {/* Mini spaces strip — tabs along the top, like the real shell */}
+        <div className="flex items-center gap-1 px-2 py-1" style={{ background: t.bg, borderBottom: `1px solid ${t.border}`, transition: 'all 0.4s ease' }}>
+          <div className="h-3.5 w-3.5 rounded-md shrink-0" style={{ background: t.accent, opacity: 0.8, transition: 'background 0.4s ease' }} />
+          <div className="h-3 w-px shrink-0" style={{ background: t.border, transition: 'background 0.4s ease' }} />
+          <div className="flex items-center gap-1 rounded-md px-1 py-0.5" style={{ background: t.chat, border: `1px solid ${t.border}`, transition: 'all 0.4s ease' }}>
+            <div className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ background: t.accent, transition: 'background 0.4s ease' }} />
+            <span className="text-[8px] font-semibold whitespace-nowrap" style={{ color: t.text, transition: 'color 0.4s ease' }}>Voxium HQ</span>
           </div>
+          <div className="h-3.5 w-3.5 rounded-md shrink-0" style={{ background: t.border, transition: 'background 0.4s ease' }} />
+        </div>
+        <div className="flex flex-1 min-h-0">
           {/* Chat */}
           <div className="flex-1 flex flex-col p-2.5 gap-2 justify-end" style={{ background: t.chat, transition: 'background 0.4s ease' }}>
             {['Alice', 'Bob', 'You'].map((name, i) => (
@@ -1041,48 +1070,36 @@ function Showcase() {
   }, []);
 
   return (
-    <section ref={sectionRef} className="relative bg-vox-bg-primary py-24 overflow-hidden">
+    <section ref={sectionRef} className="lp-section">
       {/* Subtle radial backdrop */}
       <div
         className="absolute inset-0 opacity-8"
         style={{ background: 'radial-gradient(ellipse at 30% 50%, #5b5bf720 0%, transparent 60%), radial-gradient(ellipse at 70% 50%, #3B82F615 0%, transparent 60%)' }}
       />
+      <div className="max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
+        <div className="relative z-10">
+          {/* Section header */}
+          <div className={`mb-14 lp-reveal ${visible ? 'lp-in' : ''}`}>
+            <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary mb-4">
+              {t('landing.showcase.title')} <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#8f7bff] via-[#5b5bf7] to-[#4a8df7]">{t('landing.showcase.titleHighlight')}</span>
+            </h2>
+            <p className="text-vox-text-secondary max-w-xl">
+              {t('landing.showcase.subtitle')}
+            </p>
+          </div>
 
-      <div className="relative z-10 max-w-7xl mx-auto px-6">
-        {/* Section header */}
-        <div
-          className="text-center mb-16"
-          style={{
-            opacity: visible ? 1 : 0,
-            transform: visible ? 'translateY(0)' : 'translateY(24px)',
-            transition: 'opacity 0.6s ease-out, transform 0.6s ease-out',
-          }}
-        >
-          <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary mb-4">
-            {t('landing.showcase.title')} <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#5B21B6] to-[#3B82F6]">{t('landing.showcase.titleHighlight')}</span>
-          </h2>
-          <p className="text-vox-text-secondary max-w-xl mx-auto">
-            {t('landing.showcase.subtitle')}
-          </p>
-        </div>
-
-        {/* Three showcase cards */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {[ThemeSwitcherCard, LanguageCarousel, PermissionVisualizer].map((Component, i) => (
-            <div
-              key={i}
-              className="rounded-xl border border-vox-border bg-vox-bg-secondary p-5 min-h-[380px]
-                         hover:border-vox-accent-primary/40 hover:shadow-xl hover:shadow-vox-accent-primary/5
-                         transition-all duration-500"
-              style={{
-                opacity: visible ? 1 : 0,
-                transform: visible ? 'translateY(0)' : 'translateY(40px)',
-                transition: `opacity 0.6s ease-out ${0.15 + i * 0.15}s, transform 0.6s ease-out ${0.15 + i * 0.15}s, border-color 0.3s, box-shadow 0.3s`,
-              }}
-            >
-              <Component />
-            </div>
-          ))}
+          {/* Three showcase cards */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {[ThemeSwitcherCard, LanguageCarousel, PermissionVisualizer].map((Component, i) => (
+              <div
+                key={i}
+                className={`lp-card lp-card--static p-5 min-h-[380px] ${visible ? 'lp-card-in' : 'lp-card-hidden'}`}
+                style={{ animationDelay: `${0.15 + i * 0.12}s` }}
+              >
+                <Component />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </section>
@@ -1103,7 +1120,7 @@ function ComparisonTable() {
   const { t } = useTranslation();
 
   const comparisonData: { feature: string; voxium: CellValue; discord: CellValue; teamspeak: CellValue; matrix: CellValue }[] = [
-    { feature: t('landing.comparison.openSource'),        voxium: true,                discord: false,          teamspeak: false,          matrix: true },
+    { feature: t('landing.comparison.sourceAvailable'),   voxium: true,                discord: false,          teamspeak: false,          matrix: true },
     { feature: t('landing.comparison.selfHostable'),      voxium: true,                discord: false,          teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.freeVoiceChat'),     voxium: true,                discord: true,           teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.sfuVoice'),          voxium: true,                discord: true,           teamspeak: true,           matrix: t('landing.comparison.viaJitsi') },
@@ -1117,49 +1134,54 @@ function ComparisonTable() {
     { feature: t('landing.comparison.noAdsTracking'),     voxium: true,                discord: false,          teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.desktopApp'),        voxium: true,                discord: true,           teamspeak: true,           matrix: true },
     { feature: t('landing.comparison.lightweightClient'), voxium: 'Tauri (~10MB)',      discord: 'Electron',     teamspeak: 'Native',       matrix: 'Electron' },
-    { feature: t('landing.comparison.encryption'),        voxium: 'TLS + Planned E2E', discord: 'TLS',          teamspeak: 'AES',          matrix: 'E2E (Olm)' },
+    { feature: t('landing.comparison.encryption'),        voxium: 'E2E (Olm/Megolm)',  discord: 'TLS',          teamspeak: 'AES',          matrix: 'E2E (Olm)' },
+    { feature: t('landing.comparison.encryptedChannels'), voxium: true,                discord: false,          teamspeak: false,          matrix: true },
     { feature: t('landing.comparison.customBots'),        voxium: t('landing.comparison.planned'), discord: true, teamspeak: 'Plugins + SDK', matrix: true },
     { feature: t('landing.comparison.mobileApp'),         voxium: t('landing.comparison.planned'), discord: true, teamspeak: true,           matrix: true },
   ];
 
   return (
-    <section className="bg-vox-bg-secondary py-24">
-      <div className="max-w-5xl mx-auto px-6">
-        <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary text-center mb-4">
-          {t('landing.comparison.title')}
-        </h2>
-        <p className="text-vox-text-secondary text-center mb-14 max-w-2xl mx-auto">
-          {t('landing.comparison.subtitle')}
-        </p>
+    <section className="lp-section">
+      <div className="max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
+        <Reveal>
+          <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary mb-4">
+            {t('landing.comparison.title')}
+          </h2>
+          <p className="text-vox-text-secondary mb-12 max-w-2xl">
+            {t('landing.comparison.subtitle')}
+          </p>
+        </Reveal>
 
-        <div className="overflow-x-auto rounded-xl border border-vox-border">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-vox-bg-tertiary">
-                <th className="text-left px-5 py-4 text-vox-text-primary font-semibold min-w-[180px]">{t('landing.comparison.feature')}</th>
-                <th className="px-5 py-4 text-center min-w-[110px]">
-                  <span className="font-bold text-vox-accent-primary">Voxium</span>
-                </th>
-                <th className="px-5 py-4 text-center text-vox-text-secondary font-medium min-w-[110px]">Discord</th>
-                <th className="px-5 py-4 text-center text-vox-text-secondary font-medium min-w-[110px]">TeamSpeak</th>
-                <th className="px-5 py-4 text-center text-vox-text-secondary font-medium min-w-[110px]">Matrix</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-vox-border">
-              {comparisonData.map((row) => (
-                <tr key={row.feature} className="hover:bg-vox-bg-hover/50 transition-colors">
-                  <td className="px-5 py-3.5 text-vox-text-primary font-medium">{row.feature}</td>
-                  <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.voxium} />}</td>
-                  <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.discord} />}</td>
-                  <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.teamspeak} />}</td>
-                  <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.matrix} />}</td>
+        <Reveal delay={0.1}>
+          <div className="overflow-x-auto rounded-2xl border border-white/[0.08] bg-[#0d0d20]/60">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-white/[0.03]">
+                  <th className="text-left px-5 py-4 text-vox-text-primary font-semibold min-w-[180px]">{t('landing.comparison.feature')}</th>
+                  <th className="px-5 py-4 text-center min-w-[110px] bg-[#5b5bf7]/[0.08]">
+                    <span className="font-bold text-vox-accent-primary">Voxium</span>
+                  </th>
+                  <th className="px-5 py-4 text-center text-vox-text-secondary font-medium min-w-[110px]">Discord</th>
+                  <th className="px-5 py-4 text-center text-vox-text-secondary font-medium min-w-[110px]">TeamSpeak</th>
+                  <th className="px-5 py-4 text-center text-vox-text-secondary font-medium min-w-[110px]">Matrix</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-white/[0.05]">
+                {comparisonData.map((row) => (
+                  <tr key={row.feature} className="hover:bg-white/[0.025] transition-colors">
+                    <td className="px-5 py-3.5 text-vox-text-primary font-medium">{row.feature}</td>
+                    <td className="px-5 py-3.5 text-center bg-[#5b5bf7]/[0.05]">{<ComparisonCell value={row.voxium} />}</td>
+                    <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.discord} />}</td>
+                    <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.teamspeak} />}</td>
+                    <td className="px-5 py-3.5 text-center">{<ComparisonCell value={row.matrix} />}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Reveal>
 
-        <p className="text-xs text-vox-text-muted text-center mt-6">
+        <p className="text-xs text-vox-text-muted mt-6">
           {t('landing.comparison.footnote')}
         </p>
       </div>
@@ -1172,25 +1194,28 @@ function WhyVoxium() {
 
   const highlights = [
     t('landing.highlights.noAds'),
-    t('landing.highlights.openSource'),
-    t('landing.highlights.freeVoice'),
+    t('landing.highlights.sourceAvailable'),
+    t('landing.highlights.e2eEncrypted'),
+    t('landing.highlights.freeForIndividuals'),
     t('landing.highlights.noiseSuppression'),
     t('landing.highlights.selfHostable'),
     t('landing.highlights.sfuVoice'),
   ];
 
   return (
-    <section className="relative bg-vox-bg-primary py-24 overflow-hidden">
-      {/* Decorative orbit rings */}
-      <OrbitRingsSvg className="absolute -right-32 top-1/2 -translate-y-1/2 w-[500px] h-[500px] opacity-40 hidden lg:block" />
+    <section className="lp-section overflow-hidden">
+      {/* Decorative orbit rings — clipped by the section bounds */}
+      <OrbitRingsSvg className="absolute -right-24 top-1/2 -translate-y-1/2 w-[500px] h-[500px] opacity-40 hidden lg:block" />
 
-      <div className="relative z-10 max-w-7xl mx-auto px-6">
-        <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary text-center mb-16">
-          {t('landing.why.title')}
-        </h2>
+      <div className="relative z-10 max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
+        <Reveal>
+          <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight text-vox-text-primary mb-14">
+            {t('landing.why.title')}
+          </h2>
+        </Reveal>
 
         {/* Value props */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-10 mb-20">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-10 mb-16">
           {[
             {
               icon: Lock,
@@ -1199,8 +1224,8 @@ function WhyVoxium() {
             },
             {
               icon: Code2,
-              title: t('landing.why.openSource'),
-              description: t('landing.why.openSourceDesc'),
+              title: t('landing.why.sourceAvailable'),
+              description: t('landing.why.sourceAvailableDesc'),
             },
             {
               icon: HeartHandshake,
@@ -1208,31 +1233,33 @@ function WhyVoxium() {
               description: t('landing.why.communityDrivenDesc'),
             },
           ].map((v) => (
-            <div key={v.title} className="text-center">
-              <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-[#5B21B6]/20 to-[#3B82F6]/20 flex items-center justify-center mx-auto mb-4">
+            <div key={v.title}>
+              <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-[#5B21B6]/20 to-[#3B82F6]/20 flex items-center justify-center mb-4">
                 <v.icon className="h-7 w-7 text-vox-accent-primary" />
               </div>
               <h3 className="text-xl font-semibold text-vox-text-primary mb-2">{v.title}</h3>
-              <p className="text-sm text-vox-text-secondary leading-relaxed max-w-xs mx-auto">{v.description}</p>
+              <p className="text-sm text-vox-text-secondary leading-relaxed">{v.description}</p>
             </div>
           ))}
         </div>
 
         {/* Privacy shield + highlights */}
-        <div className="flex flex-col md:flex-row items-center justify-center gap-12 max-w-3xl mx-auto">
-          <ShieldSvg className="w-28 h-32 shrink-0" />
-          <div>
-            <h3 className="text-xl font-semibold text-vox-text-primary mb-4">{t('landing.why.builtDifferent')}</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {highlights.map((h) => (
-                <div key={h} className="flex items-center gap-2">
-                  <CheckCircle2 className="h-5 w-5 text-vox-accent-success shrink-0" />
-                  <span className="text-sm text-vox-text-primary">{h}</span>
-                </div>
-              ))}
+        <Reveal delay={0.1}>
+          <div className="lp-card lp-card--static flex flex-col md:flex-row items-center gap-10 px-8 py-8 lg:px-12">
+            <ShieldSvg className="w-28 h-32 shrink-0" />
+            <div className="flex-1">
+              <h3 className="text-xl font-semibold text-vox-text-primary mb-4">{t('landing.why.builtDifferent')}</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {highlights.map((h) => (
+                  <div key={h} className="flex items-center gap-2">
+                    <CheckCircle2 className="h-5 w-5 text-vox-accent-success shrink-0" />
+                    <span className="text-sm text-vox-text-primary">{h}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
+        </Reveal>
       </div>
     </section>
   );
@@ -1310,109 +1337,88 @@ function CommunityFunding() {
   }, []);
 
   const cards = [
-    { icon: Code2, value: '100%', label: t('landing.funding.openSource'), color: 'from-pink-500/20 to-purple-500/20' },
+    { icon: Code2, value: '100%', label: t('landing.funding.sourceAvailable'), color: 'from-pink-500/20 to-purple-500/20' },
     { icon: Users, value: 'You', label: t('landing.funding.youDecide'), color: 'from-purple-500/20 to-blue-500/20' },
     { icon: Shield, value: 'Zero', label: t('landing.funding.zeroAds'), color: 'from-blue-500/20 to-pink-500/20' },
   ];
 
   return (
-    <section ref={sectionRef} className="relative bg-vox-bg-primary py-24 overflow-hidden">
+    <section ref={sectionRef} className="lp-section overflow-hidden">
       {/* Radial gradient backdrop */}
       <div
         className="absolute inset-0 opacity-15"
-        style={{ background: 'radial-gradient(ellipse at center, rgba(236,72,153,0.4) 0%, transparent 70%)' }}
+        style={{ background: 'radial-gradient(ellipse at 25% 40%, rgba(236,72,153,0.4) 0%, transparent 65%)' }}
       />
 
-      <div className="relative z-10 max-w-5xl mx-auto px-6">
-        {/* Header with heart illustration */}
-        <div
-          className="text-center mb-14"
-          style={{
-            opacity: visible ? 1 : 0,
-            transform: visible ? 'translateY(0)' : 'translateY(24px)',
-            transition: 'opacity 0.6s ease-out, transform 0.6s ease-out',
-          }}
-        >
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-pink-500/10 border border-pink-500/20 text-pink-400 text-sm font-medium mb-6">
-            <Heart size={14} className="animate-pulse" />
-            {t('landing.funding.badge')}
-            <Sparkles size={14} />
+      <div className="relative z-10 max-w-7xl mx-auto px-6 lg:px-10 py-20 sm:py-24">
+        <div className="grid grid-cols-1 lg:grid-cols-2 items-center gap-12 mb-14">
+          {/* Copy + CTAs */}
+          <div className={`lp-reveal ${visible ? 'lp-in' : ''}`}>
+            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-pink-500/10 border border-pink-500/20 text-pink-400 text-sm font-medium mb-6">
+              <Heart size={14} className="animate-pulse" />
+              {t('landing.funding.badge')}
+              <Sparkles size={14} />
+            </div>
+            <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary">
+              {t('landing.funding.title')}
+            </h2>
+            <p className="text-vox-text-secondary mt-3 text-lg max-w-xl">
+              {t('landing.funding.subtitle')}
+            </p>
+
+            <div className="mt-8 flex flex-wrap gap-4">
+              <a
+                href="https://github.com/sponsors/Aizen93"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="group relative btn-primary px-8 py-3 text-base inline-flex items-center gap-2
+                           hover:shadow-lg hover:shadow-pink-500/20 hover:scale-105 active:scale-[0.98] transition-all duration-200"
+              >
+                <Heart size={18} className="group-hover:animate-pulse" />
+                {t('landing.funding.sponsorGithub')}
+                <ArrowRight size={16} className="opacity-0 -ml-4 group-hover:opacity-100 group-hover:ml-0 transition-all duration-200" />
+              </a>
+              <a
+                href="https://opencollective.com/voxium"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-secondary px-8 py-3 text-base inline-flex items-center gap-2
+                           hover:scale-105 active:scale-[0.98] transition-all duration-200"
+              >
+                <HeartHandshake size={18} />
+                {t('landing.funding.openCollective')}
+              </a>
+            </div>
+            <p className="mt-5 text-sm text-vox-text-muted flex items-center gap-1.5">
+              <Sparkles size={14} className="text-pink-400" />
+              {t('landing.funding.supporterBadge')}
+            </p>
           </div>
 
-          <div className="flex items-center justify-center gap-4 mb-4">
-            <PulsingHeartSvg className="w-32 h-32 sm:w-40 sm:h-40 shrink-0" />
-            <div className="text-left">
-              <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary">
-                {t('landing.funding.title')}
-              </h2>
-              <p className="text-vox-text-secondary mt-2 text-lg max-w-xl">
-                {t('landing.funding.subtitle')}
-              </p>
-            </div>
+          {/* Heart illustration anchors the right column */}
+          <div className={`hidden lg:flex justify-center lp-reveal ${visible ? 'lp-in' : ''}`} style={{ transitionDelay: '0.15s' }}>
+            <PulsingHeartSvg className="w-72 h-72" />
           </div>
         </div>
 
         {/* Stat cards with staggered entrance */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-12">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {cards.map((card, i) => (
             <div
               key={card.label}
-              className="group relative rounded-xl border border-vox-border bg-vox-bg-secondary p-6 text-center
-                         hover:border-pink-500/40 hover:-translate-y-2 hover:shadow-xl hover:shadow-pink-500/10
-                         transition-all duration-300 cursor-default"
-              style={{
-                opacity: visible ? 1 : 0,
-                transform: visible ? 'translateY(0)' : 'translateY(32px)',
-                transition: `opacity 0.5s ease-out ${0.2 + i * 0.15}s, transform 0.5s ease-out ${0.2 + i * 0.15}s, border-color 0.3s, box-shadow 0.3s`,
-              }}
+              className={`group lp-card lp-card--rose flex items-center gap-5 p-6 cursor-default ${visible ? 'lp-card-in' : 'lp-card-hidden'}`}
+              style={{ animationDelay: `${0.2 + i * 0.12}s` }}
             >
-              <div className={`h-12 w-12 rounded-lg bg-gradient-to-br ${card.color} flex items-center justify-center mx-auto mb-4
+              <div className={`h-12 w-12 shrink-0 rounded-lg bg-gradient-to-br ${card.color} flex items-center justify-center
                               group-hover:scale-110 transition-transform duration-300`}>
                 <card.icon className="h-6 w-6 text-pink-400 group-hover:scale-110 transition-transform duration-300" />
               </div>
-              <p className="text-3xl sm:text-4xl font-extrabold text-vox-text-primary mb-1">{card.value}</p>
-              <p className="text-sm text-vox-text-secondary">{card.label}</p>
+              <div>
+                <p className="text-2xl sm:text-3xl font-extrabold text-vox-text-primary">{card.value}</p>
+                <p className="text-sm text-vox-text-secondary">{card.label}</p>
+              </div>
             </div>
           ))}
-        </div>
-
-        {/* CTA buttons */}
-        <div
-          className="text-center"
-          style={{
-            opacity: visible ? 1 : 0,
-            transform: visible ? 'translateY(0)' : 'translateY(20px)',
-            transition: 'opacity 0.5s ease-out 0.7s, transform 0.5s ease-out 0.7s',
-          }}
-        >
-          <div className="flex flex-wrap gap-4 justify-center mb-6">
-            <a
-              href="https://github.com/sponsors/Aizen93"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="group relative btn-primary px-8 py-3 text-base inline-flex items-center gap-2
-                         hover:shadow-lg hover:shadow-pink-500/20 hover:scale-105 active:scale-[0.98] transition-all duration-200"
-            >
-              <Heart size={18} className="group-hover:animate-pulse" />
-              {t('landing.funding.sponsorGithub')}
-              <ArrowRight size={16} className="opacity-0 -ml-4 group-hover:opacity-100 group-hover:ml-0 transition-all duration-200" />
-            </a>
-            <a
-              href="https://opencollective.com/voxium"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-secondary px-8 py-3 text-base inline-flex items-center gap-2
-                         hover:scale-105 active:scale-[0.98] transition-all duration-200"
-            >
-              <HeartHandshake size={18} />
-              {t('landing.funding.openCollective')}
-            </a>
-          </div>
-
-          <p className="text-sm text-vox-text-muted flex items-center justify-center gap-1.5">
-            <Sparkles size={14} className="text-pink-400" />
-            {t('landing.funding.supporterBadge')}
-          </p>
         </div>
       </div>
     </section>
@@ -1423,27 +1429,31 @@ function FinalCTA() {
   const { t } = useTranslation();
 
   return (
-    <section className="relative py-24 overflow-hidden">
-      <div className="absolute inset-0 bg-gradient-to-br from-[#5B21B6]/20 via-vox-bg-primary to-vox-bg-secondary" />
-      {/* Decorative orbit */}
-      <OrbitRingsSvg className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] opacity-20" />
+    <section className="relative px-4 sm:px-6 py-16 sm:py-20">
+      <div
+        className="relative max-w-7xl mx-auto overflow-hidden rounded-[32px] border border-[#8b7bff]/20 px-6 py-20 sm:py-24"
+        style={{ background: 'radial-gradient(120% 140% at 50% 0%, rgba(91,91,247,0.28) 0%, rgba(27,22,80,0.9) 45%, #0e0e26 100%)' }}
+      >
+        {/* Decorative orbit */}
+        <OrbitRingsSvg className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] opacity-25" />
 
-      <div className="relative z-10 max-w-3xl mx-auto px-6 text-center">
-        <img src="/logo.svg" alt="" className="h-16 w-16 rounded-2xl mx-auto mb-8" />
-        <h2 className="text-3xl sm:text-4xl font-bold text-vox-text-primary mb-4">
-          {t('landing.cta.title')}
-        </h2>
-        <p className="text-vox-text-secondary mb-10 text-lg">
-          {t('landing.cta.subtitle')}
-        </p>
-        <div className="flex flex-wrap gap-4 justify-center">
-          <Link to="/register" className="btn-primary px-8 py-3 text-base">
-            {t('landing.cta.getStarted')}
-          </Link>
-          <a href="#hero" className="btn-secondary px-8 py-3 text-base">
-            {t('landing.cta.downloadApp')}
-          </a>
-        </div>
+        <Reveal className="relative z-10 max-w-3xl mx-auto text-center">
+          <img src="/logo.svg" alt="" className="h-16 w-16 rounded-2xl mx-auto mb-8" />
+          <h2 className="text-3xl sm:text-5xl font-semibold tracking-tight text-vox-text-primary mb-4">
+            {t('landing.cta.title')}
+          </h2>
+          <p className="text-vox-text-secondary mb-10 text-lg">
+            {t('landing.cta.subtitle')}
+          </p>
+          <div className="flex flex-wrap gap-4 justify-center">
+            <Link to="/register" className="btn-primary rounded-full px-8 py-3 text-base hover:scale-105 active:scale-[0.98] transition-all duration-200">
+              {t('landing.cta.getStarted')}
+            </Link>
+            <a href="#hero" className="btn rounded-full bg-white/[0.06] text-vox-text-primary border border-white/15 hover:bg-white/[0.12] px-8 py-3 text-base transition-all duration-200">
+              {t('landing.cta.downloadApp')}
+            </a>
+          </div>
+        </Reveal>
       </div>
     </section>
   );
@@ -1453,22 +1463,22 @@ function Footer() {
   const { t } = useTranslation();
 
   return (
-    <footer className="bg-vox-bg-secondary border-t border-vox-border">
-      <div className="max-w-7xl mx-auto px-6 py-16">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
+    <footer className="border-t border-white/[0.06]">
+      <div className="max-w-7xl mx-auto px-6 lg:px-10 py-16">
+        <div className="grid grid-cols-2 gap-8 md:grid-cols-12">
           {/* Brand */}
-          <div className="col-span-2 md:col-span-1">
+          <div className="col-span-2 md:col-span-6">
             <div className="flex items-center gap-2.5 mb-3">
               <img src="/logo_static.svg" alt="Voxium" className="h-8 w-8 rounded-lg" />
               <span className="text-lg font-bold text-vox-text-primary">Voxium</span>
             </div>
-            <p className="text-sm text-vox-text-muted leading-relaxed">
+            <p className="text-sm text-vox-text-muted leading-relaxed max-w-xs">
               {t('landing.footer.tagline')}
             </p>
           </div>
 
           {/* Product */}
-          <div>
+          <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.product')}</h4>
             <ul className="space-y-2">
               <li><a href="#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.download')}</a></li>
@@ -1480,7 +1490,7 @@ function Footer() {
           </div>
 
           {/* Legal */}
-          <div>
+          <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.legal')}</h4>
             <ul className="space-y-2">
               <li><Link to="/privacy" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.privacyPolicy')}</Link></li>
@@ -1490,7 +1500,7 @@ function Footer() {
           </div>
 
           {/* Community */}
-          <div>
+          <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.community')}</h4>
             <ul className="space-y-2">
               <li><a href="https://github.com/Aizen93/voxium" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">GitHub</a></li>
@@ -1501,8 +1511,8 @@ function Footer() {
       </div>
 
       {/* Copyright bar */}
-      <div className="border-t border-vox-border">
-        <div className="max-w-7xl mx-auto px-6 py-4">
+      <div className="border-t border-white/[0.06]">
+        <div className="max-w-7xl mx-auto px-6 lg:px-10 py-4">
           <p className="text-xs text-vox-text-muted text-center">
             {t('landing.footer.copyright')}
           </p>
@@ -1545,7 +1555,8 @@ export function LandingPage() {
   }, []);
 
   return (
-    <div className="bg-vox-bg-primary text-vox-text-primary">
+    <div className="lp-root text-vox-text-primary">
+      <LandingStyles />
       <Navbar />
       <Hero />
       <StatsSection />

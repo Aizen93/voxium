@@ -1,18 +1,19 @@
 {
   "name": "voxium",
-  "version": "1.7.3",
+  "version": "2.0.0",
   "private": true,
   "description": "Voxium - Modern voice & text communication platform",
   "scripts": {
     "dev:server": "pnpm --filter @voxium/server dev",
     "dev:desktop": "pnpm --filter @voxium/desktop dev",
     "dev:admin": "pnpm --filter @voxium/admin dev",
-    "dev": "pnpm run dev:server & pnpm run dev:desktop",
+    "dev": "node scripts/dev-all.mjs",
+    "dev:web": "pnpm --parallel --filter @voxium/server --filter @voxium/desktop run dev",
     "build:shared": "pnpm --filter @voxium/shared build",
     "build:server": "pnpm --filter @voxium/server build",
     "build:desktop": "pnpm --filter @voxium/desktop build",
     "build:admin": "pnpm --filter @voxium/admin build",
-    "build": "pnpm run build:shared && pnpm run build:server & pnpm run build:desktop",
+    "build": "pnpm run build:shared && pnpm --parallel --filter @voxium/server --filter @voxium/desktop run build",
     "typecheck": "pnpm run build:shared && pnpm --filter @voxium/server exec tsc --noEmit && pnpm --filter @voxium/desktop exec tsc --noEmit && pnpm --filter @voxium/admin exec tsc --noEmit",
     "lint": "pnpm run --parallel -r lint",
     "db:migrate": "pnpm --filter @voxium/server db:migrate",
@@ -34,12 +35,27 @@
     ],
     "overrides": {
       "rollup": ">=4.59.0",
-      "fast-xml-parser": ">=5.5.7",
-      "tar": ">=7.5.11",
+      "esbuild": ">=0.28.1",
+      "fast-xml-parser": ">=5.7.0",
+      "fast-xml-builder": ">=1.1.7",
+      "tar": ">=7.5.16",
       "flatted": ">=3.4.2",
-      "socket.io-parser": ">=4.2.6"
+      "socket.io-parser": ">=4.2.6",
+      "ws": ">=8.21.0",
+      "path-to-regexp": ">=8.4.0",
+      "undici": ">=7.28.0 <8",
+      "form-data": ">=4.0.6",
+      "qs": ">=6.15.2",
+      "postcss": ">=8.5.10",
+      "brace-expansion": ">=5.0.6",
+      "defu": ">=6.1.5",
+      "effect": ">=3.20.0",
+      "hono": ">=4.12.25",
+      "@hono/node-server": ">=1.19.13",
+      "lodash": ">=4.18.0"
     }
   },
+  "packageManager": "pnpm@10.32.1",
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=10.0.0"
@@ -54,5 +70,6 @@
     "otpauth": "^9.5.0",
     "redis": "^5.11.0",
     "typescript-eslint": "^8.57.1"
-  }
+  },
+  "license": "SEE LICENSE IN LICENSE.md"
 }

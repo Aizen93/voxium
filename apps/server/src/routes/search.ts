@@ -1,14 +1,15 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { rateLimitSearch } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
 import { validateSearchQuery, LIMITS } from '@voxium/shared';
 import { sanitizeText } from '../utils/sanitize';
+import { filterVisibleChannels } from '../utils/permissionCalculator';
 
 export const searchRouter = Router();
 
-searchRouter.use(authenticate, requireVerifiedEmail);
+searchRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 searchRouter.use(rateLimitSearch);
 
 const authorSelect = {
@@ -36,23 +37,30 @@ searchRouter.get('/servers/:serverId/messages', async (req: Request<{ serverId: 
     });
     if (!membership) throw new ForbiddenError('Not a member of this server');
 
-    // Get text channel IDs for the server (or filter to a specific channel)
+    // Get text channel IDs for the server (or filter to a specific channel),
+    // restricted to channels this member can VIEW. Secure channels are
+    // excluded outright — their content is ciphertext the trigram index can
+    // never match, and even the attempt must not act as an existence oracle
+    // (a secure channelId gets the same generic error as an unknown one).
     let channelIds: string[];
     if (channelId) {
       const channel = await prisma.channel.findUnique({
         where: { id: channelId },
-        select: { id: true, serverId: true, type: true },
+        select: { id: true, serverId: true, type: true, secure: true },
       });
-      if (!channel || channel.serverId !== serverId || channel.type !== 'text') {
+      if (!channel || channel.serverId !== serverId || channel.type !== 'text' || channel.secure) {
         throw new BadRequestError('Invalid channel');
       }
+      const visible = await filterVisibleChannels(userId, serverId, [channel]);
+      if (visible.length === 0) throw new BadRequestError('Invalid channel');
       channelIds = [channelId];
     } else {
       const channels = await prisma.channel.findMany({
-        where: { serverId, type: 'text' },
-        select: { id: true },
+        where: { serverId, type: 'text', secure: false },
+        select: { id: true, secure: true },
       });
-      channelIds = channels.map((c) => c.id);
+      const visible = await filterVisibleChannels(userId, serverId, channels);
+      channelIds = visible.map((c) => c.id);
     }
 
     if (channelIds.length === 0) {
@@ -64,6 +72,9 @@ searchRouter.get('/servers/:serverId/messages', async (req: Request<{ serverId: 
       channelId: { in: channelIds },
       content: { contains: q, mode: 'insensitive' },
       type: 'user',
+      // Ciphertext never matches meaningfully and must never be returned —
+      // encrypted history is searched client-side only (same rule as DMs)
+      encrypted: false,
     };
     if (authorId) {
       where.authorId = authorId;
@@ -128,6 +139,9 @@ searchRouter.get('/dm/:conversationId/messages', async (req: Request<{ conversat
       conversationId,
       content: { contains: q, mode: 'insensitive' },
       type: 'user',
+      // E2E messages store ciphertext — never match (or return) them in
+      // server search; encrypted history is searched client-side only
+      encrypted: false,
     };
     if (before) {
       where.createdAt = { lt: parseDateParam(before, 'before') };

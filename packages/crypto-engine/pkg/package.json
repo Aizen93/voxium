@@ -1,0 +1,17 @@
+{
+  "name": "voxium-crypto-engine",
+  "type": "module",
+  "description": "Voxium E2E crypto engine v1 (olm1): thin wasm-bindgen marshalling layer over vodozemac. No crypto logic lives in this crate or in JS — all key derivation, ratcheting, and signature verification happen inside vodozemac.",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "files": [
+    "voxium_crypto_engine_bg.wasm",
+    "voxium_crypto_engine.js",
+    "voxium_crypto_engine.d.ts"
+  ],
+  "main": "voxium_crypto_engine.js",
+  "types": "voxium_crypto_engine.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
