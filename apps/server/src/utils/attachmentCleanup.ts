@@ -2,13 +2,26 @@ import { prisma } from './prisma';
 import { deleteMultipleFromS3 } from './s3';
 import { sendCleanupReport, describeEmailError } from './email';
 import { LIMITS } from '@voxium/shared';
-import { msUntilDailySlot } from './dailySchedule';
+import { msUntilDailySlot, withClusterLock } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
 
 const CLEANUP_HOUR = 4; // 4 AM
 const BATCH_SIZE = 100;
+
+// Production is multi-node and every node fires this slot. Without the lock
+// each of them ran the expiry pass — N S3 delete passes over the same rows
+// and N CLEANUP_REPORT_EMAIL reports a night. Long enough for a large backlog
+// of 100-row batches; the holder releases it as soon as it is done.
+export const ATTACHMENT_CLEANUP_LOCK_KEY = 'lock:attachmentcleanup';
+export const ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS = 60 * 60;
+
+export interface AttachmentCleanupResult {
+  filesExpired: number;
+  sizeFreed: number;
+  error: string | null;
+}
 
 export function startAttachmentCleanup() {
   if (!stopped) return;
@@ -33,7 +46,31 @@ function scheduleNext(afterRun: boolean) {
 
 async function runCleanup() {
   if (stopped) return;
+  try {
+    await runAttachmentCleanup();
+  } catch (err) {
+    // The pass logs its own failures; this only catches the lock plumbing.
+    console.error('[Cleanup] Attachment cleanup run failed:', err instanceof Error ? err.message : err);
+  } finally {
+    scheduleNext(true);
+  }
+}
 
+/**
+ * One expiry pass plus its report, under the cluster lock. Exported for tests;
+ * the scheduler calls it from the timer. Resolves `{ skipped: 'locked' }` when
+ * another node holds the lock (or Redis is unreachable — fail closed): no
+ * rows are touched and no report is sent, the holder's report is the night's.
+ */
+export async function runAttachmentCleanup(): Promise<AttachmentCleanupResult | { skipped: 'locked' }> {
+  const result = await withClusterLock(
+    { key: ATTACHMENT_CLEANUP_LOCK_KEY, ttlSeconds: ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS, tag: '[Cleanup]' },
+    expireAttachmentsAndReport,
+  );
+  return result;
+}
+
+async function expireAttachmentsAndReport(): Promise<AttachmentCleanupResult> {
   const startedAt = new Date();
   const cutoff = new Date(Date.now() - LIMITS.ATTACHMENT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
   let totalExpired = 0;
@@ -95,5 +132,5 @@ async function runCleanup() {
     }
   }
 
-  scheduleNext(true);
+  return { filesExpired: totalExpired, sizeFreed: totalSizeFreed, error };
 }

@@ -1,13 +1,33 @@
 import * as mediasoup from 'mediasoup';
-import type { Worker, Router, WebRtcTransport } from 'mediasoup/node/lib/types';
+import type { Worker, Router, WebRtcTransport, WebRtcServer } from 'mediasoup/node/lib/types';
 import type { SfuStats, SfuWorkerStats } from '@voxium/shared';
 import os from 'os';
-import { mediaCodecs, getWorkerSettings, getWebRtcTransportOptions } from './mediasoupConfig';
+import {
+  mediaCodecs,
+  getWorkerSettings,
+  getWebRtcTransportOptions,
+  getWebRtcServerListenInfos,
+  getWebRtcServerTransportOptions,
+  useWebRtcServer,
+  webRtcServerPort,
+} from './mediasoupConfig';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 const workers: Worker[] = [];
 let nextWorkerIdx = 0;
+
+// Each worker's WebRtcServer — the ONE udp+tcp port pair every transport on
+// that worker shares (mediasoupConfig.useWebRtcServer). Empty in the
+// per-transport listen mode.
+const webRtcServers = new Map<Worker, WebRtcServer>();
+// The worker's slot index, which fixes its WebRtcServer port
+// (MEDIASOUP_MIN_PORT + slot). A replacement worker after a crash inherits the
+// slot so it re-binds the very same ports.
+const workerSlot = new Map<Worker, number>();
+// Router → the worker it was created on, for picking that worker's WebRtcServer
+// when a transport is created. Weak: routers are closed and dropped freely.
+const routerOwner = new WeakMap<Router, Worker>();
 
 // Invoked with the affected channelIds when a worker dies, so the voice layer
 // can tear down stranded sessions and tell clients to rejoin (instead of
@@ -37,14 +57,23 @@ export async function initMediasoup(): Promise<void> {
   const maxWorkers = parseInt(process.env.MEDIASOUP_NUM_WORKERS || '0', 10) || numCores;
   const numWorkers = Math.min(numCores, maxWorkers, 8); // cap at 8
 
+  if (useWebRtcServer()) {
+    // Fail at boot, not at the first join: every worker needs its own port.
+    webRtcServerPort(numWorkers - 1);
+  }
+
   console.log(`[mediasoup] Creating ${numWorkers} worker(s)...`);
 
   for (let i = 0; i < numWorkers; i++) {
-    const worker = await createWorker();
+    const worker = await createWorker(i);
     workers.push(worker);
   }
 
-  console.log(`[mediasoup] ${workers.length} worker(s) ready`);
+  if (useWebRtcServer()) {
+    console.log(`[mediasoup] ${workers.length} worker(s) ready — WebRtcServer ports ${getWebRtcServerPorts().join(', ')} (udp+tcp)`);
+  } else {
+    console.log(`[mediasoup] ${workers.length} worker(s) ready — per-transport ports ${getWorkerSettings().rtcMinPort}-${getWorkerSettings().rtcMaxPort}`);
+  }
 }
 
 /**
@@ -68,6 +97,7 @@ export async function getOrCreateRouter(channelId: string): Promise<Router> {
     const router = await worker.createRouter({ mediaCodecs });
     channelRouters.set(channelId, router);
     routerWorkerMap.set(channelId, worker);
+    routerOwner.set(router, worker);
     console.log(`[mediasoup] Created Router for channel ${channelId} on worker pid=${worker.pid}`);
     return router;
   })();
@@ -102,10 +132,34 @@ export function releaseRouter(channelId: string): void {
 
 /**
  * Create a WebRtcTransport on the given Router.
+ *
+ * In WebRtcServer mode the transport rides the router's worker's server — it
+ * binds no port of its own. A router without a known owner (only possible if
+ * it was not created through getOrCreateRouter) or a worker without a server
+ * is a bug, not a case to paper over: falling back to a per-transport listen
+ * would silently hand out ports the firewall no longer opens, and the join
+ * would "succeed" into a transport nobody can reach.
  */
 export async function createWebRtcTransport(router: Router): Promise<WebRtcTransport> {
-  const transport = await router.createWebRtcTransport(getWebRtcTransportOptions());
-  return transport;
+  if (!useWebRtcServer()) {
+    return router.createWebRtcTransport(getWebRtcTransportOptions());
+  }
+  const worker = routerOwner.get(router);
+  const webRtcServer = worker ? webRtcServers.get(worker) : undefined;
+  if (!webRtcServer || webRtcServer.closed) {
+    throw new Error("[mediasoup] No live WebRtcServer for this router's worker");
+  }
+  return router.createWebRtcTransport(getWebRtcServerTransportOptions(webRtcServer));
+}
+
+/** The udp+tcp ports the live WebRtcServers listen on (sorted). Empty in per-transport mode. */
+export function getWebRtcServerPorts(): number[] {
+  const ports: number[] = [];
+  for (const worker of workers) {
+    const slot = workerSlot.get(worker);
+    if (webRtcServers.has(worker) && slot !== undefined) ports.push(webRtcServerPort(slot));
+  }
+  return ports.sort((a, b) => a - b);
 }
 
 /**
@@ -157,6 +211,9 @@ export async function getSfuStats(channelTransports?: Map<string, number>): Prom
     workers: workerStats,
     totalRouters: channelRouters.size,
     portRange: { min: portMin, max: portMax, total: portMax - portMin + 1 },
+    // null = per-transport listen mode, where portRange.total bounds the
+    // transport count; with WebRtcServers it does not.
+    webRtcServer: useWebRtcServer() ? { ports: getWebRtcServerPorts() } : null,
   };
 }
 
@@ -177,19 +234,41 @@ function getNextWorker(): Worker {
 /** Tracks consecutive restart failures for exponential backoff. */
 let workerRestartAttempts = 0;
 
-async function createWorker(): Promise<Worker> {
+async function createWorker(slot: number): Promise<Worker> {
   const worker = await mediasoup.createWorker({
     logLevel: getWorkerSettings().logLevel,
     rtcMinPort: getWorkerSettings().rtcMinPort,
     rtcMaxPort: getWorkerSettings().rtcMaxPort,
   });
+  workerSlot.set(worker, slot);
+
+  if (useWebRtcServer()) {
+    try {
+      const server = await worker.createWebRtcServer({ listenInfos: getWebRtcServerListenInfos(slot) });
+      webRtcServers.set(worker, server);
+    } catch (err) {
+      // A worker without its server would accept routers and then fail every
+      // transport (createWebRtcTransport refuses to fall back). Close it and
+      // surface the bind failure: at boot that stops the process; on a restart
+      // it lands in the backoff retry below.
+      workerSlot.delete(worker);
+      worker.close();
+      throw new Error(
+        `[mediasoup] Failed to bind WebRtcServer port ${webRtcServerPort(slot)} for worker #${slot}: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+  }
 
   worker.on('died', (error) => {
     console.error(`[mediasoup] Worker pid=${worker.pid} died:`, error);
 
-    // Remove dead worker
+    // Remove dead worker; its WebRtcServer died with it, and its slot (port)
+    // is what the replacement must take over.
     const idx = workers.indexOf(worker);
     if (idx !== -1) workers.splice(idx, 1);
+    webRtcServers.delete(worker);
+    workerSlot.delete(worker);
 
     // Close all Routers that were on this worker
     const affectedChannels: string[] = [];
@@ -218,8 +297,8 @@ async function createWorker(): Promise<Worker> {
 
     setTimeout(async () => {
       try {
-        console.log('[mediasoup] Restarting dead worker...');
-        const newWorker = await createWorker();
+        console.log(`[mediasoup] Restarting dead worker (slot #${slot})...`);
+        const newWorker = await createWorker(slot);
         workers.push(newWorker);
         workerRestartAttempts = 0; // Reset on success
         console.log(`[mediasoup] Replacement worker pid=${newWorker.pid} ready`);

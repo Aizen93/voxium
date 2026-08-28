@@ -8,11 +8,20 @@ vi.mock('../../utils/prisma', () => ({
   },
 }));
 
+const redisSet = vi.fn();
+const redisEval = vi.fn();
+vi.mock('../../utils/redis', () => ({
+  NODE_ID: () => 'node-under-test',
+  getRedis: () => ({ set: redisSet, eval: redisEval }),
+}));
+
 import { prisma } from '../../utils/prisma';
-import { runSweep, stopKeyShareCleanup } from '../../utils/keyShareCleanup';
+import { runSweep, startKeyShareCleanup, stopKeyShareCleanup, KEYSHARE_SWEEP_LOCK_KEY, KEYSHARE_SWEEP_LOCK_TTL_SECONDS } from '../../utils/keyShareCleanup';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  redisSet.mockResolvedValue('OK');
+  redisEval.mockResolvedValue(1);
   vi.mocked(prisma.e2EKeyShare.deleteMany).mockResolvedValue({ count: 0 } as any);
   vi.mocked(prisma.e2EMasterTransfer.deleteMany).mockResolvedValue({ count: 0 } as any);
 });
@@ -55,5 +64,39 @@ describe('E2E retention sweep', () => {
     await expect(runSweep()).resolves.toBe(0);
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+// Every node fires the 6-hourly interval; unlocked, each ran its own scan.
+describe('E2E retention sweep — cluster lock', () => {
+  it('claims the lock with SET NX EX before deleting, and releases its own token after', async () => {
+    vi.mocked(prisma.e2EKeyShare.deleteMany).mockResolvedValue({ count: 1 } as any);
+    expect(await runSweep()).toBe(1);
+    expect(redisSet).toHaveBeenCalledWith(
+      KEYSHARE_SWEEP_LOCK_KEY,
+      expect.stringMatching(/^node-under-test:[0-9a-f-]{36}$/),
+      { NX: true, EX: KEYSHARE_SWEEP_LOCK_TTL_SECONDS },
+    );
+    expect(redisSet.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(prisma.e2EKeyShare.deleteMany).mock.invocationCallOrder[0]);
+    expect(redisEval).toHaveBeenCalledWith(expect.any(String), { keys: [KEYSHARE_SWEEP_LOCK_KEY], arguments: [redisSet.mock.calls[0][1]] });
+  });
+
+  it('a node that loses the race deletes nothing and reports 0 — but still re-arms its timer', async () => {
+    redisSet.mockResolvedValue(null);
+    startKeyShareCleanup(); // arm the scheduler; a stopped scheduler never re-arms
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    expect(await runSweep()).toBe(0);
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.e2EMasterTransfer.deleteMany).not.toHaveBeenCalled();
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    setTimeoutSpy.mockRestore();
+  });
+
+  it('fails closed when Redis is unreachable', async () => {
+    redisSet.mockRejectedValue(new Error('ECONNREFUSED'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await runSweep()).toBe(0);
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

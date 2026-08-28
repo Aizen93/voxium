@@ -9,7 +9,7 @@ import { handleVoiceEvents, getVoiceStateForServers, getScreenShareState } from 
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { handleAnnotationEvents } from './annotationHandler';
 import { socketRateLimit, normalizeIp } from '../middleware/rateLimiter';
-import { trustsProxy } from '../utils/trustProxy';
+import { trustsProxy, forwardedClientAddress } from '../utils/trustProxy';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { Permissions } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
@@ -27,18 +27,21 @@ export function getSocketIp(socket: { handshake: { address: string; headers: Rec
   if (trustsProxy()) {
     const raw = socket.handshake.headers['x-forwarded-for'];
     // The LAST hop, matching Express's `trust proxy: 1`, because that is the
-    // only entry a trusted proxy wrote. nginx sets
+    // only entry a trusted proxy wrote (for the default hop count). nginx sets
     // `X-Forwarded-For $proxy_add_x_forwarded_for`, which is
     // "$http_x_forwarded_for, $remote_addr" — so the FIRST entry is whatever
     // the client put in the header themselves. Reading it let a banned client
     // pick the address the IpBan lookup queries, and made the socket surface
     // disagree with every REST control about who is calling; the socket is the
     // one surface that can evict an already-authenticated session.
+    //
+    // "Last" is really "TRUST_PROXY_HOPS-th from the right" — one nginx is
+    // the default; a load balancer in front of it makes it two. Both surfaces
+    // read the count from trustProxy.ts so they cannot disagree.
     const forwarded = Array.isArray(raw) ? raw.join(',') : raw;
     if (typeof forwarded === 'string') {
-      const hops = forwarded.split(',');
-      const lastHop = hops[hops.length - 1].trim();
-      if (lastHop) return normalizeIp(lastHop);
+      const client = forwardedClientAddress(forwarded);
+      if (client) return normalizeIp(client);
     }
   }
   return socket.handshake.address ? normalizeIp(socket.handshake.address) : undefined;

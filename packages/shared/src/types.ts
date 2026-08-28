@@ -657,6 +657,8 @@ export interface SfuStats {
   workers: SfuWorkerStats[];
   totalRouters: number;
   portRange: { min: number; max: number; total: number };
+  /** The udp+tcp ports the per-worker WebRtcServers listen on; null in the per-transport listen mode (MEDIASOUP_WEBRTC_SERVER=false), where portRange bounds the transport count. */
+  webRtcServer: { ports: number[] } | null;
 }
 
 export interface SfuMediaCounts {

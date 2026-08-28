@@ -641,10 +641,16 @@ describe('getSocketIp', () => {
   let prevEnv: string | undefined;
   let prevTrust: string | undefined;
 
-  beforeEach(() => { prevEnv = process.env.NODE_ENV; prevTrust = process.env.TRUST_PROXY; delete process.env.TRUST_PROXY; });
+  let prevHops: string | undefined;
+
+  beforeEach(() => {
+    prevEnv = process.env.NODE_ENV; prevTrust = process.env.TRUST_PROXY; prevHops = process.env.TRUST_PROXY_HOPS;
+    delete process.env.TRUST_PROXY; delete process.env.TRUST_PROXY_HOPS;
+  });
   afterEach(() => {
     process.env.NODE_ENV = prevEnv;
     if (prevTrust === undefined) delete process.env.TRUST_PROXY; else process.env.TRUST_PROXY = prevTrust;
+    if (prevHops === undefined) delete process.env.TRUST_PROXY_HOPS; else process.env.TRUST_PROXY_HOPS = prevHops;
   });
 
   it('takes the LAST forwarded hop, the only one a trusted proxy wrote', () => {
@@ -702,5 +708,25 @@ describe('getSocketIp', () => {
     expect(getSocketIp(handshake('::ffff:203.0.113.9'))).toBe('203.0.113.9');
     expect(getSocketIp(handshake('203.0.113.9', '  '))).toBe('203.0.113.9');
     expect(getSocketIp(handshake(''))).toBeUndefined();
+  });
+
+  // A load balancer in front of nginx appends nginx's address as the LAST
+  // entry; with TRUST_PROXY_HOPS=2 both surfaces step over it. Without the
+  // setting, every caller would be keyed on nginx's address — one bucket.
+  it('steps over TRUST_PROXY_HOPS trusted entries from the right', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.TRUST_PROXY_HOPS = '2';
+    expect(getSocketIp(handshake('10.0.1.5', 'spoofed, 203.0.113.7, 10.0.1.10'))).toBe('203.0.113.7');
+    // Chain shorter than the hop count → leftmost entry, like Express
+    expect(getSocketIp(handshake('10.0.1.5', '203.0.113.7'))).toBe('203.0.113.7');
+    expect(getSocketIp(handshake('10.0.1.5', ['203.0.113.7', '10.0.1.10']))).toBe('203.0.113.7');
+  });
+
+  it('treats an invalid TRUST_PROXY_HOPS as 1', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.TRUST_PROXY_HOPS = 'lots';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(getSocketIp(handshake('10.0.0.5', '198.51.100.99, 203.0.113.7'))).toBe('203.0.113.7');
+    warn.mockRestore();
   });
 });

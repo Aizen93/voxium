@@ -11,6 +11,7 @@ describe('mediasoup/mediasoupConfig — lazy getters', () => {
       'MEDIASOUP_ANNOUNCED_IP',
       'MEDIASOUP_MIN_PORT',
       'MEDIASOUP_MAX_PORT',
+      'MEDIASOUP_WEBRTC_SERVER',
     ];
     for (const key of keys) {
       savedEnv[key] = process.env[key];
@@ -131,5 +132,71 @@ describe('mediasoup/mediasoupConfig — lazy getters', () => {
     // Second call — picks up the change (no caching)
     const opts2 = mod.getWebRtcTransportOptions();
     expect(opts2.listenInfos[0].ip).toBe('10.0.0.1');
+  });
+});
+
+describe('mediasoup/mediasoupConfig — WebRtcServer helpers', () => {
+  const savedEnv: Record<string, string | undefined> = {};
+  const keys = ['MEDIASOUP_LISTEN_IP', 'MEDIASOUP_ANNOUNCED_IP', 'MEDIASOUP_MIN_PORT', 'MEDIASOUP_MAX_PORT', 'MEDIASOUP_WEBRTC_SERVER'];
+  beforeEach(() => {
+    vi.resetModules();
+    for (const k of keys) { savedEnv[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(() => {
+    for (const k of keys) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
+  });
+
+  it('useWebRtcServer() is ON unless MEDIASOUP_WEBRTC_SERVER is exactly "false"', async () => {
+    const mod = await import('../../mediasoup/mediasoupConfig');
+    expect(mod.useWebRtcServer()).toBe(true);
+    process.env.MEDIASOUP_WEBRTC_SERVER = 'false';
+    expect(mod.useWebRtcServer()).toBe(false);
+    for (const v of ['0', 'no', 'FALSE', 'true', '']) {
+      process.env.MEDIASOUP_WEBRTC_SERVER = v;
+      expect(mod.useWebRtcServer(), v).toBe(true);
+    }
+  });
+
+  it('webRtcServerPort() is MIN_PORT + slot, read at call time', async () => {
+    const mod = await import('../../mediasoup/mediasoupConfig');
+    expect(mod.webRtcServerPort(0)).toBe(10000);
+    process.env.MEDIASOUP_MIN_PORT = '40000';
+    process.env.MEDIASOUP_MAX_PORT = '40007';
+    expect(mod.webRtcServerPort(0)).toBe(40000);
+    expect(mod.webRtcServerPort(7)).toBe(40007);
+  });
+
+  it('webRtcServerPort() refuses a slot the range cannot hold, and nonsense slots', async () => {
+    const mod = await import('../../mediasoup/mediasoupConfig');
+    process.env.MEDIASOUP_MIN_PORT = '40000';
+    process.env.MEDIASOUP_MAX_PORT = '40001';
+    expect(() => mod.webRtcServerPort(2)).toThrow(/40000-40001.*no port for worker #2/);
+    expect(() => mod.webRtcServerPort(-1)).toThrow();
+    expect(() => mod.webRtcServerPort(1.5)).toThrow();
+  });
+
+  it('getWebRtcServerListenInfos() binds udp AND tcp on the SAME port with the announced address', async () => {
+    const mod = await import('../../mediasoup/mediasoupConfig');
+    process.env.MEDIASOUP_LISTEN_IP = '10.0.1.11';
+    process.env.MEDIASOUP_ANNOUNCED_IP = '203.0.113.11';
+    process.env.MEDIASOUP_MIN_PORT = '10000';
+    expect(mod.getWebRtcServerListenInfos(1)).toEqual([
+      { protocol: 'udp', ip: '10.0.1.11', announcedAddress: '203.0.113.11', port: 10001 },
+      { protocol: 'tcp', ip: '10.0.1.11', announcedAddress: '203.0.113.11', port: 10001 },
+    ]);
+  });
+
+  it('getWebRtcServerTransportOptions() carries the server and the shared flags, never listenInfos', async () => {
+    const mod = await import('../../mediasoup/mediasoupConfig');
+    const server = { id: 'srv' } as never;
+    const opts = mod.getWebRtcServerTransportOptions(server);
+    expect(opts.webRtcServer).toBe(server);
+    expect(opts).not.toHaveProperty('listenInfos');
+    expect(opts).toMatchObject({ enableUdp: true, enableTcp: true, preferUdp: true, initialAvailableOutgoingBitrate: 600_000 });
+    // Same flags on both paths — a drift here changes ICE behaviour by mode
+    const individual = mod.getWebRtcTransportOptions();
+    for (const k of ['enableUdp', 'enableTcp', 'preferUdp', 'initialAvailableOutgoingBitrate'] as const) {
+      expect(opts[k]).toBe(individual[k]);
+    }
   });
 });

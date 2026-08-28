@@ -5,7 +5,7 @@
 // is already past", and each inherited the same bug from it.
 
 import { randomUUID } from 'crypto';
-import { NODE_ID } from './redis';
+import { NODE_ID, getRedis } from './redis';
 
 /**
  * How close to the slot counts as "this is the run we just did".
@@ -87,4 +87,47 @@ export async function releaseLockIfOwned(
     { keys: [key], arguments: [owner] },
   );
   return released === 1;
+}
+
+/**
+ * Run `fn` under a `SET NX EX` cluster lock, or not at all.
+ *
+ * Production is multi-node: a scheduled job fires on EVERY node at the same
+ * slot, and a job that is not leader-locked runs N times — for the attachment
+ * cleanup that was N S3 delete passes over the same rows and N report emails
+ * a night; for the key-share sweep N identical `deleteMany`s. Fail CLOSED on
+ * a Redis error: skipping a run costs nothing (the rows are still there at
+ * the next slot), racing a peer is what the lock exists to prevent.
+ *
+ * `registrationHygiene` and `orphanCleanup` carry their own copies of this
+ * idiom with run records and audit rows around it; this is the plain form.
+ */
+export async function withClusterLock<T>(
+  opts: { key: string; ttlSeconds: number; tag: string },
+  fn: () => Promise<T>,
+): Promise<T | { skipped: 'locked' }> {
+  const owner = lockToken();
+  let claimed: string | null;
+  try {
+    claimed = await getRedis().set(opts.key, owner, { NX: true, EX: opts.ttlSeconds });
+  } catch (err) {
+    console.warn(`${opts.tag} Could not claim the cluster lock — skipping this run:`, err instanceof Error ? err.message : err);
+    return { skipped: 'locked' };
+  }
+  if (claimed === null) {
+    console.log(`${opts.tag} Another node holds the lock — skipping this run`);
+    return { skipped: 'locked' };
+  }
+  try {
+    return await fn();
+  } finally {
+    // Only if we still own it: a run that outlives the TTL must not release
+    // the lock a peer (or this node's own next run) has since taken.
+    await releaseLockIfOwned(getRedis(), opts.key, owner).catch((err) =>
+      console.warn(`${opts.tag} Lock release failed (it expires on its own):`, err instanceof Error ? err.message : err));
+  }
+}
+
+export function wasSkipped(result: unknown): result is { skipped: 'locked' } {
+  return typeof result === 'object' && result !== null && (result as { skipped?: unknown }).skipped === 'locked';
 }

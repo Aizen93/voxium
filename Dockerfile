@@ -77,8 +77,9 @@ USER voxium
 
 ENV NODE_ENV=production
 EXPOSE 3001
-EXPOSE 10000-10500/udp
-EXPOSE 10000-10500/tcp
+# mediasoup WebRtcServer ports: MEDIASOUP_MIN_PORT .. +workers-1 (one udp+tcp pair per worker, max 8)
+EXPOSE 10000-10007/udp
+EXPOSE 10000-10007/tcp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD node -e "fetch('http://localhost:3001/health').then(r=>{if(!r.ok)throw 1})" || exit 1

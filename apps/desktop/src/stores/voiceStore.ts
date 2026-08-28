@@ -42,6 +42,7 @@ import { optimizeOpusSDP } from '../services/sdpUtils';
 import i18n from '../i18n';
 import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared';
 import type { CallPeerDevice } from '../services/e2e/callCrypto';
+import { resolveStunUrl } from '../utils/stunUrl';
 
 /** Debug log — stripped in production builds by Vite tree-shaking */
 const debugLog = import.meta.env.DEV
@@ -89,13 +90,10 @@ const initialVoicePrefs = loadPersistedVoicePrefs();
 // Self-hosted STUN server (coturn in STUN-only mode) for NAT traversal.
 // STUN is a stateless UDP request/response (~100 bytes each way) that tells
 // each peer their own public IP:port — no media flows through it. Privacy-first.
-// Derives hostname from VITE_WS_URL so it points to the same Voxium server.
-const STUN_HOST = (() => {
-  try { return new URL(import.meta.env.VITE_WS_URL || 'http://localhost:3001').hostname; }
-  catch (err) { console.warn('[Voice] Failed to parse VITE_WS_URL for STUN host:', err); return 'localhost'; }
-})();
+// Derived from VITE_WS_URL (coturn lives on the edge box), or VITE_STUN_URL
+// when coturn has its own machine — see utils/stunUrl.ts.
 const ICE_SERVERS: RTCIceServer[] = [
-  { urls: `stun:${STUN_HOST}:3478` },
+  { urls: resolveStunUrl(import.meta.env) },
 ];
 
 const ICE_RESTART_DELAY_MS = 3000;
