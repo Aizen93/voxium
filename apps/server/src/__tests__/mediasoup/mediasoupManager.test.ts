@@ -158,12 +158,38 @@ describe('mediasoupManager — one WebRtcServer per worker', () => {
     expect(workersCreated).toHaveLength(0);
   });
 
-  it('closes a worker whose WebRtcServer failed to bind and surfaces the failure', async () => {
+  it('a bind failure at boot closes the failed worker AND the ones already up — no orphaned children', async () => {
     serverFailures = [null, new Error('EADDRINUSE')];
     const m = await freshManager();
     await expect(m.initMediasoup()).rejects.toThrow(/Failed to bind WebRtcServer port 10001 for worker #1: EADDRINUSE/);
     expect(workersCreated[1].closed).toBe(true);
-    expect(workersCreated[0].closed).toBe(false);
+    // Boot is about to exit; worker #0 must not stay alive holding port 10000
+    expect(workersCreated[0].closed).toBe(true);
+    expect(m.getWorkerCount()).toBe(0);
+    expect(m.getWebRtcServerPorts()).toEqual([]);
+  });
+
+  // One shared counter let a slot whose port is permanently taken pin every
+  // OTHER slot's first restart at the 30 s ceiling.
+  it('backs off per slot: a failing slot does not delay another slot\'s first restart', async () => {
+    vi.useFakeTimers();
+    const m = await freshManager();
+    await m.initMediasoup();
+
+    serverFailures = [new Error('EADDRINUSE')]; // slot 1's first replacement fails
+    workersCreated[1].emit('died', new Error('segfault'));
+    await vi.advanceTimersByTimeAsync(2_000); // slot 1 attempt 1 fails → its attempt 2 is 4 s out
+    expect(m.getWorkerCount()).toBe(2);
+
+    workersCreated[2].emit('died', new Error('segfault')); // now slot 2 dies
+    expect(m.getWorkerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(2_000); // slot 2's FIRST attempt: 2 s, not 4 s or 8 s
+    expect(m.getWorkerCount()).toBe(2);
+    expect(m.getWebRtcServerPorts()).toEqual([10000, 10002]);
+
+    await vi.advanceTimersByTimeAsync(2_000); // slot 1's attempt 2 lands at t+6 s
+    expect(m.getWorkerCount()).toBe(3);
+    expect(m.getWebRtcServerPorts()).toEqual([10000, 10001, 10002]);
   });
 
   it('a replacement worker after a crash re-binds the SAME port slot', async () => {
@@ -190,6 +216,32 @@ describe('mediasoupManager — one WebRtcServer per worker', () => {
     const { listenInfos } = replacement.createWebRtcServer.mock.calls[0][0] as { listenInfos: Array<{ port: number }> };
     expect(listenInfos.map((l) => l.port)).toEqual([10001, 10001]);
     expect(m.getWebRtcServerPorts()).toEqual([10000, 10001, 10002]);
+  });
+
+  // A bind failure on the replacement is the transient case (the dead
+  // process's socket not yet released). Abandoning the restart used to leave
+  // the node one worker short for good.
+  it('keeps retrying a restart whose WebRtcServer failed to bind, with backoff', async () => {
+    vi.useFakeTimers();
+    const m = await freshManager();
+    await m.initMediasoup();
+
+    serverFailures = [new Error('EADDRINUSE')]; // the FIRST replacement fails to bind
+    workersCreated[1].emit('died', new Error('segfault'));
+    expect(m.getWorkerCount()).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(2_000); // attempt 1 → bind fails
+    expect(m.getWorkerCount()).toBe(2);
+    expect(workersCreated[3].closed).toBe(true); // the failed replacement was closed, not leaked
+    expect(m.getWebRtcServerPorts()).toEqual([10000, 10002]);
+
+    await vi.advanceTimersByTimeAsync(3_999); // attempt 2 is 4s out — not yet
+    expect(m.getWorkerCount()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(m.getWorkerCount()).toBe(3);
+    expect(m.getWebRtcServerPorts()).toEqual([10000, 10001, 10002]);
+    const { listenInfos } = workersCreated[4].createWebRtcServer.mock.calls[0][0] as { listenInfos: Array<{ port: number }> };
+    expect(listenInfos.map((l) => l.port)).toEqual([10001, 10001]);
   });
 
   it('reports the WebRtcServer ports in the SFU stats', async () => {

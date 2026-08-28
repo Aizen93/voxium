@@ -18,12 +18,18 @@ let stopped = true;
 
 const SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
 
-// Every node fires this interval; the deletes are idempotent, so the cost of
-// running it N times was N identical scans — but a job that runs once per
-// node is a job whose logs lie about what happened. Leader-locked like the
-// other sweeps.
+// Every node fires this interval ON ITS OWN BOOT CLOCK, so two nodes never
+// contend for a lock that is released on completion — each would still sweep
+// every 6 h. The lock is therefore HELD for 5 h after a successful sweep
+// (withClusterLock's holdOnSuccess): whichever node's timer fires first does
+// the work, the others skip, and the cluster sweeps once per ≥ 5 h. The
+// deletes are idempotent, so N sweeps were never dangerous — but a job that
+// runs once per node is a job whose logs lie about what happened.
 export const KEYSHARE_SWEEP_LOCK_KEY = 'lock:keysharecleanup';
-export const KEYSHARE_SWEEP_LOCK_TTL_SECONDS = 10 * 60;
+export const KEYSHARE_SWEEP_LOCK_TTL_SECONDS = 5 * 60 * 60;
+// Redis unreachable at the interval: retry soon, not in 6 h (a peer that did
+// sweep holds the lock, so the retry is safe).
+export const KEYSHARE_SWEEP_RETRY_MS = 15 * 60 * 1000;
 
 export function startKeyShareCleanup(): void {
   if (!stopped) return;
@@ -48,17 +54,22 @@ function scheduleNext(delay: number): void {
 
 /** Rows swept, or 0 when another node holds the lock / the sweep failed. Always re-arms the timer. */
 export async function runSweep(): Promise<number> {
+  let nextDelay = SWEEP_INTERVAL_MS;
   try {
     const result = await withClusterLock(
-      { key: KEYSHARE_SWEEP_LOCK_KEY, ttlSeconds: KEYSHARE_SWEEP_LOCK_TTL_SECONDS, tag: '[E2E]' },
+      { key: KEYSHARE_SWEEP_LOCK_KEY, ttlSeconds: KEYSHARE_SWEEP_LOCK_TTL_SECONDS, tag: '[E2E]', holdOnSuccess: true },
       sweepStaleRows,
     );
-    return wasSkipped(result) ? 0 : result;
+    if (wasSkipped(result)) {
+      if (result.skipped === 'unavailable') nextDelay = KEYSHARE_SWEEP_RETRY_MS;
+      return 0;
+    }
+    return result;
   } catch (err) {
     console.error('[E2E] Key-share sweep failed:', err instanceof Error ? err.message : err);
     return 0;
   } finally {
-    scheduleNext(SWEEP_INTERVAL_MS);
+    scheduleNext(nextDelay);
   }
 }
 

@@ -51,9 +51,13 @@ import { nonstandard } from '@roamhq/wrtc';
 const NODE1_PORT = 3001;
 const NODE2_PORT = 3002;
 // Must match the ranges passed to startServer() below — used to prove WHERE
-// a transport's media actually lives (channel affinity: always the owner node)
-const NODE1_PORTS: [number, number] = [10000, 10100];
-const NODE2_PORTS: [number, number] = [10101, 10200];
+// a transport's media actually lives (channel affinity: always the owner node).
+// Neither range starts at 10000: with one WebRtcServer per worker a node binds
+// MIN_PORT + slot deterministically, so a range shared with `pnpm dev`'s
+// server (apps/server/.env, MIN_PORT=10000) would make whichever boots second
+// fail at startup instead of coexisting as the old random-port mode did.
+const NODE1_PORTS: [number, number] = [10100, 10199];
+const NODE2_PORTS: [number, number] = [10200, 10299];
 const API1 = `http://localhost:${NODE1_PORT}/api/v1`;
 const API2 = `http://localhost:${NODE2_PORT}/api/v1`;
 const WS1 = `http://localhost:${NODE1_PORT}`;
@@ -837,10 +841,10 @@ async function main() {
 
   // Step 1: Start two server instances
   console.log('Starting node-1 on port 3001...');
-  node1 = startServer(NODE1_PORT, 'node-1', 10000, 10100);
+  node1 = startServer(NODE1_PORT, 'node-1', NODE1_PORTS[0], NODE1_PORTS[1]);
 
   console.log('Starting node-2 on port 3002...');
-  node2 = startServer(NODE2_PORT, 'node-2', 10101, 10200);
+  node2 = startServer(NODE2_PORT, 'node-2', NODE2_PORTS[0], NODE2_PORTS[1]);
 
   console.log('Waiting for servers to be ready...');
   const [ready1, ready2] = await Promise.all([

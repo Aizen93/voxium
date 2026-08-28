@@ -9,13 +9,23 @@
 
 export const DEFAULT_STUN_PORT = 3478;
 
-// `stun:host[:port]` or `stuns:host[:port]`. A TURN URL is refused on purpose:
-// TURN relays media and needs credentials, and the Privacy Policy promises
-// neither — adding it is a product decision, not a config value.
-const STUN_URL_RE = /^stuns?:[^\s/?#@]+$/i;
+// `stun:host[:port]` or `stuns:host[:port]`, where host is a hostname, an IPv4
+// literal or a bracketed IPv6 literal. Strict on purpose: Chromium throws
+// `SyntaxError: Invalid ICE server URL` from `new RTCPeerConnection()` for
+// `stun:host:3478x`, `stun:host:` or an unclosed bracket, and a rejected
+// override falls back to the derived default instead of taking DM calls down.
+// A TURN URL is refused too: TURN relays media and needs credentials, and the
+// Privacy Policy promises neither — adding it is a product decision, not a
+// config value.
+const STUN_URL_RE = /^stuns?:(?:\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*)(?::(?<port>\d{1,5}))?$/i;
 
 export function isValidStunUrl(value: string): boolean {
-  return STUN_URL_RE.test(value);
+  const m = STUN_URL_RE.exec(value);
+  if (!m) return false;
+  const port = m.groups?.port;
+  if (port === undefined) return true;
+  const n = Number(port);
+  return n >= 1 && n <= 65535;
 }
 
 /** `stun:<host>:3478` for the host part of `wsUrl`, falling back to localhost. */

@@ -149,7 +149,7 @@ export function AdminDashboard() {
             {sfuStats.webRtcServer && (
               <div className="mb-4 text-xs text-vox-text-muted">
                 WebRtcServer ports (udp+tcp, one per worker): {sfuStats.webRtcServer.ports.join(', ') || 'none'}
-                <span className="ml-2 opacity-70">· worker range {sfuStats.portRange.min}–{sfuStats.portRange.max}</span>
+                <span className="ml-2 opacity-70">· configured MIN–MAX {sfuStats.portRange.min}–{sfuStats.portRange.max} (only these ports are used)</span>
               </div>
             )}
 

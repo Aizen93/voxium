@@ -69,6 +69,19 @@ export function useWebRtcServer(): boolean {
  */
 export function webRtcServerPort(workerIndex: number): number {
   const { rtcMinPort, rtcMaxPort } = getWorkerSettings();
+  // parseInt of an unexpanded `${MIN_PORT}` or a stray quote is NaN, and every
+  // comparison against NaN is false: the slot check below would PASS, mediasoup
+  // would skip the NaN range and bind RANDOM ports out of its 10000-59999
+  // default, behind a firewall that opens eight. Refuse the whole range.
+  if (
+    !Number.isInteger(rtcMinPort) || !Number.isInteger(rtcMaxPort) ||
+    rtcMinPort < 1 || rtcMaxPort > 65535 || rtcMinPort > rtcMaxPort
+  ) {
+    throw new Error(
+      `[mediasoup] MEDIASOUP_MIN_PORT/MAX_PORT must be integers with 1 <= MIN <= MAX <= 65535 ` +
+      `(got ${process.env.MEDIASOUP_MIN_PORT ?? 'unset'} / ${process.env.MEDIASOUP_MAX_PORT ?? 'unset'})`,
+    );
+  }
   const port = rtcMinPort + workerIndex;
   if (!Number.isInteger(workerIndex) || workerIndex < 0 || port > rtcMaxPort) {
     throw new Error(

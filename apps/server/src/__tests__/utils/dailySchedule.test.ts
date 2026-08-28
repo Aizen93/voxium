@@ -98,12 +98,35 @@ describe('withClusterLock', () => {
     expect(redisEval).not.toHaveBeenCalled(); // nothing to release
   });
 
-  it('fails CLOSED on a Redis error while claiming: skips, does not run, does not throw', async () => {
+  it('fails CLOSED on a Redis error while claiming: skips as UNAVAILABLE, does not run, does not throw', async () => {
     redisSet.mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     const job = vi.fn();
-    await expect(withClusterLock(opts, job)).resolves.toEqual({ skipped: 'locked' });
+    const result = await withClusterLock(opts, job);
+    expect(result).toEqual({ skipped: 'unavailable' });
+    expect(wasSkipped(result)).toBe(true);
     expect(job).not.toHaveBeenCalled();
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('[Test] Could not claim'), 'ECONNREFUSED');
+    // Error level, and a distinct result: "a peer is doing it" and "nobody
+    // knows" must not look the same to the caller or the operator.
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('[Test] Could not claim'), 'ECONNREFUSED');
+  });
+
+  // A mutex released on completion is not "once per slot": a peer's timer
+  // that fires 300 ms later finds it free and runs the pass again.
+  it('holdOnSuccess leaves the lock to expire instead of releasing it', async () => {
+    await expect(withClusterLock({ ...opts, holdOnSuccess: true }, async () => 'done')).resolves.toBe('done');
+    expect(redisEval).not.toHaveBeenCalled();
+    // A second claim at the same slot is refused by the still-held lock
+    redisSet.mockResolvedValue(null);
+    const job = vi.fn();
+    await expect(withClusterLock({ ...opts, holdOnSuccess: true }, job)).resolves.toEqual({ skipped: 'locked' });
+    expect(job).not.toHaveBeenCalled();
+  });
+
+  it('holdOnSuccess still releases after a FAILED run so the next attempt is not blocked', async () => {
+    const boom = new Error('boom');
+    await expect(withClusterLock({ ...opts, holdOnSuccess: true }, async () => { throw boom; })).rejects.toBe(boom);
+    expect(redisEval).toHaveBeenCalledTimes(1);
   });
 
   it('releases the lock even when the job throws, and re-throws', async () => {

@@ -27,11 +27,22 @@ describe('stunUrl — where DM calls send their STUN binding requests', () => {
     expect(resolveStunUrl({ VITE_STUN_URL: 'STUN:stun.voxium.app:3478' })).toBe('STUN:stun.voxium.app:3478');
   });
 
+  it('accepts hostnames, IPv4 and bracketed IPv6 literals, with or without a port', () => {
+    for (const ok of ['stun:voxium.app', 'stun:stun.voxium.app:3478', 'stun:10.0.1.10:3478', 'stun:[2001:db8::1]:3478', 'stun:[::1]', 'stun:localhost:65535', 'stuns:a-b.c:1']) {
+      expect(isValidStunUrl(ok), ok).toBe(true);
+    }
+  });
+
   // An unparseable ICE server makes `new RTCPeerConnection()` throw, which
-  // would take every DM call down with a typo. Log and ignore instead.
+  // would take every DM call down with a typo. Log and ignore instead. Chromium
+  // throws for every entry below; a regex that only excluded whitespace and
+  // / ? # @ let most of them through.
   it('ignores a malformed override (warns) and derives from VITE_WS_URL instead', () => {
     const warn = vi.fn();
-    for (const bad of ['voxium.app:3478', 'stun://voxium.app', 'stun:voxium.app/path', 'stun:user@voxium.app', 'stun:', 'stun:a b']) {
+    for (const bad of [
+      'voxium.app:3478', 'stun://voxium.app', 'stun:voxium.app/path', 'stun:user@voxium.app', 'stun:', 'stun:a b',
+      'stun:coturn.example.com:3478x', 'stun:host:', 'stun:[2001:db8::1', 'stun:host:99999', 'stun:host:0', 'stun:-bad.host', 'stun:host_name',
+    ]) {
       warn.mockClear();
       expect(resolveStunUrl({ VITE_STUN_URL: bad, VITE_WS_URL: 'https://voxium.app' }, warn), bad).toBe('stun:voxium.app:3478');
       expect(warn, bad).toHaveBeenCalledTimes(1);

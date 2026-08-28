@@ -183,10 +183,10 @@ async function main() {
   // Start admin metrics emitter
   startAdminMetricsEmitter(io);
 
-  // Start attachment cleanup (3-day retention)
+  // Start attachment cleanup (3-day retention) — leader-locked via withClusterLock
   startAttachmentCleanup();
 
-  // Sweep undeliverable E2E key shares (30-day retention)
+  // Sweep undeliverable E2E key shares (30-day retention) — leader-locked via withClusterLock
   startKeyShareCleanup();
 
   // Registration hygiene: unverified-account TTL + IP-record retention (GDPR)

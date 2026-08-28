@@ -36,6 +36,7 @@ import {
   runAttachmentCleanup,
   ATTACHMENT_CLEANUP_LOCK_KEY,
   ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS,
+  ATTACHMENT_CLEANUP_RETRY_MS,
 } from '../../utils/attachmentCleanup';
 import { prisma } from '../../utils/prisma';
 import { deleteMultipleFromS3 } from '../../utils/s3';
@@ -174,7 +175,7 @@ describe('attachmentCleanup — cluster lock', () => {
     vi.restoreAllMocks();
   });
 
-  it('the lock holder expires the rows, sends the ONE report, and releases its own lock', async () => {
+  it('the lock holder expires the rows, sends the ONE report, and HOLDS the lock for the slot', async () => {
     const result = await runAttachmentCleanup();
 
     expect(result).toEqual({ filesExpired: 2, sizeFreed: 30, error: null });
@@ -187,8 +188,22 @@ describe('attachmentCleanup — cluster lock', () => {
     expect(prisma.messageAttachment.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['a1', 'a2'] } }, data: { expired: true } });
     expect(sendCleanupReport).toHaveBeenCalledTimes(1);
     expect(sendCleanupReport).toHaveBeenCalledWith('ops@example.test', expect.objectContaining({ filesExpired: 2, sizeFreed: 30, error: null }));
-    // Released with the token it was claimed under
-    expect(redisEval).toHaveBeenCalledWith(expect.any(String), { keys: [ATTACHMENT_CLEANUP_LOCK_KEY], arguments: [redisSet.mock.calls[0][1]] });
+    // NOT released: a peer whose 04:00 timer fires a moment later (or an hour
+    // later, in another timezone) must find the slot taken. The 20 h TTL
+    // expires it before tomorrow's slot.
+    expect(redisEval).not.toHaveBeenCalled();
+    expect(ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS).toBeLessThan(24 * 60 * 60);
+    expect(ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS).toBeGreaterThanOrEqual(12 * 60 * 60);
+  });
+
+  it('a pass whose batches fail still completes (error in the result and the report) and keeps the slot', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(prisma.messageAttachment.findMany).mockReset().mockRejectedValue(new Error('db down'));
+    const result = await runAttachmentCleanup();
+    expect(result).toEqual({ filesExpired: 0, sizeFreed: 0, error: 'db down' });
+    expect(sendCleanupReport).toHaveBeenCalledWith('ops@example.test', expect.objectContaining({ error: 'db down' }));
+    // The run ran and reported; a peer must not redo the night. Held, not released.
+    expect(redisEval).not.toHaveBeenCalled();
   });
 
   it('a node that loses the SET NX race touches nothing and sends NO report', async () => {
@@ -203,11 +218,38 @@ describe('attachmentCleanup — cluster lock', () => {
     expect(redisEval).not.toHaveBeenCalled();
   });
 
-  it('fails closed when Redis is unreachable: skips the night rather than racing a peer', async () => {
+  it('fails closed when Redis is unreachable — and says UNAVAILABLE, not locked', async () => {
     redisSet.mockRejectedValue(new Error('ECONNREFUSED'));
-    await expect(runAttachmentCleanup()).resolves.toEqual({ skipped: 'locked' });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(runAttachmentCleanup()).resolves.toEqual({ skipped: 'unavailable' });
     expect(deleteMultipleFromS3).not.toHaveBeenCalled();
     expect(sendCleanupReport).not.toHaveBeenCalled();
+  });
+
+  // Skipping a night silently is what makes a retention job untrustworthy:
+  // no rows expired AND no report email, indistinguishable from "nothing to do".
+  it('re-arms in 15 minutes, not tomorrow, when Redis was unavailable at the slot', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2024, 0, 15, 3, 59, 0, 0));
+    redisSet.mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    try {
+      startAttachmentCleanup();
+      await vi.advanceTimersByTimeAsync(60_000); // the 04:00 slot: claim fails
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy.mock.calls[1][1]).toBe(ATTACHMENT_CLEANUP_RETRY_MS);
+
+      // Redis is back and a peer already did the night's pass → locked → tomorrow
+      redisSet.mockResolvedValue(null);
+      await vi.advanceTimersByTimeAsync(ATTACHMENT_CLEANUP_RETRY_MS);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(3);
+      expect(setTimeoutSpy.mock.calls[2][1] as number).toBeGreaterThan(23 * 60 * 60 * 1000);
+      expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    } finally {
+      stopAttachmentCleanup();
+      vi.useRealTimers();
+    }
   });
 
   it('the scheduled timer runs the locked pass and re-arms for tomorrow even when the lock was lost', async () => {

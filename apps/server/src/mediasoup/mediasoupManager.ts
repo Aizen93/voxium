@@ -25,6 +25,9 @@ const webRtcServers = new Map<Worker, WebRtcServer>();
 // (MEDIASOUP_MIN_PORT + slot). A replacement worker after a crash inherits the
 // slot so it re-binds the very same ports.
 const workerSlot = new Map<Worker, number>();
+// The port each live WebRtcServer actually bound — recorded at creation so
+// stats never re-derive it from env (which can throw) after the fact.
+const boundPorts = new Map<Worker, number>();
 // Router → the worker it was created on, for picking that worker's WebRtcServer
 // when a transport is created. Weak: routers are closed and dropped freely.
 const routerOwner = new WeakMap<Router, Worker>();
@@ -64,9 +67,23 @@ export async function initMediasoup(): Promise<void> {
 
   console.log(`[mediasoup] Creating ${numWorkers} worker(s)...`);
 
-  for (let i = 0; i < numWorkers; i++) {
-    const worker = await createWorker(i);
-    workers.push(worker);
+  try {
+    for (let i = 0; i < numWorkers; i++) {
+      const worker = await createWorker(i);
+      workers.push(worker);
+    }
+  } catch (err) {
+    // Boot is about to fail (index.ts exits). Do not leave the workers that
+    // DID come up as orphaned mediasoup child processes holding their ports —
+    // the very thing that would make the next boot fail the same way.
+    for (const w of workers) {
+      try { w.close(); } catch (closeErr) { console.error('[mediasoup] Failed to close worker during init rollback:', closeErr); }
+    }
+    workers.length = 0;
+    webRtcServers.clear();
+    workerSlot.clear();
+    boundPorts.clear();
+    throw err;
   }
 
   if (useWebRtcServer()) {
@@ -156,8 +173,8 @@ export async function createWebRtcTransport(router: Router): Promise<WebRtcTrans
 export function getWebRtcServerPorts(): number[] {
   const ports: number[] = [];
   for (const worker of workers) {
-    const slot = workerSlot.get(worker);
-    if (webRtcServers.has(worker) && slot !== undefined) ports.push(webRtcServerPort(slot));
+    const port = boundPorts.get(worker);
+    if (port !== undefined) ports.push(port);
   }
   return ports.sort((a, b) => a - b);
 }
@@ -231,8 +248,13 @@ function getNextWorker(): Worker {
   return worker;
 }
 
-/** Tracks consecutive restart failures for exponential backoff. */
-let workerRestartAttempts = 0;
+/**
+ * Consecutive restart failures PER SLOT, for exponential backoff. One shared
+ * counter let a slot whose port is permanently taken pin every other slot's
+ * first restart at the 30 s ceiling — and let any success drop the failing
+ * slot back to a 2 s spawn-and-close loop.
+ */
+const restartAttempts = new Map<number, number>();
 
 async function createWorker(slot: number): Promise<Worker> {
   const worker = await mediasoup.createWorker({
@@ -243,9 +265,11 @@ async function createWorker(slot: number): Promise<Worker> {
   workerSlot.set(worker, slot);
 
   if (useWebRtcServer()) {
+    const listenInfos = getWebRtcServerListenInfos(slot);
     try {
-      const server = await worker.createWebRtcServer({ listenInfos: getWebRtcServerListenInfos(slot) });
+      const server = await worker.createWebRtcServer({ listenInfos });
       webRtcServers.set(worker, server);
+      boundPorts.set(worker, listenInfos[0].port!);
     } catch (err) {
       // A worker without its server would accept routers and then fail every
       // transport (createWebRtcTransport refuses to fall back). Close it and
@@ -254,7 +278,7 @@ async function createWorker(slot: number): Promise<Worker> {
       workerSlot.delete(worker);
       worker.close();
       throw new Error(
-        `[mediasoup] Failed to bind WebRtcServer port ${webRtcServerPort(slot)} for worker #${slot}: ${err instanceof Error ? err.message : String(err)}`,
+        `[mediasoup] Failed to bind WebRtcServer port ${listenInfos[0].port} for worker #${slot}: ${err instanceof Error ? err.message : String(err)}`,
         { cause: err },
       );
     }
@@ -269,6 +293,7 @@ async function createWorker(slot: number): Promise<Worker> {
     if (idx !== -1) workers.splice(idx, 1);
     webRtcServers.delete(worker);
     workerSlot.delete(worker);
+    boundPorts.delete(worker);
 
     // Close all Routers that were on this worker
     const affectedChannels: string[] = [];
@@ -290,27 +315,42 @@ async function createWorker(slot: number): Promise<Worker> {
       }
     }
 
-    // Attempt to restart with exponential backoff (50ms, 100ms, 200ms, ... 30s max)
-    workerRestartAttempts++;
-    const delay = Math.min(2000 * Math.pow(2, workerRestartAttempts - 1), 30000);
-    console.log(`[mediasoup] Scheduling worker restart in ${delay}ms (attempt ${workerRestartAttempts})`);
-
-    setTimeout(async () => {
-      try {
-        console.log(`[mediasoup] Restarting dead worker (slot #${slot})...`);
-        const newWorker = await createWorker(slot);
-        workers.push(newWorker);
-        workerRestartAttempts = 0; // Reset on success
-        console.log(`[mediasoup] Replacement worker pid=${newWorker.pid} ready`);
-      } catch (err) {
-        console.error('[mediasoup] Failed to restart worker:', err);
-        if (workers.length === 0) {
-          console.error('[mediasoup] CRITICAL: All workers dead and restart failed. Voice will be unavailable.');
-        }
-      }
-    }, delay);
+    scheduleWorkerRestart(slot);
   });
 
   console.log(`[mediasoup] Worker pid=${worker.pid} created`);
   return worker;
+}
+
+/**
+ * Restart a dead worker's slot with exponential backoff (2s, 4s, 8s … 30s max),
+ * and KEEP retrying when the restart itself fails. A failed restart used to
+ * be logged and abandoned, which was tolerable when creating a worker could
+ * only fail on a broken install; with a WebRtcServer the replacement must
+ * re-bind the slot's port, and a bind failure is exactly the transient kind
+ * (the dead process's socket not yet released) that a second attempt fixes.
+ * Abandoning it leaves the node one worker short — silently, for the rest
+ * of the process's life.
+ */
+function scheduleWorkerRestart(slot: number): void {
+  const attempt = (restartAttempts.get(slot) ?? 0) + 1;
+  restartAttempts.set(slot, attempt);
+  const delay = Math.min(2000 * Math.pow(2, attempt - 1), 30000);
+  console.log(`[mediasoup] Scheduling worker restart for slot #${slot} in ${delay}ms (attempt ${attempt})`);
+
+  setTimeout(async () => {
+    try {
+      console.log(`[mediasoup] Restarting dead worker (slot #${slot})...`);
+      const newWorker = await createWorker(slot);
+      workers.push(newWorker);
+      restartAttempts.delete(slot); // Reset THIS slot's backoff on success
+      console.log(`[mediasoup] Replacement worker pid=${newWorker.pid} ready`);
+    } catch (err) {
+      console.error(`[mediasoup] Failed to restart worker for slot #${slot}:`, err);
+      if (workers.length === 0) {
+        console.error('[mediasoup] CRITICAL: All workers dead and restart failed. Voice is unavailable until a retry succeeds.');
+      }
+      scheduleWorkerRestart(slot);
+    }
+  }, delay);
 }

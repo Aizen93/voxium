@@ -175,6 +175,18 @@ describe('mediasoup/mediasoupConfig — WebRtcServer helpers', () => {
     expect(() => mod.webRtcServerPort(1.5)).toThrow();
   });
 
+  // parseInt('${MIN_PORT}') is NaN, and NaN compares false with everything —
+  // the old slot check passed, mediasoup skipped the NaN range and bound
+  // RANDOM ports out of 10000-59999 behind a firewall that opens eight.
+  it('webRtcServerPort() fails CLOSED on an unparseable or nonsensical range', async () => {
+    const mod = await import('../../mediasoup/mediasoupConfig');
+    for (const [min, max] of [['${MIN_PORT}', '10007'], ['10000', '"19999"'], ['abc', 'def'], ['0', '10007'], ['10000', '70000'], ['10010', '10000']]) {
+      process.env.MEDIASOUP_MIN_PORT = min;
+      process.env.MEDIASOUP_MAX_PORT = max;
+      expect(() => mod.webRtcServerPort(0), `${min}/${max}`).toThrow(/must be integers with 1 <= MIN <= MAX <= 65535/);
+    }
+  });
+
   it('getWebRtcServerListenInfos() binds udp AND tcp on the SAME port with the announced address', async () => {
     const mod = await import('../../mediasoup/mediasoupConfig');
     process.env.MEDIASOUP_LISTEN_IP = '10.0.1.11';

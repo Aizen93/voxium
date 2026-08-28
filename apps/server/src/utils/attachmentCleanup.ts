@@ -2,7 +2,7 @@ import { prisma } from './prisma';
 import { deleteMultipleFromS3 } from './s3';
 import { sendCleanupReport, describeEmailError } from './email';
 import { LIMITS } from '@voxium/shared';
-import { msUntilDailySlot, withClusterLock } from './dailySchedule';
+import { msUntilDailySlot, withClusterLock, wasSkipped, type ClusterLockSkip } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
@@ -12,10 +12,17 @@ const BATCH_SIZE = 100;
 
 // Production is multi-node and every node fires this slot. Without the lock
 // each of them ran the expiry pass — N S3 delete passes over the same rows
-// and N CLEANUP_REPORT_EMAIL reports a night. Long enough for a large backlog
-// of 100-row batches; the holder releases it as soon as it is done.
+// and N CLEANUP_REPORT_EMAIL reports a night. The lock is HELD for 20 hours
+// after a successful pass rather than released (withClusterLock's
+// holdOnSuccess): a peer whose timer fires a moment later — or an hour later,
+// in another timezone — must find it taken. 20 h < 24 h, so tomorrow's slot
+// claims it again.
 export const ATTACHMENT_CLEANUP_LOCK_KEY = 'lock:attachmentcleanup';
-export const ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS = 60 * 60;
+export const ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS = 20 * 60 * 60;
+// When Redis itself is unreachable at the slot, nobody knows whether the pass
+// ran. Try again soon rather than in 24 h — a peer that did run holds the lock,
+// so the retry is safe; if Redis is still down it says so every 15 minutes.
+export const ATTACHMENT_CLEANUP_RETRY_MS = 15 * 60 * 1000;
 
 export interface AttachmentCleanupResult {
   filesExpired: number;
@@ -46,28 +53,36 @@ function scheduleNext(afterRun: boolean) {
 
 async function runCleanup() {
   if (stopped) return;
+  let retrySoon = false;
   try {
-    await runAttachmentCleanup();
+    const result = await runAttachmentCleanup();
+    retrySoon = wasSkipped(result) && result.skipped === 'unavailable';
   } catch (err) {
     // The pass logs its own failures; this only catches the lock plumbing.
     console.error('[Cleanup] Attachment cleanup run failed:', err instanceof Error ? err.message : err);
   } finally {
-    scheduleNext(true);
+    if (retrySoon) scheduleRetry(); else scheduleNext(true);
   }
+}
+
+function scheduleRetry() {
+  if (stopped) return;
+  console.error(`[Cleanup] Redis unavailable at the cleanup slot — retrying in ${ATTACHMENT_CLEANUP_RETRY_MS / 60000} minutes`);
+  timeoutId = setTimeout(runCleanup, ATTACHMENT_CLEANUP_RETRY_MS);
 }
 
 /**
  * One expiry pass plus its report, under the cluster lock. Exported for tests;
  * the scheduler calls it from the timer. Resolves `{ skipped: 'locked' }` when
- * another node holds the lock (or Redis is unreachable — fail closed): no
- * rows are touched and no report is sent, the holder's report is the night's.
+ * another node holds the lock — no rows are touched and no report is sent, the
+ * holder's report is the night's — and `{ skipped: 'unavailable' }` when Redis
+ * could not be reached (fail closed; the scheduler retries soon).
  */
-export async function runAttachmentCleanup(): Promise<AttachmentCleanupResult | { skipped: 'locked' }> {
-  const result = await withClusterLock(
-    { key: ATTACHMENT_CLEANUP_LOCK_KEY, ttlSeconds: ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS, tag: '[Cleanup]' },
+export async function runAttachmentCleanup(): Promise<AttachmentCleanupResult | ClusterLockSkip> {
+  return withClusterLock(
+    { key: ATTACHMENT_CLEANUP_LOCK_KEY, ttlSeconds: ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS, tag: '[Cleanup]', holdOnSuccess: true },
     expireAttachmentsAndReport,
   );
-  return result;
 }
 
 async function expireAttachmentsAndReport(): Promise<AttachmentCleanupResult> {

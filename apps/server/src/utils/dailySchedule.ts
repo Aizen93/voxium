@@ -90,44 +90,70 @@ export async function releaseLockIfOwned(
 }
 
 /**
+ * `locked`: a peer holds the lock (or ran this slot already) — the work is
+ * being done, or was. `unavailable`: Redis could not be reached — nobody
+ * knows whether the work is being done, and the caller should retry soon.
+ */
+export type ClusterLockSkip = { skipped: 'locked' | 'unavailable' };
+
+/**
  * Run `fn` under a `SET NX EX` cluster lock, or not at all.
  *
  * Production is multi-node: a scheduled job fires on EVERY node at the same
  * slot, and a job that is not leader-locked runs N times — for the attachment
  * cleanup that was N S3 delete passes over the same rows and N report emails
- * a night; for the key-share sweep N identical `deleteMany`s. Fail CLOSED on
- * a Redis error: skipping a run costs nothing (the rows are still there at
- * the next slot), racing a peer is what the lock exists to prevent.
+ * a night; for the key-share sweep N identical `deleteMany`s.
+ *
+ * A mutex alone does not give "once per slot": node A's pass takes 200 ms,
+ * node B's timer fires 300 ms later, finds the lock released, and runs the
+ * whole thing again — deterministically so when the two containers sit in
+ * different timezones and their 04:00 slots are an hour apart. So a slot job
+ * passes `holdOnSuccess`: after a successful run the lock is LEFT TO EXPIRE
+ * at `ttlSeconds` instead of being released, and `ttlSeconds` is sized as
+ * the slot's exclusivity window (shorter than the interval, so the next slot
+ * can claim it), not as the run's duration. A failed run releases the lock
+ * so the next attempt is not blocked.
+ *
+ * Fail CLOSED on a Redis error — racing a peer is the bug the lock exists to
+ * prevent — but say so at error level and as a distinct result, because a
+ * retention job that silently did not run is a job nobody can trust.
  *
  * `registrationHygiene` and `orphanCleanup` carry their own copies of this
  * idiom with run records and audit rows around it; this is the plain form.
  */
 export async function withClusterLock<T>(
-  opts: { key: string; ttlSeconds: number; tag: string },
+  opts: { key: string; ttlSeconds: number; tag: string; holdOnSuccess?: boolean },
   fn: () => Promise<T>,
-): Promise<T | { skipped: 'locked' }> {
+): Promise<T | ClusterLockSkip> {
   const owner = lockToken();
   let claimed: string | null;
   try {
     claimed = await getRedis().set(opts.key, owner, { NX: true, EX: opts.ttlSeconds });
   } catch (err) {
-    console.warn(`${opts.tag} Could not claim the cluster lock — skipping this run:`, err instanceof Error ? err.message : err);
-    return { skipped: 'locked' };
+    console.error(`${opts.tag} Could not claim the cluster lock (Redis unavailable) — skipping this run:`, err instanceof Error ? err.message : err);
+    return { skipped: 'unavailable' };
   }
   if (claimed === null) {
     console.log(`${opts.tag} Another node holds the lock — skipping this run`);
     return { skipped: 'locked' };
   }
+  let succeeded = false;
   try {
-    return await fn();
+    const result = await fn();
+    succeeded = true;
+    return result;
   } finally {
-    // Only if we still own it: a run that outlives the TTL must not release
-    // the lock a peer (or this node's own next run) has since taken.
-    await releaseLockIfOwned(getRedis(), opts.key, owner).catch((err) =>
-      console.warn(`${opts.tag} Lock release failed (it expires on its own):`, err instanceof Error ? err.message : err));
+    if (!(succeeded && opts.holdOnSuccess)) {
+      // Only if we still own it: a run that outlives the TTL must not release
+      // the lock a peer (or this node's own next run) has since taken.
+      await releaseLockIfOwned(getRedis(), opts.key, owner).catch((err) =>
+        console.warn(`${opts.tag} Lock release failed (it expires on its own):`, err instanceof Error ? err.message : err));
+    }
   }
 }
 
-export function wasSkipped(result: unknown): result is { skipped: 'locked' } {
-  return typeof result === 'object' && result !== null && (result as { skipped?: unknown }).skipped === 'locked';
+export function wasSkipped(result: unknown): result is ClusterLockSkip {
+  if (typeof result !== 'object' || result === null) return false;
+  const skipped = (result as { skipped?: unknown }).skipped;
+  return skipped === 'locked' || skipped === 'unavailable';
 }

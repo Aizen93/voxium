@@ -16,7 +16,7 @@ vi.mock('../../utils/redis', () => ({
 }));
 
 import { prisma } from '../../utils/prisma';
-import { runSweep, startKeyShareCleanup, stopKeyShareCleanup, KEYSHARE_SWEEP_LOCK_KEY, KEYSHARE_SWEEP_LOCK_TTL_SECONDS } from '../../utils/keyShareCleanup';
+import { runSweep, startKeyShareCleanup, stopKeyShareCleanup, KEYSHARE_SWEEP_LOCK_KEY, KEYSHARE_SWEEP_LOCK_TTL_SECONDS, KEYSHARE_SWEEP_RETRY_MS } from '../../utils/keyShareCleanup';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -69,7 +69,7 @@ describe('E2E retention sweep', () => {
 
 // Every node fires the 6-hourly interval; unlocked, each ran its own scan.
 describe('E2E retention sweep — cluster lock', () => {
-  it('claims the lock with SET NX EX before deleting, and releases its own token after', async () => {
+  it('claims the lock with SET NX EX before deleting, and HOLDS it for most of the interval', async () => {
     vi.mocked(prisma.e2EKeyShare.deleteMany).mockResolvedValue({ count: 1 } as any);
     expect(await runSweep()).toBe(1);
     expect(redisSet).toHaveBeenCalledWith(
@@ -78,7 +78,21 @@ describe('E2E retention sweep — cluster lock', () => {
       { NX: true, EX: KEYSHARE_SWEEP_LOCK_TTL_SECONDS },
     );
     expect(redisSet.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(prisma.e2EKeyShare.deleteMany).mock.invocationCallOrder[0]);
-    expect(redisEval).toHaveBeenCalledWith(expect.any(String), { keys: [KEYSHARE_SWEEP_LOCK_KEY], arguments: [redisSet.mock.calls[0][1]] });
+    // Not released: nodes run this interval on their OWN boot clocks and would
+    // never contend for a lock released on completion — each would still sweep
+    // every 6 h. Held for 5 h (< the 6 h interval) → once per ≥ 5 h cluster-wide.
+    expect(redisEval).not.toHaveBeenCalled();
+    expect(KEYSHARE_SWEEP_LOCK_TTL_SECONDS * 1000).toBeLessThan(6 * 60 * 60 * 1000);
+    expect(KEYSHARE_SWEEP_LOCK_TTL_SECONDS).toBeGreaterThanOrEqual(4 * 60 * 60);
+  });
+
+  it('a sweep that throws releases the lock, logs, returns 0 and re-arms', async () => {
+    vi.mocked(prisma.e2EKeyShare.deleteMany).mockRejectedValue(new Error('db down'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await runSweep()).toBe(0);
+    expect(redisEval).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith('[E2E] Key-share sweep failed:', 'db down');
+    error.mockRestore();
   });
 
   it('a node that loses the race deletes nothing and reports 0 — but still re-arms its timer', async () => {
@@ -92,11 +106,16 @@ describe('E2E retention sweep — cluster lock', () => {
     setTimeoutSpy.mockRestore();
   });
 
-  it('fails closed when Redis is unreachable', async () => {
+  it('fails closed when Redis is unreachable — and re-arms in 15 minutes, not 6 hours', async () => {
     redisSet.mockRejectedValue(new Error('ECONNREFUSED'));
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    startKeyShareCleanup();
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
     expect(await runSweep()).toBe(0);
     expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
-    warn.mockRestore();
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    expect(setTimeoutSpy.mock.calls[0][1]).toBe(KEYSHARE_SWEEP_RETRY_MS);
+    setTimeoutSpy.mockRestore();
+    error.mockRestore();
   });
 });
