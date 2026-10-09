@@ -2,28 +2,54 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateServerName, validateNickname, LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, permissionsToString } from '@voxium/shared';
-import type { MemberRole, Server } from '@voxium/shared';
-import type { Socket } from 'socket.io';
-import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
-import { broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
+import { validateServerName, validateNickname, validateBanReason, LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, permissionsToString } from '@voxium/shared';
+import type { MemberRole, Server, ServerBan } from '@voxium/shared';
+import { joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
-import { leaveCurrentVoiceChannel } from '../websocket/voiceHandler';
-import { broadcastServerVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
-import { getRedis } from '../utils/redis';
+import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { purgeSecureChannelState } from '../utils/secureChannelLifecycle';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
+import { removeMemberFromServer } from '../utils/removeMember';
+import { recomputeListed } from '../utils/discoveryListing';
 
 export const serverRouter = Router();
 
 serverRouter.use(authenticate, requireVerifiedEmail, requireConsent);
+
+/**
+ * The `Server` shape the list, the updates and every server:updated emit
+ * return — exactly the fields of the shared type, directory profile included.
+ * One constant so no select can quietly miss a field the client expects.
+ */
+const serverSelect = {
+  id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true,
+  description: true, tags: true, discoverable: true, joinMode: true,
+} as const;
+
+/** API shape of a ban row (ServerBan in the shared types). */
+function formatBan(ban: {
+  serverId: string;
+  userId: string;
+  reason: string | null;
+  createdAt: Date;
+  user: { id: string; username: string; displayName: string; avatarUrl: string | null };
+  bannedBy: { id: string; username: string; displayName: string } | null;
+}): ServerBan {
+  return {
+    serverId: ban.serverId,
+    userId: ban.userId,
+    reason: ban.reason,
+    createdAt: ban.createdAt.toISOString(),
+    user: ban.user,
+    bannedBy: ban.bannedBy,
+  };
+}
 
 // List servers the user is a member of
 serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
@@ -32,7 +58,7 @@ serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) =>
       where: { userId: req.user!.userId },
       include: {
         server: {
-          select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
+          select: serverSelect,
         },
       },
       orderBy: { joinedAt: 'asc' },
@@ -288,44 +314,10 @@ serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>,
     if (!membership) throw new NotFoundError('Server membership');
     if (membership.role === 'owner') throw new ForbiddenError('Server owner cannot leave. Transfer ownership first.');
 
-    // Secure channels first: channels they created die with them (with events
-    // to their members), other memberships are removed so remaining members
-    // rotate keys. Must run BEFORE the ServerMember delete.
-    await purgeSecureChannelState(req.user!.userId, serverId);
-
-    // Leaving the server force-leaves its voice too (parity with kick — a
-    // departed member must not keep a live media session). Cross-node via the
-    // Redis reverse lookup + cluster eviction fan-out.
-    try {
-      const redis = getRedis();
-      const voiceChannelId = await redis.get(`voice:user:${req.user!.userId}`);
-      if (voiceChannelId) {
-        const voiceServerId = await redis.get(`voice:channel:server:${voiceChannelId}`);
-        if (voiceServerId === serverId) {
-          await broadcastVoiceEvictUser(getIO(), voiceChannelId, req.user!.userId);
-        }
-      }
-    } catch (err) {
-      console.warn('[Servers] Voice eviction on self-leave failed (reaper will catch up):', err);
-    }
-
-    // Clean up ChannelRead records for this server's channels
-    const textChannelIds = await prisma.channel.findMany({
-      where: { serverId, type: 'text' },
-      select: { id: true },
-    });
-    if (textChannelIds.length > 0) {
-      await prisma.channelRead.deleteMany({
-        where: { userId: req.user!.userId, channelId: { in: textChannelIds.map((c) => c.id) } },
-      });
-    }
-
-    await prisma.serverMember.delete({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-
-    // Remove the leaver's socket(s) from the server room and notify remaining members
-    await broadcastMemberLeft(req.user!.userId, serverId);
+    // The teardown (voice eviction, secure-channel purge, read markers, the
+    // membership + count transaction, member:left) is removeMemberFromServer's.
+    // No ban: a voluntary leave can come back by invite or through Explore.
+    await removeMemberFromServer(req.user!.userId, serverId);
 
     res.json({ success: true, message: 'Left server' });
   } catch (err) {
@@ -375,7 +367,7 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
 
     const updated = await prisma.server.update({
       where: { id: serverId },
-      select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
+      select: serverSelect,
       data: updateData,
     });
 
@@ -408,9 +400,14 @@ serverRouter.patch('/:serverId/invites-lock', rateLimitMemberManage, async (req:
 
     const updated = await prisma.server.update({
       where: { id: serverId },
-      select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
+      select: serverSelect,
       data: { invitesLocked: locked },
     });
+
+    // invitesLocked is one of the four inputs of the directory's materialised
+    // eligibility column: locked means "not taking members", so the server
+    // leaves Explore (and comes back on unlock). Never throws.
+    await recomputeListed(serverId);
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
 
@@ -511,7 +508,9 @@ serverRouter.patch(
   }
 );
 
-// Kick a member (owner or admin, must outrank target)
+// Remove a member AND ban them (owner or admin, must outrank target).
+// Every removal is a ban since server discovery: the undo is the unban below.
+// The path stays /kick — the client already calls it; only the label changed.
 serverRouter.post(
   '/:serverId/members/:memberId/kick',
   rateLimitMemberManage,
@@ -520,6 +519,19 @@ serverRouter.post(
       const { serverId, memberId } = req.params;
 
       if (memberId === req.user!.userId) throw new BadRequestError('Cannot kick yourself');
+
+      // Optional ban reason, shown to the moderators in the Banned section.
+      // Validated before any permission work so a bad body is a cheap 400.
+      // (Express 5: req.body is undefined when no JSON body was sent.)
+      let reason: string | null = null;
+      const rawReason: unknown = req.body?.reason;
+      if (rawReason !== undefined && rawReason !== null) {
+        if (typeof rawReason !== 'string') throw new BadRequestError('reason must be a string');
+        const sanitized = sanitizeText(rawReason);
+        const reasonErr = validateBanReason(sanitized);
+        if (reasonErr) throw new BadRequestError(reasonErr);
+        reason = sanitized.length > 0 ? sanitized : null;
+      }
 
       const canKick = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
       if (!canKick) throw new ForbiddenError('You do not have permission to kick members');
@@ -536,52 +548,79 @@ serverRouter.post(
         throw new ForbiddenError('Cannot kick a member with an equal or higher role');
       }
 
-      // Force-leave the kicked user from voice if they're in a voice channel on
-      // THIS server. Scoped to the member's own sockets via their per-user room
-      // instead of fetching every socket on every node.
-      const io = getIO();
-      const memberSockets = await io.in(`user:${memberId}`).fetchSockets();
-      for (const s of memberSockets) {
-        if (s.data.voiceChannelId) {
-          // Verify the voice channel belongs to the server the user is being kicked from
-          const voiceChannel = await prisma.channel.findUnique({
-            where: { id: s.data.voiceChannelId as string },
-            select: { serverId: true },
-          });
-          if (voiceChannel?.serverId === serverId) {
-            leaveCurrentVoiceChannel(io, s as unknown as Socket<ClientToServerEvents, ServerToClientEvents>, memberId);
-          }
-        }
-      }
-
-      // Secure channels: kicked creator's channels are deleted, other secure
-      // memberships removed (remaining members rotate keys). BEFORE the
-      // ServerMember delete.
-      await purgeSecureChannelState(memberId, serverId);
-
-      // Clean up ChannelRead records for this server's channels
-      const textChannelIds = await prisma.channel.findMany({
-        where: { serverId, type: 'text' },
-        select: { id: true },
-      });
-      if (textChannelIds.length > 0) {
-        await prisma.channelRead.deleteMany({
-          where: { userId: memberId, channelId: { in: textChannelIds.map((c) => c.id) } },
-        });
-      }
-
-      await prisma.serverMember.delete({
-        where: { userId_serverId: { userId: memberId, serverId } },
-      });
-
-      // Remove kicked user's socket from server room and notify remaining members
-      await broadcastMemberLeft(memberId, serverId);
+      // The teardown — voice eviction, secure-channel purge, read markers,
+      // and one transaction with the ban row, the join-request delete, the
+      // membership delete and the member count — lives in
+      // removeMemberFromServer, nowhere else.
+      await removeMemberFromServer(memberId, serverId, { ban: { by: req.user!.userId, reason } });
 
       // Emit member:kicked directly to the kicked user's per-user room
       // (they're already out of the server room)
-      io.to(`user:${memberId}`).emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
+      getIO().to(`user:${memberId}`).emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
 
-      res.json({ success: true, message: 'Member kicked' });
+      res.json({ success: true, message: 'Member removed and banned' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ─── Server bans (every removal is a ban; unban is the undo) ─────────────────
+// Server-level moderation stays out of the platform audit log, as kicks do.
+
+// List bans (KICK_MEMBERS)
+serverRouter.get('/:serverId/bans', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(LIMITS.MEMBERS_PER_PAGE, Math.max(1, parseInt(req.query.limit as string, 10) || LIMITS.MEMBERS_PER_PAGE));
+
+    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+    if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+    const [bans, total] = await Promise.all([
+      prisma.serverBan.findMany({
+        where: { serverId },
+        include: {
+          user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          bannedBy: { select: { id: true, username: true, displayName: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.serverBan.count({ where: { serverId } }),
+    ]);
+
+    res.json({
+      success: true,
+      data: bans.map(formatBan),
+      total,
+      page,
+      limit,
+      hasMore: page * limit < total,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Unban (KICK_MEMBERS). The user can then join again by invite, directly or
+// by request — nothing is restored, the door is simply open.
+serverRouter.delete(
+  '/:serverId/bans/:userId',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string; userId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId, userId } = req.params;
+
+      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+      if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+      const { count } = await prisma.serverBan.deleteMany({ where: { serverId, userId } });
+      if (count === 0) throw new NotFoundError('Ban');
+
+      res.json({ success: true, message: 'Member unbanned' });
     } catch (err) {
       next(err);
     }
@@ -758,7 +797,7 @@ serverRouter.post(
       // Emit server:updated with new ownerId
       const updatedServer = await prisma.server.findUnique({
         where: { id: serverId },
-        select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
+        select: serverSelect,
       });
       if (updatedServer) {
         io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updatedServer as unknown as Server);

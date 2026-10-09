@@ -45,6 +45,10 @@ const prismaMock: Record<string, any> = {
   },
   server: {
     findUnique: vi.fn(),
+    update: vi.fn(),
+  },
+  serverBan: {
+    findUnique: vi.fn(),
   },
   serverMember: {
     findUnique: vi.fn(),
@@ -123,6 +127,7 @@ import { inviteRouter } from '../../routes/invites';
 import { errorHandler } from '../../middleware/errorHandler';
 import { isFeatureEnabled } from '../../utils/featureFlags';
 import { getEffectiveLimits } from '../../utils/serverLimits';
+import { broadcastMemberJoined } from '../../utils/memberBroadcast';
 
 function createApp() {
   const app = express();
@@ -167,6 +172,8 @@ describe('Invite Routes', () => {
     mockHasServerPermission.mockResolvedValue(true);
     mockHasChannelPermission.mockResolvedValue(true);
     mockGetHighestRolePosition.mockResolvedValue(Infinity);
+    // Default: not banned from any server (joinServerMember checks first)
+    prismaMock.serverBan.findUnique.mockResolvedValue(null);
   });
 
   // ── POST /api/v1/invites/servers/:serverId ──────────────────────────────
@@ -393,6 +400,97 @@ describe('Invite Routes', () => {
 
       expect(res.status).toBe(403);
       (isFeatureEnabled as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    });
+
+    // ── Server discovery: the join sequence now lives in joinServerMember ──
+
+    it('a banned user cannot use an invite: 403, and nothing is written or broadcast', async () => {
+      const token = makeToken({ userId: 'user-5' });
+      mockAuthUser({ id: 'user-5' });
+      prismaMock.invite.findUnique.mockResolvedValue({
+        id: 'inv-1',
+        code: 'BANNED01',
+        serverId: 'srv-1',
+        expiresAt: null,
+        server: { ...mockServer, invitesLocked: false },
+      });
+      prismaMock.serverBan.findUnique.mockResolvedValue({ userId: 'user-5' });
+
+      const res = await request(app)
+        .post('/api/v1/invites/BANNED01/join')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('banned');
+      expect(prismaMock.serverBan.findUnique).toHaveBeenCalledWith({
+        where: { serverId_userId: { serverId: 'srv-1', userId: 'user-5' } },
+        select: { userId: true },
+      });
+      // The ban check comes BEFORE the duplicate check and the member-limit count
+      expect(prismaMock.serverMember.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.serverMember.count).not.toHaveBeenCalled();
+      // The invite itself survives: its delete only ever runs INSIDE the
+      // join transaction (a lazy PrismaPromise), and that never ran
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(broadcastMemberJoined).not.toHaveBeenCalled();
+    });
+
+    it('the invite delete rides in the SAME transaction as the membership create and the member count', async () => {
+      const token = makeToken({ userId: 'user-2' });
+      mockAuthUser({ id: 'user-2' });
+      prismaMock.invite.findUnique.mockResolvedValue({
+        id: 'inv-1',
+        code: 'ATOMIC01',
+        serverId: 'srv-1',
+        expiresAt: null,
+        server: { ...mockServer, invitesLocked: false },
+      });
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      const INVITE_DELETE = { op: 'invite.delete' };
+      const CREATE = { op: 'member.create' };
+      const COUNT = { op: 'server.update' };
+      prismaMock.invite.delete.mockReturnValue(INVITE_DELETE);
+      prismaMock.serverMember.create.mockReturnValue(CREATE);
+      prismaMock.server.update.mockReturnValue(COUNT);
+      prismaMock.$transaction.mockResolvedValue([]);
+      prismaMock.channel.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .post('/api/v1/invites/ATOMIC01/join')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith([INVITE_DELETE, CREATE, COUNT]);
+      expect(prismaMock.invite.delete).toHaveBeenCalledWith({ where: { code: 'ATOMIC01' } });
+      expect(prismaMock.serverMember.create).toHaveBeenCalledWith({ data: { userId: 'user-2', serverId: 'srv-1' } });
+      expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-1' }, data: { memberCount: { increment: 1 } } });
+    });
+
+    it('a consumed invite fails the whole transaction: 404, no membership, no broadcast, no seeding', async () => {
+      const token = makeToken({ userId: 'user-2' });
+      mockAuthUser({ id: 'user-2' });
+      prismaMock.invite.findUnique.mockResolvedValue({
+        id: 'inv-1',
+        code: 'RACE0001',
+        serverId: 'srv-1',
+        expiresAt: null,
+        server: { ...mockServer, invitesLocked: false },
+      });
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      // Two clients racing the same single-use code: the second one's delete
+      // finds no row and Prisma answers P2025 — the transaction, membership
+      // create included, rolls back.
+      prismaMock.$transaction.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+
+      const res = await request(app)
+        .post('/api/v1/invites/RACE0001/join')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Invite not found');
+      expect(broadcastMemberJoined).not.toHaveBeenCalled();
+      expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
     });
 
     it('seeds ChannelRead records for text channels', async () => {

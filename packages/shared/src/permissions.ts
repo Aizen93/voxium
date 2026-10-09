@@ -190,7 +190,9 @@ export const PERMISSION_LIST: PermissionInfo[] = [
   { flag: Permissions.CREATE_SECURE_CHANNELS, key: 'CREATE_SECURE_CHANNELS', name: 'Create Secure Channels', description: 'Allows members to create invite-only end-to-end encrypted channels', category: 'general' },
   // Membership
   { flag: Permissions.CREATE_INVITES, key: 'CREATE_INVITES', name: 'Create Invites', description: 'Allows members to create server invite links', category: 'membership' },
-  { flag: Permissions.KICK_MEMBERS, key: 'KICK_MEMBERS', name: 'Kick Members', description: 'Allows members to kick other members with lower roles', category: 'membership' },
+  // Kick always bans now (server discovery), so one flag covers all of
+  // membership moderation: remove-and-ban, unban, approve or decline join requests.
+  { flag: Permissions.KICK_MEMBERS, key: 'KICK_MEMBERS', name: 'Manage Members', description: 'Allows members to remove and ban members with lower roles, unban them, and approve or decline join requests', category: 'membership' },
   { flag: Permissions.MANAGE_NICKNAMES, key: 'MANAGE_NICKNAMES', name: 'Manage Nicknames', description: 'Allows members to change other members\' display names', category: 'membership' },
   { flag: Permissions.CHANGE_NICKNAME, key: 'CHANGE_NICKNAME', name: 'Change Nickname', description: 'Allows members to change their own display name', category: 'membership' },
   // Text

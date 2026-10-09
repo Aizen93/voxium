@@ -62,6 +62,11 @@ const prismaMock: Record<string, any> = {
     delete: vi.fn(),
     count: vi.fn(),
   },
+  serverBan: {
+    findMany: vi.fn(),
+    count: vi.fn(),
+    deleteMany: vi.fn(),
+  },
   channel: {
     findMany: vi.fn(),
     createMany: vi.fn(),
@@ -144,6 +149,22 @@ vi.mock('../../utils/secureChannelLifecycle', () => ({
   purgeSecureChannelState: (...args: any[]) => mockPurgeSecureChannelState(...args),
   purgeSecureChannelStateForAccount: vi.fn().mockResolvedValue(undefined),
   deleteSecureChannel: vi.fn().mockResolvedValue(true),
+}));
+
+// The removal teardown (voice eviction, secure purge, read markers, the
+// ban/membership/count transaction, member:left) has its own unit tests in
+// utils/removeMember.test.ts — here the routes are checked for delegating
+// with the right arguments.
+const mockRemoveMemberFromServer = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/removeMember', () => ({
+  removeMemberFromServer: (...args: any[]) => mockRemoveMemberFromServer(...args),
+}));
+
+// Directory listing column recompute (invites-lock is one of its inputs)
+const mockRecomputeListed = vi.fn().mockResolvedValue(true);
+vi.mock('../../utils/discoveryListing', () => ({
+  recomputeListed: (...args: any[]) => mockRecomputeListed(...args),
+  recomputeListedForOwner: vi.fn().mockResolvedValue(0),
 }));
 
 // S3
@@ -244,7 +265,23 @@ describe('Server Routes', () => {
 
   // ── GET /api/v1/servers ─────────────────────────────────────────────────
 
+  const SERVER_SELECT = {
+    id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true,
+    description: true, tags: true, discoverable: true, joinMode: true,
+  };
+
   describe('GET /api/v1/servers', () => {
+    it('selects the directory profile with every server (the shared Server type)', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+      await request(app).get('/api/v1/servers').set('Authorization', `Bearer ${token}`);
+
+      expect(prismaMock.serverMember.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        include: { server: { select: SERVER_SELECT } },
+      }));
+    });
+
     it('returns a list of servers the user is a member of', async () => {
       const token = makeToken();
       const mockServers = [
@@ -500,6 +537,8 @@ describe('Server Routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.name).toBe('New Name');
       expect(mockTo).toHaveBeenCalledWith('server:srv-1');
+      // server:updated must carry the directory profile too
+      expect(prismaMock.server.update).toHaveBeenCalledWith(expect.objectContaining({ select: SERVER_SELECT }));
     });
 
     it('returns 403 for non-owner', async () => {
@@ -693,6 +732,291 @@ describe('Server Routes', () => {
 
       expect(res.status).toBe(403);
       expect(res.body.error).toContain('owner cannot leave');
+      expect(mockRemoveMemberFromServer).not.toHaveBeenCalled();
+    });
+
+    it('runs the shared removal WITHOUT a ban, so a voluntary leave keeps the member count right and can return', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/leave')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(mockRemoveMemberFromServer).toHaveBeenCalledTimes(1);
+      expect(mockRemoveMemberFromServer).toHaveBeenCalledWith('user-1', 'srv-1');
+      // No route-level writes remain: the helper owns the whole teardown
+      expect(prismaMock.serverMember.delete).not.toHaveBeenCalled();
+      expect(prismaMock.channelRead.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('does not remove anyone who is not a member (404 first)', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/leave')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+      expect(mockRemoveMemberFromServer).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── PATCH /api/v1/servers/:serverId/invites-lock ────────────────────────
+
+  describe('PATCH /api/v1/servers/:serverId/invites-lock', () => {
+    it('recomputes the directory listing column AFTER the lock update and emits the full Server', async () => {
+      const token = makeToken();
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', ownerId: 'user-1' });
+      const order: string[] = [];
+      prismaMock.server.update.mockImplementation(async () => {
+        order.push('update');
+        return { id: 'srv-1', name: 'S', iconUrl: null, invitesLocked: true, ownerId: 'user-1', createdAt: new Date(), description: null, tags: [], discoverable: true, joinMode: 'approval' };
+      });
+      mockRecomputeListed.mockImplementation(async () => { order.push('recompute'); return false; });
+
+      const res = await request(app)
+        .patch('/api/v1/servers/srv-1/invites-lock')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ locked: true });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-1' }, select: SERVER_SELECT, data: { invitesLocked: true } });
+      expect(mockRecomputeListed).toHaveBeenCalledWith('srv-1');
+      expect(order).toEqual(['update', 'recompute']);
+      expect(mockEmit).toHaveBeenCalledWith('server:updated', expect.objectContaining({ id: 'srv-1', invitesLocked: true, joinMode: 'approval' }));
+    });
+
+    it('rejects a non-boolean without touching anything', async () => {
+      const token = makeToken();
+      const res = await request(app)
+        .patch('/api/v1/servers/srv-1/invites-lock')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ locked: 'yes' });
+
+      expect(res.status).toBe(400);
+      expect(mockRecomputeListed).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── POST /api/v1/servers/:serverId/members/:memberId/kick — remove AND ban ─
+
+  describe('POST /api/v1/servers/:serverId/members/:memberId/kick', () => {
+    function mockTarget() {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+      mockGetHighestRolePosition.mockImplementation(async (userId: string) => (userId === 'user-1' ? 10 : 1));
+    }
+
+    it('removes the member through the shared helper WITH a ban carrying the actor and the reason, then tells them', async () => {
+      const token = makeToken();
+      mockTarget();
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ reason: '  <b>spam</b> in every channel ' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', expect.anything());
+      expect(mockRemoveMemberFromServer).toHaveBeenCalledTimes(1);
+      // sanitizeText'd: tags stripped, trimmed
+      expect(mockRemoveMemberFromServer).toHaveBeenCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: 'spam in every channel' } });
+      // member:kicked goes to the removed user's own room (they are already out of server:{id})
+      expect(mockTo).toHaveBeenCalledWith('user:user-2');
+      expect(mockEmit).toHaveBeenCalledWith('member:kicked', { serverId: 'srv-1', userId: 'user-2' });
+      // No route-level membership writes remain
+      expect(prismaMock.serverMember.delete).not.toHaveBeenCalled();
+    });
+
+    it('bans with a null reason when the body is empty (the client sends none today) or the reason is blank', async () => {
+      const token = makeToken();
+      mockTarget();
+
+      let res = await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(200);
+      expect(mockRemoveMemberFromServer).toHaveBeenLastCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: null } });
+
+      res = await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ reason: '   ' });
+      expect(res.status).toBe(200);
+      expect(mockRemoveMemberFromServer).toHaveBeenLastCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: null } });
+    });
+
+    it('rejects a non-string or over-long reason BEFORE any permission work, removing nobody', async () => {
+      const token = makeToken();
+      mockTarget();
+
+      let res = await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ reason: 42 });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('reason must be a string');
+
+      res = await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ reason: 'x'.repeat(301) });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('at most 300');
+
+      expect(mockHasServerPermission).not.toHaveBeenCalled();
+      expect(mockRemoveMemberFromServer).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when kicking yourself', async () => {
+      const token = makeToken();
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/members/user-1/kick')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(400);
+      expect(mockRemoveMemberFromServer).not.toHaveBeenCalled();
+    });
+
+    it('returns 403 without KICK_MEMBERS', async () => {
+      const token = makeToken();
+      mockHasServerPermission.mockResolvedValue(false);
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(403);
+      expect(mockRemoveMemberFromServer).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the target is not a member', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(404);
+      expect(mockRemoveMemberFromServer).not.toHaveBeenCalled();
+    });
+
+    it('returns 403 when the actor does not outrank the target', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+      mockGetHighestRolePosition.mockResolvedValue(5); // equal
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('equal or higher role');
+      expect(mockRemoveMemberFromServer).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── GET /api/v1/servers/:serverId/bans ──────────────────────────────────
+
+  describe('GET /api/v1/servers/:serverId/bans', () => {
+    const banRow = {
+      serverId: 'srv-1',
+      userId: 'user-2',
+      bannedById: 'user-1',
+      reason: 'spam',
+      createdAt: new Date('2026-10-09T10:00:00Z'),
+      user: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null },
+      bannedBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
+    };
+
+    it('lists bans with the user summary, reason, date and who banned, newest first, paginated', async () => {
+      const token = makeToken();
+      prismaMock.serverBan.findMany.mockResolvedValue([banRow]);
+      prismaMock.serverBan.count.mockResolvedValue(1);
+
+      const res = await request(app)
+        .get('/api/v1/servers/srv-1/bans')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual([{
+        serverId: 'srv-1',
+        userId: 'user-2',
+        reason: 'spam',
+        createdAt: '2026-10-09T10:00:00.000Z',
+        user: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null },
+        bannedBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
+      }]);
+      expect(res.body.total).toBe(1);
+      expect(res.body.hasMore).toBe(false);
+      expect(prismaMock.serverBan.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { serverId: 'srv-1' },
+        orderBy: { createdAt: 'desc' },
+        skip: 0,
+        take: 100,
+      }));
+    });
+
+    it('caps the page size at MEMBERS_PER_PAGE and reports hasMore', async () => {
+      const token = makeToken();
+      prismaMock.serverBan.findMany.mockResolvedValue([banRow]);
+      prismaMock.serverBan.count.mockResolvedValue(250);
+
+      const res = await request(app)
+        .get('/api/v1/servers/srv-1/bans?page=2&limit=1000')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.limit).toBe(100);
+      expect(res.body.page).toBe(2);
+      expect(res.body.hasMore).toBe(true);
+      expect(prismaMock.serverBan.findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 100, take: 100 }));
+    });
+
+    it('returns 403 without KICK_MEMBERS (non-members included)', async () => {
+      const token = makeToken();
+      mockHasServerPermission.mockResolvedValue(false);
+      const res = await request(app)
+        .get('/api/v1/servers/srv-1/bans')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(403);
+      expect(prismaMock.serverBan.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── DELETE /api/v1/servers/:serverId/bans/:userId ───────────────────────
+
+  describe('DELETE /api/v1/servers/:serverId/bans/:userId', () => {
+    it('deletes the ban row', async () => {
+      const token = makeToken();
+      prismaMock.serverBan.deleteMany.mockResolvedValue({ count: 1 });
+
+      const res = await request(app)
+        .delete('/api/v1/servers/srv-1/bans/user-2')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.message).toBe('Member unbanned');
+      expect(prismaMock.serverBan.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-1', userId: 'user-2' } });
+    });
+
+    it('returns 404 when there is no ban to lift', async () => {
+      const token = makeToken();
+      prismaMock.serverBan.deleteMany.mockResolvedValue({ count: 0 });
+
+      const res = await request(app)
+        .delete('/api/v1/servers/srv-1/bans/user-2')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Ban not found');
+    });
+
+    it('returns 403 without KICK_MEMBERS', async () => {
+      const token = makeToken();
+      mockHasServerPermission.mockResolvedValue(false);
+      const res = await request(app)
+        .delete('/api/v1/servers/srv-1/bans/user-2')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(403);
+      expect(prismaMock.serverBan.deleteMany).not.toHaveBeenCalled();
     });
   });
 
@@ -857,6 +1181,8 @@ describe('Server Routes', () => {
       expect(res.status).toBe(200);
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-1', { userId: 'user-2' });
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-1', { userId: 'user-1' });
+      // the server:updated emit carries the full Server (directory profile included)
+      expect(prismaMock.server.findUnique).toHaveBeenCalledWith({ where: { id: 'srv-1' }, select: SERVER_SELECT });
       // After the commit: the util re-reads ownerId, so syncing before it
       // would recompute against the OLD owner
       expect(order[0]).toBe('txn');

@@ -19,9 +19,10 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
+import { recomputeListedForOwner } from '../utils/discoveryListing';
 
 export const adminRouter = Router();
 
@@ -423,6 +424,10 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
     ]);
     ipsBanned = ipBanResult.count;
 
+    // A banned owner's servers leave the directory without anyone having to
+    // think about it (owner.bannedAt is one of the listing column's inputs).
+    await recomputeListedForOwner(targetId);
+
     // Notify servers that user left
     const memberships = await prisma.serverMember.findMany({
       where: { userId: targetId },
@@ -496,6 +501,10 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
         ? [prisma.ipBan.deleteMany({ where: { ip: { in: ipsToRelease } } })]
         : []),
     ]);
+
+    // Their servers come back to the directory where the per-server inputs
+    // (discoverable, invites unlocked, not admin-blocked) still allow it.
+    await recomputeListedForOwner(req.params.userId);
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -595,9 +604,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
                   create: { userId: action.newOwnerId!, channelId: ch.id, lastReadAt: new Date() },
                 })
               ),
+              // The heir becomes a member here, so the inline member count
+              // (server discovery) moves in the same transaction.
               prisma.server.update({
                 where: { id: action.serverId },
-                data: { ownerId: action.newOwnerId },
+                data: { ownerId: action.newOwnerId, memberCount: { increment: 1 } },
               }),
             ]);
 
@@ -630,11 +641,15 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
           const updatedServer = await prisma.server.findUnique({
             where: { id: action.serverId },
-            select: { id: true, name: true, iconUrl: true, ownerId: true, invitesLocked: true, createdAt: true },
+            select: {
+              id: true, name: true, iconUrl: true, ownerId: true, invitesLocked: true, createdAt: true,
+              description: true, tags: true, discoverable: true, joinMode: true,
+            },
           });
           if (updatedServer) {
             io.to(`server:${action.serverId}`).emit(WS_EVENTS.SERVER_UPDATED, {
               ...updatedServer,
+              joinMode: updatedServer.joinMode as ServerJoinMode,
               createdAt: updatedServer.createdAt.toISOString(),
             });
           }
@@ -2285,6 +2300,10 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         where: { id: banTarget.id },
         data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
       });
+
+      // Same as the canonical ban route: a banned owner's servers leave the
+      // directory.
+      await recomputeListedForOwner(banTarget.id);
 
       // Remove the banned user from all server member lists/rooms — same as the
       // canonical ban route. Without this the banned user lingers in member lists.

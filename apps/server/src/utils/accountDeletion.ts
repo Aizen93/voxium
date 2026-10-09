@@ -61,6 +61,15 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // delete: purging a user who then survives strands every device they own.
   await prisma.$transaction(async (tx) => {
     await purgeE2EMaterial(userId, tx);
+    // The cascade takes this account's memberships with the row; the inline
+    // member counts (server discovery) follow in the same transaction so the
+    // directory never shows a departed member until the nightly recount.
+    if (memberships.length > 0) {
+      await tx.server.updateMany({
+        where: { id: { in: memberships.map((m) => m.serverId) }, memberCount: { gt: 0 } },
+        data: { memberCount: { decrement: 1 } },
+      });
+    }
     await tx.user.delete({ where: { id: userId } });
   }, {
     // Deleting a user cascades across ~36 relations (messages, reactions,

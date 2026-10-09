@@ -1,4 +1,8 @@
-import { LIMITS, THEME_COLOR_KEYS, TRANSLUCENT_THEME_COLOR_KEYS, THEME_PATTERN_TYPES, THEME_PATTERN_AREAS } from './constants.js';
+import {
+  LIMITS, THEME_COLOR_KEYS, TRANSLUCENT_THEME_COLOR_KEYS, THEME_PATTERN_TYPES, THEME_PATTERN_AREAS,
+  DISCOVERY_TAGS, DISCOVERY_SEARCH_MIN, DISCOVERY_SEARCH_MAX, DISCOVERY_TEXT_FORBIDDEN_RE,
+} from './constants.js';
+import type { DiscoveryTag } from './constants.js';
 import { ROLE_COLOR_REGEX } from './permissions.js';
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -110,6 +114,74 @@ export function validateThemeTag(tag: string): string | null {
   if (tag.trim().length === 0) return 'Tag cannot be empty';
   if (tag.length > LIMITS.THEME_TAG_MAX_LENGTH) return `Tag must be at most ${LIMITS.THEME_TAG_MAX_LENGTH} characters`;
   if (!/^[a-zA-Z0-9 _-]+$/.test(tag)) return 'Tag can only contain letters, numbers, spaces, underscores, and hyphens';
+  return null;
+}
+
+// ─── Server discovery ────────────────────────────────────────────────────────
+// Descriptions, join-request messages and ban reasons are shown to strangers
+// (or to the person they are about), so on top of the length caps they reject
+// the bidi-override and zero-width characters the annotation text validator
+// rejects. All of them are also sanitizeText'd server-side before storage.
+
+export function validateServerDescription(description: string): string | null {
+  if (description.length > LIMITS.SERVER_DESCRIPTION_MAX) return `Description must be at most ${LIMITS.SERVER_DESCRIPTION_MAX} characters`;
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(description)) return 'Description contains unsupported characters';
+  return null;
+}
+
+/** True when `value` is one of the fixed vocabulary (DISCOVERY_TAGS). */
+export function isDiscoveryTag(value: unknown): value is DiscoveryTag {
+  return typeof value === 'string' && (DISCOVERY_TAGS as readonly string[]).includes(value);
+}
+
+/**
+ * Validate a tag list: an array of vocabulary values, at most
+ * LIMITS.DISCOVERY_MAX_TAGS DISTINCT ones (duplicates are collapsed by
+ * `dedupeDiscoveryTags`, so they do not count against the cap). Unknown values
+ * are refused without being echoed back.
+ */
+export function validateDiscoveryTags(tags: unknown): string | null {
+  if (!Array.isArray(tags)) return 'Tags must be an array';
+  for (const tag of tags) {
+    if (!isDiscoveryTag(tag)) return 'Tags must be chosen from the supported list';
+  }
+  if (new Set(tags).size > LIMITS.DISCOVERY_MAX_TAGS) return `At most ${LIMITS.DISCOVERY_MAX_TAGS} tags are allowed`;
+  return null;
+}
+
+/** The stored form of a validated tag list: vocabulary order is NOT imposed —
+ *  first occurrence wins, duplicates dropped. Call after validateDiscoveryTags. */
+export function dedupeDiscoveryTags(tags: readonly string[]): DiscoveryTag[] {
+  const out: DiscoveryTag[] = [];
+  for (const tag of tags) {
+    if (isDiscoveryTag(tag) && !out.includes(tag)) out.push(tag);
+  }
+  return out;
+}
+
+export function validateBanReason(reason: string): string | null {
+  if (reason.length > LIMITS.SERVER_BAN_REASON_MAX) return `Reason must be at most ${LIMITS.SERVER_BAN_REASON_MAX} characters`;
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(reason)) return 'Reason contains unsupported characters';
+  return null;
+}
+
+export function validateJoinRequestMessage(message: string): string | null {
+  if (message.length > LIMITS.JOIN_REQUEST_MESSAGE_MAX) return `Message must be at most ${LIMITS.JOIN_REQUEST_MESSAGE_MAX} characters`;
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(message)) return 'Message contains unsupported characters';
+  return null;
+}
+
+/**
+ * The directory search box: trimmed, DISCOVERY_SEARCH_MIN..DISCOVERY_SEARCH_MAX
+ * characters. The minimum is what keeps the trigram index usable; the client
+ * never sends a shorter query (it shows a hint instead), so a 400 here is a
+ * client that is not ours. Mirrors validateSearchQuery, which has only length
+ * rules — wildcard escaping is the route's job.
+ */
+export function validateDiscoveryQuery(query: string): string | null {
+  const trimmed = query.trim();
+  if (trimmed.length < DISCOVERY_SEARCH_MIN) return `Search query must be at least ${DISCOVERY_SEARCH_MIN} characters`;
+  if (trimmed.length > DISCOVERY_SEARCH_MAX) return `Search query must be at most ${DISCOVERY_SEARCH_MAX} characters`;
   return null;
 }
 

@@ -140,6 +140,13 @@ vi.mock('../../utils/featureFlags', () => ({
   isFeatureEnabled: vi.fn().mockReturnValue(true),
 }));
 
+// Directory listing column (owner.bannedAt is one of its four inputs)
+const mockRecomputeListedForOwner = vi.fn().mockResolvedValue(0);
+vi.mock('../../utils/discoveryListing', () => ({
+  recomputeListed: vi.fn().mockResolvedValue(true),
+  recomputeListedForOwner: (...args: any[]) => mockRecomputeListedForOwner(...args),
+}));
+
 // ─── App setup ──────────────────────────────────────────────────────────────
 
 import { adminRouter } from '../../routes/admin';
@@ -227,6 +234,34 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
       skipDuplicates: true,
     });
   });
+
+  it('hides every server the banned user owns from the directory, after the ban committed', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    const order: string[] = [];
+    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => { order.push('txn'); return Promise.all(ops); });
+    mockRecomputeListedForOwner.mockImplementation(async () => { order.push('recompute'); return 2; });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(200);
+    expect(mockRecomputeListedForOwner).toHaveBeenCalledWith('target-1');
+    expect(order).toEqual(['txn', 'recompute']);
+  });
+
+  it('does not touch the directory when the ban is refused', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'superadmin' } });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /admin/users/:userId/unban — shared-IP-aware release (MED-13)', () => {
@@ -312,6 +347,35 @@ describe('POST /admin/users/:userId/unban — shared-IP-aware release (MED-13)',
       where: { id: 'target-1' },
       data: { bannedAt: null, banReason: null },
     });
+  });
+
+  it('brings the unbanned user\'s eligible servers back to the directory, after the unban committed', async () => {
+    mockUnbanTarget();
+    prismaMock.ipRecord.findMany.mockResolvedValue([]);
+    const order: string[] = [];
+    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => { order.push('txn'); return Promise.all(ops); });
+    mockRecomputeListedForOwner.mockImplementation(async () => { order.push('recompute'); return 1; });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockRecomputeListedForOwner).toHaveBeenCalledWith('target-1');
+    expect(order).toEqual(['txn', 'recompute']);
+  });
+
+  it('does not touch the directory when the user is not banned (400)', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user', bannedAt: null } });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
   });
 });
 

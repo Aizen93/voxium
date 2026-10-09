@@ -4,10 +4,9 @@ import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import crypto from 'crypto';
 import { INVITE_CODE_LENGTH, Permissions } from '@voxium/shared';
-import { broadcastMemberJoined } from '../utils/memberBroadcast';
 import { isFeatureEnabled } from '../utils/featureFlags';
-import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission } from '../utils/permissionCalculator';
+import { joinServerMember } from '../utils/serverJoin';
 
 export const inviteRouter = Router();
 
@@ -58,47 +57,21 @@ inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Res
       throw new BadRequestError('This invite has expired');
     }
 
-    const existing = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId: invite.serverId } },
-    });
-    if (existing) throw new BadRequestError('You are already a member of this server');
-
-    // Enforce max members per server
-    const limits = await getEffectiveLimits(invite.serverId);
-    if (limits.maxMembersPerServer > 0) {
-      const memberCount = await prisma.serverMember.count({ where: { serverId: invite.serverId } });
-      if (memberCount >= limits.maxMembersPerServer) {
-        throw new BadRequestError(`This server has reached its member limit (${limits.maxMembersPerServer})`);
-      }
-    }
-
-    await prisma.$transaction([
-      prisma.serverMember.create({
-        data: { userId: req.user!.userId, serverId: invite.serverId },
-      }),
-      prisma.invite.delete({ where: { code } }),
-    ]);
-
-    // Notify all members and add the joiner's socket(s) to the server room
-    await broadcastMemberJoined(req.user!.userId, invite.serverId);
-
-    // Seed ChannelRead for all text channels so existing history doesn't show
-    // as unread. Secure channels excluded: a joiner is not a member of any,
-    // and seeding would leak their ids into the joiner's read rows.
-    const textChannels = await prisma.channel.findMany({
-      where: { serverId: invite.serverId, type: 'text', secure: false },
-      select: { id: true },
-    });
-    if (textChannels.length > 0) {
-      const now = new Date();
-      await prisma.channelRead.createMany({
-        data: textChannels.map((ch) => ({
-          userId: req.user!.userId,
-          channelId: ch.id,
-          lastReadAt: now,
-        })),
-        skipDuplicates: true,
+    // The join sequence (ban check, duplicate check, member limit, the
+    // membership + count transaction, the room invariant, ChannelRead
+    // seeding) lives in joinServerMember. The invite delete rides in its
+    // transaction as the extra write: a single-use invite that was consumed
+    // between the lookup above and here finds no row, the transaction fails,
+    // and no membership is created.
+    try {
+      await joinServerMember(req.user!.userId, invite.serverId, {
+        via: 'invite',
+        extraWrites: [prisma.invite.delete({ where: { code } })],
       });
+    } catch (err) {
+      // P2025 = the delete found no row: the invite was already consumed.
+      if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Invite');
+      throw err;
     }
 
     res.json({ success: true, data: invite.server });

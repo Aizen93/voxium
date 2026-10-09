@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
   user: { findUnique: vi.fn(), delete: vi.fn() },
+  server: { updateMany: vi.fn() },
   serverMember: { findMany: vi.fn() },
   $transaction: vi.fn(),
 }));
@@ -42,9 +43,10 @@ beforeEach(() => {
   purgeSecure.mockImplementation(async () => { order.push('secure'); });
   purgeE2E.mockImplementation(async () => { order.push('e2e'); });
   prismaMock.user.delete.mockImplementation(async () => { order.push('delete'); return {}; });
+  prismaMock.server.updateMany.mockImplementation(async () => { order.push('counts'); return { count: 2 }; });
   prismaMock.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
     order.push('txn:start');
-    await fn({ user: prismaMock.user });
+    await fn({ user: prismaMock.user, server: prismaMock.server });
     order.push('txn:end');
   });
   deleteFromS3.mockImplementation(async () => { order.push('s3'); });
@@ -58,7 +60,7 @@ describe('deleteUserAccount', () => {
     // purge and the row delete share one transaction; the avatar blob goes
     // only AFTER the row (a failed delete must not strand a live account
     // without its avatar)
-    expect(order).toEqual(['left:s-1', 'left:s-2', 'disconnect', 'secure', 'txn:start', 'e2e', 'delete', 'txn:end', 's3']);
+    expect(order).toEqual(['left:s-1', 'left:s-2', 'disconnect', 'secure', 'txn:start', 'e2e', 'counts', 'delete', 'txn:end', 's3']);
     expect(purgeE2E).toHaveBeenCalledWith('u-1', expect.objectContaining({ user: prismaMock.user }));
     expect(prismaMock.user.delete).toHaveBeenCalledWith({ where: { id: 'u-1' } });
     expect(deleteFromS3).toHaveBeenCalledWith('avatars/u-1.webp');
@@ -89,6 +91,24 @@ describe('deleteUserAccount', () => {
 
     await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).rejects.toThrow('db gone');
     expect(deleteFromS3).not.toHaveBeenCalled();
+  });
+
+  it('decrements the inline member count of every server the account belonged to, inside the delete transaction', async () => {
+    await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+    // The cascade removes the memberships; the directory's live member count
+    // (server discovery) must follow in the same transaction — guarded so
+    // drift can never push it negative.
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['s-1', 's-2'] }, memberCount: { gt: 0 } },
+      data: { memberCount: { decrement: 1 } },
+    });
+  });
+
+  it('skips the count update when the account was a member of nothing', async () => {
+    prismaMock.serverMember.findMany.mockResolvedValue([]);
+    await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+    expect(prismaMock.server.updateMany).not.toHaveBeenCalled();
   });
 
   it('does nothing for an account that no longer exists', async () => {

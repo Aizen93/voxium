@@ -126,6 +126,13 @@ vi.mock('../../utils/featureFlags', () => ({
   isFeatureEnabled: vi.fn().mockReturnValue(true),
 }));
 
+// Directory listing column (a report-resolve ban is the third place bannedAt is set)
+const mockRecomputeListedForOwner = vi.fn().mockResolvedValue(0);
+vi.mock('../../utils/discoveryListing', () => ({
+  recomputeListed: vi.fn().mockResolvedValue(true),
+  recomputeListedForOwner: (...args: any[]) => mockRecomputeListedForOwner(...args),
+}));
+
 // ─── App setup ──────────────────────────────────────────────────────────────
 
 import { adminRouter } from '../../routes/admin';
@@ -202,6 +209,22 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     // Same as the canonical ban route: banned user leaves every member list/room
     expect(mockBroadcastMemberLeft).toHaveBeenCalledWith('target-1', 's1');
     expect(mockBroadcastMemberLeft).toHaveBeenCalledWith('target-1', 's2');
+    // ...and, same as the canonical ban route, their servers leave the directory
+    expect(mockRecomputeListedForOwner).toHaveBeenCalledWith('target-1');
+  });
+
+  it('resolving WITHOUT a ban leaves the directory alone', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    mockPendingReport('target-1');
+
+    const res = await request(app)
+      .post('/api/v1/admin/reports/rep-1/resolve')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ resolution: 'Not actionable' });
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
   });
 
   it('admin CANNOT ban a peer admin via report resolution (only superadmins can)', async () => {
