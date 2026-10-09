@@ -30,7 +30,6 @@
     "deleting": "Deleting...",
     "clear": "Clear"
   },
-
   "auth": {
     "login": {
       "title": "Welcome back!",
@@ -57,6 +56,15 @@
       "passwordPlaceholder": "At least 8 characters",
       "createAccount": "Create Account",
       "creatingAccount": "Creating account...",
+      "consentLegend": "Consent",
+      "acceptTermsPrefix": "I have read and accept the",
+      "termsOfService": "Terms of Service",
+      "acceptPrivacyPrefix": "I have read and accept the",
+      "privacyPolicy": "Privacy Policy",
+      "showPassword": "Show password",
+      "hidePassword": "Hide password",
+      "consentRequired": "Please accept the Terms of Service and the Privacy Policy to continue",
+      "verifyingBrowser": "Verifying your browser…",
       "hasAccount": "Already have an account?",
       "signIn": "Sign in",
       "passwordWeak": "Weak password",
@@ -109,6 +117,13 @@
       "missingToken": "Missing verification token.",
       "failed": "Verification failed. The link may be invalid or expired."
     },
+    "consent": {
+      "title": "Before you continue",
+      "description": "Voxium needs you to accept the Terms of Service and the Privacy Policy to keep using your account.",
+      "submit": "Accept and continue",
+      "submitting": "Saving…",
+      "failed": "Could not save your acceptance. Please try again."
+    },
     "emailPending": {
       "title": "Verify your email",
       "description": "We sent a verification link to <1>{{email}}</1>. Check your inbox and click the link to activate your account.",
@@ -120,7 +135,6 @@
       "checkSpam": "Didn't receive the email? Check your spam folder or try resending."
     }
   },
-
   "settings": {
     "title": "Settings",
     "tabs": {
@@ -141,6 +155,20 @@
       "profileUpdated": "Profile updated",
       "failedToUploadAvatar": "Failed to upload avatar",
       "failedToUpdateProfile": "Failed to update profile"
+    },
+    "deleteAccount": {
+      "title": "Delete account",
+      "description": "Permanently delete your account, your messages, your profile and your encryption keys. This cannot be undone.",
+      "open": "Delete my account…",
+      "warning": "This deletes everything tied to your account. If you own servers, transfer or delete them first — each one from its own settings.",
+      "ownsServers": "You still own these servers. Transfer or delete them, then try again:",
+      "password": "Your password",
+      "totpCode": "Two-factor authentication code",
+      "typeToConfirm": "Type {{word}} to confirm",
+      "confirmWord": "DELETE",
+      "confirm": "Delete my account permanently",
+      "deleting": "Deleting…",
+      "failed": "Could not delete your account. Please try again."
     },
     "security": {
       "changePassword": "Change Password",
@@ -237,7 +265,6 @@
       "selectLanguage": "Select Language"
     }
   },
-
   "serverSettings": {
     "title": "Server Settings",
     "tabs": {
@@ -313,30 +340,92 @@
       "failedToLoad": "Failed to load server limits"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "View Channels", "description": "Allows members to view text and voice channels" },
-    "MANAGE_CHANNELS": { "name": "Manage Channels", "description": "Allows members to create, edit, and delete channels" },
-    "MANAGE_CATEGORIES": { "name": "Manage Categories", "description": "Allows members to create, edit, and delete categories" },
-    "MANAGE_SERVER": { "name": "Manage Server", "description": "Allows members to edit server name, icon, and settings" },
-    "MANAGE_ROLES": { "name": "Manage Roles", "description": "Allows members to create, edit, and delete roles below their own" },
-    "CREATE_INVITES": { "name": "Create Invites", "description": "Allows members to create server invite links" },
-    "KICK_MEMBERS": { "name": "Kick Members", "description": "Allows members to kick other members with lower roles" },
-    "MANAGE_NICKNAMES": { "name": "Manage Nicknames", "description": "Allows members to change other members' display names" },
-    "CHANGE_NICKNAME": { "name": "Change Nickname", "description": "Allows members to change their own display name" },
-    "SEND_MESSAGES": { "name": "Send Messages", "description": "Allows members to send messages in text channels" },
-    "MANAGE_MESSAGES": { "name": "Manage Messages", "description": "Allows members to delete messages from other members" },
-    "ATTACH_FILES": { "name": "Attach Files", "description": "Allows members to upload file attachments" },
-    "ADD_REACTIONS": { "name": "Add Reactions", "description": "Allows members to add reactions to messages" },
-    "MENTION_EVERYONE": { "name": "Mention Everyone", "description": "Allows members to use @everyone mentions" },
-    "CONNECT": { "name": "Connect", "description": "Allows members to join voice channels" },
-    "SPEAK": { "name": "Speak", "description": "Allows members to speak in voice channels" },
-    "MUTE_MEMBERS": { "name": "Mute Members", "description": "Allows members to mute other members in voice" },
-    "DEAFEN_MEMBERS": { "name": "Deafen Members", "description": "Allows members to deafen other members in voice" },
-    "MOVE_MEMBERS": { "name": "Move Members", "description": "Allows members to move other members between voice channels" },
-    "ADMINISTRATOR": { "name": "Administrator", "description": "Grants all permissions and bypasses all channel overrides" }
+    "VIEW_CHANNEL": {
+      "name": "View Channels",
+      "description": "Allows members to view text and voice channels"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "Manage Channels",
+      "description": "Allows members to create, edit, and delete channels"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "Manage Categories",
+      "description": "Allows members to create, edit, and delete categories"
+    },
+    "MANAGE_SERVER": {
+      "name": "Manage Server",
+      "description": "Allows members to edit server name, icon, and settings"
+    },
+    "MANAGE_ROLES": {
+      "name": "Manage Roles",
+      "description": "Allows members to create, edit, and delete roles below their own"
+    },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "Create Secure Channels",
+      "description": "Allows members to create invite-only end-to-end encrypted channels"
+    },
+    "CREATE_INVITES": {
+      "name": "Create Invites",
+      "description": "Allows members to create server invite links"
+    },
+    "KICK_MEMBERS": {
+      "name": "Kick Members",
+      "description": "Allows members to kick other members with lower roles"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "Manage Nicknames",
+      "description": "Allows members to change other members' display names"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "Change Nickname",
+      "description": "Allows members to change their own display name"
+    },
+    "SEND_MESSAGES": {
+      "name": "Send Messages",
+      "description": "Allows members to send messages in text channels"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "Manage Messages",
+      "description": "Allows members to delete messages from other members"
+    },
+    "ATTACH_FILES": {
+      "name": "Attach Files",
+      "description": "Allows members to upload file attachments"
+    },
+    "ADD_REACTIONS": {
+      "name": "Add Reactions",
+      "description": "Allows members to add reactions to messages"
+    },
+    "MENTION_EVERYONE": {
+      "name": "Mention Everyone",
+      "description": "Allows members to use @everyone mentions"
+    },
+    "CONNECT": {
+      "name": "Connect",
+      "description": "Allows members to join voice channels"
+    },
+    "SPEAK": {
+      "name": "Speak",
+      "description": "Allows members to speak in voice channels"
+    },
+    "MUTE_MEMBERS": {
+      "name": "Mute Members",
+      "description": "Allows members to mute other members in voice"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "Deafen Members",
+      "description": "Allows members to deafen other members in voice"
+    },
+    "MOVE_MEMBERS": {
+      "name": "Move Members",
+      "description": "Allows members to move other members between voice channels"
+    },
+    "ADMINISTRATOR": {
+      "name": "Administrator",
+      "description": "Grants all permissions and bypasses all channel overrides"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "General",
@@ -368,7 +457,6 @@
     "failedToUpdate": "An error occurred",
     "failedToDelete": "An error occurred"
   },
-
   "channelPermissions": {
     "title": "Channel Permissions",
     "roles": "Roles",
@@ -386,7 +474,6 @@
     "current": "Current:",
     "clickToCycle": "Click to cycle."
   },
-
   "contextMenu": {
     "roles": "Roles",
     "voice": "Voice",
@@ -420,7 +507,6 @@
     "failedToSetNickname": "Failed to set nickname",
     "failedToClearNickname": "Failed to clear nickname"
   },
-
   "userProfile": {
     "status": {
       "online": "Online",
@@ -445,7 +531,6 @@
     "failedToDecline": "Failed to decline friend request",
     "failedToRemove": "Failed to remove friend"
   },
-
   "messageItem": {
     "todayAt": "Today at {{time}}",
     "yesterdayAt": "Yesterday at {{time}}",
@@ -459,7 +544,6 @@
     "originalDeleted": "Original message was deleted",
     "failedToToggleReaction": "Failed to toggle reaction"
   },
-
   "messageInput": {
     "replyingTo": "Replying to",
     "cancelReply": "Cancel reply",
@@ -471,8 +555,15 @@
     "sendMessage": "Send message",
     "removeAttachment": "Remove attachment"
   },
-
   "server": {
+    "pinnedSection": "Pinned",
+    "pinSpace": "Pin space",
+    "unpinSpace": "Unpin space",
+    "findSpace": "Find a space",
+    "liveNow": "Live now",
+    "allSpaces": "All spaces",
+    "moreSpaces": "{{count}} more spaces",
+    "inVoiceCount": "{{count}} in voice",
     "create": {
       "createTitle": "Create a Server",
       "joinTitle": "Join a Server",
@@ -498,10 +589,15 @@
       "inviteCode": "Invite Code",
       "generatingLink": "Generating invite link...",
       "failedToCreate": "Failed to create invite"
-    }
+    },
+    "switcherTitle": "Switch server",
+    "switcherPlaceholder": "Jump to a server…",
+    "switcherEmpty": "No server matches that name.",
+    "switcherHint": "Type to filter · ↑↓ to move · Enter to open",
+    "createOrJoin": "Create or join a server"
   },
-
   "channel": {
+    "joinVoice": "Join voice",
     "createChannel": "Create channel",
     "deleteChannel": "Delete channel",
     "deleteCategory": "Delete category",
@@ -534,7 +630,6 @@
     "newChannelPlaceholder": "New {{type}} channel",
     "editPermissions": "Edit Permissions"
   },
-
   "chat": {
     "messagePlaceholder": "Message #{{channel}}",
     "dmPlaceholder": "Message @{{user}}",
@@ -583,9 +678,10 @@
     "maxAttachments": "Max {{max}} attachments per message",
     "fileTypeNotAllowed": "{{name}}: file type not allowed",
     "fileTooLarge": "{{name}} is too large (max {{max}}MB)",
-    "searchMessages": "Search Messages (Ctrl+K)"
+    "searchMessages": "Search Messages (Ctrl+K)",
+    "today": "Today",
+    "yesterday": "Yesterday"
   },
-
   "dm": {
     "title": "Direct Messages",
     "friends": "Friends",
@@ -603,7 +699,6 @@
     "conversationStart": "This is the start of your direct message history.",
     "welcomeMessage": "Select a conversation from the sidebar, or click on a member in any server to start a new one."
   },
-
   "friends": {
     "title": "Friends",
     "tabs": {
@@ -612,10 +707,10 @@
       "pending": "Pending",
       "addFriend": "Add Friend"
     },
-    "onlineCount": "Online — {{count}}",
-    "allCount": "All Friends — {{count}}",
-    "incomingCount": "Incoming — {{count}}",
-    "outgoingCount": "Outgoing — {{count}}",
+    "onlineCount": "Online, {{count}}",
+    "allCount": "All Friends, {{count}}",
+    "incomingCount": "Incoming, {{count}}",
+    "outgoingCount": "Outgoing, {{count}}",
     "noOnline": "No friends are online right now.",
     "noFriends": "You don't have any friends yet. Try sending a friend request!",
     "noPending": "No pending friend requests.",
@@ -636,7 +731,6 @@
     "failedToAccept": "Failed to accept friend request",
     "failedToRemove": "Failed to remove friendship"
   },
-
   "members": {
     "owner": "Owner",
     "adminsCount": "Admins - {{count}}",
@@ -644,7 +738,6 @@
     "onlineCount": "Online - {{count}}",
     "offlineCount": "Offline - {{count}}"
   },
-
   "voice": {
     "connected": "Voice Connected",
     "voiceChannel": "Voice Channel",
@@ -659,6 +752,7 @@
     "serverMuted": "You are server muted",
     "moderatorRestricted": "A moderator has restricted your audio",
     "shareScreen": "Share Screen",
+    "shareWhiteboard": "Share whiteboard",
     "stopSharing": "Stop Sharing",
     "someoneSharing": "Someone is already sharing",
     "disconnect": "Disconnect",
@@ -666,9 +760,99 @@
     "incomingCall": "Incoming voice call...",
     "accept": "Accept",
     "decline": "Decline",
-    "failedToAccept": "Failed to accept call"
+    "failedToAccept": "Failed to accept call",
+    "someone": "Someone",
+    "youAreSharing": "You are sharing your screen",
+    "userIsSharing": "{{name}} is sharing their screen",
+    "fullscreen": "Fullscreen",
+    "popOut": "Pop out to floating panel",
+    "dockToInline": "Dock to inline",
+    "waitingForStream": "Waiting for screen share stream...",
+    "screenShare": "Screen Share",
+    "snapshot": {
+      "button": "Take snapshot",
+      "caption": "Snapshot of {{name}}'s share",
+      "copy": "Copy image",
+      "copied": "Copied",
+      "save": "Save…",
+      "sendTo": "Send to channel",
+      "sent": "Snapshot sent",
+      "failed": "Snapshot failed",
+      "holdBlocked": "The source changed — confirm your privacy masks first",
+      "notice": "{{name}} took a snapshot",
+      "noChannels": "No channels available"
+    },
+    "reactions": {
+      "send": "React {{emoji}}",
+      "hide": "Hide reactions",
+      "show": "Show reactions"
+    },
+    "zoom": {
+      "reset": "Reset zoom"
+    },
+    "preflight": {
+      "title": "Prepare your share",
+      "subtitle": "Cover anything private and add notes or images — nothing is shared until you go live",
+      "monitorNudge": "You are sharing a whole screen — notifications and every other window will be visible. Cover anything private.",
+      "maskCount": "{{count}} masks",
+      "skipNextTime": "Do not show this again (the whole-screen warning stays)",
+      "cancel": "Cancel",
+      "goLive": "Go live"
+    },
+    "annotations": {
+      "annotate": "Annotate",
+      "done": "Done",
+      "select": "Select",
+      "pen": "Pen",
+      "highlighter": "Highlighter",
+      "rectangle": "Rectangle",
+      "ellipse": "Ellipse",
+      "text": "Text",
+      "image": "Image overlay",
+      "mask": "Privacy mask",
+      "undo": "Undo",
+      "redo": "Redo",
+      "arrow": "Arrow",
+      "callout": "Numbered callout",
+      "spotlight": "Spotlight",
+      "laser": "Laser pointer",
+      "eraser": "Eraser",
+      "renumber": "Renumber callouts in reading order",
+      "calloutLimit": "Up to {{max}} numbered callouts per share",
+      "vanishingInk": "Vanishing ink — strokes and arrows fade after a few seconds",
+      "bringToFront": "Bring to front",
+      "bringForward": "Bring forward",
+      "sendBackward": "Send backward",
+      "sendToBack": "Send to back",
+      "moreColors": "More colours",
+      "customColor": "Custom colour",
+      "recentColors": "Recent",
+      "textSize": "Text size",
+      "maskStyleCover": "Cover",
+      "maskStylePixelate": "Pixelate",
+      "maskStyleBlur": "Blur",
+      "maskStyleCosmetic": "cosmetic: looks nicer, but pixelated or blurred text can sometimes be recovered, and moving or scrolling content even more so. Use Cover for secrets.",
+      "maskStyleCosmeticShort": "Cosmetic",
+      "sourceChanged": "Your share changed size ({{from}} → {{to}}) — check your masks. Paused until you confirm.",
+      "sourceChangedEdit": "Edit masks",
+      "sourceChangedResume": "Masks are right — resume",
+      "layoutApplied": "{{count}} masks from your last share of this source were applied",
+      "layoutKeep": "Keep",
+      "layoutFresh": "Start fresh",
+      "clearAll": "Clear all",
+      "color": "Color",
+      "width": "Stroke width",
+      "addTextPlaceholder": "Type and press Enter",
+      "sceneFull": "Annotation limit reached — remove some overlays first",
+      "imageTooLarge": "Image is too large even after compression",
+      "maskPrivacyHint": "Hidden at the source — covered pixels never leave this device",
+      "masksMayMisalign": "Shared content changed — check that masks still cover what you intended",
+      "maskFailed": "Privacy mask could not be applied — your shared screen is paused until you remove the mask",
+      "maskRestoreFailed": "Your screen is still going out through the mask compositor — viewers see the right picture, it just costs extra CPU. Restart the share to clear it.",
+      "sharePaused": "Viewers cannot see your screen right now — a privacy mask is being applied or failed to apply",
+      "syncError": "An annotation could not be shared — your view may differ from what viewers see"
+    }
   },
-
   "attachment": {
     "expired": "Expired",
     "fileExpired": "File expired",
@@ -678,7 +862,6 @@
     "loadingVideo": "Loading video...",
     "loadingAudio": "Loading audio..."
   },
-
   "support": {
     "title": "Support",
     "open": "Open",
@@ -692,7 +875,6 @@
     "failedToReopen": "Failed to reopen ticket",
     "sendMessage": "Send message"
   },
-
   "invite": {
     "youveBeenInvited": "You've been invited!",
     "loadingInvite": "Loading invite...",
@@ -702,7 +884,6 @@
     "joining": "Joining...",
     "join": "Join {{name}}"
   },
-
   "landing": {
     "nav": {
       "signIn": "Sign In",
@@ -720,43 +901,45 @@
     },
     "stats": {
       "title": "Growing Together",
-      "subtitle": "Real numbers from the Voxium community — updated live.",
+      "subtitle": "Real numbers from the Voxium community, updated live.",
       "users": "Users Registered",
       "servers": "Servers Created",
       "messages": "Messages Sent"
     },
     "features": {
       "title": "Everything you need",
-      "subtitle": "Voice, text, and community — all in one place, with no compromises on privacy or performance.",
+      "subtitle": "Voice, text, and community, all in one place, with no compromises on privacy or performance.",
       "voice": "Crystal-Clear Voice",
-      "voiceDesc": "SFU-powered server voice for 25+ users per channel. DM calls go direct peer-to-peer — no middleman.",
+      "voiceDesc": "SFU-powered server voice for 25+ users per channel. DM calls go direct peer-to-peer, no middleman.",
       "noiseSuppression": "AI Noise Suppression",
-      "noiseSuppressionDesc": "ML-powered RNNoise filter removes keyboard, mouse, and background noise in real time — so only your voice comes through.",
+      "noiseSuppressionDesc": "ML-powered RNNoise filter removes keyboard, mouse, and background noise in real time, so only your voice comes through.",
       "messaging": "Real-Time Messaging",
-      "messagingDesc": "Instant delivery, reactions, typing indicators, and direct messages — all in real time.",
+      "messagingDesc": "Instant delivery, reactions, typing indicators, and direct messages, all in real time.",
       "privacy": "Privacy First",
-      "privacyDesc": "No ads, no tracking, no data harvesting. Your conversations stay yours.",
+      "privacyDesc": "No ads, no tracking, no data harvesting. DMs and private channels are end-to-end encrypted.",
       "servers": "Servers & Communities",
-      "serversDesc": "Create servers, organize channels, invite friends — everything you need to build a community.",
+      "serversDesc": "Create servers, organize channels, invite friends, everything you need to build a community.",
       "calls": "Direct Voice Calls",
-      "callsDesc": "1-on-1 voice calls with WebRTC peer-to-peer. Crystal clear, zero latency.",
+      "callsDesc": "1-on-1 voice calls, peer-to-peer with end-to-end encrypted signaling. Crystal clear, zero latency.",
       "fast": "Fast & Lightweight",
       "fastDesc": "Built with React 19, Vite, and Redis-backed presence. Snappy on any hardware."
     },
     "highlights": {
       "noAds": "No ads or tracking",
-      "openSource": "Open source & transparent",
-      "freeVoice": "Free voice calls forever",
+      "sourceAvailable": "Source-available & transparent",
+      "e2eEncrypted": "End-to-end encrypted DMs & calls",
+      "freeForIndividuals": "Free for individuals",
       "noiseSuppression": "AI noise suppression",
       "selfHostable": "Self-hostable",
       "sfuVoice": "Scalable SFU voice"
     },
     "comparison": {
       "title": "How Voxium compares",
-      "subtitle": "See how Voxium stacks up against the alternatives. We believe communication software should be open, private, and community-owned.",
+      "subtitle": "See how Voxium stacks up against the alternatives. We believe communication software should be private, auditable, and community-owned.",
       "feature": "Feature",
-      "footnote": "Comparison based on free tiers as of March 2026. Features marked \"Planned\" are on the roadmap.",
-      "openSource": "Open Source",
+      "footnote": "Comparison based on free tiers as of August 2026. Features marked \"Planned\" are on the roadmap.",
+      "sourceAvailable": "Source Code Auditable",
+      "encryptedChannels": "Invite-Only Encrypted Channels",
       "selfHostable": "Self-Hostable",
       "freeVoiceChat": "Free Voice Chat",
       "sfuVoice": "SFU Voice (25+ users)",
@@ -783,7 +966,7 @@
     "showcase": {
       "title": "Made",
       "titleHighlight": "Yours",
-      "subtitle": "Customize every detail — from colors to languages to who can do what.",
+      "subtitle": "Customize every detail, from colors to languages to who can do what.",
       "themeLabel": "4 Built-in Themes + Custom Editor",
       "languageLabel": "11 Languages with RTL Support",
       "permissionLabel": "20 Permission Flags with Channel Overrides",
@@ -793,9 +976,9 @@
     "why": {
       "title": "Why Voxium?",
       "ownData": "You Own Your Data",
-      "ownDataDesc": "Self-host or use our servers — either way, your data belongs to you. No mining, no selling.",
-      "openSource": "Open Source",
-      "openSourceDesc": "Every line of code is public. Audit it, fork it, contribute to it. Full transparency.",
+      "ownDataDesc": "Self-host or use our servers, either way, your data belongs to you. No mining, no selling.",
+      "sourceAvailable": "Source-Available",
+      "sourceAvailableDesc": "Every line of code is public. Audit it, fork it, contribute to it. Full transparency.",
       "communityDriven": "Community-Driven",
       "communityDrivenDesc": "Built by the community, for the community. Features are shaped by the people who use them.",
       "builtDifferent": "Built different"
@@ -804,7 +987,7 @@
       "badge": "Community Powered",
       "title": "Funded by the Community",
       "subtitle": "No ads. No data harvesting. No strings attached. Voxium is funded entirely by the people who use it.",
-      "openSource": "Open Source",
+      "sourceAvailable": "Source-Available",
       "youDecide": "Decide the Roadmap",
       "zeroAds": "Ads or Tracking",
       "sponsorGithub": "Sponsor on GitHub",
@@ -814,11 +997,11 @@
     "cta": {
       "title": "Ready to experience communication, reimagined?",
       "subtitle": "Join the open communication revolution. No credit card. No subscription.",
-      "getStarted": "Get Started — It's Free",
+      "getStarted": "Get Started, It's Free",
       "downloadApp": "Download the App"
     },
     "footer": {
-      "tagline": "Open, privacy-first voice and text communication.",
+      "tagline": "Privacy-first voice and text communication.",
       "product": "Product",
       "download": "Download",
       "changelog": "Changelog",
@@ -832,21 +1015,18 @@
       "copyright": "© 2026 Voxium. All rights reserved."
     }
   },
-
   "badges": {
     "staff": "Staff",
     "supporter": "Supporter",
     "firstSupporter": "First Supporter",
-    "firstSupporterTooltip": "First Supporter — The very first to believe in Voxium",
+    "firstSupporterTooltip": "First Supporter, The very first to believe in Voxium",
     "topSupporter": "Top Supporter",
-    "topSupporterTooltip": "Top Supporter — The most generous supporter of Voxium"
+    "topSupporterTooltip": "Top Supporter, The most generous supporter of Voxium"
   },
-
   "connection": {
     "reconnecting": "Reconnecting to Voxium...",
     "lost": "Connection lost. Attempting to reconnect..."
   },
-
   "errorBoundary": {
     "title": "Something went wrong",
     "tryAgain": "Try again",
@@ -856,7 +1036,6 @@
     "tryToRecover": "Try to Recover",
     "reloadPage": "Reload Page"
   },
-
   "serverErrors": {
     "invalidCredentials": "Invalid credentials",
     "usernameOrEmailTaken": "Username or email already in use",
@@ -943,5 +1122,185 @@
     "cannotBanSelf": "Cannot ban yourself",
     "cannotBanSuperAdmin": "Cannot ban a super admin",
     "onlySuperAdminCanBan": "Only super admins can ban other admins"
+  },
+  "e2e": {
+    "badgeTitle": "End-to-end encrypted — view safety number",
+    "encryptedMessage": "Encrypted message",
+    "localSearchHint": "Searching messages decrypted on this device — results depend on what this device has received",
+    "decryptFailed": "Unable to decrypt this message",
+    "attachmentFailed": "Unable to decrypt this attachment",
+    "downloadAttachment": "Download",
+    "safetyNumberTitle": "Safety number",
+    "safetyNumberExplainer": "Compare this number with {{name}} over another channel (in person, a call) to verify your conversation is secure. It changes if either of you reinstalls or resets encryption keys.",
+    "safetyNumberUnavailable": "Safety number unavailable",
+    "verified": "Verified",
+    "notVerified": "Not verified yet",
+    "markVerified": "Mark as verified",
+    "identityChangedWarning": "{{name}}'s security keys changed. This can happen after a reinstall — verify the new safety number before trusting this conversation.",
+    "acceptNewIdentity": "Accept new keys",
+    "identityAccepted": "New keys accepted",
+    "perDeviceSafetyExplainer": "Each of {{name}}'s devices has its own safety number.",
+    "newDeviceBadgeTitle": "New device added — review devices",
+    "newDeviceWarning": "{{name}} added a new device. Review their devices to make sure it's really them.",
+    "reviewDevices": "Review devices",
+    "devicesReviewed": "Devices reviewed",
+    "manageDevices": "Manage devices",
+    "deviceManagerTitle": "Your devices",
+    "deviceManagerExplainer": "Devices registered to your account. Revoke any device you no longer use or don't recognize — new messages will be re-keyed away from it immediately.",
+    "thisDevice": "This device",
+    "deviceAdded": "Added {{date}}",
+    "revokeDevice": "Revoke",
+    "revokeConfirm": "Revoke this device? It will no longer be able to read new messages, and every encrypted conversation will re-key.",
+    "revokeFailed": "Could not revoke device",
+    "revoked": "Device revoked",
+    "ownDeviceBadgeTitle": "A device was added to your account — review it",
+    "ownDeviceWarning": "A device you may not recognise was added to your account ({{count}}). It can read your encrypted conversations. Revoke it if it is not yours.",
+    "ownDevicesReviewed": "These are my devices",
+    "ownDevicesLoadFailed": "Could not load your devices. This list may be incomplete — do not treat it as proof that no other device is registered. Reopen this panel to try again.",
+    "unrecognisedDevice": "new",
+    "accountSafetyExplainer": "Compare this number with {{name}} over another channel (in person, a call) to verify your account. It's the same on every device either of you uses, and only changes if an account key is reset.",
+    "markAccountVerified": "Mark account as verified",
+    "advancedDevices": "Advanced: per-device details",
+    "crossSignedChip": "Verified by account key",
+    "unsignedChip": "Not signed by {{name}}'s account key",
+    "unsignedChipOwn": "Not signed by your account key",
+    "approveDevice": "Approve this device",
+    "approveDeviceSuccess": "Device approved",
+    "approveDeviceFailed": "Could not approve device",
+    "cannotApproveExplainer": "This device can't approve others yet. Approve it from a device that already has access to your account key.",
+    "accountSafetyNumberUnavailable": "Account safety number unavailable — showing per-device numbers only.",
+    "unsignedDeviceBadgeTitle": "A device is not signed by the account key — review it",
+    "unsignedDevicesWarning": "{{count}} of {{name}}'s devices is not signed by their account key. It can still read new messages, so treat it as unverified until they approve it from a device they already use.",
+    "thisDeviceUnsignedBadgeTitle": "This device is not approved yet - approve it from another device",
+    "masterConflictBadgeTitle": "Your account key does not match this device - review it",
+    "masterConflictExplainer": "Your account publishes a key this device didn't create and can't replace. Your messages still send, but new devices can't be approved until you reset your account identity.",
+    "resetIdentityExplainer": "Lost access to every device that could approve? Start a new account identity. Only do this as a last resort.",
+    "resetIdentityAction": "Reset account identity",
+    "resetIdentityConfirm": "This replaces your account key. Everyone you message will see your safety number change and will have to verify you again. Other devices lose their approval.",
+    "resetIdentitySuccess": "Account identity reset",
+    "resetIdentityFailed": "Could not reset the account identity",
+    "identityChangedBadgeTitle": "This contact's security keys changed — verify before trusting",
+    "backupTitle": "Account recovery",
+    "backupExplainer": "Save a recovery key now and you can get your account key back if you lose every device — without anyone having to verify you again. We can't read it and can't recover it for you.",
+    "backupCreateAction": "Set up account recovery",
+    "backupCreateFailed": "Could not set up account recovery",
+    "backupSetUp": "Recovery is set up",
+    "backupUpdatedAt": "Recovery key created {{date}}",
+    "backupReplaceAction": "Replace recovery key",
+    "backupReplaceConfirm": "This creates a new recovery key. Your current one stops working immediately — anywhere you saved it becomes useless.",
+    "backupDeleteAction": "Turn off recovery",
+    "backupDeleteConfirm": "Delete the backup? Your recovery key stops working immediately, and if you lose every device you'll have to reset your account identity — everyone you message will have to verify you again.",
+    "backupDeleted": "Account recovery turned off",
+    "backupDeleteFailed": "Could not turn off account recovery",
+    "backupKeyTitle": "Your recovery key",
+    "backupKeyWarning": "Write this down now. It is shown once and never again — we cannot show it to you a second time and cannot recover it for you.",
+    "backupKeyLoss": "Without it, losing every device means resetting your account identity, and every contact has to verify you again.",
+    "backupKeyAcknowledge": "I've saved my recovery key somewhere safe",
+    "backupKeyDone": "Done",
+    "backupCopyFailed": "Could not copy the recovery key",
+    "backupRestoreTitle": "Restore from recovery key",
+    "backupRestoreExplainer": "This account has a recovery key. Enter it to get your account key back on this device — your safety number stays the same, so no contact has to verify you again.",
+    "backupRestorePlaceholder": "ABCD-EFGH-JKLM-...",
+    "backupRestoreAction": "Restore",
+    "backupRestoreSuccess": "Account key restored — this device can approve your other devices now",
+    "backupRestoreFailed": "That recovery key did not open this account's backup. It may belong to a previous account identity.",
+    "backupNone": "No recovery key was set up on this account, so there is nothing to restore from.",
+    "backupPreferRestore": "You have a recovery key: restoring it above keeps your identity, and nobody has to verify you again. Try that first.",
+    "backupRestoreMalformed": "That does not look like a recovery key. Check it for typos and try again.",
+    "peerNotReady": "{{name}} hasn't set up Voxium on a device yet, so there's nowhere to send an encrypted message. They'll be reachable once they open the app.",
+    "peerNotReadyFallbackName": "This person",
+    "linkCodeTitle": "Add this device to your account",
+    "linkCodeExplainer": "Open Voxium on a device you already use, go to your devices, and enter this code there. Until you do, this device can't read your encrypted messages.",
+    "linkCopyFailed": "Could not copy the linking code",
+    "linkTitle": "Link a device",
+    "linkExplainer": "Enter the code shown by the device you want to add.",
+    "linkPlaceholder": "ABCD-2345-EFGH-6789",
+    "linkAction": "Continue",
+    "linkUnknownCode": "No device waiting for approval is showing that code. Check it on the other device and try again.",
+    "linkAmbiguousCode": "More than one device is showing that code. Do not approve any of them — this should never happen by chance. Remove unrecognised devices, then link again from a fresh code.",
+    "linkKeysChanged": "That device is no longer showing the code you confirmed. Nothing was approved. Get a fresh code from the device and try again — if it keeps happening, do not approve it.",
+    "linkLookupFailed": "Could not check that code right now. Try again.",
+    "linkConfirmTitle": "Approve this device?",
+    "linkConfirmDevice": "Device {{id}} · registered {{date}}",
+    "linkConfirmExplainer": "Approving hands this device your account key: it will be able to read your encrypted conversations and approve further devices. Only continue if this is the device in front of you.",
+    "linkConfirmAction": "Approve device",
+    "devicesNotReady": "Encryption is still setting up on this device, so your devices can't be listed yet. Check back in a moment.",
+    "identityAcceptFailed": "Could not accept the new keys",
+    "callLocked": "End-to-end encrypted call",
+    "callAbortIdentityChanged": "Call ended: {{name}}'s security keys changed. Verify their new safety number before calling again.",
+    "callAbortPeerMustUpdate": "Call ended: {{name}}'s app can't make secure calls. Ask them to update Voxium.",
+    "callAbortPeerNotE2E": "Call ended: {{name}} hasn't set up encryption yet, so a secure call can't be established.",
+    "callAbortSignalingFailed": "Call ended: secure call setup failed. Try again.",
+    "callNotReady": "Can't start a secure call yet — encryption is still setting up on this device. Try again in a moment."
+  },
+  "people": {
+    "title": "People",
+    "inVoice": "In voice",
+    "active": "Active",
+    "away": "Away",
+    "offline": "Offline",
+    "speaking": "Speaking",
+    "mutedStatus": "Muted",
+    "inVoiceStatus": "In voice",
+    "dnd": "Do not disturb",
+    "awayStatus": "Away",
+    "offlineStatus": "Offline"
+  },
+  "search": {
+    "placeholder": "Search messages…"
+  },
+  "secureVoice": {
+    "locked": "End-to-end encrypted voice channel",
+    "unsupported": "Secure voice isn't available on this device — it needs encrypted-media support in the app runtime.",
+    "cantJoin": "Couldn't start the encrypted voice session. Try again.",
+    "sessionFailed": "Encrypted voice failed — you were disconnected to prevent an unprotected call.",
+    "createHint": "An invite-only voice channel where audio is end-to-end encrypted — the server only ever relays sound it cannot listen to. Screen sharing is not available.",
+    "peerIssues_one": "{{count}} member can't be keyed — you won't hear them until it's resolved.",
+    "peerIssues_other": "{{count}} members can't be keyed — you won't hear them until it's resolved."
+  },
+  "secureChannel": {
+    "sectionTitle": "Secure channels",
+    "createTitle": "Create Secure Channel",
+    "createDescription": "An invite-only, end-to-end encrypted channel. Only the members you invite can see it — not even server admins can read it.",
+    "namePlaceholder": "channel-name",
+    "inviteMembers": "Invite members ({{count}}/{{max}})",
+    "searchMembers": "Search members…",
+    "noMembersFound": "No members found",
+    "create": "Create",
+    "creating": "Creating…",
+    "created": "Secure channel created",
+    "failedToCreate": "Failed to create secure channel",
+    "memberCapReached": "A secure channel can have at most {{max}} members",
+    "members": "Members",
+    "membersCount": "Members ({{count}}/{{max}})",
+    "inviteMember": "Invite a member",
+    "memberInvited": "Member invited",
+    "failedToInvite": "Failed to invite member",
+    "memberRemoved": "Member removed",
+    "failedToRemove": "Failed to remove member",
+    "removeMember": "Remove member",
+    "failedToLoadMembers": "Failed to load members",
+    "leave": "Leave channel",
+    "left": "Left the channel",
+    "failedToLeave": "Failed to leave channel",
+    "membersNotReady": "{{names}} can't read messages yet — they haven't set up encryption",
+    "moderationTitle": "Secure channels",
+    "moderationLoading": "Loading…",
+    "moderationCount": "This server has {{count}} secure channel(s). Their names and contents are visible only to their members.",
+    "moderationHint": "Messages in secure channels can't be reported — their members handle things among themselves. If a secure channel needs to go, a member can copy its id from the channel's right-click menu and give it to you; paste it here to delete the channel.",
+    "moderationDeletePlaceholder": "Channel id from a member",
+    "copyId": "Copy channel ID",
+    "copyIdHint": "Give this id to a server admin if this channel needs to be deleted",
+    "idCopied": "Channel ID copied",
+    "idCopyFailed": "Couldn't copy the channel ID",
+    "moderationDelete": "Delete",
+    "moderationDeleted": "Secure channel deleted",
+    "moderationDeleteFailed": "Failed to delete — check the channel id",
+    "renameLabel": "Channel name",
+    "rename": "Rename",
+    "renaming": "Renaming…",
+    "renamed": "Channel renamed",
+    "failedToRename": "Failed to rename channel",
+    "moderationNotSecure": "\"{{name}}\" is a regular channel — delete it from the sidebar instead"
   }
 }

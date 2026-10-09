@@ -21,6 +21,11 @@ function getEncryptionKey(): Buffer | null {
 function encryptSecret(plaintext: string): string {
   const key = getEncryptionKey();
   if (!key) {
+    // Fail closed: never store a recoverable secret in plaintext in
+    // production (index.ts also refuses to boot; this guards other entrypoints)
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('TOTP_ENCRYPTION_KEY required in production');
+    }
     console.warn('[TOTP] WARNING: TOTP_ENCRYPTION_KEY not set — TOTP secrets will be stored unencrypted. Set this env var in production!');
     return plaintext;
   }

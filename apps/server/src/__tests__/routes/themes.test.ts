@@ -11,6 +11,7 @@ vi.mock('../../middleware/auth', () => ({
     next();
   },
   requireVerifiedEmail: (_req: any, _res: any, next: any) => next(),
+  requireConsent: (_req: any, _res: any, next: any) => next(),
 }));
 
 vi.mock('../../middleware/requireSuperAdmin', () => ({
@@ -350,6 +351,56 @@ describe('Themes API', () => {
     it('rejects invalid color values', async () => {
       const colors = makeValidColors();
       colors['bg-primary'] = 'not-a-color';
+
+      const res = await request(app)
+        .post('/api/v1/themes')
+        .send({ name: 'Test', colors });
+
+      expect(res.status).toBe(400);
+    });
+
+    it('publishes a theme with translucent hover/active/border/scrollbar layers', async () => {
+      // The bug this pins: the 2026 palettes make those layers rgba() by
+      // design, so a hex-only rule rejected every theme started from a
+      // built-in — it saved locally and then failed here.
+      const colors = makeValidColors();
+      colors['bg-hover'] = 'rgba(141, 141, 242, 0.08)';
+      colors['bg-active'] = 'rgba(141, 141, 242, 0.14)';
+      colors['border'] = 'rgba(141, 141, 242, 0.12)';
+      colors['scrollbar-thumb'] = 'rgba(141, 141, 242, 0.14)';
+      colors['scrollbar-thumb-hover'] = 'rgba(141, 141, 242, 0.26)';
+      prismaMock.communityTheme.count.mockResolvedValue(0);
+      prismaMock.communityTheme.create.mockResolvedValue(makeThemeRow({ colors }));
+
+      const res = await request(app)
+        .post('/api/v1/themes')
+        .send({ name: 'Translucent', colors });
+
+      expect(res.status).toBe(201);
+      // Stored verbatim — the alpha the author picked is the alpha installed.
+      expect(prismaMock.communityTheme.create.mock.calls[0][0].data.colors['bg-hover']).toBe(
+        'rgba(141, 141, 242, 0.08)',
+      );
+    });
+
+    it('still refuses a translucent OPAQUE surface', async () => {
+      // `chat` is a panel; alpha there would show the page through a surface
+      // meant to be solid. Loosening the translucent layers must not loosen
+      // this one.
+      const colors = makeValidColors();
+      colors['chat'] = 'rgba(26, 26, 46, 0.5)';
+
+      const res = await request(app)
+        .post('/api/v1/themes')
+        .send({ name: 'Test', colors });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('chat');
+    });
+
+    it('does not accept arbitrary CSS on the translucent keys', async () => {
+      const colors = makeValidColors();
+      colors['bg-hover'] = 'rgba(141, 141, 242, 0.08); background: url(evil)';
 
       const res = await request(app)
         .post('/api/v1/themes')

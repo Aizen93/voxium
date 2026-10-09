@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
-import { useVoiceStore } from '../stores/voiceStore';
+import { useVoiceStore, isMicProducer } from '../stores/voiceStore';
 import { getSocket } from '../services/socket';
 
 function isTextInput(el: Element | null): boolean {
@@ -31,11 +31,11 @@ export function usePushToTalk() {
       // Disable raw mic tracks
       localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
 
-      // Pause SFU audio producer (server voice only)
+      // Pause the SFU mic producer (server voice only — screen audio unaffected)
       if (activeChannelId) {
         const { msProducers } = useVoiceStore.getState();
         for (const producer of msProducers.values()) {
-          if (producer.kind === 'audio') producer.pause();
+          if (isMicProducer(producer)) producer.pause();
         }
       }
 
@@ -73,11 +73,11 @@ export function usePushToTalk() {
       // Enable raw mic tracks
       localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
 
-      // Resume SFU audio producer (server voice only)
+      // Resume the SFU mic producer (server voice only — screen audio unaffected)
       if (activeChannelId) {
         const { msProducers } = useVoiceStore.getState();
         for (const producer of msProducers.values()) {
-          if (producer.kind === 'audio') producer.resume();
+          if (isMicProducer(producer)) producer.resume();
         }
       }
 

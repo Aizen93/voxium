@@ -1,0 +1,356 @@
+import { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
+import { ANNOTATION_IMAGE_MAX_DECODED_EDGE, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS } from '@voxium/shared';
+import type { AnnotationScene } from '@voxium/shared';
+import { useAnnotationStore, type MaskRect } from '../../stores/annotationStore';
+import { useAnnotationLiveStore, hasLiveActivity, fadeAlpha, type FadeClock } from '../../stores/annotationLiveStore';
+import { useVideoContentRect } from '../../hooks/useVideoContentRect';
+import { drawLivePointer } from '../../utils/annotationLiveDraw';
+import { drawArrow, drawCallout, drawSpotlight } from '../../utils/annotationDraw';
+import { paintStyledMask, createScratchCanvas, type ScratchCanvas } from '../../utils/maskStyles';
+
+/**
+ * Render-only overlay for screen-share annotations. Positions itself over the
+ * video CONTENT rect (object-contain letterboxing accounted for) inside a
+ * position:relative wrapper shared with the <video>. Pointer events pass
+ * through — the sharer's editor layer (separate component) handles input.
+ *
+ * Masks are local-only sharer state (empty for viewers): the sharer previews
+ * the RAW capture, so masks are painted here exactly as viewers receive them
+ * baked into the composited video — black boxes or cover images.
+ */
+
+interface AnnotationCanvasProps {
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  /** Paint ONLY the privacy masks (pre-flight preview). */
+  masksOnly?: boolean;
+  /** false = a SECONDARY canvas (the pre-flight) that may be mounted
+   *  alongside the live viewer: it must neither clear the module image cache
+   *  on unmount nor prune entries its own draw does not use. */
+  cacheOwner?: boolean;
+}
+
+// Decoded overlay images, keyed by cache id. Entries no longer referenced by
+// the scene/masks are dropped after each draw, so the cache tracks the scene.
+const imageCache = new Map<string, { src: string; img: HTMLImageElement; loaded: boolean; notify: Set<() => void> }>();
+/** Decode-notification subscribers per entry — bounded; the set is one-shot
+ *  (cleared after firing), so a never-decoding image cannot accumulate a
+ *  closure per redraw forever. */
+const IMAGE_NOTIFY_MAX = 16;
+
+function cachedImage(id: string, src: string, usedIds: Set<string>, requestRedraw: () => void): HTMLImageElement | null {
+  usedIds.add(id);
+  let entry = imageCache.get(id);
+  if (entry && entry.src === src && !entry.loaded) {
+    // EVERY canvas drawing an undecoded image gets the decode notification —
+    // a single slot let one drawer steal it from another (a one-shot snapshot
+    // draw with a no-op, or the pre-flight canvas vs the live viewer canvas).
+    if (entry.notify.size < IMAGE_NOTIFY_MAX) entry.notify.add(requestRedraw);
+  }
+  if (!entry || entry.src !== src) {
+    const img = new Image();
+    entry = { src, img, loaded: false, notify: new Set([requestRedraw]) };
+    imageCache.set(id, entry);
+    img.onload = () => {
+      // Server-side header validation is the primary bomb gate; this is the
+      // viewer's own belt — never draw (or keep) an image that decoded larger
+      // than anything a legitimate client can produce.
+      if (img.naturalWidth > ANNOTATION_IMAGE_MAX_DECODED_EDGE || img.naturalHeight > ANNOTATION_IMAGE_MAX_DECODED_EDGE) {
+        console.warn('[Annotations] Overlay image exceeds decoded-size cap — dropped');
+        imageCache.delete(id);
+        return;
+      }
+      const current = imageCache.get(id);
+      if (current) {
+        current.loaded = true;
+        const subscribers = [...current.notify];
+        current.notify.clear();
+        for (const notify of subscribers) notify();
+      }
+    };
+    img.onerror = () => {
+      console.warn('[Annotations] Overlay image failed to decode');
+    };
+    img.src = src;
+  }
+  return entry.loaded ? entry.img : null;
+}
+
+/** What the sharer's preview needs to paint a pixelate/blur mask the way viewers see it. */
+export interface MaskPreviewSource {
+  video: HTMLVideoElement;
+  scratch: ScratchCanvas | null;
+}
+
+export function drawScene(
+  ctx: CanvasRenderingContext2D,
+  scene: AnnotationScene,
+  masks: MaskRect[],
+  w: number,
+  h: number,
+  requestRedraw: () => void,
+  fading: ReadonlyMap<string, FadeClock> = new Map(),
+  now: number = Date.now(),
+  preview: MaskPreviewSource | null = null,
+  pruneCache = true,
+): void {
+  ctx.clearRect(0, 0, w, h);
+  const usedIds = new Set<string>();
+
+  // Masks under annotations — annotations must stay visible over a cover.
+  // The sharer previews the RAW capture, so masks are painted here exactly
+  // as viewers receive them baked into the video: cover image, black box,
+  // or the same pixelate/blur sampled from the preview video.
+  for (const mask of masks) {
+    const x = mask.x * w, y = mask.y * h, bw = mask.w * w, bh = mask.h * h;
+    if (mask.src) {
+      const img = cachedImage(`mask:${mask.id}`, mask.src, usedIds, requestRedraw);
+      if (img) {
+        ctx.drawImage(img, x, y, bw, bh);
+      } else {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(x, y, bw, bh);
+      }
+    } else if ((mask.style === 'pixelate' || mask.style === 'blur') && preview && preview.video.videoWidth > 0) {
+      const scale = preview.video.videoWidth / w;
+      paintStyledMask(mask.style, {
+        ctx, scratch: preview.scratch, scale,
+        source: preview.video,
+        sourceSize: { w: preview.video.videoWidth, h: preview.video.videoHeight },
+        dst: { x, y, w: bw, h: bh },
+        src: { x: mask.x * preview.video.videoWidth, y: mask.y * preview.video.videoHeight, w: mask.w * preview.video.videoWidth, h: mask.h * preview.video.videoHeight },
+      });
+    } else {
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(x, y, bw, bh);
+    }
+  }
+
+  // The spotlight dims the frame under every other annotation, wherever it
+  // sits in the scene order (the editor keeps at most one)
+  for (const obj of scene.objects) {
+    if (obj.kind === 'spotlight') drawSpotlight(ctx, obj, w, h);
+  }
+
+  for (const obj of scene.objects) {
+    switch (obj.kind) {
+      case 'spotlight':
+        break; // painted above
+      case 'stroke': {
+        if (obj.points.length < 4) break;
+        // Vanishing ink: fade on THIS client's clock, and skip once gone even
+        // if the sharer's remove has not arrived
+        const alpha = obj.fade ? fadeAlpha(fading.get(obj.id), now, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS) : 1;
+        if (alpha <= 0) break;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        if (obj.tool === 'highlighter') {
+          ctx.globalAlpha = 0.35 * alpha;
+          ctx.globalCompositeOperation = 'multiply';
+        }
+        ctx.strokeStyle = obj.color;
+        ctx.lineWidth = Math.max(1, obj.width * h);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(obj.points[0] * w, obj.points[1] * h);
+        for (let i = 2; i < obj.points.length; i += 2) {
+          ctx.lineTo(obj.points[i] * w, obj.points[i + 1] * h);
+        }
+        ctx.stroke();
+        ctx.restore();
+        break;
+      }
+      case 'shape': {
+        ctx.save();
+        ctx.strokeStyle = obj.color;
+        ctx.fillStyle = obj.color;
+        ctx.lineWidth = Math.max(1, obj.width * h);
+        const x = obj.x * w, y = obj.y * h, bw = obj.w * w, bh = obj.h * h;
+        ctx.beginPath();
+        if (obj.shape === 'ellipse') {
+          ctx.ellipse(x + bw / 2, y + bh / 2, Math.abs(bw / 2), Math.abs(bh / 2), 0, 0, Math.PI * 2);
+        } else {
+          ctx.rect(x, y, bw, bh);
+        }
+        if (obj.fill) {
+          ctx.globalAlpha = 0.25;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+        ctx.stroke();
+        ctx.restore();
+        break;
+      }
+      case 'text': {
+        ctx.save();
+        ctx.fillStyle = obj.color;
+        const px = Math.max(9, obj.size * h);
+        ctx.font = `600 ${px}px system-ui, sans-serif`;
+        ctx.textBaseline = 'top';
+        // Subtle halo so text stays readable on any background
+        ctx.shadowColor = 'rgba(0,0,0,0.8)';
+        ctx.shadowBlur = Math.max(2, px * 0.12);
+        ctx.fillText(obj.text, obj.x * w, obj.y * h);
+        ctx.restore();
+        break;
+      }
+      case 'image': {
+        const img = cachedImage(obj.id, obj.src, usedIds, requestRedraw);
+        if (img) {
+          ctx.drawImage(img, obj.x * w, obj.y * h, obj.w * w, obj.h * h);
+        }
+        break;
+      }
+      case 'arrow': {
+        // Vanishing arrows fade exactly like vanishing strokes — on THIS
+        // client's clock, hidden even if the sharer's remove never arrives
+        const alpha = obj.fade ? fadeAlpha(fading.get(obj.id), now, ANNOTATION_FADE_AFTER_MS, ANNOTATION_FADE_OUT_MS) : 1;
+        if (alpha <= 0) break;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        drawArrow(ctx, obj, w, h);
+        ctx.restore();
+        break;
+      }
+      case 'callout':
+        drawCallout(ctx, obj, w, h);
+        break;
+      // No default on purpose: an object kind this client predates is skipped,
+      // never thrown on — that is what lets an old viewer follow a new sharer.
+    }
+  }
+
+  for (const id of imageCache.keys()) {
+    if (pruneCache && !usedIds.has(id)) imageCache.delete(id);
+  }
+}
+
+/**
+ * Drive a requestAnimationFrame loop ONLY while the live store holds
+ * something time-dependent (a pointer still fading, reactions in flight).
+ * The loop prunes expired items, redraws, and stops itself on the first idle
+ * frame — no viewer ever runs a permanent loop for an overlay that is usually
+ * static. A fresh event while idle starts it again via the subscription.
+ */
+export function useLiveScheduler(draw: () => void, enabled = true): void {
+  const drawRef = useRef(draw);
+  useLayoutEffect(() => {
+    drawRef.current = draw;
+  });
+
+  useEffect(() => {
+    if (!enabled) return; // a masks-only canvas paints nothing time-driven
+    let handle = 0;
+    let running = false;
+    const tick = () => {
+      const live = useAnnotationLiveStore.getState();
+      live.prune(Date.now());
+      drawRef.current();
+      if (hasLiveActivity(useAnnotationLiveStore.getState())) {
+        handle = requestAnimationFrame(tick);
+      } else {
+        running = false;
+      }
+    };
+    const start = () => {
+      if (running) return;
+      running = true;
+      handle = requestAnimationFrame(tick);
+    };
+    const unsubscribe = useAnnotationLiveStore.subscribe((state) => {
+      if (hasLiveActivity(state)) start();
+    });
+    if (hasLiveActivity(useAnnotationLiveStore.getState())) start();
+    return () => {
+      unsubscribe();
+      cancelAnimationFrame(handle);
+      running = false;
+    };
+  }, [enabled]);
+}
+
+const MASKS_ONLY_SCENE: AnnotationScene = { objects: [] };
+
+export function AnnotationCanvas({ videoRef, masksOnly = false, cacheOwner = true }: AnnotationCanvasProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scratchRef = useRef<ScratchCanvas | null | undefined>(undefined);
+  const liveScene = useAnnotationStore((s) => s.scene);
+  // The pre-flight preview is PRIVATE: with someone else live-sharing, their
+  // scene (and pointer) must not paint over the sharer's local capture.
+  const scene = masksOnly ? MASKS_ONLY_SCENE : liveScene;
+  const masks = useAnnotationStore((s) => s.masks);
+  const rect = useVideoContentRect(videoRef);
+  const [redrawTick, setRedrawTick] = useState(0);
+
+  // The cache is module-level (survives re-renders); without this, decoded
+  // images from a share leak until the NEXT annotated share prunes them.
+  // Inline/floating render exactly one SCENE canvas at a time, so a full
+  // clear on unmount is safe — but a masks-only canvas (the pre-flight) can
+  // be mounted ALONGSIDE the live viewer, so it must neither clear the cache
+  // on unmount nor prune entries its empty scene never uses (the draw below
+  // passes pruneCache: false).
+  useEffect(() => {
+    if (!cacheOwner) return;
+    return () => imageCache.clear();
+  }, [cacheOwner]);
+
+  // One draw routine for both triggers: scene/mask/rect changes (effect
+  // below) and the live scheduler (time-driven frames). It is cheap enough to
+  // repaint the whole scene per frame for the handful of seconds a pointer
+  // is visible — and far simpler than a second, layered canvas.
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || rect.w <= 0 || rect.h <= 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(rect.w * dpr));
+    const height = Math.max(1, Math.round(rect.h * dpr));
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const now = Date.now();
+    const { pointer, fading } = useAnnotationLiveStore.getState();
+    if (scratchRef.current === undefined) scratchRef.current = createScratchCanvas();
+    const preview = videoRef.current ? { video: videoRef.current, scratch: scratchRef.current } : null;
+    drawScene(ctx, scene, masks, rect.w, rect.h, () => setRedrawTick((t) => t + 1), fading, now, preview, cacheOwner);
+    if (pointer && !masksOnly) drawLivePointer(ctx, pointer, now, rect.w, rect.h);
+  }, [scene, masks, rect, videoRef, masksOnly, cacheOwner]);
+
+  useEffect(() => {
+    draw();
+  }, [draw, redrawTick]);
+
+  // Latest draw for the styled-mask interval below (assigned in a layout
+  // effect — never during render)
+  const drawRef = useRef(draw);
+  useLayoutEffect(() => {
+    drawRef.current = draw;
+  });
+
+  // A pixelated/blurred preview samples the live video, so it follows the
+  // frames at 15 fps for AS LONG AS such a mask exists — editing or not:
+  // viewers see live pixelation, and a sharer shown a frozen sample would be
+  // looking at a different picture than their audience. Costs are the
+  // sharer's own (this canvas only has masks for the sharer). The interval
+  // reads `draw` through a ref so a store touch does not recreate it.
+  const hasStyledMask = masks.some((m) => !m.src && (m.style === 'pixelate' || m.style === 'blur'));
+  useEffect(() => {
+    if (!hasStyledMask) return;
+    const id = setInterval(() => drawRef.current(), 1000 / 15);
+    return () => clearInterval(id);
+  }, [hasStyledMask]);
+
+  useLiveScheduler(draw, !masksOnly);
+
+  if (rect.w <= 0 || rect.h <= 0) return null;
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="pointer-events-none absolute"
+      style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
+      aria-hidden="true"
+    />
+  );
+}

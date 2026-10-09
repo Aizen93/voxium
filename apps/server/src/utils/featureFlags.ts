@@ -17,6 +17,11 @@ const DEFAULTS: Record<string, FeatureFlagDef> = {
   dm_voice:        { name: 'dm_voice',        label: 'DM Voice Calls',      description: 'Allow users to start direct message voice calls',  enabled: true },
   support:         { name: 'support',         label: 'Support Tickets',     description: 'Allow users to open support tickets',              enabled: true },
   community_funding: { name: 'community_funding', label: 'Community Funding', description: 'Show the community funding section on the landing page', enabled: false },
+  // Wire v2 of screen-share annotations (arrows, callouts, spotlight, vanishing
+  // ink, moving strokes). OFF makes this node reject v2 ops AND stop
+  // advertising annotationsVersion 2 on the share claim, so new clients hide
+  // the tools instead of drawing things the server will refuse.
+  annotations_v2:  { name: 'annotations_v2',  label: 'Annotations v2',      description: 'Arrows, callouts, spotlight, vanishing ink and stroke editing on screen shares', enabled: true },
 };
 
 const REDIS_KEY = 'feature:flags';

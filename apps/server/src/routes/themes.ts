@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { rateLimitThemeManage, rateLimitThemeBrowse } from '../middleware/rateLimiter';
 import { requireAdmin } from '../middleware/requireSuperAdmin';
 import { prisma } from '../utils/prisma';
@@ -19,7 +19,7 @@ import type { CommunityTheme } from '@voxium/shared';
 
 export const themeRouter = Router();
 
-themeRouter.use(authenticate, requireVerifiedEmail);
+themeRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // ─── Helper: format theme for API response ──────────────────────────────────
 

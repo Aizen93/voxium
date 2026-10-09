@@ -127,6 +127,20 @@ Use the GitHub issue templates:
 
 Open a [GitHub Discussion](../../discussions) for questions, ideas, or general conversation.
 
-## License
+## License and contributions
 
-By contributing, you agree that your contributions will be licensed under the [AGPL-3.0 License](LICENSE.md).
+Voxium is source-available under the [Voxium Community License 1.0](LICENSE.md)
+(see [NOTICE.md](NOTICE.md) for the license history).
+
+By submitting a contribution, you agree that:
+
+1. you wrote the contribution yourself (or have the right to submit it), and
+2. you grant the project's copyright holder a perpetual, worldwide,
+   non-exclusive, irrevocable, royalty-free license to use, reproduce,
+   modify, distribute, sublicense, and relicense your contribution — under
+   the Voxium Community License and under any other terms, including
+   commercial licenses.
+
+This grant is what lets the project stay under a single license and remain
+sustainably funded. Your contribution is distributed to everyone else under
+the Voxium Community License like the rest of the codebase.

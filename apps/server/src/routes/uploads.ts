@@ -1,10 +1,10 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { rateLimitUpload, rateLimitGeneral } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions } from '@voxium/shared';
+import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, LIMITS, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
 import crypto from 'crypto';
 import { Readable } from 'stream';
 import { hasServerPermission, hasChannelPermission } from '../utils/permissionCalculator';
@@ -16,6 +16,7 @@ uploadRouter.post(
   '/presign/avatar',
   authenticate,
   requireVerifiedEmail,
+  requireConsent,
   rateLimitUpload,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -34,6 +35,7 @@ uploadRouter.post(
   '/presign/server-icon/:serverId',
   authenticate,
   requireVerifiedEmail,
+  requireConsent,
   rateLimitUpload,
   async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
     try {
@@ -58,10 +60,11 @@ uploadRouter.post(
   '/presign/attachment',
   authenticate,
   requireVerifiedEmail,
+  requireConsent,
   rateLimitUpload,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { fileName, fileSize, mimeType, channelId, conversationId } = req.body;
+      const { fileName, fileSize, mimeType, channelId, conversationId, encrypted } = req.body;
 
       // Validate exactly one context
       if (channelId !== undefined && typeof channelId !== 'string') throw new BadRequestError('channelId must be a string');
@@ -72,27 +75,57 @@ uploadRouter.post(
 
       if (!fileName || typeof fileName !== 'string') throw new BadRequestError('fileName required');
       if (!mimeType || typeof mimeType !== 'string') throw new BadRequestError('mimeType required');
-      if (!ALLOWED_ATTACHMENT_TYPES.includes(mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) {
-        throw new BadRequestError('File type not allowed');
-      }
-      const maxSize = getMaxAttachmentSize(mimeType);
-      if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxSize) {
-        throw new BadRequestError(`Invalid file size (max ${maxSize / 1024 / 1024}MB)`);
+
+      if (encrypted === true) {
+        // E2E attachment: the server stores an opaque AES-GCM blob. The real
+        // mime/size are inside the message ciphertext, so only the outer cap
+        // (largest allowed plaintext + GCM tag) is enforceable here — clients
+        // enforce the per-type plaintext caps before encrypting (spec §13).
+        // Context rule (DMs always; channels only when secure) is enforced in
+        // the authorization block below, where the channel row is available.
+        if (mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be uploaded as application/octet-stream');
+        const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
+        if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxCipherSize) {
+          throw new BadRequestError(`Invalid file size (max ${LIMITS.MAX_VIDEO_ATTACHMENT_SIZE / 1024 / 1024}MB)`);
+        }
+      } else {
+        if (!ALLOWED_ATTACHMENT_TYPES.includes(mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) {
+          throw new BadRequestError('File type not allowed');
+        }
+        const maxSize = getMaxAttachmentSize(mimeType);
+        if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxSize) {
+          throw new BadRequestError(`Invalid file size (max ${maxSize / 1024 / 1024}MB)`);
+        }
       }
 
       // Authorization
       if (channelId) {
         const channel = await prisma.channel.findUnique({
           where: { id: channelId },
-          select: { serverId: true },
+          select: { serverId: true, secure: true },
         });
         if (!channel) throw new NotFoundError('Channel');
         const membership = await prisma.serverMember.findUnique({
           where: { userId_serverId: { userId: req.user!.userId, serverId: channel.serverId } },
         });
-        if (!membership) throw new ForbiddenError('Not a member of this server');
+        if (!membership) {
+          // Opacity: a secure-channel denial must be byte-identical to the
+          // nonexistent-channel response (a 403 would confirm existence)
+          throw channel.secure ? new NotFoundError('Channel') : new ForbiddenError('Not a member of this server');
+        }
         const canAttach = await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.ATTACH_FILES);
-        if (!canAttach) throw new ForbiddenError('You do not have permission to attach files in this channel');
+        // Also the secrecy gate: non-members of a secure channel have 0n
+        if (!canAttach) {
+          throw channel.secure ? new NotFoundError('Channel') : new ForbiddenError('You do not have permission to attach files in this channel');
+        }
+        // Secure channels store ONLY opaque blobs; plaintext channels never
+        // accept them (the DM-only rule, widened to secure channels)
+        if (channel.secure && encrypted !== true) {
+          throw new BadRequestError('This channel is end-to-end encrypted; update your client to upload files');
+        }
+        if (!channel.secure && encrypted === true) {
+          throw new BadRequestError('Encrypted attachments are only supported in direct messages and secure channels');
+        }
       } else {
         const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
         if (!conv) throw new NotFoundError('Conversation');
@@ -102,7 +135,10 @@ uploadRouter.post(
       }
 
       const contextPrefix = channelId ? `ch-${channelId}` : `dm-${conversationId}`;
-      const sanitizedName = fileName.replace(/[^\w.-]/g, '_').slice(0, 100);
+      // Encrypted attachments never leak the real file name into the S3 key
+      const sanitizedName = encrypted === true
+        ? E2E_ATTACHMENT_NAME
+        : fileName.replace(/[^\w.-]/g, '_').slice(0, 100);
       const attachmentId = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
       const key = `attachments/${contextPrefix}/${attachmentId}-${sanitizedName}`;
       const uploadUrl = await generatePresignedPutUrl(key, mimeType);
@@ -119,6 +155,7 @@ uploadRouter.get(
   '/attachments/*path',
   authenticate,
   requireVerifiedEmail,
+  requireConsent,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const pathSegments = req.params.path;
@@ -136,7 +173,7 @@ uploadRouter.get(
             select: {
               channelId: true,
               conversationId: true,
-              channel: { select: { serverId: true } },
+              channel: { select: { serverId: true, secure: true } },
             },
           },
         },
@@ -146,6 +183,8 @@ uploadRouter.get(
 
       // Authorize: server member with VIEW_CHANNEL, or DM participant
       if (attachment.message.channelId && attachment.message.channel) {
+        // Opacity: secure-channel denials read exactly like a missing key
+        const secure = attachment.message.channel.secure;
         const membership = await prisma.serverMember.findUnique({
           where: {
             userId_serverId: {
@@ -154,7 +193,7 @@ uploadRouter.get(
             },
           },
         });
-        if (!membership) throw new ForbiddenError('Not a member');
+        if (!membership) throw secure ? new NotFoundError('Attachment') : new ForbiddenError('Not a member');
         // Check VIEW_CHANNEL permission — prevents downloading attachments from restricted channels
         const canView = await hasChannelPermission(
           req.user!.userId,
@@ -162,7 +201,7 @@ uploadRouter.get(
           attachment.message.channel.serverId,
           Permissions.VIEW_CHANNEL,
         );
-        if (!canView) throw new ForbiddenError('Not authorized');
+        if (!canView) throw secure ? new NotFoundError('Attachment') : new ForbiddenError('Not authorized');
       } else if (attachment.message.conversationId) {
         const conv = await prisma.conversation.findUnique({
           where: { id: attachment.message.conversationId },

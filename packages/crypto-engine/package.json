@@ -1,0 +1,24 @@
+{
+  "name": "@voxium/crypto-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voxium E2E crypto engine v1 (olm1) — wasm-bindgen marshalling layer over pinned vodozemac. Built artifact in pkg/ is committed; rebuild with `pnpm build:wasm` (requires Rust + wasm32 target + wasm-pack).",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "type": "module",
+  "main": "./pkg/voxium_crypto_engine.js",
+  "types": "./pkg/voxium_crypto_engine.d.ts",
+  "exports": {
+    ".": {
+      "types": "./pkg/voxium_crypto_engine.d.ts",
+      "default": "./pkg/voxium_crypto_engine.js"
+    },
+    "./wasm": "./pkg/voxium_crypto_engine_bg.wasm"
+  },
+  "files": [
+    "pkg"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build --target web --release --out-dir pkg && node -e \"require('fs').rmSync('pkg/.gitignore',{force:true})\" && node scripts/source-hash.mjs",
+    "check:wasm-fresh": "node scripts/source-hash.mjs --check"
+  }
+}

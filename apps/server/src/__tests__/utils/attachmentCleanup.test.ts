@@ -18,11 +18,29 @@ vi.mock('../../utils/s3', () => ({
 
 vi.mock('../../utils/email', () => ({
   sendCleanupReport: vi.fn().mockResolvedValue(undefined),
+  describeEmailError: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+}));
+
+const redisSet = vi.fn();
+const redisEval = vi.fn();
+vi.mock('../../utils/redis', () => ({
+  NODE_ID: () => 'node-under-test',
+  getRedis: () => ({ set: redisSet, eval: redisEval }),
 }));
 
 // We need to test msUntilNext4AM which is not exported,
 // so we test the behavior indirectly via startAttachmentCleanup + stopAttachmentCleanup
-import { startAttachmentCleanup, stopAttachmentCleanup } from '../../utils/attachmentCleanup';
+import {
+  startAttachmentCleanup,
+  stopAttachmentCleanup,
+  runAttachmentCleanup,
+  ATTACHMENT_CLEANUP_LOCK_KEY,
+  ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS,
+  ATTACHMENT_CLEANUP_RETRY_MS,
+} from '../../utils/attachmentCleanup';
+import { prisma } from '../../utils/prisma';
+import { deleteMultipleFromS3 } from '../../utils/s3';
+import { sendCleanupReport } from '../../utils/email';
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -128,5 +146,130 @@ describe('attachmentCleanup — start/stop lifecycle', () => {
     const callsBeforeRestart = setTimeoutSpy.mock.calls.length;
     startAttachmentCleanup();
     expect(setTimeoutSpy.mock.calls.length).toBe(callsBeforeRestart + 1);
+  });
+});
+
+// ─── Leader lock ────────────────────────────────────────────────────────────
+//
+// Every node fires the 04:00 slot. Unlocked, each ran the expiry pass — N S3
+// delete passes over the same rows and N CLEANUP_REPORT_EMAIL reports a
+// night — which is exactly what an operator cannot tell apart from "the
+// cleanup is broken".
+
+describe('attachmentCleanup — cluster lock', () => {
+  const savedReportEmail = process.env.CLEANUP_REPORT_EMAIL;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    redisSet.mockResolvedValue('OK');
+    redisEval.mockResolvedValue(1);
+    process.env.CLEANUP_REPORT_EMAIL = 'ops@example.test';
+    vi.mocked(prisma.messageAttachment.findMany)
+      .mockResolvedValueOnce([{ id: 'a1', s3Key: 'attachments/a1', fileSize: 10 }, { id: 'a2', s3Key: 'attachments/a2', fileSize: 20 }] as never)
+      .mockResolvedValue([] as never);
+    vi.mocked(prisma.messageAttachment.count).mockResolvedValue(0);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    if (savedReportEmail === undefined) delete process.env.CLEANUP_REPORT_EMAIL; else process.env.CLEANUP_REPORT_EMAIL = savedReportEmail;
+    vi.restoreAllMocks();
+  });
+
+  it('the lock holder expires the rows, sends the ONE report, and HOLDS the lock for the slot', async () => {
+    const result = await runAttachmentCleanup();
+
+    expect(result).toEqual({ filesExpired: 2, sizeFreed: 30, error: null });
+    expect(redisSet).toHaveBeenCalledWith(
+      ATTACHMENT_CLEANUP_LOCK_KEY,
+      expect.stringMatching(/^node-under-test:[0-9a-f-]{36}$/),
+      { NX: true, EX: ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS },
+    );
+    expect(deleteMultipleFromS3).toHaveBeenCalledWith(['attachments/a1', 'attachments/a2']);
+    expect(prisma.messageAttachment.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['a1', 'a2'] } }, data: { expired: true } });
+    expect(sendCleanupReport).toHaveBeenCalledTimes(1);
+    expect(sendCleanupReport).toHaveBeenCalledWith('ops@example.test', expect.objectContaining({ filesExpired: 2, sizeFreed: 30, error: null }));
+    // NOT released: a peer whose 04:00 timer fires a moment later (or an hour
+    // later, in another timezone) must find the slot taken. The 20 h TTL
+    // expires it before tomorrow's slot.
+    expect(redisEval).not.toHaveBeenCalled();
+    expect(ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS).toBeLessThan(24 * 60 * 60);
+    expect(ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS).toBeGreaterThanOrEqual(12 * 60 * 60);
+  });
+
+  it('a pass whose batches fail still completes (error in the result and the report) and keeps the slot', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(prisma.messageAttachment.findMany).mockReset().mockRejectedValue(new Error('db down'));
+    const result = await runAttachmentCleanup();
+    expect(result).toEqual({ filesExpired: 0, sizeFreed: 0, error: 'db down' });
+    expect(sendCleanupReport).toHaveBeenCalledWith('ops@example.test', expect.objectContaining({ error: 'db down' }));
+    // The run ran and reported; a peer must not redo the night. Held, not released.
+    expect(redisEval).not.toHaveBeenCalled();
+  });
+
+  it('a node that loses the SET NX race touches nothing and sends NO report', async () => {
+    redisSet.mockResolvedValue(null);
+    const result = await runAttachmentCleanup();
+
+    expect(result).toEqual({ skipped: 'locked' });
+    expect(prisma.messageAttachment.findMany).not.toHaveBeenCalled();
+    expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    expect(prisma.messageAttachment.updateMany).not.toHaveBeenCalled();
+    expect(sendCleanupReport).not.toHaveBeenCalled();
+    expect(redisEval).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when Redis is unreachable — and says UNAVAILABLE, not locked', async () => {
+    redisSet.mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(runAttachmentCleanup()).resolves.toEqual({ skipped: 'unavailable' });
+    expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    expect(sendCleanupReport).not.toHaveBeenCalled();
+  });
+
+  // Skipping a night silently is what makes a retention job untrustworthy:
+  // no rows expired AND no report email, indistinguishable from "nothing to do".
+  it('re-arms in 15 minutes, not tomorrow, when Redis was unavailable at the slot', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2024, 0, 15, 3, 59, 0, 0));
+    redisSet.mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    try {
+      startAttachmentCleanup();
+      await vi.advanceTimersByTimeAsync(60_000); // the 04:00 slot: claim fails
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy.mock.calls[1][1]).toBe(ATTACHMENT_CLEANUP_RETRY_MS);
+
+      // Redis is back and a peer already did the night's pass → locked → tomorrow
+      redisSet.mockResolvedValue(null);
+      await vi.advanceTimersByTimeAsync(ATTACHMENT_CLEANUP_RETRY_MS);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(3);
+      expect(setTimeoutSpy.mock.calls[2][1] as number).toBeGreaterThan(23 * 60 * 60 * 1000);
+      expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    } finally {
+      stopAttachmentCleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('the scheduled timer runs the locked pass and re-arms for tomorrow even when the lock was lost', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2024, 0, 15, 3, 59, 0, 0));
+    redisSet.mockResolvedValue(null);
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    try {
+      startAttachmentCleanup();
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(60_000); // fire the 04:00 slot
+      expect(redisSet).toHaveBeenCalledTimes(1);
+      expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+      // Re-armed for tomorrow's slot (afterRun=true → never the slot just served)
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+      const delay = setTimeoutSpy.mock.calls[1][1] as number;
+      expect(delay).toBeGreaterThan(23 * 60 * 60 * 1000);
+    } finally {
+      stopAttachmentCleanup();
+      vi.useRealTimers();
+    }
   });
 });

@@ -82,7 +82,7 @@ export function CreateServerModal({ onClose }: Props) {
           <button
             className={`flex-1 rounded-lg py-2 text-sm font-medium transition-colors ${
               mode === 'create'
-                ? 'bg-vox-accent-primary text-white'
+                ? 'bg-vox-accent-primary text-vox-on-accent'
                 : 'bg-vox-bg-hover text-vox-text-secondary hover:text-vox-text-primary'
             }`}
             onClick={() => { setMode('create'); setError(''); }}
@@ -92,7 +92,7 @@ export function CreateServerModal({ onClose }: Props) {
           <button
             className={`flex-1 rounded-lg py-2 text-sm font-medium transition-colors ${
               mode === 'join'
-                ? 'bg-vox-accent-primary text-white'
+                ? 'bg-vox-accent-primary text-vox-on-accent'
                 : 'bg-vox-bg-hover text-vox-text-secondary hover:text-vox-text-primary'
             }`}
             onClick={() => { setMode('join'); setError(''); }}

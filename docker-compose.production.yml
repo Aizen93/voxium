@@ -17,9 +17,17 @@ services:
     restart: unless-stopped
     ports:
       - "3001:3001"
-      # mediasoup RTC port range for WebRTC media (UDP required, TCP fallback)
-      - "${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10100}:${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10100}/udp"
-      - "${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10100}:${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10100}/tcp"
+      # mediasoup WebRtcServer ports (UDP required, TCP fallback): one udp+tcp
+      # pair per worker at MIN_PORT + slot, one worker per CPU core (max 8), so
+      # MIN..MIN+7 covers any host. Keep MEDIASOUP_MAX_PORT small here — Docker
+      # creates an iptables rule per published port, and a 20k-port range takes
+      # minutes to start. Only MEDIASOUP_WEBRTC_SERVER=false needs a wide range —
+      # and then this mapping must widen with it. The ${...} here are expanded
+      # from the --env-file named in Usage above (the same file the container
+      # reads), so both sides see one range; run without --env-file and the
+      # defaults below are what gets published, whatever the container believes.
+      - "${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}:${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}/udp"
+      - "${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}:${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}/tcp"
     env_file:
       - .env.production
     environment:

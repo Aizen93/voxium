@@ -33,7 +33,7 @@ void main() {
   vec2 p  = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
   float t = u_time;
 
-  vec3 bg = vec3(0.102, 0.102, 0.180);
+  vec3 bg = vec3(0.043, 0.043, 0.102);
   vec3 waves = vec3(0.0);
 
   vec3 c1 = vec3(0.357, 0.357, 0.969); // #5b5bf7 indigo

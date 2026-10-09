@@ -23,7 +23,7 @@ vi.mock('../../utils/prisma', () => ({
 }));
 
 // Import after mocks
-import { authenticate, requireVerifiedEmail } from '../../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent, consentIsRequired } from '../../middleware/auth';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -406,5 +406,76 @@ describe('requireVerifiedEmail middleware', () => {
     const err = next.mock.calls[0][0];
     expect(err).toBeDefined();
     expect(err.statusCode).toBe(403);
+  });
+});
+
+// ─── Consent gate (CNIL/GDPR) ───────────────────────────────────────────────
+
+describe('consentIsRequired', () => {
+  it('is required until BOTH documents have been accepted', () => {
+    const d = new Date();
+    expect(consentIsRequired({ termsAcceptedAt: null, privacyAcceptedAt: null })).toBe(true);
+    expect(consentIsRequired({ termsAcceptedAt: d, privacyAcceptedAt: null })).toBe(true);
+    expect(consentIsRequired({ termsAcceptedAt: null, privacyAcceptedAt: d })).toBe(true);
+    expect(consentIsRequired({ termsAcceptedAt: d, privacyAcceptedAt: d })).toBe(false);
+  });
+});
+
+describe('requireConsent middleware', () => {
+  it('passes an account that has consented', () => {
+    const { req, res, next } = createMockReqResNext();
+    (req as Request).user = { userId: 'u', username: 'u', role: 'user', tokenVersion: 0, emailVerified: true, consentRequired: false };
+
+    requireConsent(req as Request, res as Response, next as NextFunction);
+
+    expect(next).toHaveBeenCalledWith();
+  });
+
+  it('returns 403 for an account that has not — the pre-consent legacy case', () => {
+    const { req, res, next } = createMockReqResNext();
+    (req as Request).user = { userId: 'u', username: 'u', role: 'user', tokenVersion: 0, emailVerified: true, consentRequired: true };
+
+    requireConsent(req as Request, res as Response, next as NextFunction);
+
+    const err = next.mock.calls[0][0];
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toMatch(/accept the Terms of Service and the Privacy Policy/);
+  });
+});
+
+describe('authenticate — resolves consentRequired from the stored timestamps', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = JWT_SECRET;
+  });
+
+  function tokenFor(userId: string) {
+    return jwt.sign({ userId, username: 'u', role: 'user', tokenVersion: 0 }, JWT_SECRET, { algorithm: 'HS256' });
+  }
+
+  it('flags an account with null timestamps — one created before consent was collected at signup', async () => {
+    mockPrismaUser.findUnique.mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: null, privacyAcceptedAt: null });
+    const { req, res, next } = createMockReqResNext();
+    req.headers = { authorization: `Bearer ${tokenFor('legacy')}` };
+
+    await authenticate(req as Request, res as Response, next as NextFunction);
+
+    expect(next).toHaveBeenCalledWith();
+    expect((req as Request).user?.consentRequired).toBe(true);
+    // The select asks for the two columns explicitly — a select that omits
+    // them would read as "consented" for every account
+    expect(mockPrismaUser.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      select: expect.objectContaining({ termsAcceptedAt: true, privacyAcceptedAt: true }),
+    }));
+  });
+
+  it('does not flag an account that accepted both', async () => {
+    mockPrismaUser.findUnique.mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(), privacyAcceptedAt: new Date() });
+    const { req, res, next } = createMockReqResNext();
+    req.headers = { authorization: `Bearer ${tokenFor('fresh')}` };
+
+    await authenticate(req as Request, res as Response, next as NextFunction);
+
+    expect((req as Request).user?.consentRequired).toBe(false);
   });
 });

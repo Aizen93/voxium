@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { buildMegolmEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME } from '@voxium/shared';
+import { extractMentionIds } from '../../utils/mentions';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -60,6 +62,7 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
     create: vi.fn(),
     delete: vi.fn(),
+    deleteMany: vi.fn(),
     findMany: vi.fn(),
     groupBy: vi.fn(),
   },
@@ -93,6 +96,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return {
     rateLimitGeneral: passthrough,
+    rateLimitInteract: passthrough,
     rateLimitMessageSend: passthrough,
   };
 });
@@ -132,7 +136,7 @@ function mockAuthUser(overrides: Record<string, unknown> = {}) {
     bannedAt: null,
     tokenVersion: 0,
     role: 'user',
-    emailVerified: true,
+    emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
   };
   prismaMock.user.findUnique.mockResolvedValue({ ...defaults, ...overrides });
 }
@@ -555,8 +559,53 @@ describe('Message Routes', () => {
       expect(res.body.error).toContain('own messages');
     });
 
+    it('returns 404 when the author can no longer VIEW the channel (revoked access / removed from secure channel)', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeMockMessage());
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        serverId: 'srv-1',
+        role: 'member',
+      });
+      mockHasChannelPermission.mockResolvedValue(false);
+
+      const res = await request(app)
+        .patch('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'Edited message' });
+
+      expect(res.status).toBe(404);
+      expect(prismaMock.message.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses to edit a system message', async () => {
+      // System rows ("X joined the server") are authored by a real user, so
+      // the ownership check passes for them. Rewriting one would put arbitrary
+      // text on screen with system styling — words the app appears to be
+      // saying itself.
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeMockMessage({ type: 'system' }));
+
+      const res = await request(app)
+        .patch('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'never happened' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/system messages cannot be edited/i);
+      expect(prismaMock.message.update).not.toHaveBeenCalled();
+    });
+
     it('returns 400 with empty content', async () => {
       const token = makeToken();
+      // Content validation now runs AFTER the message fetch (the secure branch
+      // needs channel.secure before deciding how to treat req.body.content)
+      prismaMock.message.findUnique.mockResolvedValue(makeMockMessage());
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        serverId: 'srv-1',
+        role: 'member',
+      });
 
       const res = await request(app)
         .patch('/api/v1/channels/ch-1/messages/msg-1')
@@ -604,6 +653,98 @@ describe('Message Routes', () => {
         .send({ content: 'Edited' });
 
       expect(res.status).toBe(403);
+    });
+  });
+
+  // ── PUT /api/v1/channels/:channelId/messages/:messageId/reactions/:emoji ──
+
+  describe('PUT /api/v1/channels/:channelId/messages/:messageId/reactions/:emoji', () => {
+    const EMOJI = '👍';
+    const reactionUrl = `/api/v1/channels/ch-1/messages/msg-1/reactions/${encodeURIComponent(EMOJI)}`;
+
+    function mockReactableMessage() {
+      prismaMock.message.findUnique.mockResolvedValue({
+        id: 'msg-1',
+        channelId: 'ch-1',
+        channel: { serverId: 'srv-1' },
+      });
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        serverId: 'srv-1',
+        role: 'member',
+      });
+    }
+
+    it('adds a reaction and responds with action "add"', async () => {
+      const token = makeToken();
+      mockReactableMessage();
+      prismaMock.messageReaction.findUnique.mockResolvedValue(null);
+      prismaMock.messageReaction.groupBy.mockResolvedValue([]);
+      prismaMock.messageReaction.create.mockResolvedValue({});
+      prismaMock.messageReaction.findMany.mockResolvedValue([{ emoji: EMOJI, userId: 'user-1' }]);
+
+      const res = await request(app)
+        .put(reactionUrl)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.action).toBe('add');
+    });
+
+    it('race idempotency: responds 200 with action "add" when create rejects with P2002 (concurrent duplicate)', async () => {
+      const token = makeToken();
+      mockReactableMessage();
+      prismaMock.messageReaction.findUnique.mockResolvedValue(null);
+      prismaMock.messageReaction.groupBy.mockResolvedValue([]);
+      // The losing half of a double-click race: unique constraint violation
+      prismaMock.messageReaction.create.mockRejectedValue({ code: 'P2002' });
+      prismaMock.messageReaction.findMany.mockResolvedValue([{ emoji: EMOJI, userId: 'user-1' }]);
+
+      const res = await request(app)
+        .put(reactionUrl)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.action).toBe('add');
+    });
+
+    it('non-P2002 create errors still fail the request', async () => {
+      const token = makeToken();
+      mockReactableMessage();
+      prismaMock.messageReaction.findUnique.mockResolvedValue(null);
+      prismaMock.messageReaction.groupBy.mockResolvedValue([]);
+      prismaMock.messageReaction.create.mockRejectedValue(new Error('connection lost'));
+
+      const res = await request(app)
+        .put(reactionUrl)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(500);
+    });
+
+    it('removes an existing reaction via deleteMany (idempotent) and responds with action "remove"', async () => {
+      const token = makeToken();
+      mockReactableMessage();
+      prismaMock.messageReaction.findUnique.mockResolvedValue({
+        messageId: 'msg-1',
+        userId: 'user-1',
+        emoji: EMOJI,
+      });
+      prismaMock.messageReaction.deleteMany.mockResolvedValue({ count: 1 });
+      prismaMock.messageReaction.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .put(reactionUrl)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.action).toBe('remove');
+      // deleteMany (not delete) — a concurrent remove that already deleted the
+      // row must not 500 with P2025
+      expect(prismaMock.messageReaction.deleteMany).toHaveBeenCalledWith({
+        where: { messageId: 'msg-1', userId: 'user-1', emoji: EMOJI },
+      });
     });
   });
 
@@ -663,14 +804,31 @@ describe('Message Routes', () => {
       prismaMock.message.findUnique.mockResolvedValue(
         makeMockMessage({ authorId: 'user-2' }),
       );
-      // No MANAGE_MESSAGES permission (channel-level check)
-      mockHasChannelPermission.mockResolvedValue(false);
+      // Can VIEW the channel (first check), but no MANAGE_MESSAGES (second)
+      mockHasChannelPermission
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
 
       const res = await request(app)
         .delete('/api/v1/channels/ch-1/messages/msg-1')
         .set('Authorization', `Bearer ${token}`);
 
       expect(res.status).toBe(403);
+    });
+
+    it('returns 404 when the author can no longer VIEW the channel (removed from a secure channel)', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(
+        makeMockMessage({ channelId: 'sec-1', channel: { serverId: 'srv-1', secure: true } }),
+      );
+      mockHasChannelPermission.mockResolvedValue(false); // no VIEW → 404, opaque
+
+      const res = await request(app)
+        .delete('/api/v1/channels/sec-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+      expect(prismaMock.message.delete).not.toHaveBeenCalled();
     });
 
     it('IDOR prevention: rejects delete when channelId does not match', async () => {
@@ -716,6 +874,219 @@ describe('Message Routes', () => {
         messageId: 'msg-1',
         channelId: 'ch-1',
       });
+    });
+  });
+
+  // ── SECURE channels: encrypted-only enforcement ────────────────────────
+
+  describe('secure channels — encrypted-only enforcement', () => {
+    const ENVELOPE = buildMegolmEnvelope('sessAbc123', 'Y2lwaGVydGV4dA');
+
+    function mockSecureChannel() {
+      prismaMock.channel.findUnique.mockResolvedValue({
+        id: 'sec-1',
+        serverId: 'srv-1',
+        type: 'text',
+        name: 'covert',
+        secure: true,
+        server: { name: 'Test Server' },
+      });
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        serverId: 'srv-1',
+        role: 'member',
+      });
+    }
+
+    function mockTxCapture() {
+      const create = vi.fn().mockResolvedValue({ id: 'msg-1' });
+      const createManyAttachments = vi.fn().mockResolvedValue({ count: 1 });
+      prismaMock.$transaction.mockImplementation(async (cb: Function) =>
+        cb({
+          message: {
+            create,
+            findUniqueOrThrow: vi.fn().mockResolvedValue(
+              makeMockMessage({ channelId: 'sec-1', encrypted: true, content: ENVELOPE }),
+            ),
+          },
+          messageAttachment: { createMany: createManyAttachments },
+        }),
+      );
+      return { create, createManyAttachments };
+    }
+
+    it('rejects a plaintext send with a hard 400 (no silent downgrade)', async () => {
+      const token = makeToken();
+      mockSecureChannel();
+
+      const res = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'hello in the clear' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('end-to-end encrypted');
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('a NON-member probing POST gets the nonexistent-channel 404, never the encrypted 400', async () => {
+      const token = makeToken();
+      prismaMock.channel.findUnique.mockResolvedValue({
+        id: 'sec-1', serverId: 'srv-1', type: 'text', name: 'covert',
+        secure: true, server: { name: 'Test Server' },
+      });
+      // Not a server member at all — the secure-flag branch must be unreachable
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+
+      const nonMember = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'probe' });
+      expect(nonMember.status).toBe(404);
+      expect(nonMember.body.error).not.toContain('encrypted');
+
+      // Server member without channel membership (owner/ADMIN included): same 404
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1' });
+      mockHasChannelPermission.mockResolvedValue(false);
+      const serverMember = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'probe' });
+      expect(serverMember.status).toBe(404);
+      expect(serverMember.body.error).not.toContain('encrypted');
+    });
+
+    it('a NON-member fetching GET messages gets the nonexistent-channel 404', async () => {
+      const token = makeToken();
+      prismaMock.channel.findUnique.mockResolvedValue({ serverId: 'srv-1', secure: true });
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1' });
+      mockHasChannelPermission.mockResolvedValue(false); // no VIEW → opaque
+
+      const res = await request(app)
+        .get('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+    });
+
+    it('rejects encrypted:true with a malformed envelope', async () => {
+      const token = makeToken();
+      mockSecureChannel();
+
+      const res = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: '{"v":1,"garbage":true}', encrypted: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('envelope');
+    });
+
+    it('stores a valid envelope VERBATIM with encrypted:true and resolves no mentions', async () => {
+      const token = makeToken();
+      mockSecureChannel();
+      const { create } = mockTxCapture();
+
+      const res = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: ENVELOPE, encrypted: true });
+
+      expect(res.status).toBe(201);
+      expect(create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ content: ENVELOPE, encrypted: true }),
+      });
+      // Ciphertext is never mention-parsed
+      expect(vi.mocked(extractMentionIds)).not.toHaveBeenCalled();
+      // Broadcast still goes to the channel room (its membership = channel members)
+      expect(mockTo).toHaveBeenCalledWith('channel:sec-1');
+    });
+
+    it('rejects encrypted:true in a PLAINTEXT channel', async () => {
+      const token = makeToken();
+      prismaMock.channel.findUnique.mockResolvedValue({
+        id: 'ch-1', serverId: 'srv-1', type: 'text', name: 'general',
+        secure: false, server: { name: 'Test Server' },
+      });
+
+      const res = await request(app)
+        .post('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: ENVELOPE, encrypted: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('secure channels');
+    });
+
+    it('rejects non-opaque attachments and forces the stored fileName for valid ones', async () => {
+      const token = makeToken();
+      mockSecureChannel();
+
+      // Non-opaque mime → rejected
+      let res = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          content: ENVELOPE,
+          encrypted: true,
+          attachments: [{ s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin', fileSize: 1024, mimeType: 'image/png' }],
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('opaque');
+
+      // Valid opaque blob → accepted, fileName forced server-side
+      const { createManyAttachments } = mockTxCapture();
+      res = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          content: ENVELOPE,
+          encrypted: true,
+          attachments: [{
+            s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin',
+            fileName: 'real-secret-name.pdf', // must be discarded
+            fileSize: 1024,
+            mimeType: E2E_ATTACHMENT_MIME,
+          }],
+        });
+      expect(res.status).toBe(201);
+      expect(createManyAttachments).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ fileName: E2E_ATTACHMENT_NAME })],
+      });
+    });
+
+    it('secure edits must be fresh ciphertexts (plaintext edit → 400, envelope edit stored verbatim)', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(
+        makeMockMessage({ channelId: 'sec-1', encrypted: true, channel: { serverId: 'srv-1', secure: true } }),
+      );
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user-1', serverId: 'srv-1', role: 'member',
+      });
+
+      let res = await request(app)
+        .patch('/api/v1/channels/sec-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'plaintext edit' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('end-to-end encrypted');
+
+      prismaMock.message.update.mockResolvedValue(
+        makeMockMessage({
+          channelId: 'sec-1', encrypted: true, content: ENVELOPE,
+          editedAt: new Date(), channel: { serverId: 'srv-1', secure: true },
+        }),
+      );
+      res = await request(app)
+        .patch('/api/v1/channels/sec-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: ENVELOPE, encrypted: true });
+      expect(res.status).toBe(200);
+      expect(prismaMock.message.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ content: ENVELOPE }),
+        }),
+      );
     });
   });
 });

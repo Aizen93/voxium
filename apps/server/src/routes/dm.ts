@@ -1,12 +1,11 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
-import { rateLimitMessageSend, rateLimitGeneral, rateLimitMarkRead } from '../middleware/rateLimiter';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
+import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, type Message } from '@voxium/shared';
+import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
-import { sanitizeText } from '../utils/sanitize';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
 
 const attachmentSelect = {
@@ -15,7 +14,7 @@ const attachmentSelect = {
 
 export const dmRouter = Router();
 
-dmRouter.use(authenticate, requireVerifiedEmail);
+dmRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, status: true, role: true, isSupporter: true, supporterTier: true },
@@ -25,6 +24,7 @@ const replyToSelect = {
   select: {
     id: true,
     content: true,
+    encrypted: true,
     author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
   },
 };
@@ -60,10 +60,13 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
         messages: {
           orderBy: { createdAt: 'desc' },
           take: 1,
-          select: { content: true, createdAt: true, authorId: true },
+          select: { id: true, content: true, encrypted: true, createdAt: true, authorId: true },
         },
       },
       orderBy: { updatedAt: 'desc' },
+      // Bounded: most-recently-active first. Each row costs a lastMessage
+      // subquery — an unbounded list grows without limit over an account's life.
+      take: 200,
     });
 
     const data = conversations.map((c) => ({
@@ -72,8 +75,16 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
       user2Id: c.user2Id,
       participant: c.user1Id === userId ? c.user2 : c.user1,
       lastMessage: c.messages[0]
-        ? { content: c.messages[0].content, createdAt: c.messages[0].createdAt.toISOString(), authorId: c.messages[0].authorId }
+        ? {
+            id: c.messages[0].id,
+            content: c.messages[0].content,
+            encrypted: c.messages[0].encrypted,
+            createdAt: c.messages[0].createdAt.toISOString(),
+            authorId: c.messages[0].authorId,
+          }
         : null,
+      // always set — conversations are born encrypted (plan §4.2)
+      encryptedAt: c.encryptedAt.toISOString(),
       createdAt: c.createdAt.toISOString(),
     }));
 
@@ -112,6 +123,8 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
     });
 
     const isNew = !existing;
+    // encryptedAt is filled by the column default — a conversation is born
+    // encrypted and there is no route that turns it on (plan §4.2)
     const conversation = existing ?? await prisma.conversation.create({
       data: { user1Id, user2Id },
     }).catch(async (err) => {
@@ -136,14 +149,11 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
         skipDuplicates: true,
       });
 
-      // Join both users' sockets to the DM room
+      // Join both users' sockets to the DM room via their per-user rooms —
+      // adapter-wide socketsJoin instead of fetching every socket on every node
       const io = getIO();
-      const sockets = await io.fetchSockets();
-      for (const s of sockets) {
-        if (s.data.userId === user1Id || s.data.userId === user2Id) {
-          s.join(`dm:${conversation.id}`);
-        }
-      }
+      io.in(`user:${user1Id}`).socketsJoin(`dm:${conversation.id}`);
+      io.in(`user:${user2Id}`).socketsJoin(`dm:${conversation.id}`);
     }
 
     res.status(isNew ? 201 : 200).json({
@@ -154,6 +164,7 @@ dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
         user2Id: conversation.user2Id,
         participant: targetUser,
         lastMessage: null,
+        encryptedAt: conversation.encryptedAt.toISOString(),
         createdAt: conversation.createdAt.toISOString(),
       },
     });
@@ -261,40 +272,49 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;
-    const content = sanitizeText(req.body.content ?? '');
+    await getConversationOrThrow(conversationId, userId);
+    const wantsEncrypted = req.body.encrypted === true;
 
-    // Validate attachments
+    // Every conversation is born encrypted (plan §4.2 — encrypted_at is NOT
+    // NULL), so a DM is always an opaque ciphertext envelope and there is no
+    // plaintext path left to fall back to. An un-updated client must get a
+    // hard error, not a silent downgrade (docs/e2e-dm-spec.md §6).
+    if (!wantsEncrypted) {
+      throw new BadRequestError('This conversation is end-to-end encrypted; update your client to send messages');
+    }
+
+    // E2E attachments (spec §13): the server stores opaque AES-GCM blobs. Real
+    // fileName/mimeType/size live inside the message ciphertext — only the S3
+    // key and the ciphertext size are validated here.
     const attachments = req.body.attachments as Array<{
-      s3Key: string; fileName: string; fileSize: number; mimeType: string;
+      s3Key: string; fileSize: number; mimeType: string;
     }> | undefined;
 
-    if (attachments) {
+    if (attachments !== undefined) {
       if (!Array.isArray(attachments)) throw new BadRequestError('attachments must be an array');
-      if (attachments.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE) {
+      if (attachments.length === 0 || attachments.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE) {
         throw new BadRequestError(`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments`);
       }
       const expectedPrefix = `attachments/dm-${conversationId}/`;
+      const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
       for (const a of attachments) {
         if (!a || typeof a !== 'object') throw new BadRequestError('Invalid attachment');
-        if (typeof a.s3Key !== 'string' || typeof a.fileName !== 'string' || typeof a.fileSize !== 'number' || typeof a.mimeType !== 'string') {
+        if (typeof a.s3Key !== 'string' || typeof a.fileSize !== 'number') {
           throw new BadRequestError('Invalid attachment fields');
         }
         if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
         if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this conversation');
-        if (a.fileSize <= 0 || a.fileSize > getMaxAttachmentSize(a.mimeType)) throw new BadRequestError('Invalid attachment size');
-        if (!ALLOWED_ATTACHMENT_TYPES.includes(a.mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) throw new BadRequestError('Invalid file type');
+        if (a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
+        if (a.mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be opaque');
       }
     }
 
-    // Allow empty content if attachments are present
-    if (!attachments?.length) {
-      const contentErr = validateMessageContent(content);
-      if (contentErr) throw new BadRequestError(contentErr);
-    } else if (content.length > LIMITS.MESSAGE_MAX) {
-      throw new BadRequestError(`Message must be at most ${LIMITS.MESSAGE_MAX} characters`);
+    if (!parseE2EEnvelope(req.body.content)) {
+      throw new BadRequestError('Invalid encrypted message envelope');
     }
-
-    await getConversationOrThrow(conversationId, userId);
+    // Stored verbatim: sanitizeText would corrupt ciphertext, and the envelope
+    // was already strictly validated above.
+    const content = req.body.content as string;
 
     // Validate optional replyToId
     const replyToId = req.body.replyToId as string | undefined;
@@ -308,6 +328,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
       const msg = await tx.message.create({
         data: {
           content,
+          encrypted: true,
           conversationId,
           authorId: userId,
           ...(replyToId && { replyToId }),
@@ -318,7 +339,9 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
           data: attachments.map((a) => ({
             messageId: msg.id,
             s3Key: a.s3Key,
-            fileName: a.fileName,
+            // never trust/store a client-supplied name for E2E blobs — the
+            // real name lives inside the message ciphertext
+            fileName: E2E_ATTACHMENT_NAME,
             fileSize: a.fileSize,
             mimeType: a.mimeType,
           })),
@@ -349,22 +372,42 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
   }
 });
 
+// There is deliberately no "enable encryption" route: POST
+// /:conversationId/encryption was removed in the always-on cutover (plan §4.2,
+// §5). Conversations are encrypted from the moment they are created, so there
+// is nothing to turn on and no window in which a conversation is plaintext.
+
 // ─── Edit DM ─────────────────────────────────────────────────────────────────
 
-dmRouter.patch('/:conversationId/messages/:messageId', rateLimitGeneral, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
+dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId, messageId } = req.params;
     const userId = req.user!.userId;
-    const content = sanitizeText(req.body.content ?? '');
-
-    const contentErr = validateMessageContent(content);
-    if (contentErr) throw new BadRequestError(contentErr);
+    const wantsEncrypted = req.body.encrypted === true;
 
     await getConversationOrThrow(conversationId, userId);
 
     const message = await prisma.message.findUnique({ where: { id: messageId } });
     if (!message || message.conversationId !== conversationId) throw new NotFoundError('Message');
     if (message.authorId !== userId) throw new ForbiddenError('You can only edit your own messages');
+    // A system row ("Voice call started") carries a real participant as its
+    // author, so the ownership check above passes for it. Without this, that
+    // row's content could be edited into arbitrary text that still renders
+    // with system styling — words the app appears to be saying itself.
+    if (message.type === 'system') throw new ForbiddenError('System messages cannot be edited');
+
+    // Every editable DM is encrypted: user messages always are after the
+    // cutover, and the only plaintext DM rows are the `type: 'system'` voice
+    // notices refused above. So an edit is always a fresh ciphertext envelope
+    // — a new ratchet message, which is why clients version their plaintext
+    // cache by editedAt.
+    if (!wantsEncrypted) {
+      throw new BadRequestError('This message is end-to-end encrypted; update your client to edit it');
+    }
+    if (!parseE2EEnvelope(req.body.content)) {
+      throw new BadRequestError('Invalid encrypted message envelope');
+    }
+    const content = req.body.content as string; // verbatim — never sanitized
 
     const updated = await prisma.message.update({
       where: { id: messageId },
@@ -388,7 +431,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitGeneral, async (
 
 // ─── Delete DM ───────────────────────────────────────────────────────────────
 
-dmRouter.delete('/:conversationId/messages/:messageId', rateLimitGeneral, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
+dmRouter.delete('/:conversationId/messages/:messageId', rateLimitInteract, async (req: Request<{ conversationId: string; messageId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId, messageId } = req.params;
     const userId = req.user!.userId;
@@ -419,7 +462,7 @@ dmRouter.delete('/:conversationId/messages/:messageId', rateLimitGeneral, async 
 
 // ─── Toggle reaction on DM ──────────────────────────────────────────────────
 
-dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitGeneral, async (req: Request<{ conversationId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
+dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitInteract, async (req: Request<{ conversationId: string; messageId: string; emoji: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId, messageId } = req.params;
     const emoji = decodeURIComponent(req.params.emoji);
@@ -440,9 +483,11 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitG
       where: { messageId_userId_emoji: { messageId, userId, emoji } },
     });
 
+    // Toggle is check-then-act — both branches must be idempotent so a
+    // double-click's losing request doesn't 500 (see messages.ts reactions)
     let action: 'add' | 'remove';
     if (existing) {
-      await prisma.messageReaction.delete({ where: { id: existing.id } });
+      await prisma.messageReaction.deleteMany({ where: { messageId, userId, emoji } });
       action = 'remove';
     } else {
       const distinctCount = await prisma.messageReaction.groupBy({
@@ -452,7 +497,12 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitG
       if (distinctCount.length >= LIMITS.MAX_REACTIONS_PER_MESSAGE) {
         throw new BadRequestError(`Maximum of ${LIMITS.MAX_REACTIONS_PER_MESSAGE} different reactions per message`);
       }
-      await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
+      try {
+        await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
+      } catch (err) {
+        // P2002: the concurrent duplicate add won the race — same outcome
+        if (!(err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === 'P2002')) throw err;
+      }
       action = 'add';
     }
 
@@ -475,7 +525,7 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitG
 
 // ─── Delete conversation ────────────────────────────────────────────────────
 
-dmRouter.delete('/:conversationId', rateLimitGeneral, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
+dmRouter.delete('/:conversationId', rateLimitInteract, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;

@@ -238,6 +238,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
                 avatarUrl={user.avatarUrl}
                 displayName={user.displayName}
                 size="lg"
+                shape="circle"
               />
             </div>
           </div>

@@ -152,7 +152,7 @@ export function UpdateChecker() {
               </div>
               <p className="text-xs text-vox-text-muted">
                 {phase.total > 0
-                  ? `${formatBytes(phase.progress)} / ${formatBytes(phase.total)} — ${Math.round((phase.progress / phase.total) * 100)}%`
+                  ? `${formatBytes(phase.progress)} / ${formatBytes(phase.total)}, ${Math.round((phase.progress / phase.total) * 100)}%`
                   : `${formatBytes(phase.progress)} downloaded`}
               </p>
             </>

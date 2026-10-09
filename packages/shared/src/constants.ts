@@ -58,6 +58,98 @@ export const LIMITS = {
   THEME_SVG_MAX_SIZE: 10_000, // 10KB max for custom SVG patterns
 } as const;
 
+/**
+ * Max serialized dm:voice:signal payload the server will relay (UTF-16 chars,
+ * matching the JSON.stringify length check). Signals are opaque olm1 envelopes
+ * after the E2E cutover — the cap must fit a base64-inflated audio SDP with
+ * envelope framing, with generous headroom.
+ */
+export const DM_SIGNAL_MAX = 65_536;
+
+// ─── Screen-share annotations (sharer-drawn overlays, session-only) ──────────
+// Serialized-length caps use UTF-16 char counts (JSON.stringify().length),
+// matching the DM_SIGNAL_MAX convention. All must stay well under the 1MB
+// engine.io frame default.
+
+/** Max serialized chars of one voice:annotation:ops batch (fits one max-size image op). */
+export const ANNOTATION_OPS_MAX = 400_000;
+/** Max ops per batch. */
+export const ANNOTATION_MAX_OPS_PER_BATCH = 64;
+/** Max serialized chars of the whole scene (= Redis value cap = snapshot emit cap). */
+export const ANNOTATION_SCENE_MAX = 800_000;
+/** Max objects in a scene (bounds viewer redraw cost). */
+export const ANNOTATION_MAX_OBJECTS = 300;
+/** Max points per stroke, appends included. */
+export const ANNOTATION_STROKE_MAX_POINTS = 2_000;
+/** Max chars for a text overlay. */
+export const ANNOTATION_TEXT_MAX = 200;
+/** Characters a text overlay may never carry: control chars, and the
+ *  bidi-override / zero-width / invisible format characters that let a caption
+ *  visually read as something it is not (U+202E flips the rest of the line).
+ *  The server REJECTS the whole batch on a hit; the editor strips them before
+ *  committing so a pasted tab never desyncs the viewers. Non-global on
+ *  purpose (`.test()` on a /g regex mutates lastIndex) — build a /g copy to
+ *  strip. */
+// eslint-disable-next-line no-control-regex
+export const ANNOTATION_TEXT_FORBIDDEN_RE = /[\u0000-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/;
+/** Max chars for an image overlay data-URL (≈256KB decoded after base64 inflation). */
+export const ANNOTATION_IMAGE_DATAURL_MAX = 360_000;
+/** Client-side resize target for overlay images (px, longest edge). */
+export const ANNOTATION_IMAGE_MAX_EDGE = 512;
+/** Hard cap on an overlay image's DECODED pixel edge, enforced server-side by
+ *  header parsing and client-side at decode — a small-byte "image bomb" can
+ *  otherwise declare a multi-gigabyte bitmap and crash every viewer. */
+export const ANNOTATION_IMAGE_MAX_DECODED_EDGE = 4096;
+/** Total stroke points allowed in a scene (all strokes combined) — bounds the
+ *  per-frame redraw cost a hostile sharer can impose on every viewer. */
+export const ANNOTATION_MAX_SCENE_POINTS = 20_000;
+/** Client op-flush throttle — ≤ ~7 batches/s while actively drawing. */
+export const ANNOTATION_BATCH_INTERVAL_MS = 150;
+/** socketRateLimit bucket for voice:annotation:ops (150ms flush ⇒ ≤400/min + headroom). */
+export const ANNOTATION_RATE_PER_MIN = 600;
+/** Serialized ops chars a sharer may send per minute — the request-count
+ *  limiter alone would allow 600 × 400K chars/min of Redis write amplification. */
+export const ANNOTATION_BYTES_PER_MIN = 2_000_000;
+/** Client-side wait for a batch ack before sending the next chunk (keeps the
+ *  server's read-modify-write single-writer without wedging the queue). */
+export const ANNOTATION_ACK_TIMEOUT_MS = 3_000;
+/** Undo/redo history depth on the sharer (entries, one per gesture). */
+export const ANNOTATION_HISTORY_MAX = 100;
+/** Serialized chars the history may retain across both stacks — one undone
+ *  `clear` holds every object it removed, images included, so an entry cap
+ *  alone could pin tens of MB next to a running screen compositor. */
+export const ANNOTATION_HISTORY_BYTES_MAX = 8_000_000;
+
+// ─── voice:annotation:live — the ephemeral sibling of :ops ───────────────────
+// Fire-and-forget, no Redis, no rev, no ack, no hydration. Each kind has its
+// own socketRateLimit bucket so a reaction burst cannot starve the sharer's
+// pointer, and none of them shares the :ops bucket.
+
+/** Laser pointer: 20 Hz is 1200/min; the rest is headroom for pointer-off. */
+export const ANNOTATION_LIVE_POINTER_RATE_PER_MIN = 1500;
+/** Client-side throttle for pointer moves (ms). */
+export const ANNOTATION_LIVE_POINTER_INTERVAL_MS = 50;
+/** Reactions per socket per minute. */
+export const ANNOTATION_LIVE_REACTION_RATE_PER_MIN = 10;
+/** Snapshot notices per socket per minute. */
+export const ANNOTATION_LIVE_SNAPSHOT_RATE_PER_MIN = 5;
+/** Serialized chars of one live event — a pointer is ~60. */
+export const ANNOTATION_LIVE_MAX = 256;
+/** The only emoji a reaction may carry — the wire sends an INDEX into this
+ *  list, never a string, so no arbitrary Unicode crosses it. Order is wire
+ *  format: append only. */
+export const ANNOTATION_REACTIONS = ['👍', '❤️', '😂', '🎉', '👀', '🔥', '👏', '🤔'] as const;
+/** How long a viewer keeps painting a laser dot after the last update. */
+export const ANNOTATION_LIVE_POINTER_FADE_MS = 700;
+
+// ─── Vanishing ink ───────────────────────────────────────────────────────────
+// A stroke with `fade: true` is REMOVED by the sharer ANNOTATION_FADE_AFTER_MS
+// after it is finished (authoritative: late joiners and old clients see the
+// remove), and every client fades it on its OWN clock from the last append it
+// saw, over the final ANNOTATION_FADE_OUT_MS. No timestamp travels.
+export const ANNOTATION_FADE_AFTER_MS = 3_000;
+export const ANNOTATION_FADE_OUT_MS = 800;
+
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
 export type ThemePatternType = (typeof THEME_PATTERN_TYPES)[number];
 
@@ -88,6 +180,10 @@ export const WS_EVENTS = {
   CHANNEL_CREATED: 'channel:created',
   CHANNEL_UPDATED: 'channel:updated',
   CHANNEL_DELETED: 'channel:deleted',
+  // Secure channels only — emitted to the channel:{id} room on invite/remove/
+  // leave so member lists refresh and clients re-key on next send. Secure
+  // channel events NEVER go to server:{id} (non-members must learn nothing).
+  CHANNEL_MEMBERS_UPDATED: 'channel:members_updated',
   CATEGORY_CREATED: 'category:created',
   CATEGORY_UPDATED: 'category:updated',
   CATEGORY_DELETED: 'category:deleted',
@@ -100,12 +196,15 @@ export const WS_EVENTS = {
   VOICE_STATE_UPDATE: 'voice:state_update',
   VOICE_SPEAKING: 'voice:speaking',
   VOICE_SIGNAL: 'voice:signal',
+  VOICE_E2E_KEY: 'voice:e2e:key',
+  VOICE_E2E_KEY_REQUEST: 'voice:e2e:key_request',
   VOICE_ERROR: 'voice:error',
   VOICE_TRANSPORT_CREATED: 'voice:transport_created',
   VOICE_TRANSPORT_CONNECT: 'voice:transport:connect',
   VOICE_PRODUCE: 'voice:produce',
   VOICE_NEW_CONSUMER: 'voice:new_consumer',
   VOICE_CONSUMER_RESUME: 'voice:consumer:resume',
+  VOICE_PRODUCER_CLOSE: 'voice:producer:close',
   VOICE_PRODUCER_CLOSED: 'voice:producer_closed',
   VOICE_RTP_CAPABILITIES: 'voice:rtp_capabilities',
   TYPING_START: 'typing:start',
@@ -154,6 +253,9 @@ export const WS_EVENTS = {
   VOICE_SCREEN_SHARE_START: 'voice:screen_share:start',
   VOICE_SCREEN_SHARE_STOP: 'voice:screen_share:stop',
   VOICE_SCREEN_SHARE_STATE: 'voice:screen_share:state',
+  VOICE_ANNOTATION_OPS: 'voice:annotation:ops',
+  VOICE_ANNOTATION_STATE: 'voice:annotation:state',
+  VOICE_ANNOTATION_LIVE: 'voice:annotation:live',
   ADMIN_METRICS: 'admin:metrics',
   ADMIN_SUBSCRIBE_METRICS: 'admin:subscribe_metrics',
   ADMIN_UNSUBSCRIBE_METRICS: 'admin:unsubscribe_metrics',
@@ -205,5 +307,25 @@ export const THEME_COLOR_GROUPS: Record<string, readonly ThemeColorKey[]> = {
   'Scrollbar': ['scrollbar-thumb', 'scrollbar-thumb-hover'],
   'Selection': ['selection-bg', 'selection-text'],
 } as const;
+
+/**
+ * The theme keys that paint ON another surface instead of BEING one, where an
+ * alpha channel is meaningful — and, since the 2026 redesign, the norm: hover,
+ * active, hairline borders and scrollbars are mixed from the accent family into
+ * transparency, which is what keeps a dark theme tinted rather than grey.
+ *
+ * Everything else is an opaque surface. Alpha on those would let whatever sits
+ * behind show through a panel that is supposed to be solid, so the validator
+ * keeps them hex-only — see `isValidThemeColorValue`.
+ */
+export const TRANSLUCENT_THEME_COLOR_KEYS: readonly ThemeColorKey[] = [
+  'bg-hover',
+  'bg-active',
+  'border',
+  'scrollbar-thumb',
+  'scrollbar-thumb-hover',
+  'selection-bg',
+  'selection-text',
+] as const;
 
 export const BUILT_IN_THEME_IDS = ['dark', 'light', 'midnight', 'tactical'] as const;

@@ -10,10 +10,11 @@
 6. [Database Design](#database-design)
 7. [Real-Time Communication](#real-time-communication)
 8. [Voice Architecture](#voice-architecture)
-9. [Authentication & Security](#authentication--security)
-10. [Scalability Strategy](#scalability-strategy)
-11. [Deployment Architecture](#deployment-architecture)
-12. [Future Architecture](#future-architecture)
+9. [End-to-End Encryption](#end-to-end-encryption)
+10. [Authentication & Security](#authentication--security)
+11. [Scalability Strategy](#scalability-strategy)
+12. [Deployment Architecture](#deployment-architecture)
+13. [Future Architecture](#future-architecture)
 
 ---
 
@@ -25,9 +26,10 @@ Voxium is a real-time communication platform enabling users to create communitie
 
 - **Real-time first:** All interactions are immediately reflected across connected clients
 - **Low latency:** Voice and messaging prioritize sub-100ms delivery
-- **Horizontal scalability:** Stateless services behind load balancers
+- **Horizontal scalability:** Multi-node in production — Socket.IO Redis adapter, Redis-backed shared state, channel-affinity voice relay with crash takeover
 - **Cross-platform:** Single codebase serves Windows, macOS, Linux, and web browsers (future: mobile)
 - **Privacy-first:** No third-party services — all traffic stays on user's own infrastructure
+- **End-to-end encrypted where it matters:** DMs (always on), invite-only secure channels, and DM call signaling use Olm/Megolm; the server stores ciphertext it cannot read
 - **Security:** JWT auth, input validation, rate limiting, CORS protection
 
 ---
@@ -74,7 +76,7 @@ graph TD
 | Auth | JWT (jsonwebtoken) | 9.x |
 | Rate Limiting | rate-limiter-flexible | 9.x |
 | Password Hashing | bcryptjs | 3.x |
-| File Storage | S3-compatible (OVH) | — |
+| File Storage | S3-compatible object storage | — |
 | S3 Presigning | @aws-sdk/s3-request-presigner | — |
 | Email | Nodemailer | 8.x |
 
@@ -153,6 +155,8 @@ apps/server/
 │       ├── s3.ts                # S3 client + presigned URL generation + delete helper + getS3Object proxy + VALID_S3_KEY_RE
 │       ├── email.ts             # Nodemailer transporter + password reset email + cleanup report email
 │       ├── attachmentCleanup.ts # Scheduled job (daily 4 AM) — expires attachments older than retention period, deletes from S3, emails report
+│       ├── orphanCleanup.ts    # Scheduled job (daily 5 AM) — deletes S3 objects nothing references, age-gated (7d) and leader-locked; backstop for delete paths that miss a blob
+│       ├── registrationHygiene.ts # Scheduled job (daily 4:30 AM) — deletes unverified accounts past the 7d TTL + IpRecords past 180d; leader-locked, records each run for the admin panel
 │       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
 │       ├── mentions.ts          # @mention extraction, resolution, batch resolution (server members only)
 │       ├── memberBroadcast.ts   # Server room join + member event broadcast
@@ -749,11 +753,28 @@ Server resource limits are enforced dynamically via `utils/serverLimits.ts`:
 Screen sharing allows one user per voice channel to share their screen with all other participants using `getDisplayMedia` for capture:
 
 - **Capture:** Browser/WebView2 native `getDisplayMedia()` API (hardware-accelerated, supports video + optional system audio)
-- **Transport:** Video track produced as a mediasoup Producer with `appData: { type: 'screen' }`, consumed by all other channel users
-- **One sharer per channel:** Server enforces via `screenSharers` Map; second start request is silently dropped
-- **Late-joiner hydration:** `voice:join` handler emits `voice:screen_share:state` so users joining mid-share see the stream immediately
+- **Transport:** Video track produced as a mediasoup Producer with server-derived `appData: { type: 'screen-video' }` (system audio: `screen-audio`), consumed by all other channel users. The server never trusts client appData — a non-sharer's claimed screen producer is rejected/downgraded.
+- **One sharer per channel:** Server enforces via `screenSharers` Map (mirrored to Redis `voice:screen:{channelId}`); a second start request is ACKed `{ ok: false, error: 'Someone else is already sharing in this channel' }`
+- **Late-joiner hydration:** `voice:join` handler emits `voice:screen_share:state` (and `voice:annotation:state` when a scene exists) so users joining mid-share see the stream and its annotations immediately
 - **Viewer modes:** Inline (replaces ChatArea) or floating (draggable/resizable portal)
 - **Cleanup:** Automatic stop on voice leave, disconnect, server deletion, or browser stop button (`track.onended`)
+
+### Screen-Share Annotations & Overlays
+
+The active sharer can draw over the shared screen live (Twitch-style): pen/highlighter strokes, rectangle/ellipse highlights, text captions, and image overlays (logo/promo), plus **privacy masks** that truly hide screen regions. Two disjoint data planes:
+
+- **Annotations (metadata plane):** vector ops in normalized [0..1] frame coordinates, batched every 150ms over `voice:annotation:ops`, broadcast to the `voice:{channelId}` room, and rendered by every viewer on a DPR-aware canvas mapped onto the video's object-contain content rect (`AnnotationCanvas`). The authoritative scene lives ONLY in Redis (`voice:annotations:{channelId}`, 4h TTL backstop) with a server-assigned `rev` counter for late-joiner snapshot ordering. Image overlays travel as size-capped webp data-URLs inside ops (session-only — no S3, no cleanup jobs). Caps in `packages/shared/src/constants.ts` (`ANNOTATION_*`); shared reducer in `packages/shared/src/annotations.ts`.
+- **Privacy masks (video plane):** mask geometry NEVER touches the network. While ≥1 mask exists, the sharer's client composites raw frame + masks on a canvas (`services/screenComposite.ts`) and swaps the outgoing producer track via `producer.replaceTrack()` — covered pixels never leave the sharer's machine. The screen-video producer is created with `stopTracks: false, disableTrackOnPause: false, zeroRtpOnPause: true` and the compositor reads a CLONE of the capture track — mediasoup's defaults would otherwise stop the capture on replaceTrack and black out the clone-less source on pause. The whole pipeline is **fail-closed**: the producer is PAUSED synchronously at the 0→1 mask transition, before any async setup (no raw frame can ship between "mask exists" and "composited track live"); it stays paused if setup fails (persistent `sharePaused` banner + `maskFailed` toast; removing the masks resumes); `stopComposite` re-checks the live mask list before restoring raw output (a queued stop must not un-mask a re-added mask); and a generation counter stops an in-flight setup from outliving a stopped share. A mask whose cover image hasn't decoded (or decodes oversized) paints black.
+- **Multi-node:** annotation events deliberately bypass the owner-node voice relay (`ROUTED_VOICE_EVENTS`) — they touch no mediasoup state. `annotationHandler.ts` runs on the sharer's own node, authorizes each batch against the Redis sharer mirror (`voice:screen:{channelId}`), and broadcasts through the Redis adapter — keeping stroke traffic out of the shared 600/min `voice:relay` budget.
+- **Lifecycle:** every screen-share cleanup path clears the scene — `mirrorScreenShare()` deletes it on claim and release (EXCEPT an idempotent same-user re-claim, i.e. a retry after a failed produce, which preserves the scene so the rev counter doesn't restart under viewers), plus the empty-channel pipeline, `cleanupServerVoice`, and the boot/dead-node reap (`utils/voiceMirror.ts`). If the Redis scene is lost mid-share (TTL/failover/corruption), the next accepted batch broadcasts a full `voice:annotation:state` snapshot to viewers and acks `restarted: true` to the sharer, whose client re-sends its complete local scene. Client-side, a `voiceStore.screenSharingUserId` subscription in `annotationStore` clears viewer scenes and tears down the sharer session on every stop/handoff/reconnect path; every rejected batch surfaces a toast (the sharer's local echo is ahead of viewers at that point). Overlay images are dimension-capped server-side by container-header parsing (`utils/imageHeader.ts` — image-bomb guard) with a viewer-side decode cap as backstop, and scenes carry a global stroke-point budget bounding viewer redraw cost.
+- **Secure voice channels:** unaffected — they reject screen sharing entirely, so no `voice:screen` key ever exists and every annotation batch is refused.
+- **Wire v2 (additive, flag-gated):** `arrow`, `callout`, `spotlight` kinds, `stroke.fade` (vanishing ink), a `translate` op (moves a stroke/arrow without re-sending points), an optional `at` z-index on `add` (undo re-inserts a removed object UNDER what was drawn over it; out-of-range appends, v1 clients append) and `width`/`n`/`x1..y2` patch keys. The reducer keeps objects it does not understand and `drawScene` skips them, so an OLD client in a call with a NEW sharer keeps working minus the new kinds; the SERVER rejects what it does not know, so it deploys first and advertises `annotationsVersion` on the `voice:screen_share:start` ack (`voiceStore.screenShareAnnotationsVersion`; the toolbar hides v2 tools below 2). The owner node answers the claim but the sharer's HOME node validates its ops, so the relay dispatch on the home node stamps ITS version over the owner's (`withLocalAnnotationsVersion`) — during a rolling deploy the two can run different code. The `annotations_v2` feature flag turns both the validators and the advertisement off together. A `translate` is validated on its delta AND the resulting geometry is re-checked against the wire bounds (reject, never clamp — the client clamps via `clampTranslation`). Every added object is stamped `by: userId` by the server (the client's value is overwritten, never trusted) so scenes already carry ownership for viewer annotations later.
+- **Ephemeral plane — `voice:annotation:live`:** the fire-and-forget sibling of `:ops` for things that must never persist: the laser pointer (`pointer` / `pointer-off`), reactions (an INDEX into `ANNOTATION_REACTIONS`, never a string) and the snapshot notice. No Redis write, no rev, no ack, no hydration. Authorization is per kind in `LIVE_AUTH` (`annotationHandler.ts`): `sharer` kinds check the Redis sharer mirror with a 2 s per-socket positive cache (a miss is never cached — fail closed); `member` kinds check `socket.rooms` for `voice:{channelId}` (relay shims join rooms adapter-wide, so the real socket's rooms are authoritative on its home node). Each kind has its own `socketRateLimit` bucket; none shares the `:ops` budget or the voice relay. Client-side `annotationLiveStore` records WHAT and WHEN on the local clock (a pointer fades `ANNOTATION_LIVE_POINTER_FADE_MS` after its last update — a lost `pointer-off` costs nothing); the sharer's sends are throttled leading+trailing to `ANNOTATION_LIVE_POINTER_INTERVAL_MS` and survive a wall clock stepping backwards. `useLiveScheduler` (in `AnnotationCanvas`) runs a requestAnimationFrame loop ONLY while `hasLiveActivity()` and stops itself on the first idle frame.
+- **Sharer history:** undo/redo is a stack of per-GESTURE entries of INVERSE ops (`utils/annotationHistory.ts`), computed against the scene each op was applied to — the wire only speaks ops, so undo has to send something, and the inverse is exactly what viewers need. `beginGesture()`/`endGesture()` (called by the editor around drags) collapse a stroke's 300 appends or a move's 60 updates into one entry; ops on an object added in the same gesture need no inverse (the add's `remove` covers them), and redo re-sends the compacted gesture (one `add` of the finished stroke). Remote ops and hydration never enter the history; it is capped at `ANNOTATION_HISTORY_MAX` entries AND `ANNOTATION_HISTORY_BYTES_MAX` serialized chars (an undone `clear` retains every object it removed), reset with the scene, closed on editor unmount (a drag without a pointerup must not swallow later actions into one entry) and reset explicitly by `resetAccountStores` (`resetAnnotationModuleState`) — module-level state is invisible to the slice replace. The op queue chunks by SERIALIZED SIZE as well as count (`takeNextBatch`) because undoing a `clear` re-sends whole objects — 64 image adds are 23 MB against a 400K-char batch cap.
+- **Phase 1 tools (all behind the same v2 gate where they need it):** arrows (two-point drag, Shift = both heads, endpoint handles, moved by `translate`), numbered callouts (stable numbers, max+1, Renumber re-sequences in reading order as one undo step), one spotlight per scene (replace-in-gesture; a degenerate release restores what it replaced), laser pointer (hover-driven, live plane), vanishing ink (`fade: true`; the SHARER ships the authoritative `remove` 3 s after the stroke is finished, EVERY client fades on its own clock via `annotationLiveStore.fading` — a fully faded clock flips to `hidden` so the loop idles while the stroke stays invisible), palette + recents + text size (device prefs in `utils/annotationPrefs.ts`, validated on load; with a selection the colour/width/size pickers patch the object as its own undo step — `width` only on v2), object eraser (a sweep is one gesture), strokes selectable along their path and moved by clamped `translate`, captions edited by double-click. Keyboard: `useAnnotationShortcuts` listens from the same `TOOL_DEFS` table the toolbar renders (no key without a button), never in an editable target, never on the push-to-talk key while PTT is the voice mode. **Mask styles** (`MaskRect.style`: cover | pixelate | blur, local-only, NOT persisted — Cover is the safe default every session): `utils/maskStyles.ts` computes TRUE 32-source-px block MEANS via a chain of exact 2× bilinear halvings (a nearest-neighbour downscale would ship one raw pixel per block — a sliding raw-pixel dump the moment the mask or the content moves), on a lattice ANCHORED TO SOURCE COORDINATES so dragging/resizing the mask never re-samples; the scratch surfaces are pre-filled black and the mask region gets an opaque black backstop inside the clip BEFORE the block pass (drawImage of a frameless video is a silent no-op, so fail-closed must hold by construction); blur is a `ctx.filter` pass painted OVER the opaque pixelated pass (a blur alone goes translucent at its edges and the raw frame shows through); anything missing fails closed to black, an undecoded cover image on a styled mask is black (never pixelated), and `maskStyle` resets to Cover with every share. The sharer's preview samples the same function from the preview video so WYSIWYG holds, and with a cosmetic style selected the toolbar swaps the “never leaves this device” tooltip for the cosmetic warning plus a VISIBLE note (motion/scrolling content is more recoverable — the copy says so). The toolbar labels pixelate/blur as COSMETIC — pixelated text is partially reversible and the Privacy Policy's guarantee is about the black box.
+- **Editor layer:** `AnnotationEditorLayer` never decides who it is for — a `ToolCapabilities` prop does (the sharer passes everything; a pre-share preview passes masks only; a viewer with drawing rights would pass a few marking tools), so a stale `activeTool` cannot leak past the set. Geometry and hit-testing are pure (`utils/annotationHit.ts`: strokes and arrows are hit along their PATH, never their bbox); the caption draft is `useTextDraft` (state + ref, idempotent commit — see the CLAUDE.md text-tool note).
+- **Phase 3 tools:** (a) *Viewer zoom + magnifier* — CLIENT-ONLY: wheel/pinch scales a wrapper holding BOTH the video and the AnnotationCanvas (the content-rect hook reads untransformed offsetLeft/clientWidth, so registration is free), pan bounded, reset on double-click/pill; disabled AND reset while the sharer edits (the editor needs an untransformed layer rect). Z holds a 220px lens at 3x reading straight from the video element (`utils/stageZoom.ts` — pure math, tested at the letterbox edges). (b) *Reactions* — the Phase 0 live-plane `reaction` kind (INDEX into the 8-emoji allowlist, member-auth, own bucket) gets its UI: a strip that paces sends at 1/s, DOM+CSS rise/fade (35% of stage height, 2.5s = the store TTL, deterministic per-id drift, `prefers-reduced-motion` swaps to a static fade in CSS), per-viewer hide as a device pref (the sharer cannot disable them for others in v1). (c) *Snapshot* — `utils/shareSnapshot.ts` composes video → masks → scene at source resolution (the sharer's preview is RAW, so their mask pass is mandatory; viewers pass none — masks are baked into their stream), WebP q=0.92 with one 2560px-edge downscale retry under the attachment cap; delivery is copy (PNG), save, or send through the EXISTING presign→PUT→message pipeline into a non-secure text channel of the VOICE server (fetched, never serverStore.channels); a `{ k: 'snapshot' }` live event always tells the sharer. (d) *Whiteboard v1* — a canvas IS a screen: a static 1920x1080 themed dot-grid board, `captureStream(5)`, through the injected-track share path (`utils/whiteboard.ts`, `voiceStore.startWhiteboardShare`) — zero server change; `shareKind: 'whiteboard'` hides the mask tool (toolbar, editor capabilities, and the M shortcut), the source key is the uncollidable `whiteboard:1920x1080`, and secure voice keeps the button hidden with the rest of the share section. The producer-less board stays a v2 decision.
+- **Phase 2 privacy plays (all local-only — nothing here touches the network):** (a) *Share pre-flight* — `startScreenShare` captures and parks the stream in `voiceStore.pendingShare`; `SharePreflightModal` shows a local preview where the sharer places masks (mask-only `ToolCapabilities`) before the share is claimed or produced — viewers cannot know a share is being prepared. Going live runs `activateScreenShare`, which, when masks exist, produces the COMPOSITED track from frame one: `prepareComposite()` builds the compositor session pre-produce and returns the composite track (fail-closed — a compositor failure aborts the share), and `attachCompositeProducerHandles()` wires the real producer controls in after produce. Confirm stamps `screenShareSourceKey` in the same store update that clears `pendingShare`, which is how downstream subscribers distinguish confirm from cancel. A whole-monitor capture always carries a nudge to prefer a window; `skipPreflight` is a device pref (checkbox in the modal). (b) *Source-change guard* — the compositor detects source-dimension changes BEFORE drawing; with masks present the producer is paused synchronously and held (`sourceHold`) until the sharer confirms (masks are normalized coordinates — a window resize or tab navigation moves what they cover). (c) *Remembered mask layouts* — per-user localStorage keyed by `displaySurface:WxH` (LRU 12, sanitized on load); auto-applied at pre-flight open (privacy-default: applied unless "start fresh"), re-saved debounced while sharing, deleted when the mask list empties.
 
 ### DM Voice Calls (V0.5 - 1-on-1)
 
@@ -764,11 +785,12 @@ graph TD
     UserB -->|"signaling"| Srv
 ```
 
-- WebRTC P2P (1-on-1 only) with self-hosted STUN for NAT traversal
+- WebRTC P2P (1-on-1 only) with self-hosted STUN for NAT traversal — media is end-to-end encrypted by DTLS-SRTP between the two peers
+- **E2E-authenticated signaling** — every SDP offer/answer and ICE candidate travels as a pairwise-Olm envelope sealed to the peer's pinned E2E device (`docs/e2e-dm-spec.md` §20). The server relays signals opaquely and cannot substitute DTLS fingerprints; a plaintext signal aborts the call rather than downgrading. The call panel shows a lock once the peer device is pinned.
 - **Self-hosted STUN server** — coturn in STUN-only mode (`--stun-only --no-auth`) runs alongside the Voxium backend via docker-compose. STUN is stateless UDP (~100 bytes each way) that tells each peer its public IP:port — no media flows through it. Privacy-first: no third-party STUN/TURN servers. Frontend derives STUN URL from `VITE_WS_URL` hostname + port 3478.
 - **Perfect Negotiation pattern** — resolves offer glare (both peers sending offers simultaneously) via polite/impolite roles based on userId comparison
 - **Mutually exclusive** with server voice — joining one leaves the other (cross-cleanup on both server and client)
-- In-memory state: `dmVoiceUsers` Map (conversationId → Map of userId → socketId) + `userDMCall` reverse lookup
+- Redis-backed call state (`dm:voice:users:{convId}` hashes, `dm:voice:call:{userId}` reverse lookup, `dm:voice:active` set) — DM calls work across cluster nodes
 - System messages ("Voice call started" / "Voice call ended") persisted to DB as `type: 'system'`
 - Call offer broadcasts to `dm:{conversationId}` room; incoming call shown via `IncomingCallModal` with looping ringtone (stops on accept/decline/cancel)
 - DM call UI has two layers: `DMCallPanel` renders inline in `DMChatArea` (full avatars + controls when viewing the conversation), and `DMVoicePanel` is a compact global panel rendered in both `ChannelSidebar` (after `VoicePanel`) and `DMList` so the user always sees their DM call status from any view
@@ -797,6 +819,42 @@ graph LR
 - **Live toggle:** Noise suppression can be enabled/disabled mid-call. A generation counter prevents race conditions on rapid toggles.
 - **Push-to-talk:** Works in both server voice and DM calls. PTT overrides mute — pressing the key temporarily enables the mic regardless of mute state. `pttActive` store state drives the speaking indicator so the green ring shows during PTT even when muted.
 - **Browser noiseSuppression inversion:** When RNNoise is enabled, the browser's built-in `noiseSuppression` getUserMedia constraint is disabled to avoid double-processing.
+
+---
+
+## End-to-End Encryption
+
+Authoritative spec: `docs/e2e-dm-spec.md`. Summary of what ships and how it fits the architecture:
+
+### Engine
+
+- **vodozemac WASM** (the audited Rust implementation of the Olm/Megolm double-ratchet protocols used by Matrix), wrapped in `packages/crypto-engine`. Hard rule: **no cryptography implemented in JavaScript** — the JS layer only orchestrates engine calls.
+- Key material lives in an IndexedDB vault, pickled under a key held in the OS keychain via Tauri (localStorage fallback for browser dev). The server only ever stores ciphertext, public keys, and sealed key shares.
+
+### Encrypted DMs (always on)
+
+- Every DM is end-to-end encrypted — there is no opt-in and no plaintext fallback; clients refuse plaintext user messages outright.
+- **Megolm group sessions** encrypt the message stream; session keys are delivered per recipient device over **pairwise Olm sessions**. Attachments are encrypted client-side and stored as opaque blobs with server-forced generic names.
+- **Multi-device:** up to 5 devices per account. New devices link via a short displayed code; revoking a device re-keys every conversation away from it immediately.
+- **Cross-signing:** one account master key signs devices, giving one safety number per account (verified out-of-band). Identity changes surface blocking warnings that must be explicitly accepted.
+- **Backups:** encrypted account-key backup unlockable with a recovery key, plus message-key backup so history follows the account onto new devices.
+- **Search** over encrypted conversations runs client-side against this device's decrypted history — the server cannot index what it cannot read.
+
+### Secure Channels (invite-only E2E server channels)
+
+- A `secure: true` channel grants access **only** via explicit channel membership — the permission calculator checks membership *before* the owner/ADMINISTRATOR fast paths, so even the server owner sees nothing without an invite.
+- Opacity as a design rule: every non-member probe answers exactly like a nonexistent channel. Moderation is deliberately blind — admins get a count endpoint and delete-by-id, never contents.
+- Same Megolm machinery as DMs via scope strings (`ch:{channelId}`); membership changes rotate the group session, and new members receive no history by design.
+
+### E2E-Authenticated DM Call Signaling
+
+- DM call media was always P2P DTLS-SRTP; the signaling relay was the MITM surface. Every `dm:voice:signal` payload is now a pairwise-Olm envelope pinned to the peer's call device, with epoch/sequence ordering, replay defense, and a hard cutover: non-envelope signals abort the call.
+
+### What stays plaintext (by design)
+
+- Server text channels (except secure channels) — moderation-friendly community spaces.
+- Server voice (SFU) media terminates at mediasoup; true SFU E2E (SFrame-class) is future work.
+- Metadata: participants, timing, sizes — the same envelope visibility as Signal-style designs generally.
 
 ---
 
@@ -916,7 +974,7 @@ sequenceDiagram
 | Passwords | bcrypt with 12 salt rounds, PASSWORD_MAX=72 (matches bcrypt's actual input limit) |
 | Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
 | Email Verification | SHA-256 hashed tokens, 24hr expiry, single-use, format validation (64 hex chars, lowercase normalized), `requireVerifiedEmail` on all functional routes + attachment proxy + Socket.IO, StrictMode double-POST guard, migration preflight duplicate check |
-| Registration | Generic "Username or email already in use" error prevents email enumeration; email normalized to lowercase; Nodemailer structured address prevents header injection |
+| Registration | Generic "Username or email already in use" error prevents email enumeration; email normalized to lowercase; Nodemailer structured address prevents header injection; full anti-bot pipeline (see Registration Abuse Defenses below) |
 | CORS | Explicit origin whitelist (must include Tauri origins: `https://tauri.localhost` Win, `tauri://localhost` macOS, `http://tauri.localhost` Linux). No `withCredentials` on client (Bearer tokens, not cookies) — avoids strict CORS mode that breaks on custom protocol origins. Server CORS echoes first allowed origin on null-origin requests instead of `*` |
 | Input | Server-side validation on all endpoints + runtime type validation on all Socket.IO payloads |
 | SQL Injection | Prisma parameterized queries |
@@ -929,6 +987,48 @@ sequenceDiagram
 | S3 Uploads | Presigned PUT URLs enforce Content-Type via `signableHeaders`; proxy streaming for attachments (S3 URL never exposed) |
 | Trust Proxy | Conditional on `NODE_ENV=production` or `TRUST_PROXY=true` — prevents IP spoofing in dev |
 | CI/CD | GitHub Actions use env vars for attacker-controlled context (never interpolated in `run:`) |
+
+### Registration Abuse Defenses
+
+Registration is the cheapest attack surface on any open platform — bots feed
+breached-credential email lists through the form to squat accounts, validate
+stolen addresses, and turn the verification mailer into a spam cannon. The
+defense is layered so that each layer catches what the previous one cannot,
+and everything is self-hosted (no captcha services, no IP-reputation APIs —
+nothing about a visitor leaves the infrastructure):
+
+```mermaid
+flowchart TD
+    A[POST /auth/register] --> B{Rate limits<br/>3/min + 5/day per IP<br/>20/day per /24 subnet}
+    B -->|over budget| R1[429]
+    B --> C{Proof-of-work valid?<br/>HMAC challenge, single-use,<br/>difficulty scales with subnet pressure}
+    C -->|missing/invalid/replayed| R2[400 generic]
+    C --> D{IP banned?}
+    D -->|banned| R3[403]
+    D --> E{Disposable domain?<br/>CANONICAL email taken?<br/>gmail dots/+tags collapsed}
+    E -->|either| R4[409 generic — same message,<br/>no oracle]
+    E --> F{Novel-domain budget?<br/>10/day per non-provider domain,<br/>consumed only on SUCCESS}
+    F -->|exhausted| R5[429]
+    F --> G[Create user +<br/>IpRecord kind=register]
+    G --> H[Verification mail<br/>max 5/day per canonical inbox]
+    H --> I[Unverified after 7 days?<br/>Daily sweep deletes the account]
+```
+
+Key mechanisms:
+
+| Mechanism | What it defeats |
+|-----------|-----------------|
+| **Canonical email uniqueness** (`email_canonical`, unique) — lowercase everywhere; gmail-family additionally strips dots and `+tags` | One Gmail inbox minting unlimited "unique" addresses (`j.o.h.n+x@gmail.com` ≡ `john@gmail.com`) |
+| **Proof-of-work** — self-hosted, ALTCHA-style; server-enforced so direct-API scripts pay the same CPU as browsers; HMAC key derived from `JWT_SECRET` (cannot be unconfigured); base 16 bits, +2 per same-subnet registration that day (each step quadruples the work) | Off-the-shelf bot tooling; makes distributed campaigns pay per attempt. Known limit: a native SHA-256 solver is ~100× faster than browser WebCrypto — PoW raises cost, it does not make registration impossible |
+| **Long-window budgets** — 5/IP/day, 20 per /24 (IPv6 /48) per day, 10 per novel email domain per day (major consumer providers exempt; domain budget consumed only on successful create so garbage attempts cannot lock out a legitimate small-org domain) | Slow drips that slide under per-minute limits (one signup every 45 min = 32/day); catch-all domains that defeat the disposable blocklist |
+| **IP attribution + bans at the door** — registration records an `IpRecord` with `kind: 'register'` (offline geoip, never a third-party lookup); `IpBan` is enforced at registration, login, and socket connect | Anonymous registration; banned sources re-registering |
+| **Mail caps per canonical inbox** — 5 verification + 5 password-reset sends per day, regardless of source IP or account; reset cap skips silently (that endpoint must answer identically for existing and unknown emails) | Drip-harassment of breached-list victims; SMTP reputation damage |
+| **Unverified-account TTL** — daily 4:30 AM sweep deletes accounts unverified after 7 days (guards: `role='user'`, no owned servers); the same sweep expires `IpRecord` rows unseen for 180 days (GDPR retention) | Bot harvests holding value; squatted usernames/emails; indefinite IP retention |
+| **Observability** — `/admin/registration-stats` + the Users-tab panel (signups/hour and /24h, unverified backlog, top registering IPs and email domains over 7 days); hourly spike check mails the operator at 30+ signups/hour (Redis-deduped, one sender across the cluster) | Waves progressing unnoticed; the ultimate backstop is operational — the `registration` feature flag is a live killswitch |
+
+All counters are Redis-backed under the `rl:` prefix (admin-tunable at runtime,
+covered by the same clearing paths as every other limiter), so the whole
+pipeline is multi-node correct by construction.
 
 ### TOTP Two-Factor Authentication Flow
 
@@ -1201,13 +1301,12 @@ User-created themes with a marketplace for sharing. Themes customize all `--vox-
 
 ## Scalability Strategy
 
-### Phase 1: Single Node (1K users)
+### Phase 1: Single Node (1K users) — superseded
 - Single Node.js process
 - PostgreSQL + Redis on same machine or nearby
-- In-memory voice state
-- Simple deployment
+- Simple deployment (still works: a lone node detects it is the sole node and runs full-cleanup boot paths)
 
-### Phase 2: Multi-Node (10K users)
+### Phase 2: Multi-Node (10K users) — IMPLEMENTED, running in production
 
 ```mermaid
 graph TD
@@ -1220,11 +1319,13 @@ graph TD
     N1 & N2 & N3 --> PG[("PostgreSQL<br/>Primary + Replica")]
 ```
 
-Key changes:
-- Socket.IO with Redis adapter for cross-node event distribution
-- Voice state in Redis
-- Sticky sessions for WebSocket connections (IP hash or cookie)
-- Connection pooling for PostgreSQL
+Implemented (validated live: 35/35 cross-node scenarios in `scripts/test-multi-node.ts`, including real RTP and hard owner-crash takeover):
+- Socket.IO Redis adapter for cross-node event distribution (4 Redis clients: data, pub, sub, configSub)
+- Presence, DM-call, and voice-channel metadata fully in Redis; mediasoup objects stay node-local
+- **Channel-affinity voice relay:** each voice channel's mediasoup Router lives on exactly ONE node (claimed atomically via `SET NX`); participants whose sockets live on other nodes are relayed over Redis pub/sub and represented on the owner node by shims. Clients send RTP straight to the owning node's announced IP — media bypasses nginx
+- **Node heartbeats + takeover:** `node:alive:{id}` keys (30s TTL) gate boot cleanups; a 60s reaper takes over channels owned by crashed peers
+- Sticky sessions for WebSocket connections (nginx `ip_hash`); feature flags and rate-limit overrides propagate to every node over Redis pub/sub
+- Cross-cluster room operations only (`socketsJoin`/`socketsLeave`/`io.in(room)`) — `fetchSockets()` is banned in hot paths (it waits on every node and throws when a peer is dead)
 
 ### Phase 3: Microservices (100K+ users)
 

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
+import { AdminRegistrationPanel } from './AdminRegistrationPanel';
 import { Search, Ban, Trash2, Heart, Sparkles, Crown } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminTable } from './AdminTable';
@@ -100,6 +101,10 @@ export function AdminUserList({ onSelectUser }: { onSelectUser: (userId: string)
 
   return (
     <div className="space-y-4">
+      {/* Registration abuse triage — the IPs and backlog this panel surfaces
+          are acted on right here (ban, purge), so it lives with the users */}
+      <AdminRegistrationPanel />
+
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-vox-text-primary">Users</h2>
         <div className="flex items-center gap-2">

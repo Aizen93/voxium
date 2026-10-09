@@ -5,17 +5,33 @@ import { getAccessToken, setTokens, clearTokens, isRemembered } from '../service
 import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
 import { useVoiceStore } from './voiceStore';
+import { resetAccountStores } from './resetStores';
 import { processImage } from '../utils/imageProcessing';
 import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
-import type { User } from '@voxium/shared';
+import type { User, RegistrationConsent } from '@voxium/shared';
+import { PowExpiredError, PowAbortedError } from '@voxium/shared';
+import { solveRegistrationPowOffThread } from '../services/powSolver';
+import { forgetLocalE2EState } from '../services/e2e/e2eService';
 
 interface AuthState {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   isSubmitting: boolean;
+  /** Registration only, deliberately NOT `isSubmitting`.
+   *
+   *  Before the proof-of-work moved into a worker the solve froze the main
+   *  thread, so nobody could leave the register view mid-solve. Now they can —
+   *  and a store-wide submitting flag then disables the SIGN IN button on the
+   *  login page for the tens of seconds the abandoned solve keeps running,
+   *  reading "Signing in…" with Enter inert and no explanation. */
+  isRegistering: boolean;
   error: string | null;
+  /** Anti-bot proof-of-work progress in [0, 1] while registering, else null.
+   *  The solve can run for tens of seconds on a slow device under subnet
+   *  pressure, which is far too long for an unexplained disabled button. */
+  powProgress: number | null;
 
   // TOTP login flow
   totpRequired: boolean;
@@ -25,7 +41,11 @@ interface AuthState {
   login: (email: string, password: string, rememberMe?: boolean) => Promise<void>;
   verifyTOTP: (code: string) => Promise<void>;
   cancelTOTP: () => void;
-  register: (username: string, email: string, password: string) => Promise<void>;
+  register: (username: string, email: string, password: string, consent: RegistrationConsent) => Promise<void>;
+  /** Abandon an in-flight registration: stop the solve and clear its state.
+   *  Without it the abandoned solve finishes, POSTs, and signs the user into
+   *  the account they walked away from. */
+  cancelRegistration: () => void;
   logout: () => void;
   checkAuth: () => Promise<void>;
   clearError: () => void;
@@ -35,17 +55,62 @@ interface AuthState {
   resetPassword: (token: string, password: string) => Promise<string>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<string>;
   resendVerification: () => Promise<void>;
+  /** Accept the Terms of Service and the Privacy Policy from an existing
+   *  account (one that predates consent-at-signup). Clears the gate the
+   *  server holds on every functional route and the socket, then connects. */
+  acceptConsent: (consent: RegistrationConsent) => Promise<void>;
+  /** Self-service erasure. Re-authenticates with the password (and the TOTP
+   *  code when 2FA is on); the server answers 409 with `ownedServers` while
+   *  the account still owns any. On success the session is gone server-side
+   *  already — this just cleans up locally. */
+  deleteAccount: (password: string, totpCode?: string) => Promise<void>;
   setupTOTP: () => Promise<{ secret: string; qrCodeDataUrl: string }>;
   enableTOTP: (code: string) => Promise<string[]>;
   disableTOTP: (code: string) => Promise<void>;
 }
+
+/**
+ * Fetch a proof-of-work challenge and solve it, retrying ONCE with a fresh
+ * challenge if the first one expires mid-solve. Solve time is geometric, so a
+ * small tail of honest attempts overruns the window on a slow device even at
+ * the difficulty ceiling; one retry turns that dead end into a slower success.
+ * Exactly one retry — an unbounded loop on a device too slow for the issued
+ * difficulty would grind forever instead of surfacing the failure.
+ */
+async function solveWithRetry(onProgress: (fraction: number) => void, signal: AbortSignal) {
+  for (let attempt = 0; ; attempt++) {
+    if (signal.aborted) throw new PowAbortedError();
+    const { data: challengeRes } = await api.get('/auth/register-challenge');
+    try {
+      return await solveRegistrationPowOffThread(challengeRes.data, onProgress, signal);
+    } catch (err) {
+      if (attempt >= 1 || !(err instanceof PowExpiredError)) throw err;
+      console.warn('[PoW] Challenge expired mid-solve — retrying with a fresh one');
+      onProgress(0);
+    }
+  }
+}
+
+/** Can this account hold a live session? The socket auth refuses BOTH an
+ *  unverified email and an account that has not accepted the legal
+ *  documents; connecting anyway only produces a reconnect loop. */
+function canConnect(user: { emailVerified: boolean; consentRequired?: boolean }): boolean {
+  return user.emailVerified && !user.consentRequired;
+}
+
+/** The in-flight registration's abort handle. Module scope, not store state:
+ *  it is a live object, never rendered, and must not be part of the reset
+ *  snapshot `resetAccountStores` captures. */
+let registrationAbort: AbortController | null = null;
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   isAuthenticated: false,
   isLoading: true,
   isSubmitting: false,
+  isRegistering: false,
   error: null,
+  powProgress: null,
   totpRequired: false,
   totpToken: null,
   totpRememberMe: true,
@@ -64,7 +129,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       const { user, accessToken, refreshToken } = data.data;
       setTokens(accessToken, refreshToken, rememberMe);
-      if (user.emailVerified) {
+      if (canConnect(user)) {
         connectSocket(accessToken);
       }
       set({ user, isAuthenticated: true, isSubmitting: false });
@@ -88,7 +153,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (trustedDeviceToken) {
         localStorage.setItem('voxium_trusted_device', trustedDeviceToken);
       }
-      if (user.emailVerified) {
+      if (canConnect(user)) {
         connectSocket(accessToken);
       }
       set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true });
@@ -105,27 +170,63 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ totpRequired: false, totpToken: null, totpRememberMe: true, error: null });
   },
 
-  register: async (username, email, password) => {
-    set({ isSubmitting: true, error: null });
+  register: async (username, email, password, consent) => {
+    registrationAbort?.abort();
+    const controller = new AbortController();
+    registrationAbort = controller;
+    set({ isRegistering: true, error: null, powProgress: 0 });
     try {
-      const { data } = await api.post('/auth/register', { username, email, password });
+      // Anti-bot proof-of-work: fetch a challenge and burn CPU solving it. No
+      // captcha, no third-party service, nothing leaves our infrastructure.
+      // Solved in a worker so the page stays interactive, with progress shown
+      // — under subnet pressure this is tens of seconds, not a blink.
+      const pow = await solveWithRetry((fraction) => set({ powProgress: fraction }), controller.signal);
+      if (controller.signal.aborted) throw new PowAbortedError();
+
+      const { data } = await api.post('/auth/register', { username, email, password, pow, ...consent });
       const { user, accessToken, refreshToken } = data.data;
 
+      // The account now EXISTS, so there is nothing left to abandon: finish the
+      // sign-in even if the view was left in the meantime, rather than stranding
+      // someone with credentials they were never told about — UNLESS the user
+      // already signed in as someone else while this POST was in flight. The
+      // abandoned registration must not silently swap their session for the
+      // account they walked away from; they can sign in to it deliberately.
+      const current = get();
+      if (controller.signal.aborted && current.isAuthenticated && current.user && current.user.id !== user.id) {
+        return;
+      }
       setTokens(accessToken, refreshToken, true);
 
-      // Don't connect socket until email is verified
-      if (user.emailVerified) {
+      // Don't connect socket until email is verified (consent was just given)
+      if (canConnect(user)) {
         connectSocket(accessToken);
       }
 
-      set({ user, isAuthenticated: true, isSubmitting: false });
+      set({ user, isAuthenticated: true, isRegistering: false, powProgress: null });
     } catch (err) {
+      // An abandoned solve is not a failure to report — the view is gone and
+      // `cancelRegistration` already cleared the flags. The same goes for a
+      // POST that was already in flight when the view was left: the store's
+      // `error` is shared with LoginPage, which would render a 409 from this
+      // abandoned registration as a failed login the user never attempted.
+      if (err instanceof PowAbortedError) throw err;
+      if (controller.signal.aborted) throw new PowAbortedError();
       set({
         error: getTranslatedError(err, i18n.t, 'auth.register.registrationFailed'),
-        isSubmitting: false,
+        isRegistering: false,
+        powProgress: null,
       });
       throw err;
+    } finally {
+      if (registrationAbort === controller) registrationAbort = null;
     }
+  },
+
+  cancelRegistration: () => {
+    registrationAbort?.abort();
+    registrationAbort = null;
+    set({ isRegistering: false, powProgress: null });
   },
 
   logout: () => {
@@ -136,6 +237,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     clearTokens();
     disconnectSocket();
+    // Wipe every account-scoped store — on a shared machine the next login must
+    // never see the previous account's servers, DMs, or support transcript
+    resetAccountStores();
     set({ user: null, isAuthenticated: false });
   },
 
@@ -148,7 +252,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     try {
       const { data } = await api.get('/auth/me');
-      if (data.data.emailVerified) {
+      if (canConnect(data.data)) {
         connectSocket(token);
       }
       set({ user: data.data, isAuthenticated: true, isLoading: false });
@@ -214,6 +318,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       setTokens(data.data.accessToken, data.data.refreshToken);
     }
     return data.message;
+  },
+
+  deleteAccount: async (password, totpCode) => {
+    const userId = get().user?.id;
+    await api.delete('/auth/account', { data: { password, ...(totpCode ? { totpCode } : {}) } });
+    // The server has purged the account and disconnected its sockets; what is
+    // left is this device's copy of it. Same cleanup as logout, plus the E2E
+    // vault logout deliberately keeps — every key it pairs with is gone.
+    get().logout();
+    if (userId) forgetLocalE2EState(userId);
+    localStorage.removeItem('voxium_trusted_device');
+  },
+
+  acceptConsent: async (consent) => {
+    await api.post('/auth/consent', consent);
+    const user = get().user;
+    if (!user) return;
+    const updated = { ...user, consentRequired: false };
+    set({ user: updated });
+    const token = getAccessToken();
+    if (token && canConnect(updated)) connectSocket(token);
   },
 
   resendVerification: async () => {

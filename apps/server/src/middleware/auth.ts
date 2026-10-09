@@ -11,6 +11,10 @@ export interface AuthPayload {
   tokenVersion: number;
   rememberMe?: boolean;
   emailVerified?: boolean;
+  /** Resolved from the DB on every request, like emailVerified: true until
+   *  the account has accepted BOTH the Terms of Service and the Privacy
+   *  Policy. Accounts that predate consent-at-signup start out here. */
+  consentRequired?: boolean;
 }
 
 declare global {
@@ -43,7 +47,7 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     // Check account ban, token version, and current role against DB
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },
-      select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true },
+      select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true, termsAcceptedAt: true, privacyAcceptedAt: true },
     });
 
     if (!user) return next(new UnauthorizedError('User not found'));
@@ -53,7 +57,12 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     }
 
     // Use DB role (not JWT role) so role changes take effect immediately
-    req.user = { ...payload, role: user.role as UserRole, emailVerified: user.emailVerified };
+    req.user = {
+      ...payload,
+      role: user.role as UserRole,
+      emailVerified: user.emailVerified,
+      consentRequired: consentIsRequired(user),
+    };
     next();
   } catch (err) {
     if (err instanceof ForbiddenError || err instanceof UnauthorizedError) {
@@ -67,6 +76,29 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
 export function requireVerifiedEmail(req: Request, _res: Response, next: NextFunction) {
   if (!req.user?.emailVerified) {
     return next(new ForbiddenError('Email not verified'));
+  }
+  next();
+}
+
+/** Has this account accepted both legal documents? Null timestamps mean it
+ *  has not — accounts created before consent was collected at signup. */
+export function consentIsRequired(user: { termsAcceptedAt: Date | null; privacyAcceptedAt: Date | null }): boolean {
+  return !user.termsAcceptedAt || !user.privacyAcceptedAt;
+}
+
+export const CONSENT_REQUIRED_MESSAGE = 'You must accept the Terms of Service and the Privacy Policy to continue';
+
+/**
+ * Middleware that blocks accounts that have not accepted the Terms of Service
+ * and the Privacy Policy (CNIL/GDPR — consent is collected at signup, and
+ * accounts that predate that step have to give it before using anything).
+ * Applied wherever requireVerifiedEmail is: every functional route and the
+ * socket. The auth self-management routes stay open, because POST
+ * /auth/consent is how the gate is cleared.
+ */
+export function requireConsent(req: Request, _res: Response, next: NextFunction) {
+  if (req.user?.consentRequired) {
+    return next(new ForbiddenError(CONSENT_REQUIRED_MESSAGE));
   }
   next();
 }

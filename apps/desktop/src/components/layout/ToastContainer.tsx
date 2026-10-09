@@ -20,8 +20,20 @@ export function ToastContainer() {
 
   if (toasts.length === 0) return null;
 
+  // Toasts sit ABOVE every other layer, deliberately.
+  //
+  // They are how the app reports failures, and the thing that triggered the
+  // failure is usually the very panel on top — the theme editor and the
+  // marketplace are z-[9999] with a backdrop blur, context menus reach
+  // z-[10000]. At the old z-[100] an error raised BY a modal rendered
+  // underneath it and was never seen. Nothing may outrank this.
   return (
-    <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-2 w-80" role="status" aria-live="polite">
+    <div
+      className="fixed bottom-6 right-6 z-[100000] flex flex-col gap-2 w-80"
+      data-testid="toast-container"
+      role="status"
+      aria-live="polite"
+    >
       {toasts.map((t) => {
         const Icon = iconMap[t.type];
         const colors = colorMap[t.type];

@@ -6,7 +6,7 @@ import { getSocket, onConnectionStatusChange } from '../../services/socket';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { SearchModal } from '../search/SearchModal';
-import { Hash, Search } from 'lucide-react';
+import { Search } from 'lucide-react';
 
 export function ChatArea() {
   const { t } = useTranslation();
@@ -126,16 +126,16 @@ export function ChatArea() {
   return (
     <div className="flex h-full min-w-0 flex-col bg-vox-chat">
       {/* Channel Header */}
-      <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
-        <Hash size={18} className="text-vox-text-muted" />
-        <h3 className="flex-1 text-sm font-semibold text-vox-text-primary">{activeChannel.name}</h3>
+      <div className="flex h-[54px] flex-none items-center gap-2.5 border-b border-vox-border px-5">
+        <span aria-hidden className="font-mono text-[15px] leading-none text-vox-accent-primary">#</span>
+        <h3 className="truncate text-[14.5px] font-semibold tracking-[-0.01em] text-vox-text-primary">{activeChannel.name}</h3>
         <button
           onClick={() => setShowSearch(true)}
-          className="rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
+          className="ml-auto flex h-[30px] w-[30px] items-center justify-center rounded-md text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
           title={t('chat.searchMessages')}
           aria-label={t('chat.searchMessages')}
         >
-          <Search size={18} />
+          <Search size={15} />
         </button>
       </div>
 

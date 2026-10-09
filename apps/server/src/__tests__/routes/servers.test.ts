@@ -132,6 +132,20 @@ vi.mock('../../utils/memberBroadcast', () => ({
   joinServerRoom: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Visibility-room resync (owner transfer changes VIEW_CHANNEL for two users)
+const mockSyncVisibilityRooms = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/channelVisibilityRooms', () => ({
+  syncChannelVisibilityRooms: (...args: any[]) => mockSyncVisibilityRooms(...args),
+}));
+
+// Secure-channel lifecycle (leave/kick purge their secure state first)
+const mockPurgeSecureChannelState = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/secureChannelLifecycle', () => ({
+  purgeSecureChannelState: (...args: any[]) => mockPurgeSecureChannelState(...args),
+  purgeSecureChannelStateForAccount: vi.fn().mockResolvedValue(undefined),
+  deleteSecureChannel: vi.fn().mockResolvedValue(true),
+}));
+
 // S3
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,
@@ -180,7 +194,7 @@ function mockAuthUser(overrides: Record<string, unknown> = {}) {
     bannedAt: null,
     tokenVersion: 0,
     role: 'user',
-    emailVerified: true,
+    emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
   };
   prismaMock.user.findUnique.mockResolvedValue({ ...defaults, ...overrides });
 }
@@ -627,6 +641,23 @@ describe('Server Routes', () => {
     });
   });
 
+  // ── POST /api/v1/servers/:serverId/join — removed (HIGH-6) ──────────────
+
+  describe('POST /api/v1/servers/:serverId/join (removed route)', () => {
+    it('returns 404 — joining MUST go through POST /invites/:code/join', async () => {
+      // The direct join-by-id route bypassed invite validity, invitesLocked,
+      // and maxMembers. It was removed; only the invite flow may add members.
+      const token = makeToken();
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/join')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+      // Defense-in-depth: no membership row was created
+      expect(prismaMock.serverMember.create).not.toHaveBeenCalled();
+    });
+  });
+
   // ── POST /api/v1/servers/:serverId/leave ────────────────────────────────
 
   describe('POST /api/v1/servers/:serverId/leave', () => {
@@ -801,6 +832,35 @@ describe('Server Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/targetUserId/i);
+    });
+
+    // server.ownerId is the pivot of every visibility calculator's owner fast
+    // path, and channel:{id} rooms are computed at connect. Without a resync
+    // the old owner keeps receiving staff-only channels' events and the new
+    // owner misses channel-scoped lifecycle events until reconnect.
+    it('resyncs channel visibility rooms for BOTH the new and the old owner after the transaction', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockImplementation(({ where }: any) =>
+        Promise.resolve(where.userId_serverId.userId === 'user-1'
+          ? { userId: 'user-1', serverId: 'srv-1', role: 'owner' }
+          : { userId: 'user-2', serverId: 'srv-1', role: 'member' }));
+      const order: string[] = [];
+      prismaMock.$transaction.mockImplementation(async () => { order.push('txn'); return []; });
+      mockSyncVisibilityRooms.mockImplementation(async (_sid: string, opts: { userId: string }) => { order.push(`sync:${opts.userId}`); });
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: null, invitesLocked: false, ownerId: 'user-2', createdAt: new Date() });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/transfer-ownership')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ targetUserId: 'user-2' });
+
+      expect(res.status).toBe(200);
+      expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-1', { userId: 'user-2' });
+      expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-1', { userId: 'user-1' });
+      // After the commit: the util re-reads ownerId, so syncing before it
+      // would recompute against the OLD owner
+      expect(order[0]).toBe('txn');
+      expect(order).toEqual(expect.arrayContaining(['sync:user-2', 'sync:user-1']));
     });
   });
 });

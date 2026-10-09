@@ -1,9 +1,10 @@
 import { useTranslation } from 'react-i18next';
+import { useAnnotationStore } from '../../stores/annotationStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { ConnectionQuality } from './ConnectionQuality';
-import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff } from 'lucide-react';
+import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff, Lock, ShieldAlert, Presentation } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export function VoicePanel() {
@@ -11,8 +12,10 @@ export function VoicePanel() {
   const {
     activeChannelId, channelUsers, selfMute, selfDeaf,
     toggleMute, toggleDeaf, leaveChannel, latency,
-    isScreenSharing, screenSharingUserId, startScreenShare, stopScreenShare,
+    isScreenSharing, screenSharingUserId, startScreenShare, startWhiteboardShare, stopScreenShare,
   } = useVoiceStore();
+  const secureVoicePeerIssues = useVoiceStore((s) => s.secureVoicePeerIssues);
+  const secureVoiceActive = useVoiceStore((s) => s.secureVoiceActive);
   const { channels } = useServerStore();
   const { user } = useAuthStore();
   const servers = useServerStore((s) => s.servers);
@@ -35,9 +38,14 @@ export function VoicePanel() {
   const isServerDeafened = localVoiceUser?.serverDeafened ?? false;
 
   const otherSharing = screenSharingUserId && screenSharingUserId !== user?.id;
+  // From the live voice session, NOT the viewed server's channel list: a user
+  // browsing another server still has `channels` swapped out from under them,
+  // which would drop the E2E lock and the un-keyed-member warning mid-call and
+  // put the screen-share button back in an audio-only encrypted channel.
+  const isSecureVoice = secureVoiceActive || channel?.secure === true;
 
   return (
-    <div data-testid="voice-panel" className="border-t border-vox-border bg-vox-sidebar">
+    <div data-testid="voice-panel" className="mx-1 mb-1 rounded-xl border border-vox-border bg-vox-bg-tertiary">
       {/* Connection info row */}
       <div className="px-3 py-2">
         <div className="flex items-center gap-1.5">
@@ -45,6 +53,16 @@ export function VoicePanel() {
           <p className="text-xs font-semibold text-vox-voice-connected">
             {t('voice.connected')}
           </p>
+          {isSecureVoice && (
+            <span
+              className="shrink-0"
+              data-testid="secure-voice-e2e-lock"
+              title={t('secureVoice.locked')}
+              aria-label={t('secureVoice.locked')}
+            >
+              <Lock size={10} className="text-vox-voice-connected" />
+            </span>
+          )}
           {latency !== null && (
             <span className={clsx('text-[10px] font-medium', latencyColor)}>
               {latency}ms
@@ -73,20 +91,30 @@ export function VoicePanel() {
         </div>
       )}
 
+      {/* Secure voice: members we could not exchange keys with (spec §21) */}
+      {isSecureVoice && Object.keys(secureVoicePeerIssues).length > 0 && (
+        <div className="mx-3 mb-2 rounded-md bg-vox-accent-warning/10 border border-vox-accent-warning/20 px-2.5 py-1.5" data-testid="secure-voice-issues">
+          <p className="flex items-center gap-1 text-[11px] font-medium text-vox-accent-warning">
+            <ShieldAlert size={11} className="shrink-0" />
+            {t('secureVoice.peerIssues', { count: Object.keys(secureVoicePeerIssues).length })}
+          </p>
+        </div>
+      )}
+
       {/* Controls */}
-      <div className="flex items-center justify-between px-3 py-2 border-t border-vox-border">
+      <div className="flex items-center justify-between px-2.5 pb-2.5 pt-0.5">
         <div className="flex items-center gap-1">
           {/* Mute */}
           <button
             onClick={toggleMute}
             disabled={isServerMuted}
             className={clsx(
-              'rounded-full p-2 transition-colors',
+              'rounded-md p-1.5 transition-colors',
               isServerMuted
                 ? 'bg-vox-accent-danger/20 text-vox-accent-danger cursor-not-allowed'
                 : selfMute
                   ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
-                  : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
+                  : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
             )}
             title={isServerMuted ? t('voice.mutedByModerator') : selfMute ? t('voice.unmute') : t('voice.mute')}
             aria-label={isServerMuted ? t('voice.mutedByModerator') : selfMute ? t('voice.unmute') : t('voice.mute')}
@@ -99,12 +127,12 @@ export function VoicePanel() {
             onClick={toggleDeaf}
             disabled={isServerDeafened}
             className={clsx(
-              'rounded-full p-2 transition-colors',
+              'rounded-md p-1.5 transition-colors',
               isServerDeafened
                 ? 'bg-vox-accent-danger/20 text-vox-accent-danger cursor-not-allowed'
                 : selfDeaf
                   ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
-                  : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
+                  : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
             )}
             title={isServerDeafened ? t('voice.deafenedByModerator') : selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
             aria-label={isServerDeafened ? t('voice.deafenedByModerator') : selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
@@ -112,29 +140,59 @@ export function VoicePanel() {
             {selfDeaf || isServerDeafened ? <HeadphoneOff size={16} /> : <Headphones size={16} />}
           </button>
 
-          {/* Screen Share */}
+          {/* Screen Share — hidden in secure voice channels (audio-only v1,
+              spec §21; the server rejects screen producers there anyway) */}
+          {!isSecureVoice && (
           <button
             onClick={() => isScreenSharing ? stopScreenShare() : startScreenShare()}
             disabled={!!otherSharing}
             className={clsx(
-              'rounded-full p-2 transition-colors',
+              'rounded-md p-1.5 transition-colors',
               isScreenSharing
                 ? 'bg-vox-voice-connected/20 text-vox-voice-connected hover:bg-vox-accent-danger/20 hover:text-vox-accent-danger'
                 : otherSharing
                   ? 'bg-vox-bg-hover text-vox-text-muted cursor-not-allowed opacity-50'
-                  : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
+                  : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
             )}
             title={isScreenSharing ? t('voice.stopSharing') : otherSharing ? t('voice.someoneSharing') : t('voice.shareScreen')}
             aria-label={isScreenSharing ? t('voice.stopSharing') : otherSharing ? t('voice.someoneSharing') : t('voice.shareScreen')}
           >
             {isScreenSharing ? <MonitorOff size={16} /> : <Monitor size={16} />}
           </button>
+          )}
+
+          {/* Whiteboard — a canvas IS a screen (item 11); hidden while any
+              share is live (stopping goes through the share button) and in
+              secure voice with the whole share section */}
+          {!isSecureVoice && !isScreenSharing && (
+          <button
+            onClick={async () => {
+              await startWhiteboardShare();
+              // A blank board with a closed toolbar is a dead end — open it
+              if (useVoiceStore.getState().isScreenSharing) {
+                useAnnotationStore.getState().setIsEditing(true);
+              }
+            }}
+            disabled={!!otherSharing}
+            className={clsx(
+              'rounded-md p-1.5 transition-colors',
+              otherSharing
+                ? 'bg-vox-bg-hover text-vox-text-muted cursor-not-allowed opacity-50'
+                : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
+            )}
+            title={otherSharing ? t('voice.someoneSharing') : t('voice.shareWhiteboard')}
+            aria-label={otherSharing ? t('voice.someoneSharing') : t('voice.shareWhiteboard')}
+            data-testid="share-whiteboard"
+          >
+            <Presentation size={16} />
+          </button>
+          )}
         </div>
 
         {/* Disconnect */}
         <button
           onClick={leaveChannel}
-          className="rounded-full p-2 bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30 transition-colors"
+          className="rounded-md p-1.5 bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30 transition-colors"
           title={t('voice.disconnect')}
           aria-label={t('voice.disconnectFromVoice')}
         >

@@ -1,0 +1,44 @@
+# ── Auto-detect text files and normalize to LF in the repo ────────────────────
+# On checkout, Git converts to the platform's native line ending (CRLF on
+# Windows, LF elsewhere). In the Git object store, text files are always LF.
+* text=auto
+
+# ── Force LF on checkout for files that break with CRLF ──────────────────────
+# Shell scripts must be LF — CRLF causes /bin/sh parse errors.
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+
+# Lockfiles — pnpm's YAML parser treats \r\n as a document boundary.
+pnpm-lock.yaml text eol=lf
+# Cargo.lock is TOML; keep consistent across platforms.
+Cargo.lock text eol=lf
+
+# GitHub Actions workflows — YAML that runs on Linux runners.
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Rust / TOML sources
+*.rs text eol=lf
+*.toml text eol=lf
+
+# Prisma schema and migrations
+*.prisma text eol=lf
+
+# ── Binary files — never normalize ───────────────────────────────────────────
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.wasm binary
+*.mp3 binary
+*.ogg binary
+*.wav binary

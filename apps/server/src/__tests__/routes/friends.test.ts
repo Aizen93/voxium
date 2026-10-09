@@ -17,8 +17,9 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
+// Friend events target the recipient's per-user room: io.to('user:{id}').emit(...)
 const mockSocketEmit = vi.fn();
-const mockFetchSockets = vi.fn().mockResolvedValue([]);
+const mockTo = vi.fn(() => ({ emit: mockSocketEmit }));
 
 const prismaMock: Record<string, any> = {
   user: {
@@ -46,7 +47,7 @@ vi.mock('../../utils/prisma', () => ({
 // Socket.IO
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
-    fetchSockets: mockFetchSockets,
+    to: mockTo,
   })),
 }));
 
@@ -80,7 +81,7 @@ function mockAuthUser(overrides: Record<string, unknown> = {}) {
     bannedAt: null,
     tokenVersion: 0,
     role: 'user',
-    emailVerified: true,
+    emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
   };
   prismaMock.user.findUnique.mockResolvedValue({ ...defaults, ...overrides });
 }
@@ -123,7 +124,7 @@ describe('Friend Routes', () => {
     vi.clearAllMocks();
     app = createApp();
     mockAuthUser();
-    mockFetchSockets.mockResolvedValue([]);
+    mockTo.mockReturnValue({ emit: mockSocketEmit });
   });
 
   // ── GET /api/v1/friends ──────────────────────────────────────────────────
@@ -218,8 +219,6 @@ describe('Friend Routes', () => {
 
     it('emits friend:request_received to target user', async () => {
       const token = makeToken();
-      const targetSocket = { data: { userId: 'user-2' }, emit: mockSocketEmit };
-      mockFetchSockets.mockResolvedValue([targetSocket]);
 
       prismaMock.user.findFirst.mockResolvedValue(mockTargetUser);
       prismaMock.friendship.findFirst.mockResolvedValue(null);
@@ -230,6 +229,7 @@ describe('Friend Routes', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({ username: 'targetuser' });
 
+      expect(mockTo).toHaveBeenCalledWith('user:user-2');
       expect(mockSocketEmit).toHaveBeenCalledWith('friend:request_received', expect.objectContaining({
         friendship: expect.objectContaining({
           requesterId: 'user-1',
@@ -403,8 +403,6 @@ describe('Friend Routes', () => {
 
     it('emits friend:request_accepted to requester', async () => {
       const token = makeToken();
-      const requesterSocket = { data: { userId: 'user-2' }, emit: mockSocketEmit };
-      mockFetchSockets.mockResolvedValue([requesterSocket]);
 
       prismaMock.friendship.findUnique.mockResolvedValue({
         id: 'friendship-1',
@@ -427,6 +425,7 @@ describe('Friend Routes', () => {
         .post('/api/v1/friends/friendship-1/accept')
         .set('Authorization', `Bearer ${token}`);
 
+      expect(mockTo).toHaveBeenCalledWith('user:user-2');
       expect(mockSocketEmit).toHaveBeenCalledWith('friend:request_accepted', expect.objectContaining({
         friendship: expect.objectContaining({
           status: 'accepted',
@@ -554,8 +553,6 @@ describe('Friend Routes', () => {
 
     it('emits friend:removed to the other user', async () => {
       const token = makeToken();
-      const otherSocket = { data: { userId: 'user-2' }, emit: mockSocketEmit };
-      mockFetchSockets.mockResolvedValue([otherSocket]);
 
       prismaMock.friendship.findUnique.mockResolvedValue({
         id: 'friendship-1',
@@ -569,6 +566,7 @@ describe('Friend Routes', () => {
         .delete('/api/v1/friends/friendship-1')
         .set('Authorization', `Bearer ${token}`);
 
+      expect(mockTo).toHaveBeenCalledWith('user:user-2');
       expect(mockSocketEmit).toHaveBeenCalledWith('friend:removed', { userId: 'user-1' });
     });
 

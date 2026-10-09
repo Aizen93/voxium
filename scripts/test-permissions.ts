@@ -8,6 +8,7 @@
  */
 
 import axios, { type AxiosError } from 'axios';
+import { solveRegistrationPow } from '../packages/shared/src/pow';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import pg from 'pg';
 import { readFileSync, existsSync } from 'fs';
@@ -89,11 +90,16 @@ function fail(desc: string, err: unknown) {
 
 const h = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
 
-const LIMITS_TO_RAISE = ['login', 'register', 'admin', 'general', 'roleManage', 'memberManage', 'categoryManage', 'upload', 'messageSend', 'search', 'markRead'];
+const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'powChallenge', 'admin', 'general', 'roleManage', 'memberManage', 'categoryManage', 'upload', 'messageSend', 'search', 'markRead'];
 
 async function login(email: string): Promise<{ token: string; userId: string }> {
   const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD });
   const r = data.data || data;
+  // Accounts from runs before consent-at-signup are refused everything until
+  // they accept — do what a real client does on its consent screen.
+  if (r.user?.consentRequired) {
+    await axios.post(`${API}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, h(r.accessToken));
+  }
   return { token: r.accessToken, userId: r.user.id };
 }
 
@@ -108,7 +114,12 @@ async function raiseRateLimits(token: string): Promise<void> {
 }
 
 async function resetRateLimits(token: string): Promise<void> {
-  for (const name of LIMITS_TO_RAISE) {
+  // 'admin' LAST: the moment it is reset, every further reset call is itself
+  // subject to the restored admin bucket — which this script has just spent
+  // on hundreds of admin calls — and the swallowed 429s left the remaining
+  // overrides raised. 'general' (per IP) likewise.
+  const order = [...LIMITS_TO_RAISE.filter((n) => n !== 'admin' && n !== 'general'), 'general', 'admin'];
+  for (const name of order) {
     try {
       await axios.post(`${API}/admin/rate-limits/${name}/reset`, {}, h(token));
     } catch {
@@ -119,9 +130,15 @@ async function resetRateLimits(token: string): Promise<void> {
 
 async function registerUser(username: string, email: string): Promise<{ token: string; userId: string }> {
   try {
-    await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD });
-  } catch {
-    // May already exist
+    // Registration requires a solved proof-of-work and explicit consent to the
+    // legal documents — the same code path a browser takes. Without the pow
+    // the 400 used to be swallowed here and login then failed on an account
+    // that was never created.
+    const { data: chal } = await axios.get(`${API}/auth/register-challenge`);
+    const pow = await solveRegistrationPow(chal.data);
+    await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow, acceptTerms: true, acceptPrivacy: true });
+  } catch (err) {
+    if (!axios.isAxiosError(err) || err.response?.status !== 409) throw err; // 409 = already exists
   }
   return login(email);
 }

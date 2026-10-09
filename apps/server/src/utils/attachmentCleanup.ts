@@ -1,7 +1,8 @@
 import { prisma } from './prisma';
 import { deleteMultipleFromS3 } from './s3';
-import { sendCleanupReport } from './email';
+import { sendCleanupReport, describeEmailError } from './email';
 import { LIMITS } from '@voxium/shared';
+import { msUntilDailySlot, withClusterLock, wasSkipped, type ClusterLockSkip } from './dailySchedule';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
@@ -9,20 +10,30 @@ let stopped = true;
 const CLEANUP_HOUR = 4; // 4 AM
 const BATCH_SIZE = 100;
 
-function msUntilNext4AM(): number {
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(CLEANUP_HOUR, 0, 0, 0);
-  if (next.getTime() <= now.getTime()) {
-    next.setDate(next.getDate() + 1);
-  }
-  return next.getTime() - now.getTime();
+// Production is multi-node and every node fires this slot. Without the lock
+// each of them ran the expiry pass — N S3 delete passes over the same rows
+// and N CLEANUP_REPORT_EMAIL reports a night. The lock is HELD for 20 hours
+// after a successful pass rather than released (withClusterLock's
+// holdOnSuccess): a peer whose timer fires a moment later — or an hour later,
+// in another timezone — must find it taken. 20 h < 24 h, so tomorrow's slot
+// claims it again.
+export const ATTACHMENT_CLEANUP_LOCK_KEY = 'lock:attachmentcleanup';
+export const ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS = 20 * 60 * 60;
+// When Redis itself is unreachable at the slot, nobody knows whether the pass
+// ran. Try again soon rather than in 24 h — a peer that did run holds the lock,
+// so the retry is safe; if Redis is still down it says so every 15 minutes.
+export const ATTACHMENT_CLEANUP_RETRY_MS = 15 * 60 * 1000;
+
+export interface AttachmentCleanupResult {
+  filesExpired: number;
+  sizeFreed: number;
+  error: string | null;
 }
 
 export function startAttachmentCleanup() {
   if (!stopped) return;
   stopped = false;
-  scheduleNext();
+  scheduleNext(false);
 }
 
 export function stopAttachmentCleanup() {
@@ -33,16 +44,48 @@ export function stopAttachmentCleanup() {
   }
 }
 
-function scheduleNext() {
+function scheduleNext(afterRun: boolean) {
   if (stopped) return;
-  const delay = msUntilNext4AM();
+  const delay = msUntilDailySlot(CLEANUP_HOUR, 0, afterRun);
   console.log(`[Cleanup] Next run scheduled in ${Math.round(delay / 60000)} minutes`);
   timeoutId = setTimeout(runCleanup, delay);
 }
 
 async function runCleanup() {
   if (stopped) return;
+  let retrySoon = false;
+  try {
+    const result = await runAttachmentCleanup();
+    retrySoon = wasSkipped(result) && result.skipped === 'unavailable';
+  } catch (err) {
+    // The pass logs its own failures; this only catches the lock plumbing.
+    console.error('[Cleanup] Attachment cleanup run failed:', err instanceof Error ? err.message : err);
+  } finally {
+    if (retrySoon) scheduleRetry(); else scheduleNext(true);
+  }
+}
 
+function scheduleRetry() {
+  if (stopped) return;
+  console.error(`[Cleanup] Redis unavailable at the cleanup slot — retrying in ${ATTACHMENT_CLEANUP_RETRY_MS / 60000} minutes`);
+  timeoutId = setTimeout(runCleanup, ATTACHMENT_CLEANUP_RETRY_MS);
+}
+
+/**
+ * One expiry pass plus its report, under the cluster lock. Exported for tests;
+ * the scheduler calls it from the timer. Resolves `{ skipped: 'locked' }` when
+ * another node holds the lock — no rows are touched and no report is sent, the
+ * holder's report is the night's — and `{ skipped: 'unavailable' }` when Redis
+ * could not be reached (fail closed; the scheduler retries soon).
+ */
+export async function runAttachmentCleanup(): Promise<AttachmentCleanupResult | ClusterLockSkip> {
+  return withClusterLock(
+    { key: ATTACHMENT_CLEANUP_LOCK_KEY, ttlSeconds: ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS, tag: '[Cleanup]', holdOnSuccess: true },
+    expireAttachmentsAndReport,
+  );
+}
+
+async function expireAttachmentsAndReport(): Promise<AttachmentCleanupResult> {
   const startedAt = new Date();
   const cutoff = new Date(Date.now() - LIMITS.ATTACHMENT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
   let totalExpired = 0;
@@ -100,9 +143,9 @@ async function runCleanup() {
         error,
       });
     } catch (emailErr) {
-      console.error('[Cleanup] Failed to send report email:', emailErr);
+      console.error('[Cleanup] Failed to send report email:', describeEmailError(emailErr));
     }
   }
 
-  scheduleNext();
+  return { filesExpired: totalExpired, sizeFreed: totalSizeFreed, error };
 }
