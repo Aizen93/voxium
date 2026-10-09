@@ -9,7 +9,7 @@ import { isFeatureEnabled } from '../utils/featureFlags';
 import { joinServerMember } from '../utils/serverJoin';
 import { serverSelect } from '../utils/serverSelect';
 import { emitToModerators } from '../utils/moderatorAudience';
-import { encodeDiscoveryCursor, decodeDiscoveryCursor, hashDiscoveryQuery } from '../utils/discoveryCursor';
+import { encodeDiscoveryCursor, decodeDiscoveryCursor, hashDiscoveryQuery, type DiscoveryCursor } from '../utils/discoveryCursor';
 import {
   DISCOVERY_PAGE_SIZE,
   DISCOVERY_MAX_PAGE_SIZE,
@@ -48,13 +48,18 @@ const cardSelect = {
   id: true, name: true, iconUrl: true, description: true, tags: true,
   memberCount: true, onlineCount: true, weeklyMessages: true, joinMode: true,
   featuredAt: true, createdAt: true, statsRefreshedAt: true,
+  // the Active sort's key — read for the cursor, never put on a card
+  activityScore: true,
 } as const;
 
 type CardRow = {
   id: string; name: string; iconUrl: string | null; description: string | null; tags: string[];
   memberCount: number; onlineCount: number; weeklyMessages: number; joinMode: string;
-  featuredAt: Date | null; createdAt: Date; statsRefreshedAt: Date | null;
+  featuredAt: Date | null; createdAt: Date; statsRefreshedAt: Date | null; activityScore: number;
 };
+
+/** The depth cap counts ROWS, so the ceiling is the same whatever page size the client picks. */
+const DISCOVERY_MAX_ROWS = DISCOVERY_MAX_PAGES * DISCOVERY_PAGE_SIZE;
 
 /** The cacheable part of a card: everything but the two per-user flags. */
 type PublicCard = Omit<DiscoveryServer, 'isMember' | 'requestPending'>;
@@ -94,6 +99,44 @@ function orderFor(sort: DiscoverySort): Prisma.ServerOrderByWithRelationInput[] 
   }
 }
 
+/** The sort-key value of a row, as the cursor carries it. */
+function sortKeyOf(sort: DiscoverySort, row: CardRow): string | number {
+  switch (sort) {
+    case 'members': return row.memberCount;
+    case 'newest': return row.createdAt.toISOString();
+    case 'name': return row.name;
+    case 'active':
+    default: return row.activityScore;
+  }
+}
+
+/**
+ * "Strictly after the cursor" in the sort's order: (key, id) smaller for the
+ * descending sorts, greater for name. The planner serves it as the sort
+ * index's range with the predicate as its filter, skipping at most the rows
+ * above the cursor — bounded by the depth cap (measured at one million rows:
+ * page 40 in 0.1–5 ms). Independent of whether the cursor row still exists,
+ * is still listed, or has moved: the page is frozen to the keys the viewer
+ * was issued, which Prisma's `cursor` + `skip: 1` (keyed on the id alone)
+ * could not promise.
+ */
+function keysetAfter(cursor: DiscoveryCursor): Prisma.ServerWhereInput {
+  const { id, key } = cursor;
+  switch (cursor.sort) {
+    case 'members':
+      return { OR: [{ memberCount: { lt: key as number } }, { memberCount: key as number, id: { lt: id } }] };
+    case 'newest': {
+      const at = new Date(key as string);
+      return { OR: [{ createdAt: { lt: at } }, { createdAt: at, id: { lt: id } }] };
+    }
+    case 'name':
+      return { OR: [{ name: { gt: key as string } }, { name: key as string, id: { gt: id } }] };
+    case 'active':
+    default:
+      return { OR: [{ activityScore: { lt: key as number } }, { activityScore: key as number, id: { lt: id } }] };
+  }
+}
+
 /** ILIKE pattern for the capped total's raw count — `%`, `_` and `\` escaped (Prisma escapes its own `contains`). */
 function likePattern(q: string): string {
   return `%${q.replace(/[\\%_]/g, '\\$&')}%`;
@@ -123,15 +166,16 @@ const COUNT_ORDER: Record<DiscoverySort, Prisma.Sql> = {
  *    ones (≈ 3 ms) — through the activity index the same count read heap
  *    rows for 130 ms;
  *  - a query AND a tag: a plain count, capped in code — the planner answers
- *    it with the trigram bitmap and the tag as a filter (≈ 60 ms even for a
- *    three-letter fragment), while every ordered LIMIT form walked a sort
- *    index for half a second.
+ *    it with a BitmapAnd of the trigram and tag indexes (≈ 30 ms), while
+ *    every ordered LIMIT form walked a sort index for half a second.
+ * The tag is written `tags @> ARRAY[tag]` — the operator the GIN array index
+ * serves (`= ANY(tags)` is not one of them).
  */
 async function countCapped(q: string, tag: string, sort: DiscoverySort): Promise<number> {
   if (q && tag) {
     const rows = await prisma.$queryRaw<Array<{ n: number }>>`
       SELECT COUNT(*)::int AS n FROM servers
-      WHERE discovery_listed = true AND name ILIKE ${likePattern(q)} AND ${tag} = ANY(tags)`;
+      WHERE discovery_listed = true AND name ILIKE ${likePattern(q)} AND tags @> ARRAY[${tag}]::text[]`;
     return Math.min(rows[0]?.n ?? 0, DISCOVERY_TOTAL_CAP + 1);
   }
   const order = q ? COUNT_ORDER.name : COUNT_ORDER[sort];
@@ -140,7 +184,7 @@ async function countCapped(q: string, tag: string, sort: DiscoverySort): Promise
       SELECT 1 FROM servers
       WHERE discovery_listed = true
         ${q ? Prisma.sql`AND name ILIKE ${likePattern(q)}` : Prisma.empty}
-        ${tag ? Prisma.sql`AND ${tag} = ANY(tags)` : Prisma.empty}
+        ${tag ? Prisma.sql`AND tags @> ARRAY[${tag}]::text[]` : Prisma.empty}
       ${order}
       LIMIT ${DISCOVERY_TOTAL_CAP + 1}
     ) t`;
@@ -185,9 +229,9 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
     const qHash = hashDiscoveryQuery(q);
 
     const cursorToken = typeof req.query.cursor === 'string' && req.query.cursor ? req.query.cursor : '';
-    const cursor = cursorToken ? decodeDiscoveryCursor(cursorToken, { sort, tag, q: qHash }) : null;
+    const cursor = cursorToken ? decodeDiscoveryCursor(cursorToken, { sort, tag, q: qHash, limit }) : null;
     if (cursorToken && !cursor) throw new BadRequestError('Invalid cursor');
-    if (cursor && cursor.page > DISCOVERY_MAX_PAGES) throw new BadRequestError('Refine your search');
+    if (cursor && cursor.page * cursor.limit > DISCOVERY_MAX_ROWS) throw new BadRequestError('Refine your search');
     const page = cursor ? cursor.page : 1;
 
     // The public part of the page is shared by every viewer for a minute —
@@ -203,7 +247,7 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
 
     if (!publicPage) {
       const where: Prisma.ServerWhereInput = {
-        // discoveryListed alone — materialised eligibility, no joins, no ORs
+        // discoveryListed alone — materialised eligibility, no joins
         discoveryListed: true,
         ...(q ? { name: { contains: q, mode: 'insensitive' as const } } : {}),
         ...(tag ? { tags: { has: tag } } : {}),
@@ -211,10 +255,9 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
 
       const [rows, featuredRows, totalCapped] = await Promise.all([
         prisma.server.findMany({
-          where,
+          where: cursor ? { ...where, ...keysetAfter(cursor) } : where,
           orderBy: orderFor(sort),
           take: limit + 1,
-          ...(cursor ? { cursor: { id: cursor.id }, skip: 1 } : {}),
           select: cardSelect,
         }),
         // Featured only on the first page without a query: a separate row,
@@ -235,8 +278,8 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
       const last = pageRows[pageRows.length - 1];
       // No cursor is issued past the depth cap — the answer there is "refine
       // your search", and the client never has to be told twice.
-      const nextCursor = hasMore && last && page + 1 <= DISCOVERY_MAX_PAGES
-        ? encodeDiscoveryCursor({ sort, tag, q: qHash, id: last.id, page: page + 1 })
+      const nextCursor = hasMore && last && (page + 1) * limit <= DISCOVERY_MAX_ROWS
+        ? encodeDiscoveryCursor({ sort, tag, q: qHash, limit, id: last.id, key: sortKeyOf(sort, last), page: page + 1 })
         : null;
 
       publicPage = {
@@ -253,11 +296,11 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
     }
 
     // isMember / requestPending are the caller's, never cached: two IN (ids)
-    // lookups on primary keys per page.
-    const [featured, servers] = await Promise.all([
-      withUserFlags(req.user!.userId, publicPage.featured),
-      withUserFlags(req.user!.userId, publicPage.servers),
-    ]);
+    // lookups on primary keys per page, over the featured row and the page
+    // together (withUserFlags keeps the order).
+    const flagged = await withUserFlags(req.user!.userId, [...publicPage.featured, ...publicPage.servers]);
+    const featured = flagged.slice(0, publicPage.featured.length);
+    const servers = flagged.slice(publicPage.featured.length);
     const data: DiscoveryPage = { featured, servers, nextCursor: publicPage.nextCursor, totalCapped: publicPage.totalCapped };
     res.json({ success: true, data });
   } catch (err) {
@@ -269,8 +312,11 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
 
 /**
  * Opacity: a hidden server answers exactly like a nonexistent one, on every
- * directory endpoint (card, join, request, cancel) — byte-identical body.
- * Returns the card row (what every one of them needs at most).
+ * directory endpoint that READS it (card, join, request) — byte-identical
+ * body. Returns the card row (what every one of them needs at most). Cancel
+ * is deliberately not behind it: the requester's own pending row must stay
+ * withdrawable after the server is hidden or locked (such requests are kept,
+ * and still approvable from the Members tab).
  */
 async function listedServerOrThrow(serverId: string): Promise<CardRow> {
   const server = await prisma.server.findUnique({
@@ -358,17 +404,41 @@ discoveryRouter.post('/servers/:serverId/join', rateLimitDiscoveryJoin, async (r
     }
 
     // A declined row past its cooldown is reused (the sweep may not have
-    // reached it yet); otherwise a fresh one.
-    const request = existing
-      ? await prisma.serverJoinRequest.update({
-          where: { id: existing.id },
-          data: { status: 'pending', message, decidedById: null, decidedAt: null, createdAt: new Date() },
-          include: { user: { select: requestUserSelect } },
-        })
-      : await prisma.serverJoinRequest.create({
-          data: { serverId, userId, message },
-          include: { user: { select: requestUserSelect } },
+    // reached it yet); otherwise a fresh one. Two concurrent requests from
+    // one user (a double-click, two tabs) race the (serverId, userId) unique:
+    // the loser answers like the idempotent branch above, never a 500.
+    const createRequest = () => prisma.serverJoinRequest.create({
+      data: { serverId, userId, message },
+      include: { user: { select: requestUserSelect } },
+    });
+    let request;
+    try {
+      request = existing
+        ? await prisma.serverJoinRequest.update({
+            where: { id: existing.id },
+            data: { status: 'pending', message, decidedById: null, decidedAt: null, createdAt: new Date() },
+            include: { user: { select: requestUserSelect } },
+          })
+        : await createRequest();
+    } catch (err) {
+      const code = (err as { code?: unknown })?.code;
+      if (code === 'P2025') {
+        // the row to reuse was swept between the read and the update
+        request = await createRequest();
+      } else if (code === 'P2002') {
+        const raced = await prisma.serverJoinRequest.findUnique({
+          where: { serverId_userId: { serverId, userId } },
+          select: { status: true },
         });
+        if (raced?.status === 'pending') {
+          res.json({ success: true, data: { status: 'pending' } });
+          return;
+        }
+        throw err;
+      } else {
+        throw err;
+      }
+    }
 
     // Moderators only — never the server room (that would show every member
     // who is asking to join).
@@ -383,9 +453,11 @@ discoveryRouter.post('/servers/:serverId/join', rateLimitDiscoveryJoin, async (r
 discoveryRouter.delete('/servers/:serverId/join', rateLimitDiscoveryJoin, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
-    const server = await listedServerOrThrow(req.params.serverId);
-    const serverId = server.id;
+    const { serverId } = req.params;
 
+    // No listing check: a pending request survives the server being hidden
+    // or locked (it stays approvable), so its owner must be able to withdraw
+    // it. Nothing is revealed — an unknown or hidden server has no row.
     const { count } = await prisma.serverJoinRequest.deleteMany({ where: { serverId, userId, status: 'pending' } });
     if (count === 0) throw new NotFoundError('Join request');
 

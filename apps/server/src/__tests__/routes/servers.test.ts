@@ -1074,7 +1074,8 @@ describe('Server Routes', () => {
 
       expect(res.status).toBe(200);
       expect(mockJoinServerMember).toHaveBeenCalledWith('user-2', 'srv-1', { via: 'approval', extraWrites: [DELETE] });
-      expect(prismaMock.serverJoinRequest.delete).toHaveBeenCalledWith({ where: { id: 'req-1' } });
+      // status-scoped: a decline that committed first leaves a row this delete must not find
+      expect(prismaMock.serverJoinRequest.delete).toHaveBeenCalledWith({ where: { id: 'req-1', status: 'pending' } });
       expect(mockTo).toHaveBeenCalledWith('user:user-2');
       expect(mockEmit).toHaveBeenCalledWith('server:join_approved', { server: SERVER_ROW });
       expect(mockEmitToModerators).toHaveBeenCalledWith('srv-1', 'server:join_request_resolved', { serverId: 'srv-1', userId: 'user-2', outcome: 'approved' });

@@ -1,6 +1,6 @@
 import { prisma } from './prisma';
 import { getRedis } from './redis';
-import { withClusterLock, wasSkipped } from './dailySchedule';
+import { withClusterLock, wasSkipped, lockToken, releaseLockIfOwned } from './dailySchedule';
 import { DISCOVERY_SCORE_WEIGHTS, JOIN_REQUEST_DECLINE_COOLDOWN_DAYS, JOIN_REQUEST_PENDING_TTL_DAYS } from '@voxium/shared';
 
 // The directory's activity figures on a daily cycle
@@ -43,6 +43,16 @@ export const DISCOVERY_STATS_BACKLOG_MS = 48 * 60 * 60 * 1000;
 export const DISCOVERY_HOUSEKEEPING_HOURLY_KEY = 'discovery:housekeeping:hourly';
 export const DISCOVERY_HOUSEKEEPING_DAILY_KEY = 'discovery:housekeeping:daily';
 export const DISCOVERY_HOUSEKEEPING_HOUR = 4;
+/** The housekeeping claims are SET NX EX keys sized as the slot's exclusivity
+ *  window (shorter than the interval, so the next slot can claim) — the same
+ *  idiom as the held cluster lock. Two nodes in different timezones have
+ *  different 04:xx hours; the claim, not the wall clock, is what makes the
+ *  nightly pass once per cluster-day. */
+export const DISCOVERY_HOUSEKEEPING_HOURLY_TTL_S = 55 * 60;
+export const DISCOVERY_HOUSEKEEPING_DAILY_TTL_S = 20 * 60 * 60;
+/** The backlog count after a run is capped: its cost grows with the backlog,
+ *  i.e. exactly when the job is behind. Above the cap the log says "N+". */
+export const DISCOVERY_BACKLOG_COUNT_CAP = 100_000;
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
@@ -165,12 +175,21 @@ export async function recomputeServerStats(ids: string[]): Promise<void> {
     WHERE s.id = v.id`;
 }
 
-/** Listed servers whose figures are missing or older than the backlog window. */
+/**
+ * Listed servers whose figures are missing or older than the backlog window,
+ * counted through a subquery capped at DISCOVERY_BACKLOG_COUNT_CAP + 1 rows
+ * (an index-only range scan that stops at the cap — never a count that
+ * scales with how far behind the job is).
+ */
 export async function countStatsBacklog(now: Date = new Date()): Promise<number> {
   const cutoff = new Date(now.getTime() - DISCOVERY_STATS_BACKLOG_MS);
-  return prisma.server.count({
-    where: { discoveryListed: true, OR: [{ statsRefreshedAt: null }, { statsRefreshedAt: { lt: cutoff } }] },
-  });
+  const rows = await prisma.$queryRaw<Array<{ n: number }>>`
+    SELECT COUNT(*)::int AS n FROM (
+      SELECT 1 FROM servers
+      WHERE discovery_listed = true AND (discovery_stats_at IS NULL OR discovery_stats_at < ${cutoff})
+      LIMIT ${DISCOVERY_BACKLOG_COUNT_CAP + 1}
+    ) t`;
+  return rows[0]?.n ?? 0;
 }
 
 /** The two join-request sweeps, each served by its [status, …] index. */
@@ -190,10 +209,15 @@ export async function sweepJoinRequests(now: Date = new Date()): Promise<{ decli
  * Each writes only the rows that disagree.
  */
 export async function correctDrift(): Promise<{ memberCounts: number; listed: number }> {
+  // The GROUP BY is the statement's snapshot, but under READ COMMITTED the
+  // `<>` is re-checked against the NEWEST version of a row a concurrent
+  // join just incremented — and would write the pre-join count back over
+  // it. Both membership helpers stamp updated_at, so rows touched in the
+  // last five minutes are left for the next night.
   const memberCounts = await prisma.$executeRaw`
     UPDATE servers s SET member_count = c.n
     FROM (SELECT server_id, COUNT(*)::int AS n FROM server_members GROUP BY server_id) c
-    WHERE c.server_id = s.id AND s.member_count <> c.n`;
+    WHERE c.server_id = s.id AND s.member_count <> c.n AND s.updated_at < now() - interval '5 minutes'`;
   const listed = await prisma.$executeRaw`
     UPDATE servers s SET discovery_listed = (
       s.discoverable AND NOT s.invites_locked AND s.discovery_blocked_at IS NULL AND u.banned_at IS NULL
@@ -205,16 +229,23 @@ export async function correctDrift(): Promise<{ memberCounts: number; listed: nu
   return { memberCounts, listed };
 }
 
-/** Whether the hourly / daily housekeeping is due, judged from Redis markers the lock holder stamps. */
-export async function housekeepingDue(now: Date = new Date()): Promise<{ hourly: boolean; daily: boolean }> {
+/**
+ * Claim the hourly and (inside the 04:xx slot) the daily housekeeping BEFORE
+ * doing it: `SET NX EX` keys whose TTL is the slot's exclusivity window.
+ * Returns the claim tokens (null = not claimed: someone did it this slot, or
+ * not in the slot). A claim whose work then fails is released so the next
+ * cycle retries, see runCycleBody.
+ */
+export async function claimHousekeeping(now: Date = new Date()): Promise<{ hourly: string | null; daily: string | null }> {
   const redis = getRedis();
-  const [hourlyAt, dailyAt] = await Promise.all([
-    redis.get(DISCOVERY_HOUSEKEEPING_HOURLY_KEY),
-    redis.get(DISCOVERY_HOUSEKEEPING_DAILY_KEY),
-  ]);
-  const hourly = !hourlyAt || now.getTime() - new Date(hourlyAt).getTime() >= 60 * 60 * 1000;
+  const claim = async (key: string, ttl: number): Promise<string | null> => {
+    const token = lockToken();
+    const ok = await redis.set(key, token, { NX: true, EX: ttl });
+    return ok === 'OK' ? token : null;
+  };
+  const hourly = await claim(DISCOVERY_HOUSEKEEPING_HOURLY_KEY, DISCOVERY_HOUSEKEEPING_HOURLY_TTL_S);
   const inSlot = now.getHours() === DISCOVERY_HOUSEKEEPING_HOUR;
-  const daily = inSlot && (!dailyAt || new Date(dailyAt).toDateString() !== now.toDateString());
+  const daily = inSlot ? await claim(DISCOVERY_HOUSEKEEPING_DAILY_KEY, DISCOVERY_HOUSEKEEPING_DAILY_TTL_S) : null;
   return { hourly, daily };
 }
 
@@ -222,36 +253,51 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
   const startedAt = Date.now();
   let refreshed = 0;
   let batches = 0;
+  let drained = false;
 
   while (refreshed < DISCOVERY_STATS_RUN_MAX && Date.now() - startedAt < DISCOVERY_STATS_RUN_BUDGET_MS) {
     const ids = await pickStaleServerIds(Math.min(DISCOVERY_STATS_BATCH, DISCOVERY_STATS_RUN_MAX - refreshed));
-    if (ids.length === 0) break;
+    if (ids.length === 0) {
+      drained = true;
+      break;
+    }
     await recomputeServerStats(ids);
     refreshed += ids.length;
     batches += 1;
   }
 
-  const backlog = await countStatsBacklog();
+  // Nothing stale was left to pick, so nothing can be older than 48 h
+  const backlog = drained ? 0 : await countStatsBacklog();
   const elapsedMs = Date.now() - startedAt;
   if (refreshed > 0 || backlog > 0) {
-    console.log(`[Discovery] Refreshed ${refreshed} listed server(s) in ${batches} batch(es), ${elapsedMs}ms; backlog older than 48h: ${backlog}`);
+    const backlogLabel = backlog > DISCOVERY_BACKLOG_COUNT_CAP ? `${DISCOVERY_BACKLOG_COUNT_CAP}+` : String(backlog);
+    console.log(`[Discovery] Refreshed ${refreshed} listed server(s) in ${batches} batch(es), ${elapsedMs}ms; backlog older than 48h: ${backlogLabel}`);
   }
 
-  const due = await housekeepingDue();
-  const now = new Date().toISOString();
-  if (due.hourly) {
-    const swept = await sweepJoinRequests();
-    if (swept.declined + swept.pending > 0) {
-      console.log(`[Discovery] Swept ${swept.declined} declined and ${swept.pending} stale pending join request(s)`);
+  const claims = await claimHousekeeping();
+  if (claims.hourly) {
+    try {
+      const swept = await sweepJoinRequests();
+      if (swept.declined + swept.pending > 0) {
+        console.log(`[Discovery] Swept ${swept.declined} declined and ${swept.pending} stale pending join request(s)`);
+      }
+    } catch (err) {
+      await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_HOURLY_KEY, claims.hourly)
+        .catch((e) => console.warn('[Discovery] Hourly claim release failed (it expires on its own):', e instanceof Error ? e.message : e));
+      throw err;
     }
-    await getRedis().set(DISCOVERY_HOUSEKEEPING_HOURLY_KEY, now);
   }
-  if (due.daily) {
-    const fixed = await correctDrift();
-    console.log(`[Discovery] Nightly drift correction: ${fixed.memberCounts} member count(s), ${fixed.listed} listing flag(s)`);
-    await getRedis().set(DISCOVERY_HOUSEKEEPING_DAILY_KEY, now);
+  if (claims.daily) {
+    try {
+      const fixed = await correctDrift();
+      console.log(`[Discovery] Nightly drift correction: ${fixed.memberCounts} member count(s), ${fixed.listed} listing flag(s)`);
+    } catch (err) {
+      await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_DAILY_KEY, claims.daily)
+        .catch((e) => console.warn('[Discovery] Daily claim release failed (it expires on its own):', e instanceof Error ? e.message : e));
+      throw err;
+    }
   }
 
-  return { refreshed, batches, elapsedMs, backlog, hourlyHousekeeping: due.hourly, dailyHousekeeping: due.daily };
+  return { refreshed, batches, elapsedMs, backlog, hourlyHousekeeping: claims.hourly !== null, dailyHousekeeping: claims.daily !== null };
 }
 

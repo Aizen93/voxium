@@ -18,10 +18,11 @@ vi.mock('../../utils/redis', () => ({ NODE_ID: () => 'node-under-test', getRedis
 
 import {
   runDiscoveryStatsCycle, startDiscoveryStats, stopDiscoveryStats, pickStaleServerIds, recomputeServerStats,
-  sweepJoinRequests, correctDrift, housekeepingDue, countStatsBacklog,
+  sweepJoinRequests, correctDrift, claimHousekeeping, countStatsBacklog,
   DISCOVERY_STATS_LOCK_KEY, DISCOVERY_STATS_LOCK_TTL_SECONDS, DISCOVERY_STATS_RETRY_MS, DISCOVERY_STATS_INTERVAL_MS,
   DISCOVERY_STATS_BATCH, DISCOVERY_STATS_RUN_MAX, DISCOVERY_STATS_RUN_BUDGET_MS, DISCOVERY_STATS_STALE_MS,
   DISCOVERY_HOUSEKEEPING_HOURLY_KEY, DISCOVERY_HOUSEKEEPING_DAILY_KEY, DISCOVERY_HOUSEKEEPING_HOUR,
+  DISCOVERY_HOUSEKEEPING_HOURLY_TTL_S, DISCOVERY_HOUSEKEEPING_DAILY_TTL_S, DISCOVERY_BACKLOG_COUNT_CAP,
 } from '../../utils/discoveryStats';
 
 const ids = (n: number, prefix = 's') => Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}` }));
@@ -43,6 +44,8 @@ beforeEach(() => {
 afterEach(() => {
   stopDiscoveryStats();
   vi.useRealTimers();
+  // a failing assertion must not leak a mocked Date.now / setTimeout into the next test
+  vi.restoreAllMocks();
 });
 
 describe('pickStaleServerIds — NULL figures first, then oldest, two index range scans', () => {
@@ -109,24 +112,32 @@ describe('the cycle', () => {
       .mockResolvedValueOnce(ids(500))                                // batch 1: nulls fill it (no second scan)
       .mockResolvedValueOnce(ids(120)).mockResolvedValueOnce(ids(30)) // batch 2: 120 nulls + 30 old
       .mockResolvedValue([]);                                         // batch 3: nothing left → stop
-    prismaMock.server.count.mockResolvedValue(4);
+    redis.set.mockImplementation(async (key: string) => (key === DISCOVERY_STATS_LOCK_KEY ? 'OK' : null)); // housekeeping not claimed
 
     const run = await runDiscoveryStatsCycle();
 
     expect(redis.set).toHaveBeenCalledWith(DISCOVERY_STATS_LOCK_KEY, expect.stringMatching(/^node-under-test:/), { NX: true, EX: DISCOVERY_STATS_LOCK_TTL_SECONDS });
-    expect(run).toMatchObject({ refreshed: 650, batches: 2, backlog: 4 });
+    // the loop drained, so the backlog is known to be 0 without a count
+    expect(run).toMatchObject({ refreshed: 650, batches: 2, backlog: 0 });
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(4); // two aggregates per batch, no backlog count
     // held on success: no compare-and-delete release
     expect(redis.eval).not.toHaveBeenCalled();
-    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('backlog older than 48h: 4'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('backlog older than 48h: 0'));
     expect(DISCOVERY_STATS_BATCH).toBe(500);
   });
 
-  it('stops at the row cap', async () => {
+  it('stops at the row cap and then counts the backlog through the capped subquery, logging "N+" above the cap', async () => {
     prismaMock.server.findMany.mockImplementation(async ({ take }: any) => ids(take));
+    prismaMock.$queryRaw.mockImplementation(async (strings: string[]) =>
+      strings.join('?').includes('LIMIT') ? [{ n: DISCOVERY_BACKLOG_COUNT_CAP + 1 }] : []);
+    redis.set.mockImplementation(async (key: string) => (key === DISCOVERY_STATS_LOCK_KEY ? 'OK' : null));
+
     const run = await runDiscoveryStatsCycle();
     expect(run?.refreshed).toBe(DISCOVERY_STATS_RUN_MAX);
     expect(run?.batches).toBe(DISCOVERY_STATS_RUN_MAX / DISCOVERY_STATS_BATCH);
+    expect(run?.backlog).toBe(DISCOVERY_BACKLOG_COUNT_CAP + 1);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining(`backlog older than 48h: ${DISCOVERY_BACKLOG_COUNT_CAP}+`));
   });
 
   it('stops at the time budget and leaves the rest for the next run', async () => {
@@ -134,11 +145,11 @@ describe('the cycle', () => {
     let t = 1_000_000;
     // every Date.now() read advances the clock 12 s: start → check (0) → batch → check (24 s) → batch → check (36 s) stop
     vi.spyOn(Date, 'now').mockImplementation(() => { t += 12_000; return t; });
+    redis.set.mockImplementation(async (key: string) => (key === DISCOVERY_STATS_LOCK_KEY ? 'OK' : null));
 
     const run = await runDiscoveryStatsCycle();
     expect(run?.batches).toBeLessThan(DISCOVERY_STATS_RUN_MAX / DISCOVERY_STATS_BATCH);
     expect(run!.elapsedMs).toBeGreaterThanOrEqual(DISCOVERY_STATS_RUN_BUDGET_MS);
-    vi.restoreAllMocks();
   });
 
   it('another node holds the lock: no reads, no writes, next run in 5 min', async () => {
@@ -185,23 +196,41 @@ describe('the cycle', () => {
 });
 
 describe('housekeeping on the same timer', () => {
-  it('hourly: due when the marker is missing or an hour old; daily: only in the 04:xx slot and not yet today', async () => {
+  it('claims the hourly slot every cycle and the daily slot only in the 04:xx hour — SET NX EX keys sized as the exclusivity window', async () => {
     const inSlot = new Date(2026, 9, 10, DISCOVERY_HOUSEKEEPING_HOUR, 7, 0);
     const outOfSlot = new Date(2026, 9, 10, 13, 7, 0);
 
-    redis.get.mockResolvedValue(null);
-    await expect(housekeepingDue(inSlot)).resolves.toEqual({ hourly: true, daily: true });
-    await expect(housekeepingDue(outOfSlot)).resolves.toEqual({ hourly: true, daily: false });
+    redis.set.mockResolvedValue('OK');
+    const claimed = await claimHousekeeping(inSlot);
+    expect(claimed.hourly).toMatch(/^node-under-test:/);
+    expect(claimed.daily).toMatch(/^node-under-test:/);
+    expect(redis.set).toHaveBeenCalledWith(DISCOVERY_HOUSEKEEPING_HOURLY_KEY, claimed.hourly, { NX: true, EX: DISCOVERY_HOUSEKEEPING_HOURLY_TTL_S });
+    expect(redis.set).toHaveBeenCalledWith(DISCOVERY_HOUSEKEEPING_DAILY_KEY, claimed.daily, { NX: true, EX: DISCOVERY_HOUSEKEEPING_DAILY_TTL_S });
+    // the daily window is shorter than a day (the next slot can claim) and longer than any node's clock skew
+    expect(DISCOVERY_HOUSEKEEPING_DAILY_TTL_S).toBe(20 * 3600);
+    expect(DISCOVERY_HOUSEKEEPING_HOURLY_TTL_S).toBe(55 * 60);
 
-    redis.get.mockImplementation(async (key: string) =>
-      key === DISCOVERY_HOUSEKEEPING_HOURLY_KEY ? new Date(inSlot.getTime() - 30 * 60 * 1000).toISOString()
-      : new Date(inSlot.getTime() - 60 * 60 * 1000).toISOString()); // daily stamped at 03:07 today
-    await expect(housekeepingDue(inSlot)).resolves.toEqual({ hourly: false, daily: false });
+    vi.clearAllMocks();
+    redis.set.mockResolvedValue('OK');
+    await expect(claimHousekeeping(outOfSlot)).resolves.toMatchObject({ daily: null });
+    expect(redis.set).toHaveBeenCalledTimes(1); // no daily attempt outside the slot
 
-    redis.get.mockImplementation(async (key: string) =>
-      key === DISCOVERY_HOUSEKEEPING_HOURLY_KEY ? new Date(inSlot.getTime() - 61 * 60 * 1000).toISOString()
-      : new Date(inSlot.getTime() - 24 * 60 * 60 * 1000).toISOString()); // daily stamped yesterday
-    await expect(housekeepingDue(inSlot)).resolves.toEqual({ hourly: true, daily: true });
+    // a peer (any timezone) already holds the slot: not claimed, no work
+    redis.set.mockResolvedValue(null);
+    await expect(claimHousekeeping(inSlot)).resolves.toEqual({ hourly: null, daily: null });
+  });
+
+  it('a claim whose work fails is released (compare-and-delete) so the next cycle retries, and the cycle reports the failure', async () => {
+    vi.useFakeTimers({ now: new Date(2026, 9, 10, DISCOVERY_HOUSEKEEPING_HOUR, 30, 0), toFake: ['Date'] });
+    redis.set.mockResolvedValue('OK');
+    prismaMock.$executeRaw.mockRejectedValueOnce(new Error('recount failed'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const run = await runDiscoveryStatsCycle();
+
+    expect(run).toBeNull();
+    expect(redis.eval).toHaveBeenCalledWith(expect.stringContaining("redis.call('del'"), expect.objectContaining({ keys: [DISCOVERY_HOUSEKEEPING_DAILY_KEY] }));
+    expect(error).toHaveBeenCalledWith('[Discovery] Stats cycle failed:', 'recount failed');
   });
 
   it('the hourly sweep deletes declined requests older than 7 days and pending ones older than 30', async () => {
@@ -216,44 +245,50 @@ describe('housekeeping on the same timer', () => {
     });
   });
 
-  it('the daily correction recounts member_count and recomputes discovery_listed, writing only rows that disagree', async () => {
+  it('the daily correction recounts member_count (leaving rows a live join just touched alone) and recomputes discovery_listed, writing only rows that disagree', async () => {
     prismaMock.$executeRaw.mockResolvedValueOnce(3).mockResolvedValueOnce(1);
     await expect(correctDrift()).resolves.toEqual({ memberCounts: 3, listed: 1 });
     const counts = sqlOf(prismaMock.$executeRaw.mock.calls[0]);
     expect(counts).toContain('UPDATE servers s SET member_count = c.n');
     expect(counts).toContain('GROUP BY server_id');
     expect(counts).toContain('s.member_count <> c.n');
+    // READ COMMITTED re-checks the `<>` against the NEWEST row version: a
+    // concurrent join's increment would be written back over otherwise
+    expect(counts).toContain("s.updated_at < now() - interval '5 minutes'");
     const listed = sqlOf(prismaMock.$executeRaw.mock.calls[1]);
     expect(listed).toContain('s.discoverable AND NOT s.invites_locked AND s.discovery_blocked_at IS NULL AND u.banned_at IS NULL');
     expect(listed).toContain('IS DISTINCT FROM');
   });
 
-  it('the cycle runs what is due and stamps the markers; nothing when nothing is due', async () => {
+  it('the cycle runs what it claimed, before anything else can; nothing when the claims are held elsewhere', async () => {
     vi.useFakeTimers({ now: new Date(2026, 9, 10, DISCOVERY_HOUSEKEEPING_HOUR, 30, 0), toFake: ['Date'] });
-    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
 
     const run = await runDiscoveryStatsCycle();
     expect(run).toMatchObject({ hourlyHousekeeping: true, dailyHousekeeping: true });
     expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledTimes(2);
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
-    expect(redis.set).toHaveBeenCalledWith(DISCOVERY_HOUSEKEEPING_HOURLY_KEY, expect.any(String));
-    expect(redis.set).toHaveBeenCalledWith(DISCOVERY_HOUSEKEEPING_DAILY_KEY, expect.any(String));
+    // claimed BEFORE the work (the set precedes the deletes), never stamped after
+    const claimAt = redis.set.mock.invocationCallOrder.find((_, i) => redis.set.mock.calls[i][0] === DISCOVERY_HOUSEKEEPING_DAILY_KEY)!;
+    expect(claimAt).toBeLessThan(prismaMock.$executeRaw.mock.invocationCallOrder[0]);
 
     vi.clearAllMocks();
-    redis.set.mockResolvedValue('OK');
-    redis.get.mockResolvedValue(new Date().toISOString());
+    redis.set.mockImplementation(async (key: string) => (key === DISCOVERY_STATS_LOCK_KEY ? 'OK' : null));
     const quiet = await runDiscoveryStatsCycle();
     expect(quiet).toMatchObject({ hourlyHousekeeping: false, dailyHousekeeping: false });
     expect(prismaMock.serverJoinRequest.deleteMany).not.toHaveBeenCalled();
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
   });
 
-  it('countStatsBacklog counts listed servers with missing or 48 h-old figures', async () => {
+  it('countStatsBacklog counts listed servers with missing or 48 h-old figures through a CAPPED subquery, never a full count', async () => {
     const now = new Date('2026-10-09T12:00:00Z');
-    prismaMock.server.count.mockResolvedValue(9);
+    prismaMock.$queryRaw.mockResolvedValue([{ n: 9 }]);
     await expect(countStatsBacklog(now)).resolves.toBe(9);
-    expect(prismaMock.server.count).toHaveBeenCalledWith({
-      where: { discoveryListed: true, OR: [{ statsRefreshedAt: null }, { statsRefreshedAt: { lt: new Date(now.getTime() - 48 * 3600 * 1000) } }] },
-    });
+    const [strings, ...values] = prismaMock.$queryRaw.mock.calls[0];
+    const sql = sqlOf([strings]);
+    expect(sql).toContain('WHERE discovery_listed = true AND (discovery_stats_at IS NULL OR discovery_stats_at < ?)');
+    expect(sql).toContain('LIMIT ?');
+    expect(values).toEqual([new Date(now.getTime() - 48 * 3600 * 1000), DISCOVERY_BACKLOG_COUNT_CAP + 1]);
+    expect(prismaMock.server.count).not.toHaveBeenCalled();
   });
 });

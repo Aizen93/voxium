@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
   serverBan: { findUnique: vi.fn() },
-  serverJoinRequest: { deleteMany: vi.fn() },
+  serverJoinRequest: { deleteMany: vi.fn(), findUnique: vi.fn() },
   serverMember: { findUnique: vi.fn(), count: vi.fn(), create: vi.fn() },
   server: { update: vi.fn() },
   channel: { findMany: vi.fn() },
@@ -21,6 +21,9 @@ vi.mock('../../utils/serverLimits', () => ({ getEffectiveLimits: (...a: unknown[
 
 const broadcastMemberJoined = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/memberBroadcast', () => ({ broadcastMemberJoined: (...a: unknown[]) => broadcastMemberJoined(...a) }));
+
+const emitToModerators = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: unknown[]) => emitToModerators(...a) }));
 
 import { joinServerMember } from '../../utils/serverJoin';
 
@@ -39,7 +42,9 @@ beforeEach(() => {
   order.length = 0;
   prismaMock.serverBan.findUnique.mockResolvedValue(null);
   prismaMock.serverMember.findUnique.mockResolvedValue(null);
+  prismaMock.serverJoinRequest.findUnique.mockResolvedValue(null);
   prismaMock.serverMember.count.mockResolvedValue(3);
+  emitToModerators.mockImplementation(async () => { order.push('resolved'); });
   // The model mocks return SENTINELS (the PrismaPromises a real client would
   // build) so the transaction's contents and order can be asserted exactly.
   prismaMock.serverJoinRequest.deleteMany.mockReturnValue(REQ);
@@ -143,6 +148,29 @@ describe('joinServerMember', () => {
       ],
       skipDuplicates: true,
     });
+  });
+
+  it('a PENDING request this join sweeps is reported to the moderators as resolved (joined), after the rooms are joined', async () => {
+    prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ status: 'pending' });
+
+    await joinServerMember('u-1', 's-1', { via: 'invite' });
+
+    expect(prismaMock.serverJoinRequest.findUnique).toHaveBeenCalledWith({ where: { serverId_userId: { serverId: 's-1', userId: 'u-1' } }, select: { status: true } });
+    expect(emitToModerators).toHaveBeenCalledWith('s-1', 'server:join_request_resolved', { serverId: 's-1', userId: 'u-1', outcome: 'joined' });
+    expect(order.indexOf('resolved')).toBeGreaterThan(order.indexOf('broadcast'));
+  });
+
+  it('says nothing to the moderators when there was no pending request, when the row was declined, or when THEY are approving (that route emits its own)', async () => {
+    await joinServerMember('u-1', 's-1', { via: 'discovery' });
+    prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ status: 'declined' });
+    await joinServerMember('u-1', 's-1', { via: 'discovery' });
+    expect(emitToModerators).not.toHaveBeenCalled();
+
+    prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ status: 'pending' });
+    await joinServerMember('u-1', 's-1', { via: 'approval', extraWrites: [{ op: 'request.delete' }] as never });
+    expect(emitToModerators).not.toHaveBeenCalled();
+    // the approval path does not even look: its extra write IS the row
+    expect(prismaMock.serverJoinRequest.findUnique).toHaveBeenCalledTimes(2);
   });
 
   it('skips the seeding write when the server has no text channels', async () => {

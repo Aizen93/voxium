@@ -52,6 +52,7 @@ const prismaMock: Record<string, any> = {
   },
   serverJoinRequest: {
     deleteMany: vi.fn(),
+    findUnique: vi.fn(),
   },
   serverMember: {
     findUnique: vi.fn(),
@@ -107,6 +108,12 @@ vi.mock('../../middleware/rateLimiter', () => {
 // Member broadcast
 vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberJoined: vi.fn().mockResolvedValue(undefined),
+}));
+
+// Moderator audience (a pending request the invite join sweeps is reported)
+const mockEmitToModerators = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/moderatorAudience', () => ({
+  emitToModerators: (...args: any[]) => mockEmitToModerators(...args),
 }));
 
 // Feature flags
@@ -175,8 +182,9 @@ describe('Invite Routes', () => {
     mockHasServerPermission.mockResolvedValue(true);
     mockHasChannelPermission.mockResolvedValue(true);
     mockGetHighestRolePosition.mockResolvedValue(Infinity);
-    // Default: not banned from any server (joinServerMember checks first)
+    // Default: not banned from any server (joinServerMember checks first), no request pending
     prismaMock.serverBan.findUnique.mockResolvedValue(null);
+    prismaMock.serverJoinRequest.findUnique.mockResolvedValue(null);
   });
 
   // ── POST /api/v1/invites/servers/:serverId ──────────────────────────────
@@ -470,6 +478,23 @@ describe('Invite Routes', () => {
       expect(prismaMock.invite.delete).toHaveBeenCalledWith({ where: { code: 'ATOMIC01' } });
       expect(prismaMock.serverMember.create).toHaveBeenCalledWith({ data: { userId: 'user-2', serverId: 'srv-1' } });
       expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-1' }, data: { memberCount: { increment: 1 } } });
+    });
+
+    it('an invite used while a join request was pending resolves that request for the moderators', async () => {
+      const token = makeToken({ userId: 'user-2' });
+      mockAuthUser({ id: 'user-2' });
+      prismaMock.invite.findUnique.mockResolvedValue({
+        id: 'inv-1', code: 'PEND0001', serverId: 'srv-1', expiresAt: null, server: { ...mockServer, invitesLocked: false },
+      });
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ status: 'pending' });
+      prismaMock.$transaction.mockResolvedValue([]);
+      prismaMock.channel.findMany.mockResolvedValue([]);
+
+      const res = await request(app).post('/api/v1/invites/PEND0001/join').set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(mockEmitToModerators).toHaveBeenCalledWith('srv-1', 'server:join_request_resolved', { serverId: 'srv-1', userId: 'user-2', outcome: 'joined' });
     });
 
     it('a consumed invite fails the whole transaction: 404, no membership, no broadcast, no seeding', async () => {

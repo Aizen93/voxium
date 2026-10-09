@@ -90,6 +90,15 @@ describe('emitToModerators', () => {
     expect(io.emit).toHaveBeenCalledWith('server:join_request_resolved', { serverId: 's-1', userId: 'x', outcome: 'cancelled' });
   });
 
+  it('logs and swallows a failure — the caller\'s write is already committed', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.role.findMany.mockRejectedValue(new Error('db gone'));
+    await expect(emitToModerators('s-1', 'server:join_request_resolved', { serverId: 's-1', userId: 'x', outcome: 'joined' })).resolves.toBeUndefined();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('server:join_request_resolved for server s-1'), 'db gone');
+    expect(io.to).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+
   it('emits nothing for an unknown server', async () => {
     prismaMock.server.findUnique.mockResolvedValue(null);
     await emitToModerators('gone', 'server:join_request_resolved', { serverId: 'gone', userId: 'x', outcome: 'cancelled' });

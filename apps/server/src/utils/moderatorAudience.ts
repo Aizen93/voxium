@@ -60,11 +60,19 @@ export async function emitToModerators<E extends keyof ServerToClientEvents>(
   event: E,
   ...args: Parameters<ServerToClientEvents[E]>
 ): Promise<void> {
-  const userIds = await moderatorAudienceUserIds(serverId);
-  if (userIds.length === 0) return;
-  const io = getIO();
-  for (let i = 0; i < userIds.length; i += ROOM_FANOUT_BATCH) {
-    const rooms = userIds.slice(i, i + ROOM_FANOUT_BATCH).map((id) => `user:${id}`);
-    io.to(rooms).emit(event, ...args);
+  // Every caller runs this AFTER its write committed. A failure here (the
+  // audience lookup is two queries) must not turn a successful request into
+  // a 500 the client would retry into the idempotent branch — log it and let
+  // the moderators find the row in the Members tab.
+  try {
+    const userIds = await moderatorAudienceUserIds(serverId);
+    if (userIds.length === 0) return;
+    const io = getIO();
+    for (let i = 0; i < userIds.length; i += ROOM_FANOUT_BATCH) {
+      const rooms = userIds.slice(i, i + ROOM_FANOUT_BATCH).map((id) => `user:${id}`);
+      io.to(rooms).emit(event, ...args);
+    }
+  } catch (err) {
+    console.error(`[ModeratorAudience] Failed to emit ${String(event)} for server ${serverId}:`, err instanceof Error ? err.message : err);
   }
 }

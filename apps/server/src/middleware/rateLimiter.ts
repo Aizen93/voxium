@@ -103,8 +103,9 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
   themeBrowse:    { keyPrefix: 'rl:themebr',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Browse' },
   // Server discovery. Browse covers pages, cards and search (a scraper pays
-  // per page and gets at most 1,200 results per distinct query); join covers
-  // direct joins, join requests and cancels (request spam toward moderators).
+  // per page and gets at most 1,200 results per distinct query — the depth
+  // cap counts rows, whatever page size it picks); join covers direct joins,
+  // join requests and cancels (request spam toward moderators).
   discoveryBrowse: { keyPrefix: 'rl:discbr',   points: 60,  duration: 60,   blockDuration: 0,  keyType: 'userId', label: 'Discovery Browse' },
   discoveryJoin:   { keyPrefix: 'rl:discjoin', points: 10,  duration: 3600, blockDuration: 0,  keyType: 'userId', label: 'Discovery Join' },
   // E2E key distribution: registration is rare (per install / key reset);

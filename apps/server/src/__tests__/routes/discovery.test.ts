@@ -71,9 +71,10 @@ function row(i: number, extra: Record<string, unknown> = {}) {
   return {
     id: `srv-${i}`, name: `Server ${i}`, iconUrl: null, description: i % 2 ? 'desc' : null, tags: ['gaming'],
     memberCount: 10 + i, onlineCount: i, weeklyMessages: i * 3, joinMode: 'approval',
-    featuredAt: null, createdAt: NOW, statsRefreshedAt: null, ...extra,
+    featuredAt: null, createdAt: NOW, statsRefreshedAt: null, activityScore: i * 10, ...extra,
   };
 }
+const CURSOR_Q = { sort: 'active' as const, tag: '', q: '', limit: 24 };
 
 const app = createApp();
 
@@ -130,9 +131,11 @@ describe('GET /discovery/servers', () => {
     }));
     expect(prismaMock.server.findMany.mock.calls[0][0]).not.toHaveProperty('cursor');
     expect(prismaMock.server.findMany.mock.calls[0][0]).not.toHaveProperty('skip');
+    expect(prismaMock.server.findMany.mock.calls[0][0].where).not.toHaveProperty('OR');
     expect(res.body.data.servers).toHaveLength(2);
     expect(res.body.data.nextCursor).toBeNull();
     expect(res.body.data.totalCapped).toBe(3);
+    // the sort key is read for the cursor but never put on a card
     expect(res.body.data.servers[0]).toEqual({
       id: 'srv-1', name: 'Server 1', iconUrl: null, description: 'desc', tags: ['gaming'],
       memberCount: 11, onlineCount: 1, weeklyMessages: 3, joinMode: 'approval', featured: false,
@@ -197,7 +200,7 @@ describe('GET /discovery/servers', () => {
     expect(sqlOf(0)).not.toContain('ILIKE');
     // a tag rides the same shape as a filter
     await request(app).get('/api/v1/discovery/servers?tag=music');
-    expect(sqlOf(1)).toContain('= ANY(tags)');
+    expect(sqlOf(1)).toContain('tags @> ARRAY[?]::text[]'); // the operator the GIN index serves
     expect(sqlOf(1)).toContain('ORDER BY discovery_activity_score DESC, id DESC LIMIT ?');
     // a query: the covering name index, whatever the sort
     await request(app).get('/api/v1/discovery/servers?q=voxium&sort=active');
@@ -226,7 +229,7 @@ describe('GET /discovery/servers', () => {
     }));
   });
 
-  it('issues a signed keyset cursor when there is more, and pages with cursor + skip 1', async () => {
+  it('issues a signed keyset cursor carrying the last row\'s sort key, and pages with an explicit "(key, id) after" predicate', async () => {
     prismaMock.server.findMany.mockResolvedValueOnce(Array.from({ length: 25 }, (_, i) => row(i + 1))).mockResolvedValueOnce([]);
 
     const first = await request(app).get('/api/v1/discovery/servers');
@@ -234,7 +237,7 @@ describe('GET /discovery/servers', () => {
     expect(first.body.data.servers).toHaveLength(24);
     const cursor = first.body.data.nextCursor as string;
     expect(cursor).toBeTruthy();
-    expect(decodeDiscoveryCursor(cursor, { sort: 'active', tag: '', q: '' })).toEqual({ sort: 'active', tag: '', q: '', id: 'srv-24', page: 2 });
+    expect(decodeDiscoveryCursor(cursor, CURSOR_Q)).toEqual({ ...CURSOR_Q, id: 'srv-24', key: 240, page: 2 });
 
     vi.clearAllMocks();
     redis.get.mockResolvedValue(null);
@@ -242,17 +245,48 @@ describe('GET /discovery/servers', () => {
     prismaMock.$queryRaw.mockResolvedValue([{ n: 25 }]);
     const second = await request(app).get(`/api/v1/discovery/servers?cursor=${encodeURIComponent(cursor)}`);
     expect(second.status).toBe(200);
+    // never Prisma's cursor/skip (keyed on the id alone — no position left
+    // when that row was deleted, hidden or re-ranked); the page is frozen to
+    // the keys the viewer was issued
     expect(prismaMock.server.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      cursor: { id: 'srv-24' }, skip: 1, take: 25,
+      where: { discoveryListed: true, OR: [{ activityScore: { lt: 240 } }, { activityScore: 240, id: { lt: 'srv-24' } }] },
+      take: 25,
     }));
+    expect(prismaMock.server.findMany.mock.calls[0][0]).not.toHaveProperty('cursor');
+    expect(prismaMock.server.findMany.mock.calls[0][0]).not.toHaveProperty('skip');
     // page 2: no featured row
     expect(prismaMock.server.findMany).toHaveBeenCalledTimes(1);
     expect(second.body.data.featured).toEqual([]);
     expect(second.body.data.nextCursor).toBeNull();
   });
 
+  it('the keyset predicate follows the sort: members and newest descending, name ascending', async () => {
+    prismaMock.server.findMany.mockResolvedValue([]);
+    for (const [sort, cursor, or] of [
+      ['members', { sort: 'members', key: 42 }, [{ memberCount: { lt: 42 } }, { memberCount: 42, id: { lt: 'srv-x' } }]],
+      ['newest', { sort: 'newest', key: NOW.toISOString() }, [{ createdAt: { lt: NOW } }, { createdAt: NOW, id: { lt: 'srv-x' } }]],
+      ['name', { sort: 'name', key: 'Makhtofi' }, [{ name: { gt: 'Makhtofi' } }, { name: 'Makhtofi', id: { gt: 'srv-x' } }]],
+    ] as const) {
+      vi.clearAllMocks();
+      redis.get.mockResolvedValue(null);
+      prismaMock.server.findMany.mockResolvedValue([]);
+      prismaMock.$queryRaw.mockResolvedValue([{ n: 0 }]);
+      const token = encodeDiscoveryCursor({ ...cursor, tag: '', q: '', limit: 24, id: 'srv-x', page: 2 } as never);
+      const res = await request(app).get(`/api/v1/discovery/servers?sort=${sort}&cursor=${encodeURIComponent(token)}`);
+      expect(res.status).toBe(200);
+      expect(prismaMock.server.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({ where: { discoveryListed: true, OR: or } }));
+    }
+  });
+
+  it('a cursor is bound to the page size it was issued for', async () => {
+    const token = encodeDiscoveryCursor({ ...CURSOR_Q, id: 'srv-24', key: 240, page: 2 });
+    const res = await request(app).get(`/api/v1/discovery/servers?limit=48&cursor=${encodeURIComponent(token)}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid cursor');
+  });
+
   it('rejects a tampered cursor, a cursor from another sort/tag/query, and one past the depth cap', async () => {
-    const good = encodeDiscoveryCursor({ sort: 'active', tag: '', q: '', id: 'srv-24', page: 2 });
+    const good = encodeDiscoveryCursor({ ...CURSOR_Q, id: 'srv-24', key: 240, page: 2 });
     const tampered = good.slice(0, -2) + (good.endsWith('AA') ? 'BB' : 'AA');
     let res = await request(app).get(`/api/v1/discovery/servers?cursor=${encodeURIComponent(tampered)}`);
     expect(res.status).toBe(400);
@@ -262,20 +296,34 @@ describe('GET /discovery/servers', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Invalid cursor');
 
-    const deep = encodeDiscoveryCursor({ sort: 'active', tag: '', q: '', id: 'srv-x', page: DISCOVERY_MAX_PAGES + 1 });
+    // the depth cap counts ROWS: page 51 of 24 is 1,224 rows, and so is page 26 of 48
+    const deep = encodeDiscoveryCursor({ ...CURSOR_Q, id: 'srv-x', key: 1, page: DISCOVERY_MAX_PAGES + 1 });
     res = await request(app).get(`/api/v1/discovery/servers?cursor=${encodeURIComponent(deep)}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Refine your search');
+    const deep48 = encodeDiscoveryCursor({ ...CURSOR_Q, limit: 48, id: 'srv-x', key: 1, page: 26 });
+    res = await request(app).get(`/api/v1/discovery/servers?limit=48&cursor=${encodeURIComponent(deep48)}`);
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Refine your search');
     expect(prismaMock.server.findMany).not.toHaveBeenCalled();
   });
 
-  it('never issues a cursor beyond the depth cap, even when more rows exist', async () => {
-    const last = encodeDiscoveryCursor({ sort: 'active', tag: '', q: '', id: 'srv-prev', page: DISCOVERY_MAX_PAGES });
+  it('never issues a cursor beyond the depth cap, even when more rows exist — 1,200 rows whatever the page size', async () => {
+    const last = encodeDiscoveryCursor({ ...CURSOR_Q, id: 'srv-prev', key: 999, page: DISCOVERY_MAX_PAGES });
     prismaMock.server.findMany.mockResolvedValue(Array.from({ length: 25 }, (_, i) => row(i + 1)));
-
-    const res = await request(app).get(`/api/v1/discovery/servers?cursor=${encodeURIComponent(last)}`);
+    let res = await request(app).get(`/api/v1/discovery/servers?cursor=${encodeURIComponent(last)}`);
     expect(res.status).toBe(200);
     expect(res.body.data.servers).toHaveLength(24);
+    expect(res.body.data.nextCursor).toBeNull();
+
+    vi.clearAllMocks();
+    redis.get.mockResolvedValue(null);
+    prismaMock.$queryRaw.mockResolvedValue([{ n: 5000 }]);
+    const last48 = encodeDiscoveryCursor({ ...CURSOR_Q, limit: 48, id: 'srv-prev', key: 999, page: 25 });
+    prismaMock.server.findMany.mockResolvedValue(Array.from({ length: 49 }, (_, i) => row(i + 1)));
+    res = await request(app).get(`/api/v1/discovery/servers?limit=48&cursor=${encodeURIComponent(last48)}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.servers).toHaveLength(48);
     expect(res.body.data.nextCursor).toBeNull();
   });
 
@@ -326,7 +374,7 @@ describe('GET /discovery/servers', () => {
     warn.mockRestore();
   });
 
-  it('marks featured cards and computes their flags too', async () => {
+  it('marks featured cards and resolves the flags of the featured row and the page in ONE pair of lookups', async () => {
     prismaMock.server.findMany.mockResolvedValueOnce([row(1)]).mockResolvedValueOnce([row(9, { featuredAt: NOW })]);
     prismaMock.serverMember.findMany.mockImplementation(async ({ where }: any) =>
       where.serverId.in.includes('srv-9') ? [{ serverId: 'srv-9' }] : []);
@@ -335,6 +383,21 @@ describe('GET /discovery/servers', () => {
     expect(res.body.data.featured).toHaveLength(1);
     expect(res.body.data.featured[0]).toMatchObject({ id: 'srv-9', featured: true, isMember: true });
     expect(res.body.data.servers[0]).toMatchObject({ id: 'srv-1', featured: false, isMember: false });
+    expect(prismaMock.serverMember.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.serverMember.findMany).toHaveBeenCalledWith({ where: { userId: 'user-1', serverId: { in: ['srv-9', 'srv-1'] } }, select: { serverId: true } });
+    expect(prismaMock.serverJoinRequest.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('parses the limit defensively', async () => {
+    prismaMock.server.findMany.mockResolvedValue([]);
+    for (const bad of ['0', 'abc', '-5']) {
+      vi.clearAllMocks();
+      redis.get.mockResolvedValue(null);
+      prismaMock.server.findMany.mockResolvedValue([]);
+      prismaMock.$queryRaw.mockResolvedValue([{ n: 0 }]);
+      await request(app).get(`/api/v1/discovery/servers?limit=${bad}`);
+      expect(prismaMock.server.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({ take: 25 }));
+    }
   });
 });
 
@@ -358,6 +421,8 @@ describe('GET /discovery/servers/:serverId', () => {
     const res = await request(app).get('/api/v1/discovery/servers/srv-1');
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ id: 'srv-1', requestPending: true, isMember: false });
+    expect(res.body.data).not.toHaveProperty('activityScore');
+    expect(limiters.browse).toHaveBeenCalled();
   });
 });
 
@@ -462,6 +527,26 @@ describe('POST /discovery/servers/:serverId/join', () => {
       expect(emitToModerators).not.toHaveBeenCalled();
     });
 
+    it('a double-click races the unique key: the loser answers 200 pending, never a 500, and emits nothing', async () => {
+      prismaMock.serverJoinRequest.create.mockRejectedValueOnce(Object.assign(new Error('Unique constraint'), { code: 'P2002' }));
+      prismaMock.serverJoinRequest.findUnique
+        .mockResolvedValueOnce(null)                 // the pre-check saw nothing
+        .mockResolvedValueOnce({ status: 'pending' }); // the re-read after P2002
+      const res = await request(app).post('/api/v1/discovery/servers/srv-1/join').send({});
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual({ status: 'pending' });
+      expect(emitToModerators).not.toHaveBeenCalled();
+    });
+
+    it('a declined row swept between the read and the reuse (P2025) falls through to a fresh request', async () => {
+      prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ id: 'req-1', status: 'declined', decidedAt: new Date(Date.now() - 8 * 24 * 3600 * 1000) });
+      prismaMock.serverJoinRequest.update.mockRejectedValueOnce(Object.assign(new Error('Record not found'), { code: 'P2025' }));
+      const res = await request(app).post('/api/v1/discovery/servers/srv-1/join').send({});
+      expect(res.status).toBe(202);
+      expect(prismaMock.serverJoinRequest.create).toHaveBeenCalledTimes(1);
+      expect(emitToModerators).toHaveBeenCalledTimes(1);
+    });
+
     it('refuses within the 7-day cooldown after a decline, and reuses the row past it', async () => {
       prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ id: 'req-1', status: 'declined', decidedAt: new Date(Date.now() - 6 * 24 * 3600 * 1000) });
       let res = await request(app).post('/api/v1/discovery/servers/srv-1/join').send({});
@@ -488,29 +573,23 @@ describe('POST /discovery/servers/:serverId/join', () => {
 // ─── Cancel ─────────────────────────────────────────────────────────────────
 
 describe('DELETE /discovery/servers/:serverId/join', () => {
-  it('deletes the caller\'s PENDING request and tells the moderators it was cancelled', async () => {
-    prismaMock.server.findUnique.mockResolvedValue({ ...row(1), discoveryListed: true });
+  it('deletes the caller\'s PENDING request and tells the moderators it was cancelled — without a listing check, so a request on a since-hidden server stays withdrawable', async () => {
     prismaMock.serverJoinRequest.deleteMany.mockResolvedValue({ count: 1 });
 
     const res = await request(app).delete('/api/v1/discovery/servers/srv-1/join');
     expect(res.status).toBe(200);
+    expect(limiters.join).toHaveBeenCalled();
+    expect(prismaMock.server.findUnique).not.toHaveBeenCalled();
     expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-1', userId: 'user-1', status: 'pending' } });
     expect(emitToModerators).toHaveBeenCalledWith('srv-1', 'server:join_request_resolved', { serverId: 'srv-1', userId: 'user-1', outcome: 'cancelled' });
   });
 
-  it('is 404 when there is nothing pending, and 404 (identical) for a hidden server', async () => {
-    prismaMock.server.findUnique.mockResolvedValueOnce({ ...row(1), discoveryListed: true });
+  it('is 404 when there is nothing pending — identical for an unknown server (no row either way)', async () => {
     prismaMock.serverJoinRequest.deleteMany.mockResolvedValue({ count: 0 });
     const none = await request(app).delete('/api/v1/discovery/servers/srv-1/join');
-    expect(none.status).toBe(404);
-    expect(emitToModerators).not.toHaveBeenCalled();
-
-    prismaMock.server.findUnique.mockResolvedValueOnce({ ...row(1), discoveryListed: false });
-    const hidden = await request(app).delete('/api/v1/discovery/servers/srv-1/join');
-    prismaMock.server.findUnique.mockResolvedValueOnce(null);
     const missing = await request(app).delete('/api/v1/discovery/servers/zzz/join');
-    expect(hidden.status).toBe(404);
-    expect(hidden.body).toEqual(missing.body);
-    expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledTimes(1);
+    expect(none.status).toBe(404);
+    expect(missing.body).toEqual(none.body);
+    expect(emitToModerators).not.toHaveBeenCalled();
   });
 });

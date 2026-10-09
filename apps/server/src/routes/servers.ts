@@ -767,10 +767,13 @@ serverRouter.post(
       try {
         await joinServerMember(userId, serverId, {
           via: 'approval',
-          extraWrites: [prisma.serverJoinRequest.delete({ where: { id: request.id } })],
+          // status in the where: a decline that commits between the read
+          // above and this transaction leaves a row this delete must NOT
+          // find, so the approval fails instead of admitting a declined user
+          extraWrites: [prisma.serverJoinRequest.delete({ where: { id: request.id, status: 'pending' } })],
         });
       } catch (err) {
-        // P2025 = the row was cancelled or approved by someone else meanwhile
+        // P2025 = the row was cancelled, declined or approved by someone else meanwhile
         if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Join request');
         throw err;
       }

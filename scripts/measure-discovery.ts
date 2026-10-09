@@ -41,7 +41,7 @@ const SORTS = ['active', 'members', 'newest', 'name'] as const;
 const cardSelect = {
   id: true, name: true, iconUrl: true, description: true, tags: true,
   memberCount: true, onlineCount: true, weeklyMessages: true, joinMode: true,
-  featuredAt: true, createdAt: true, statsRefreshedAt: true,
+  featuredAt: true, createdAt: true, statsRefreshedAt: true, activityScore: true,
 } as const;
 
 function orderFor(sort: (typeof SORTS)[number]): Prisma.ServerOrderByWithRelationInput[] {
@@ -112,16 +112,21 @@ async function main() {
     }));
   }
 
-  // Page 40 per sort: the keyset cursor from the last row of page 39 (found
-  // ONCE here with an offset the app never uses)
+  // Page 40 per sort: the explicit "(key, id) after the cursor" predicate the
+  // route emits, from the last row of page 39 (found ONCE here with an
+  // offset the app never uses)
   for (const sort of SORTS) {
-    const anchor = await prisma.server.findMany({ where: { discoveryListed: true }, orderBy: orderFor(sort), skip: 39 * DISCOVERY_PAGE_SIZE - 1, take: 1, select: { id: true } });
-    const cursorId = anchor[0]?.id;
-    if (!cursorId) continue;
+    const anchor = (await prisma.server.findMany({ where: { discoveryListed: true }, orderBy: orderFor(sort), skip: 39 * DISCOVERY_PAGE_SIZE - 1, take: 1, select: cardSelect }))[0];
+    if (!anchor) continue;
+    const after: Prisma.ServerWhereInput =
+      sort === 'members' ? { OR: [{ memberCount: { lt: anchor.memberCount } }, { memberCount: anchor.memberCount, id: { lt: anchor.id } }] }
+      : sort === 'newest' ? { OR: [{ createdAt: { lt: anchor.createdAt } }, { createdAt: anchor.createdAt, id: { lt: anchor.id } }] }
+      : sort === 'name' ? { OR: [{ name: { gt: anchor.name } }, { name: anchor.name, id: { gt: anchor.id } }] }
+      : { OR: [{ activityScore: { lt: anchor.activityScore } }, { activityScore: anchor.activityScore, id: { lt: anchor.id } }] };
     results.push(await measure({
       name: `page 40 · sort=${sort}`,
       target: TARGETS.firstPageMs,
-      run: () => prisma.server.findMany({ where: { discoveryListed: true }, orderBy: orderFor(sort), cursor: { id: cursorId }, skip: 1, take: DISCOVERY_PAGE_SIZE + 1, select: cardSelect }),
+      run: () => prisma.server.findMany({ where: { discoveryListed: true, ...after }, orderBy: orderFor(sort), take: DISCOVERY_PAGE_SIZE + 1, select: cardSelect }),
     }));
   }
 
@@ -134,7 +139,7 @@ async function main() {
   results.push(await measure({
     name: 'capped count · tag=music (sort index order)',
     target: TARGETS.searchTagP95Ms,
-    run: () => prisma.$queryRaw`SELECT COUNT(*)::int AS n FROM (SELECT 1 FROM servers WHERE discovery_listed = true AND ${'music'} = ANY(tags) ORDER BY discovery_activity_score DESC, id DESC LIMIT ${DISCOVERY_TOTAL_CAP + 1}) t`,
+    run: () => prisma.$queryRaw`SELECT COUNT(*)::int AS n FROM (SELECT 1 FROM servers WHERE discovery_listed = true AND tags @> ARRAY[${'music'}]::text[] ORDER BY discovery_activity_score DESC, id DESC LIMIT ${DISCOVERY_TOTAL_CAP + 1}) t`,
   }));
 
   // Search: a rare word and a common one, rows + capped count (name index order)
@@ -159,7 +164,7 @@ async function main() {
   results.push(await measure({
     name: 'search "Gaming" + tag=music · plain count',
     target: TARGETS.searchTagP95Ms,
-    run: () => prisma.$queryRaw`SELECT COUNT(*)::int AS n FROM servers WHERE discovery_listed = true AND name ILIKE ${'%Gaming%'} AND ${'music'} = ANY(tags)`,
+    run: () => prisma.$queryRaw`SELECT COUNT(*)::int AS n FROM servers WHERE discovery_listed = true AND name ILIKE ${'%Gaming%'} AND tags @> ARRAY[${'music'}]::text[]`,
   }));
 
   // Every tag with the Active sort
@@ -225,12 +230,33 @@ async function main() {
     ['online members', `SELECT sm.server_id, COUNT(*)::int AS n FROM server_members sm JOIN users u ON u.id = sm.user_id WHERE sm.server_id = ANY(ARRAY[${idList}]::text[]) AND u.status = 'online' GROUP BY sm.server_id`],
     ['stale pick (NULL first)', `SELECT id FROM servers WHERE discovery_listed = true AND discovery_stats_at IS NULL ORDER BY discovery_stats_at ASC LIMIT 500`],
     ['stale pick (oldest)', `SELECT id FROM servers WHERE discovery_listed = true AND discovery_stats_at < now() - interval '24 hours' ORDER BY discovery_stats_at ASC LIMIT 500`],
+    ['backlog count (capped)', `SELECT COUNT(*)::int AS n FROM (SELECT 1 FROM servers WHERE discovery_listed = true AND (discovery_stats_at IS NULL OR discovery_stats_at < now() - interval '48 hours') LIMIT 100001) t`],
   ] as const) {
     const rows = await prisma.$queryRawUnsafe<Array<{ 'QUERY PLAN': string }>>(`EXPLAIN (ANALYZE, BUFFERS) ${sql}`);
     const plan = rows.map((r) => r['QUERY PLAN']).join('\n');
     statsPlans.push(`### stats · ${label}\n\n\`\`\`\n${plan}\n\`\`\``);
     const seq = seqScans(plan);
     if (seq.length) results.push({ name: `stats · ${label}`, p50: 0, p95: 0, target: 0, plan, seq });
+  }
+
+  // The nightly statements (full-table BY DESIGN, once a day, leader-locked):
+  // timed once each inside a rolled-back transaction so the data is untouched.
+  const nightly: string[] = [];
+  for (const [label, sql] of [
+    ['nightly · member_count recount', `UPDATE servers s SET member_count = c.n FROM (SELECT server_id, COUNT(*)::int AS n FROM server_members GROUP BY server_id) c WHERE c.server_id = s.id AND s.member_count <> c.n AND s.updated_at < now() - interval '5 minutes'`],
+    ['nightly · discovery_listed recompute', `UPDATE servers s SET discovery_listed = (s.discoverable AND NOT s.invites_locked AND s.discovery_blocked_at IS NULL AND u.banned_at IS NULL) FROM users u WHERE u.id = s.owner_id AND s.discovery_listed IS DISTINCT FROM (s.discoverable AND NOT s.invites_locked AND s.discovery_blocked_at IS NULL AND u.banned_at IS NULL)`],
+    ['hourly · declined sweep', `DELETE FROM server_join_requests WHERE status = 'declined' AND decided_at < now() - interval '7 days'`],
+    ['hourly · pending sweep', `DELETE FROM server_join_requests WHERE status = 'pending' AND created_at < now() - interval '30 days'`],
+  ] as const) {
+    const t = process.hrtime.bigint();
+    let plan = '';
+    await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRawUnsafe<Array<{ 'QUERY PLAN': string }>>(`EXPLAIN (ANALYZE, BUFFERS) ${sql}`);
+      plan = rows.map((r) => r['QUERY PLAN']).join('\n');
+      throw new Error('rollback');
+    }, { timeout: 600_000 }).catch((err: Error) => { if (err.message !== 'rollback') throw err; });
+    const ms = Number(process.hrtime.bigint() - t) / 1e6;
+    nightly.push(`### ${label} — ${ms.toFixed(0)} ms (one run, rolled back)\n\n\`\`\`\n${plan}\n\`\`\``);
   }
 
   // Report
@@ -250,6 +276,8 @@ async function main() {
     lines.push(`### ${r.name}`, '', '```', r.plan, '```', '');
   }
   lines.push(...statsPlans, '');
+  lines.push('## Nightly and hourly housekeeping (full-table by design, not subject to the no-sequential-scan rule)', '', ...nightly, '');
+  lines.push('Not measured: the featured row (the first-page query shape with `featured_at IS NOT NULL`, served by the featured_at index) and the card lookup (a primary-key read).', '');
   const report = lines.join('\n');
   console.log(report);
   const out = process.argv[2];

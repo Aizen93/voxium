@@ -3,6 +3,8 @@ import { prisma } from './prisma';
 import { BadRequestError, ForbiddenError } from './errors';
 import { getEffectiveLimits } from './serverLimits';
 import { broadcastMemberJoined } from './memberBroadcast';
+import { emitToModerators } from './moderatorAudience';
+import { WS_EVENTS } from '@voxium/shared';
 
 /** Which door the member came through — logged, never a branch. */
 export type JoinServerVia = 'invite' | 'discovery' | 'approval';
@@ -59,6 +61,18 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
     }
   }
 
+  // A pending request this join resolves by another door (an open-mode join
+  // after the owner switched modes, an invite used while a request waited):
+  // the transaction below sweeps the row, and the moderators must hear it
+  // the same way they hear an approve or a decline, or their badge and the
+  // Members tab keep a request that answers 404 on Approve.
+  const pending = opts.via === 'approval'
+    ? null
+    : await prisma.serverJoinRequest.findUnique({
+        where: { serverId_userId: { serverId, userId } },
+        select: { status: true },
+      });
+
   try {
     await prisma.$transaction([
       ...(opts.extraWrites ?? []),
@@ -89,6 +103,10 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
 
   // Notify all members and add the joiner's socket(s) to the server room
   await broadcastMemberJoined(userId, serverId);
+
+  if (pending?.status === 'pending') {
+    await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'joined' });
+  }
 
   // Seed ChannelRead for all text channels so existing history doesn't show
   // as unread. Secure channels excluded: a joiner is not a member of any,

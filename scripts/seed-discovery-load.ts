@@ -87,8 +87,19 @@ async function main() {
     console.log(`  ${(to + 1).toLocaleString()} / ${N.toLocaleString()} servers (${Math.round((Date.now() - t0) / 1000)}s)`);
   }
 
-  // The 1% slice: 5..50 text channels per server, 20 messages each over the last week
-  console.log('Seeding the 1% slice with channels and messages …');
+  // The 1% slice: memberships matching member_count (so the online aggregate
+  // and the nightly recount run on representative rows), then 5..50 text
+  // channels per server and 20 messages each over the last week
+  console.log('Seeding the 1% slice with memberships, channels and messages …');
+  for (let from = 0; from < N; from += CHUNK) {
+    const to = Math.min(N, from + CHUNK) - 1;
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO server_members (user_id, server_id, role, joined_at)
+      SELECT 'lu_' || ((i + k) % ${N}), 'ls_' || i, 'member', now()
+      FROM generate_series(${from}, ${to}, ${SLICE_EVERY}) AS i
+      CROSS JOIN LATERAL generate_series(1, (SELECT member_count - 1 FROM servers WHERE id = 'ls_' || i)) AS k
+      ON CONFLICT (user_id, server_id) DO NOTHING`);
+  }
   await prisma.$executeRawUnsafe(`
     INSERT INTO channels (id, name, type, server_id, position, secure, created_at, updated_at)
     SELECT 'lc_'||i||'_'||c, 'channel-'||c, 'text', 'ls_'||i, c, false, now(), now()

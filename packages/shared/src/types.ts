@@ -153,7 +153,8 @@ export interface ServerJoinRequest {
   user: ServerMemberSummary;
 }
 
-export type ServerJoinRequestOutcome = 'approved' | 'declined' | 'cancelled';
+/** 'joined' = the requester got in by another door (invite, open-mode join) and the request was swept. */
+export type ServerJoinRequestOutcome = 'approved' | 'declined' | 'cancelled' | 'joined';
 
 // ─── Category ───────────────────────────────────────────────────────────────
 
@@ -682,6 +683,9 @@ export interface AdminServer {
   discoveryBlockedAt: string | null;
   invitesLocked: boolean;
 }
+
+/** What GET /admin/export/servers returns per row — the pre-directory columns only. */
+export type AdminServerExport = Pick<AdminServer, 'id' | 'name' | 'iconUrl' | 'ownerId' | 'ownerUsername' | 'memberCount' | 'channelCount' | 'messageCount' | 'createdAt'>;
 
 export interface BanRecord {
   id: string;
