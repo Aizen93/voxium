@@ -1,5 +1,140 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { socketRateLimit } from '../../middleware/rateLimiter';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+// Minimal Redis mock — getAllRateLimits and socketRateLimit never touch Redis,
+// so the client getters can simply throw if anything reaches for them.
+vi.mock('../../utils/redis', () => ({
+  getRedis: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
+  getRedisPubSub: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
+  getRedisConfigSub: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
+}));
+
+import { socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, consumeMailCap } from '../../middleware/rateLimiter';
+
+describe('normalizeIp — one spelling of an address for every keyed control', () => {
+  it.each([
+    // [input, expected, why]
+    ['203.0.113.7', '203.0.113.7', 'plain IPv4 is left alone'],
+    ['::ffff:203.0.113.7', '203.0.113.7', 'IPv4-mapped, dotted'],
+    ['::FFFF:203.0.113.7', '203.0.113.7', 'IPv4-mapped, UPPERCASE — the old strip was case-sensitive'],
+    ['::ffff:cb00:7107', '203.0.113.7', 'IPv4-mapped, hex form — the old strip missed it entirely'],
+    ['fe80::1%eth0', 'fe80::1', 'zone id would key a link-local address per NIC'],
+    ['2001:DB8::1', '2001:db8::1', 'hex case is not part of the address'],
+    // IpBan.ip is an exact-match unique column and every reader queries the
+    // normalized form, so a ban an operator typed in any OTHER spelling was a
+    // row nothing ever hit. The output is the RFC 5952 text form — what the OS
+    // hands Node for a remote address — so writers and readers converge.
+    ['2001:db8:0:0:0:0:0:1', '2001:db8::1', 'expanded spelling'],
+    ['2001:0db8:0000:0000:0000:0000:0000:0001', '2001:db8::1', 'leading zeros'],
+    ['2001:db8:0:0:1:0:0:1', '2001:db8::1:0:0:1', 'the FIRST of two equal zero runs is compressed'],
+    ['2001:db8:0:1:0:0:0:1', '2001:db8:0:1::1', 'the LONGEST zero run is compressed'],
+    ['2001:db8:0:1:2:3:4:5', '2001:db8:0:1:2:3:4:5', 'a single zero hextet is never collapsed'],
+    ['::1', '::1', 'loopback keeps its shape'],
+    ['::', '::', 'the unspecified address keeps its shape'],
+    ['fe80::1', 'fe80::1', 'an already-canonical address is unchanged'],
+    ['unknown', 'unknown', 'non-addresses pass through untouched'],
+    [')(*&^%', ')(*&^%', 'a stray % must not truncate garbage'],
+  ])('%s → %s (%s)', (input, expected) => {
+    expect(normalizeIp(input)).toBe(expected);
+  });
+
+  it('is idempotent — normalizing an already-normalized address is a no-op', () => {
+    for (const ip of ['2001:db8::1:0:0:1', '203.0.113.7', 'fe80::1', '2001:db8:0:1::1', '::']) {
+      expect(normalizeIp(normalizeIp(ip))).toBe(normalizeIp(ip));
+    }
+  });
+});
+
+describe('subnetOf — the range key the slow-drip counters group by', () => {
+  it('keeps the documented IPv4 /24 and IPv6 /48 behaviour', () => {
+    expect(subnetOf('203.0.113.9')).toBe('203.0.113.0/24');
+    expect(subnetOf('::ffff:203.0.113.9')).toBe('203.0.113.0/24');
+    expect(subnetOf('2001:db8:abcd:12::1')).toBe('2001:db8:abcd::/48');
+  });
+
+  it('passes through unparseable input rather than grouping strangers together', () => {
+    expect(subnetOf('unknown')).toBe('unknown');
+    expect(subnetOf('1.2.3')).toBe('1.2.3');
+    // The old implementation decorated this with '::/48' because it merely
+    // looked for a colon
+    expect(subnetOf('a:b')).toBe('a:b');
+  });
+
+  // F7: the key was built by splitting the COMPRESSED text — '2001:db8::a'
+  // splits to ['2001','db8','','a'], losing the third hextet. Addresses inside
+  // one /48 landed in different buckets (doubling the daily budget), and with
+  // hextets 2 and 3 both zero the key absorbed the interface id, degrading the
+  // /48 limiter to per-address.
+  it.each([
+    ['2001:db8::a', '2001:db8:0:1::a'],
+    ['2001:db8:1::a', '2001:db8:1:99::a'],
+    ['2001::1', '2001::2'],
+    ['2001::abcd:1', '2001:0:0:1::1'],
+    ['fd00::1', 'fd00::2'],
+    ['2001:DB8::1', '2001:db8:0:5::9'],
+    ['203.0.113.7', '203.0.113.200'],
+    ['::ffff:203.0.113.7', '::FFFF:cb00:71c8'],
+  ])('groups %s and %s into one bucket', (a, b) => {
+    expect(subnetOf(a)).toBe(subnetOf(b));
+  });
+
+  it.each([
+    // Neighbouring /48s — grouping these together would let one customer site
+    // spend its neighbour's budget
+    ['2001:db8:1::1', '2001:db8:2::1'],
+    ['2a01:e0a::5', '2a01:e0a:1:2::5'],
+    ['203.0.113.7', '203.0.114.7'],
+  ])('keeps %s and %s in separate buckets', (a, b) => {
+    expect(subnetOf(a)).not.toBe(subnetOf(b));
+  });
+});
+
+describe('consumeMailCap', () => {
+  it('FAILS OPEN when the store is unreachable — a broken counter must not block verification mail', async () => {
+    // The module-level getRedis mock throws, so limiter construction fails
+    await expect(consumeMailCap('verifyMail', 'someone@example.com')).resolves.toBe(true);
+    await expect(consumeMailCap('resetMail', 'someone@example.com')).resolves.toBe(true);
+  });
+});
+
+describe('getAllRateLimits', () => {
+  it('registers every abuse counter under the rl: prefix', () => {
+    // The e2e fixture, clearUserRateLimits and the admin rate-limit API all
+    // key off this prefix — a bare Redis counter is invisible to all three.
+    for (const limit of getAllRateLimits()) {
+      expect(limit.keyPrefix, `${limit.name} must live under rl:`).toMatch(/^rl:/);
+    }
+  });
+
+  it('exposes the per-inbox mail caps and the registration attempt bucket as tunable rules', () => {
+    const names = getAllRateLimits().map((l) => l.name);
+    expect(names).toEqual(expect.arrayContaining(['verifyMail', 'resetMail', 'registerAttempt']));
+    // blockDuration must stay 0 on the daily buckets: a block would push the
+    // window past 24h and strand the inbox for longer than the cap intends.
+    for (const name of ['verifyMail', 'resetMail', 'registerDaily', 'registerSubnet', 'registerAttempt']) {
+      expect(getAllRateLimits().find((l) => l.name === name)!.blockDuration).toBe(0);
+    }
+  });
+});
+
+describe('getAllRateLimits (key types)', () => {
+  it('includes the interact limiter keyed by userId (P2 — NAT-shared IP budgets)', () => {
+    const limits = getAllRateLimits();
+    const interact = limits.find((l) => l.name === 'interact');
+
+    expect(interact).toBeDefined();
+    expect(interact).toMatchObject({ name: 'interact', keyType: 'userId' });
+  });
+
+  it('keeps the general limiter keyed by ip', () => {
+    const limits = getAllRateLimits();
+    const general = limits.find((l) => l.name === 'general');
+
+    expect(general).toBeDefined();
+    expect(general).toMatchObject({ name: 'general', keyType: 'ip' });
+  });
+});
 
 describe('socketRateLimit', () => {
   beforeEach(() => {
@@ -83,5 +218,37 @@ describe('socketRateLimit', () => {
     const socket = {};
     expect(socketRateLimit(socket, 'strict', 1)).toBe(true);
     expect(socketRateLimit(socket, 'strict', 1)).toBe(false);
+  });
+});
+
+// ─── Middleware order on userId-keyed limiters ──────────────────────────────
+
+describe('userId-keyed limiters sit AFTER authenticate on every auth route', () => {
+  // byUserId falls back to req.ip when there is no req.user yet. A limiter
+  // listed before authenticate therefore keys on the address — one bucket
+  // for everyone behind a NAT — and the load test found it: the 11th account
+  // to accept the legal documents from one IP was refused, and the deletion
+  // bucket would have BLOCKED a whole office for 15 minutes on one person's
+  // typos. Read the route file rather than mount it: this is about the
+  // order of the argument list, which a request-level test cannot see.
+  const source = readFileSync(resolve(__dirname, '../../routes/auth.ts'), 'utf8');
+  const userKeyed = getAllRateLimits().filter((l) => l.keyType === 'userId').map((l) => l.name);
+  const middlewareFor = (name: string) => `rateLimit${name[0].toUpperCase()}${name.slice(1)}`;
+
+  it('covers the limiters this test is about', () => {
+    expect(userKeyed).toEqual(expect.arrayContaining(['consent', 'deleteAccount', 'resendVerification']));
+  });
+
+  it.each(userKeyed.map(middlewareFor).filter((mw) => source.includes(mw)))('%s comes after authenticate', (mw) => {
+    const routes = source
+      .split(/\r?\n/)
+      .filter((line) => /^authRouter\.[a-z]+\(/.test(line) && new RegExp(`\\b${mw}\\b`).test(line));
+    expect(routes.length, `${mw} is imported but mounted on no route`).toBeGreaterThan(0);
+    for (const line of routes) {
+      const auth = line.indexOf('authenticate');
+      const lim = line.indexOf(mw);
+      expect(auth, `${line.trim()} — no authenticate`).toBeGreaterThan(-1);
+      expect(auth, `${line.trim()} — limiter before authenticate`).toBeLessThan(lim);
+    }
   });
 });

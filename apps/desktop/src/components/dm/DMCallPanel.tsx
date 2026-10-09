@@ -57,7 +57,7 @@ export function DMCallPanel() {
         <button
           onClick={toggleMute}
           className={clsx(
-            'rounded-full p-3 transition-colors',
+            'rounded-lg p-2.5 transition-colors',
             selfMute
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
@@ -71,7 +71,7 @@ export function DMCallPanel() {
         <button
           onClick={toggleDeaf}
           className={clsx(
-            'rounded-full p-3 transition-colors',
+            'rounded-lg p-2.5 transition-colors',
             selfDeaf
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'

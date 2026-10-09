@@ -24,6 +24,10 @@ async function main() {
       displayName: 'Alice',
       password,
       emailVerified: true,
+      // Demo accounts are created consented, or the gate would greet every
+      // fresh dev DB with the consent screen
+      termsAcceptedAt: new Date(),
+      privacyAcceptedAt: new Date(),
     },
   });
 
@@ -36,6 +40,10 @@ async function main() {
       displayName: 'Bob',
       password,
       emailVerified: true,
+      // Demo accounts are created consented, or the gate would greet every
+      // fresh dev DB with the consent screen
+      termsAcceptedAt: new Date(),
+      privacyAcceptedAt: new Date(),
     },
   });
 
@@ -48,6 +56,8 @@ async function main() {
       displayName: 'Charlie',
       emailVerified: true,
       password,
+      termsAcceptedAt: new Date(),
+      privacyAcceptedAt: new Date(),
     },
   });
 

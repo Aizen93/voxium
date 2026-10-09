@@ -29,6 +29,12 @@
   --color-vox-accent-info: var(--vox-accent-info);
 
   --color-vox-border: var(--vox-border);
+  /* v2 derived tokens (themes.css :root block — computed from the authored
+   * keys, safe for pre-redesign custom themes) */
+  --color-vox-border-strong: var(--vox-border-strong);
+  --color-vox-accent-tint: var(--vox-accent-tint);
+  --color-vox-accent-tint-strong: var(--vox-accent-tint-strong);
+  --color-vox-on-accent: var(--vox-on-accent);
 
   --color-vox-voice-connected: var(--vox-voice-connected);
   --color-vox-voice-speaking: var(--vox-voice-speaking);
@@ -37,6 +43,21 @@
   /* Fonts */
   --font-sans: "Inter", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+  /* Radius scale — the redesign's rounded language (panels 16, cards 13,
+   * rows/controls 9-11). Remapping the namespace restyles every existing
+   * rounded-* utility app-wide without touching components. */
+  --radius-xs: 5px;
+  --radius-sm: 7px;
+  --radius-md: 9px;
+  --radius-lg: 11px;
+  --radius-xl: 13px;
+  --radius-2xl: 16px;
+  --radius-3xl: 20px;
+
+  /* Elevation — exactly two levels (panel, floating), theme-aware. */
+  --shadow-panel: var(--vox-shadow-panel);
+  --shadow-float: var(--vox-shadow-float);
 
   /* Animations */
   --animate-pulse-ring: pulse-ring 1.5s ease-out infinite;
@@ -96,13 +117,17 @@
 
   body {
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--vox-bg-primary);
+    color: var(--vox-text-primary);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Custom scrollbar */
+  /* Custom scrollbar — v2: wider gutter, inset pill thumb (the 4px transparent
+   * border + content-box clip keeps the visible thumb slim while giving a
+   * comfortable hit target) */
   ::-webkit-scrollbar {
-    width: 8px;
+    width: 12px;
   }
 
   ::-webkit-scrollbar-track {
@@ -111,11 +136,14 @@
 
   ::-webkit-scrollbar-thumb {
     background: var(--vox-scrollbar-thumb);
-    border-radius: 4px;
+    border-radius: 6px;
+    border: 4px solid transparent;
+    background-clip: content-box;
   }
 
   ::-webkit-scrollbar-thumb:hover {
     background: var(--vox-scrollbar-thumb-hover);
+    background-clip: content-box;
   }
 
   /* Selection */
@@ -126,21 +154,23 @@
 }
 
 @utility btn {
-  @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium
-         transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-vox-accent-primary
-         focus:ring-offset-2 focus:ring-offset-vox-bg-primary disabled:opacity-50 disabled:cursor-not-allowed;
+  @apply inline-flex h-[34px] items-center justify-center gap-2 rounded-md px-4 text-[13px] font-semibold
+         transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vox-accent-primary/60
+         disabled:opacity-50 disabled:cursor-not-allowed;
 }
 
 @utility btn-primary {
-  @apply btn bg-vox-accent-primary text-white hover:bg-vox-accent-hover;
+  /* Accent fill with dark ink + brightness hover — the v2 accent-button idiom */
+  @apply btn bg-vox-accent-primary text-vox-on-accent hover:brightness-110;
 }
 
 @utility btn-secondary {
-  @apply btn bg-vox-bg-tertiary text-vox-text-primary hover:bg-vox-bg-hover;
+  /* Quiet fill + hairline that firms up on hover; reads on any surface */
+  @apply btn bg-vox-bg-hover text-vox-text-primary border border-vox-border hover:border-vox-border-strong;
 }
 
 @utility btn-danger {
-  @apply btn bg-vox-accent-danger text-white hover:bg-red-600;
+  @apply btn bg-vox-accent-danger text-vox-on-accent hover:brightness-110;
 }
 
 @utility btn-ghost {
@@ -148,13 +178,94 @@
 }
 
 @utility input {
-  @apply w-full rounded-md border border-vox-border bg-vox-bg-floating px-3 py-2 text-sm
+  @apply w-full rounded-lg border border-vox-border bg-vox-bg-tertiary px-3 py-2 text-sm
          text-vox-text-primary placeholder:text-vox-text-muted
-         focus:border-vox-accent-primary focus:outline-none focus:ring-1 focus:ring-vox-accent-primary
+         focus:border-vox-border-strong focus:outline-none focus:ring-2 focus:ring-vox-accent-primary/35
          transition-colors duration-150;
 }
 
 @utility tooltip {
-  @apply absolute z-50 rounded-md bg-vox-bg-floating px-2 py-1 text-xs text-vox-text-primary
-         shadow-lg border border-vox-border animate-fade-in pointer-events-none;
+  @apply absolute z-50 rounded-lg bg-vox-bg-floating px-2.5 py-1 text-xs text-vox-text-primary
+         shadow-float border border-vox-border animate-fade-in pointer-events-none;
+}
+
+/* ─── v2 layout utilities ─────────────────────────────────────────────────── */
+
+/* A floating panel: the redesign's core surface. Callers pick the background
+ * (bg-vox-chat for the main canvas, bg-vox-bg-secondary for aux rails). */
+@utility panel {
+  @apply rounded-2xl border border-vox-border shadow-panel overflow-hidden;
+}
+
+/* Sidebar/People section headers — the uppercase micro-label from the mock */
+@utility section-label {
+  @apply text-[10.5px] font-semibold uppercase tracking-[0.1em] text-vox-text-muted;
+}
+
+/* Accent-tinted chip/button fill (Join voice, active channel, Voice pill).
+ * Pair with text-vox-accent-primary; hover with hover:bg-vox-accent-tint-strong. */
+@utility tint {
+  @apply bg-vox-accent-tint text-vox-accent-primary;
+}
+
+/* The server rail: one non-wrapping row whose height never depends on how many
+ * servers you are in. The scrollbar is hidden because a visible one under
+ * 36px chips is louder than the chips; the edge masks are what tell you there
+ * is more, which is also how Arc and Linear indicate overflow in dense rails.
+ *
+ * The mask is applied only while the strip actually overflows — an unconditional
+ * one fades the first and last server on a three-server account for no reason.
+ * `scrollbar-width: none` covers Firefox; the ::-webkit rule covers the rest. */
+@utility rail-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  scroll-behavior: smooth;
+}
+
+/* The fade tells you the rail continues past the edge — the cue Arc and Linear
+ * use in dense rails, instead of a scrollbar loud enough to compete with the
+ * icons it sits next to. Gated on [data-overflowing], set by the component from
+ * a ResizeObserver: an unconditional mask dims the first and last server on an
+ * account that has three of them and never scrolls at all. */
+.rail-scroll[data-overflowing='true'] {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 16px,
+    #000 calc(100% - 16px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 16px,
+    #000 calc(100% - 16px),
+    transparent 100%
+  );
+}
+
+.rail-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Floating reaction emoji (item 12): rise 35% of the stage with horizontal
+   drift, fade out. Reduced motion gets a static fade in place. */
+@keyframes vox-reaction-rise {
+  0% { transform: translate(0, 0) scale(0.8); opacity: 0; }
+  12% { transform: translate(calc(var(--vox-reaction-drift, 0px) * 0.3), calc(var(--vox-reaction-rise, 160px) * -0.12)) scale(1); opacity: 1; }
+  100% { transform: translate(var(--vox-reaction-drift, 0px), calc(var(--vox-reaction-rise, 160px) * -1)) scale(1); opacity: 0; }
+}
+@keyframes vox-reaction-fade {
+  0% { opacity: 0; }
+  15% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.vox-reaction {
+  animation: vox-reaction-rise 2.5s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .vox-reaction {
+    animation-name: vox-reaction-fade;
+  }
 }

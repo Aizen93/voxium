@@ -1,6 +1,6 @@
 # Voxium
 
-**A free, open-source real-time communication platform built for privacy.**
+**A free, source-available real-time communication platform built for privacy.**
 
 > **Try it now:** [https://voxium.app](https://voxium.app)
 
@@ -13,8 +13,9 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 ## Why Voxium?
 
 - **Zero personal data required** — No phone number, no ID verification, no tracking
-- **Fully open source** — Audit every line, self-host on your own infrastructure
-- **Production-ready voice** — mediasoup SFU for servers, direct P2P for DM calls (private STUN), AI noise suppression (RNNoise ML)
+- **End-to-end encrypted** — Always-on E2E DMs, invite-only encrypted channels, and E2E-authenticated calls (Olm/Megolm double-ratchet via vodozemac); not even the server can read them
+- **Fully auditable, source-available** — Read every line, self-host on your own infrastructure
+- **Production-ready voice** — mediasoup SFU for servers (multi-node with crash takeover), direct P2P for DM calls (private STUN), AI noise suppression (RNNoise ML)
 - **11 languages** — English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL)
 - **Theme engine** — 4 built-in themes, full custom theme editor with live preview, community marketplace
 - **Cross-platform** — Native desktop apps for Windows, macOS, and Linux via Tauri 2
@@ -29,13 +30,13 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 <td width="50%">
 
 ### Advanced Permission System
-Discord-style role-based access control with 20 granular permission flags, per-channel overrides (allow/deny/inherit), role hierarchy enforcement, and a permission calculator that resolves @everyone → role permissions → channel overrides. Admins manage roles, assign them to members, and configure channel-specific restrictions — all through the UI.
+Role-based access control with 20 granular permission flags, per-channel overrides (allow/deny/inherit), role hierarchy enforcement, and a permission calculator that resolves @everyone → role permissions → channel overrides. Admins manage roles, assign them to members, and configure channel-specific restrictions — all through the UI.
 
 </td>
 <td width="50%">
 
 ### Production-Ready Voice
-mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing, and voice quality selector. DM calls use direct P2P WebRTC with Perfect Negotiation, routed through a private self-hosted STUN server (coturn) — no third-party relay.
+mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing with live annotations and source-composited privacy masks, and voice quality selector. DM calls use direct P2P WebRTC with Perfect Negotiation, routed through a private self-hosted STUN server (coturn) — no third-party relay.
 
 </td>
 </tr>
@@ -67,6 +68,20 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 
 </td>
 </tr>
+<tr>
+<td width="50%">
+
+### End-to-End Encryption
+All DMs are end-to-end encrypted by default — Olm/Megolm double-ratchet (vodozemac WASM), always on, with no plaintext fallback. Up to 5 devices per account with cross-signing, one safety number per account, device linking by short code, and instant revocation with re-keying. Invite-only **secure channels** bring E2E to servers: not even the server owner or admins can read them. Encrypted attachments, encrypted key backup with a recovery key, and DM call signaling sealed in Olm envelopes so not even the relay can tamper with a call.
+
+</td>
+<td width="50%">
+
+### Built for Multi-Node Scale
+Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-node events, Redis-backed presence and voice state, channel-affinity voice relay so each voice channel lives on exactly one mediasoup node with automatic takeover when a node crashes, cross-node DM calls, and heartbeat-gated cleanup. Validated live: 35/35 cross-node scenarios including real RTP and hard owner-crash takeover.
+
+</td>
+</tr>
 </table>
 
 ---
@@ -81,10 +96,19 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 | | Message Editing & Deletion | Edit inline, delete with confirmation; admins can delete any message |
 | | Reactions | Emoji reactions with grouped display and toggle support (channels and DMs) |
 | | Direct Messages | 1-on-1 text with real-time delivery, typing indicators, reactions, persistent unread tracking, conversation deletion |
-| | Message Search | Full-text search across server channels and DM conversations with jump-to-message navigation |
+| | Message Search | Full-text search across server channels and DM conversations with jump-to-message navigation; encrypted conversations search this device's decrypted history locally |
+| **Encryption** | E2E Direct Messages | Always-on end-to-end encryption for every DM (Olm/Megolm via vodozemac WASM) — no opt-in, no plaintext fallback; the server stores only ciphertext |
+| | Multi-Device | Up to 5 devices per account with per-device key shares; link a new device with a short code; revoke any device and conversations re-key instantly |
+| | Cross-Signing & Safety Numbers | One safety number per account, verified out-of-band; key changes surface loud warnings that must be explicitly accepted |
+| | Secure Channels | Invite-only E2E-encrypted server channels — invisible and unreadable to non-members, including the server owner and admins; membership changes rotate keys, new members see no history |
+| | E2E-Authenticated Calls | DM calls are P2P DTLS-SRTP with signaling sealed in Olm envelopes pinned to the peer's device — a compromised relay cannot substitute or inject call setup; plaintext signals abort the call |
+| | Encrypted Attachments | DM and secure-channel attachments are encrypted client-side; the server stores opaque blobs with forced generic names |
+| | Key & History Backup | Encrypted account-key backup with a recovery key, plus message-key backup so history follows the account to new devices |
 | **Voice** | Server Voice (SFU) | mediasoup Selective Forwarding Unit for scalable voice (25+ users per channel), speaking indicators, latency display |
-| | DM Voice Calls | 1-on-1 WebRTC P2P audio with Perfect Negotiation, private STUN server (coturn), incoming call modal, ringtone, speaking indicators, call history as system messages |
+| | DM Voice Calls | 1-on-1 WebRTC P2P audio with Perfect Negotiation, E2E-authenticated signaling (Olm-enveloped, device-pinned), private STUN server (coturn), incoming call modal, ringtone, speaking indicators, call history as system messages |
 | | Screen Sharing | Share screen in voice channels with real-time video and system audio, inline/floating viewer modes |
+| | Screen Annotations & Overlays | Draw (pen/highlighter/shapes/text) and place movable image overlays (logos, promos) over a live share — rendered vector-crisp on every viewer, synced in real time, late joiners included |
+| | Privacy Masks | Cover screen regions with black boxes composited into the video **on the sharer's machine** — covered pixels never leave it; masking fails closed (share pauses with a banner rather than exposing content) |
 | | AI Noise Suppression | ML-powered RNNoise WASM filter removes keyboard, mouse, and background noise in real time via AudioWorklet |
 | | Opus Optimization | DTX for bandwidth savings, in-band FEC for packet loss recovery, optimized bitrate |
 | | Push-to-Talk | Configurable input mode with key binding picker; noise gate sensitivity slider for voice activity mode |
@@ -94,7 +118,7 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 | **Permissions** | Custom Roles | Create unlimited custom roles with names, colors, and granular permissions; role hierarchy enforcement prevents privilege escalation |
 | | 20 Permission Flags | VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, and 12 more |
 | | Channel Overrides | Per-channel permission overrides with allow/deny/inherit tri-state per role — restrict #announcements to read-only, hide #staff channels |
-| | Permission Calculator | Discord-style resolution: @everyone base → OR all role permissions → channel overrides; ADMINISTRATOR bypasses everything |
+| | Permission Calculator | Layered resolution: @everyone base → OR all role permissions → channel overrides; ADMINISTRATOR bypasses everything |
 | | Voice Moderation | Server mute/deafen (persists across reconnect via Redis), cross-channel force-move, role hierarchy enforcement |
 | | Per-Server Nicknames | Members can set server-specific display names; admins can manage others' nicknames |
 | **Social** | Friend System | Send, accept, decline, and remove friend requests with real-time notifications |
@@ -108,15 +132,17 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 | **Security** | Two-Factor Auth | TOTP 2FA with authenticator app support, QR code setup, 8 backup codes, 30-day trusted device tokens |
 | | Authentication | JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation |
 | | Rate Limiting | Per-endpoint and per-socket rate limiting, admin-editable via Redis-backed registry |
+| | Anti-Bot Registration | Self-hosted proof-of-work (no captcha service — nothing leaves the platform), canonical-email dedupe (gmail dot/+tag aliases collapse to one account), daily per-IP/subnet/domain budgets, IP bans enforced at signup, per-inbox mail caps, 7-day unverified-account expiry, live abuse dashboard with spike alerts |
 | | Input Sanitization | HTML stripping, validation, CORS protection |
 | **Themes** | Built-in Themes | 4 built-in themes — Dark, Light, Midnight, Tactical — switchable instantly in settings |
-| | Custom Theme Editor | Full visual editor with live preview: customize all colors, patterns, and CSS overrides to match your branding |
+| | Custom Theme Editor | Full visual editor: customize all colors, patterns, and CSS overrides to match your branding, judged on a scale model of the real app shell — or applied to the whole app with one click and taken back with Escape |
 | | Theme Marketplace | Publish your custom themes for the community; browse, preview, and install themes created by other users |
 | **Internationalization** | 11 Languages | English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL) |
 | | Auto-Detection | Language auto-detected from browser locale; switchable in settings; RTL layout for Arabic |
 | **Platform** | File Uploads | S3-compatible storage for avatars, server icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
 | | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
-| | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with Discord-inspired dark UI |
+| | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with polished dark UI |
+| | Multi-Node Clustering | Socket.IO Redis adapter, Redis-backed presence/voice state, channel-affinity voice relay with automatic crash takeover, cross-node DM calls — validated live across nodes |
 | | Self-Hosted STUN | Private coturn STUN server for P2P WebRTC — STUN URL derived from your server hostname, zero reliance on Google or third-party STUN/TURN services |
 | | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |
 
@@ -589,11 +615,25 @@ pnpm test:watch
 # Run with coverage report
 pnpm --filter @voxium/server test:coverage
 
-# Run E2E tests (requires backend + frontend + Redis running)
+# Run E2E tests (Playwright starts the backend, desktop and admin apps itself;
+# needs PostgreSQL + Redis, plus an SMTP catcher on :1025 for the
+# email-verification specs — e.g. docker run -p 1025:1025 axllent/mailpit)
 pnpm test:e2e               # Headless
 pnpm test:e2e:ui             # Interactive UI mode
 pnpm test:e2e:headed         # Visible browser
+
+# Cross-engine proof for encrypted voice (Gecko's RTCRtpScriptTransform path)
+npx playwright test secure-voice --config=playwright-firefox.config.ts
+
+# What CI gates on: everything except specs tagged @quarantine
+npx playwright test --grep-invert @quarantine
 ```
+
+E2E runs on every pull request and blocks merging. The job provisions
+PostgreSQL, Redis, Mailpit and MinIO, applies migrations, and runs the suite on
+Chromium plus the encrypted-voice spec on Firefox. Specs tagged `@quarantine`
+still run, but in a non-blocking step — see the note at the top of
+`tests/e2e/e2e-encryption.spec.ts` for why that one is currently tagged.
 
 ### Test Coverage
 
@@ -610,9 +650,12 @@ pnpm test:e2e:headed         # Visible browser
 | **DM Routes** | 18 | Conversations, messages, cascade delete, authorization |
 | **Upload Routes** | 19 | S3 redirect/proxy, Express 5 wildcards, path traversal prevention |
 | **Permission System** | 119 | Role CRUD, hierarchy enforcement, channel overrides, permission calculator, bitmask utilities |
-| **Voice Handler** | 45 | Transport ACK on all code paths, join validation, mute/deaf/speaking, server_mute/deafen/force_move + deafen-implies-mute |
+| **Voice Handler** | 118 | Transport ACK on all code paths, join validation, mute/deaf/speaking, moderation + deafen-implies-mute, screen-share slot protocol, annotation scene lifecycle/hydration, multi-node routing, secure voice |
+| **Screen Annotations** | 38 | Sharer-only authorization, op/geometry/text validation, scene & byte budgets, image-bomb rejection, restart snapshot + resync ack, shared reducer semantics |
+| **Image Header Parsing** | 4 | PNG/JPEG/WebP dimension extraction from container headers, fail-closed on malformed input |
 | **DM Voice Handler** | 81 | P2P call lifecycle, signal relay, atomic mute/deaf (Lua), call timeout, 1-on-1 capacity, decline auth, mutual exclusivity |
-| **Theme Routes** | 29 | CRUD, publish/unpublish marketplace, browse/search, install count, validation |
+| **Theme Routes** | 63 | CRUD, publish/unpublish marketplace, browse/search, install count, validation |
+| **Theme Colors** | 11 | Which keys may carry alpha (translucent layers vs opaque surfaces), rgba/hex acceptance, CSS injection rejection, every built-in palette parsed from themes.css and re-validated |
 | **Auth Service** | 22 | Registration, login, tokens, password reset, email normalization |
 | **TOTP Service** | 19 | Setup, enable, verify, disable, encrypt/decrypt roundtrip, backup codes |
 | **Pure Utilities** | 75 | Sanitization, error classes, mentions, reactions, rate limiting |
@@ -657,4 +700,17 @@ pnpm test:e2e:headed         # Visible browser
 
 ## License
 
-This project is open source. See the repository for license details.
+Voxium is **source-available** under the [Voxium Community License 1.0](LICENSE.md).
+
+In short: run it, read it, audit it, modify it, share it — for yourself, your
+community, or internally in your organization. Access to any instance must
+stay free for its users: no paywalls, no gated features, no ads, no selling
+of user data. Commercial exploitation (selling access, hosted/managed
+offerings, bundling into paid products) is reserved to the project.
+Individuals and nonprofits may accept voluntary donations as long as nothing
+is gated behind them. If you deploy a modified version for people outside
+your organization, publish your changes.
+
+Releases up to `v1.7.3` were AGPL-3.0 and remain so — see
+[NOTICE.md](NOTICE.md) for the full history, and [TRADEMARK.md](TRADEMARK.md)
+for use of the Voxium name.

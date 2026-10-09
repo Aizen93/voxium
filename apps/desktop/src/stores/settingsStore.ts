@@ -15,6 +15,13 @@ type BuiltInThemeId = (typeof BUILT_IN_THEME_IDS)[number];
 /** Theme identifier: built-in ID or 'custom:<localId>' for community themes */
 export type ThemeId = BuiltInThemeId | `custom:${string}`;
 
+/**
+ * The tabs of the settings modal. Declared here rather than in the modal so
+ * callers can deep-link (`openSettings('security')`) without importing the
+ * component — and so a renamed tab breaks at the call sites, not at runtime.
+ */
+export type SettingsTab = 'account' | 'security' | 'appearance' | 'audio' | 'language';
+
 export const THEMES: { id: BuiltInThemeId; label: string }[] = [
   { id: 'dark', label: 'Dark' },
   { id: 'light', label: 'Light' },
@@ -53,9 +60,27 @@ interface PersistedSettings {
 
 interface SettingsState extends PersistedSettings {
   isSettingsOpen: boolean;
-  openSettings: () => void;
+  /**
+   * A tab the opener asked for, consumed once by the modal.
+   *
+   * It is a REQUEST, not the current tab: the modal owns which tab is showing
+   * (the user clicks the nav), so parking that here would give two owners to
+   * one piece of state. Clearing it on consumption is what keeps a later plain
+   * `openSettings()` landing on the default instead of re-opening wherever the
+   * last deep link pointed.
+   */
+  initialSettingsTab: SettingsTab | null;
+  openSettings: (tab?: SettingsTab) => void;
   closeSettings: () => void;
+  /** Called by the modal once it has honoured `initialSettingsTab`. */
+  clearInitialSettingsTab: () => void;
   setTheme: (theme: ThemeId) => void;
+  /**
+   * Re-apply the stored theme to the document without changing (or
+   * re-persisting) it — how the marketplace and the theme editor put the app
+   * back after a full-app preview painted someone else's colors on <html>.
+   */
+  reapplyTheme: () => void;
   setLanguage: (lang: string) => void;
   setAudioInputDeviceId: (deviceId: string) => void;
   setAudioOutputDeviceId: (deviceId: string) => void;
@@ -198,14 +223,23 @@ function generateLocalId(): string {
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   ...initial,
   isSettingsOpen: false,
+  initialSettingsTab: null,
 
-  openSettings: () => set({ isSettingsOpen: true }),
-  closeSettings: () => set({ isSettingsOpen: false }),
+  // No argument keeps the old behaviour exactly: open on the default tab.
+  openSettings: (tab?: SettingsTab) => set({ isSettingsOpen: true, initialSettingsTab: tab ?? null }),
+  // Also drops an unconsumed request, so a deep link that never got rendered
+  // cannot resurface on the next open.
+  closeSettings: () => set({ isSettingsOpen: false, initialSettingsTab: null }),
+  clearInitialSettingsTab: () => set({ initialSettingsTab: null }),
 
   setTheme: (theme: ThemeId) => {
     applyTheme(theme, get().customThemes);
     set({ theme });
     persistSettings(get());
+  },
+
+  reapplyTheme: () => {
+    applyTheme(get().theme, get().customThemes);
   },
 
   setLanguage: (lang: string) => {

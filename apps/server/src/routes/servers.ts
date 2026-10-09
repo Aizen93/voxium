@@ -1,25 +1,29 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateServerName, validateNickname, LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, permissionsToString } from '@voxium/shared';
 import type { MemberRole, Server } from '@voxium/shared';
 import type { Socket } from 'socket.io';
 import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
-import { broadcastMemberJoined, broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
+import { broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
-import { leaveCurrentVoiceChannel, cleanupServerVoice } from '../websocket/voiceHandler';
+import { leaveCurrentVoiceChannel } from '../websocket/voiceHandler';
+import { broadcastServerVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
+import { getRedis } from '../utils/redis';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
+import { purgeSecureChannelState } from '../utils/secureChannelLifecycle';
+import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 
 export const serverRouter = Router();
 
-serverRouter.use(authenticate, requireVerifiedEmail);
+serverRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // List servers the user is a member of
 serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
@@ -268,48 +272,10 @@ serverRouter.get('/:serverId/members/search', rateLimitSearch, async (req: Reque
   }
 });
 
-// Join a server (via invite code - simplified)
-serverRouter.post('/:serverId/join', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
-  try {
-    const { serverId } = req.params;
-
-    const server = await prisma.server.findUnique({ where: { id: serverId } });
-    if (!server) throw new NotFoundError('Server');
-
-    const existing = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-    if (existing) throw new BadRequestError('Already a member of this server');
-
-    await prisma.serverMember.create({
-      data: { userId: req.user!.userId, serverId },
-    });
-
-    // Notify all members and add the joiner's socket(s) to the server room
-    await broadcastMemberJoined(req.user!.userId, serverId);
-
-    // Seed ChannelRead for all text channels so existing history doesn't show as unread
-    const textChannels = await prisma.channel.findMany({
-      where: { serverId, type: 'text' },
-      select: { id: true },
-    });
-    if (textChannels.length > 0) {
-      const now = new Date();
-      await prisma.channelRead.createMany({
-        data: textChannels.map((ch) => ({
-          userId: req.user!.userId,
-          channelId: ch.id,
-          lastReadAt: now,
-        })),
-        skipDuplicates: true,
-      });
-    }
-
-    res.json({ success: true, data: server });
-  } catch (err) {
-    next(err);
-  }
-});
+// NOTE: There is intentionally no direct POST /:serverId/join route. Joining a
+// server MUST go through POST /invites/:code/join, which enforces invite
+// validity, invitesLocked, and maxMembers. A direct join-by-id route would
+// bypass all three (HIGH-6 in the stabilization audit).
 
 // Leave a server
 serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -321,6 +287,27 @@ serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>,
     });
     if (!membership) throw new NotFoundError('Server membership');
     if (membership.role === 'owner') throw new ForbiddenError('Server owner cannot leave. Transfer ownership first.');
+
+    // Secure channels first: channels they created die with them (with events
+    // to their members), other memberships are removed so remaining members
+    // rotate keys. Must run BEFORE the ServerMember delete.
+    await purgeSecureChannelState(req.user!.userId, serverId);
+
+    // Leaving the server force-leaves its voice too (parity with kick — a
+    // departed member must not keep a live media session). Cross-node via the
+    // Redis reverse lookup + cluster eviction fan-out.
+    try {
+      const redis = getRedis();
+      const voiceChannelId = await redis.get(`voice:user:${req.user!.userId}`);
+      if (voiceChannelId) {
+        const voiceServerId = await redis.get(`voice:channel:server:${voiceChannelId}`);
+        if (voiceServerId === serverId) {
+          await broadcastVoiceEvictUser(getIO(), voiceChannelId, req.user!.userId);
+        }
+      }
+    } catch (err) {
+      console.warn('[Servers] Voice eviction on self-leave failed (reaper will catch up):', err);
+    }
 
     // Clean up ChannelRead records for this server's channels
     const textChannelIds = await prisma.channel.findMany({
@@ -444,8 +431,9 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
 
     const io = getIO();
 
-    // 1. Silently eject all users from voice channels (no voice:user_left events — clients handle via server:deleted)
-    cleanupServerVoice(io, serverId);
+    // 1. Silently eject all users from voice channels (no voice:user_left events — clients handle via server:deleted).
+    //    Broadcast: mediasoup objects are node-local, every node must reap its own.
+    await broadcastServerVoiceCleanup(io, serverId);
 
     // 2. Notify all members before removing them from rooms
     io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_DELETED, { serverId });
@@ -548,11 +536,13 @@ serverRouter.post(
         throw new ForbiddenError('Cannot kick a member with an equal or higher role');
       }
 
-      // Force-leave the kicked user from voice if they're in a voice channel on THIS server
+      // Force-leave the kicked user from voice if they're in a voice channel on
+      // THIS server. Scoped to the member's own sockets via their per-user room
+      // instead of fetching every socket on every node.
       const io = getIO();
-      const sockets = await io.fetchSockets();
-      for (const s of sockets) {
-        if (s.data.userId === memberId && s.data.voiceChannelId) {
+      const memberSockets = await io.in(`user:${memberId}`).fetchSockets();
+      for (const s of memberSockets) {
+        if (s.data.voiceChannelId) {
           // Verify the voice channel belongs to the server the user is being kicked from
           const voiceChannel = await prisma.channel.findUnique({
             where: { id: s.data.voiceChannelId as string },
@@ -563,6 +553,11 @@ serverRouter.post(
           }
         }
       }
+
+      // Secure channels: kicked creator's channels are deleted, other secure
+      // memberships removed (remaining members rotate keys). BEFORE the
+      // ServerMember delete.
+      await purgeSecureChannelState(memberId, serverId);
 
       // Clean up ChannelRead records for this server's channels
       const textChannelIds = await prisma.channel.findMany({
@@ -582,13 +577,9 @@ serverRouter.post(
       // Remove kicked user's socket from server room and notify remaining members
       await broadcastMemberLeft(memberId, serverId);
 
-      // Emit member:kicked directly to the kicked user's sockets (they're already out of the server room)
-      const kickedSockets = await io.fetchSockets();
-      for (const s of kickedSockets) {
-        if (s.data.userId === memberId) {
-          s.emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
-        }
-      }
+      // Emit member:kicked directly to the kicked user's per-user room
+      // (they're already out of the server room)
+      io.to(`user:${memberId}`).emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
 
       res.json({ success: true, message: 'Member kicked' });
     } catch (err) {
@@ -739,6 +730,18 @@ serverRouter.post(
       ]);
 
       const io = getIO();
+
+      // `server.ownerId` is the pivot of every visibility calculator's owner
+      // fast path, so this transfer changes VIEW_CHANNEL for two users at once:
+      // the new owner can now see every channel and the old one drops to what
+      // their roles grant. channel:{id} rooms are only computed at connect, so
+      // without a resync the old owner keeps receiving messages, typing and
+      // voice presence for staff-only channels they can no longer view, and
+      // the new owner misses every channel-scoped lifecycle event until they
+      // reconnect. Two user-scoped recomputes, after the transaction commits
+      // (the util re-reads ownerId).
+      void syncChannelVisibilityRooms(serverId, { userId: targetUserId });
+      void syncChannelVisibilityRooms(serverId, { userId: req.user!.userId });
 
       // Emit role updates for both users
       io.to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {

@@ -29,7 +29,6 @@
     "creating": "创建中...",
     "deleting": "删除中..."
   },
-
   "auth": {
     "login": {
       "title": "欢迎回来！",
@@ -56,6 +55,15 @@
       "passwordPlaceholder": "至少 8 个字符",
       "createAccount": "创建账号",
       "creatingAccount": "正在创建账号...",
+      "consentLegend": "同意",
+      "acceptTermsPrefix": "我已阅读并接受",
+      "termsOfService": "服务条款",
+      "acceptPrivacyPrefix": "我已阅读并接受",
+      "privacyPolicy": "隐私政策",
+      "showPassword": "显示密码",
+      "hidePassword": "隐藏密码",
+      "consentRequired": "请接受服务条款和隐私政策以继续",
+      "verifyingBrowser": "正在验证您的浏览器…",
       "hasAccount": "已有账号？",
       "signIn": "登录",
       "passwordWeak": "密码强度弱",
@@ -108,6 +116,13 @@
       "missingToken": "缺少验证令牌。",
       "failed": "验证失败。链接可能无效或已过期。"
     },
+    "consent": {
+      "title": "继续之前",
+      "description": "要继续使用您的账户，Voxium 需要您接受服务条款和隐私政策。",
+      "submit": "接受并继续",
+      "submitting": "保存中…",
+      "failed": "无法保存您的同意，请重试。"
+    },
     "emailPending": {
       "title": "验证你的邮箱",
       "description": "我们已向 <1>{{email}}</1> 发送了验证链接。请检查收件箱并点击链接以激活你的账号。",
@@ -119,7 +134,6 @@
       "checkSpam": "没收到邮件？请检查垃圾邮件文件夹或尝试重新发送。"
     }
   },
-
   "settings": {
     "title": "设置",
     "tabs": {
@@ -140,6 +154,20 @@
       "profileUpdated": "个人资料已更新",
       "failedToUploadAvatar": "头像上传失败",
       "failedToUpdateProfile": "个人资料更新失败"
+    },
+    "deleteAccount": {
+      "title": "删除账户",
+      "description": "永久删除您的账户、消息、个人资料和加密密钥。此操作无法撤销。",
+      "open": "删除我的账户…",
+      "warning": "与您账户相关的一切都将被删除。如果您拥有服务器，请先在各服务器的设置中转让或删除它们。",
+      "ownsServers": "您仍然拥有以下服务器。请转让或删除后重试：",
+      "password": "您的密码",
+      "totpCode": "双重认证验证码",
+      "typeToConfirm": "输入 {{word}} 以确认",
+      "confirmWord": "删除",
+      "confirm": "永久删除我的账户",
+      "deleting": "正在删除…",
+      "failed": "无法删除您的账户，请重试。"
     },
     "security": {
       "changePassword": "修改密码",
@@ -234,7 +262,6 @@
       "selectLanguage": "选择语言"
     }
   },
-
   "serverSettings": {
     "title": "服务器设置",
     "tabs": {
@@ -310,30 +337,92 @@
       "failedToLoad": "服务器限制加载失败"
     }
   },
-
   "permissions": {
-    "VIEW_CHANNEL": { "name": "查看频道", "description": "允许成员查看文字和语音频道" },
-    "MANAGE_CHANNELS": { "name": "管理频道", "description": "允许成员创建、编辑和删除频道" },
-    "MANAGE_CATEGORIES": { "name": "管理分类", "description": "允许成员创建、编辑和删除分类" },
-    "MANAGE_SERVER": { "name": "管理服务器", "description": "允许成员编辑服务器名称、图标和设置" },
-    "MANAGE_ROLES": { "name": "管理角色", "description": "允许成员创建、编辑和删除低于自己的角色" },
-    "CREATE_INVITES": { "name": "创建邀请", "description": "允许成员创建服务器邀请链接" },
-    "KICK_MEMBERS": { "name": "踢出成员", "description": "允许成员踢出拥有较低角色的其他成员" },
-    "MANAGE_NICKNAMES": { "name": "管理昵称", "description": "允许成员更改其他成员的显示名称" },
-    "CHANGE_NICKNAME": { "name": "更改昵称", "description": "允许成员更改自己的显示名称" },
-    "SEND_MESSAGES": { "name": "发送消息", "description": "允许成员在文字频道中发送消息" },
-    "MANAGE_MESSAGES": { "name": "管理消息", "description": "允许成员删除其他成员的消息" },
-    "ATTACH_FILES": { "name": "附加文件", "description": "允许成员上传文件附件" },
-    "ADD_REACTIONS": { "name": "添加表情", "description": "允许成员为消息添加表情回应" },
-    "MENTION_EVERYONE": { "name": "提及所有人", "description": "允许成员使用 @everyone 提及" },
-    "CONNECT": { "name": "连接", "description": "允许成员加入语音频道" },
-    "SPEAK": { "name": "发言", "description": "允许成员在语音频道中发言" },
-    "MUTE_MEMBERS": { "name": "静音成员", "description": "允许成员在语音中将其他成员静音" },
-    "DEAFEN_MEMBERS": { "name": "关闭成员声音", "description": "允许成员在语音中关闭其他成员的声音" },
-    "MOVE_MEMBERS": { "name": "移动成员", "description": "允许成员在语音频道之间移动其他成员" },
-    "ADMINISTRATOR": { "name": "管理员", "description": "授予所有权限并绕过所有频道覆盖" }
+    "VIEW_CHANNEL": {
+      "name": "查看频道",
+      "description": "允许成员查看文字和语音频道"
+    },
+    "MANAGE_CHANNELS": {
+      "name": "管理频道",
+      "description": "允许成员创建、编辑和删除频道"
+    },
+    "MANAGE_CATEGORIES": {
+      "name": "管理分类",
+      "description": "允许成员创建、编辑和删除分类"
+    },
+    "MANAGE_SERVER": {
+      "name": "管理服务器",
+      "description": "允许成员编辑服务器名称、图标和设置"
+    },
+    "MANAGE_ROLES": {
+      "name": "管理角色",
+      "description": "允许成员创建、编辑和删除低于自己的角色"
+    },
+    "CREATE_SECURE_CHANNELS": {
+      "name": "创建安全频道",
+      "description": "允许成员创建仅限邀请的端到端加密频道"
+    },
+    "CREATE_INVITES": {
+      "name": "创建邀请",
+      "description": "允许成员创建服务器邀请链接"
+    },
+    "KICK_MEMBERS": {
+      "name": "踢出成员",
+      "description": "允许成员踢出拥有较低角色的其他成员"
+    },
+    "MANAGE_NICKNAMES": {
+      "name": "管理昵称",
+      "description": "允许成员更改其他成员的显示名称"
+    },
+    "CHANGE_NICKNAME": {
+      "name": "更改昵称",
+      "description": "允许成员更改自己的显示名称"
+    },
+    "SEND_MESSAGES": {
+      "name": "发送消息",
+      "description": "允许成员在文字频道中发送消息"
+    },
+    "MANAGE_MESSAGES": {
+      "name": "管理消息",
+      "description": "允许成员删除其他成员的消息"
+    },
+    "ATTACH_FILES": {
+      "name": "附加文件",
+      "description": "允许成员上传文件附件"
+    },
+    "ADD_REACTIONS": {
+      "name": "添加表情",
+      "description": "允许成员为消息添加表情回应"
+    },
+    "MENTION_EVERYONE": {
+      "name": "提及所有人",
+      "description": "允许成员使用 @everyone 提及"
+    },
+    "CONNECT": {
+      "name": "连接",
+      "description": "允许成员加入语音频道"
+    },
+    "SPEAK": {
+      "name": "发言",
+      "description": "允许成员在语音频道中发言"
+    },
+    "MUTE_MEMBERS": {
+      "name": "静音成员",
+      "description": "允许成员在语音中将其他成员静音"
+    },
+    "DEAFEN_MEMBERS": {
+      "name": "关闭成员声音",
+      "description": "允许成员在语音中关闭其他成员的声音"
+    },
+    "MOVE_MEMBERS": {
+      "name": "移动成员",
+      "description": "允许成员在语音频道之间移动其他成员"
+    },
+    "ADMINISTRATOR": {
+      "name": "管理员",
+      "description": "授予所有权限并绕过所有频道覆盖"
+    }
   },
-
   "roles": {
     "categories": {
       "general": "常规",
@@ -365,7 +454,6 @@
     "failedToUpdate": "发生了一个错误",
     "failedToDelete": "发生了一个错误"
   },
-
   "channelPermissions": {
     "title": "频道权限",
     "roles": "角色",
@@ -383,7 +471,6 @@
     "current": "当前：",
     "clickToCycle": "点击切换。"
   },
-
   "contextMenu": {
     "roles": "角色",
     "voice": "语音",
@@ -417,7 +504,6 @@
     "failedToSetNickname": "昵称设置失败",
     "failedToClearNickname": "昵称清除失败"
   },
-
   "userProfile": {
     "status": {
       "online": "在线",
@@ -442,7 +528,6 @@
     "failedToDecline": "好友请求拒绝失败",
     "failedToRemove": "好友删除失败"
   },
-
   "messageItem": {
     "todayAt": "今天 {{time}}",
     "yesterdayAt": "昨天 {{time}}",
@@ -456,7 +541,6 @@
     "originalDeleted": "原始消息已被删除",
     "failedToToggleReaction": "表情更改失败"
   },
-
   "messageInput": {
     "replyingTo": "回复",
     "cancelReply": "取消回复",
@@ -465,8 +549,15 @@
     "uploadFailed": "失败",
     "attachFile": "附加文件"
   },
-
   "server": {
+    "pinnedSection": "已固定",
+    "pinSpace": "固定空间",
+    "unpinSpace": "取消固定",
+    "findSpace": "查找空间",
+    "liveNow": "正在进行",
+    "allSpaces": "所有空间",
+    "moreSpaces": "还有 {{count}} 个空间",
+    "inVoiceCount": "{{count}} 人在语音中",
     "create": {
       "createTitle": "创建服务器",
       "joinTitle": "加入服务器",
@@ -492,10 +583,15 @@
       "inviteCode": "邀请码",
       "generatingLink": "正在生成邀请链接...",
       "failedToCreate": "邀请创建失败"
-    }
+    },
+    "switcherTitle": "切换服务器",
+    "switcherPlaceholder": "跳转到服务器…",
+    "switcherEmpty": "没有名称匹配的服务器。",
+    "switcherHint": "输入以筛选 · ↑↓ 移动 · Enter 打开",
+    "createOrJoin": "创建或加入服务器"
   },
-
   "channel": {
+    "joinVoice": "加入语音",
     "createChannel": "创建频道",
     "deleteChannel": "删除频道",
     "deleteCategory": "删除分类",
@@ -528,7 +624,6 @@
     "newChannelPlaceholder": "新{{type}}频道",
     "editPermissions": "编辑权限"
   },
-
   "chat": {
     "messagePlaceholder": "在 #{{channel}} 中发消息",
     "dmPlaceholder": "给 @{{user}} 发消息",
@@ -577,9 +672,10 @@
     "maxAttachments": "每条消息最多 {{max}} 个附件",
     "fileTypeNotAllowed": "{{name}}：不允许的文件类型",
     "fileTooLarge": "{{name}} 太大（最大 {{max}}MB）",
-    "searchMessages": "搜索消息 (Ctrl+K)"
+    "searchMessages": "搜索消息 (Ctrl+K)",
+    "today": "今天",
+    "yesterday": "昨天"
   },
-
   "dm": {
     "title": "私信",
     "friends": "好友",
@@ -597,7 +693,6 @@
     "conversationStart": "这是你们私信记录的开始。",
     "welcomeMessage": "从侧边栏选择一个对话，或点击任意服务器中的成员来开始新的对话。"
   },
-
   "friends": {
     "title": "好友",
     "tabs": {
@@ -606,10 +701,10 @@
       "pending": "待处理",
       "addFriend": "添加好友"
     },
-    "onlineCount": "在线 — {{count}}",
-    "allCount": "全部好友 — {{count}}",
-    "incomingCount": "收到的请求 — {{count}}",
-    "outgoingCount": "发出的请求 — {{count}}",
+    "onlineCount": "在线，{{count}}",
+    "allCount": "全部好友，{{count}}",
+    "incomingCount": "收到的请求，{{count}}",
+    "outgoingCount": "发出的请求，{{count}}",
     "noOnline": "当前没有好友在线。",
     "noFriends": "你还没有好友。试试发送好友请求吧！",
     "noPending": "没有待处理的好友请求。",
@@ -630,7 +725,6 @@
     "failedToAccept": "好友请求接受失败",
     "failedToRemove": "好友关系删除失败"
   },
-
   "members": {
     "owner": "所有者",
     "adminsCount": "管理员 - {{count}}",
@@ -638,7 +732,6 @@
     "onlineCount": "在线 - {{count}}",
     "offlineCount": "离线 - {{count}}"
   },
-
   "voice": {
     "connected": "语音已连接",
     "voiceChannel": "语音频道",
@@ -653,6 +746,7 @@
     "serverMuted": "你已被服务器静音",
     "moderatorRestricted": "管理员已限制你的音频",
     "shareScreen": "共享屏幕",
+    "shareWhiteboard": "共享白板",
     "stopSharing": "停止共享",
     "someoneSharing": "其他人正在共享屏幕",
     "disconnect": "断开连接",
@@ -660,9 +754,99 @@
     "incomingCall": "来电中...",
     "accept": "接听",
     "decline": "拒绝",
-    "failedToAccept": "接听失败"
+    "failedToAccept": "接听失败",
+    "someone": "有人",
+    "youAreSharing": "你正在共享屏幕",
+    "userIsSharing": "{{name}} 正在共享屏幕",
+    "fullscreen": "全屏",
+    "popOut": "弹出为浮动窗口",
+    "dockToInline": "停靠到主视图",
+    "waitingForStream": "正在等待屏幕共享流...",
+    "screenShare": "屏幕共享",
+    "snapshot": {
+      "button": "拍摄快照",
+      "caption": "{{name}} 的共享快照",
+      "copy": "复制图片",
+      "copied": "已复制",
+      "save": "保存…",
+      "sendTo": "发送到频道",
+      "sent": "快照已发送",
+      "failed": "快照失败",
+      "holdBlocked": "来源已更改 — 请先确认您的隐私遮罩",
+      "notice": "{{name}} 拍摄了快照",
+      "noChannels": "没有可用的频道"
+    },
+    "reactions": {
+      "send": "发送 {{emoji}} 反应",
+      "hide": "隐藏反应",
+      "show": "显示反应"
+    },
+    "zoom": {
+      "reset": "重置缩放"
+    },
+    "preflight": {
+      "title": "准备共享",
+      "subtitle": "遮盖隐私内容并添加注释或图片 — 开播前不会共享任何内容",
+      "monitorNudge": "你正在共享整个屏幕 — 通知和其他所有窗口都将可见。请遮盖隐私内容。",
+      "maskCount": "{{count}} 个遮罩",
+      "skipNextTime": "不再显示（全屏警告仍会保留）",
+      "cancel": "取消",
+      "goLive": "开始直播"
+    },
+    "annotations": {
+      "annotate": "标注",
+      "done": "完成",
+      "select": "选择",
+      "pen": "画笔",
+      "highlighter": "荧光笔",
+      "rectangle": "矩形",
+      "ellipse": "椭圆",
+      "text": "文字",
+      "image": "图片叠加",
+      "mask": "隐私遮罩",
+      "undo": "撤销",
+      "redo": "重做",
+      "arrow": "箭头",
+      "callout": "编号标注",
+      "spotlight": "聚光灯",
+      "laser": "激光笔",
+      "eraser": "橡皮擦",
+      "renumber": "按阅读顺序重新编号",
+      "calloutLimit": "每次共享最多 {{max}} 个编号标注",
+      "vanishingInk": "消失墨水 — 笔迹和箭头几秒后淡出",
+      "bringToFront": "置于顶层",
+      "bringForward": "上移一层",
+      "sendBackward": "下移一层",
+      "sendToBack": "置于底层",
+      "moreColors": "更多颜色",
+      "customColor": "自定义颜色",
+      "recentColors": "最近使用",
+      "textSize": "文字大小",
+      "maskStyleCover": "遮盖",
+      "maskStylePixelate": "像素化",
+      "maskStyleBlur": "模糊",
+      "maskStyleCosmetic": "仅为美观：像素化或模糊的文字有时可被还原，移动或滚动的内容更是如此。机密内容请使用“遮盖”。",
+      "maskStyleCosmeticShort": "仅为美观",
+      "sourceChanged": "共享画面尺寸已变化（{{from}} → {{to}}），请检查遮罩。确认前已暂停。",
+      "sourceChangedEdit": "编辑遮罩",
+      "sourceChangedResume": "遮罩无误 — 继续",
+      "layoutApplied": "已应用上次共享此源时的 {{count}} 个遮罩",
+      "layoutKeep": "保留",
+      "layoutFresh": "重新开始",
+      "clearAll": "全部清除",
+      "color": "颜色",
+      "width": "线条粗细",
+      "addTextPlaceholder": "输入后按 Enter",
+      "sceneFull": "已达到标注上限 — 请先删除部分内容",
+      "imageTooLarge": "图片压缩后仍然过大",
+      "maskPrivacyHint": "在源头隐藏 — 被遮盖的像素绝不会离开此设备",
+      "masksMayMisalign": "共享内容已变化 — 请确认遮罩仍覆盖预期区域",
+      "maskFailed": "隐私遮罩无法应用 — 在你移除遮罩之前，屏幕共享将保持暂停",
+      "maskRestoreFailed": "你的屏幕仍在通过遮罩合成器发送 — 观众看到的画面是正确的，只是会多占用一些 CPU。重新开始共享即可恢复。",
+      "sharePaused": "观看者目前看不到你的屏幕 — 正在应用隐私遮罩或应用失败",
+      "syncError": "有一条标注未能共享 — 你看到的内容可能与观看者不同"
+    }
   },
-
   "attachment": {
     "expired": "已过期",
     "fileExpired": "文件已过期",
@@ -672,7 +856,6 @@
     "loadingVideo": "加载视频中...",
     "loadingAudio": "加载音频中..."
   },
-
   "support": {
     "title": "客服",
     "open": "开放",
@@ -685,7 +868,6 @@
     "failedToSend": "消息发送失败",
     "failedToReopen": "工单重新打开失败"
   },
-
   "invite": {
     "youveBeenInvited": "你收到了邀请！",
     "loadingInvite": "加载邀请中...",
@@ -695,7 +877,6 @@
     "joining": "加入中...",
     "join": "加入 {{name}}"
   },
-
   "landing": {
     "nav": {
       "signIn": "登录",
@@ -713,43 +894,45 @@
     },
     "stats": {
       "title": "共同成长",
-      "subtitle": "来自 Voxium 社区的真实数据 — 实时更新。",
+      "subtitle": "来自 Voxium 社区的真实数据，实时更新。",
       "users": "注册用户",
       "servers": "已创建服务器",
       "messages": "已发送消息"
     },
     "features": {
       "title": "你需要的一切",
-      "subtitle": "语音、文本和社区 — 一站式提供，不在隐私或性能上妥协。",
+      "subtitle": "语音、文本和社区，一站式提供，不在隐私或性能上妥协。",
       "voice": "水晶般清晰的语音",
-      "voiceDesc": "基于 SFU 的服务器语音，每频道支持 25+ 用户。私聊通话直接点对点 — 无中间人。",
+      "voiceDesc": "基于 SFU 的服务器语音，每频道支持 25+ 用户。私聊通话直接点对点，无中间人。",
       "noiseSuppression": "AI 噪音抑制",
-      "noiseSuppressionDesc": "基于 ML 的 RNNoise 滤波器实时去除键盘、鼠标和背景噪音 — 只传递你的声音。",
+      "noiseSuppressionDesc": "基于 ML 的 RNNoise 滤波器实时去除键盘、鼠标和背景噪音，只传递你的声音。",
       "messaging": "实时消息",
-      "messagingDesc": "即时送达、表情回应、输入指示器和私信 — 全部实时。",
+      "messagingDesc": "即时送达、表情回应、输入指示器和私信，全部实时。",
       "privacy": "隐私优先",
-      "privacyDesc": "没有广告，没有追踪，没有数据采集。你的对话只属于你。",
+      "privacyDesc": "无广告、无跟踪、不收集数据。私信和私密频道均为端到端加密。",
       "servers": "服务器与社区",
-      "serversDesc": "创建服务器、组织频道、邀请好友 — 构建社区所需的一切。",
+      "serversDesc": "创建服务器、组织频道、邀请好友，构建社区所需的一切。",
       "calls": "直接语音通话",
-      "callsDesc": "通过 WebRTC 点对点的一对一语音通话。水晶般清晰，零延迟。",
+      "callsDesc": "一对一语音通话,点对点直连,信令也经过端到端加密。清晰无延迟。",
       "fast": "快速且轻量",
       "fastDesc": "使用 React 19、Vite 和 Redis 驱动的在线状态构建。任何硬件上都流畅响应。"
     },
     "highlights": {
       "noAds": "无广告无追踪",
-      "openSource": "开源且透明",
-      "freeVoice": "永久免费语音通话",
+      "sourceAvailable": "源代码公开透明",
+      "e2eEncrypted": "私信与通话端到端加密",
+      "freeForIndividuals": "个人用户免费",
       "noiseSuppression": "AI 噪音抑制",
       "selfHostable": "可自托管",
       "sfuVoice": "可扩展的 SFU 语音"
     },
     "comparison": {
       "title": "Voxium 对比",
-      "subtitle": "看看 Voxium 与其他方案相比如何。我们相信通信软件应该是开放的、私密的、由社区拥有的。",
+      "subtitle": "看看 Voxium 与其他方案的对比。我们相信,通讯软件应当私密、可审计、属于社区。",
       "feature": "功能",
-      "footnote": "基于 2026 年 3 月免费方案的对比。标记为\u201c计划中\u201d的功能在路线图中。",
-      "openSource": "开源",
+      "footnote": "对比基于 2026 年 8 月的免费方案。标注「计划中」的功能在路线图上。",
+      "sourceAvailable": "源代码可审计",
+      "encryptedChannels": "仅限邀请的加密频道",
       "selfHostable": "可自托管",
       "freeVoiceChat": "免费语音聊天",
       "sfuVoice": "SFU 语音（25+ 用户）",
@@ -776,7 +959,7 @@
     "showcase": {
       "title": "随心",
       "titleHighlight": "定制",
-      "subtitle": "自定义每一个细节——从颜色到语言，再到权限管理。",
+      "subtitle": "自定义每一个细节，从颜色到语言，再到权限管理。",
       "themeLabel": "4 款内置主题 + 自定义编辑器",
       "languageLabel": "11 种语言，支持 RTL",
       "permissionLabel": "20 个权限标志，支持频道级覆盖",
@@ -786,9 +969,9 @@
     "why": {
       "title": "为什么选择 Voxium？",
       "ownData": "数据归你所有",
-      "ownDataDesc": "自托管或使用我们的服务器 — 无论哪种方式，你的数据都属于你。不挖掘，不出售。",
-      "openSource": "开源",
-      "openSourceDesc": "每一行代码都是公开的。审计、分叉、贡献。完全透明。",
+      "ownDataDesc": "自托管或使用我们的服务器，无论哪种方式，你的数据都属于你。不挖掘，不出售。",
+      "sourceAvailable": "源代码公开",
+      "sourceAvailableDesc": "每一行代码都是公开的。审计它、复刻它、参与贡献。完全透明。",
       "communityDriven": "社区驱动",
       "communityDrivenDesc": "由社区构建，为社区服务。功能由使用者来塑造。",
       "builtDifferent": "与众不同"
@@ -797,7 +980,7 @@
       "badge": "社区驱动",
       "title": "由社区资助",
       "subtitle": "没有广告。没有数据采集。没有附加条件。Voxium 完全由用户资助。",
-      "openSource": "开源",
+      "sourceAvailable": "源代码公开",
       "youDecide": "决定路线图",
       "zeroAds": "广告或追踪",
       "sponsorGithub": "在 GitHub 上赞助",
@@ -807,11 +990,11 @@
     "cta": {
       "title": "准备好体验全新的通信方式了吗？",
       "subtitle": "加入开放通信革命。无需信用卡。无需订阅。",
-      "getStarted": "开始使用 — 完全免费",
+      "getStarted": "开始使用，完全免费",
       "downloadApp": "下载应用"
     },
     "footer": {
-      "tagline": "开放、隐私优先的语音和文本通信。",
+      "tagline": "隐私优先的语音与文字沟通。",
       "product": "产品",
       "download": "下载",
       "changelog": "更新日志",
@@ -822,24 +1005,21 @@
       "cookiePolicy": "Cookie 政策",
       "community": "社区",
       "contributing": "参与贡献",
-      "copyright": "\u00a9 2026 Voxium. All rights reserved."
+      "copyright": "© 2026 Voxium. All rights reserved."
     }
   },
-
   "badges": {
     "staff": "工作人员",
     "supporter": "支持者",
     "firstSupporter": "首位支持者",
-    "firstSupporterTooltip": "首位支持者 — 最早相信 Voxium 的人",
+    "firstSupporterTooltip": "首位支持者，最早相信 Voxium 的人",
     "topSupporter": "顶级支持者",
-    "topSupporterTooltip": "顶级支持者 — Voxium 最慷慨的支持者"
+    "topSupporterTooltip": "顶级支持者，Voxium 最慷慨的支持者"
   },
-
   "connection": {
     "reconnecting": "正在重新连接 Voxium...",
     "lost": "连接已断开，正在尝试重新连接..."
   },
-
   "errorBoundary": {
     "title": "出了点问题",
     "tryAgain": "重试",
@@ -849,7 +1029,6 @@
     "tryToRecover": "尝试恢复",
     "reloadPage": "重新加载页面"
   },
-
   "serverErrors": {
     "invalidCredentials": "凭据无效",
     "usernameOrEmailTaken": "用户名或邮箱已被使用",
@@ -936,5 +1115,184 @@
     "cannotBanSelf": "不能封禁自己",
     "cannotBanSuperAdmin": "无法封禁超级管理员",
     "onlySuperAdminCanBan": "只有超级管理员才能封禁其他管理员"
+  },
+  "e2e": {
+    "badgeTitle": "已端到端加密 — 查看安全码",
+    "encryptedMessage": "加密消息",
+    "localSearchHint": "正在搜索此设备上已解密的消息 — 结果取决于此设备收到的内容",
+    "decryptFailed": "无法解密此消息",
+    "attachmentFailed": "无法解密此附件",
+    "downloadAttachment": "下载",
+    "safetyNumberTitle": "安全码",
+    "safetyNumberExplainer": "请通过其他渠道（当面或通话）与 {{name}} 核对此安全码，以确认对话是安全的。若任何一方重新安装应用或重置加密密钥，该安全码将会改变。",
+    "safetyNumberUnavailable": "安全码不可用",
+    "verified": "已验证",
+    "notVerified": "尚未验证",
+    "markVerified": "标记为已验证",
+    "identityChangedWarning": "{{name}} 的安全密钥已更改。这可能发生在重新安装应用之后 — 请先核对新的安全码，再信任此对话。",
+    "acceptNewIdentity": "接受新密钥",
+    "identityAccepted": "已接受新密钥",
+    "perDeviceSafetyExplainer": "{{name}} 的每台设备都有各自的安全码。",
+    "newDeviceBadgeTitle": "新增设备 — 请查看设备列表",
+    "newDeviceWarning": "{{name}} 添加了一台新设备。请查看其设备列表，确认确实是本人。",
+    "reviewDevices": "查看设备",
+    "devicesReviewed": "已查看设备",
+    "manageDevices": "管理设备",
+    "deviceManagerTitle": "你的设备",
+    "deviceManagerExplainer": "注册到你账户的设备。撤销任何你不再使用或无法识别的设备 — 新消息将立即改用不包含该设备的密钥重新加密。",
+    "thisDevice": "此设备",
+    "deviceAdded": "添加于 {{date}}",
+    "revokeDevice": "撤销",
+    "revokeConfirm": "撤销此设备？该设备将无法再读取新消息，且所有加密对话都会重新加密。",
+    "revokeFailed": "无法撤销设备",
+    "revoked": "设备已撤销",
+    "ownDeviceBadgeTitle": "您的账户新增了一台设备 — 请查看",
+    "ownDeviceWarning": "您的账户新增了一台可能不认识的设备（{{count}}）。它可以读取您的加密对话。如果不是您的设备，请撤销。",
+    "ownDevicesReviewed": "这些是我的设备",
+    "ownDevicesLoadFailed": "无法加载您的设备列表。此列表可能不完整 — 不要将其视为没有其他设备已注册的证据。请重新打开此面板重试。",
+    "unrecognisedDevice": "新",
+    "accountSafetyExplainer": "请通过其他渠道（当面或通话）与 {{name}} 核对此号码，以验证你们的账户。无论使用哪台设备，该号码都相同，只有在账户密钥被重置时才会改变。",
+    "markAccountVerified": "将账户标记为已验证",
+    "advancedDevices": "高级：按设备查看详情",
+    "crossSignedChip": "已通过账户密钥验证",
+    "unsignedChip": "未经 {{name}} 的账户密钥签名",
+    "unsignedChipOwn": "未经你的账户密钥签名",
+    "approveDevice": "批准此设备",
+    "approveDeviceSuccess": "设备已批准",
+    "approveDeviceFailed": "无法批准设备",
+    "cannotApproveExplainer": "此设备暂时无法批准其他设备。请从已可访问你账户密钥的设备进行批准。",
+    "accountSafetyNumberUnavailable": "账户安全码不可用 — 仅显示按设备的安全码。",
+    "unsignedDeviceBadgeTitle": "有设备未经账户密钥签名 — 请查看",
+    "unsignedDevicesWarning": "{{name}} 有 {{count}} 台设备未经其账户密钥签名。它仍能读取新消息，请在对方用已有设备批准之前将其视为未验证。",
+    "thisDeviceUnsignedBadgeTitle": "此设备尚未获批准 — 请从另一台设备批准",
+    "masterConflictBadgeTitle": "账户密钥与此设备不匹配 — 请查看",
+    "masterConflictExplainer": "你的账户发布了一个此设备既未创建也无法替换的密钥。消息仍可发送，但在重置账户身份前无法批准新设备。",
+    "resetIdentityExplainer": "所有能批准的设备都无法访问了？请创建新的账户身份。仅在万不得已时使用。",
+    "resetIdentityAction": "重置账户身份",
+    "resetIdentityConfirm": "这会替换你的账户密钥。所有与你聊天的人都会看到安全号码变化，并需要重新验证你。其他设备也会失去批准状态。",
+    "resetIdentitySuccess": "账户身份已重置",
+    "resetIdentityFailed": "无法重置账户身份",
+    "identityChangedBadgeTitle": "此联系人的安全密钥已变更 — 请先验证再信任",
+    "backupTitle": "账户恢复",
+    "backupExplainer": "现在保存一个恢复密钥，即使你丢失了所有设备，也能找回账户密钥——而且无需任何人重新验证你。我们无法读取它，也无法替你找回。",
+    "backupCreateAction": "设置账户恢复",
+    "backupCreateFailed": "无法设置账户恢复",
+    "backupSetUp": "已设置账户恢复",
+    "backupUpdatedAt": "恢复密钥创建于 {{date}}",
+    "backupReplaceAction": "更换恢复密钥",
+    "backupReplaceConfirm": "这会生成新的恢复密钥。你当前的密钥会立即失效——你保存过它的任何地方都将不再可用。",
+    "backupDeleteAction": "关闭账户恢复",
+    "backupDeleteConfirm": "删除备份？你的恢复密钥会立即失效；一旦丢失所有设备，你就只能重置账户身份——所有联系人都需要重新验证你。",
+    "backupDeleted": "已关闭账户恢复",
+    "backupDeleteFailed": "无法关闭账户恢复",
+    "backupKeyTitle": "你的恢复密钥",
+    "backupKeyWarning": "请立即记下它。它只显示这一次——我们无法再次显示，也无法替你找回。",
+    "backupKeyLoss": "没有它，丢失所有设备就意味着必须重置账户身份，每位联系人都要重新验证你。",
+    "backupKeyAcknowledge": "我已把恢复密钥保存在安全的地方",
+    "backupKeyDone": "完成",
+    "backupCopyFailed": "无法复制恢复密钥",
+    "backupRestoreTitle": "使用恢复密钥恢复",
+    "backupRestoreExplainer": "该账户设置过恢复密钥。输入它即可在这台设备上找回账户密钥——你的安全码不会改变，因此无需任何联系人重新验证你。",
+    "backupRestorePlaceholder": "ABCD-EFGH-JKLM-...",
+    "backupRestoreAction": "恢复",
+    "backupRestoreSuccess": "账户密钥已恢复——这台设备现在可以批准你的其他设备",
+    "backupRestoreFailed": "该恢复密钥无法打开此账户的备份。它可能属于之前的账户身份。",
+    "backupNone": "此账户未设置恢复密钥，因此无法恢复。",
+    "backupPreferRestore": "你有恢复密钥：在上方恢复可以保留你的身份，也无需任何人重新验证你。请先尝试这个方式。",
+    "backupRestoreMalformed": "这不像是恢复密钥。请检查是否输错并重试。",
+    "peerNotReady": "{{name}} 尚未在任何设备上设置 Voxium，因此无处发送加密消息。对方打开应用后即可联系。",
+    "peerNotReadyFallbackName": "此人",
+    "linkCodeTitle": "将此设备添加到你的账户",
+    "linkCodeExplainer": "在你已经在用的设备上打开 Voxium，进入设备列表并输入此代码。在此之前，此设备无法读取你的加密消息。",
+    "linkCopyFailed": "无法复制关联代码",
+    "linkTitle": "关联设备",
+    "linkExplainer": "输入你要添加的设备上显示的代码。",
+    "linkPlaceholder": "ABCD-2345-EFGH-6789",
+    "linkAction": "继续",
+    "linkUnknownCode": "没有等待批准的设备显示该代码。请在另一台设备上核对后重试。",
+    "linkAmbiguousCode": "有多台设备显示该代码。不要批准其中任何一台 — 这不可能是巧合。请删除不认识的设备，再用新代码重新关联。",
+    "linkKeysChanged": "该设备已不再显示您确认的代码。未批准任何内容。请在设备上获取新代码后重试 — 如果反复出现，请不要批准。",
+    "linkLookupFailed": "暂时无法校验该代码，请重试。",
+    "linkConfirmTitle": "批准此设备？",
+    "linkConfirmDevice": "设备 {{id}} · 注册于 {{date}}",
+    "linkConfirmExplainer": "批准后，此设备将获得你的账户密钥：它可以读取你的加密对话，并批准其他设备。只有在这是你面前的设备时才继续。",
+    "linkConfirmAction": "批准设备",
+    "devicesNotReady": "此设备仍在设置加密，因此暂时无法列出你的设备。请稍后再看。",
+    "identityAcceptFailed": "无法接受新密钥",
+    "callLocked": "端到端加密通话",
+    "callAbortIdentityChanged": "通话已结束:{{name}}的安全密钥已更改。再次通话前请核对新的安全码。",
+    "callAbortPeerMustUpdate": "通话已结束:{{name}}的应用无法进行安全通话。请对方更新 Voxium。",
+    "callAbortPeerNotE2E": "通话已结束:{{name}}尚未设置加密,无法建立安全通话。",
+    "callAbortSignalingFailed": "通话已结束:安全通话建立失败。请重试。",
+    "callNotReady": "暂时无法发起安全通话——此设备仍在设置加密。请稍后重试。"
+  },
+  "people": {
+    "title": "成员",
+    "inVoice": "语音中",
+    "active": "活跃",
+    "away": "离开",
+    "offline": "离线",
+    "speaking": "正在说话",
+    "mutedStatus": "已静音",
+    "inVoiceStatus": "语音中",
+    "dnd": "请勿打扰",
+    "awayStatus": "离开",
+    "offlineStatus": "离线"
+  },
+  "search": {
+    "placeholder": "搜索消息…"
+  },
+  "secureVoice": {
+    "locked": "端到端加密语音频道",
+    "unsupported": "此设备无法使用安全语音——需要支持加密媒体的运行环境。",
+    "cantJoin": "无法启动加密语音会话。请重试。",
+    "sessionFailed": "加密语音失败——为避免未受保护的通话,你已被断开连接。",
+    "createHint": "仅限邀请的语音频道,音频经端到端加密——服务器只转发它无法收听的声音。不支持屏幕共享。",
+    "peerIssues_other": "{{count}} 位成员无法接收密钥——在解决之前你将听不到他们的声音。"
+  },
+  "secureChannel": {
+    "sectionTitle": "安全频道",
+    "createTitle": "创建安全频道",
+    "createDescription": "仅限邀请的端到端加密频道。只有受邀成员可以看到它——即使服务器管理员也无法读取。",
+    "namePlaceholder": "频道名称",
+    "inviteMembers": "邀请成员 ({{count}}/{{max}})",
+    "searchMembers": "搜索成员…",
+    "noMembersFound": "未找到成员",
+    "create": "创建",
+    "creating": "创建中…",
+    "created": "安全频道已创建",
+    "failedToCreate": "创建安全频道失败",
+    "memberCapReached": "安全频道最多可有 {{max}} 名成员",
+    "members": "成员",
+    "membersCount": "成员 ({{count}}/{{max}})",
+    "inviteMember": "邀请成员",
+    "memberInvited": "已邀请成员",
+    "failedToInvite": "邀请成员失败",
+    "memberRemoved": "已移除成员",
+    "failedToRemove": "移除成员失败",
+    "removeMember": "移除成员",
+    "failedToLoadMembers": "加载成员失败",
+    "leave": "退出频道",
+    "left": "已退出频道",
+    "failedToLeave": "退出频道失败",
+    "membersNotReady": "{{names}} 还无法读取消息——尚未设置加密",
+    "moderationTitle": "安全频道",
+    "moderationLoading": "加载中…",
+    "moderationCount": "此服务器有 {{count}} 个安全频道。其名称和内容仅对其成员可见。",
+    "moderationHint": "安全频道中的消息无法举报——由成员自行处理。如果需要删除某个安全频道，成员可以在频道的右键菜单中复制频道 ID 并交给你；在此粘贴即可删除该频道。",
+    "moderationDeletePlaceholder": "成员提供的频道 ID",
+    "copyId": "复制频道 ID",
+    "copyIdHint": "如果需要删除此频道，请将此 ID 交给服务器管理员",
+    "idCopied": "已复制频道 ID",
+    "idCopyFailed": "无法复制频道 ID",
+    "moderationDelete": "删除",
+    "moderationDeleted": "安全频道已删除",
+    "moderationDeleteFailed": "删除失败——请检查频道 ID",
+    "renameLabel": "频道名称",
+    "rename": "重命名",
+    "renaming": "重命名中…",
+    "renamed": "频道已重命名",
+    "failedToRename": "重命名频道失败",
+    "moderationNotSecure": "\"{{name}}\"是普通频道——请从侧边栏删除它"
   }
 }

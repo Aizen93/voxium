@@ -132,7 +132,7 @@ export function AdminRateLimits() {
 
       {/* Clear user rate limits */}
       <div className="rounded-lg bg-vox-bg-secondary border border-vox-border p-4">
-        <h3 className="text-sm font-semibold text-vox-text-primary mb-2 inline-flex items-center">Clear User Rate Limits<Tip text="This resets the user's request counters back to zero, giving them a fresh quota. It does NOT remove rate limiting — the rules still apply, the user just gets a clean slate." /></h3>
+        <h3 className="text-sm font-semibold text-vox-text-primary mb-2 inline-flex items-center">Clear User Rate Limits<Tip text="This resets the user's request counters back to zero, giving them a fresh quota. It does NOT remove rate limiting, the rules still apply, the user just gets a clean slate." /></h3>
         <p className="text-xs text-vox-text-muted mb-3">Reset all rate limit counters for a specific user ID or IP address.</p>
         <form onSubmit={handleClearUser} className="flex gap-2">
           <input

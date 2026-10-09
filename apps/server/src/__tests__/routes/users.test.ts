@@ -79,7 +79,7 @@ function mockAuthUser(overrides: Record<string, unknown> = {}) {
     bannedAt: null,
     tokenVersion: 0,
     role: 'user',
-    emailVerified: true,
+    emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
   };
   prismaMock.user.findUnique.mockResolvedValue({ ...defaults, ...overrides });
 }
@@ -120,7 +120,7 @@ describe('User Routes', () => {
           bannedAt: null,
           tokenVersion: 0,
           role: 'user',
-          emailVerified: true,
+          emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce(mockProfile);
 
@@ -156,7 +156,7 @@ describe('User Routes', () => {
           bannedAt: null,
           tokenVersion: 0,
           role: 'user',
-          emailVerified: true,
+          emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce(mockProfile);
 
@@ -178,7 +178,7 @@ describe('User Routes', () => {
           bannedAt: null,
           tokenVersion: 0,
           role: 'user',
-          emailVerified: true,
+          emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce(null);
 
@@ -235,7 +235,7 @@ describe('User Routes', () => {
           bannedAt: null,
           tokenVersion: 0,
           role: 'user',
-          emailVerified: true,
+          emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce(mockProfile);
 
@@ -264,7 +264,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       prismaMock.user.update.mockResolvedValue({
@@ -298,7 +298,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       prismaMock.user.update.mockResolvedValue({
@@ -332,7 +332,7 @@ describe('User Routes', () => {
           bannedAt: null,
           tokenVersion: 0,
           role: 'user',
-          emailVerified: true,
+          emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         // Fetch old avatar for cleanup
         .mockResolvedValueOnce({ avatarUrl: null });
@@ -368,7 +368,7 @@ describe('User Routes', () => {
           bannedAt: null,
           tokenVersion: 0,
           role: 'user',
-          emailVerified: true,
+          emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
         })
         .mockResolvedValueOnce({ avatarUrl: 'avatars/user-1-old.webp' });
 
@@ -402,7 +402,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       const res = await request(app)
@@ -422,7 +422,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       const res = await request(app)
@@ -442,7 +442,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       const res = await request(app)
@@ -462,7 +462,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       const longName = 'a'.repeat(65);
@@ -484,7 +484,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       const longBio = 'a'.repeat(501);
@@ -506,7 +506,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       const res = await request(app)
@@ -526,7 +526,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       const res = await request(app)
@@ -546,7 +546,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       prismaMock.user.update.mockResolvedValue({
@@ -581,7 +581,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       prismaMock.user.update.mockResolvedValue({
@@ -621,7 +621,7 @@ describe('User Routes', () => {
         bannedAt: null,
         tokenVersion: 0,
         role: 'user',
-        emailVerified: true,
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
 
       prismaMock.user.update.mockResolvedValue({

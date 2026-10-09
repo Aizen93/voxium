@@ -3,10 +3,26 @@ import axios from 'axios';
 import { api } from '../services/api';
 import { getSocket } from '../services/socket';
 import { toast } from './toastStore';
-import type { Message, MessageAuthor, Attachment, ReactionGroup } from '@voxium/shared';
+import i18n from '../i18n';
+import { useDMStore } from './dmStore';
+import { useServerStore } from './serverStore';
+import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
+import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
+import {
+  decryptChannelMessagesForDisplay,
+  prepareOutgoingChannelMessage,
+  cacheSentChannelPlaintext,
+} from '../services/e2e/channelCrypto';
+import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
+import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMeta } from '@voxium/shared';
 
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Secure channels are decided by the channel list the server already gave us. */
+function isSecureChannel(channelId: string): boolean {
+  return useServerStore.getState().channels.some((c) => c.id === channelId && c.secure === true);
+}
 
 // Track current fetch to prevent duplicate requests
 let activeFetchController: AbortController | null = null;
@@ -25,13 +41,15 @@ interface ChatState {
   clearReplyingTo: () => void;
   fetchMessages: (channelId: string, before?: string) => Promise<void>;
   fetchMessagesAround: (channelId: string, messageId: string) => Promise<void>;
-  sendMessage: (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => Promise<void>;
+  sendMessage: (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[], e2eAttachments?: E2EAttachmentMeta[]) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   toggleReaction: (channelId: string, messageId: string, emoji: string) => Promise<void>;
   fetchDMMessages: (conversationId: string, before?: string) => Promise<void>;
   fetchDMMessagesAround: (conversationId: string, messageId: string) => Promise<void>;
-  sendDMMessage: (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => Promise<void>;
+  /** DMs are always E2E, so attachments only ever travel as E2E metas — there
+   *  is no plaintext-attachment parameter to pass. */
+  sendDMMessage: (conversationId: string, content: string, e2eAttachments?: E2EAttachmentMeta[]) => Promise<void>;
   editDMMessage: (conversationId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteDMMessage: (conversationId: string, messageId: string) => Promise<void>;
   toggleDMReaction: (conversationId: string, messageId: string, emoji: string) => Promise<void>;
@@ -81,7 +99,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/channels/${channelId}/messages?${params}`, {
         signal: controller.signal,
       });
-      const newMessages = data.data;
+      // Secure channels: ciphertext never reaches the store or the DOM
+      const newMessages = isSecureChannel(channelId)
+        ? await decryptChannelMessagesForDisplay(data.data)
+        : data.data;
 
       // Check if this fetch is still relevant (channel may have changed)
       if (controller.signal.aborted) return;
@@ -126,11 +147,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/channels/${channelId}/messages?around=${messageId}`, {
         signal: controller.signal,
       });
+      const around = isSecureChannel(channelId)
+        ? await decryptChannelMessagesForDisplay(data.data)
+        : data.data;
 
       if (controller.signal.aborted) return;
 
       set({
-        messages: data.data,
+        messages: around,
         hasMore: data.hasMore,
         hasMoreAfter: data.hasMoreAfter ?? false,
         targetMessageId: data.targetMessageId ?? messageId,
@@ -148,18 +172,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (channelId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => {
+  sendMessage: async (
+    channelId: string,
+    content: string,
+    attachments?: Omit<Attachment, 'id' | 'expired'>[],
+    e2eAttachments?: E2EAttachmentMeta[],
+  ) => {
     try {
       const replyingTo = get().replyingTo;
-      const body: Record<string, unknown> = { content };
-      if (replyingTo) body.replyToId = replyingTo.id;
-      if (attachments?.length) body.attachments = attachments;
 
-      const { data } = await api.post(`/channels/${channelId}/messages`, body);
-      // The message will be added via WebSocket, but we also handle it here as fallback
-      const exists = get().messages.some((m) => m.id === data.data.id);
-      if (!exists) {
-        set((state) => ({ messages: [...state.messages, data.data] }));
+      if (isSecureChannel(channelId)) {
+        // Secure channels mirror the DM send: encrypt before anything leaves
+        // the client; real attachment metadata travels inside the ciphertext.
+        const prepared = await prepareOutgoingChannelMessage(channelId, content, e2eAttachments);
+        if (prepared.notReadyUserIds.length > 0) {
+          const members = useServerStore.getState().members;
+          const names = prepared.notReadyUserIds
+            .map((id) => members.find((m) => m.userId === id)?.user.displayName ?? id)
+            .join(', ');
+          toast.error(i18n.t('secureChannel.membersNotReady', { names }));
+        }
+
+        const body: Record<string, unknown> = { content: prepared.content, encrypted: true };
+        if (replyingTo) body.replyToId = replyingTo.id;
+        if (e2eAttachments?.length) {
+          body.attachments = e2eAttachments.map((meta) => ({
+            s3Key: meta.s3Key,
+            fileName: E2E_ATTACHMENT_NAME,
+            fileSize: meta.fileSize + E2E_GCM_TAG_BYTES, // ciphertext size
+            mimeType: E2E_ATTACHMENT_MIME,
+          }));
+        }
+
+        const { data } = await api.post(`/channels/${channelId}/messages`, body);
+        const raw: Message = data.data;
+        await cacheSentChannelPlaintext(raw.id, channelId, prepared.plaintext, null, raw.createdAt);
+        const sent: Message = {
+          ...raw,
+          content,
+          ...(e2eAttachments?.length && { e2eAttachments }),
+        };
+        const exists = get().messages.some((m) => m.id === sent.id);
+        if (!exists) {
+          set((state) => ({ messages: [...state.messages, sent] }));
+        }
+      } else {
+        const body: Record<string, unknown> = { content };
+        if (replyingTo) body.replyToId = replyingTo.id;
+        if (attachments?.length) body.attachments = attachments;
+
+        const { data } = await api.post(`/channels/${channelId}/messages`, body);
+        // The message will be added via WebSocket, but we also handle it here as fallback
+        const exists = get().messages.some((m) => m.id === data.data.id);
+        if (!exists) {
+          set((state) => ({ messages: [...state.messages, data.data] }));
+        }
       }
 
       if (replyingTo) set({ replyingTo: null });
@@ -175,6 +242,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   editMessage: async (channelId: string, messageId: string, content: string) => {
+    if (isSecureChannel(channelId)) {
+      // An edit is a fresh ciphertext for the same id (mirrors editDMMessage)
+      const prepared = await prepareOutgoingChannelMessage(channelId, content);
+      const { data } = await api.patch(`/channels/${channelId}/messages/${messageId}`, {
+        content: prepared.content,
+        encrypted: true,
+      });
+      // cache under the new editedAt version BEFORE the socket echo decrypts it
+      await cacheSentChannelPlaintext(
+        messageId, channelId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt,
+      );
+      return;
+    }
     await api.patch(`/channels/${channelId}/messages/${messageId}`, { content });
   },
 
@@ -211,7 +291,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/dm/${conversationId}/messages?${params}`, {
         signal: controller.signal,
       });
-      const newMessages = data.data;
+      // E2E conversations: ciphertext never reaches the store or the DOM
+      const newMessages = await decryptMessagesForDisplay(data.data);
 
       if (controller.signal.aborted) return;
 
@@ -254,11 +335,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/dm/${conversationId}/messages?around=${messageId}`, {
         signal: controller.signal,
       });
+      const decrypted = await decryptMessagesForDisplay(data.data);
 
       if (controller.signal.aborted) return;
 
       set({
-        messages: data.data,
+        messages: decrypted,
         hasMore: data.hasMore,
         hasMoreAfter: data.hasMoreAfter ?? false,
         targetMessageId: data.targetMessageId ?? messageId,
@@ -276,17 +358,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendDMMessage: async (conversationId: string, content: string, attachments?: Omit<Attachment, 'id' | 'expired'>[]) => {
+  sendDMMessage: async (conversationId: string, content: string, e2eAttachments?: E2EAttachmentMeta[]) => {
     try {
       const replyingTo = get().replyingTo;
-      const body: Record<string, unknown> = { content };
+
+      // Every DM is encrypted: encrypt before anything leaves the client. Real
+      // attachment metadata travels inside the ciphertext; the server only
+      // receives opaque rows (s3Key + ciphertext size).
+      const prepared = await prepareOutgoingDM(conversationId, content, e2eAttachments);
+
+      const body: Record<string, unknown> = { content: prepared.content, encrypted: true };
       if (replyingTo) body.replyToId = replyingTo.id;
-      if (attachments?.length) body.attachments = attachments;
+      if (e2eAttachments?.length) {
+        body.attachments = e2eAttachments.map((meta) => ({
+          s3Key: meta.s3Key,
+          fileName: E2E_ATTACHMENT_NAME,
+          fileSize: meta.fileSize + E2E_GCM_TAG_BYTES, // ciphertext size
+          mimeType: E2E_ATTACHMENT_MIME,
+        }));
+      }
 
       const { data } = await api.post(`/dm/${conversationId}/messages`, body);
-      const exists = get().messages.some((m) => m.id === data.data.id);
+      const raw: Message = data.data;
+      // Cache the exact raw plaintext that was encrypted (Olm can't
+      // decrypt-to-self); display fields come from the parsed payload
+      await cacheSentPlaintext(raw.id, conversationId, prepared.plaintext, null, raw.createdAt);
+      const sent: Message = {
+        ...raw,
+        content,
+        ...(e2eAttachments?.length && { e2eAttachments }),
+      };
+      const exists = get().messages.some((m) => m.id === sent.id);
       if (!exists) {
-        set((state) => ({ messages: [...state.messages, data.data] }));
+        set((state) => ({ messages: [...state.messages, sent] }));
       }
 
       if (replyingTo) set({ replyingTo: null });
@@ -296,13 +400,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
         socket.emit('dm:typing:stop', conversationId);
       }
     } catch (err) {
+      // "They have not set up a device yet" is a state of the world, not a
+      // fault: say who and why, instead of a generic send failure the user
+      // would read as the app being broken.
+      if (err instanceof E2EPeerNotReadyError) {
+        const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
+        toast.error(
+          i18n.t('e2e.peerNotReady', {
+            name: conversation?.participant.displayName ?? i18n.t('e2e.peerNotReadyFallbackName'),
+          })
+        );
+        throw err;
+      }
       console.error('Failed to send DM:', err);
       throw err;
     }
   },
 
   editDMMessage: async (conversationId: string, messageId: string, content: string) => {
-    await api.patch(`/dm/${conversationId}/messages/${messageId}`, { content });
+    // An edit is a fresh ciphertext for the same id
+    const prepared = await prepareOutgoingDM(conversationId, content);
+    const { data } = await api.patch(`/dm/${conversationId}/messages/${messageId}`, {
+      content: prepared.content,
+      encrypted: true,
+    });
+    // cache under the new editedAt version BEFORE the socket echo decrypts it
+    await cacheSentPlaintext(messageId, conversationId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt);
   },
 
   requestDeleteDMMessage: async (conversationId: string, messageId: string) => {

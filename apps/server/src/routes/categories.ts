@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { authenticate, requireVerifiedEmail } from '../middleware/auth';
+import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateCategoryName, WS_EVENTS, Permissions } from '@voxium/shared';
@@ -12,7 +12,7 @@ import { hasServerPermission } from '../utils/permissionCalculator';
 
 export const categoryRouter = Router({ mergeParams: true });
 
-categoryRouter.use(authenticate, requireVerifiedEmail);
+categoryRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // Bulk reorder categories
 categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -150,8 +150,12 @@ categoryRouter.delete('/:categoryId', rateLimitCategoryManage, async (req: Reque
       const orphanedChannels = await prisma.channel.findMany({
         where: { id: { in: affectedChannelIds } },
       });
+      // Per-channel room, not the server's: these carry the channel NAME, and
+      // a staff-only channel orphaned by a category delete must not announce
+      // itself to members who cannot view it. (The CATEGORY_DELETED above is
+      // server-wide by design — a category has no per-member visibility.)
       for (const ch of orphanedChannels) {
-        io.to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_UPDATED, ch as unknown as Channel);
+        io.to(`channel:${ch.id}`).emit(WS_EVENTS.CHANNEL_UPDATED, ch as unknown as Channel);
       }
     }
 

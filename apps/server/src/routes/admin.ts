@@ -2,11 +2,14 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import net from 'net';
 import { authenticate } from '../middleware/auth';
 import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin';
-import { rateLimitAdmin } from '../middleware/rateLimiter';
+import { rateLimitAdmin, normalizeIp } from '../middleware/rateLimiter';
+import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { prisma } from '../utils/prisma';
+import { deleteUserAccount } from '../utils/accountDeletion';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
-import { cleanupServerVoice, getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
+import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
+import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
 import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
 import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
@@ -14,6 +17,8 @@ import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
+import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
+import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
 import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
@@ -38,6 +43,107 @@ async function clearServerRoom(serverId: string): Promise<void> {
 }
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
+
+
+// Registration abuse triage (anti-bot Phase 4): the numbers that make a bot
+// wave visible — volume over two windows, the unverified backlog, and which
+// registration IPs are pulling the average up. All queries are bounded
+// (counts + a groupBy take:10) per the admin-analytics rules.
+// ─── Registration hygiene sweep ─────────────────────────────────────────────
+// The unverified-account TTL runs itself nightly at 04:30. These two make it
+// observable and operable: before, the only evidence it had ever run was a log
+// line that only appeared when it deleted something, and there was no way to
+// run it on demand.
+
+adminRouter.get('/registration/hygiene', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [{ lastRun, history }, pending] = await Promise.all([
+      getHygieneHistory(),
+      // What the NEXT run would take, so the panel can show the backlog
+      // without an operator having to trigger a dry run to find out.
+      prisma.user.count({
+        where: {
+          emailVerified: false,
+          createdAt: { lt: new Date(Date.now() - UNVERIFIED_ACCOUNT_TTL_DAYS * 24 * 60 * 60 * 1000) },
+          role: 'user',
+          ownedServers: { none: {} },
+        },
+      }),
+    ]);
+    res.json({
+      success: true,
+      data: { lastRun, history, pendingDeletions: pending, ttlDays: UNVERIFIED_ACCOUNT_TTL_DAYS },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// requireAdmin, not superadmin: this cannot delete anything the nightly job
+// would not delete by itself a few hours later. `?dryRun=1` reports without
+// touching a row.
+adminRouter.post('/registration/hygiene', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+    const result = await runRegistrationHygieneLocked({
+      trigger: 'manual',
+      actorId: req.user!.userId,
+      dryRun,
+    });
+
+    if ('skipped' in result) {
+      // A sweep is already running — on this node or a peer. Saying so is more
+      // use than silently reporting zero deletions.
+      res.status(409).json({ success: false, error: 'A hygiene sweep is already running. Try again shortly.' });
+      return;
+    }
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/registration-stats', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const [lastHour, last24h, unverifiedTotal, topRegisterIps, topDomains] = await Promise.all([
+      prisma.user.count({ where: { createdAt: { gte: hourAgo } } }),
+      prisma.user.count({ where: { createdAt: { gte: dayAgo } } }),
+      prisma.user.count({ where: { emailVerified: false } }),
+      prisma.ipRecord.groupBy({
+        by: ['ip'],
+        where: { kind: 'register', lastSeenAt: { gte: weekAgo } },
+        _count: { ip: true },
+        orderBy: { _count: { ip: 'desc' } },
+        take: 10,
+      }),
+      // Domain is derived, not stored, so raw SQL — bounded by LIMIT, and the
+      // only parameter is a server-computed Date (no user input reaches it)
+      prisma.$queryRaw<Array<{ domain: string; registrations: bigint }>>`
+        SELECT split_part(email, '@', 2) AS domain, COUNT(*) AS registrations
+        FROM users WHERE created_at >= ${weekAgo}
+        GROUP BY domain ORDER BY registrations DESC LIMIT 10`,
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        lastHour,
+        last24h,
+        unverifiedTotal,
+        topRegisterIps: topRegisterIps.map((r) => ({ ip: r.ip, registrations: r._count.ip })),
+        // bigint from raw SQL does not survive JSON.stringify
+        topDomains: topDomains.map((r) => ({ domain: r.domain, registrations: Number(r.registrations) })),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
@@ -214,7 +320,8 @@ adminRouter.get('/users/:userId', async (req: Request<{ userId: string }>, res: 
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
         bio: true, role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
-        ipRecords: { select: { ip: true, lastSeenAt: true }, orderBy: { lastSeenAt: 'desc' } },
+        emailVerified: true, emailVerifiedAt: true,
+        ipRecords: { select: { ip: true, kind: true, country: true, lastSeenAt: true }, orderBy: { lastSeenAt: 'desc' } },
         _count: { select: { messages: true, memberships: true, ownedServers: true } },
       },
     });
@@ -292,34 +399,29 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
 
     const sanitizedReason = reason ? sanitizeText(reason) : null;
 
-    // Ban the account
-    await prisma.user.update({
-      where: { id: targetId },
-      data: {
-        bannedAt: new Date(),
-        banReason: sanitizedReason,
-        tokenVersion: { increment: 1 }, // Invalidate all tokens
-      },
-    });
-
-    // Optionally ban all known IPs
+    // Ban the account + all known IPs ATOMICALLY (MED-13). The old flow updated
+    // the user, then upserted IP bans one-by-one in a loop — a failure midway
+    // left a half-banned state, and N known IPs meant N+1 statements.
     let ipsBanned = 0;
-    if (banIps) {
-      const ipRecords = await prisma.ipRecord.findMany({
-        where: { userId: targetId },
-        select: { ip: true },
-      });
-      for (const record of ipRecords) {
-        try {
-          await prisma.ipBan.upsert({
-            where: { ip: record.ip },
-            update: {},
-            create: { ip: record.ip, reason: sanitizedReason, bannedBy: req.user!.userId },
-          });
-          ipsBanned++;
-        } catch { /* Ignore if already exists */ }
-      }
-    }
+    const ipRecords = banIps
+      ? await prisma.ipRecord.findMany({ where: { userId: targetId }, select: { ip: true } })
+      : [];
+
+    const [, ipBanResult] = await prisma.$transaction([
+      prisma.user.update({
+        where: { id: targetId },
+        data: {
+          bannedAt: new Date(),
+          banReason: sanitizedReason,
+          tokenVersion: { increment: 1 }, // Invalidate all tokens
+        },
+      }),
+      prisma.ipBan.createMany({
+        data: ipRecords.map((r) => ({ ip: r.ip, reason: sanitizedReason, bannedBy: req.user!.userId })),
+        skipDuplicates: true, // already-banned IPs are fine
+      }),
+    ]);
+    ipsBanned = ipBanResult.count;
 
     // Notify servers that user left
     const memberships = await prisma.serverMember.findMany({
@@ -338,10 +440,19 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       action: 'user.ban',
       targetType: 'user',
       targetId: targetId,
-      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned },
+      // knownIps distinguishes "user had no IPs" from "all IPs already banned"
+      // (createMany with skipDuplicates only counts NEWLY inserted bans)
+      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned, knownIps: ipRecords.length },
     });
 
-    res.json({ success: true, message: ipsBanned > 0 ? `User banned (${ipsBanned} IP(s) also banned)` : banIps ? 'User banned (no known IPs to ban)' : 'User banned' });
+    const message = !banIps
+      ? 'User banned'
+      : ipsBanned > 0
+        ? `User banned (${ipsBanned} IP(s) also banned)`
+        : ipRecords.length > 0
+          ? 'User banned (all known IPs were already banned)'
+          : 'User banned (no known IPs to ban)';
+    res.json({ success: true, message });
   } catch (err) {
     next(err);
   }
@@ -353,32 +464,38 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
     if (!user) throw new NotFoundError('User');
     if (!user.bannedAt) throw new BadRequestError('User is not banned');
 
-    // Remove IP bans for this user's IPs — but only if no other banned user shares that IP
+    // Remove IP bans for this user's IPs — but only if no other banned user
+    // shares that IP. Resolved in ONE query instead of a findFirst per IP
+    // (MED-13: the old loop was N+1 for users seen from many IPs).
     const ipRecords = await prisma.ipRecord.findMany({
       where: { userId: req.params.userId },
       select: { ip: true },
     });
-    const ipsToRelease: string[] = [];
-    for (const { ip } of ipRecords) {
-      const otherBannedOnSameIp = await prisma.ipRecord.findFirst({
-        where: {
-          ip,
-          userId: { not: req.params.userId },
-          user: { bannedAt: { not: null } },
-        },
-      });
-      if (!otherBannedOnSameIp) ipsToRelease.push(ip);
-    }
-    if (ipsToRelease.length > 0) {
-      await prisma.ipBan.deleteMany({
-        where: { ip: { in: ipsToRelease } },
-      });
-    }
+    const ips = ipRecords.map((r) => r.ip);
+    const sharedWithOtherBanned = ips.length > 0
+      ? await prisma.ipRecord.findMany({
+          where: {
+            ip: { in: ips },
+            userId: { not: req.params.userId },
+            user: { bannedAt: { not: null } },
+          },
+          select: { ip: true },
+          distinct: ['ip'],
+        })
+      : [];
+    const stillBannedIps = new Set(sharedWithOtherBanned.map((r) => r.ip));
+    const ipsToRelease = ips.filter((ip) => !stillBannedIps.has(ip));
 
-    await prisma.user.update({
-      where: { id: req.params.userId },
-      data: { bannedAt: null, banReason: null },
-    });
+    // Unban + IP release atomically — no half-unbanned state on failure
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: req.params.userId },
+        data: { bannedAt: null, banReason: null },
+      }),
+      ...(ipsToRelease.length > 0
+        ? [prisma.ipBan.deleteMany({ where: { ip: { in: ipsToRelease } } })]
+        : []),
+    ]);
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -411,11 +528,7 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
     if (target.role === 'superadmin') throw new ForbiddenError('Cannot delete a super admin');
     if (target.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can delete other admins');
 
-    // Fetch memberships and owned servers in parallel
-    const [memberships, ownedServers] = await Promise.all([
-      prisma.serverMember.findMany({ where: { userId: targetId }, select: { serverId: true } }),
-      prisma.server.findMany({ where: { ownerId: targetId }, select: { id: true, name: true } }),
-    ]);
+    const ownedServers = await prisma.server.findMany({ where: { ownerId: targetId }, select: { id: true, name: true } });
 
     // If user owns servers, require serverActions
     if (ownedServers.length > 0) {
@@ -464,9 +577,10 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           });
 
           if (!existingMembership) {
-            // Add them as a member first, seed ChannelRead records
+            // Add them as a member first, seed ChannelRead records (secure
+            // channels excluded — ownership grants no secure-channel access)
             const textChannels = await prisma.channel.findMany({
-              where: { serverId: action.serverId, type: 'text' },
+              where: { serverId: action.serverId, type: 'text', secure: false },
               select: { id: true },
             });
 
@@ -500,6 +614,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
                 data: { role: 'owner' },
               }),
             ]);
+            // Owner status changes VIEW_CHANNEL for the new owner; their
+            // channel:{id} rooms were computed at connect against the old
+            // ownerId. (The new-member branch above gets this for free from
+            // broadcastMemberJoined, which joins rooms after the transaction.)
+            void syncChannelVisibilityRooms(action.serverId, { userId: action.newOwnerId });
           }
 
           // Emit role + server update events
@@ -520,30 +639,30 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
             });
           }
 
-          // Broadcast that the deleted user left this server
-          await broadcastMemberLeft(targetId, action.serverId);
-
+          // (member:left for the transferred server is broadcast by
+          // deleteUserAccount, which re-reads the surviving memberships.)
         } else {
-          // action === 'delete' — clean up and delete the server
-          cleanupServerVoice(io, action.serverId);
+          // action === 'delete' — clean up and delete the server (voice cleanup
+          // fans out to every node; mediasoup objects are node-local)
+          await broadcastServerVoiceCleanup(io, action.serverId);
           io.to(`server:${action.serverId}`).emit('server:deleted', { serverId: action.serverId });
           await clearServerRoom(action.serverId);
+          // Read the icon key BEFORE the row goes; delete the blob after, so a
+          // failed delete never strands a live server without its icon. The
+          // user-facing DELETE /servers/:id already does exactly this.
+          const doomed = await prisma.server.findUnique({ where: { id: action.serverId }, select: { iconUrl: true } });
           await prisma.server.delete({ where: { id: action.serverId } });
+          if (doomed?.iconUrl) {
+            await deleteFromS3(doomed.iconUrl).catch((err) =>
+              console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
+          }
         }
       }
 
-      // Notify non-owned servers that user left
-      for (const { serverId } of memberships) {
-        if (!ownedServerIds.has(serverId)) {
-          await broadcastMemberLeft(targetId, serverId);
-        }
-      }
-
-      // Force logout then disconnect active socket (works across all nodes)
-      await forceLogoutUser(targetId, 'Your account has been deleted');
-
-      // Delete user — cascade only removes ServerMember records for transferred servers
-      await prisma.user.delete({ where: { id: targetId } });
+      // Every owned server is now transferred or gone — the shared core takes
+      // it from here (member:left for the rest, sessions, secure channels,
+      // E2E purge + delete in one transaction, avatar blob after the row).
+      await deleteUserAccount(targetId, { reason: 'Your account has been deleted', logPrefix: '[Admin]' });
 
       logAuditEvent({
         actorId: req.user!.userId,
@@ -555,19 +674,8 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
       res.json({ success: true, message: 'User deleted' });
     } else {
-      // User owns no servers — proceed with original simple delete
-      const ownedServerIds = new Set<string>();
-
-      for (const { serverId } of memberships) {
-        if (!ownedServerIds.has(serverId)) {
-          await broadcastMemberLeft(targetId, serverId);
-        }
-      }
-
-      // Force logout then disconnect active socket (works across all nodes)
-      await forceLogoutUser(targetId, 'Your account has been deleted');
-
-      await prisma.user.delete({ where: { id: targetId } });
+      // User owns no servers — the shared core is the whole deletion
+      await deleteUserAccount(targetId, { reason: 'Your account has been deleted', logPrefix: '[Admin]' });
 
       logAuditEvent({
         actorId: req.user!.userId,
@@ -782,8 +890,8 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
 
     const io = getIO();
 
-    // Clean up voice state
-    cleanupServerVoice(io, server.id);
+    // Clean up voice state on every node (mediasoup objects are node-local)
+    await broadcastServerVoiceCleanup(io, server.id);
 
     // Notify members
     io.to(`server:${server.id}`).emit('server:deleted', { serverId: server.id });
@@ -1036,18 +1144,26 @@ adminRouter.post('/ip-bans', async (req: Request, res: Response, next: NextFunct
     if (net.isIP(trimmedIp) === 0) {
       throw new BadRequestError('Invalid IP address format');
     }
+    // Every reader (login, register, the socket handshake) looks a ban up by
+    // normalizeIp() of the caller's address and IpBan.ip is an exact-match
+    // unique column, so a ban stored in the operator's spelling — uppercase
+    // hextets, an IPv4-mapped form, an expanded IPv6, a zone id — was a row
+    // nothing ever hit: a silently dead ban. Store the canonical form.
+    const banIp = normalizeIp(trimmedIp);
 
     const sanitizedReason = reason ? sanitizeText(reason) : null;
 
-    const ipBan = await prisma.ipBan.create({
-      data: { ip: trimmedIp, reason: sanitizedReason, bannedBy: req.user!.userId },
+    const ipBan = await prisma.ipBan.upsert({
+      where: { ip: banIp },
+      create: { ip: banIp, reason: sanitizedReason, bannedBy: req.user!.userId },
+      update: { reason: sanitizedReason, bannedBy: req.user!.userId },
     });
 
     logAuditEvent({
       actorId: req.user!.userId,
       action: 'ip_ban.create',
       targetType: 'ip',
-      targetId: trimmedIp,
+      targetId: banIp,
       metadata: { reason: sanitizedReason },
     });
 
@@ -1152,16 +1268,27 @@ adminRouter.get('/top-servers', async (req: Request, res: Response, next: NextFu
   try {
     const limit = Math.min(20, Math.max(1, parseInt(req.query.limit as string, 10) || 10));
 
+    // Aggregate messages and members in separate subqueries. The old double
+    // LEFT JOIN produced a cartesian rowset (messages × members per server) that
+    // COUNT(DISTINCT) then had to deduplicate — one dashboard load could scan
+    // millions of intermediate rows and pin Postgres (MED-12).
     const rows = await prisma.$queryRawUnsafe<Array<{ id: string; name: string; message_count: bigint; member_count: bigint }>>(
       `SELECT s.id, s.name,
-              COUNT(DISTINCT m.id) AS message_count,
-              COUNT(DISTINCT sm.user_id) AS member_count
+              COALESCE(mc.message_count, 0) AS message_count,
+              COALESCE(smc.member_count, 0) AS member_count
        FROM servers s
-       LEFT JOIN channels c ON c.server_id = s.id
-       LEFT JOIN messages m ON m.channel_id = c.id
-       LEFT JOIN server_members sm ON sm.server_id = s.id
-       GROUP BY s.id, s.name
-       ORDER BY message_count DESC
+       LEFT JOIN (
+         SELECT c.server_id, COUNT(m.id) AS message_count
+         FROM channels c
+         JOIN messages m ON m.channel_id = c.id
+         GROUP BY c.server_id
+       ) mc ON mc.server_id = s.id
+       LEFT JOIN (
+         SELECT server_id, COUNT(*) AS member_count
+         FROM server_members
+         GROUP BY server_id
+       ) smc ON smc.server_id = s.id
+       ORDER BY COALESCE(mc.message_count, 0) DESC
        LIMIT $1`,
       limit
     );
@@ -1279,55 +1406,34 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
     }
 
     // ── 2. DB-based aggregation for attachments ──
-    // Top users by attachment storage (grouped by message author)
-    const userAttachments = await prisma.messageAttachment.groupBy({
-      by: ['messageId'],
-      _count: { id: true },
-      _sum: { fileSize: true },
-      where: { expired: false },
-    });
+    // Aggregated in SQL. The old code grouped by messageId then fetched every
+    // message with attachments through an UNBOUNDED `id IN (...)` list — at
+    // scale that's a multi-megabyte query that errors out or pins Postgres
+    // (MED-12). Two grouped queries return at most one row per user/server.
+    const [userRows, serverRows] = await Promise.all([
+      prisma.$queryRawUnsafe<Array<{ entity_id: string; file_count: bigint; total_size: bigint }>>(
+        `SELECT m.author_id AS entity_id, COUNT(a.id) AS file_count, COALESCE(SUM(a.file_size), 0) AS total_size
+         FROM message_attachments a
+         JOIN messages m ON m.id = a.message_id
+         WHERE a.expired = false
+         GROUP BY m.author_id`,
+      ),
+      prisma.$queryRawUnsafe<Array<{ entity_id: string; file_count: bigint; total_size: bigint }>>(
+        `SELECT c.server_id AS entity_id, COUNT(a.id) AS file_count, COALESCE(SUM(a.file_size), 0) AS total_size
+         FROM message_attachments a
+         JOIN messages m ON m.id = a.message_id
+         JOIN channels c ON c.id = m.channel_id
+         WHERE a.expired = false
+         GROUP BY c.server_id`,
+      ),
+    ]);
 
-    // Resolve messageId → authorId
-    const messageIds = userAttachments.map((g) => g.messageId);
-    const messagesWithAuthor = messageIds.length > 0
-      ? await prisma.message.findMany({
-          where: { id: { in: messageIds } },
-          select: { id: true, authorId: true, channelId: true, channel: { select: { serverId: true } } },
-        })
-      : [];
-    const messageInfoMap = new Map(messagesWithAuthor.map((m) => [m.id, m]));
-
-    // Aggregate attachments per user and per server
-    const userAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>();
-    const serverAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>();
-
-    for (const group of userAttachments) {
-      const msgInfo = messageInfoMap.get(group.messageId);
-      if (!msgInfo) continue;
-      const count = group._count.id;
-      const size = group._sum.fileSize ?? 0;
-
-      // Per-user
-      const userEntry = userAttachmentMap.get(msgInfo.authorId);
-      if (userEntry) {
-        userEntry.fileCount += count;
-        userEntry.totalSize += size;
-      } else {
-        userAttachmentMap.set(msgInfo.authorId, { fileCount: count, totalSize: size });
-      }
-
-      // Per-server (only for channel messages)
-      if (msgInfo.channel) {
-        const serverId = msgInfo.channel.serverId;
-        const serverEntry = serverAttachmentMap.get(serverId);
-        if (serverEntry) {
-          serverEntry.fileCount += count;
-          serverEntry.totalSize += size;
-        } else {
-          serverAttachmentMap.set(serverId, { fileCount: count, totalSize: size });
-        }
-      }
-    }
+    const userAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>(
+      userRows.map((r) => [r.entity_id, { fileCount: Number(r.file_count), totalSize: Number(r.total_size) }]),
+    );
+    const serverAttachmentMap = new Map<string, { fileCount: number; totalSize: number }>(
+      serverRows.map((r) => [r.entity_id, { fileCount: Number(r.file_count), totalSize: Number(r.total_size) }]),
+    );
 
     // ── 3. Merge S3 + attachment data ──
     const mergedUsers = new Map<string, { fileCount: number; totalSize: number }>();
@@ -1367,46 +1473,36 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
       }
     }
 
-    // ── 4. Resolve names ──
-    const allUserIds = [...mergedUsers.keys()];
-    const allServerIds = [...mergedServers.keys()];
+    // ── 4. Rank first, then resolve names for ONLY the top 10 ──
+    // (the old code looked up names for every uploader in the instance)
+    const unnamed: Array<Omit<StorageTopUploader, 'entityName'>> = [];
+    for (const [entityId, info] of mergedUsers) {
+      unnamed.push({ entityId, type: 'user', fileCount: info.fileCount, totalSize: info.totalSize });
+    }
+    for (const [entityId, info] of mergedServers) {
+      unnamed.push({ entityId, type: 'server', fileCount: info.fileCount, totalSize: info.totalSize });
+    }
+    unnamed.sort((a, b) => b.totalSize - a.totalSize);
+    const top = unnamed.slice(0, 10);
 
+    const topUserIds = top.filter((e) => e.type === 'user').map((e) => e.entityId);
+    const topServerIds = top.filter((e) => e.type === 'server').map((e) => e.entityId);
     const [users, servers] = await Promise.all([
-      allUserIds.length > 0
-        ? prisma.user.findMany({ where: { id: { in: allUserIds } }, select: { id: true, username: true } })
+      topUserIds.length > 0
+        ? prisma.user.findMany({ where: { id: { in: topUserIds } }, select: { id: true, username: true } })
         : [],
-      allServerIds.length > 0
-        ? prisma.server.findMany({ where: { id: { in: allServerIds } }, select: { id: true, name: true } })
+      topServerIds.length > 0
+        ? prisma.server.findMany({ where: { id: { in: topServerIds } }, select: { id: true, name: true } })
         : [],
     ]);
-
     const nameMap = new Map<string, string>();
     for (const u of users) nameMap.set(u.id, u.username);
     for (const s of servers) nameMap.set(s.id, s.name);
 
-    // ── 5. Build result ──
-    const result: StorageTopUploader[] = [];
-    for (const [entityId, info] of mergedUsers) {
-      result.push({
-        entityId,
-        entityName: nameMap.get(entityId) ?? 'Deleted',
-        type: 'user',
-        fileCount: info.fileCount,
-        totalSize: info.totalSize,
-      });
-    }
-    for (const [entityId, info] of mergedServers) {
-      result.push({
-        entityId,
-        entityName: nameMap.get(entityId) ?? 'Deleted',
-        type: 'server',
-        fileCount: info.fileCount,
-        totalSize: info.totalSize,
-      });
-    }
-    result.sort((a, b) => b.totalSize - a.totalSize);
-
-    const data = result.slice(0, 10);
+    const data: StorageTopUploader[] = top.map((e) => ({
+      ...e,
+      entityName: nameMap.get(e.entityId) ?? 'Deleted',
+    }));
     topUploadersCache = { data, expiresAt: Date.now() + TOP_UPLOADERS_TTL_MS };
 
     res.json({ success: true, data });
@@ -1695,15 +1791,36 @@ adminRouter.post('/feature-flags/:name/reset', async (req: Request<{ name: strin
 
 // ─── Data Export ─────────────────────────────────────────────────────────────
 
+// Exports read whole tables. Fetching them as one statement pins Postgres and
+// can exceed statement timeouts at scale (MED-12) — page through with a stable
+// id cursor in fixed-size batches instead. The response still contains the
+// full dataset (that's what an export is), but each query stays bounded.
+const EXPORT_BATCH_SIZE = 1000;
+
+async function collectInBatches<T extends { id: string }>(
+  fetchPage: (cursor: string | undefined, take: number) => Promise<T[]>,
+): Promise<T[]> {
+  const all: T[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await fetchPage(cursor, EXPORT_BATCH_SIZE);
+    all.push(...page);
+    if (page.length < EXPORT_BATCH_SIZE) return all;
+    cursor = page[page.length - 1].id;
+  }
+}
+
 adminRouter.get('/export/users', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const users = await prisma.user.findMany({
+    const users = await collectInBatches((cursor, take) => prisma.user.findMany({
       select: {
         id: true, username: true, displayName: true, email: true, avatarUrl: true,
         role: true, status: true, isSupporter: true, supporterTier: true, bannedAt: true, banReason: true, createdAt: true,
       },
-      orderBy: { createdAt: 'desc' },
-    });
+      orderBy: { id: 'asc' },
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    }));
     res.json({ success: true, data: users });
   } catch (err) {
     next(err);
@@ -1712,40 +1829,26 @@ adminRouter.get('/export/users', async (_req: Request, res: Response, next: Next
 
 adminRouter.get('/export/servers', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const servers = await prisma.server.findMany({
+    const servers = await collectInBatches((cursor, take) => prisma.server.findMany({
       select: {
         id: true, name: true, iconUrl: true, ownerId: true, createdAt: true,
         owner: { select: { username: true } },
         _count: { select: { members: true, channels: true } },
       },
-      orderBy: { createdAt: 'desc' },
-    });
+      orderBy: { id: 'asc' },
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    }));
 
-    const serverIds = servers.map((s) => s.id);
-    const messageCounts = serverIds.length > 0
-      ? await prisma.message.groupBy({
-          by: ['channelId'],
-          where: { channel: { serverId: { in: serverIds } } },
-          _count: true,
-        })
-      : [];
-
-    const channelToServer = new Map<string, string>();
-    if (serverIds.length > 0) {
-      const channels = await prisma.channel.findMany({
-        where: { serverId: { in: serverIds } },
-        select: { id: true, serverId: true },
-      });
-      for (const ch of channels) channelToServer.set(ch.id, ch.serverId);
-    }
-
-    const serverMessageCounts = new Map<string, number>();
-    for (const mc of messageCounts) {
-      if (mc.channelId) {
-        const sid = channelToServer.get(mc.channelId);
-        if (sid) serverMessageCounts.set(sid, (serverMessageCounts.get(sid) || 0) + mc._count);
-      }
-    }
+    // Per-server message counts in ONE grouped query. The old code grouped ALL
+    // messages by channel and fetched every channel row to remap channel → server.
+    const messageCountRows = await prisma.$queryRawUnsafe<Array<{ server_id: string; message_count: bigint }>>(
+      `SELECT c.server_id, COUNT(m.id) AS message_count
+       FROM channels c
+       JOIN messages m ON m.channel_id = c.id
+       GROUP BY c.server_id`,
+    );
+    const serverMessageCounts = new Map(messageCountRows.map((r) => [r.server_id, Number(r.message_count)]));
 
     const data = servers.map((s) => ({
       id: s.id,
@@ -1767,11 +1870,13 @@ adminRouter.get('/export/servers', async (_req: Request, res: Response, next: Ne
 
 adminRouter.get('/export/bans', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const bans = await prisma.user.findMany({
+    const bans = await collectInBatches((cursor, take) => prisma.user.findMany({
       where: { bannedAt: { not: null } },
       select: { id: true, username: true, displayName: true, email: true, bannedAt: true, banReason: true },
-      orderBy: { bannedAt: 'desc' },
-    });
+      orderBy: { id: 'asc' },
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    }));
     res.json({ success: true, data: bans });
   } catch (err) {
     next(err);
@@ -1780,10 +1885,12 @@ adminRouter.get('/export/bans', async (_req: Request, res: Response, next: NextF
 
 adminRouter.get('/export/ip-bans', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const ipBans = await prisma.ipBan.findMany({
+    const ipBans = await collectInBatches((cursor, take) => prisma.ipBan.findMany({
       select: { id: true, ip: true, reason: true, bannedBy: true, createdAt: true, creator: { select: { username: true } } },
-      orderBy: { createdAt: 'desc' },
-    });
+      orderBy: { id: 'asc' },
+      take,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    }));
 
     const data = ipBans.map((b) => ({
       id: b.id,
@@ -2023,40 +2130,42 @@ adminRouter.delete('/announcements/:id', async (req: Request<{ id: string }>, re
   }
 });
 
+// Manual trigger for the same sweep the scheduler runs nightly. Deliberately
+// shares the same functions rather than reimplementing them: the age gate, the
+// list-before-DB ordering and the cluster lock are what stop it deleting an
+// upload whose message has not been sent yet or racing the nightly run, and an
+// operator-initiated sweep must not skip any of them.
+// `?dryRun=1` reports what would go without deleting anything. `?force=1`
+// lifts the proportional bound (never the absolute ceiling) for a bucket that
+// genuinely is mostly orphans — a first-ever sweep — and exists ONLY here: the
+// nightly path cannot pass it.
 adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const [objects, usersWithAvatar, serversWithIcon, attachmentKeys] = await Promise.all([
-      listAllS3Objects(),
-      prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
-      prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
-      prisma.messageAttachment.findMany({ where: { expired: false }, select: { s3Key: true } }),
-    ]);
-
-    const referencedKeys = new Set<string>();
-    for (const u of usersWithAvatar) if (u.avatarUrl) referencedKeys.add(u.avatarUrl);
-    for (const s of serversWithIcon) if (s.iconUrl) referencedKeys.add(s.iconUrl);
-    for (const a of attachmentKeys) referencedKeys.add(a.s3Key);
-
-    const orphans = objects.filter((obj) => !referencedKeys.has(obj.key));
-    let deleted = 0;
-
-    for (const orphan of orphans) {
-      try {
-        await deleteFromS3(orphan.key);
-        deleted++;
-      } catch {
-        // Continue with remaining orphans
-      }
+    const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+    const force = req.query.force === '1' || req.query.force === 'true';
+    // A destructive run takes the SAME cluster lock the nightly one does, and
+    // answers 409 rather than starting a second full-bucket scan from a second
+    // snapshot. Without it an operator clicking through nginx's 60s read
+    // timeout adds a concurrent scan per retry, and each run's audit row claims
+    // the full orphan count as its own. Dry runs stay unlocked — they delete
+    // nothing, so there is no concurrency to guard, and an operator must always
+    // be able to look.
+    const result = dryRun
+      ? await runOrphanCleanup({ dryRun: true })
+      : await runScheduledOrphanCleanup({ force });
+    if (result.skipped === 'not-leader') {
+      res.status(409).json({ success: false, error: 'An orphan sweep is already running. Try again once it finishes.' });
+      return;
     }
 
     logAuditEvent({
       actorId: req.user!.userId,
       action: 'storage.cleanup_orphans',
       targetType: 'storage',
-      metadata: { found: orphans.length, deleted },
+      metadata: { found: result.orphaned, deleted: result.deleted, withinGrace: result.tooYoung, dryRun, force, skipped: result.skipped ?? null },
     });
 
-    res.json({ success: true, data: { found: orphans.length, deleted } });
+    res.json({ success: true, data: { found: result.orphaned, deleted: result.deleted, scanned: result.scanned, withinGrace: result.tooYoung, notOurs: result.foreign, dryRun, force, skipped: result.skipped ?? null } });
   } catch (err) {
     next(err);
   }
@@ -2101,6 +2210,7 @@ adminRouter.get('/reports', async (req: Request, res: Response, next: NextFuncti
       reportedUsername: r.reportedUser.username,
       messageId: r.messageId,
       messageContent: r.messageContent,
+      contentSource: r.contentSource,
       channelId: r.channelId,
       conversationId: r.conversationId,
       serverId: r.serverId,
@@ -2128,6 +2238,23 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
 
     const sanitizedResolution = resolution ? sanitizeText(resolution) : 'Resolved';
 
+    // Pre-validate the optional ban action BEFORE mutating anything, applying the
+    // same self/hierarchy rules as the canonical POST /users/:userId/ban route.
+    // Throwing here (rather than silently skipping) means a disallowed ban leaves
+    // the report untouched and gives the admin explicit feedback.
+    let banTarget: { id: string; role: string } | null = null;
+    if (action === 'ban') {
+      if (report.reportedUserId === req.user!.userId) throw new ForbiddenError('Cannot ban yourself');
+      banTarget = await prisma.user.findUnique({
+        where: { id: report.reportedUserId },
+        select: { id: true, role: true },
+      });
+      if (banTarget) {
+        if (banTarget.role === 'superadmin') throw new ForbiddenError('Cannot ban a super admin');
+        if (banTarget.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can ban other admins');
+      }
+    }
+
     await prisma.report.update({
       where: { id },
       data: {
@@ -2152,31 +2279,33 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       }
     }
 
-    // Optional action: ban the reported user
-    if (action === 'ban') {
-      const target = await prisma.user.findUnique({
-        where: { id: report.reportedUserId },
-        select: { id: true, role: true },
+    // Optional action: ban the reported user (validated above)
+    if (banTarget) {
+      await prisma.user.update({
+        where: { id: banTarget.id },
+        data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
       });
-      if (target && target.role !== 'superadmin') {
-        await prisma.user.update({
-          where: { id: report.reportedUserId },
-          data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
-        });
 
-        // Force logout the banned user via per-user room
-        const io = getIO();
-        io.in(`user:${report.reportedUserId}`).emit('force:logout', { reason: 'Your account has been banned.' });
-        io.in(`user:${report.reportedUserId}`).disconnectSockets(true);
-
-        logAuditEvent({
-          actorId: req.user!.userId,
-          action: 'user.ban',
-          targetType: 'user',
-          targetId: report.reportedUserId,
-          metadata: { reason: `Report resolved: ${sanitizedResolution}` },
-        });
+      // Remove the banned user from all server member lists/rooms — same as the
+      // canonical ban route. Without this the banned user lingers in member lists.
+      const memberships = await prisma.serverMember.findMany({
+        where: { userId: banTarget.id },
+        select: { serverId: true },
+      });
+      for (const { serverId } of memberships) {
+        await broadcastMemberLeft(banTarget.id, serverId);
       }
+
+      // Force logout then disconnect active sockets (works across all nodes)
+      await forceLogoutUser(banTarget.id, 'Your account has been banned');
+
+      logAuditEvent({
+        actorId: req.user!.userId,
+        action: 'user.ban',
+        targetType: 'user',
+        targetId: banTarget.id,
+        metadata: { reason: `Report resolved: ${sanitizedResolution}` },
+      });
     }
 
     logAuditEvent({

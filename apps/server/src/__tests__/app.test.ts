@@ -259,6 +259,47 @@ describe('app.ts — lazy morgan middleware', () => {
     expect(res.status).toBe(200);
   });
 
+  it('json access log redacts invite codes from URLs', async () => {
+    process.env.LOG_FORMAT = 'json';
+    const { app } = await import('../app');
+
+    const lines: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+    try {
+      await request(app, 'GET', '/api/v1/invites/SUPERSECRETCODE123');
+      // morgan logs on response finish — give the event loop a tick
+      await new Promise((r) => setTimeout(r, 50));
+
+      const logged = lines.join('');
+      expect(logged).toContain('/api/v1/invites/[redacted]');
+      expect(logged).not.toContain('SUPERSECRETCODE123');
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('json access log leaves non-invite URLs untouched', async () => {
+    process.env.LOG_FORMAT = 'json';
+    const { app } = await import('../app');
+
+    const lines: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+    try {
+      await request(app, 'GET', '/health');
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(lines.join('')).toContain('"/health"');
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
   it('morgan handler is reused across multiple requests (lazy singleton)', async () => {
     const { app } = await import('../app');
 
@@ -408,6 +449,31 @@ describe('app.ts — security headers', () => {
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['x-frame-options']).toBe('SAMEORIGIN');
     expect(res.headers['content-security-policy']).toBeDefined();
+  });
+
+  it('does NOT set HSTS outside production (plain-HTTP dev must not cache the policy)', async () => {
+    delete process.env.NODE_ENV;
+    const { app } = await import('../app');
+
+    const res = await request(app, 'GET', '/health');
+    expect(res.headers['strict-transport-security']).toBeUndefined();
+  });
+
+  it('sets HSTS with 1-year max-age and includeSubDomains in production', async () => {
+    const savedNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const { app } = await import('../app');
+
+      const res = await request(app, 'GET', '/health');
+      expect(res.headers['strict-transport-security']).toBe('max-age=31536000; includeSubDomains');
+    } finally {
+      if (savedNodeEnv !== undefined) {
+        process.env.NODE_ENV = savedNodeEnv;
+      } else {
+        delete process.env.NODE_ENV;
+      }
+    }
   });
 
   it('readiness probe returns 503 before server is marked ready', async () => {

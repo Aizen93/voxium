@@ -29,6 +29,9 @@ const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, pa
 
   const mockPrismaIpRecord = {
     upsert: vi.fn(),
+    // resolved value matters: the service calls .catch() on the returned
+    // promise, and a bare vi.fn() returns undefined
+    create: vi.fn().mockResolvedValue({}),
   };
 
   const mockRedisClient = {
@@ -108,6 +111,21 @@ vi.mock('../../routes/categories', () => ({ categoryRouter: Router() }));
 vi.mock('../../routes/search', () => ({ searchRouter: Router() }));
 vi.mock('../../routes/reports', () => ({ reportsRouter: Router() }));
 vi.mock('../../routes/stats', () => ({ statsRouter: Router() }));
+
+// Self-service deletion: the shared core and the TOTP check are mocked so the
+// route's own decisions (re-auth, owned-server refusal, audit row) are what
+// the tests observe.
+const { deleteUserAccountMock, verifyTOTPMock, logAuditEventMock } = vi.hoisted(() => ({
+  deleteUserAccountMock: vi.fn().mockResolvedValue(undefined),
+  verifyTOTPMock: vi.fn().mockResolvedValue(true),
+  logAuditEventMock: vi.fn(),
+}));
+vi.mock('../../utils/accountDeletion', () => ({ deleteUserAccount: (...a: unknown[]) => deleteUserAccountMock(...a) }));
+vi.mock('../../services/totpService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/totpService')>();
+  return { ...actual, verifyTOTP: (...a: unknown[]) => verifyTOTPMock(...a) };
+});
+vi.mock('../../utils/auditLog', () => ({ logAuditEvent: (...a: unknown[]) => logAuditEventMock(...a) }));
 vi.mock('../../routes/admin', () => ({ adminRouter: Router() }));
 vi.mock('../../routes/support', () => ({ supportRouter: Router() }));
 vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
@@ -115,6 +133,17 @@ vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 // Mock rate limiters — pass through all requests for most tests
 vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitRegister: passthroughMiddleware,
+  rateLimitRegisterAttempt: passthroughMiddleware,
+  rateLimitRegisterAttemptSubnet: passthroughMiddleware,
+  chargeRegistrationBudgets: passthroughMiddleware,
+  rateLimitPowChallenge: passthroughMiddleware,
+  normalizeIp: (ip: string) => (ip.startsWith('::ffff:') ? ip.slice(7) : ip),
+  subnetOf: (ip: string) => ip,
+  consumeMailCap: vi.fn().mockResolvedValue(true),
+  getSubnetRegistrationPressure: vi.fn().mockResolvedValue(0),
+  getDomainRegistrationCount: vi.fn().mockResolvedValue(0),
+  countDomainRegistration: vi.fn().mockResolvedValue(undefined),
+  domainRegistrationCap: vi.fn().mockReturnValue(10),
   rateLimitLogin: passthroughMiddleware,
   rateLimitForgotPassword: passthroughMiddleware,
   rateLimitResetPassword: passthroughMiddleware,
@@ -123,6 +152,8 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitTOTP: passthroughMiddleware,
   rateLimitVerifyEmail: passthroughMiddleware,
   rateLimitResendVerification: passthroughMiddleware,
+  rateLimitConsent: passthroughMiddleware,
+  rateLimitDeleteAccount: passthroughMiddleware,
   rateLimitGeneral: passthroughMiddleware,
   rateLimitMessageSend: passthroughMiddleware,
   rateLimitUpload: passthroughMiddleware,
@@ -136,9 +167,27 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitSupport: passthroughMiddleware,
   rateLimitMarkRead: passthroughMiddleware,
   rateLimitRoleManage: passthroughMiddleware,
+  rateLimitSecureChannelManage: passthroughMiddleware,
   rateLimitThemeManage: passthroughMiddleware,
   rateLimitThemeBrowse: passthroughMiddleware,
+  rateLimitE2EDevice: passthroughMiddleware,
+  rateLimitE2EKeys: passthroughMiddleware,
+  rateLimitE2EBundle: passthroughMiddleware,
+  rateLimitE2EStatus: passthroughMiddleware,
+  rateLimitE2EShares: passthroughMiddleware,
+  rateLimitE2EApprove: passthroughMiddleware,
   socketRateLimit: vi.fn().mockReturnValue(true),
+}));
+
+// Mock the registration proof-of-work: verification has its own unit suite
+// (registrationPow.test.ts); route tests only assert it is REQUIRED and wired.
+const { mockVerifyPow, mockIssueChallenge } = vi.hoisted(() => ({
+  mockVerifyPow: vi.fn().mockResolvedValue(undefined),
+  mockIssueChallenge: vi.fn(() => ({ challenge: 'c'.repeat(32), difficulty: 4, expires: 4102444800000, sig: 's'.repeat(64) })),
+}));
+vi.mock('../../utils/registrationPow', () => ({
+  issueRegistrationChallenge: mockIssueChallenge,
+  verifyRegistrationPow: mockVerifyPow,
 }));
 
 // Now import the app (after all mocks are set up)
@@ -205,6 +254,77 @@ const MOCK_USER = {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
+describe('GET /api/v1/auth/register-challenge', () => {
+  it('returns a signed proof-of-work challenge', async () => {
+    const res = await request(app).get('/api/v1/auth/register-challenge');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ difficulty: expect.any(Number), sig: expect.any(String) });
+    expect(mockIssueChallenge).toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/v1/auth/register — consent (CNIL/GDPR)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrismaUser.findFirst.mockResolvedValue(null);
+    mockPrismaUser.create.mockResolvedValue({ ...MOCK_USER });
+  });
+
+  const body = { username: 'testuser', email: 'test@example.com', password: 'password123' };
+
+  it.each([
+    ['no consent at all', {}],
+    ['terms only', { acceptTerms: true }],
+    ['privacy only', { acceptPrivacy: true }],
+    ['a truthy string is not acceptance', { acceptTerms: 'true', acceptPrivacy: 'true' }],
+    ['explicit refusal', { acceptTerms: true, acceptPrivacy: false }],
+  ])('refuses to register with %s', async (_label, consent) => {
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ ...body, ...consent });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/accept the (Terms of Service|Privacy Policy)/);
+    expect(mockPrismaUser.create).not.toHaveBeenCalled();
+    // Refused with the other cheap validations, BEFORE the proof-of-work is
+    // verified — a verify burns the challenge, and the client only refetches
+    // one on expiry
+    expect(mockVerifyPow).not.toHaveBeenCalled();
+  });
+
+  it('records WHEN each document was accepted, not just that it was', async () => {
+    const before = Date.now();
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ ...body, acceptTerms: true, acceptPrivacy: true });
+
+    expect(res.status).toBe(201);
+    const data = mockPrismaUser.create.mock.calls[0][0].data;
+    expect(data.termsAcceptedAt).toBeInstanceOf(Date);
+    expect(data.privacyAcceptedAt).toBeInstanceOf(Date);
+    expect(data.termsAcceptedAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(data.privacyAcceptedAt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe('POST /api/v1/auth/register — proof-of-work gate', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('verifies the PoW BEFORE creating anything — a failed solve never reaches the service', async () => {
+    mockVerifyPow.mockRejectedValueOnce(Object.assign(new Error('Registration challenge is invalid or expired — refresh and try again'), { statusCode: 400 }));
+
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ username: 'bot', email: 'bot@example.com', password: 'ValidPass123', acceptTerms: true, acceptPrivacy: true });
+
+    expect(mockVerifyPow).toHaveBeenCalled();
+    expect(mockPrismaUser.create).not.toHaveBeenCalled();
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+});
+
 describe('POST /api/v1/auth/register', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -220,6 +340,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(201);
@@ -241,6 +363,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(409);
@@ -255,6 +379,8 @@ describe('POST /api/v1/auth/register', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -268,6 +394,8 @@ describe('POST /api/v1/auth/register', () => {
       .send({
         username: 'testuser',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -297,6 +425,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'test@example.com',
         password: longPassword,
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -314,6 +444,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'TEST@EXAMPLE.COM',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(201);
@@ -329,6 +461,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'ab',
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -342,6 +476,8 @@ describe('POST /api/v1/auth/register', () => {
         username: 'testuser',
         email: 'not-an-email',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(400);
@@ -359,6 +495,35 @@ describe('POST /api/v1/auth/register', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
+  });
+
+  it('checks username uniqueness case-insensitively (MED-4)', async () => {
+    // "alice" already exists — registering "Alice" must be rejected
+    mockPrismaUser.findFirst.mockResolvedValue({ id: 'existing-user' });
+
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({
+        username: 'Alice',
+        email: 'brand-new@example.com',
+        password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('Username or email already in use');
+    // The duplicate lookup must match the username case-insensitively
+    expect(mockPrismaUser.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            { username: { equals: 'Alice', mode: 'insensitive' } },
+          ]),
+        }),
+      }),
+    );
   });
 });
 
@@ -385,6 +550,8 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(200);
@@ -432,12 +599,37 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'nonexistent@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(401);
     expect(res.body.success).toBe(false);
     expect(res.body.error).toBe('Invalid credentials');
   });
+
+  it('burns a bcrypt compare for unknown emails so timing matches a wrong password (MED-3)', async () => {
+    const compareSpy = vi.spyOn(bcrypt, 'compare');
+    try {
+      mockPrismaIpBan.findUnique.mockResolvedValue(null);
+      mockPrismaUser.findUnique.mockResolvedValue(null); // unknown email
+
+      const res = await request(app)
+        .post('/api/v1/auth/login')
+        .send({
+          email: 'ghost@example.com',
+          password: 'password123',
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('Invalid credentials');
+      // The timing-equalizer hash must be compared against even with no user
+      // (the first such call also lazily builds the hash via one bcrypt.hash)
+      expect(compareSpy).toHaveBeenCalled();
+    } finally {
+      compareSpy.mockRestore();
+    }
+  }, 20000); // first run pays a cost-12 bcrypt.hash for the equalizer hash
 
   it('normalizes email to lowercase', async () => {
     const hashedPassword = await bcrypt.hash('password123', 4);
@@ -456,6 +648,8 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'TEST@EXAMPLE.COM',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(200);
@@ -480,6 +674,8 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(403);
@@ -495,6 +691,8 @@ describe('POST /api/v1/auth/login', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(403);
@@ -671,6 +869,8 @@ describe('GET /api/v1/auth/me', () => {
         isSupporter: false,
         supporterTier: null,
         createdAt: MOCK_USER.createdAt,
+        termsAcceptedAt: null,
+        privacyAcceptedAt: null,
       });
 
     const res = await request(app)
@@ -682,6 +882,10 @@ describe('GET /api/v1/auth/me', () => {
     expect(res.body.data.id).toBe(MOCK_USER.id);
     expect(res.body.data.username).toBe(MOCK_USER.username);
     expect(res.body.data.email).toBe(MOCK_USER.email);
+    // The client gates on this flag; the timestamps themselves stay server-side
+    expect(res.body.data.consentRequired).toBe(true);
+    expect(res.body.data).not.toHaveProperty('termsAcceptedAt');
+    expect(res.body.data).not.toHaveProperty('privacyAcceptedAt');
   });
 
   it('returns 401 without auth header', async () => {
@@ -936,6 +1140,8 @@ describe('POST /api/v1/auth/login — TOTP flow', () => {
       .send({
         email: 'test@example.com',
         password: 'password123',
+        acceptTerms: true,
+        acceptPrivacy: true,
       });
 
     expect(res.status).toBe(200);
@@ -945,5 +1151,174 @@ describe('POST /api/v1/auth/login — TOTP flow', () => {
     // Should NOT have user or tokens
     expect(res.body.data).not.toHaveProperty('user');
     expect(res.body.data).not.toHaveProperty('accessToken');
+  });
+});
+
+// ─── POST /api/v1/auth/consent — existing accounts accept the documents ─────
+
+describe('POST /api/v1/auth/consent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrismaUser.updateMany = vi.fn().mockResolvedValue({ count: 1 });
+  });
+
+  function authAs(userId = MOCK_USER.id) {
+    // Auth middleware lookup: a pre-consent account
+    mockPrismaUser.findUnique.mockResolvedValueOnce({
+      bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: null, privacyAcceptedAt: null,
+    });
+    return generateAccessToken({ userId, username: MOCK_USER.username, tokenVersion: 0 });
+  }
+
+  it('records both acceptances and clears the gate', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/consent')
+      .set('Authorization', `Bearer ${authAs()}`)
+      .send({ acceptTerms: true, acceptPrivacy: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ consentRequired: false });
+    // Null-guarded writes: a FIRST acceptance is recorded, an existing
+    // timestamp is never moved forward (it is the accountability record)
+    expect(mockPrismaUser.updateMany).toHaveBeenCalledWith({
+      where: { id: MOCK_USER.id, termsAcceptedAt: null }, data: { termsAcceptedAt: expect.any(Date) },
+    });
+    expect(mockPrismaUser.updateMany).toHaveBeenCalledWith({
+      where: { id: MOCK_USER.id, privacyAcceptedAt: null }, data: { privacyAcceptedAt: expect.any(Date) },
+    });
+  });
+
+  it.each([
+    ['nothing', {}],
+    ['terms only', { acceptTerms: true }],
+    ['privacy only', { acceptPrivacy: true }],
+    ['a truthy string', { acceptTerms: 'yes', acceptPrivacy: 'yes' }],
+  ])('records nothing when given %s', async (_label, body) => {
+    const res = await request(app)
+      .post('/api/v1/auth/consent')
+      .set('Authorization', `Bearer ${authAs()}`)
+      .send(body);
+
+    expect(res.status).toBe(400);
+    expect(mockPrismaUser.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('is reachable by a pre-consent account — it is the route that clears the gate', async () => {
+    // Same auth row as above (consentRequired: true); a requireConsent on
+    // this route would lock legacy accounts out permanently
+    const res = await request(app)
+      .post('/api/v1/auth/consent')
+      .set('Authorization', `Bearer ${authAs()}`)
+      .send({ acceptTerms: true, acceptPrivacy: true });
+    expect(res.status).toBe(200);
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).post('/api/v1/auth/consent').send({ acceptTerms: true, acceptPrivacy: true });
+    expect(res.status).toBe(401);
+  });
+});
+
+// ─── DELETE /api/v1/auth/account — self-service erasure ─────────────────────
+
+describe('DELETE /api/v1/auth/account', () => {
+  const PASSWORD = 'ValidPass123';
+  let hash: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // mockReset, not clear: a test that is refused before the service lookup
+    // leaves its second queued row for the NEXT test's auth middleware
+    mockPrismaUser.findUnique.mockReset();
+    const bcrypt = await import('bcryptjs');
+    hash = await bcrypt.hash(PASSWORD, 4);
+  });
+
+  /** Auth lookup + the service's own lookup, in that order. */
+  function mockAccount(row: Record<string, unknown>) {
+    mockPrismaUser.findUnique
+      // authenticate(): a pre-consent, unverified account — deletion must
+      // still be reachable for it
+      .mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: false, termsAcceptedAt: null, privacyAcceptedAt: null })
+      .mockResolvedValueOnce({ id: MOCK_USER.id, password: hash, totpEnabled: false, ownedServers: [], ...row });
+    return generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username, tokenVersion: 0 });
+  }
+
+  it('deletes the account after re-authenticating with the password, and audits it as a self-deletion', async () => {
+    const token = mockAccount({});
+    const res = await request(app)
+      .delete('/api/v1/auth/account')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: PASSWORD });
+
+    expect(res.status).toBe(200);
+    expect(deleteUserAccountMock).toHaveBeenCalledWith(MOCK_USER.id, expect.objectContaining({ reason: expect.any(String) }));
+    expect(logAuditEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      actorId: null, action: 'user.delete', targetId: MOCK_USER.id, metadata: { trigger: 'self' },
+    }));
+  });
+
+  it('is reachable by an unverified, unconsented account — leaving must always be possible', async () => {
+    // mockAccount's auth row is exactly that account
+    const token = mockAccount({});
+    const res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({ password: PASSWORD });
+    expect(res.status).toBe(200);
+  });
+
+  it('refuses a wrong password — a stolen session is not enough to erase someone', async () => {
+    const token = mockAccount({});
+    const res = await request(app)
+      .delete('/api/v1/auth/account')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: 'not-it' });
+
+    expect(res.status).toBe(400);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+  });
+
+  it('requires the password at all', async () => {
+    const token = mockAccount({});
+    const res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({});
+    expect(res.status).toBe(400);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+  });
+
+  it('with TOTP enabled, requires a valid code on top of the password', async () => {
+    let token = mockAccount({ totpEnabled: true });
+    let res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({ password: PASSWORD });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Two-factor/);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+
+    verifyTOTPMock.mockResolvedValueOnce(false);
+    token = mockAccount({ totpEnabled: true });
+    res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({ password: PASSWORD, totpCode: '000000' });
+    expect(res.status).toBe(400);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+
+    verifyTOTPMock.mockResolvedValueOnce(true);
+    token = mockAccount({ totpEnabled: true });
+    res = await request(app).delete('/api/v1/auth/account').set('Authorization', `Bearer ${token}`).send({ password: PASSWORD, totpCode: '123 456' });
+    expect(res.status).toBe(200);
+    expect(verifyTOTPMock).toHaveBeenCalledWith(MOCK_USER.id, '123456');
+    expect(deleteUserAccountMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers 409 with the servers the account still owns — transfer or delete them first', async () => {
+    const token = mockAccount({ ownedServers: [{ id: 's-1', name: 'My Guild' }, { id: 's-2', name: 'Study group' }] });
+    const res = await request(app)
+      .delete('/api/v1/auth/account')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: PASSWORD });
+
+    expect(res.status).toBe(409);
+    expect(res.body.data.ownedServers).toEqual([{ id: 's-1', name: 'My Guild' }, { id: 's-2', name: 'Study group' }]);
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+    expect(logAuditEventMock).not.toHaveBeenCalled();
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).delete('/api/v1/auth/account').send({ password: PASSWORD });
+    expect(res.status).toBe(401);
   });
 });

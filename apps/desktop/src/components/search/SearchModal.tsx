@@ -6,7 +6,7 @@ import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { Avatar } from '../common/Avatar';
-import { Search, X, Hash } from 'lucide-react';
+import { Search, X, Hash, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import type { SearchResult, Channel } from '@voxium/shared';
 
@@ -32,6 +32,10 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
   const abortRef = useRef<AbortController>(undefined);
 
   const textChannels = channels?.filter((c) => c.type === 'text') ?? [];
+  // Every DM is encrypted (plan §4.2), so searching one is always a local
+  // search over this device's decrypted history — there is no encrypted/
+  // plaintext conversation distinction left to test for.
+  const isEncryptedDM = !!conversationId;
 
   // Auto-focus input + cleanup in-flight requests on unmount
   useEffect(() => {
@@ -61,6 +65,49 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
       return;
     }
 
+    // DMs: the server only ever holds ciphertext, so search runs over this
+    // device's locally decrypted history instead (spec §9)
+    if (conversationId) {
+      setIsSearching(true);
+      try {
+        const { searchEncryptedHistory } = await import('../../services/e2e/dmCrypto');
+        const local = await searchEncryptedHistory(conversationId, searchQuery);
+        setResults(local);
+        setHasMore(false);
+        setHasSearched(true);
+      } catch (err) {
+        console.error('Local E2E search failed:', err);
+      } finally {
+        setIsSearching(false);
+      }
+      return;
+    }
+
+    // Secure channels: same rule as DMs — the server is blind to ciphertext,
+    // so a secure-channel filter searches this device's decrypted history
+    const secureChannelFilter = channelFilter && channels?.some((c) => c.id === channelFilter && c.secure === true)
+      ? channelFilter
+      : null;
+    if (secureChannelFilter) {
+      // A server-wide search may still be in flight from before the filter was
+      // selected — abort it, or its late response would overwrite these local
+      // results with server-wide plaintext hits
+      if (abortRef.current) abortRef.current.abort();
+      setIsSearching(true);
+      try {
+        const { searchEncryptedChannelHistory } = await import('../../services/e2e/channelCrypto');
+        const local = await searchEncryptedChannelHistory(secureChannelFilter, searchQuery);
+        setResults(local);
+        setHasMore(false);
+        setHasSearched(true);
+      } catch (err) {
+        console.error('Local E2E channel search failed:', err);
+      } finally {
+        setIsSearching(false);
+      }
+      return;
+    }
+
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -71,11 +118,11 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
       if (beforeCursor) params.set('before', beforeCursor);
       if (channelFilter) params.set('channelId', channelFilter);
 
-      const url = serverId
-        ? `/search/servers/${serverId}/messages?${params}`
-        : `/search/dm/${conversationId}/messages?${params}`;
-
-      const { data } = await api.get(url, { signal: controller.signal });
+      // Only server channels reach here — the DM branch above returned already
+      const { data } = await api.get(
+        `/search/servers/${serverId}/messages?${params}`,
+        { signal: controller.signal }
+      );
 
       if (controller.signal.aborted) return;
 
@@ -92,7 +139,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
     } finally {
       setIsSearching(false);
     }
-  }, [serverId, conversationId, channelFilter]);
+  }, [serverId, conversationId, channelFilter, channels]);
 
   // Debounced search on query change
   useEffect(() => {
@@ -161,7 +208,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-center" style={{ paddingTop: '15vh' }}>
+    <div data-testid="search-modal" className="fixed inset-0 z-50 flex justify-center" style={{ paddingTop: '15vh' }}>
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
 
@@ -187,6 +234,14 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
             ESC
           </button>
         </div>
+
+        {/* E2E conversations are searched locally — be honest about coverage */}
+        {isEncryptedDM && (
+          <div className="flex items-center gap-1.5 border-b border-vox-border px-4 py-1.5 text-[11px] text-vox-text-muted">
+            <Lock size={11} className="shrink-0 text-vox-accent-success" />
+            {t('e2e.localSearchHint')}
+          </div>
+        )}
 
         {/* Channel filter (server mode only) */}
         {serverId && textChannels.length > 1 && (

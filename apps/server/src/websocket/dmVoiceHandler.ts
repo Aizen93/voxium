@@ -1,10 +1,11 @@
 import type { Server as SocketServer, Socket } from 'socket.io';
+import { DM_SIGNAL_MAX, E2E_DEVICE_ID_RE } from '@voxium/shared';
 import type { ServerToClientEvents, ClientToServerEvents, Message } from '@voxium/shared';
 import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
-import { getRedis } from '../utils/redis';
+import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup, type SweepOptions } from '../utils/redis';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -72,6 +73,13 @@ interface DMVoiceUserState {
   socketId: string;
   selfMute: boolean;
   selfDeaf: boolean;
+  /**
+   * The E2E device the participant is calling from. Routing metadata only —
+   * the server validates the SHAPE and relays it so peers know which device
+   * to seal call signals to; the cryptographic binding happens client-side
+   * (a lied-about deviceId fails Olm decryption against the pinned identity).
+   */
+  deviceId?: string;
 }
 
 async function getDMVoiceUsers(conversationId: string): Promise<Map<string, DMVoiceUserState>> {
@@ -84,53 +92,261 @@ async function getDMVoiceUsers(conversationId: string): Promise<Map<string, DMVo
   return map;
 }
 
-/** TTL safety net for DM voice Redis keys (10 minutes). Prevents orphaned keys if cleanup fails. */
-const DM_VOICE_KEY_TTL_SEC = 600;
-
 async function addDMVoiceUser(
   conversationId: string,
   userId: string,
   state: DMVoiceUserState
 ): Promise<void> {
+  // NOTE: These keys are intentionally created WITHOUT a TTL. A prior 10-minute TTL
+  // safety net expired keys mid-call (signaling/mute/hangup silently broke past 10
+  // minutes). Stale keys from a crash are instead reaped by clearDMVoiceState() on
+  // boot — correct for single-node, since a restart drops every socket anyway.
+  // Multi-node would additionally need a per-node heartbeat/TTL to reap a crashed peer.
   const redis = getRedis();
   await redis.multi()
     .hSet(`dm:voice:users:${conversationId}`, userId, JSON.stringify(state))
-    .set(`dm:voice:call:${userId}`, conversationId, { EX: DM_VOICE_KEY_TTL_SEC })
+    .set(`dm:voice:call:${userId}`, conversationId)
     .sAdd('dm:voice:active', conversationId)
     .exec();
-  // Set TTL on hash key (cannot set in multi with hSet; use separate EXPIRE)
-  await redis.expire(`dm:voice:users:${conversationId}`, DM_VOICE_KEY_TTL_SEC);
+}
+
+/**
+ * Rebind a user's registered socket for an ongoing call WITHOUT ending it — used when
+ * a reconnected socket rejoins the same call. Preserves the call and re-targets
+ * signaling relay at the new socket. Returns false if the user is no longer in the call.
+ */
+async function updateDMVoiceUserSocket(
+  conversationId: string,
+  userId: string,
+  socketId: string,
+  selfMute: boolean,
+  selfDeaf: boolean,
+  deviceId?: string
+): Promise<boolean> {
+  const redis = getRedis();
+  // A rebind that omits deviceId (transient E2E init failure on reconnect)
+  // must not erase the stored routing hint: the peer's next replay would read
+  // a deviceId-less state and abort the call as "peer must update". A rebind
+  // WITH a deviceId still overwrites — that is a legitimate device change.
+  let effectiveDeviceId = deviceId;
+  if (!effectiveDeviceId) {
+    try {
+      const currentStr = await redis.hGet(`dm:voice:users:${conversationId}`, userId);
+      if (currentStr) {
+        const current = JSON.parse(currentStr) as DMVoiceUserState;
+        if (current.deviceId) effectiveDeviceId = current.deviceId;
+      }
+    } catch (err) {
+      console.warn(`[DMVoice] Could not read call state for deviceId merge (rebind proceeds without it):`, err);
+    }
+  }
+  const state: DMVoiceUserState = { socketId, selfMute, selfDeaf, ...(effectiveDeviceId && { deviceId: effectiveDeviceId }) };
+  const updated = await redis.eval(
+    `if redis.call('hexists', KEYS[1], ARGV[1]) == 0 then return 0 end
+     redis.call('hset', KEYS[1], ARGV[1], ARGV[2])
+     redis.call('set', KEYS[2], ARGV[3])
+     return 1`,
+    { keys: [`dm:voice:users:${conversationId}`, `dm:voice:call:${userId}`], arguments: [userId, JSON.stringify(state), conversationId] },
+  ) as number;
+  return updated === 1;
+}
+
+/**
+ * Clear stale DM-voice Redis state on startup.
+ *
+ * Multi-node aware: DM-call state is fully Redis-based and calls keep working
+ * across nodes, so when other nodes are alive a full wipe would destroy the
+ * state of LIVE calls between users on peer nodes (mute/leave/signal handlers
+ * validate against these keys). In that case only entries whose registered
+ * socket no longer exists ANYWHERE in the cluster (crash ghosts) are reaped.
+ * The full wipe runs only when this is the sole node — every socket is dead.
+ */
+export async function clearDMVoiceState(
+  io?: ClusterSocketLookup & { to: (room: string) => { emit: (event: 'dm:voice:left', data: { conversationId: string; userId: string }) => void } },
+  { allowFullWipe = true }: SweepOptions = {},
+): Promise<{ skipped: boolean }> {
+  const redis = getRedis();
+
+  // `allowFullWipe: false` — the post-listen retry of a refused boot sweep —
+  // forces the scoped path even with no peers alive: the full wipe below
+  // assumes every socket is dead, which stopped being true at listen(). See
+  // SweepOptions in utils/redis.ts.
+  const { peers } = io ? await liveNodeCounts() : { peers: 0 };
+  if (io && (peers > 0 || !allowFullWipe)) {
+    // ORDER MATTERS: collect the candidates FIRST, snapshot liveness AFTER, so
+    // the liveness view is strictly newer than everything it judges. Snapshot
+    // first and a call that starts in between looks dead and gets hung up.
+    const participants: Array<{ conversationId: string; userId: string; socketId?: string }> = [];
+    const activeConvs = await redis.sMembers('dm:voice:active');
+    for (const conversationId of activeConvs) {
+      const users = await redis.hGetAll(`dm:voice:users:${conversationId}`);
+      for (const [userId, json] of Object.entries(users)) {
+        let socketId: string | undefined;
+        try {
+          socketId = (JSON.parse(json) as DMVoiceUserState).socketId;
+        } catch {
+          socketId = undefined; // malformed entry — treat as ghost
+        }
+        participants.push({ conversationId, userId, socketId });
+      }
+    }
+
+    // One adapter snapshot for the whole sweep — see clearPresenceState. A
+    // timed-out snapshot is partial, and acting on it would hang up LIVE calls
+    // between users on a slow peer node, so the participant reap is skipped
+    // entirely. The orphan reverse-key scan below is NOT skipped: it compares
+    // Redis against Redis and never consults socket liveness.
+    let live: Set<string> | null = null;
+    let snapshotFailed = false;
+    try {
+      live = await liveClusterSocketIds(io, peers);
+    } catch (err) {
+      console.warn('[DMVoice] Cluster socket snapshot unusable — skipping the participant reap:', err instanceof Error ? err.message : err);
+      snapshotFailed = true;
+    }
+
+    let reaped = 0;
+    if (!snapshotFailed) {
+      for (const { conversationId, userId, socketId } of participants) {
+        let stillConnected: boolean;
+        if (live) {
+          stillConnected = !!socketId && live.has(socketId);
+        } else {
+          // Adapter without allRooms (a hand-rolled io): legacy per-socket path
+          try {
+            stillConnected = !!socketId && await socketExistsInCluster(io, socketId);
+          } catch (err) {
+            console.warn('[DMVoice] Cluster socket lookup failed, skipping reap for', userId, err);
+            continue;
+          }
+        }
+        if (stillConnected) continue;
+        await removeDMVoiceUser(conversationId, userId);
+        io.to(`dm:voice:${conversationId}`).emit('dm:voice:left', { conversationId, userId });
+        reaped++;
+      }
+    }
+    // Orphaned reverse-lookup keys pointing at conversations with no user entry
+    for await (const batch of redis.scanIterator({ MATCH: 'dm:voice:call:*', COUNT: 200 })) {
+      for (const key of batch) {
+        const userId = key.slice('dm:voice:call:'.length);
+        const conversationId = await redis.get(key);
+        if (!conversationId) continue;
+        const stillInCall = await redis.hExists(`dm:voice:users:${conversationId}`, userId);
+        if (!stillInCall) await redis.del(key);
+      }
+    }
+    if (reaped > 0) {
+      console.log(`[DMVoice] Reaped ${reaped} stale DM-call participant(s) (scoped, ${peers} peer(s) alive)`);
+    }
+    return { skipped: snapshotFailed };
+  }
+
+  // Sole node: every socket is gone, all DM-voice state is stale — full wipe.
+  const keys: string[] = [];
+  for await (const batch of redis.scanIterator({ MATCH: 'dm:voice:*', COUNT: 200 })) {
+    for (const k of batch) keys.push(k);
+  }
+  if (keys.length > 0) {
+    await redis.del(keys);
+    console.log(`[DMVoice] Cleared ${keys.length} stale DM-voice key(s)`);
+  }
+  return { skipped: false };
 }
 
 async function removeDMVoiceUser(conversationId: string, userId: string): Promise<void> {
-  const redis = getRedis();
-  await redis.multi()
-    .hDel(`dm:voice:users:${conversationId}`, userId)
-    .del(`dm:voice:call:${userId}`)
-    .exec();
-  // Clean up empty hash + active set (separate call to check remaining)
-  const remaining = await redis.hLen(`dm:voice:users:${conversationId}`);
-  if (remaining === 0) {
-    await redis.multi()
-      .del(`dm:voice:users:${conversationId}`)
-      .sRem('dm:voice:active', conversationId)
-      .exec();
-  }
+  // Atomic via Lua: the hLen check and the hash/active-set deletion must be indivisible.
+  // A non-atomic version let a concurrent addDMVoiceUser for the same conversation slot
+  // between them, which could delete a just-joined user's hash and orphan a
+  // dm:voice:call:{userId} key (never reaped from the active set).
+  await getRedis().eval(
+    `redis.call('hdel', KEYS[1], ARGV[1])
+     redis.call('del', KEYS[2])
+     if redis.call('hlen', KEYS[1]) == 0 then
+       redis.call('del', KEYS[1])
+       redis.call('srem', KEYS[3], ARGV[2])
+     end
+     return 1`,
+    {
+      keys: [`dm:voice:users:${conversationId}`, `dm:voice:call:${userId}`, 'dm:voice:active'],
+      arguments: [userId, conversationId],
+    },
+  );
 }
 
 async function getUserDMCall(userId: string): Promise<string | null> {
   return await getRedis().get(`dm:voice:call:${userId}`);
 }
 
+/**
+ * Arm (or re-arm) the 30s auto-cancel timer for an unanswered call — fires only while the
+ * call still has a single participant (i.e. is still ringing). Used both when a call first
+ * starts ringing and when the caller's socket reconnects mid-ring (so the timer survives
+ * the reconnect instead of being cancelled and never re-armed).
+ */
+function armCallTimeout(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  conversationId: string,
+  ringingUserId: string,
+) {
+  clearCallTimeout(conversationId);
+  dmCallTimeouts.set(conversationId, setTimeout(async () => {
+    dmCallTimeouts.delete(conversationId);
+    // Check Redis — call may have been answered on another node
+    try {
+      const currentUsers = await getDMVoiceUsers(conversationId);
+      // Exactly 1 => still ringing (auto-cancel). 0 => already ended (do nothing).
+      if (currentUsers.size === 1) {
+        console.log(`[DMVoice] Call timeout for conversation ${conversationId}`);
+        // Clean up all remaining users. socketsLeave is fire-and-forget across
+        // the cluster — fetchSockets here used to WAIT for every node's reply,
+        // so one dead/unresponsive peer node made this throw after 5s and the
+        // ended/left emits below never ran (clients stuck "in a call").
+        for (const [uid] of currentUsers) {
+          await removeDMVoiceUser(conversationId, uid);
+          io.in(`user:${uid}`).socketsLeave(`dm:voice:${conversationId}`);
+        }
+        io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: ringingUserId });
+        io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
+        createSystemMessage(io, conversationId, ringingUserId, 'Voice call ended');
+      }
+    } catch (err) {
+      console.error(`[DMVoice] Redis error during call timeout cleanup:`, err);
+    }
+  }, DM_CALL_TIMEOUT_MS));
+}
+
 // ─── Leave / cleanup ──────────────────────────────────────────────────────────
 
 export async function leaveCurrentDMVoiceChannel(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
-  socket: Socket<ClientToServerEvents, ServerToClientEvents>,
-  userId: string
+  // Structural subset so voiceHandler can pass either a real Socket or a
+  // relay shim (multi-node) — only id / leave / data are touched here.
+  socket: Pick<Socket<ClientToServerEvents, ServerToClientEvents>, 'id' | 'leave'> & { data: { dmCallConversationId?: string } },
+  userId: string,
+  opts?: { force?: boolean }
 ) {
   const conversationId = await getUserDMCall(userId);
   if (!conversationId) return;
+
+  const force = opts?.force ?? false;
+
+  // Socket-ownership guard (skip on force): only the socket currently registered in
+  // the call may end it. A stale socket — whose session a reconnect has since taken
+  // over — must NOT tear down the live 1-on-1 call, otherwise the call would end
+  // ~10-35s after any network blip when the old socket finally times out.
+  if (!force) {
+    const selfStr = await getRedis().hGet(`dm:voice:users:${conversationId}`, userId);
+    if (selfStr) {
+      let selfSocketId: string | undefined;
+      try { selfSocketId = (JSON.parse(selfStr) as DMVoiceUserState).socketId; } catch { selfSocketId = undefined; }
+      if (selfSocketId && selfSocketId !== socket.id) {
+        socket.leave(`dm:voice:${conversationId}`);
+        if (socket.data.dmCallConversationId === conversationId) socket.data.dmCallConversationId = undefined;
+        return;
+      }
+    }
+  }
 
   console.log(`[DMVoice] Removing user ${userId} from DM call ${conversationId}`);
 
@@ -146,13 +362,15 @@ export async function leaveCurrentDMVoiceChannel(
   socket.leave(`dm:voice:${conversationId}`);
   socket.data.dmCallConversationId = undefined;
 
-  // DM calls are 1-on-1: always end the call when someone leaves
-  // Clean up remaining users' state and socket rooms
+  // DM calls are 1-on-1: always end the call when someone leaves.
+  // Clean up remaining users' state and socket rooms. socketsLeave is
+  // fire-and-forget across the cluster — fetchSockets here used to WAIT for
+  // every node's reply, so one dead/unresponsive peer node made this throw
+  // after 5s and the left/ended emits below never ran: the remaining
+  // participant's client stayed "in a call" forever.
   for (const remaining of remainingUsers) {
     await removeDMVoiceUser(conversationId, remaining.id);
-    // fetchSockets works across nodes via Redis adapter
-    const sockets = await io.in(`user:${remaining.id}`).fetchSockets();
-    for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
+    io.in(`user:${remaining.id}`).socketsLeave(`dm:voice:${conversationId}`);
   }
 
   clearCallTimeout(conversationId);
@@ -193,7 +411,7 @@ export function handleDMVoiceEvents(
 ) {
   const userId = socket.data.userId as string;
 
-  socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean }) => {
+  socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => {
     if (!socketRateLimit(socket, 'dm:voice:join', 10)) return;
     if (typeof conversationId !== 'string' || !conversationId) return;
     if (!isFeatureEnabled('dm_voice')) {
@@ -212,11 +430,52 @@ export function handleDMVoiceEvents(
       return;
     }
 
-    // Leave any current server voice channel first
-    leaveCurrentVoiceChannel(io, socket, userId);
+    // Leave any current server voice channel first (mutual exclusivity; force-evict
+    // any stale session so a reconnected socket doesn't orphan old voice transports).
+    leaveCurrentVoiceChannel(io, socket, userId, { force: true });
 
-    // Leave any existing DM call
-    await leaveCurrentDMVoiceChannel(io, socket, userId);
+    const initialMute = state?.selfMute ?? false;
+    const initialDeaf = state?.selfDeaf ?? false;
+    // E2E call-signaling routing hint: shape-validated, stripped if malformed
+    // (never trusted — clients bind it cryptographically via Olm)
+    const deviceId =
+      typeof state?.deviceId === 'string' && E2E_DEVICE_ID_RE.test(state.deviceId)
+        ? state.deviceId
+        : undefined;
+
+    // Handle an existing DM call for this user.
+    const existingCall = await getUserDMCall(userId);
+    if (existingCall === conversationId) {
+      // Reconnect into the SAME call: rebind our socket in place without ending the
+      // call or re-ringing the peer, then rehydrate this socket's participant view.
+      const rebound = await updateDMVoiceUserSocket(conversationId, userId, socket.id, initialMute, initialDeaf, deviceId);
+      if (rebound) {
+        socket.join(`dm:voice:${conversationId}`);
+        socket.data.dmCallConversationId = conversationId;
+        const rejoinUsers = await getDMVoiceUsers(conversationId);
+        // Re-arm (still ringing) or clear (already answered) the auto-cancel timer.
+        // Without re-arming, a caller reconnecting mid-ring would cancel the 30s
+        // unanswered-call timeout and never restore it, stranding the call ringing
+        // forever with orphaned Redis keys (the safety-net TTL was removed for HIGH-2).
+        if (rejoinUsers.size === 1) armCallTimeout(io, conversationId, userId);
+        else clearCallTimeout(conversationId);
+        const ids = Array.from(rejoinUsers.keys());
+        const infos = ids.length > 0 ? await prisma.user.findMany({
+          where: { id: { in: ids } },
+          select: { id: true, username: true, displayName: true, avatarUrl: true },
+        }) : [];
+        for (const u of infos) {
+          const st = rejoinUsers.get(u.id);
+          socket.emit('dm:voice:joined', { conversationId, user: { ...u, selfMute: st?.selfMute ?? false, selfDeaf: st?.selfDeaf ?? false, serverMuted: false, serverDeafened: false, speaking: false, ...(st?.deviceId && { deviceId: st.deviceId }) } });
+        }
+        console.log(`[DMVoice] User ${userId} rebound socket for existing call ${conversationId}`);
+        return;
+      }
+      // Rebind failed (user left the call between checks) — fall through to a fresh join.
+    } else if (existingCall) {
+      // Joining a DIFFERENT call — leave the old one (force-evict; ends that 1-on-1 call).
+      await leaveCurrentDMVoiceChannel(io, socket, userId, { force: true });
+    }
 
     // DM calls are 1-on-1 — reject if call already has 2 participants
     let existingUsers: Map<string, DMVoiceUserState>;
@@ -236,14 +495,12 @@ export function handleDMVoiceEvents(
     socket.join(`dm:voice:${conversationId}`);
     socket.data.dmCallConversationId = conversationId;
 
-    const initialMute = state?.selfMute ?? false;
-    const initialDeaf = state?.selfDeaf ?? false;
-
     try {
       await addDMVoiceUser(conversationId, userId, {
         socketId: socket.id,
         selfMute: initialMute,
         selfDeaf: initialDeaf,
+        ...(deviceId && { deviceId }),
       });
     } catch (err) {
       console.error(`[DMVoice] Redis error adding user to call:`, err);
@@ -261,7 +518,7 @@ export function handleDMVoiceEvents(
 
     if (!user) return;
 
-    const voiceUser = { ...user, selfMute: initialMute, selfDeaf: initialDeaf, serverMuted: false, serverDeafened: false, speaking: false };
+    const voiceUser = { ...user, selfMute: initialMute, selfDeaf: initialDeaf, serverMuted: false, serverDeafened: false, speaking: false, ...(deviceId && { deviceId }) };
     const callUsers = await getDMVoiceUsers(conversationId);
 
     if (callUsers.size === 1) {
@@ -273,28 +530,7 @@ export function handleDMVoiceEvents(
       createSystemMessage(io, conversationId, userId, 'Voice call started');
 
       // Start call timeout — auto-cancel if no one answers within 30s
-      clearCallTimeout(conversationId);
-      dmCallTimeouts.set(conversationId, setTimeout(async () => {
-        dmCallTimeouts.delete(conversationId);
-        // Check Redis — call may have been answered on another node
-        try {
-          const currentUsers = await getDMVoiceUsers(conversationId);
-          if (currentUsers.size <= 1) {
-            console.log(`[DMVoice] Call timeout for conversation ${conversationId}`);
-            // Clean up all remaining users
-            for (const [uid] of currentUsers) {
-              await removeDMVoiceUser(conversationId, uid);
-              const sockets = await io.in(`user:${uid}`).fetchSockets();
-              for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
-            }
-            io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId });
-            io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
-            createSystemMessage(io, conversationId, userId, 'Voice call ended');
-          }
-        } catch (err) {
-          console.error(`[DMVoice] Redis error during call timeout cleanup:`, err);
-        }
-      }, DM_CALL_TIMEOUT_MS));
+      armCallTimeout(io, conversationId, userId);
     } else {
       // Second user joined — clear the call timeout
       clearCallTimeout(conversationId);
@@ -310,7 +546,7 @@ export function handleDMVoiceEvents(
         });
         const existingVoiceUsers = existingUserInfos.map((u) => {
           const uState = callUsers.get(u.id);
-          return { ...u, selfMute: uState?.selfMute ?? false, selfDeaf: uState?.selfDeaf ?? false, serverMuted: false, serverDeafened: false, speaking: false };
+          return { ...u, selfMute: uState?.selfMute ?? false, selfDeaf: uState?.selfDeaf ?? false, serverMuted: false, serverDeafened: false, speaking: false, ...(uState?.deviceId && { deviceId: uState.deviceId }) };
         });
         // Send as joined events to the new joiner so they know who's already there
         for (const vu of existingVoiceUsers) {
@@ -346,9 +582,8 @@ export function handleDMVoiceEvents(
     const callerIdForMsg = Array.from(callUsers.keys())[0];
     for (const [callerId] of callUsers) {
       await removeDMVoiceUser(conversationId, callerId);
-      // fetchSockets works across nodes via Redis adapter
-      const sockets = await io.in(`user:${callerId}`).fetchSockets();
-      for (const s of sockets) s.leave(`dm:voice:${conversationId}`);
+      // socketsLeave: adapter-wide and fire-and-forget (never blocks on peers)
+      io.in(`user:${callerId}`).socketsLeave(`dm:voice:${conversationId}`);
     }
 
     clearCallTimeout(conversationId);
@@ -359,7 +594,7 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:mute', async (muted: boolean) => {
-    if (!socketRateLimit(socket, 'dm:voice:mute', 30)) return;
+    if (!socketRateLimit(socket, 'dm:voice:mute', 120)) return;
     if (typeof muted !== 'boolean') return;
     // Use socket.data for fast local lookup (source of truth is Redis)
     const conversationId = socket.data.dmCallConversationId as string;
@@ -389,7 +624,7 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:deaf', async (deafened: boolean) => {
-    if (!socketRateLimit(socket, 'dm:voice:deaf', 30)) return;
+    if (!socketRateLimit(socket, 'dm:voice:deaf', 120)) return;
     if (typeof deafened !== 'boolean') return;
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
@@ -434,8 +669,15 @@ export function handleDMVoiceEvents(
   socket.on('dm:voice:signal', async (data: { to: string; signal: unknown }) => {
     if (!socketRateLimit(socket, 'dm:voice:signal', 300)) return;
     if (!data || typeof data !== 'object' || typeof data.to !== 'string' || !data.to) return;
-    // Reject excessively large signal payloads (max 64KB serialized)
-    if (JSON.stringify(data.signal).length > 65536) return;
+    // Only strings (olm1 envelopes after the E2E cutover) and plain objects
+    // (legacy signals during rollout) are relayable. This gate also fixes a
+    // latent crash: JSON.stringify(undefined | function | symbol) returns
+    // undefined, so `.length` on it threw inside this async handler — an
+    // unhandled rejection any client could trigger with a malformed frame.
+    const signalType = typeof data.signal;
+    if (data.signal == null || (signalType !== 'string' && signalType !== 'object')) return;
+    // Reject excessively large signal payloads (serialized, UTF-16 chars)
+    if (JSON.stringify(data.signal).length > DM_SIGNAL_MAX) return;
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
 

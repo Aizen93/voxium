@@ -12,6 +12,7 @@ vi.mock('../../middleware/auth', () => ({
     next();
   },
   requireVerifiedEmail: (_req: any, _res: any, next: any) => next(),
+  requireConsent: (_req: any, _res: any, next: any) => next(),
 }));
 
 // Mock rate limiters
@@ -418,6 +419,78 @@ describe('uploads — POST /presign/attachment', () => {
       .send({ fileName: 'report.pdf', fileSize: 1024, mimeType: 'application/pdf' });
 
     expect(res.status).toBe(400);
+  });
+
+  it('presigns E2E attachments as opaque blobs — real file name never reaches the S3 key', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
+      id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2',
+    } as any);
+
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/v1/uploads/presign/attachment')
+      .send({
+        fileName: 'encrypted.bin',
+        fileSize: 8 * 1024 * 1024 + 16, // ciphertext above the plain 8MB cap — allowed for E2E
+        mimeType: 'application/octet-stream',
+        conversationId: 'conv-1',
+        encrypted: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.key).toMatch(/^attachments\/dm-conv-1\/[a-f0-9]{16}-encrypted\.bin$/);
+  });
+
+  it('rejects E2E presigns with a non-opaque mime, oversized ciphertext, or channel context', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
+      id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2',
+    } as any);
+    const app = createApp();
+    const base = { fileName: 'encrypted.bin', fileSize: 1024, conversationId: 'conv-1', encrypted: true };
+
+    let res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ ...base, mimeType: 'image/png' });
+    expect(res.status).toBe(400);
+
+    res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ ...base, mimeType: 'application/octet-stream', fileSize: 12 * 1024 * 1024 + 17 });
+    expect(res.status).toBe(400);
+
+    // Channel context: E2E presigns are rejected for PLAINTEXT channels (the
+    // check now lives in the auth block, where the channel row is available)
+    vi.mocked(prisma.channel.findUnique).mockResolvedValue({
+      serverId: 'srv-1', secure: false,
+    } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({
+      userId: 'user-1', serverId: 'srv-1',
+    } as any);
+    res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ fileName: 'encrypted.bin', fileSize: 1024, mimeType: 'application/octet-stream', channelId: 'ch-1', encrypted: true });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/direct messages/i);
+  });
+
+  it('SECURE channels: accepts E2E presigns (opaque key) and rejects plaintext presigns', async () => {
+    const app = createApp();
+    vi.mocked(prisma.channel.findUnique).mockResolvedValue({
+      serverId: 'srv-1', secure: true,
+    } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({
+      userId: 'user-1', serverId: 'srv-1',
+    } as any);
+
+    // Encrypted presign works, key never carries the real file name
+    let res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ fileName: 'my-secret-doc.pdf', fileSize: 1024, mimeType: 'application/octet-stream', channelId: 'sec-1', encrypted: true });
+    expect(res.status).toBe(200);
+    expect(res.body.data.key).toMatch(/^attachments\/ch-sec-1\/[a-f0-9]{16}-encrypted\.bin$/);
+    expect(res.body.data.key).not.toContain('my-secret-doc');
+
+    // A plaintext presign into a secure channel is a hard 400
+    res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ fileName: 'doc.pdf', fileSize: 1024, mimeType: 'application/pdf', channelId: 'sec-1' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/end-to-end encrypted/i);
   });
 
   it('rejects disallowed file types', async () => {

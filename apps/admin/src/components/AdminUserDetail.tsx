@@ -73,14 +73,29 @@ export function AdminUserDetail({ userId, onBack }: Props) {
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+        <div className="mt-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 text-sm">
           <div>
             <p className="text-vox-text-muted">Status</p>
             <p className="text-vox-text-primary">{selectedUser.status}</p>
           </div>
           <div>
-            <p className="text-vox-text-muted">Joined</p>
-            <p className="text-vox-text-primary">{new Date(selectedUser.createdAt).toLocaleDateString()}</p>
+            <p className="text-vox-text-muted">Registered</p>
+            {/* Time-of-day matters here: bot waves register on a fixed cadence,
+                and the pattern is invisible at date granularity */}
+            <p className="text-vox-text-primary">{new Date(selectedUser.createdAt).toLocaleString()}</p>
+          </div>
+          <div>
+            <p className="text-vox-text-muted">Email verification</p>
+            {selectedUser.emailVerified ? (
+              <p className="text-vox-voice-connected" data-testid="user-verified-status">
+                Verified
+                {selectedUser.emailVerifiedAt && (
+                  <span className="block text-xs text-vox-text-muted">{new Date(selectedUser.emailVerifiedAt).toLocaleString()}</span>
+                )}
+              </p>
+            ) : (
+              <p className="text-vox-accent-warning" data-testid="user-verified-status">Not verified</p>
+            )}
           </div>
           {selectedUser._count && (
             <>
@@ -214,9 +229,16 @@ export function AdminUserDetail({ userId, onBack }: Props) {
           </h3>
           <div className="space-y-2">
             {selectedUser.ipRecords.map((record, i) => (
-              <div key={i} className="flex items-center justify-between text-sm py-1">
-                <code className="text-vox-text-primary font-mono text-xs bg-vox-bg-hover px-2 py-0.5 rounded">{record.ip}</code>
-                <span className="text-vox-text-muted text-xs">{new Date(record.lastSeenAt).toLocaleString()}</span>
+              <div key={i} className="flex items-center justify-between gap-2 text-sm py-1">
+                <span className="flex items-center gap-2 min-w-0">
+                  <code className="text-vox-text-primary font-mono text-xs bg-vox-bg-hover px-2 py-0.5 rounded">{record.ip}</code>
+                  {/* The registration IP is the forensic anchor for bot triage */}
+                  {record.kind === 'register' && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-vox-accent-primary/20 text-vox-accent-primary shrink-0">registration</span>
+                  )}
+                  {record.country && <span className="text-vox-text-muted text-xs truncate">{record.country}</span>}
+                </span>
+                <span className="text-vox-text-muted text-xs shrink-0">{new Date(record.lastSeenAt).toLocaleString()}</span>
               </div>
             ))}
           </div>

@@ -61,7 +61,7 @@ function IncomingCallContent({ incomingCall }: { incomingCall: { conversationId:
         <div className="flex gap-4">
           <button
             onClick={declineCall}
-            className="flex h-12 w-12 items-center justify-center rounded-full bg-vox-accent-danger text-white transition-colors hover:bg-vox-accent-danger/80"
+            className="flex h-12 w-12 items-center justify-center rounded-full bg-vox-accent-danger text-vox-on-accent transition-colors hover:bg-vox-accent-danger/80"
             title={t('voice.decline')}
             aria-label={t('voice.decline')}
           >

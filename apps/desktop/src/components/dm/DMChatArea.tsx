@@ -12,6 +12,7 @@ import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Phone, PhoneOff, Search } from 'lucide-react';
 import { SearchModal } from '../search/SearchModal';
+import { E2EControls } from './E2EControls';
 import { clsx } from 'clsx';
 import type { UserStatus } from '@voxium/shared';
 
@@ -162,6 +163,7 @@ export function DMChatArea() {
             {conversation.participant.displayName}
           </h3>
         </UserHoverTarget>
+        <E2EControls conversation={conversation} />
         <button
           onClick={() => setShowSearch(true)}
           className="rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"

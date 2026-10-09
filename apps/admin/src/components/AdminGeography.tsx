@@ -5,13 +5,13 @@ import { AdminGlobe } from './AdminGlobe';
 import { toast } from '../stores/toastStore';
 import type { InfraServer } from '@voxium/shared';
 
-const PROVIDERS = ['OVH', 'AWS', 'Azure', 'GCP', 'Hetzner', 'DigitalOcean', 'Other'];
+const PROVIDERS = ['AWS', 'Azure', 'GCP', 'Hetzner', 'DigitalOcean', 'Scaleway', 'Other'];
 
 function InfraServerForm({ onSubmit }: { onSubmit: (data: Omit<InfraServer, 'id' | 'createdAt'>) => Promise<void> }) {
   const [name, setName] = useState('');
   const [country, setCountry] = useState('');
   const [city, setCity] = useState('');
-  const [provider, setProvider] = useState('OVH');
+  const [provider, setProvider] = useState('Other');
   const [latitude, setLatitude] = useState('');
   const [longitude, setLongitude] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -38,7 +38,7 @@ function InfraServerForm({ onSubmit }: { onSubmit: (data: Omit<InfraServer, 'id'
       setName('');
       setCountry('');
       setCity('');
-      setProvider('OVH');
+      setProvider('Other');
       setLatitude('');
       setLongitude('');
       toast.success('Infrastructure server added');

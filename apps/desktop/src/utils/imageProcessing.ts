@@ -1,3 +1,5 @@
+import { ANNOTATION_IMAGE_MAX_EDGE, ANNOTATION_IMAGE_DATAURL_MAX } from '@voxium/shared';
+
 const TARGET_SIZE = 256;
 const WEBP_QUALITY = 0.85;
 
@@ -24,4 +26,33 @@ export async function processImage(file: File): Promise<Blob> {
   bitmap.close();
 
   return canvas.convertToBlob({ type: 'image/webp', quality: WEBP_QUALITY });
+}
+
+/**
+ * Prepare a screen-share overlay image (logo/promo): contain-fit resize to
+ * ANNOTATION_IMAGE_MAX_EDGE (no crop), webp, returned as a data URL that fits
+ * the annotation wire cap. Returns null when the encoded image is still too
+ * large (caller toasts) — never throws for size, only for decode failures.
+ */
+export async function processOverlayImage(file: File): Promise<{ dataUrl: string; width: number; height: number } | null> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, ANNOTATION_IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+
+  const blob = await canvas.convertToBlob({ type: 'image/webp', quality: WEBP_QUALITY });
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error('overlay image read failed'));
+    reader.readAsDataURL(blob);
+  });
+
+  if (dataUrl.length > ANNOTATION_IMAGE_DATAURL_MAX) return null;
+  return { dataUrl, width: w, height: h };
 }
