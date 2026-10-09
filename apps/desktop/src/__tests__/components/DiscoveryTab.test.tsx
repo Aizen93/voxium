@@ -180,6 +180,40 @@ describe('DiscoveryTab', () => {
     await act(async () => { setValue(q('[data-testid="discovery-description"]') as HTMLTextAreaElement, `Free${String.fromCharCode(0x202e)}stuff`); });
     await act(async () => { save().click(); });
     expect(updateDiscovery).not.toHaveBeenCalled();
-    expect(toastError).toHaveBeenCalledTimes(1);
+    // the shared validator's English string is mapped to a translated key
+    expect(toastError).toHaveBeenCalledWith('serverErrors.descriptionUnsupportedChars');
+  });
+
+  it('a server:updated resyncs the UNTOUCHED drafts and leaves the touched one alone; a save clears the touched set', async () => {
+    await render();
+    await act(async () => { setValue(q('[data-testid="discovery-description"]') as HTMLTextAreaElement, 'Typing'); });
+    // another moderator flipped the join mode and picked a tag meanwhile
+    server = { ...server, joinMode: 'open', tags: ['music'] };
+    await render();
+    expect((q('[data-testid="discovery-join-open"]') as HTMLInputElement).checked).toBe(true);
+    expect(q('[data-testid="discovery-tag-music"]')!.getAttribute('aria-pressed')).toBe('true');
+    expect((q('[data-testid="discovery-description"]') as HTMLTextAreaElement).value).toBe('Typing');
+    // so the save carries ONLY the description, against the updated store
+    await act(async () => { save().click(); });
+    expect(updateDiscovery).toHaveBeenCalledWith('srv-1', { description: 'Typing' });
+    // the echo of our own save lands, then a later remote edit of the same
+    // field: nothing is dirty any more, so the draft follows it
+    server = { ...server, description: 'Typing' };
+    await render();
+    server = { ...server, description: 'Edited elsewhere' };
+    await render();
+    expect((q('[data-testid="discovery-description"]') as HTMLTextAreaElement).value).toBe('Edited elsewhere');
+    expect(save().disabled).toBe(true);
+  });
+
+  it('a failed save keeps the touched fields touched: the next server:updated does not wipe the typing', async () => {
+    updateDiscovery.mockRejectedValue(new Error('Listing is disabled by an administrator'));
+    await render();
+    await act(async () => { setValue(q('[data-testid="discovery-description"]') as HTMLTextAreaElement, 'Keep me'); });
+    await act(async () => { save().click(); });
+    expect(toastError).toHaveBeenCalledWith('serverErrors.listingDisabledByAdmin');
+    server = { ...server, description: 'Remote' };
+    await render();
+    expect((q('[data-testid="discovery-description"]') as HTMLTextAreaElement).value).toBe('Keep me');
   });
 });

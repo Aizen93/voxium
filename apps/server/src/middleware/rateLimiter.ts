@@ -85,6 +85,9 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   upload:         { keyPrefix: 'rl:upload',    points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Upload' },
   friendRequest:  { keyPrefix: 'rl:friend',    points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Friend Request' },
   memberManage:   { keyPrefix: 'rl:member',    points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Member Manage' },
+  // Reads of the moderation lists (join requests, bans): the client follows
+  // pages and refetches on open, so they must not share the write budget.
+  memberRead:     { keyPrefix: 'rl:memberrd',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Member Lists Read' },
   categoryManage: { keyPrefix: 'rl:category',  points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Category Manage' },
   search:         { keyPrefix: 'rl:search',    points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Search' },
   stats:          { keyPrefix: 'rl:stats',     points: 30,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Stats' },
@@ -565,6 +568,7 @@ export const rateLimitMessageSend = createMiddleware('messageSend', byUserId);
 export const rateLimitUpload = createMiddleware('upload', byUserId);
 export const rateLimitFriendRequest = createMiddleware('friendRequest', byUserId);
 export const rateLimitMemberManage = createMiddleware('memberManage', byUserId);
+export const rateLimitMemberRead = createMiddleware('memberRead', byUserId);
 export const rateLimitCategoryManage = createMiddleware('categoryManage', byUserId);
 export const rateLimitSearch = createMiddleware('search', byUserId);
 export const rateLimitStats = createMiddleware('stats', byIp);

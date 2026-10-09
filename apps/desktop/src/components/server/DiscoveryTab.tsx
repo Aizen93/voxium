@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Lock, ShieldAlert, Eye, EyeOff } from 'lucide-react';
 import { DISCOVERY_TAGS, LIMITS, validateServerDescription, validateDiscoveryTags } from '@voxium/shared';
 import type { DiscoveryServer, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
-import { getTranslatedError } from '../../utils/serverErrors';
+import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
 import { DiscoveryCard } from '../discovery/DiscoveryCard';
 
 interface Props {
@@ -33,6 +33,24 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
   const [tags, setTags] = useState<string[]>(server?.tags ?? []);
   const [info, setInfo] = useState<ServerDiscoveryInfo | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Which fields the owner has touched since the last save. A server:updated
+  // (another moderator saved, or our own save echoing back) resyncs the
+  // UNTOUCHED drafts to the store and leaves the touched ones alone — the
+  // draft neither fights the store nor silently discards typing.
+  const dirty = useRef<{ discoverable: boolean; joinMode: boolean; description: boolean; tags: boolean }>({
+    discoverable: false, joinMode: false, description: false, tags: false,
+  });
+  const serverDiscoverable = server?.discoverable ?? true;
+  const serverJoinMode = server?.joinMode ?? 'approval';
+  const serverDescription = server?.description ?? '';
+  const serverTagsKey = (server?.tags ?? []).join(',');
+  useEffect(() => {
+    if (!dirty.current.discoverable) setDiscoverable(serverDiscoverable);
+    if (!dirty.current.joinMode) setJoinMode(serverJoinMode);
+    if (!dirty.current.description) setDescription(serverDescription);
+    if (!dirty.current.tags) setTags(serverTagsKey ? serverTagsKey.split(',') : []);
+  }, [serverDiscoverable, serverJoinMode, serverDescription, serverTagsKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +95,7 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
   const hasChanges = Object.keys(changes).length > 0;
 
   const toggleTag = (tag: string) => {
+    dirty.current.tags = true;
     setTags((prev) => {
       if (prev.includes(tag)) return prev.filter((x) => x !== tag);
       if (prev.length >= LIMITS.DISCOVERY_MAX_TAGS) return prev;
@@ -88,15 +107,18 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
     if (!hasChanges || saving) return;
     if (changes.description !== undefined && changes.description !== null) {
       const err = validateServerDescription(changes.description);
-      if (err) { toast.error(err); return; }
+      if (err) { toast.error(translateServerError(err, t)); return; }
     }
     if (changes.tags !== undefined) {
       const err = validateDiscoveryTags(changes.tags);
-      if (err) { toast.error(err); return; }
+      if (err) { toast.error(translateServerError(err, t)); return; }
     }
     setSaving(true);
     try {
       await updateDiscovery(serverId, changes);
+      // Saved: the drafts are the store's values now (server:updated carries
+      // them back), so nothing is dirty any more.
+      dirty.current = { discoverable: false, joinMode: false, description: false, tags: false };
       toast.success(t('discovery.settings.saved'));
     } catch (err) {
       toast.error(getTranslatedError(err, t, 'discovery.settings.failedToSave'));
@@ -124,7 +146,7 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
             role="switch"
             aria-checked={discoverable}
             disabled={blocked}
-            onClick={() => setDiscoverable((v) => !v)}
+            onClick={() => { dirty.current.discoverable = true; setDiscoverable((v) => !v); }}
             className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50 ${discoverable ? 'bg-vox-accent-primary' : 'bg-vox-bg-hover border border-vox-border'}`}
             data-testid="discovery-listed-toggle"
           >
@@ -165,7 +187,7 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
                 name="joinMode"
                 value={mode}
                 checked={joinMode === mode}
-                onChange={() => setJoinMode(mode)}
+                onChange={() => { dirty.current.joinMode = true; setJoinMode(mode); }}
                 className="mt-0.5"
                 data-testid={`discovery-join-${mode}`}
               />
@@ -193,7 +215,7 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
         <textarea
           id="discovery-description"
           value={description}
-          onChange={(e) => setDescription(e.target.value)}
+          onChange={(e) => { dirty.current.description = true; setDescription(e.target.value); }}
           maxLength={LIMITS.SERVER_DESCRIPTION_MAX}
           rows={3}
           placeholder={t('discovery.settings.descriptionPlaceholder')}

@@ -126,11 +126,13 @@ vi.mock('../../websocket/socketServer', () => ({
 
 // Rate limiters (memberManage is observable: every new route must carry one)
 const mockRateLimitMemberManage = vi.fn((_req: any, _res: any, next: () => void) => next());
+const mockRateLimitMemberRead = vi.fn((_req: any, _res: any, next: () => void) => next());
 vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return {
     rateLimitGeneral: passthrough,
     rateLimitMemberManage: (...args: any[]) => mockRateLimitMemberManage(...args),
+    rateLimitMemberRead: (...args: any[]) => mockRateLimitMemberRead(...args),
     rateLimitSearch: passthrough,
     rateLimitCategoryManage: passthrough,
     rateLimitMessageSend: passthrough,
@@ -1047,7 +1049,8 @@ describe('Server Routes', () => {
       expect(prismaMock.serverJoinRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: { serverId: 'srv-1', status: 'pending' }, orderBy: { createdAt: 'asc' }, skip: 0, take: 100,
       }));
-      expect(mockRateLimitMemberManage).toHaveBeenCalled();
+      // reads carry the READ limiter, not the write budget approve/decline share
+      expect(mockRateLimitMemberRead).toHaveBeenCalled();
 
       mockHasServerPermission.mockResolvedValueOnce(false);
       const denied = await request(app).get('/api/v1/servers/srv-1/join-requests').set('Authorization', `Bearer ${makeToken()}`);
@@ -1156,8 +1159,9 @@ describe('Server Routes', () => {
       }]);
       expect(res.body.total).toBe(1);
       expect(res.body.hasMore).toBe(false);
-      // every new REST route carries a limiter from middleware/rateLimiter.ts
-      expect(mockRateLimitMemberManage).toHaveBeenCalled();
+      // every new REST route carries a limiter from middleware/rateLimiter.ts —
+      // the read one here, so following pages cannot starve unban/kick
+      expect(mockRateLimitMemberRead).toHaveBeenCalled();
       expect(prismaMock.serverBan.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: { serverId: 'srv-1' },
         orderBy: { createdAt: 'desc' },

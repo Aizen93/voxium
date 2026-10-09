@@ -53,6 +53,7 @@ describe('DiscoveryCard', () => {
     expect(tags).toEqual(['discovery.tags.open-source', 'discovery.tags.community']);
     expect(q('[data-testid="discovery-card-online"]')!.textContent).toBe('discovery.card.online:42');
     expect(q('[data-testid="discovery-card-members"]')!.textContent).toBe('discovery.card.members:318');
+    expect(q('[data-testid="discovery-card-messages"]')!.textContent).toBe('discovery.card.messages:900');
     expect(q('[data-testid="discovery-featured"]')).toBeNull();
   });
 

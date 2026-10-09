@@ -25,11 +25,15 @@ const S = vi.hoisted(() => ({
 
 let joinRequests: ServerJoinRequest[] = [];
 let bans: ServerBan[] = [];
+/** Which server the store's lists were loaded for (one list at a time). */
+let listsFor = 'srv-1';
 vi.mock('../../stores/serverStore', () => {
-  const state = () => ({ joinRequests, bans, ...S });
+  const NO_JOIN_REQUESTS: never[] = [];
+  const NO_BANS: never[] = [];
+  const state = () => ({ joinRequests, bans, joinRequestsServerId: listsFor, bansServerId: listsFor, ...S });
   const useServerStore = <T,>(sel: (s: ReturnType<typeof state>) => T) => sel(state());
   useServerStore.getState = state;
-  return { useServerStore };
+  return { useServerStore, NO_JOIN_REQUESTS, NO_BANS };
 });
 vi.mock('../../stores/toastStore', () => ({ toast: { success: S.toastSuccess, error: S.toastError, info: vi.fn(), warning: vi.fn() } }));
 
@@ -52,6 +56,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   joinRequests = [];
   bans = [];
+  listsFor = 'srv-1';
   S.fetchJoinRequests.mockResolvedValue(undefined);
   S.fetchBans.mockResolvedValue(undefined);
   S.approveJoinRequest.mockResolvedValue(undefined);
@@ -111,6 +116,14 @@ describe('JoinRequestsSection', () => {
     expect(S.toastError).toHaveBeenCalledTimes(1);
     expect(q('[data-testid="join-requests"]')).not.toBeNull();
   });
+
+  it('a list the store loaded for ANOTHER server is not shown here', async () => {
+    joinRequests = [{ id: 'r-1', serverId: 'srv-9', userId: 'u-2', message: null, status: 'pending', createdAt: '2026-10-09T10:00:00.000Z', user: bob }];
+    listsFor = 'srv-9';
+    await render(<JoinRequestsSection serverId="srv-1" />);
+    expect(qa('[data-testid="join-request-row"]')).toHaveLength(0);
+    expect(q('[data-testid="join-requests-empty"]')).not.toBeNull();
+  });
 });
 
 describe('BannedSection', () => {
@@ -142,5 +155,13 @@ describe('BannedSection', () => {
     S.unbanMember.mockRejectedValue(new Error('Ban not found'));
     await act(async () => { q('[data-testid="ban-unban"]')!.click(); });
     expect(S.toastError).toHaveBeenCalledTimes(1);
+  });
+
+  it('a banned list the store loaded for ANOTHER server is not shown here', async () => {
+    bans = [{ serverId: 'srv-9', userId: 'u-2', reason: null, createdAt: '2026-10-09T10:00:00.000Z', user: bob, bannedBy: null }];
+    listsFor = 'srv-9';
+    await render(<BannedSection serverId="srv-1" />);
+    expect(qa('[data-testid="ban-row"]')).toHaveLength(0);
+    expect(q('[data-testid="banned-empty"]')).not.toBeNull();
   });
 });

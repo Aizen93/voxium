@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Ban } from 'lucide-react';
-import { useServerStore } from '../../stores/serverStore';
+import { useServerStore, NO_BANS } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { Avatar } from '../common/Avatar';
@@ -13,7 +13,7 @@ import { Avatar } from '../common/Avatar';
  */
 export function BannedSection({ serverId }: { serverId: string }) {
   const { t } = useTranslation();
-  const bans = useServerStore((s) => s.bans);
+  const bans = useServerStore((s) => (s.bansServerId === serverId ? s.bans : NO_BANS));
   const fetchBans = useServerStore((s) => s.fetchBans);
   const unbanMember = useServerStore((s) => s.unbanMember);
   const [loading, setLoading] = useState(true);

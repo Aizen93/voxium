@@ -594,7 +594,8 @@
       "failedToLoad": "Échec du chargement des demandes",
       "failedToApprove": "Échec de l’acceptation de la demande",
       "failedToDecline": "Échec du refus de la demande",
-      "pending": "{{count}} demandes en attente"
+      "pending_one": "{{count}} demande en attente",
+      "pending_other": "{{count}} demandes en attente"
     },
     "banned": {
       "title": "Bannis",
@@ -1149,7 +1150,13 @@
     "cannotReportOwnServer": "Vous ne pouvez pas signaler votre propre espace",
     "noPermissionManageMembers": "Vous n’avez pas la permission de gérer les membres",
     "noPermissionKickMembers": "Vous n’avez pas la permission de retirer des membres",
-    "cannotKickHigherRole": "Impossible de retirer un membre de rang égal ou supérieur"
+    "cannotKickHigherRole": "Impossible de retirer un membre de rang égal ou supérieur",
+    "descriptionUnsupportedChars": "La description contient des caractères non pris en charge",
+    "descriptionTooLong": "La description ne peut pas dépasser {{max}} caractères",
+    "reasonUnsupportedChars": "Le motif contient des caractères non pris en charge",
+    "reasonTooLong": "Le motif ne peut pas dépasser {{max}} caractères",
+    "tagsNotSupported": "Les tags doivent être choisis dans la liste proposée",
+    "tooManyTags": "{{max}} tags au maximum"
   },
   "e2e": {
     "badgeTitle": "Chiffré de bout en bout — voir le numéro de sécurité",
@@ -1349,8 +1356,12 @@
     "card": {
       "featured": "À la une",
       "noDescription": "Pas encore de description.",
-      "online": "{{count}} en ligne",
-      "members": "{{count}} membres",
+      "online_one": "{{count}} en ligne",
+      "online_other": "{{count}} en ligne",
+      "members_one": "{{count}} membre",
+      "members_other": "{{count}} membres",
+      "messages_one": "{{count}} message cette semaine",
+      "messages_other": "{{count}} messages cette semaine",
       "join": "Rejoindre",
       "requestToJoin": "Demander à rejoindre",
       "requested": "Demande envoyée",

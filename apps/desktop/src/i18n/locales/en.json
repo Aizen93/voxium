@@ -600,7 +600,8 @@
       "failedToLoad": "Failed to load join requests",
       "failedToApprove": "Failed to approve the request",
       "failedToDecline": "Failed to decline the request",
-      "pending": "{{count}} pending join requests"
+      "pending_one": "{{count}} pending join request",
+      "pending_other": "{{count}} pending join requests"
     },
     "banned": {
       "title": "Banned",
@@ -1156,7 +1157,13 @@
     "cannotReportOwnServer": "You cannot report your own space",
     "noPermissionManageMembers": "You do not have permission to manage members",
     "noPermissionKickMembers": "You do not have permission to remove members",
-    "cannotKickHigherRole": "Cannot remove a member with an equal or higher role"
+    "cannotKickHigherRole": "Cannot remove a member with an equal or higher role",
+    "descriptionUnsupportedChars": "Description contains unsupported characters",
+    "descriptionTooLong": "Description must be at most {{max}} characters",
+    "reasonUnsupportedChars": "Reason contains unsupported characters",
+    "reasonTooLong": "Reason must be at most {{max}} characters",
+    "tagsNotSupported": "Tags must be chosen from the supported list",
+    "tooManyTags": "At most {{max}} tags are allowed"
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",
@@ -1356,8 +1363,12 @@
     "card": {
       "featured": "Featured",
       "noDescription": "No description yet.",
-      "online": "{{count}} online",
-      "members": "{{count}} members",
+      "online_one": "{{count}} online",
+      "online_other": "{{count}} online",
+      "members_one": "{{count}} member",
+      "members_other": "{{count}} members",
+      "messages_one": "{{count}} message this week",
+      "messages_other": "{{count}} messages this week",
       "join": "Join",
       "requestToJoin": "Request to join",
       "requested": "Requested",

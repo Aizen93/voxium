@@ -8,13 +8,13 @@ import { ImageUploadButton } from '../common/ImageUploadButton';
 import { X, Lock, Unlock } from 'lucide-react';
 import type { ServerMember, MemberRole, ResourceLimits } from '@voxium/shared';
 import { outranksRole } from '../../utils/roles';
-import { Permissions, permissionsFromString, hasPermission, LIMITS } from '@voxium/shared';
+import { Permissions, permissionsFromString, hasPermission, LIMITS, validateBanReason } from '@voxium/shared';
 import { RoleEditor } from './RoleEditor';
 import { DiscoveryTab } from './DiscoveryTab';
 import { JoinRequestsSection } from './JoinRequestsSection';
 import { BannedSection } from './BannedSection';
 import { api } from '../../services/api';
-import { getTranslatedError } from '../../utils/serverErrors';
+import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
 
 interface Props {
   serverId: string;
@@ -27,7 +27,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<Tab>('general');
 
-  const { servers, roles, fetchEffectivePermissions } = useServerStore();
+  const { servers, roles, fetchEffectivePermissions, fetchJoinRequests } = useServerStore();
   const pendingRequests = useServerStore((s) => s.joinRequestCounts[serverId] ?? 0);
   const currentUser = useAuthStore((s) => s.user);
   const server = servers.find((s) => s.id === serverId);
@@ -43,6 +43,15 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   // Discovery tab: MANAGE_SERVER. Join requests + Banned: KICK_MEMBERS ("Manage members").
   const canManageServer = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_SERVER));
   const canModerateMembers = isOwner || (perms !== null && hasPermission(perms, Permissions.KICK_MEMBERS));
+
+  // The Members tab badge is fed by the socket events and by the list fetch;
+  // until step 4 wires the events, and on the first open of a session, the
+  // count is only known once the list has been fetched — do it as soon as
+  // we know the viewer may moderate, not when they reach the tab.
+  useEffect(() => {
+    if (!canModerateMembers) return;
+    fetchJoinRequests(serverId).catch((err) => { console.warn('[ServerSettings] Failed to fetch join requests:', err); });
+  }, [serverId, canModerateMembers, fetchJoinRequests]);
 
   if (!server) return null;
 
@@ -137,7 +146,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
           ) : activeTab === 'members' ? (
             <MembersTab serverId={serverId} canModerateMembers={canModerateMembers} />
           ) : activeTab === 'discovery' ? (
-            <DiscoveryTab serverId={serverId} onGoToGeneral={() => setActiveTab('general')} />
+            <DiscoveryTab key={serverId} serverId={serverId} onGoToGeneral={() => setActiveTab('general')} />
           ) : activeTab === 'roles' ? (
             <RoleEditor serverId={serverId} roles={roles} canManageRoles={canManageRoles} />
           ) : (
@@ -430,6 +439,7 @@ function MembersTab({ serverId, canModerateMembers }: { serverId: string; canMod
   const currentMember = members.find((m) => m.userId === currentUser?.id);
   const [confirmAction, setConfirmAction] = useState<{ type: 'kick' | 'transfer'; userId: string } | null>(null);
   const [banReason, setBanReason] = useState('');
+  const [removing, setRemoving] = useState(false);
   const [expandedMember, setExpandedMember] = useState<string | null>(null);
   const [savingRoles, setSavingRoles] = useState(false);
   const [search, setSearch] = useState('');
@@ -474,14 +484,21 @@ function MembersTab({ serverId, canModerateMembers }: { serverId: string; canMod
   }
 
   async function handleKick(memberId: string, name: string) {
+    if (removing) return;
+    const reason = banReason.trim();
+    const invalid = reason ? validateBanReason(reason) : null;
+    if (invalid) { toast.error(translateServerError(invalid, t)); return; }
+    setRemoving(true);
     try {
-      await useServerStore.getState().kickMember(serverId, memberId, banReason.trim() || undefined);
+      await useServerStore.getState().kickMember(serverId, memberId, reason || undefined);
       toast.success(t('server.removeAndBanned', { name }));
       setConfirmAction(null);
       setBanReason('');
       setExpandedMember(null);
     } catch (err) {
       toast.error(getTranslatedError(err, t, 'server.removeAndBanFailed'));
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -726,6 +743,7 @@ function MembersTab({ serverId, canModerateMembers }: { serverId: string; canMod
                             maxLength={LIMITS.SERVER_BAN_REASON_MAX}
                             onChange={(e) => setBanReason(e.target.value)}
                             onClick={(e) => e.stopPropagation()}
+                            disabled={removing}
                             placeholder={t('server.banReasonPlaceholder')}
                             className="mb-2.5 w-full rounded-md border border-vox-border bg-vox-bg-secondary px-2.5 py-1.5 text-xs text-vox-text-primary placeholder:text-vox-text-muted focus:border-vox-accent-danger focus:outline-none"
                             data-testid="ban-reason-input"
@@ -733,14 +751,16 @@ function MembersTab({ serverId, canModerateMembers }: { serverId: string; canMod
                           <div className="flex items-center gap-2">
                             <button
                               onClick={(e) => { e.stopPropagation(); handleKick(member.userId, member.nickname || member.user.displayName); }}
-                              className="rounded-md bg-vox-accent-danger px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-danger/80 transition-colors"
+                              disabled={removing}
+                              className="rounded-md bg-vox-accent-danger px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-danger/80 transition-colors disabled:opacity-50"
                               data-testid="remove-and-ban-submit"
                             >
                               {t('server.removeAndBan')}
                             </button>
                             <button
                               onClick={(e) => { e.stopPropagation(); setConfirmAction(null); setBanReason(''); }}
-                              className="rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
+                              disabled={removing}
+                              className="rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors disabled:opacity-50"
                             >
                               {t('common.cancel')}
                             </button>

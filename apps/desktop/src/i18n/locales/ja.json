@@ -364,7 +364,7 @@
     },
     "KICK_MEMBERS": {
       "name": "メンバー管理",
-      "description": "下位ロールのメンバーの退出とBAN、BAN解除、参加リクエストの承認・却下を許可します"
+      "description": "下位ロールのメンバーの強制退出とBAN、BAN解除、参加リクエストの承認・却下を許可します"
     },
     "MANAGE_NICKNAMES": {
       "name": "ニックネームの管理",
@@ -594,14 +594,14 @@
       "failedToLoad": "参加リクエストを読み込めませんでした",
       "failedToApprove": "リクエストを承認できませんでした",
       "failedToDecline": "リクエストを却下できませんでした",
-      "pending": "保留中の参加リクエスト{{count}}件"
+      "pending_other": "保留中の参加リクエスト{{count}}件"
     },
     "banned": {
       "title": "BAN済み",
       "empty": "BANされているユーザーはいません。",
       "unban": "BAN解除",
       "unbanned": "{{name}}は再び参加できます",
-      "by": "{{name}}による",
+      "by": "{{name}}がBAN",
       "noReason": "理由なし",
       "at": "{{when}}にBAN",
       "failedToLoad": "BANリストを読み込めませんでした",
@@ -1149,7 +1149,13 @@
     "cannotReportOwnServer": "自分のスペースは報告できません",
     "noPermissionManageMembers": "メンバーを管理する権限がありません",
     "noPermissionKickMembers": "メンバーを退出させる権限がありません",
-    "cannotKickHigherRole": "同じか上位のロールのメンバーは退出させられません"
+    "cannotKickHigherRole": "同じか上位のロールのメンバーは退出させられません",
+    "descriptionUnsupportedChars": "説明にサポートされていない文字が含まれています",
+    "descriptionTooLong": "説明は{{max}}文字以内にしてください",
+    "reasonUnsupportedChars": "理由にサポートされていない文字が含まれています",
+    "reasonTooLong": "理由は{{max}}文字以内にしてください",
+    "tagsNotSupported": "タグは対応リストから選んでください",
+    "tooManyTags": "タグは最大{{max}}個までです"
   },
   "e2e": {
     "badgeTitle": "エンドツーエンド暗号化済み — 安全番号を表示",
@@ -1348,8 +1354,9 @@
     "card": {
       "featured": "おすすめ",
       "noDescription": "まだ説明がありません。",
-      "online": "{{count}}人がオンライン",
-      "members": "メンバー{{count}}人",
+      "online_other": "{{count}}人がオンライン",
+      "members_other": "メンバー{{count}}人",
+      "messages_other": "今週のメッセージ{{count}}件",
       "join": "参加",
       "requestToJoin": "参加をリクエスト",
       "requested": "リクエスト済み",

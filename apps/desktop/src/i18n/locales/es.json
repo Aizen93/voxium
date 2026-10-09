@@ -594,7 +594,8 @@
       "failedToLoad": "No se pudieron cargar las solicitudes",
       "failedToApprove": "No se pudo aprobar la solicitud",
       "failedToDecline": "No se pudo rechazar la solicitud",
-      "pending": "{{count}} solicitudes pendientes"
+      "pending_one": "{{count}} solicitud pendiente",
+      "pending_other": "{{count}} solicitudes pendientes"
     },
     "banned": {
       "title": "Baneados",
@@ -1149,7 +1150,13 @@
     "cannotReportOwnServer": "No puedes denunciar tu propio espacio",
     "noPermissionManageMembers": "No tienes permiso para gestionar miembros",
     "noPermissionKickMembers": "No tienes permiso para expulsar miembros",
-    "cannotKickHigherRole": "No se puede expulsar a un miembro con un rol igual o superior"
+    "cannotKickHigherRole": "No se puede expulsar a un miembro con un rol igual o superior",
+    "descriptionUnsupportedChars": "La descripción contiene caracteres no admitidos",
+    "descriptionTooLong": "La descripción no puede superar los {{max}} caracteres",
+    "reasonUnsupportedChars": "El motivo contiene caracteres no admitidos",
+    "reasonTooLong": "El motivo no puede superar los {{max}} caracteres",
+    "tagsNotSupported": "Las etiquetas deben elegirse de la lista disponible",
+    "tooManyTags": "Se permiten como máximo {{max}} etiquetas"
   },
   "e2e": {
     "badgeTitle": "Cifrado de extremo a extremo — ver número de seguridad",
@@ -1349,8 +1356,12 @@
     "card": {
       "featured": "Destacado",
       "noDescription": "Aún no hay descripción.",
-      "online": "{{count}} en línea",
-      "members": "{{count}} miembros",
+      "online_one": "{{count}} en línea",
+      "online_other": "{{count}} en línea",
+      "members_one": "{{count}} miembro",
+      "members_other": "{{count}} miembros",
+      "messages_one": "{{count}} mensaje esta semana",
+      "messages_other": "{{count}} mensajes esta semana",
       "join": "Unirse",
       "requestToJoin": "Solicitar unirse",
       "requested": "Solicitado",

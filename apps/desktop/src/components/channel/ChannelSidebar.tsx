@@ -38,6 +38,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { Permissions, hasPermission, permissionsFromString } from '@voxium/shared';
+import { canOpenServerSettings } from '../../utils/serverSettingsAccess';
 import type { Channel, Category } from '@voxium/shared';
 import { isSecureVoiceSupported } from '../../services/e2e/voiceFrameTransform';
 
@@ -431,6 +432,11 @@ export function ChannelSidebar() {
   const [showSecureCreate, setShowSecureCreate] = useState(false);
   const [secureMembersChannel, setSecureMembersChannel] = useState<{ id: string; name: string } | null>(null);
   const [canCreateSecure, setCanCreateSecure] = useState(false);
+  // Server settings opens for anyone with something to do inside: owner and
+  // legacy admin at once, and a role-only moderator (KICK_MEMBERS: join
+  // requests + bans; MANAGE_SERVER: discovery; MANAGE_ROLES) once the
+  // effective permissions are known.
+  const [roleOpensSettings, setRoleOpensSettings] = useState(false);
   const ctxRef = useRef<HTMLDivElement>(null);
 
   const activeServer = servers.find((s) => s.id === activeServerId);
@@ -460,12 +466,15 @@ export function ChannelSidebar() {
   // member.role field — a custom role can carry CREATE_SECURE_CHANNELS.
   useEffect(() => {
     setCanCreateSecure(false);
+    setRoleOpensSettings(false);
     if (!activeServerId) return;
     let cancelled = false;
     fetchEffectivePermissions(activeServerId)
       .then((bits) => {
         if (!cancelled) {
-          setCanCreateSecure(hasPermission(permissionsFromString(bits), Permissions.CREATE_SECURE_CHANNELS));
+          const perms = permissionsFromString(bits);
+          setCanCreateSecure(hasPermission(perms, Permissions.CREATE_SECURE_CHANNELS));
+          setRoleOpensSettings(canOpenServerSettings(perms));
         }
       })
       .catch((err) => console.warn('[SecureChannel] Failed to fetch effective permissions:', err));
@@ -821,7 +830,7 @@ export function ChannelSidebar() {
           >
             <UserPlus size={15} />
           </button>
-          {isAdmin && (
+          {(isAdmin || roleOpensSettings) && (
             <button
               onClick={() => setShowServerSettings(true)}
               className="flex h-[26px] w-[26px] items-center justify-center rounded-md text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"

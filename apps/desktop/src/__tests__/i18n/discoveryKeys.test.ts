@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { DISCOVERY_TAGS } from '@voxium/shared';
+import { DISCOVERY_ERROR_KEYS } from '../../utils/serverErrors';
 
 // A missing translation does not throw — i18next renders the raw key, so a
 // non-English owner would see "discovery.settings.blockedByAdmin" exactly
@@ -62,15 +63,44 @@ function leafKeys(node: unknown, prefix = ''): string[] {
     typeof v === 'string' ? [prefix + k] : leafKeys(v, `${prefix}${k}.`));
 }
 
+// ─── Plurals (i18next JSON v4): `t(key, { count })` resolves `key_<category>`
+// and every CLDR category falls back to `key_other`. A locale that lacks a
+// category it uses would silently render the fallback form ("1 members").
+const PLURAL_CATEGORIES = ['zero', 'one', 'two', 'few', 'many', 'other'] as const;
+const PLURAL_SUFFIX = /_(zero|one|two|few|many|other)$/;
+const REQUIRED_CATEGORIES: Record<string, readonly string[]> = {
+  en: ['one', 'other'], fr: ['one', 'other'], de: ['one', 'other'], es: ['one', 'other'], pt: ['one', 'other'],
+  ru: ['one', 'few', 'many', 'other'], uk: ['one', 'few', 'many', 'other'],
+  ar: ['zero', 'one', 'two', 'few', 'many', 'other'],
+  ja: ['other'], ko: ['other'], zh: ['other'],
+};
+
+function isString(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0;
+}
+/** A key resolves when it is a leaf or a plural family (`key_other` exists). */
+function resolves(bundle: unknown, key: string): boolean {
+  return isString(lookup(bundle, key)) || isString(lookup(bundle, `${key}_other`));
+}
+function isPluralIn(bundle: unknown, key: string): boolean {
+  return isString(lookup(bundle, `${key}_other`));
+}
+/** `{{name}}` placeholders, as a sorted list. */
+function placeholders(text: string): string[] {
+  return [...text.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)].map((m) => m[1]).sort();
+}
+
 // The tag labels are reached through a template (`discovery.tags.${tag}`),
 // which the static regex cannot see; the vocabulary is the list.
 const TAG_KEYS = DISCOVERY_TAGS.map((tag) => `discovery.tags.${tag}`);
 
-// The server strings the client maps to serverErrors.* for this feature
-const ERROR_KEYS = [
-  'discoveryDisabled', 'listingDisabledByAdmin', 'bannedFromServer', 'requestDeclinedRecently', 'joinRequestNotFound',
-  'banNotFound', 'cannotTransferToBanned', 'cannotReportOwnServer', 'noPermissionManageMembers', 'noPermissionKickMembers', 'cannotKickHigherRole',
-].map((k) => `serverErrors.${k}`);
+// The server strings the client maps to serverErrors.* for this feature —
+// the list is exported by the mapping module, so a new mapping is checked
+// here without anyone remembering to copy its key.
+const ERROR_KEYS = DISCOVERY_ERROR_KEYS.map((k) => `serverErrors.${k}`);
+
+const ALL_KEYS = [...keys, ...TAG_KEYS, ...ERROR_KEYS];
+const en = locales.find((l) => l.name === 'en');
 
 describe('server-discovery translation keys', () => {
   it('finds the translation calls it is supposed to check', () => {
@@ -83,28 +113,77 @@ describe('server-discovery translation keys', () => {
     expect(keys).toContain('server.banned.unban');                   // banned section
     expect(keys).toContain('serverSettings.tabs.discovery');         // the modal's tab
     expect(keys).toContain('server.removeAndBanDescription');        // context menu + members tab
+    expect(ERROR_KEYS.length).toBeGreaterThan(10);
     expect(locales.length).toBe(11);
+    expect(en, 'en.json is the reference locale and must exist').toBeDefined();
+    for (const { name } of locales) {
+      expect(REQUIRED_CATEGORIES[name], `${name}.json has no plural-category entry in this test`).toBeDefined();
+    }
   });
 
   it('resolves every key, every tag label and every mapped server error in every locale', () => {
     const missing: string[] = [];
     for (const { name, bundle } of locales) {
-      for (const key of [...keys, ...TAG_KEYS, ...ERROR_KEYS]) {
-        const value = lookup(bundle, key);
-        if (typeof value !== 'string' || value.length === 0) missing.push(`${name}.json → ${key}`);
+      for (const key of ALL_KEYS) {
+        if (!resolves(bundle, key)) missing.push(`${name}.json → ${key}`);
       }
     }
     expect(missing, `untranslated keys would render raw to users:\n${missing.join('\n')}`).toEqual([]);
   });
 
+  it('every key en.json pluralises is pluralised in every locale, with every category that language uses', () => {
+    const problems: string[] = [];
+    const pluralKeys = ALL_KEYS.filter((key) => isPluralIn(en!.bundle, key));
+    // the three card figures and the badge label are the ones that bit
+    expect(pluralKeys).toEqual(expect.arrayContaining([
+      'discovery.card.online', 'discovery.card.members', 'discovery.card.messages', 'server.joinRequests.pending',
+    ]));
+    for (const { name, bundle } of locales) {
+      for (const key of pluralKeys) {
+        if (isString(lookup(bundle, key))) problems.push(`${name}.json → ${key} is a bare string (en.json pluralises it)`);
+        for (const category of REQUIRED_CATEGORIES[name]) {
+          if (!isString(lookup(bundle, `${key}_${category}`))) problems.push(`${name}.json → ${key}_${category} missing`);
+        }
+      }
+    }
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('keeps the same {{placeholders}} as en.json in every locale (a plural form may omit {{count}}, never invent one)', () => {
+    const problems: string[] = [];
+    for (const { name, bundle } of locales) {
+      if (name === 'en') continue;
+      for (const key of ALL_KEYS) {
+        if (isPluralIn(en!.bundle, key)) {
+          const reference = placeholders(String(lookup(en!.bundle, `${key}_other`)));
+          for (const category of PLURAL_CATEGORIES) {
+            const form = lookup(bundle, `${key}_${category}`);
+            if (!isString(form)) continue;
+            const extra = placeholders(form).filter((p) => !reference.includes(p));
+            if (extra.length) problems.push(`${name}.json → ${key}_${category} uses {{${extra.join('}}, {{')}}} which en.json does not`);
+          }
+        } else {
+          const ref = lookup(en!.bundle, key);
+          const val = lookup(bundle, key);
+          if (!isString(ref) || !isString(val)) continue;
+          const a = placeholders(ref).join(',');
+          const b = placeholders(val).join(',');
+          if (a !== b) problems.push(`${name}.json → ${key}: {{${b || '∅'}}} vs en {{${a || '∅'}}}`);
+        }
+      }
+    }
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
   it('has no discovery key in a translation that en.json lacks', () => {
-    const en = locales.find((l) => l.name === 'en');
-    expect(en, 'en.json is the reference locale and must exist').toBeDefined();
     const reference = new Set([
       ...leafKeys(en!.bundle.discovery, 'discovery.'),
       ...leafKeys((en!.bundle.server as Record<string, unknown>).joinRequests, 'server.joinRequests.'),
       ...leafKeys((en!.bundle.server as Record<string, unknown>).banned, 'server.banned.'),
     ]);
+    // a plural form is an orphan only when en.json has no family for it —
+    // ru/uk/ar carry categories English does not
+    const known = (key: string) => reference.has(key) || (PLURAL_SUFFIX.test(key) && reference.has(key.replace(PLURAL_SUFFIX, '_other')));
 
     const orphans: string[] = [];
     for (const { name, bundle } of locales) {
@@ -115,16 +194,15 @@ describe('server-discovery translation keys', () => {
         ...leafKeys(server?.joinRequests, 'server.joinRequests.'),
         ...leafKeys(server?.banned, 'server.banned.'),
       ]) {
-        if (!reference.has(key)) orphans.push(`${name}.json → ${key}`);
+        if (!known(key)) orphans.push(`${name}.json → ${key}`);
       }
     }
     expect(orphans, `keys absent from en.json (stale or misspelled):\n${orphans.join('\n')}`).toEqual([]);
   });
 
   it('calls the permission "Manage members" everywhere — kick always bans now, and the label says what the bit does', () => {
-    const en = locales.find((l) => l.name === 'en')!.bundle;
-    expect(lookup(en, 'permissions.KICK_MEMBERS.name')).toBe('Manage members');
-    expect(String(lookup(en, 'permissions.KICK_MEMBERS.description'))).toMatch(/join requests/);
+    expect(lookup(en!.bundle, 'permissions.KICK_MEMBERS.name')).toBe('Manage members');
+    expect(String(lookup(en!.bundle, 'permissions.KICK_MEMBERS.description'))).toMatch(/join requests/);
     for (const { name, bundle } of locales) {
       const label = String(lookup(bundle, 'permissions.KICK_MEMBERS.name'));
       // the old wording in every locale was a bare "kick/expel members" label;
@@ -137,7 +215,11 @@ describe('server-discovery translation keys', () => {
   it('no locale still carries the pre-discovery kick keys (removed with the rename)', () => {
     const stale: string[] = [];
     for (const { name, bundle } of locales) {
-      for (const key of ['serverSettings.members.kickMember', 'serverSettings.members.kickConfirm', 'serverSettings.members.kick', 'contextMenu.kick', 'contextMenu.confirmKick']) {
+      for (const key of [
+        'serverSettings.members.kickMember', 'serverSettings.members.kickConfirm', 'serverSettings.members.kick',
+        'serverSettings.members.kickDescription', 'serverSettings.members.failedToKick',
+        'contextMenu.kick', 'contextMenu.confirmKick', 'contextMenu.failedToKick',
+      ]) {
         if (lookup(bundle, key) !== undefined) stale.push(`${name}.json → ${key}`);
       }
     }

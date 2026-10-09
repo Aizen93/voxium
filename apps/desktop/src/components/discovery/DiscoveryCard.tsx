@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { Star, Users, Radio } from 'lucide-react';
+import { Star, Users, Radio, MessageSquare } from 'lucide-react';
 import type { DiscoveryServer } from '@voxium/shared';
 import { ServerIcon } from '../server/ServerIcon';
 
@@ -104,6 +104,10 @@ export function DiscoveryCard({ server, preview = false, busy = false, onJoin, o
           <span className="inline-flex items-center gap-1" data-testid="discovery-card-members">
             <Users size={12} />
             {t('discovery.card.members', { count: server.memberCount })}
+          </span>
+          <span className="inline-flex items-center gap-1" data-testid="discovery-card-messages">
+            <MessageSquare size={12} />
+            {t('discovery.card.messages', { count: server.weeklyMessages })}
           </span>
         </div>
         <div className="flex items-center gap-1.5">

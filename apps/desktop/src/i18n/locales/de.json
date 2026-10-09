@@ -594,7 +594,8 @@
       "failedToLoad": "Beitrittsanfragen konnten nicht geladen werden",
       "failedToApprove": "Anfrage konnte nicht angenommen werden",
       "failedToDecline": "Anfrage konnte nicht abgelehnt werden",
-      "pending": "{{count}} offene Beitrittsanfragen"
+      "pending_one": "{{count}} offene Beitrittsanfrage",
+      "pending_other": "{{count}} offene Beitrittsanfragen"
     },
     "banned": {
       "title": "Gebannt",
@@ -1149,7 +1150,13 @@
     "cannotReportOwnServer": "Du kannst deinen eigenen Space nicht melden",
     "noPermissionManageMembers": "Du hast keine Berechtigung, Mitglieder zu verwalten",
     "noPermissionKickMembers": "Du hast keine Berechtigung, Mitglieder zu entfernen",
-    "cannotKickHigherRole": "Ein Mitglied mit gleicher oder höherer Rolle kann nicht entfernt werden"
+    "cannotKickHigherRole": "Ein Mitglied mit gleicher oder höherer Rolle kann nicht entfernt werden",
+    "descriptionUnsupportedChars": "Die Beschreibung enthält nicht unterstützte Zeichen",
+    "descriptionTooLong": "Die Beschreibung darf höchstens {{max}} Zeichen lang sein",
+    "reasonUnsupportedChars": "Der Grund enthält nicht unterstützte Zeichen",
+    "reasonTooLong": "Der Grund darf höchstens {{max}} Zeichen lang sein",
+    "tagsNotSupported": "Tags müssen aus der vorgegebenen Liste gewählt werden",
+    "tooManyTags": "Höchstens {{max}} Tags sind erlaubt"
   },
   "e2e": {
     "badgeTitle": "Ende-zu-Ende-verschlüsselt — Sicherheitsnummer anzeigen",
@@ -1349,8 +1356,12 @@
     "card": {
       "featured": "Empfohlen",
       "noDescription": "Noch keine Beschreibung.",
-      "online": "{{count}} online",
-      "members": "{{count}} Mitglieder",
+      "online_one": "{{count}} online",
+      "online_other": "{{count}} online",
+      "members_one": "{{count}} Mitglied",
+      "members_other": "{{count}} Mitglieder",
+      "messages_one": "{{count}} Nachricht diese Woche",
+      "messages_other": "{{count}} Nachrichten diese Woche",
       "join": "Beitreten",
       "requestToJoin": "Beitritt anfragen",
       "requested": "Angefragt",

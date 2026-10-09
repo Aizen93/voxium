@@ -290,7 +290,7 @@ const req = (userId: string, id = `r-${userId}`): ServerJoinRequest =>
 describe('serverStore — discovery, join requests and bans', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    useServerStore.setState({ joinRequestCounts: {}, joinRequests: [], joinRequestsServerId: null, bans: [] });
+    useServerStore.setState({ joinRequestCounts: {}, joinRequests: [], joinRequestsServerId: null, bans: [], bansServerId: null });
   });
 
   it('updateDiscovery PATCHes the fields and touches no local state (server:updated is the source of truth)', async () => {
@@ -313,19 +313,76 @@ describe('serverStore — discovery, join requests and bans', () => {
   });
 
   it('fetchJoinRequests loads the list, remembers whose it is, and sets the badge from the total', async () => {
-    mockGet.mockResolvedValue({ data: { data: [req('u-2')], total: 7 } });
+    mockGet.mockResolvedValue({ data: { data: [req('u-2')], total: 7, hasMore: false } });
     await useServerStore.getState().fetchJoinRequests('srv-1');
     const s = useServerStore.getState();
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/join-requests', { params: { page: 1 } });
+    expect(mockGet).toHaveBeenCalledTimes(1);
     expect(s.joinRequests).toHaveLength(1);
     expect(s.joinRequestsServerId).toBe('srv-1');
     expect(s.joinRequestCounts).toEqual({ 'srv-1': 7 });
+  });
+
+  it('fetchJoinRequests follows hasMore through the pages, and stops at the page cap', async () => {
+    const pageOf = (opts?: { params?: { page?: number } }) => opts?.params?.page ?? 1;
+    mockGet.mockImplementation((_url: string, opts?: { params?: { page?: number } }) =>
+      Promise.resolve({ data: { data: [req(`u-${pageOf(opts)}`)], total: 3, hasMore: pageOf(opts) < 3 } }));
+    await useServerStore.getState().fetchJoinRequests('srv-1');
+    expect(mockGet).toHaveBeenCalledTimes(3);
+    expect(mockGet).toHaveBeenLastCalledWith('/servers/srv-1/join-requests', { params: { page: 3 } });
+    expect(useServerStore.getState().joinRequests.map((r) => r.userId)).toEqual(['u-1', 'u-2', 'u-3']);
+    expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 3 });
+
+    // a server that always answers "more" is cut off at the cap, never looped
+    mockGet.mockClear();
+    mockGet.mockImplementation((_url: string, opts?: { params?: { page?: number } }) =>
+      Promise.resolve({ data: { data: [req(`u-${pageOf(opts)}`)], total: 5000, hasMore: true } }));
+    await useServerStore.getState().fetchJoinRequests('srv-1');
+    expect(mockGet).toHaveBeenCalledTimes(10);
+    expect(useServerStore.getState().joinRequests).toHaveLength(10);
+    expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 5000 }); // the badge says the truth
+  });
+
+  it('a fetch that resolves after another server was asked for is dropped — the list belongs to the LAST server', async () => {
+    const slow = deferred();
+    const fast = deferred();
+    mockGet.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise);
+    const p1 = useServerStore.getState().fetchJoinRequests('srv-1');
+    const p2 = useServerStore.getState().fetchJoinRequests('srv-2');
+    // claimed at once, so a section opening for srv-2 never shows srv-1's rows
+    expect(useServerStore.getState().joinRequestsServerId).toBe('srv-2');
+    expect(useServerStore.getState().joinRequests).toEqual([]);
+    fast.resolve({ data: { data: [{ ...req('u-9'), serverId: 'srv-2' }], total: 1, hasMore: false } });
+    await p2;
+    slow.resolve({ data: { data: [req('u-2')], total: 1, hasMore: false } });
+    await p1;
+    const s = useServerStore.getState();
+    expect(s.joinRequestsServerId).toBe('srv-2');
+    expect(s.joinRequests.map((r) => r.userId)).toEqual(['u-9']);
+    expect(s.joinRequestCounts).toEqual({ 'srv-2': 1 });
+  });
+
+  it('handleJoinRequest drops a malformed payload (socket JSON is untrusted) and one whose serverId disagrees', () => {
+    useServerStore.setState({ joinRequests: [], joinRequestsServerId: 'srv-1' });
+    useServerStore.getState().handleJoinRequest('srv-1', { id: 'r-x' });
+    useServerStore.getState().handleJoinRequest('srv-1', { ...req('u-2'), user: { id: 'u-2' } });
+    useServerStore.getState().handleJoinRequest('srv-1', { ...req('u-2'), createdAt: 123 });
+    useServerStore.getState().handleJoinRequest(42, req('u-2'));
+    useServerStore.getState().handleJoinRequest('srv-2', req('u-2')); // the row says srv-1
+    useServerStore.getState().handleJoinRequestResolved(undefined, 'u-2');
+    useServerStore.getState().handleJoinRequestResolved('srv-1', { userId: 'u-2' });
+    expect(useServerStore.getState().joinRequests).toEqual([]);
+    expect(useServerStore.getState().joinRequestCounts).toEqual({});
+    // and a well-formed one is still taken
+    useServerStore.getState().handleJoinRequest('srv-1', req('u-2'));
+    expect(useServerStore.getState().joinRequests).toHaveLength(1);
   });
 
   it('handleJoinRequest appends to the loaded list once and bumps the badge; another server only bumps its badge', () => {
     useServerStore.setState({ joinRequests: [], joinRequestsServerId: 'srv-1' });
     useServerStore.getState().handleJoinRequest('srv-1', req('u-2'));
     useServerStore.getState().handleJoinRequest('srv-1', req('u-2')); // socket replay
-    useServerStore.getState().handleJoinRequest('srv-9', req('u-5'));
+    useServerStore.getState().handleJoinRequest('srv-9', { ...req('u-5'), serverId: 'srv-9' });
     const s = useServerStore.getState();
     expect(s.joinRequests.map((r) => r.userId)).toEqual(['u-2']);
     expect(s.joinRequestCounts).toEqual({ 'srv-1': 1, 'srv-9': 1 });
@@ -364,23 +421,67 @@ describe('serverStore — discovery, join requests and bans', () => {
     expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 1 });
   });
 
-  it('fetchBans loads the list; unbanMember DELETEs and drops the row locally (no socket event carries bans)', async () => {
+  it('fetchBans loads the list (scoped to its server); unbanMember DELETEs and drops the row locally (no socket event carries bans)', async () => {
     const ban: ServerBan = { serverId: 'srv-1', userId: 'u-2', reason: 'spam', createdAt: '2026-10-09T10:00:00.000Z', user: bob, bannedBy: null };
-    mockGet.mockResolvedValue({ data: { data: [ban] } });
+    mockGet.mockResolvedValue({ data: { data: [ban], total: 1, hasMore: false } });
     await useServerStore.getState().fetchBans('srv-1');
-    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/bans');
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/bans', { params: { page: 1 } });
     expect(useServerStore.getState().bans).toEqual([ban]);
+    expect(useServerStore.getState().bansServerId).toBe('srv-1');
     mockDelete.mockResolvedValue({ data: {} });
     await useServerStore.getState().unbanMember('srv-1', 'u-2');
     expect(mockDelete).toHaveBeenCalledWith('/servers/srv-1/bans/u-2');
     expect(useServerStore.getState().bans).toEqual([]);
+
+    // a fetch for another server replaces the list and its owner at once
+    const other: ServerBan = { ...ban, serverId: 'srv-2', userId: 'u-5' };
+    mockGet.mockResolvedValue({ data: { data: [other], total: 1, hasMore: false } });
+    await useServerStore.getState().fetchBans('srv-2');
+    expect(useServerStore.getState().bansServerId).toBe('srv-2');
+    expect(useServerStore.getState().bans).toEqual([other]);
+    // an unban on a server whose list is not the loaded one touches nothing
+    await useServerStore.getState().unbanMember('srv-1', 'u-5');
+    expect(useServerStore.getState().bans).toEqual([other]);
   });
 
-  it('kickMember sends the reason when given and an empty body otherwise', async () => {
+  it('a bans fetch that resolves after another server was asked for is dropped', async () => {
+    const slow = deferred();
+    const fast = deferred();
+    mockGet.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise);
+    const p1 = useServerStore.getState().fetchBans('srv-1');
+    const p2 = useServerStore.getState().fetchBans('srv-2');
+    fast.resolve({ data: { data: [{ serverId: 'srv-2', userId: 'u-5', reason: null, createdAt: 'x', user: bob, bannedBy: null }], total: 1, hasMore: false } });
+    await p2;
+    slow.resolve({ data: { data: [{ serverId: 'srv-1', userId: 'u-2', reason: null, createdAt: 'x', user: bob, bannedBy: null }], total: 1, hasMore: false } });
+    await p1;
+    expect(useServerStore.getState().bansServerId).toBe('srv-2');
+    expect(useServerStore.getState().bans.map((b) => b.userId)).toEqual(['u-5']);
+  });
+
+  it('kickMember sends the reason when given and an empty body otherwise, and refreshes the banned list only while it is open for THAT server', async () => {
     mockPost.mockResolvedValue({ data: {} });
     await useServerStore.getState().kickMember('srv-1', 'u-2', 'spam');
     expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/members/u-2/kick', { reason: 'spam' });
     await useServerStore.getState().kickMember('srv-1', 'u-2');
     expect(mockPost).toHaveBeenLastCalledWith('/servers/srv-1/members/u-2/kick', {});
+    expect(mockGet).not.toHaveBeenCalled(); // no Banned section open: nothing to refresh
+
+    useServerStore.setState({ bans: [], bansServerId: 'srv-9' });
+    await useServerStore.getState().kickMember('srv-1', 'u-2');
+    expect(mockGet).not.toHaveBeenCalled(); // open for another server: still nothing
+
+    const ban: ServerBan = { serverId: 'srv-1', userId: 'u-2', reason: null, createdAt: '2026-10-09T10:00:00.000Z', user: bob, bannedBy: null };
+    useServerStore.setState({ bans: [], bansServerId: 'srv-1' });
+    mockGet.mockResolvedValue({ data: { data: [ban], total: 1, hasMore: false } });
+    await useServerStore.getState().kickMember('srv-1', 'u-2');
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/bans', { params: { page: 1 } });
+    expect(useServerStore.getState().bans).toEqual([ban]);
+
+    // a failed refresh is logged, not thrown — the removal itself succeeded
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockGet.mockRejectedValue(new Error('boom'));
+    await expect(useServerStore.getState().kickMember('srv-1', 'u-3')).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

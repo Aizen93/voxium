@@ -10,7 +10,7 @@ import type { MemberRole, Server, ServerBan, ServerJoinRequest } from '@voxium/s
 import { joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
-import { rateLimitMemberManage, rateLimitSearch } from '../middleware/rateLimiter';
+import { rateLimitMemberManage, rateLimitMemberRead, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
@@ -588,7 +588,7 @@ serverRouter.post(
 // Server-level moderation stays out of the platform audit log, as kicks do.
 
 // List bans (KICK_MEMBERS)
-serverRouter.get('/:serverId/bans', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+serverRouter.get('/:serverId/bans', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
     const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
@@ -711,7 +711,7 @@ serverRouter.patch('/:serverId/discovery', rateLimitMemberManage, async (req: Re
 });
 
 // Pending join requests, oldest first (KICK_MEMBERS)
-serverRouter.get('/:serverId/join-requests', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+serverRouter.get('/:serverId/join-requests', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
     const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);

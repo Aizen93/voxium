@@ -594,7 +594,8 @@
       "failedToLoad": "Falha ao carregar os pedidos",
       "failedToApprove": "Falha ao aprovar o pedido",
       "failedToDecline": "Falha ao recusar o pedido",
-      "pending": "{{count}} pedidos pendentes"
+      "pending_one": "{{count}} pedido pendente",
+      "pending_other": "{{count}} pedidos pendentes"
     },
     "banned": {
       "title": "Banidos",
@@ -1149,7 +1150,13 @@
     "cannotReportOwnServer": "Você não pode denunciar o seu próprio espaço",
     "noPermissionManageMembers": "Você não tem permissão para gerenciar membros",
     "noPermissionKickMembers": "Você não tem permissão para remover membros",
-    "cannotKickHigherRole": "Não é possível remover um membro com cargo igual ou superior"
+    "cannotKickHigherRole": "Não é possível remover um membro com cargo igual ou superior",
+    "descriptionUnsupportedChars": "A descrição contém caracteres não suportados",
+    "descriptionTooLong": "A descrição não pode ter mais de {{max}} caracteres",
+    "reasonUnsupportedChars": "O motivo contém caracteres não suportados",
+    "reasonTooLong": "O motivo não pode ter mais de {{max}} caracteres",
+    "tagsNotSupported": "As tags devem ser escolhidas na lista disponível",
+    "tooManyTags": "São permitidas no máximo {{max}} tags"
   },
   "e2e": {
     "badgeTitle": "Criptografia de ponta a ponta — ver número de segurança",
@@ -1349,8 +1356,12 @@
     "card": {
       "featured": "Em destaque",
       "noDescription": "Ainda sem descrição.",
-      "online": "{{count}} online",
-      "members": "{{count}} membros",
+      "online_one": "{{count}} online",
+      "online_other": "{{count}} online",
+      "members_one": "{{count}} membro",
+      "members_other": "{{count}} membros",
+      "messages_one": "{{count}} mensagem esta semana",
+      "messages_other": "{{count}} mensagens esta semana",
       "join": "Entrar",
       "requestToJoin": "Pedir para entrar",
       "requested": "Pedido enviado",

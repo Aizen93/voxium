@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { UserPlus } from 'lucide-react';
-import { useServerStore } from '../../stores/serverStore';
+import { useServerStore, NO_JOIN_REQUESTS } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { Avatar } from '../common/Avatar';
@@ -14,7 +14,10 @@ import { Avatar } from '../common/Avatar';
  */
 export function JoinRequestsSection({ serverId }: { serverId: string }) {
   const { t } = useTranslation();
-  const requests = useServerStore((s) => s.joinRequests);
+  // Only THIS server's list — the store holds one list at a time, and a
+  // fetch for another server must not render here (default outside the
+  // selector, against the module constant, never a fresh `[]`).
+  const requests = useServerStore((s) => (s.joinRequestsServerId === serverId ? s.joinRequests : NO_JOIN_REQUESTS));
   const fetchJoinRequests = useServerStore((s) => s.fetchJoinRequests);
   const approveJoinRequest = useServerStore((s) => s.approveJoinRequest);
   const declineJoinRequest = useServerStore((s) => s.declineJoinRequest);

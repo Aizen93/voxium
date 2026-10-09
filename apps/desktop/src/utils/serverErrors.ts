@@ -1,5 +1,6 @@
 import type { TFunction } from 'i18next';
 import axios from 'axios';
+import { LIMITS } from '@voxium/shared';
 
 /**
  * Maps known server error strings → i18n keys under "serverErrors.*".
@@ -138,12 +139,39 @@ const ERROR_MAP: Record<string, string> = {
   'You do not have permission to manage members': 'noPermissionManageMembers',
   'You do not have permission to kick members': 'noPermissionKickMembers',
   'Cannot kick a member with an equal or higher role': 'cannotKickHigherRole',
+  // Shared validators (packages/shared/src/validators.ts) — run client-side
+  // before the request AND server-side; the SAME strings reach both paths.
+  'Description contains unsupported characters': 'descriptionUnsupportedChars',
+  [`Description must be at most ${LIMITS.SERVER_DESCRIPTION_MAX} characters`]: 'descriptionTooLong',
+  'Reason contains unsupported characters': 'reasonUnsupportedChars',
+  [`Reason must be at most ${LIMITS.SERVER_BAN_REASON_MAX} characters`]: 'reasonTooLong',
+  'Tags must be chosen from the supported list': 'tagsNotSupported',
+  [`At most ${LIMITS.DISCOVERY_MAX_TAGS} tags are allowed`]: 'tooManyTags',
 
   // ─── Admin ─────────────────────────────────────────────────────────────
   'Cannot ban yourself': 'cannotBanSelf',
   'Cannot ban a super admin': 'cannotBanSuperAdmin',
   'Only super admins can ban other admins': 'onlySuperAdminCanBan',
 };
+
+/**
+ * Interpolation values for the mapped keys whose text carries a limit — the
+ * translations say `{{max}}`, never a literal number, so a changed LIMIT
+ * changes every language at once.
+ */
+const ERROR_VARS: Record<string, Record<string, unknown>> = {
+  descriptionTooLong: { max: LIMITS.SERVER_DESCRIPTION_MAX },
+  reasonTooLong: { max: LIMITS.SERVER_BAN_REASON_MAX },
+  tooManyTags: { max: LIMITS.DISCOVERY_MAX_TAGS },
+};
+
+/** The server-discovery subset of the map, for the locale parity test. */
+export const DISCOVERY_ERROR_KEYS: readonly string[] = [
+  'discoveryDisabled', 'listingDisabledByAdmin', 'bannedFromServer', 'requestDeclinedRecently', 'joinRequestNotFound',
+  'banNotFound', 'cannotTransferToBanned', 'cannotReportOwnServer', 'noPermissionManageMembers', 'noPermissionKickMembers',
+  'cannotKickHigherRole', 'descriptionUnsupportedChars', 'descriptionTooLong', 'reasonUnsupportedChars', 'reasonTooLong',
+  'tagsNotSupported', 'tooManyTags',
+];
 
 /**
  * Translate a server error message to the user's language.
@@ -158,7 +186,7 @@ export function translateServerError(
   if (!serverMessage) return t(fallbackKey);
 
   const key = ERROR_MAP[serverMessage];
-  if (key) return t(`serverErrors.${key}`, { defaultValue: serverMessage });
+  if (key) return t(`serverErrors.${key}`, { defaultValue: serverMessage, ...ERROR_VARS[key] });
 
   // Handle dynamic messages with variables (e.g., "Server can have at most 20 channels")
   // Return raw message as fallback — at least it's informative

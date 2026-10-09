@@ -6,6 +6,45 @@ import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, U
 
 /** Module-level constant so selectors can default without a fresh reference. */
 export const NO_SECURE_MEMBERS: SecureChannelMember[] = [];
+/** Same rule for the moderation lists: a section for a server the lists are
+ *  not loaded for selects THESE, never a fresh `[]`. */
+export const NO_JOIN_REQUESTS: ServerJoinRequest[] = [];
+export const NO_BANS: ServerBan[] = [];
+
+/** How many pages the moderation lists follow (`hasMore`) before stopping:
+ *  10 × MEMBERS_PER_PAGE rows is far past any real queue, and bounds the
+ *  fan-out of one tab open. */
+const MODERATION_LIST_MAX_PAGES = 10;
+
+/** `page` within a moderation payload, or the shape we refuse (socket events
+ *  are unauthenticated JSON as far as this client knows). */
+function isUserSummary(v: unknown): v is ServerJoinRequest['user'] {
+  return !!v && typeof v === 'object'
+    && typeof (v as { id?: unknown }).id === 'string'
+    && typeof (v as { username?: unknown }).username === 'string'
+    && typeof (v as { displayName?: unknown }).displayName === 'string';
+}
+export function isServerJoinRequest(v: unknown): v is ServerJoinRequest {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as Partial<ServerJoinRequest>;
+  return typeof r.id === 'string' && typeof r.serverId === 'string' && typeof r.userId === 'string'
+    && typeof r.createdAt === 'string' && (r.message === null || r.message === undefined || typeof r.message === 'string')
+    && isUserSummary(r.user);
+}
+
+/** Follows `hasMore` through a paginated moderation list, up to the cap. */
+async function fetchAllPages<T>(url: string): Promise<{ rows: T[]; total: number }> {
+  const rows: T[] = [];
+  let total = 0;
+  for (let page = 1; page <= MODERATION_LIST_MAX_PAGES; page++) {
+    const { data } = await api.get(url, { params: { page } });
+    const chunk = Array.isArray(data.data) ? (data.data as T[]) : [];
+    rows.push(...chunk);
+    total = typeof data.total === 'number' ? data.total : rows.length;
+    if (!data.hasMore || chunk.length === 0) break;
+  }
+  return { rows, total: Math.max(total, rows.length) };
+}
 
 const PINNED_KEY = 'voxium_pinned_spaces';
 
@@ -122,19 +161,23 @@ interface ServerState {
   // Profile changes land through server:updated, never the PATCH response.
   /** Pending join requests per server, for the Members tab badge (moderators only). */
   joinRequestCounts: Record<string, number>;
-  /** The loaded list (one server at a time) and whose it is. */
+  /** The loaded list (one server at a time) and whose it is. Components
+   *  select the list ONLY when the id matches theirs (NO_JOIN_REQUESTS /
+   *  NO_BANS otherwise): a fetch for another server must not show here. */
   joinRequests: ServerJoinRequest[];
   joinRequestsServerId: string | null;
   bans: ServerBan[];
+  bansServerId: string | null;
   updateDiscovery: (serverId: string, fields: { discoverable?: boolean; joinMode?: ServerJoinMode; description?: string | null; tags?: string[] }) => Promise<void>;
   fetchDiscoveryInfo: (serverId: string) => Promise<ServerDiscoveryInfo>;
   fetchJoinRequests: (serverId: string) => Promise<void>;
   approveJoinRequest: (serverId: string, userId: string) => Promise<void>;
   declineJoinRequest: (serverId: string, userId: string) => Promise<void>;
-  /** server:join_request — appends to the loaded list, bumps the badge. */
-  handleJoinRequest: (serverId: string, request: ServerJoinRequest) => void;
+  /** server:join_request — appends to the loaded list, bumps the badge.
+   *  Shape-validated: a malformed payload is dropped, never rendered. */
+  handleJoinRequest: (serverId: unknown, request: unknown) => void;
   /** server:join_request_resolved (any outcome) and our own approve/decline. */
-  handleJoinRequestResolved: (serverId: string, userId: string) => void;
+  handleJoinRequestResolved: (serverId: unknown, userId: unknown) => void;
   fetchBans: (serverId: string) => Promise<void>;
   unbanMember: (serverId: string, userId: string) => Promise<void>;
 }
@@ -539,6 +582,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   kickMember: async (serverId: string, memberId: string, reason?: string) => {
     await api.post(`/servers/${serverId}/members/${memberId}/kick`, reason ? { reason } : {});
+    // Every removal is a ban and no socket event carries bans: with that
+    // server's Banned section open, refetch so the row shows at once.
+    if (get().bansServerId === serverId) {
+      await get().fetchBans(serverId).catch((err) => console.warn('[Members] Failed to refresh the banned list:', err));
+    }
   },
 
   transferOwnership: async (serverId: string, targetUserId: string) => {
@@ -781,6 +829,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   joinRequests: [],
   joinRequestsServerId: null,
   bans: [],
+  bansServerId: null,
 
   updateDiscovery: async (serverId, fields) => {
     await api.patch(`/servers/${serverId}/discovery`, fields);
@@ -802,12 +851,18 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   fetchJoinRequests: async (serverId) => {
-    const { data } = await api.get(`/servers/${serverId}/join-requests`);
-    set((state) => ({
-      joinRequests: data.data as ServerJoinRequest[],
-      joinRequestsServerId: serverId,
-      joinRequestCounts: { ...state.joinRequestCounts, [serverId]: typeof data.total === 'number' ? data.total : (data.data as unknown[]).length },
-    }));
+    // Claim the list for this server BEFORE the request: a section that
+    // opens for another server meanwhile wins, and this response is dropped
+    // (same staleness rule as setActiveServer / fetchMembers).
+    set((state) => (state.joinRequestsServerId === serverId ? state : { joinRequests: [], joinRequestsServerId: serverId }));
+    const { rows, total } = await fetchAllPages<ServerJoinRequest>(`/servers/${serverId}/join-requests`);
+    set((state) => {
+      if (state.joinRequestsServerId !== serverId) return state;
+      return {
+        joinRequests: rows,
+        joinRequestCounts: { ...state.joinRequestCounts, [serverId]: total },
+      };
+    });
   },
 
   approveJoinRequest: async (serverId, userId) => {
@@ -824,6 +879,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   handleJoinRequest: (serverId, request) => {
+    if (typeof serverId !== 'string' || !isServerJoinRequest(request) || request.serverId !== serverId) return;
     set((state) => {
       const listed = state.joinRequestsServerId === serverId;
       const known = listed && state.joinRequests.some((r) => r.id === request.id || r.userId === request.userId);
@@ -836,6 +892,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   handleJoinRequestResolved: (serverId, userId) => {
+    if (typeof serverId !== 'string' || typeof userId !== 'string') return;
     set((state) => {
       const listed = state.joinRequestsServerId === serverId;
       const had = listed && state.joinRequests.some((r) => r.userId === userId);
@@ -853,13 +910,14 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   fetchBans: async (serverId) => {
-    const { data } = await api.get(`/servers/${serverId}/bans`);
-    set({ bans: data.data as ServerBan[] });
+    set((state) => (state.bansServerId === serverId ? state : { bans: [], bansServerId: serverId }));
+    const { rows } = await fetchAllPages<ServerBan>(`/servers/${serverId}/bans`);
+    set((state) => (state.bansServerId !== serverId ? state : { bans: rows }));
   },
 
   unbanMember: async (serverId, userId) => {
     await api.delete(`/servers/${serverId}/bans/${userId}`);
-    set((state) => ({ bans: state.bans.filter((b) => !(b.serverId === serverId && b.userId === userId)) }));
+    set((state) => (state.bansServerId !== serverId ? state : { bans: state.bans.filter((b) => b.userId !== userId) }));
   },
 
   handleChannelMembersUpdated: (payload) => {

@@ -594,7 +594,7 @@
       "failedToLoad": "加载加入申请失败",
       "failedToApprove": "批准申请失败",
       "failedToDecline": "拒绝申请失败",
-      "pending": "{{count}} 个待处理的加入申请"
+      "pending_other": "{{count}} 个待处理的加入申请"
     },
     "banned": {
       "title": "已封禁",
@@ -1149,7 +1149,13 @@
     "cannotReportOwnServer": "不能举报自己的空间",
     "noPermissionManageMembers": "你没有管理成员的权限",
     "noPermissionKickMembers": "你没有移除成员的权限",
-    "cannotKickHigherRole": "无法移除角色相同或更高的成员"
+    "cannotKickHigherRole": "无法移除角色相同或更高的成员",
+    "descriptionUnsupportedChars": "描述包含不支持的字符",
+    "descriptionTooLong": "描述最多 {{max}} 个字符",
+    "reasonUnsupportedChars": "原因包含不支持的字符",
+    "reasonTooLong": "原因最多 {{max}} 个字符",
+    "tagsNotSupported": "标签必须从支持的列表中选择",
+    "tooManyTags": "最多允许 {{max}} 个标签"
   },
   "e2e": {
     "badgeTitle": "已端到端加密 — 查看安全码",
@@ -1348,8 +1354,9 @@
     "card": {
       "featured": "精选",
       "noDescription": "暂无简介。",
-      "online": "{{count}} 人在线",
-      "members": "{{count}} 位成员",
+      "online_other": "{{count}} 人在线",
+      "members_other": "{{count}} 位成员",
+      "messages_other": "本周 {{count}} 条消息",
       "join": "加入",
       "requestToJoin": "申请加入",
       "requested": "已申请",
