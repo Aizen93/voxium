@@ -4,7 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { DISCOVERY_TAGS } from '@voxium/shared';
+import { DISCOVERY_TAGS, DISCOVERY_SORTS } from '@voxium/shared';
 import { DISCOVERY_ERROR_KEYS } from '../../utils/serverErrors';
 
 // A missing translation does not throw — i18next renders the raw key, so a
@@ -21,11 +21,20 @@ const SOURCES = [
   fileURLToPath(new URL('../../components/server/ServerSettingsModal.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/MemberContextMenu.tsx', import.meta.url)),
   fileURLToPath(new URL('../../stores/serverStore.ts', import.meta.url)),
+  // step 4 — the member side
+  fileURLToPath(new URL('../../components/discovery/DiscoveryModal.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/discovery/JoinRequestDialog.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/server/SpacesStrip.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/server/ServerSwitcher.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/server/CreateServerModal.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/chat/ReportModal.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../stores/discoveryStore.ts', import.meta.url)),
+  fileURLToPath(new URL('../../services/discoverySocketHandlers.ts', import.meta.url)),
 ];
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
 
 /** The discovery surface's prefixes: the plan's namespaces plus the tab label. */
-const PREFIX = String.raw`(?:discovery\.|server\.joinRequests\.|server\.banned\.|server\.removeAndBan|server\.banReason|serverSettings\.tabs\.discovery)`;
+const PREFIX = String.raw`(?:discovery\.|server\.joinRequests\.|server\.banned\.|server\.removeAndBan|server\.banReason|serverSettings\.tabs\.discovery|chat\.report\.reportSpace)`;
 
 /** Every static key the surface can reach, via t() or i18n.t(). */
 function extractKeys(sources: string[]): string[] {
@@ -93,13 +102,18 @@ function placeholders(text: string): string[] {
 // The tag labels are reached through a template (`discovery.tags.${tag}`),
 // which the static regex cannot see; the vocabulary is the list.
 const TAG_KEYS = DISCOVERY_TAGS.map((tag) => `discovery.tags.${tag}`);
+// Same for the sort labels (`discovery.sort.${sort}` in the Explore modal)
+const SORT_KEYS = DISCOVERY_SORTS.map((sort) => `discovery.sort.${sort}`);
+// The report modal picks its title inside a ternary (`t(a ? '…' : b ? '…' : '…')`),
+// which the call regex cannot see either
+const TERNARY_KEYS = ['chat.report.reportSpace'];
 
 // The server strings the client maps to serverErrors.* for this feature —
 // the list is exported by the mapping module, so a new mapping is checked
 // here without anyone remembering to copy its key.
 const ERROR_KEYS = DISCOVERY_ERROR_KEYS.map((k) => `serverErrors.${k}`);
 
-const ALL_KEYS = [...keys, ...TAG_KEYS, ...ERROR_KEYS];
+const ALL_KEYS = [...keys, ...TAG_KEYS, ...SORT_KEYS, ...TERNARY_KEYS, ...ERROR_KEYS];
 const en = locales.find((l) => l.name === 'en');
 
 describe('server-discovery translation keys', () => {
@@ -113,6 +127,14 @@ describe('server-discovery translation keys', () => {
     expect(keys).toContain('server.banned.unban');                   // banned section
     expect(keys).toContain('serverSettings.tabs.discovery');         // the modal's tab
     expect(keys).toContain('server.removeAndBanDescription');        // context menu + members tab
+    expect(keys).toContain('discovery.modal.loadMore');              // the Explore modal
+    expect(keys).toContain('discovery.request.send');                // the request dialog
+    expect(keys).toContain('discovery.explore');                     // the strip's compass
+    expect(keys).toContain('discovery.switcherExplore');             // the switcher's no-match offer
+    expect(keys).toContain('discovery.browsePublic');                // the create/join modal link
+    expect(keys).toContain('discovery.toasts.approved');             // the socket handlers
+    // the report modal's server title is template-reached: pinned via TERNARY_KEYS
+    expect(readFileSync(SOURCES[SOURCES.length - 3], 'utf8')).toContain("'chat.report.reportSpace'");
     expect(ERROR_KEYS.length).toBeGreaterThan(10);
     expect(locales.length).toBe(11);
     expect(en, 'en.json is the reference locale and must exist').toBeDefined();

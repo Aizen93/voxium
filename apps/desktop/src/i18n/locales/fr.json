@@ -671,7 +671,8 @@
       "submitReport": "Envoyer le signalement",
       "submitting": "Envoi…",
       "submitted": "Signalement envoyé. Merci !",
-      "failedToSubmit": "Impossible d'envoyer le signalement"
+      "failedToSubmit": "Impossible d'envoyer le signalement",
+      "reportSpace": "Signaler l’espace"
     },
     "search": {
       "searchIn": "Rechercher dans {{name}}",
@@ -1156,7 +1157,10 @@
     "reasonUnsupportedChars": "Le motif contient des caractères non pris en charge",
     "reasonTooLong": "Le motif ne peut pas dépasser {{max}} caractères",
     "tagsNotSupported": "Les tags doivent être choisis dans la liste proposée",
-    "tooManyTags": "{{max}} tags au maximum"
+    "tooManyTags": "{{max}} tags au maximum",
+    "joinMessageUnsupportedChars": "Le message contient des caractères non pris en charge",
+    "joinMessageTooLong": "Le message ne peut pas dépasser {{max}} caractères",
+    "refineSearch": "Trop de résultats — affinez votre recherche"
   },
   "e2e": {
     "badgeTitle": "Chiffré de bout en bout — voir le numéro de sécurité",
@@ -1399,6 +1403,58 @@
       "saved": "Réglages de découverte enregistrés",
       "failedToSave": "Échec de l’enregistrement des réglages de découverte",
       "failedToLoad": "Échec du chargement des informations de découverte"
+    },
+    "explore": "Explorer",
+    "browsePublic": "Parcourir les espaces publics",
+    "noInvite": "Pas d’invitation ?",
+    "switcherExplore": "Explorer les espaces publics",
+    "sort": {
+      "active": "Les plus actifs",
+      "members": "Le plus de membres",
+      "newest": "Les plus récents",
+      "name": "Nom"
+    },
+    "modal": {
+      "title": "Explorer",
+      "subtitle": "Les espaces publics que tout le monde sur Voxium peut trouver et rejoindre",
+      "searchPlaceholder": "Rechercher des espaces publics…",
+      "searchHint": "Saisissez au moins {{min}} caractères pour rechercher",
+      "sortLabel": "Trier",
+      "sortPrefix": "Tri : ",
+      "tagsLabel": "Tags",
+      "allTags": "Tous",
+      "featured": "À la une",
+      "resultsCapped": "{{count}}+ espaces",
+      "loadMore": "Afficher plus",
+      "emptyMatch": "Aucun espace public ne correspond.",
+      "emptyMatchHint": "Essayez un autre mot ou un autre tag.",
+      "emptyNone": "Rien n’est encore référencé.",
+      "off": "Explorer est désactivé pour le moment.",
+      "offHint": "Un administrateur a désactivé l’annuaire. Les invitations fonctionnent toujours.",
+      "failedToLoad": "Impossible de charger Explorer",
+      "retry": "Réessayer",
+      "footer": "Les chiffres d’activité sont mis à jour une fois par jour ; le nombre de membres est en direct.",
+      "joinFailed": "Impossible de rejoindre l’espace",
+      "requestFailed": "Impossible d’envoyer la demande",
+      "cancelFailed": "Impossible d’annuler la demande",
+      "results_one": "{{count}} espace",
+      "results_other": "{{count}} espaces"
+    },
+    "request": {
+      "title": "Demander à rejoindre {{name}}",
+      "description": "Les modérateurs verront votre nom, votre avatar et ce message.",
+      "messageLabel": "Message (facultatif)",
+      "placeholder": "Dites pourquoi vous souhaitez rejoindre…",
+      "send": "Envoyer la demande"
+    },
+    "toasts": {
+      "joined": "Bienvenue sur {{name}}",
+      "requestSent": "Demande envoyée à {{name}}",
+      "requestCancelled": "Demande pour {{name}} annulée",
+      "approved": "{{name}} a accepté votre demande. Bienvenue !",
+      "declined": "{{name}} a refusé votre demande d’adhésion",
+      "newRequest": "{{user}} demande à rejoindre {{server}}",
+      "unknownSpace": "un espace"
     }
   }
 }

@@ -670,7 +670,8 @@
       "submitReport": "報告を送信",
       "submitting": "送信中...",
       "submitted": "報告が送信されました。ありがとうございます！",
-      "failedToSubmit": "報告の送信に失敗しました"
+      "failedToSubmit": "報告の送信に失敗しました",
+      "reportSpace": "スペースを報告"
     },
     "search": {
       "searchIn": "{{name}} で検索",
@@ -1155,7 +1156,10 @@
     "reasonUnsupportedChars": "理由にサポートされていない文字が含まれています",
     "reasonTooLong": "理由は{{max}}文字以内にしてください",
     "tagsNotSupported": "タグは対応リストから選んでください",
-    "tooManyTags": "タグは最大{{max}}個までです"
+    "tooManyTags": "タグは最大{{max}}個までです",
+    "joinMessageUnsupportedChars": "メッセージにサポートされていない文字が含まれています",
+    "joinMessageTooLong": "メッセージは{{max}}文字以内にしてください",
+    "refineSearch": "結果が多すぎます。検索条件を絞ってください"
   },
   "e2e": {
     "badgeTitle": "エンドツーエンド暗号化済み — 安全番号を表示",
@@ -1394,6 +1398,57 @@
       "saved": "探索設定を保存しました",
       "failedToSave": "探索設定を保存できませんでした",
       "failedToLoad": "探索情報を読み込めませんでした"
+    },
+    "explore": "探索",
+    "browsePublic": "公開スペースを見る",
+    "noInvite": "招待がない場合は",
+    "switcherExplore": "公開スペースを探索",
+    "sort": {
+      "active": "活発な順",
+      "members": "メンバー数順",
+      "newest": "新着順",
+      "name": "名前順"
+    },
+    "modal": {
+      "title": "探索",
+      "subtitle": "Voxiumの誰もが見つけて参加できる公開スペース",
+      "searchPlaceholder": "公開スペースを検索…",
+      "searchHint": "{{min}}文字以上入力すると検索できます",
+      "sortLabel": "並び替え",
+      "sortPrefix": "並び替え：",
+      "tagsLabel": "タグ",
+      "allTags": "すべて",
+      "featured": "注目",
+      "resultsCapped": "{{count}}件以上のスペース",
+      "loadMore": "さらに読み込む",
+      "emptyMatch": "一致する公開スペースはありません。",
+      "emptyMatchHint": "別の言葉やタグで試してください。",
+      "emptyNone": "まだ何も掲載されていません。",
+      "off": "探索は現在オフになっています。",
+      "offHint": "管理者がディレクトリを無効にしました。招待は引き続き利用できます。",
+      "failedToLoad": "探索を読み込めませんでした",
+      "retry": "再試行",
+      "footer": "アクティビティの数値は1日1回更新され、メンバー数はリアルタイムです。",
+      "joinFailed": "スペースに参加できませんでした",
+      "requestFailed": "リクエストを送信できませんでした",
+      "cancelFailed": "リクエストを取り消せませんでした",
+      "results_other": "{{count}}件のスペース"
+    },
+    "request": {
+      "title": "{{name}}への参加をリクエスト",
+      "description": "モデレーターにはあなたの名前、アバター、このメッセージが表示されます。",
+      "messageLabel": "メッセージ（任意）",
+      "placeholder": "参加したい理由を書いてください…",
+      "send": "リクエストを送信"
+    },
+    "toasts": {
+      "joined": "{{name}}へようこそ",
+      "requestSent": "{{name}}にリクエストを送信しました",
+      "requestCancelled": "{{name}}へのリクエストを取り消しました",
+      "approved": "{{name}}がリクエストを承認しました。ようこそ！",
+      "declined": "{{name}}が参加リクエストを却下しました",
+      "newRequest": "{{user}}が{{server}}への参加をリクエストしました",
+      "unknownSpace": "スペース"
     }
   }
 }

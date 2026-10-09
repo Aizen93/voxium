@@ -671,7 +671,8 @@
       "submitReport": "Meldung absenden",
       "submitting": "Wird gesendet...",
       "submitted": "Meldung gesendet. Vielen Dank!",
-      "failedToSubmit": "Meldung konnte nicht gesendet werden"
+      "failedToSubmit": "Meldung konnte nicht gesendet werden",
+      "reportSpace": "Space melden"
     },
     "search": {
       "searchIn": "Suche in {{name}}",
@@ -1156,7 +1157,10 @@
     "reasonUnsupportedChars": "Der Grund enthält nicht unterstützte Zeichen",
     "reasonTooLong": "Der Grund darf höchstens {{max}} Zeichen lang sein",
     "tagsNotSupported": "Tags müssen aus der vorgegebenen Liste gewählt werden",
-    "tooManyTags": "Höchstens {{max}} Tags sind erlaubt"
+    "tooManyTags": "Höchstens {{max}} Tags sind erlaubt",
+    "joinMessageUnsupportedChars": "Die Nachricht enthält nicht unterstützte Zeichen",
+    "joinMessageTooLong": "Die Nachricht darf höchstens {{max}} Zeichen lang sein",
+    "refineSearch": "Zu viele Ergebnisse — grenze deine Suche ein"
   },
   "e2e": {
     "badgeTitle": "Ende-zu-Ende-verschlüsselt — Sicherheitsnummer anzeigen",
@@ -1399,6 +1403,58 @@
       "saved": "Entdecken-Einstellungen gespeichert",
       "failedToSave": "Entdecken-Einstellungen konnten nicht gespeichert werden",
       "failedToLoad": "Entdecken-Details konnten nicht geladen werden"
+    },
+    "explore": "Entdecken",
+    "browsePublic": "Öffentliche Spaces durchsuchen",
+    "noInvite": "Keine Einladung?",
+    "switcherExplore": "Öffentliche Spaces entdecken",
+    "sort": {
+      "active": "Aktivste",
+      "members": "Meiste Mitglieder",
+      "newest": "Neueste",
+      "name": "Name"
+    },
+    "modal": {
+      "title": "Entdecken",
+      "subtitle": "Öffentliche Spaces, die jeder auf Voxium finden und beitreten kann",
+      "searchPlaceholder": "Öffentliche Spaces suchen …",
+      "searchHint": "Mindestens {{min}} Zeichen eingeben, um zu suchen",
+      "sortLabel": "Sortieren",
+      "sortPrefix": "Sortierung: ",
+      "tagsLabel": "Tags",
+      "allTags": "Alle",
+      "featured": "Empfohlen",
+      "resultsCapped": "{{count}}+ Spaces",
+      "loadMore": "Mehr laden",
+      "emptyMatch": "Kein öffentlicher Space passt dazu.",
+      "emptyMatchHint": "Versuche ein anderes Wort oder einen anderen Tag.",
+      "emptyNone": "Noch ist nichts gelistet.",
+      "off": "Entdecken ist gerade ausgeschaltet.",
+      "offHint": "Ein Administrator hat das Verzeichnis deaktiviert. Einladungen funktionieren weiterhin.",
+      "failedToLoad": "Entdecken konnte nicht geladen werden",
+      "retry": "Erneut versuchen",
+      "footer": "Aktivitätszahlen werden einmal täglich aktualisiert; Mitgliederzahlen sind live.",
+      "joinFailed": "Beitritt zum Space fehlgeschlagen",
+      "requestFailed": "Anfrage konnte nicht gesendet werden",
+      "cancelFailed": "Anfrage konnte nicht zurückgezogen werden",
+      "results_one": "{{count}} Space",
+      "results_other": "{{count}} Spaces"
+    },
+    "request": {
+      "title": "Beitritt zu {{name}} anfragen",
+      "description": "Moderatoren sehen deinen Namen, dein Profilbild und diese Nachricht.",
+      "messageLabel": "Nachricht (optional)",
+      "placeholder": "Sag, warum du beitreten möchtest …",
+      "send": "Anfrage senden"
+    },
+    "toasts": {
+      "joined": "Willkommen bei {{name}}",
+      "requestSent": "Anfrage an {{name}} gesendet",
+      "requestCancelled": "Anfrage an {{name}} zurückgezogen",
+      "approved": "{{name}} hat deine Anfrage angenommen. Willkommen!",
+      "declined": "{{name}} hat deine Beitrittsanfrage abgelehnt",
+      "newRequest": "{{user}} möchte {{server}} beitreten",
+      "unknownSpace": "ein Space"
     }
   }
 }

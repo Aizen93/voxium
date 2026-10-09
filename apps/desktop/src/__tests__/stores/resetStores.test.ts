@@ -87,6 +87,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
+import { useDiscoveryStore } from '../../stores/discoveryStore';
 import type { Server, ServerMember, Conversation, Friendship, Message } from '@voxium/shared';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -141,6 +142,12 @@ function populateAccountStores() {
     reactions: [{ id: 'r1', userId: 'u-2', e: 0, at: 1 }],
     snapshotNotice: { userId: 'u-2', at: 1 },
   });
+  // Explore: the browse and the previous account's isMember/requestPending flags
+  useDiscoveryStore.setState({
+    query: 'raid', tag: 'gaming', sort: 'members', status: 'ready', totalCapped: 3, nextCursor: 'c1',
+    servers: [{ id: 'srv-x', name: 'X', isMember: true, requestPending: false } as never],
+    featured: [{ id: 'srv-f', name: 'F', isMember: false, requestPending: true } as never],
+  });
 }
 
 describe('resetAccountStores (HIGH-14b)', () => {
@@ -158,6 +165,16 @@ describe('resetAccountStores (HIGH-14b)', () => {
     expect(server.servers).toEqual([]);
     expect(server.activeServerId).toBeNull();
     expect(server.members).toEqual([]);
+
+    // discoveryStore — another account must not inherit "Requested"/"Open" cards or the browse
+    const discovery = useDiscoveryStore.getState();
+    expect(discovery.servers).toEqual([]);
+    expect(discovery.featured).toEqual([]);
+    expect(discovery.query).toBe('');
+    expect(discovery.tag).toBe('');
+    expect(discovery.sort).toBe('active');
+    expect(discovery.status).toBe('idle');
+    expect(discovery.nextCursor).toBeNull();
     expect(server.activeChannelId).toBeNull();
     expect(server.unreadCounts).toEqual({});
     expect(server.serverUnreadCounts).toEqual({});

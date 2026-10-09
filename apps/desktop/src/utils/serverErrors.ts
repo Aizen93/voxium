@@ -147,6 +147,10 @@ const ERROR_MAP: Record<string, string> = {
   [`Reason must be at most ${LIMITS.SERVER_BAN_REASON_MAX} characters`]: 'reasonTooLong',
   'Tags must be chosen from the supported list': 'tagsNotSupported',
   [`At most ${LIMITS.DISCOVERY_MAX_TAGS} tags are allowed`]: 'tooManyTags',
+  'Message contains unsupported characters': 'joinMessageUnsupportedChars',
+  [`Message must be at most ${LIMITS.JOIN_REQUEST_MESSAGE_MAX} characters`]: 'joinMessageTooLong',
+  // Explore paging past the depth cap (DISCOVERY_MAX_PAGES × page size)
+  'Refine your search': 'refineSearch',
 
   // ─── Admin ─────────────────────────────────────────────────────────────
   'Cannot ban yourself': 'cannotBanSelf',
@@ -163,6 +167,7 @@ const ERROR_VARS: Record<string, Record<string, unknown>> = {
   descriptionTooLong: { max: LIMITS.SERVER_DESCRIPTION_MAX },
   reasonTooLong: { max: LIMITS.SERVER_BAN_REASON_MAX },
   tooManyTags: { max: LIMITS.DISCOVERY_MAX_TAGS },
+  joinMessageTooLong: { max: LIMITS.JOIN_REQUEST_MESSAGE_MAX },
 };
 
 /** The server-discovery subset of the map, for the locale parity test. */
@@ -170,7 +175,7 @@ export const DISCOVERY_ERROR_KEYS: readonly string[] = [
   'discoveryDisabled', 'listingDisabledByAdmin', 'bannedFromServer', 'requestDeclinedRecently', 'joinRequestNotFound',
   'banNotFound', 'cannotTransferToBanned', 'cannotReportOwnServer', 'noPermissionManageMembers', 'noPermissionKickMembers',
   'cannotKickHigherRole', 'descriptionUnsupportedChars', 'descriptionTooLong', 'reasonUnsupportedChars', 'reasonTooLong',
-  'tagsNotSupported', 'tooManyTags',
+  'tagsNotSupported', 'tooManyTags', 'joinMessageUnsupportedChars', 'joinMessageTooLong', 'refineSearch',
 ];
 
 /**

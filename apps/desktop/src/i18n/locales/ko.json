@@ -670,7 +670,8 @@
       "submitReport": "신고 제출",
       "submitting": "제출 중...",
       "submitted": "신고가 제출되었습니다. 감사합니다!",
-      "failedToSubmit": "신고 제출에 실패했습니다"
+      "failedToSubmit": "신고 제출에 실패했습니다",
+      "reportSpace": "스페이스 신고"
     },
     "search": {
       "searchIn": "{{name}}에서 검색",
@@ -1155,7 +1156,10 @@
     "reasonUnsupportedChars": "사유에 지원되지 않는 문자가 포함되어 있습니다",
     "reasonTooLong": "사유는 최대 {{max}}자까지 입력할 수 있습니다",
     "tagsNotSupported": "태그는 지원 목록에서 선택해야 합니다",
-    "tooManyTags": "태그는 최대 {{max}}개까지 가능합니다"
+    "tooManyTags": "태그는 최대 {{max}}개까지 가능합니다",
+    "joinMessageUnsupportedChars": "메시지에 지원되지 않는 문자가 포함되어 있습니다",
+    "joinMessageTooLong": "메시지는 최대 {{max}}자까지 입력할 수 있습니다",
+    "refineSearch": "결과가 너무 많습니다. 검색어를 더 구체적으로 입력하세요"
   },
   "e2e": {
     "badgeTitle": "종단간 암호화됨 — 안전 번호 보기",
@@ -1394,6 +1398,57 @@
       "saved": "탐색 설정을 저장했습니다",
       "failedToSave": "탐색 설정을 저장하지 못했습니다",
       "failedToLoad": "탐색 정보를 불러오지 못했습니다"
+    },
+    "explore": "탐색",
+    "browsePublic": "공개 스페이스 둘러보기",
+    "noInvite": "초대가 없나요?",
+    "switcherExplore": "공개 스페이스 탐색",
+    "sort": {
+      "active": "활발한 순",
+      "members": "멤버 많은 순",
+      "newest": "최신순",
+      "name": "이름순"
+    },
+    "modal": {
+      "title": "탐색",
+      "subtitle": "Voxium의 누구나 찾고 참여할 수 있는 공개 스페이스",
+      "searchPlaceholder": "공개 스페이스 검색…",
+      "searchHint": "{{min}}자 이상 입력하면 검색됩니다",
+      "sortLabel": "정렬",
+      "sortPrefix": "정렬: ",
+      "tagsLabel": "태그",
+      "allTags": "전체",
+      "featured": "추천",
+      "resultsCapped": "{{count}}개 이상의 스페이스",
+      "loadMore": "더 보기",
+      "emptyMatch": "일치하는 공개 스페이스가 없습니다.",
+      "emptyMatchHint": "다른 단어나 태그로 시도해 보세요.",
+      "emptyNone": "아직 등록된 스페이스가 없습니다.",
+      "off": "탐색이 현재 꺼져 있습니다.",
+      "offHint": "관리자가 디렉터리를 비활성화했습니다. 초대는 계속 사용할 수 있습니다.",
+      "failedToLoad": "탐색을 불러오지 못했습니다",
+      "retry": "다시 시도",
+      "footer": "활동 수치는 하루에 한 번 갱신되며, 멤버 수는 실시간입니다.",
+      "joinFailed": "스페이스에 참여하지 못했습니다",
+      "requestFailed": "요청을 보내지 못했습니다",
+      "cancelFailed": "요청을 취소하지 못했습니다",
+      "results_other": "스페이스 {{count}}개"
+    },
+    "request": {
+      "title": "{{name}} 참여 요청",
+      "description": "모더레이터에게 이름, 아바타, 이 메시지가 표시됩니다.",
+      "messageLabel": "메시지 (선택)",
+      "placeholder": "참여하고 싶은 이유를 적어 주세요…",
+      "send": "요청 보내기"
+    },
+    "toasts": {
+      "joined": "{{name}}에 오신 것을 환영합니다",
+      "requestSent": "{{name}}에 요청을 보냈습니다",
+      "requestCancelled": "{{name}} 요청을 취소했습니다",
+      "approved": "{{name}}에서 요청을 승인했습니다. 환영합니다!",
+      "declined": "{{name}}에서 참여 요청을 거절했습니다",
+      "newRequest": "{{user}}님이 {{server}} 참여를 요청했습니다",
+      "unknownSpace": "스페이스"
     }
   }
 }

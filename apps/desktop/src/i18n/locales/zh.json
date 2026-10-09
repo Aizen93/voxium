@@ -670,7 +670,8 @@
       "submitReport": "提交举报",
       "submitting": "提交中...",
       "submitted": "举报已提交，谢谢！",
-      "failedToSubmit": "举报提交失败"
+      "failedToSubmit": "举报提交失败",
+      "reportSpace": "举报空间"
     },
     "search": {
       "searchIn": "在 {{name}} 中搜索",
@@ -1155,7 +1156,10 @@
     "reasonUnsupportedChars": "原因包含不支持的字符",
     "reasonTooLong": "原因最多 {{max}} 个字符",
     "tagsNotSupported": "标签必须从支持的列表中选择",
-    "tooManyTags": "最多允许 {{max}} 个标签"
+    "tooManyTags": "最多允许 {{max}} 个标签",
+    "joinMessageUnsupportedChars": "消息包含不支持的字符",
+    "joinMessageTooLong": "消息最多 {{max}} 个字符",
+    "refineSearch": "结果过多，请缩小搜索范围"
   },
   "e2e": {
     "badgeTitle": "已端到端加密 — 查看安全码",
@@ -1394,6 +1398,57 @@
       "saved": "发现设置已保存",
       "failedToSave": "保存发现设置失败",
       "failedToLoad": "加载发现信息失败"
+    },
+    "explore": "发现",
+    "browsePublic": "浏览公开空间",
+    "noInvite": "没有邀请？",
+    "switcherExplore": "发现公开空间",
+    "sort": {
+      "active": "最活跃",
+      "members": "成员最多",
+      "newest": "最新",
+      "name": "名称"
+    },
+    "modal": {
+      "title": "发现",
+      "subtitle": "Voxium 上任何人都能找到并加入的公开空间",
+      "searchPlaceholder": "搜索公开空间…",
+      "searchHint": "输入至少 {{min}} 个字符即可搜索",
+      "sortLabel": "排序",
+      "sortPrefix": "排序：",
+      "tagsLabel": "标签",
+      "allTags": "全部",
+      "featured": "精选",
+      "resultsCapped": "{{count}}+ 个空间",
+      "loadMore": "加载更多",
+      "emptyMatch": "没有匹配的公开空间。",
+      "emptyMatchHint": "试试其他词语或标签。",
+      "emptyNone": "还没有任何空间被列出。",
+      "off": "“发现”目前已关闭。",
+      "offHint": "管理员已禁用目录。邀请仍然可用。",
+      "failedToLoad": "无法加载“发现”",
+      "retry": "重试",
+      "footer": "活跃度数据每天更新一次；成员数为实时数据。",
+      "joinFailed": "无法加入该空间",
+      "requestFailed": "无法发送申请",
+      "cancelFailed": "无法取消申请",
+      "results_other": "{{count}} 个空间"
+    },
+    "request": {
+      "title": "申请加入 {{name}}",
+      "description": "版主将看到你的名称、头像和这条消息。",
+      "messageLabel": "留言（可选）",
+      "placeholder": "说说你为什么想加入…",
+      "send": "发送申请"
+    },
+    "toasts": {
+      "joined": "欢迎来到 {{name}}",
+      "requestSent": "已向 {{name}} 发送申请",
+      "requestCancelled": "已取消加入 {{name}} 的申请",
+      "approved": "{{name}} 已批准你的申请。欢迎！",
+      "declined": "{{name}} 拒绝了你的加入申请",
+      "newRequest": "{{user}} 申请加入 {{server}}",
+      "unknownSpace": "某个空间"
     }
   }
 }

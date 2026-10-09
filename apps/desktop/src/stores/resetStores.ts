@@ -9,6 +9,7 @@ import { useE2EStore } from './e2eStore';
 import { useAnnotationStore, resetAnnotationModuleState } from './annotationStore';
 import { useAnnotationLiveStore, resetAnnotationLiveModuleState } from './annotationLiveStore';
 import { useMaskLayoutStore, resetMaskLayoutModuleState } from './maskLayoutStore';
+import { useDiscoveryStore } from './discoveryStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
 import { stopE2EDeviceListWatch } from './e2eStore';
 
@@ -37,6 +38,8 @@ const ACCOUNT_STORES = [
   // reads a different key) and deliberately survive logout, like trusted
   // devices and the E2E vault
   useMaskLayoutStore,
+  // Explore's browse state and the viewer's isMember/requestPending flags
+  useDiscoveryStore,
 ] as const;
 
 // Captured at module import — before any user interaction — so this is each

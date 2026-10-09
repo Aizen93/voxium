@@ -217,3 +217,54 @@ export async function acceptFriendRequest(
     throw new Error(`Accept friend failed (${res.status()}): ${body.error || res.statusText()}`);
   }
 }
+
+// ─── Server discovery (step 4 spec) ──────────────────────────────────────────
+
+/** Owner side: PATCH /servers/:id/discovery (description, tags, joinMode, discoverable). */
+export async function setServerDiscovery(
+  request: APIRequestContext,
+  token: string,
+  serverId: string,
+  fields: { description?: string | null; tags?: string[]; joinMode?: 'approval' | 'open'; discoverable?: boolean },
+) {
+  const res = await request.patch(`${API_URL}/servers/${serverId}/discovery`, {
+    data: fields,
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok()) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Set discovery failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
+}
+
+/** Remove and ban a member (every removal is a ban). */
+export async function kickMember(request: APIRequestContext, token: string, serverId: string, userId: string, reason?: string) {
+  const res = await request.post(`${API_URL}/servers/${serverId}/members/${userId}/kick`, {
+    data: reason ? { reason } : {},
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok()) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Kick failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
+}
+
+/** Lift a ban. */
+export async function unbanMember(request: APIRequestContext, token: string, serverId: string, userId: string) {
+  const res = await request.delete(`${API_URL}/servers/${serverId}/bans/${userId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok()) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Unban failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
+}
+
+/** The raw status + body of an invite join — for asserting a refusal. */
+export async function tryJoinServerViaInvite(request: APIRequestContext, token: string, inviteCode: string) {
+  const res = await request.post(`${API_URL}/invites/${inviteCode}/join`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const body = await res.json().catch(() => ({}));
+  return { status: res.status(), error: body.error as string | undefined };
+}

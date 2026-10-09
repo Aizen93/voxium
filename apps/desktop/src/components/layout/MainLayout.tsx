@@ -40,6 +40,7 @@ import { AnnouncementBanner } from './AnnouncementBanner';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { SharePreflightModal } from '../voice/SharePreflightModal';
+import { discoverySocketHandlers } from '../../services/discoverySocketHandlers';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
@@ -790,6 +791,13 @@ export function MainLayout() {
       ['announcement:new', handlers.announcementNew],
       ['support:message:new', handlers.supportMessageNew],
       ['support:status_change', handlers.supportStatusChange],
+      // Server discovery (services/discoverySocketHandlers.ts): two reach the
+      // requester's user room, two the moderator audience; each validates
+      // its payload shape.
+      ['server:join_approved', discoverySocketHandlers.joinApproved],
+      ['server:join_declined', discoverySocketHandlers.joinDeclined],
+      ['server:join_request', discoverySocketHandlers.joinRequest],
+      ['server:join_request_resolved', discoverySocketHandlers.joinRequestResolved],
     ];
 
     /**

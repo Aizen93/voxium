@@ -8,8 +8,11 @@ import { LIMITS } from '@voxium/shared';
 import { getTranslatedError } from '../../utils/serverErrors';
 
 interface Props {
-  type: 'message' | 'user';
-  reportedUserId: string;
+  type: 'message' | 'user' | 'server';
+  /** Who the report is against — not for a server report: the server resolves the owner from the listing. */
+  reportedUserId?: string;
+  /** Server reports (Explore): the listed server. */
+  serverId?: string;
   messageId?: string;
   /** E2E messages: the reporter's locally-decrypted plaintext — the server
    *  only holds ciphertext, so this is what moderators will see. */
@@ -17,7 +20,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function ReportModal({ type, reportedUserId, messageId, reportedContent, onClose }: Props) {
+export function ReportModal({ type, reportedUserId, serverId, messageId, reportedContent, onClose }: Props) {
   const { t } = useTranslation();
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -41,7 +44,7 @@ export function ReportModal({ type, reportedUserId, messageId, reportedContent, 
     try {
       await api.post('/reports', {
         type,
-        reportedUserId,
+        ...(type === 'server' ? { serverId } : { reportedUserId }),
         ...(type === 'message' && messageId ? { messageId } : {}),
         ...(type === 'message' && reportedContent ? { reportedContent } : {}),
         reason: reason.trim(),
@@ -56,7 +59,7 @@ export function ReportModal({ type, reportedUserId, messageId, reportedContent, 
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose} role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/60" onClick={onClose} role="dialog" aria-modal="true" data-testid="report-modal">
       <div
         className="w-full max-w-md rounded-lg bg-vox-bg-floating border border-vox-border shadow-xl"
         onClick={(e) => e.stopPropagation()}
@@ -66,7 +69,7 @@ export function ReportModal({ type, reportedUserId, messageId, reportedContent, 
           <div className="flex items-center gap-2 text-vox-text-primary">
             <Flag size={16} className="text-vox-accent-warning" />
             <h3 className="text-sm font-semibold">
-              {t(type === 'message' ? 'chat.report.reportMessage' : 'chat.report.reportUser')}
+              {t(type === 'message' ? 'chat.report.reportMessage' : type === 'server' ? 'chat.report.reportSpace' : 'chat.report.reportUser')}
             </h3>
           </div>
           <button onClick={onClose} className="text-vox-text-muted hover:text-vox-text-primary" aria-label={t('common.close')}>

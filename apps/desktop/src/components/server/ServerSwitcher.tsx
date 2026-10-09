@@ -34,9 +34,12 @@ const EMPTY_PINNED: string[] = [];
 export function ServerSwitcher({
   onClose,
   anchorRef,
+  onExplore,
 }: {
   onClose: () => void;
   anchorRef?: RefObject<HTMLElement | null>;
+  /** The no-match state offers Explore (the public directory) when given. */
+  onExplore?: () => void;
 }) {
   const { t } = useTranslation();
   const servers = useServerStore((s) => s.servers);
@@ -224,9 +227,19 @@ export function ServerSwitcher({
 
       <div ref={listRef} className="max-h-[52vh] overflow-y-auto p-1.5">
         {rows.length === 0 && (
-          <p className="px-3 py-6 text-center text-[13px] text-vox-text-muted">
-            {t('server.switcherEmpty')}
-          </p>
+          <div className="px-3 py-6 text-center">
+            <p className="text-[13px] text-vox-text-muted">{t('server.switcherEmpty')}</p>
+            {onExplore && (
+              <button
+                type="button"
+                onClick={() => { onClose(); onExplore(); }}
+                className="mt-2 text-[12.5px] text-vox-accent-primary underline-offset-2 hover:underline"
+                data-testid="switcher-explore"
+              >
+                {t('discovery.switcherExplore')}
+              </button>
+            )}
+          </div>
         )}
         {rows.map((row, i) => {
           const isPinned = row.kind === 'server' && pinnedServerIds.includes(row.id);

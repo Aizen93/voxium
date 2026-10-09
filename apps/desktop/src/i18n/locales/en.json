@@ -677,7 +677,8 @@
       "submitReport": "Submit Report",
       "submitting": "Submitting...",
       "submitted": "Report submitted. Thank you!",
-      "failedToSubmit": "Failed to submit report"
+      "failedToSubmit": "Failed to submit report",
+      "reportSpace": "Report Space"
     },
     "search": {
       "searchIn": "Search in {{name}}",
@@ -1163,7 +1164,10 @@
     "reasonUnsupportedChars": "Reason contains unsupported characters",
     "reasonTooLong": "Reason must be at most {{max}} characters",
     "tagsNotSupported": "Tags must be chosen from the supported list",
-    "tooManyTags": "At most {{max}} tags are allowed"
+    "tooManyTags": "At most {{max}} tags are allowed",
+    "joinMessageUnsupportedChars": "Message contains unsupported characters",
+    "joinMessageTooLong": "Message must be at most {{max}} characters",
+    "refineSearch": "Too many results — refine your search"
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",
@@ -1406,6 +1410,58 @@
       "saved": "Discovery settings saved",
       "failedToSave": "Failed to save discovery settings",
       "failedToLoad": "Failed to load discovery details"
+    },
+    "explore": "Explore",
+    "browsePublic": "Browse public spaces",
+    "noInvite": "No invite?",
+    "switcherExplore": "Explore public spaces",
+    "sort": {
+      "active": "Most active",
+      "members": "Most members",
+      "newest": "Newest",
+      "name": "Name"
+    },
+    "modal": {
+      "title": "Explore",
+      "subtitle": "Public spaces anyone on Voxium can find and join",
+      "searchPlaceholder": "Search public spaces…",
+      "searchHint": "Type {{min}} characters or more to search",
+      "sortLabel": "Sort",
+      "sortPrefix": "Sort: ",
+      "tagsLabel": "Tags",
+      "allTags": "All",
+      "featured": "Featured",
+      "resultsCapped": "{{count}}+ spaces",
+      "loadMore": "Load more",
+      "emptyMatch": "No public spaces match.",
+      "emptyMatchHint": "Try another word or tag.",
+      "emptyNone": "Nothing is listed yet.",
+      "off": "Explore is turned off right now.",
+      "offHint": "An administrator has disabled the directory. Invites still work.",
+      "failedToLoad": "Failed to load Explore",
+      "retry": "Try again",
+      "footer": "Activity figures update once a day; member counts are live.",
+      "joinFailed": "Failed to join the space",
+      "requestFailed": "Failed to send the request",
+      "cancelFailed": "Failed to cancel the request",
+      "results_one": "{{count}} space",
+      "results_other": "{{count}} spaces"
+    },
+    "request": {
+      "title": "Request to join {{name}}",
+      "description": "Moderators will see your name, your avatar and this message.",
+      "messageLabel": "Message (optional)",
+      "placeholder": "Say why you would like to join…",
+      "send": "Send request"
+    },
+    "toasts": {
+      "joined": "Welcome to {{name}}",
+      "requestSent": "Request sent to {{name}}",
+      "requestCancelled": "Request to {{name}} cancelled",
+      "approved": "{{name}} approved your request. Welcome!",
+      "declined": "{{name}} declined your join request",
+      "newRequest": "{{user}} asked to join {{server}}",
+      "unknownSpace": "a space"
     }
   }
 }

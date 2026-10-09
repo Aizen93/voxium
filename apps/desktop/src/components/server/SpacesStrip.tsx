@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
-import { Pin, PinOff, Plus, Search, Volume2 } from 'lucide-react';
+import { Compass, Pin, PinOff, Plus, Search, Volume2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { VoiceUser } from '@voxium/shared';
 import { useServerStore } from '../../stores/serverStore';
@@ -10,6 +10,7 @@ import { useVoiceStore } from '../../stores/voiceStore';
 import { CreateServerModal } from './CreateServerModal';
 import { ServerSwitcher } from './ServerSwitcher';
 import { ServerIcon } from './ServerIcon';
+import { DiscoveryModal } from '../discovery/DiscoveryModal';
 
 /**
  * The spaces strip: communities as tabs along the top of the app.
@@ -71,6 +72,14 @@ export function SpacesStrip() {
 
   const [showSwitcher, setShowSwitcher] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  // Explore (server discovery) — one mount point; the switcher's no-match
+  // state and the create/join modal hand over to it
+  const [showExplore, setShowExplore] = useState(false);
+  const openExplore = () => {
+    setShowSwitcher(false);
+    setShowCreateModal(false);
+    setShowExplore(true);
+  };
   const [pinMenu, setPinMenu] = useState<{ serverId: string; x: number; y: number } | null>(null);
   const findBtnRef = useRef<HTMLButtonElement>(null);
   const moreBtnRef = useRef<HTMLButtonElement>(null);
@@ -301,6 +310,18 @@ export function SpacesStrip() {
           </kbd>
         </button>
 
+        {/* Explore — the public directory */}
+        <button
+          className="flex h-[32px] flex-none items-center gap-2 rounded-full border border-vox-border px-3.5 text-[12.5px] text-vox-text-muted transition-colors hover:border-vox-border-strong hover:text-vox-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vox-accent-primary"
+          onClick={openExplore}
+          aria-label={t('discovery.explore')}
+          title={t('discovery.explore')}
+          data-testid="discovery-open"
+        >
+          <Compass size={13} />
+          <span className="hidden sm:inline">{t('discovery.explore')}</span>
+        </button>
+
         <button
           className="flex h-[32px] w-[32px] flex-none items-center justify-center rounded-full border border-vox-border text-vox-text-muted transition-colors hover:border-vox-border-strong hover:text-vox-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vox-accent-primary"
           onClick={() => setShowCreateModal(true)}
@@ -344,9 +365,11 @@ export function SpacesStrip() {
         <ServerSwitcher
           anchorRef={switcherAnchor === 'more' ? moreBtnRef : findBtnRef}
           onClose={() => setShowSwitcher(false)}
+          onExplore={openExplore}
         />
       )}
-      {showCreateModal && <CreateServerModal onClose={() => setShowCreateModal(false)} />}
+      {showCreateModal && <CreateServerModal onClose={() => setShowCreateModal(false)} onExplore={openExplore} />}
+      {showExplore && <DiscoveryModal onClose={() => setShowExplore(false)} />}
     </>
   );
 }

@@ -675,7 +675,8 @@
       "submitReport": "إرسال البلاغ",
       "submitting": "جارٍ الإرسال...",
       "submitted": "تم إرسال البلاغ. شكرًا لك!",
-      "failedToSubmit": "فشل إرسال البلاغ"
+      "failedToSubmit": "فشل إرسال البلاغ",
+      "reportSpace": "الإبلاغ عن المساحة"
     },
     "search": {
       "searchIn": "البحث في {{name}}",
@@ -1160,7 +1161,10 @@
     "reasonUnsupportedChars": "يحتوي السبب على أحرف غير مدعومة",
     "reasonTooLong": "يجب ألا يتجاوز السبب {{max}} حرفًا",
     "tagsNotSupported": "يجب اختيار الوسوم من القائمة المدعومة",
-    "tooManyTags": "يُسمح بـ {{max}} وسوم كحد أقصى"
+    "tooManyTags": "يُسمح بـ {{max}} وسوم كحد أقصى",
+    "joinMessageUnsupportedChars": "تحتوي الرسالة على أحرف غير مدعومة",
+    "joinMessageTooLong": "يجب ألا تتجاوز الرسالة {{max}} حرفًا",
+    "refineSearch": "نتائج كثيرة جدًا — حدّد بحثك"
   },
   "e2e": {
     "badgeTitle": "مشفَّر تشفيرًا تامًا بين الطرفين — عرض رقم الأمان",
@@ -1419,6 +1423,62 @@
       "saved": "تم حفظ إعدادات الاستكشاف",
       "failedToSave": "تعذّر حفظ إعدادات الاستكشاف",
       "failedToLoad": "تعذّر تحميل بيانات الاستكشاف"
+    },
+    "explore": "استكشاف",
+    "browsePublic": "تصفّح المساحات العامة",
+    "noInvite": "لا تملك دعوة؟",
+    "switcherExplore": "استكشاف المساحات العامة",
+    "sort": {
+      "active": "الأكثر نشاطًا",
+      "members": "الأكثر أعضاءً",
+      "newest": "الأحدث",
+      "name": "الاسم"
+    },
+    "modal": {
+      "title": "استكشاف",
+      "subtitle": "مساحات عامة يمكن لأي شخص على Voxium العثور عليها والانضمام إليها",
+      "searchPlaceholder": "ابحث في المساحات العامة…",
+      "searchHint": "اكتب {{min}} أحرف أو أكثر للبحث",
+      "sortLabel": "ترتيب",
+      "sortPrefix": "الترتيب: ",
+      "tagsLabel": "الوسوم",
+      "allTags": "الكل",
+      "featured": "مميّزة",
+      "resultsCapped": "أكثر من {{count}} مساحة",
+      "loadMore": "تحميل المزيد",
+      "emptyMatch": "لا توجد مساحات عامة مطابقة.",
+      "emptyMatchHint": "جرّب كلمة أو وسمًا آخر.",
+      "emptyNone": "لا يوجد شيء مدرج بعد.",
+      "off": "الاستكشاف متوقف حاليًا.",
+      "offHint": "عطّل مسؤول الدليل. لا تزال الدعوات تعمل.",
+      "failedToLoad": "تعذّر تحميل الاستكشاف",
+      "retry": "إعادة المحاولة",
+      "footer": "تُحدَّث أرقام النشاط مرة يوميًا؛ أما عدد الأعضاء فهو مباشر.",
+      "joinFailed": "تعذّر الانضمام إلى المساحة",
+      "requestFailed": "تعذّر إرسال الطلب",
+      "cancelFailed": "تعذّر إلغاء الطلب",
+      "results_zero": "لا مساحات",
+      "results_one": "مساحة واحدة",
+      "results_two": "مساحتان",
+      "results_few": "{{count}} مساحات",
+      "results_many": "{{count}} مساحة",
+      "results_other": "{{count}} مساحة"
+    },
+    "request": {
+      "title": "طلب الانضمام إلى {{name}}",
+      "description": "سيرى المشرفون اسمك وصورتك الرمزية وهذه الرسالة.",
+      "messageLabel": "رسالة (اختياري)",
+      "placeholder": "اذكر سبب رغبتك في الانضمام…",
+      "send": "إرسال الطلب"
+    },
+    "toasts": {
+      "joined": "مرحبًا بك في {{name}}",
+      "requestSent": "أُرسل الطلب إلى {{name}}",
+      "requestCancelled": "أُلغي طلب الانضمام إلى {{name}}",
+      "approved": "وافق {{name}} على طلبك. مرحبًا بك!",
+      "declined": "رفض {{name}} طلب انضمامك",
+      "newRequest": "طلب {{user}} الانضمام إلى {{server}}",
+      "unknownSpace": "مساحة"
     }
   }
 }

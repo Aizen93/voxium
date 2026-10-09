@@ -671,7 +671,8 @@
       "submitReport": "Enviar denúncia",
       "submitting": "Enviando...",
       "submitted": "Denúncia enviada. Obrigado!",
-      "failedToSubmit": "Não foi possível enviar a denúncia"
+      "failedToSubmit": "Não foi possível enviar a denúncia",
+      "reportSpace": "Denunciar espaço"
     },
     "search": {
       "searchIn": "Pesquisar em {{name}}",
@@ -1156,7 +1157,10 @@
     "reasonUnsupportedChars": "O motivo contém caracteres não suportados",
     "reasonTooLong": "O motivo não pode ter mais de {{max}} caracteres",
     "tagsNotSupported": "As tags devem ser escolhidas na lista disponível",
-    "tooManyTags": "São permitidas no máximo {{max}} tags"
+    "tooManyTags": "São permitidas no máximo {{max}} tags",
+    "joinMessageUnsupportedChars": "A mensagem contém caracteres não suportados",
+    "joinMessageTooLong": "A mensagem não pode ter mais de {{max}} caracteres",
+    "refineSearch": "Resultados demais — refine sua pesquisa"
   },
   "e2e": {
     "badgeTitle": "Criptografia de ponta a ponta — ver número de segurança",
@@ -1399,6 +1403,58 @@
       "saved": "Configurações de descoberta salvas",
       "failedToSave": "Falha ao salvar as configurações de descoberta",
       "failedToLoad": "Falha ao carregar os detalhes de descoberta"
+    },
+    "explore": "Explorar",
+    "browsePublic": "Explorar espaços públicos",
+    "noInvite": "Sem convite?",
+    "switcherExplore": "Explorar espaços públicos",
+    "sort": {
+      "active": "Mais ativos",
+      "members": "Mais membros",
+      "newest": "Mais recentes",
+      "name": "Nome"
+    },
+    "modal": {
+      "title": "Explorar",
+      "subtitle": "Espaços públicos que qualquer pessoa no Voxium pode encontrar e entrar",
+      "searchPlaceholder": "Pesquisar espaços públicos…",
+      "searchHint": "Digite {{min}} caracteres ou mais para pesquisar",
+      "sortLabel": "Ordenar",
+      "sortPrefix": "Ordem: ",
+      "tagsLabel": "Tags",
+      "allTags": "Todos",
+      "featured": "Em destaque",
+      "resultsCapped": "{{count}}+ espaços",
+      "loadMore": "Carregar mais",
+      "emptyMatch": "Nenhum espaço público corresponde.",
+      "emptyMatchHint": "Tente outra palavra ou outra tag.",
+      "emptyNone": "Ainda não há nada listado.",
+      "off": "Explorar está desativado no momento.",
+      "offHint": "Um administrador desativou o diretório. Os convites continuam funcionando.",
+      "failedToLoad": "Não foi possível carregar Explorar",
+      "retry": "Tentar novamente",
+      "footer": "Os números de atividade são atualizados uma vez por dia; a contagem de membros é ao vivo.",
+      "joinFailed": "Não foi possível entrar no espaço",
+      "requestFailed": "Não foi possível enviar o pedido",
+      "cancelFailed": "Não foi possível cancelar o pedido",
+      "results_one": "{{count}} espaço",
+      "results_other": "{{count}} espaços"
+    },
+    "request": {
+      "title": "Pedir para entrar em {{name}}",
+      "description": "Os moderadores verão seu nome, seu avatar e esta mensagem.",
+      "messageLabel": "Mensagem (opcional)",
+      "placeholder": "Diga por que gostaria de entrar…",
+      "send": "Enviar pedido"
+    },
+    "toasts": {
+      "joined": "Bem-vindo a {{name}}",
+      "requestSent": "Pedido enviado para {{name}}",
+      "requestCancelled": "Pedido para {{name}} cancelado",
+      "approved": "{{name}} aprovou seu pedido. Bem-vindo!",
+      "declined": "{{name}} recusou seu pedido de entrada",
+      "newRequest": "{{user}} pediu para entrar em {{server}}",
+      "unknownSpace": "um espaço"
     }
   }
 }

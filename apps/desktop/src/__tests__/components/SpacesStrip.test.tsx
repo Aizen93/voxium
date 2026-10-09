@@ -57,7 +57,12 @@ vi.mock('../../components/server/CreateServerModal', () => ({
   CreateServerModal: () => <div data-testid="create-modal" />,
 }));
 vi.mock('../../components/server/ServerSwitcher', () => ({
-  ServerSwitcher: () => <div data-testid="switcher-open-marker" />,
+  ServerSwitcher: ({ onExplore }: { onExplore?: () => void }) => (
+    <div data-testid="switcher-open-marker"><button data-testid="switcher-explore" onClick={onExplore} /></div>
+  ),
+}));
+vi.mock('../../components/discovery/DiscoveryModal', () => ({
+  DiscoveryModal: () => <div data-testid="explore-open-marker" />,
 }));
 
 import { SpacesStrip, computeMaxTabs } from '../../components/server/SpacesStrip';
@@ -102,6 +107,22 @@ afterEach(() => {
 });
 
 describe('SpacesStrip', () => {
+  it('the compass opens Explore, and the switcher hands over to it (closing itself)', () => {
+    render();
+    expect(document.body.querySelector('[data-testid="explore-open-marker"]')).toBeNull();
+    click(strip().querySelector('[data-testid="discovery-open"]')!);
+    expect(document.body.querySelector('[data-testid="explore-open-marker"]')).not.toBeNull();
+  });
+
+  it('the switcher\'s no-match offer opens Explore and closes the switcher', () => {
+    render();
+    click(strip().querySelector('[data-testid="server-switcher-open"]')!);
+    expect(document.body.querySelector('[data-testid="switcher-open-marker"]')).not.toBeNull();
+    click(document.body.querySelector('[data-testid="switcher-explore"]')!);
+    expect(document.body.querySelector('[data-testid="switcher-open-marker"]')).toBeNull();
+    expect(document.body.querySelector('[data-testid="explore-open-marker"]')).not.toBeNull();
+  });
+
   it('shows at most seven space tabs plus the overflow count', () => {
     render();
     const tabs = servers.filter((s) => tabByName(s.name));
