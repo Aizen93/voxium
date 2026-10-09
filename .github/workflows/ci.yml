@@ -180,17 +180,24 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # Object storage: one spec performs a REAL presigned upload of an
-      # encrypted attachment, so a stub endpoint is not enough. Run as a plain
-      # container rather than a service — MinIO needs a `server` command, and
-      # service containers cannot override the image's entrypoint arguments.
+      # encrypted attachment, so a stub endpoint is not enough. Kept as a plain
+      # container (not a service) so the health wait and the bucket creation
+      # live in the same step as the container they depend on.
+      #
+      # Image: MinIO's own registries (quay.io/minio/minio AND docker.io/minio/minio)
+      # stopped serving anonymous pulls in autumn 2026 — every tag now answers
+      # "unauthorized", which killed every E2E run before a single test started.
+      # bitnamilegacy/minio is Bitnami's frozen, still-public build of MinIO
+      # RELEASE.2025-07-23, pinned by digest so a tag move cannot change what
+      # runs. Its entrypoint starts the server itself (no `server /data`
+      # argument) and honours MINIO_ROOT_USER / MINIO_ROOT_PASSWORD.
       - name: Start MinIO and create the assets bucket
         run: |
           docker run -d --name minio \
             -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
-            server /data
+            bitnamilegacy/minio:2025.7.23-debian-12-r5@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
           for i in $(seq 1 30); do
             curl -fsS http://127.0.0.1:9000/minio/health/live && break
             sleep 2
