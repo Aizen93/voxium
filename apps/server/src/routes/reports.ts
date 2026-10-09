@@ -16,16 +16,26 @@ reportsRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
-    const { type, reportedUserId, messageId, reason: rawReason } = req.body;
+    const { type, messageId, reason: rawReason } = req.body;
 
     // Validate type
-    if (type !== 'message' && type !== 'user') {
+    if (type !== 'message' && type !== 'user' && type !== 'server') {
       throw new BadRequestError('Invalid report type');
     }
 
-    // Validate reportedUserId
-    if (!reportedUserId || typeof reportedUserId !== 'string') {
-      throw new BadRequestError('reportedUserId is required');
+    // Who the report is against. For a server report the owner is resolved
+    // below from the listing itself; the client never names them.
+    let reportedUserId: string;
+    if (type === 'server') {
+      if (!req.body.serverId || typeof req.body.serverId !== 'string') {
+        throw new BadRequestError('serverId is required for server reports');
+      }
+      reportedUserId = '';
+    } else {
+      if (!req.body.reportedUserId || typeof req.body.reportedUserId !== 'string') {
+        throw new BadRequestError('reportedUserId is required');
+      }
+      reportedUserId = req.body.reportedUserId;
     }
 
     // Validate reason
@@ -37,36 +47,63 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       throw new BadRequestError(`Reason must be at most ${LIMITS.REPORT_REASON_MAX} characters`);
     }
 
-    // Can't report yourself
-    if (reportedUserId === userId) {
-      throw new BadRequestError('You cannot report yourself');
-    }
-
-    // Validate reported user exists
-    const reportedUser = await prisma.user.findUnique({
-      where: { id: reportedUserId },
-      select: { id: true },
-    });
-    if (!reportedUser) throw new NotFoundError('User');
-
-    // Check for existing pending report from this user against the same target
-    const existingReport = await prisma.report.findFirst({
-      where: {
-        reporterId: userId,
-        reportedUserId,
-        status: 'pending',
-        ...(type === 'message' && messageId ? { messageId } : { type: 'user' }),
-      },
-    });
-    if (existingReport) {
-      throw new BadRequestError('You already have a pending report against this target');
-    }
-
     let messageContent: string | null = null;
     let contentSource = 'server';
     let channelId: string | null = null;
     let conversationId: string | null = null;
     let serverId: string | null = null;
+
+    if (type === 'server') {
+      // A public listing is content; this is its path into the queue. A
+      // hidden server answers exactly like a nonexistent one (opacity) —
+      // the reports endpoint must not become the oracle that tells a prober
+      // a hidden server exists.
+      const server = await prisma.server.findUnique({
+        where: { id: req.body.serverId as string },
+        select: { id: true, name: true, description: true, ownerId: true, discoveryListed: true },
+      });
+      if (!server || !server.discoveryListed) throw new NotFoundError('Server');
+      if (server.ownerId === userId) throw new BadRequestError('You cannot report your own server');
+
+      const existingReport = await prisma.report.findFirst({
+        where: { reporterId: userId, serverId: server.id, type: 'server', status: 'pending' },
+        select: { id: true },
+      });
+      if (existingReport) {
+        throw new BadRequestError('You already have a pending report against this target');
+      }
+
+      reportedUserId = server.ownerId;
+      serverId = server.id;
+      // The listing as the reporter saw it — name and description snapshot,
+      // so an edit after the report does not erase what was reported.
+      messageContent = server.description ? `${server.name}\n\n${server.description}` : server.name;
+    } else {
+      // Can't report yourself
+      if (reportedUserId === userId) {
+        throw new BadRequestError('You cannot report yourself');
+      }
+
+      // Validate reported user exists
+      const reportedUser = await prisma.user.findUnique({
+        where: { id: reportedUserId },
+        select: { id: true },
+      });
+      if (!reportedUser) throw new NotFoundError('User');
+
+      // Check for existing pending report from this user against the same target
+      const existingReport = await prisma.report.findFirst({
+        where: {
+          reporterId: userId,
+          reportedUserId,
+          status: 'pending',
+          ...(type === 'message' && messageId ? { messageId } : { type: 'user' }),
+        },
+      });
+      if (existingReport) {
+        throw new BadRequestError('You already have a pending report against this target');
+      }
+    }
 
     if (type === 'message') {
       if (!messageId || typeof messageId !== 'string') throw new BadRequestError('messageId is required for message reports');

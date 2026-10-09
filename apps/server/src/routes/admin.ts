@@ -19,10 +19,11 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode, Server } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
 import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
+import { serverSelect } from '../utils/serverSelect';
 
 export const adminRouter = Router();
 
@@ -842,12 +843,16 @@ adminRouter.get('/servers', async (req: Request, res: Response, next: NextFuncti
     if (search) {
       where.name = { contains: search, mode: 'insensitive' };
     }
+    // Directory view: only servers that currently appear in Explore
+    if (req.query.listed === '1') where.discoveryListed = true;
 
     const [servers, total] = await Promise.all([
       prisma.server.findMany({
         where,
         select: {
           id: true, name: true, iconUrl: true, ownerId: true, createdAt: true,
+          description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true,
+          featuredAt: true, discoveryBlockedAt: true, invitesLocked: true,
           owner: { select: { username: true } },
           _count: { select: { members: true, channels: true } },
         },
@@ -896,9 +901,88 @@ adminRouter.get('/servers', async (req: Request, res: Response, next: NextFuncti
       channelCount: s._count.channels,
       messageCount: serverMessageCounts.get(s.id) || 0,
       createdAt: s.createdAt,
+      description: s.description,
+      tags: s.tags,
+      discoverable: s.discoverable,
+      discoveryListed: s.discoveryListed,
+      joinMode: s.joinMode,
+      featuredAt: s.featuredAt,
+      discoveryBlockedAt: s.discoveryBlockedAt,
+      invitesLocked: s.invitesLocked,
     }));
 
     res.json({ success: true, data, total, page, limit, hasMore: page * limit < total });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Directory curation: feature / unfeature, block / unblock. Curated means a
+// person chose it; Featured never jumps the ranked list. Block hides the
+// server and the owner cannot relist until unblocked (hiding alone invites a
+// relist war). Every change is audited.
+adminRouter.patch('/servers/:serverId/discovery', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.featured !== undefined && typeof body.featured !== 'boolean') throw new BadRequestError('featured must be a boolean');
+    if (body.blocked !== undefined && typeof body.blocked !== 'boolean') throw new BadRequestError('blocked must be a boolean');
+    if (body.featured === undefined && body.blocked === undefined) throw new BadRequestError('Provide featured and/or blocked');
+
+    const server = await prisma.server.findUnique({
+      where: { id: serverId },
+      select: { id: true, discoveryListed: true, featuredAt: true, discoveryBlockedAt: true },
+    });
+    if (!server) throw new NotFoundError('Server');
+
+    const data: { featuredAt?: Date | null; discoveryBlockedAt?: Date | null; discoverable?: boolean } = {};
+    const actions: Array<'server.discovery_feature' | 'server.discovery_unfeature' | 'server.discovery_block' | 'server.discovery_unblock'> = [];
+
+    if (body.blocked === true) {
+      data.discoverable = false;
+      data.featuredAt = null;
+      data.discoveryBlockedAt = server.discoveryBlockedAt ?? new Date();
+      if (!server.discoveryBlockedAt) actions.push('server.discovery_block');
+      if (server.featuredAt) actions.push('server.discovery_unfeature');
+    } else if (body.blocked === false) {
+      data.discoveryBlockedAt = null;
+      if (server.discoveryBlockedAt) actions.push('server.discovery_unblock');
+    }
+
+    if (body.featured === true) {
+      if (body.blocked === true) throw new BadRequestError('A blocked server cannot be featured');
+      // Only listed servers can be featured — a Featured row of hidden
+      // servers would be a list of 404s
+      if (!server.discoveryListed) throw new BadRequestError('Only listed servers can be featured');
+      if (!server.featuredAt) {
+        data.featuredAt = new Date();
+        actions.push('server.discovery_feature');
+      }
+    } else if (body.featured === false && body.blocked !== true) {
+      data.featuredAt = null;
+      if (server.featuredAt) actions.push('server.discovery_unfeature');
+    }
+
+    const updated = await prisma.server.update({
+      where: { id: serverId },
+      data,
+      select: { ...serverSelect, discoveryListed: true, featuredAt: true, discoveryBlockedAt: true },
+    });
+
+    // discoveryBlockedAt / discoverable are inputs of the listing column (never throws)
+    const discoveryListed = (await recomputeListed(serverId)) ?? updated.discoveryListed;
+
+    const { discoveryListed: _ignored, featuredAt, discoveryBlockedAt, ...serverShape } = updated;
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, serverShape as unknown as Server);
+
+    for (const action of actions) {
+      logAuditEvent({ actorId: req.user!.userId, action, targetType: 'server', targetId: serverId });
+    }
+
+    res.json({
+      success: true,
+      data: { id: serverId, discoverable: updated.discoverable, discoveryListed, featuredAt, discoveryBlockedAt },
+    });
   } catch (err) {
     next(err);
   }

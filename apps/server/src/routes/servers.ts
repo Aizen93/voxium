@@ -2,8 +2,11 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateServerName, validateNickname, validateBanReason, LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, permissionsToString } from '@voxium/shared';
-import type { MemberRole, Server, ServerBan } from '@voxium/shared';
+import {
+  validateServerName, validateNickname, validateBanReason, validateServerDescription, validateDiscoveryTags, dedupeDiscoveryTags,
+  LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, SERVER_JOIN_MODES, permissionsToString,
+} from '@voxium/shared';
+import type { MemberRole, Server, ServerBan, ServerJoinRequest } from '@voxium/shared';
 import { joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
@@ -17,20 +20,31 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { removeMemberFromServer } from '../utils/removeMember';
 import { recomputeListed } from '../utils/discoveryListing';
+import { joinServerMember } from '../utils/serverJoin';
+import { serverSelect } from '../utils/serverSelect';
+import { emitToModerators } from '../utils/moderatorAudience';
 
 export const serverRouter = Router();
 
 serverRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
-/**
- * The `Server` shape the list, the updates and every server:updated emit
- * return — exactly the fields of the shared type, directory profile included.
- * One constant so no select can quietly miss a field the client expects.
- */
-const serverSelect = {
-  id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true,
-  description: true, tags: true, discoverable: true, joinMode: true,
-} as const;
+const requestUserSelect = { id: true, username: true, displayName: true, avatarUrl: true } as const;
+
+/** API shape of a join request (ServerJoinRequest in the shared types). */
+function formatJoinRequest(row: {
+  id: string; serverId: string; userId: string; message: string | null; status: string; createdAt: Date;
+  user: { id: string; username: string; displayName: string; avatarUrl: string | null };
+}): ServerJoinRequest {
+  return {
+    id: row.id,
+    serverId: row.serverId,
+    userId: row.userId,
+    message: row.message,
+    status: row.status as ServerJoinRequest['status'],
+    createdAt: row.createdAt.toISOString(),
+    user: row.user,
+  };
+}
 
 /** API shape of a ban row (ServerBan in the shared types). */
 function formatBan(ban: {
@@ -626,6 +640,178 @@ serverRouter.delete(
       if (count === 0) throw new NotFoundError('Ban');
 
       res.json({ success: true, message: 'Member unbanned' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ─── Server discovery: the owner side ────────────────────────────────────────
+
+// Discovery profile and switches (MANAGE_SERVER): "Listed in Explore", who
+// can join, description, tags. No stats recompute on write — a relisted
+// server shows its last daily figures and joins the next cycle.
+serverRouter.patch('/:serverId/discovery', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+
+    const server = await prisma.server.findUnique({
+      where: { id: serverId },
+      select: { id: true, discoveryBlockedAt: true },
+    });
+    if (!server) throw new NotFoundError('Server');
+
+    const canManageServer = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_SERVER);
+    if (!canManageServer) throw new ForbiddenError('You do not have permission to manage server settings');
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const updateData: { discoverable?: boolean; joinMode?: string; description?: string | null; tags?: string[] } = {};
+
+    if (body.discoverable !== undefined) {
+      if (typeof body.discoverable !== 'boolean') throw new BadRequestError('discoverable must be a boolean');
+      // Block is the operator's last word: the owner cannot relist until unblocked.
+      if (body.discoverable && server.discoveryBlockedAt) throw new ForbiddenError('Listing is disabled by an administrator');
+      updateData.discoverable = body.discoverable;
+    }
+    if (body.joinMode !== undefined) {
+      if (typeof body.joinMode !== 'string' || !(SERVER_JOIN_MODES as readonly string[]).includes(body.joinMode)) {
+        throw new BadRequestError('joinMode must be "approval" or "open"');
+      }
+      updateData.joinMode = body.joinMode;
+    }
+    if (body.description !== undefined) {
+      if (body.description !== null && typeof body.description !== 'string') throw new BadRequestError('description must be a string');
+      const sanitized = body.description === null ? '' : sanitizeText(body.description);
+      const descErr = validateServerDescription(sanitized);
+      if (descErr) throw new BadRequestError(descErr);
+      updateData.description = sanitized.length > 0 ? sanitized : null;
+    }
+    if (body.tags !== undefined) {
+      const tagsErr = validateDiscoveryTags(body.tags);
+      if (tagsErr) throw new BadRequestError(tagsErr);
+      updateData.tags = dedupeDiscoveryTags(body.tags as string[]);
+    }
+    if (Object.keys(updateData).length === 0) throw new BadRequestError('No fields to update');
+
+    const updated = await prisma.server.update({
+      where: { id: serverId },
+      select: serverSelect,
+      data: updateData,
+    });
+
+    // discoverable is one of the listing column's four inputs (never throws)
+    await recomputeListed(serverId);
+
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
+
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Pending join requests, oldest first (KICK_MEMBERS)
+serverRouter.get('/:serverId/join-requests', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(LIMITS.MEMBERS_PER_PAGE, Math.max(1, parseInt(req.query.limit as string, 10) || LIMITS.MEMBERS_PER_PAGE));
+
+    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+    if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+    const where = { serverId, status: 'pending' } as const;
+    const [requests, total] = await Promise.all([
+      prisma.serverJoinRequest.findMany({
+        where,
+        include: { user: { select: requestUserSelect } },
+        orderBy: { createdAt: 'asc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.serverJoinRequest.count({ where }),
+    ]);
+
+    res.json({
+      success: true,
+      data: requests.map(formatJoinRequest),
+      total,
+      page,
+      limit,
+      hasMore: page * limit < total,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Approve a join request (KICK_MEMBERS): the join helper runs with the row
+// delete as its extra write, so ban, member-limit and duplicate checks all
+// apply at approval time, and a double approval fails on the missing row.
+serverRouter.post(
+  '/:serverId/join-requests/:userId/approve',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string; userId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId, userId } = req.params;
+
+      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+      if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+      const request = await prisma.serverJoinRequest.findUnique({
+        where: { serverId_userId: { serverId, userId } },
+        select: { id: true, status: true },
+      });
+      if (!request || request.status !== 'pending') throw new NotFoundError('Join request');
+
+      try {
+        await joinServerMember(userId, serverId, {
+          via: 'approval',
+          extraWrites: [prisma.serverJoinRequest.delete({ where: { id: request.id } })],
+        });
+      } catch (err) {
+        // P2025 = the row was cancelled or approved by someone else meanwhile
+        if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Join request');
+        throw err;
+      }
+
+      const server = await prisma.server.findUnique({ where: { id: serverId }, select: serverSelect });
+      const io = getIO();
+      if (server) {
+        io.to(`user:${userId}`).emit(WS_EVENTS.SERVER_JOIN_APPROVED, { server: server as unknown as Server });
+      }
+      await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'approved' });
+
+      res.json({ success: true, message: 'Join request approved' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Decline a join request (KICK_MEMBERS). The row stays as the cooldown
+// marker; the sweep removes it after JOIN_REQUEST_DECLINE_COOLDOWN_DAYS.
+serverRouter.post(
+  '/:serverId/join-requests/:userId/decline',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string; userId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId, userId } = req.params;
+
+      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+      if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+      const { count } = await prisma.serverJoinRequest.updateMany({
+        where: { serverId, userId, status: 'pending' },
+        data: { status: 'declined', decidedById: req.user!.userId, decidedAt: new Date() },
+      });
+      if (count === 0) throw new NotFoundError('Join request');
+
+      const server = await prisma.server.findUnique({ where: { id: serverId }, select: { name: true } });
+      getIO().to(`user:${userId}`).emit(WS_EVENTS.SERVER_JOIN_DECLINED, { serverId, serverName: server?.name ?? '' });
+      await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'declined' });
+
+      res.json({ success: true, message: 'Join request declined' });
     } catch (err) {
       next(err);
     }

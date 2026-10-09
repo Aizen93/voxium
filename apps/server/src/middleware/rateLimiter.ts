@@ -102,6 +102,11 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   interact:       { keyPrefix: 'rl:interact',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Interact' },
   themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
   themeBrowse:    { keyPrefix: 'rl:themebr',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Browse' },
+  // Server discovery. Browse covers pages, cards and search (a scraper pays
+  // per page and gets at most 1,200 results per distinct query); join covers
+  // direct joins, join requests and cancels (request spam toward moderators).
+  discoveryBrowse: { keyPrefix: 'rl:discbr',   points: 60,  duration: 60,   blockDuration: 0,  keyType: 'userId', label: 'Discovery Browse' },
+  discoveryJoin:   { keyPrefix: 'rl:discjoin', points: 10,  duration: 3600, blockDuration: 0,  keyType: 'userId', label: 'Discovery Join' },
   // E2E key distribution: registration is rare (per install / key reset);
   // bundle claims consume the TARGET user's one-time keys, so they get a
   // tighter budget than plain reads to slow deliberate prekey draining.
@@ -578,6 +583,8 @@ export const rateLimitGeneral = createMiddleware('general', byIp);
 export const rateLimitInteract = createMiddleware('interact', byUserId);
 export const rateLimitThemeManage = createMiddleware('themeManage', byUserId);
 export const rateLimitThemeBrowse = createMiddleware('themeBrowse', byUserId);
+export const rateLimitDiscoveryBrowse = createMiddleware('discoveryBrowse', byUserId);
+export const rateLimitDiscoveryJoin = createMiddleware('discoveryJoin', byUserId);
 export const rateLimitE2EDevice = createMiddleware('e2eDevice', byUserId);
 export const rateLimitE2EKeys = createMiddleware('e2eKeys', byUserId);
 export const rateLimitE2EBundle = createMiddleware('e2eBundle', byUserId);

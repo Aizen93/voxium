@@ -40,6 +40,7 @@ import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmen
 import { startRegistrationHygiene, stopRegistrationHygiene } from './utils/registrationHygiene';
 import { startKeyShareCleanup, stopKeyShareCleanup } from './utils/keyShareCleanup';
 import { startOrphanCleanup, stopOrphanCleanup } from './utils/orphanCleanup';
+import { startDiscoveryStats, stopDiscoveryStats } from './utils/discoveryStats';
 import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, NODE_HEARTBEAT_TTL_S, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { ensureBucketEncryption } from './utils/s3';
@@ -197,6 +198,11 @@ async function main() {
   // matter more than the sweep itself.
   startOrphanCleanup();
 
+  // Directory activity figures on a rolling daily cycle (every 5 min, lock
+  // held 290 s, budgeted batches) plus the join-request sweeps and the
+  // nightly drift corrections — see utils/discoveryStats.ts.
+  startDiscoveryStats();
+
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n[Node ${NODE_ID()}] Voxium server running on http://0.0.0.0:${PORT}\n`);
     // Signal readiness probe after full initialization (migrations, Redis, mediasoup)
@@ -214,6 +220,7 @@ async function main() {
     stopKeyShareCleanup();
     stopRegistrationHygiene();
     stopOrphanCleanup();
+    stopDiscoveryStats();
     stopVoiceCluster();
     // Drop our liveness key FIRST so peer reapers promptly clean up any voice
     // state this node owned, instead of waiting out the heartbeat TTL.

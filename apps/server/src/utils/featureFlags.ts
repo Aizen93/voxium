@@ -22,6 +22,10 @@ const DEFAULTS: Record<string, FeatureFlagDef> = {
   // advertising annotationsVersion 2 on the share claim, so new clients hide
   // the tools instead of drawing things the server will refuse.
   annotations_v2:  { name: 'annotations_v2',  label: 'Annotations v2',      description: 'Arrows, callouts, spotlight, vanishing ink and stroke editing on screen shares', enabled: true },
+  // The directory's kill switch. OFF: every /discovery route answers 403 and
+  // the client shows its "turned off" state. Invites, bans and existing
+  // memberships are unaffected; profiles and pending requests are kept.
+  server_discovery: { name: 'server_discovery', label: 'Server Discovery',  description: 'Let users browse the public server directory and join or request to join from it', enabled: true },
 };
 
 const REDIS_KEY = 'feature:flags';

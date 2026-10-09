@@ -67,6 +67,13 @@ const prismaMock: Record<string, any> = {
     count: vi.fn(),
     deleteMany: vi.fn(),
   },
+  serverJoinRequest: {
+    findMany: vi.fn(),
+    count: vi.fn(),
+    findUnique: vi.fn(),
+    delete: vi.fn(),
+    updateMany: vi.fn(),
+  },
   channel: {
     findMany: vi.fn(),
     createMany: vi.fn(),
@@ -166,6 +173,18 @@ const mockRecomputeListed = vi.fn().mockResolvedValue(true);
 vi.mock('../../utils/discoveryListing', () => ({
   recomputeListed: (...args: any[]) => mockRecomputeListed(...args),
   recomputeListedForOwner: vi.fn().mockResolvedValue(0),
+}));
+
+// The join helper (approval runs it with the request delete as extra write)
+const mockJoinServerMember = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/serverJoin', () => ({
+  joinServerMember: (...args: any[]) => mockJoinServerMember(...args),
+}));
+
+// Moderator audience (join-request events never reach the server room)
+const mockEmitToModerators = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/moderatorAudience', () => ({
+  emitToModerators: (...args: any[]) => mockEmitToModerators(...args),
 }));
 
 // S3
@@ -939,6 +958,167 @@ describe('Server Routes', () => {
       expect(res.status).toBe(403);
       expect(res.body.error).toContain('equal or higher role');
       expect(mockRemoveMemberFromServer).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── PATCH /api/v1/servers/:serverId/discovery ───────────────────────────
+
+  describe('PATCH /api/v1/servers/:serverId/discovery', () => {
+    const UPDATED = { id: 'srv-1', name: 'S', iconUrl: null, invitesLocked: false, ownerId: 'user-1', createdAt: new Date(), description: 'd', tags: ['gaming'], discoverable: true, joinMode: 'open' };
+    const patch = (body: unknown) => request(app).patch('/api/v1/servers/srv-1/discovery').set('Authorization', `Bearer ${makeToken()}`).send(body);
+
+    beforeEach(() => {
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', discoveryBlockedAt: null });
+      prismaMock.server.update.mockResolvedValue(UPDATED);
+    });
+
+    it('404 unknown server, 403 without MANAGE_SERVER, 400 without fields', async () => {
+      prismaMock.server.findUnique.mockResolvedValueOnce(null);
+      expect((await patch({ discoverable: false })).status).toBe(404);
+      mockHasServerPermission.mockResolvedValueOnce(false);
+      expect((await patch({ discoverable: false })).status).toBe(403);
+      expect((await patch({})).status).toBe(400);
+      expect(prismaMock.server.update).not.toHaveBeenCalled();
+      expect(mockRecomputeListed).not.toHaveBeenCalled();
+    });
+
+    it('validates every field', async () => {
+      expect((await patch({ discoverable: 'yes' })).status).toBe(400);
+      expect((await patch({ joinMode: 'invite' })).status).toBe(400);
+      expect((await patch({ description: 42 })).status).toBe(400);
+      expect((await patch({ description: 'x'.repeat(301) })).status).toBe(400);
+      expect((await patch({ description: `a${String.fromCharCode(0x200b)}b` })).status).toBe(400);
+      expect((await patch({ tags: 'gaming' })).status).toBe(400);
+      expect((await patch({ tags: ['nope'] })).status).toBe(400);
+      expect((await patch({ tags: ['gaming', 'esports', 'music', 'art', 'community', 'science'] })).status).toBe(400);
+      expect(prismaMock.server.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses to relist a server an administrator blocked (403), but still allows hiding it', async () => {
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', discoveryBlockedAt: new Date() });
+      let res = await patch({ discoverable: true });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('administrator');
+      res = await patch({ discoverable: false });
+      expect(res.status).toBe(200);
+    });
+
+    it('writes the sanitized profile (deduped tags, empty description → null), recomputes AFTER the update, emits server:updated', async () => {
+      const order: string[] = [];
+      prismaMock.server.update.mockImplementation(async () => { order.push('update'); return UPDATED; });
+      mockRecomputeListed.mockImplementation(async () => { order.push('recompute'); return true; });
+
+      const res = await patch({ discoverable: false, joinMode: 'open', description: ' <i>Hi</i> there ', tags: ['music', 'gaming', 'music'] });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.server.update).toHaveBeenCalledWith({
+        where: { id: 'srv-1' },
+        select: SERVER_SELECT,
+        data: { discoverable: false, joinMode: 'open', description: 'Hi there', tags: ['music', 'gaming'] },
+      });
+      expect(order).toEqual(['update', 'recompute']);
+      expect(mockTo).toHaveBeenCalledWith('server:srv-1');
+      expect(mockEmit).toHaveBeenCalledWith('server:updated', expect.objectContaining({ id: 'srv-1', joinMode: 'open' }));
+      expect(res.body.data.joinMode).toBe('open');
+
+      await patch({ description: '   ' });
+      expect(prismaMock.server.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { description: null } }));
+      await patch({ description: null });
+      expect(prismaMock.server.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { description: null } }));
+    });
+  });
+
+  // ── Join requests (KICK_MEMBERS) ────────────────────────────────────────
+
+  describe('join requests', () => {
+    const REQUEST_ROW = {
+      id: 'req-1', serverId: 'srv-1', userId: 'user-2', message: 'hi', status: 'pending', createdAt: new Date('2026-10-09T10:00:00Z'),
+      user: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null },
+    };
+    const SERVER_ROW = { id: 'srv-1', name: 'S', iconUrl: null, invitesLocked: false, ownerId: 'user-1', createdAt: new Date(), description: null, tags: [], discoverable: true, joinMode: 'approval' };
+
+    it('GET lists pending requests oldest first with the user summary, paginated, KICK_MEMBERS only', async () => {
+      prismaMock.serverJoinRequest.findMany.mockResolvedValue([REQUEST_ROW]);
+      prismaMock.serverJoinRequest.count.mockResolvedValue(1);
+
+      const res = await request(app).get('/api/v1/servers/srv-1/join-requests').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual([{ id: 'req-1', serverId: 'srv-1', userId: 'user-2', message: 'hi', status: 'pending', createdAt: '2026-10-09T10:00:00.000Z', user: REQUEST_ROW.user }]);
+      expect(prismaMock.serverJoinRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { serverId: 'srv-1', status: 'pending' }, orderBy: { createdAt: 'asc' }, skip: 0, take: 100,
+      }));
+      expect(mockRateLimitMemberManage).toHaveBeenCalled();
+
+      mockHasServerPermission.mockResolvedValueOnce(false);
+      const denied = await request(app).get('/api/v1/servers/srv-1/join-requests').set('Authorization', `Bearer ${makeToken()}`);
+      expect(denied.status).toBe(403);
+    });
+
+    it('approve: 404 without a PENDING row', async () => {
+      prismaMock.serverJoinRequest.findUnique.mockResolvedValueOnce(null);
+      let res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/approve').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(404);
+      prismaMock.serverJoinRequest.findUnique.mockResolvedValueOnce({ id: 'req-1', status: 'declined' });
+      res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/approve').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(404);
+      expect(mockJoinServerMember).not.toHaveBeenCalled();
+    });
+
+    it('approve: runs the join helper with the row delete as the extra write, then notifies the requester and the moderators', async () => {
+      prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ id: 'req-1', status: 'pending' });
+      const DELETE = { op: 'request.delete' };
+      prismaMock.serverJoinRequest.delete.mockReturnValue(DELETE);
+      prismaMock.server.findUnique.mockResolvedValue(SERVER_ROW);
+
+      const res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/approve').set('Authorization', `Bearer ${makeToken()}`);
+
+      expect(res.status).toBe(200);
+      expect(mockJoinServerMember).toHaveBeenCalledWith('user-2', 'srv-1', { via: 'approval', extraWrites: [DELETE] });
+      expect(prismaMock.serverJoinRequest.delete).toHaveBeenCalledWith({ where: { id: 'req-1' } });
+      expect(mockTo).toHaveBeenCalledWith('user:user-2');
+      expect(mockEmit).toHaveBeenCalledWith('server:join_approved', { server: SERVER_ROW });
+      expect(mockEmitToModerators).toHaveBeenCalledWith('srv-1', 'server:join_request_resolved', { serverId: 'srv-1', userId: 'user-2', outcome: 'approved' });
+    });
+
+    it('approve: a row that vanished mid-flight (P2025) is 404; the helper\'s refusals pass through', async () => {
+      prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ id: 'req-1', status: 'pending' });
+      mockJoinServerMember.mockRejectedValueOnce(Object.assign(new Error('gone'), { code: 'P2025' }));
+      let res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/approve').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Join request not found');
+      expect(mockEmitToModerators).not.toHaveBeenCalled();
+
+      const { ForbiddenError } = await import('../../utils/errors');
+      mockJoinServerMember.mockRejectedValueOnce(new ForbiddenError('You are banned from this server'));
+      res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/approve').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(403);
+    });
+
+    it('decline: marks the row with decider and time, tells the requester (with the server name) and the moderators', async () => {
+      prismaMock.serverJoinRequest.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.server.findUnique.mockResolvedValue({ name: 'S' });
+
+      const res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/decline').set('Authorization', `Bearer ${makeToken()}`);
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.serverJoinRequest.updateMany).toHaveBeenCalledWith({
+        where: { serverId: 'srv-1', userId: 'user-2', status: 'pending' },
+        data: { status: 'declined', decidedById: 'user-1', decidedAt: expect.any(Date) },
+      });
+      expect(mockTo).toHaveBeenCalledWith('user:user-2');
+      expect(mockEmit).toHaveBeenCalledWith('server:join_declined', { serverId: 'srv-1', serverName: 'S' });
+      expect(mockEmitToModerators).toHaveBeenCalledWith('srv-1', 'server:join_request_resolved', { serverId: 'srv-1', userId: 'user-2', outcome: 'declined' });
+      expect(mockJoinServerMember).not.toHaveBeenCalled();
+    });
+
+    it('decline: 404 without a pending row; 403 without KICK_MEMBERS', async () => {
+      prismaMock.serverJoinRequest.updateMany.mockResolvedValue({ count: 0 });
+      let res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/decline').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(404);
+      expect(mockEmitToModerators).not.toHaveBeenCalled();
+      mockHasServerPermission.mockResolvedValueOnce(false);
+      res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/decline').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(403);
     });
   });
 

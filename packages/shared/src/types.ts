@@ -671,6 +671,16 @@ export interface AdminServer {
   channelCount: number;
   messageCount: number;
   createdAt: string;
+  // Directory state (server discovery)
+  description: string | null;
+  tags: string[];
+  discoverable: boolean;
+  /** The materialised eligibility: discoverable AND invites unlocked AND not blocked AND owner not banned. */
+  discoveryListed: boolean;
+  joinMode: ServerJoinMode;
+  featuredAt: string | null;
+  discoveryBlockedAt: string | null;
+  invitesLocked: boolean;
 }
 
 export interface BanRecord {
@@ -810,7 +820,8 @@ export interface StorageTopUploader {
 // ─── Reports ────────────────────────────────────────────────────────────────
 
 export type ReportStatus = 'pending' | 'resolved' | 'dismissed';
-export type ReportType = 'message' | 'user';
+/** 'server' = a directory listing (the owner is the reported user; name and description snapshot in messageContent). */
+export type ReportType = 'message' | 'user' | 'server';
 
 export interface Report {
   id: string;
