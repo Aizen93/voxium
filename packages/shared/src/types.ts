@@ -156,6 +156,18 @@ export interface ServerJoinRequest {
 /** 'joined' = the requester got in by another door (invite, open-mode join) and the request was swept. */
 export type ServerJoinRequestOutcome = 'approved' | 'declined' | 'cancelled' | 'joined';
 
+/** What the owner's Discovery tab reads from GET /servers/:id — the live
+ *  member count, the daily activity snapshot and the curation/block state. */
+export interface ServerDiscoveryInfo {
+  memberCount: number;
+  onlineCount: number;
+  weeklyMessages: number;
+  statsRefreshedAt: string | null;
+  discoveryListed: boolean;
+  discoveryBlockedAt: string | null;
+  featuredAt: string | null;
+}
+
 // ─── Category ───────────────────────────────────────────────────────────────
 
 export interface Category {

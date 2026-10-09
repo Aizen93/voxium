@@ -271,7 +271,8 @@
       "general": "General",
       "members": "Members",
       "roles": "Roles",
-      "limits": "Limits"
+      "limits": "Limits",
+      "discovery": "Discovery"
     },
     "general": {
       "serverName": "Server Name",
@@ -309,16 +310,11 @@
       "assignRoles": "Assign Roles",
       "promoteToAdmin": "Promote to Admin",
       "demoteToMember": "Demote to Member",
-      "kickMember": "Kick member",
       "transferOwnership": "Transfer ownership",
-      "kickConfirm": "Kick {{name}}?",
-      "kickDescription": "They will be removed from the server and will need a new invite to rejoin.",
-      "kick": "Kick",
       "transferConfirm": "Transfer ownership to {{name}}?",
       "transferDescription": "You will lose owner privileges and become an admin. This cannot be undone by you.",
       "transfer": "Transfer",
       "failedToUpdateRole": "Failed to update role",
-      "failedToKick": "Failed to kick member",
       "failedToTransfer": "Failed to transfer ownership",
       "failedToUpdateRoles": "Failed to update roles",
       "noResults": "No members match your search",
@@ -370,8 +366,8 @@
       "description": "Allows members to create server invite links"
     },
     "KICK_MEMBERS": {
-      "name": "Kick Members",
-      "description": "Allows members to kick other members with lower roles"
+      "name": "Manage members",
+      "description": "Allows members to remove and ban members with lower roles, unban them, and approve or decline join requests"
     },
     "MANAGE_NICKNAMES": {
       "name": "Manage Nicknames",
@@ -488,13 +484,10 @@
     "clearNickname": "Clear",
     "promoteToAdmin": "Promote to Admin",
     "demoteToMember": "Demote to Member",
-    "confirmKick": "Click again to confirm",
-    "kick": "Kick",
     "assignRoles": "Assign Roles",
     "noRolesCreated": "No roles created",
     "failedToPromote": "Failed to promote member",
     "failedToDemote": "Failed to demote member",
-    "failedToKick": "Failed to kick member",
     "rolesUpdated": "Roles updated",
     "failedToUpdateRoles": "Failed to update roles",
     "userMuted": "User muted",
@@ -594,7 +587,38 @@
     "switcherPlaceholder": "Jump to a server…",
     "switcherEmpty": "No server matches that name.",
     "switcherHint": "Type to filter · ↑↓ to move · Enter to open",
-    "createOrJoin": "Create or join a server"
+    "createOrJoin": "Create or join a server",
+    "joinRequests": {
+      "title": "Join requests",
+      "empty": "No pending requests.",
+      "approve": "Approve",
+      "decline": "Decline",
+      "approved": "{{name}} is now a member",
+      "declined": "Request from {{name}} declined",
+      "noMessage": "No message",
+      "requestedAt": "Requested {{when}}",
+      "failedToLoad": "Failed to load join requests",
+      "failedToApprove": "Failed to approve the request",
+      "failedToDecline": "Failed to decline the request",
+      "pending": "{{count}} pending join requests"
+    },
+    "banned": {
+      "title": "Banned",
+      "empty": "Nobody is banned.",
+      "unban": "Unban",
+      "unbanned": "{{name}} can join again",
+      "by": "by {{name}}",
+      "noReason": "No reason given",
+      "at": "Banned {{when}}",
+      "failedToLoad": "Failed to load the banned list",
+      "failedToUnban": "Failed to unban"
+    },
+    "removeAndBan": "Remove and ban",
+    "removeAndBanConfirm": "Remove and ban {{name}}?",
+    "removeAndBanDescription": "They will be removed from the space and cannot return, by invite, directly or by request, until you unban them from the Banned section.",
+    "banReasonPlaceholder": "Reason (optional, shown to moderators)",
+    "removeAndBanned": "{{name}} was removed and banned",
+    "removeAndBanFailed": "Failed to remove the member"
   },
   "channel": {
     "joinVoice": "Join voice",
@@ -1121,7 +1145,18 @@
     "ticketClosed": "Ticket is closed. Reopen it to send messages.",
     "cannotBanSelf": "Cannot ban yourself",
     "cannotBanSuperAdmin": "Cannot ban a super admin",
-    "onlySuperAdminCanBan": "Only super admins can ban other admins"
+    "onlySuperAdminCanBan": "Only super admins can ban other admins",
+    "discoveryDisabled": "Server discovery is currently disabled",
+    "listingDisabledByAdmin": "Listing is disabled by an administrator",
+    "bannedFromServer": "You are banned from this space",
+    "requestDeclinedRecently": "Your request was declined recently. Please try again later.",
+    "joinRequestNotFound": "Join request not found",
+    "banNotFound": "Ban not found",
+    "cannotTransferToBanned": "Cannot transfer ownership to a banned user",
+    "cannotReportOwnServer": "You cannot report your own space",
+    "noPermissionManageMembers": "You do not have permission to manage members",
+    "noPermissionKickMembers": "You do not have permission to remove members",
+    "cannotKickHigherRole": "Cannot remove a member with an equal or higher role"
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",
@@ -1302,5 +1337,64 @@
     "renamed": "Channel renamed",
     "failedToRename": "Failed to rename channel",
     "moderationNotSecure": "\"{{name}}\" is a regular channel — delete it from the sidebar instead"
+  },
+  "discovery": {
+    "tags": {
+      "gaming": "Gaming",
+      "esports": "Esports",
+      "open-source": "Open source",
+      "programming": "Programming",
+      "science": "Science",
+      "education": "Education",
+      "languages": "Languages",
+      "music": "Music",
+      "art": "Art",
+      "film-tv": "Film & TV",
+      "creators": "Creators",
+      "community": "Community"
+    },
+    "card": {
+      "featured": "Featured",
+      "noDescription": "No description yet.",
+      "online": "{{count}} online",
+      "members": "{{count}} members",
+      "join": "Join",
+      "requestToJoin": "Request to join",
+      "requested": "Requested",
+      "cancelRequest": "Cancel",
+      "open": "Open",
+      "onlineHint": "Online at the last daily check; the member count is live",
+      "report": "Report this space"
+    },
+    "settings": {
+      "title": "Listed in Explore",
+      "listedHint": "Every signed-in Voxium user can find this space in Explore. A hidden space can still be joined by invite.",
+      "audience": "A listing shows the name, icon, description, tags, member count and online count. Members, messages and voice are never shown.",
+      "hiddenInvitesLocked": "Hidden from Explore while invites are locked.",
+      "goToGeneral": "Unlock invites in General",
+      "blockedByAdmin": "Listing disabled by an administrator.",
+      "whoCanJoin": "Who can join",
+      "joinApproval": "Request to join",
+      "joinApprovalHint": "Newcomers ask first; moderators approve or decline each request.",
+      "joinOpen": "Join directly",
+      "joinOpenHint": "Anyone who finds the space can join at once.",
+      "description": "Description",
+      "descriptionPlaceholder": "What is this space about, and who is it for?",
+      "descriptionNudge": "Spaces with a description are found more often.",
+      "tags": "Tags",
+      "tagsHint": "Up to {{max}}. Newcomers filter Explore by tag.",
+      "preview": "Your card in Explore",
+      "stats": "Activity",
+      "statsMembers": "Members: {{count}}",
+      "statsMessages": "Messages this week: {{count}}",
+      "statsOnline": "Online at the last check: {{count}}",
+      "statsRefreshedAt": "Last check: {{when}}",
+      "statsDaily": "Activity figures refresh once a day; the member count is live.",
+      "statsNever": "Activity figures have not been computed yet; they refresh once a day.",
+      "save": "Save discovery settings",
+      "saved": "Discovery settings saved",
+      "failedToSave": "Failed to save discovery settings",
+      "failedToLoad": "Failed to load discovery details"
+    }
   }
 }

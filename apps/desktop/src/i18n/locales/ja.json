@@ -268,7 +268,8 @@
       "general": "一般",
       "members": "メンバー",
       "roles": "ロール",
-      "limits": "制限"
+      "limits": "制限",
+      "discovery": "探索"
     },
     "general": {
       "serverName": "サーバー名",
@@ -306,16 +307,11 @@
       "assignRoles": "ロールを割り当て",
       "promoteToAdmin": "管理者に昇格",
       "demoteToMember": "メンバーに降格",
-      "kickMember": "メンバーをキック",
       "transferOwnership": "所有権を移譲",
-      "kickConfirm": "{{name}} をキックしますか？",
-      "kickDescription": "サーバーから削除され、再参加するには新しい招待が必要になります。",
-      "kick": "キック",
       "transferConfirm": "{{name}} に所有権を移譲しますか？",
       "transferDescription": "オーナー権限を失い、管理者になります。この操作は自分では取り消せません。",
       "transfer": "移譲",
       "failedToUpdateRole": "ロールの更新に失敗しました",
-      "failedToKick": "メンバーのキックに失敗しました",
       "failedToTransfer": "所有権の移譲に失敗しました",
       "failedToUpdateRoles": "ロールの更新に失敗しました",
       "noResults": "検索に一致するメンバーがいません",
@@ -367,8 +363,8 @@
       "description": "メンバーがサーバーの招待リンクを作成できるようにします"
     },
     "KICK_MEMBERS": {
-      "name": "メンバーをキック",
-      "description": "メンバーが下位のロールを持つ他のメンバーをキックできるようにします"
+      "name": "メンバー管理",
+      "description": "下位ロールのメンバーの退出とBAN、BAN解除、参加リクエストの承認・却下を許可します"
     },
     "MANAGE_NICKNAMES": {
       "name": "ニックネームの管理",
@@ -485,13 +481,10 @@
     "clearNickname": "クリア",
     "promoteToAdmin": "管理者に昇格",
     "demoteToMember": "メンバーに降格",
-    "confirmKick": "もう一度クリックして確認",
-    "kick": "キック",
     "assignRoles": "ロールを割り当て",
     "noRolesCreated": "ロールが作成されていません",
     "failedToPromote": "メンバーの昇格に失敗しました",
     "failedToDemote": "メンバーの降格に失敗しました",
-    "failedToKick": "メンバーのキックに失敗しました",
     "rolesUpdated": "ロールが更新されました",
     "failedToUpdateRoles": "ロールの更新に失敗しました",
     "userMuted": "ユーザーをミュートしました",
@@ -588,7 +581,38 @@
     "switcherPlaceholder": "サーバーを検索…",
     "switcherEmpty": "一致するサーバーはありません。",
     "switcherHint": "入力で絞り込み · ↑↓ で移動 · Enter で開く",
-    "createOrJoin": "サーバーを作成または参加"
+    "createOrJoin": "サーバーを作成または参加",
+    "joinRequests": {
+      "title": "参加リクエスト",
+      "empty": "保留中のリクエストはありません。",
+      "approve": "承認",
+      "decline": "却下",
+      "approved": "{{name}}がメンバーになりました",
+      "declined": "{{name}}のリクエストを却下しました",
+      "noMessage": "メッセージなし",
+      "requestedAt": "{{when}}にリクエスト",
+      "failedToLoad": "参加リクエストを読み込めませんでした",
+      "failedToApprove": "リクエストを承認できませんでした",
+      "failedToDecline": "リクエストを却下できませんでした",
+      "pending": "保留中の参加リクエスト{{count}}件"
+    },
+    "banned": {
+      "title": "BAN済み",
+      "empty": "BANされているユーザーはいません。",
+      "unban": "BAN解除",
+      "unbanned": "{{name}}は再び参加できます",
+      "by": "{{name}}による",
+      "noReason": "理由なし",
+      "at": "{{when}}にBAN",
+      "failedToLoad": "BANリストを読み込めませんでした",
+      "failedToUnban": "BANを解除できませんでした"
+    },
+    "removeAndBan": "退出させてBAN",
+    "removeAndBanConfirm": "{{name}}を退出させてBANしますか？",
+    "removeAndBanDescription": "このユーザーはスペースから退出させられ、「BAN済み」セクションでBANを解除するまで、招待・直接参加・リクエストのいずれでも戻ることはできません。",
+    "banReasonPlaceholder": "理由（任意、モデレーターに表示されます）",
+    "removeAndBanned": "{{name}}を退出させてBANしました",
+    "removeAndBanFailed": "メンバーを退出させられませんでした"
   },
   "channel": {
     "joinVoice": "ボイスに参加",
@@ -1114,7 +1138,18 @@
     "ticketClosed": "チケットはクローズされています。メッセージを送るには再オープンしてください。",
     "cannotBanSelf": "自分自身をBANすることはできません",
     "cannotBanSuperAdmin": "スーパー管理者はBANできません",
-    "onlySuperAdminCanBan": "他の管理者をBANできるのはスーパー管理者のみです"
+    "onlySuperAdminCanBan": "他の管理者をBANできるのはスーパー管理者のみです",
+    "discoveryDisabled": "サーバー探索は現在無効です",
+    "listingDisabledByAdmin": "管理者によって掲載が無効化されています",
+    "bannedFromServer": "このスペースからBANされています",
+    "requestDeclinedRecently": "リクエストは最近却下されました。しばらくしてからもう一度お試しください。",
+    "joinRequestNotFound": "参加リクエストが見つかりません",
+    "banNotFound": "BANが見つかりません",
+    "cannotTransferToBanned": "BANされたユーザーには所有権を譲渡できません",
+    "cannotReportOwnServer": "自分のスペースは報告できません",
+    "noPermissionManageMembers": "メンバーを管理する権限がありません",
+    "noPermissionKickMembers": "メンバーを退出させる権限がありません",
+    "cannotKickHigherRole": "同じか上位のロールのメンバーは退出させられません"
   },
   "e2e": {
     "badgeTitle": "エンドツーエンド暗号化済み — 安全番号を表示",
@@ -1294,5 +1329,64 @@
     "renamed": "チャンネル名を変更しました",
     "failedToRename": "チャンネル名の変更に失敗しました",
     "moderationNotSecure": "「{{name}}」は通常のチャンネルです — サイドバーから削除してください"
+  },
+  "discovery": {
+    "tags": {
+      "gaming": "ゲーム",
+      "esports": "eスポーツ",
+      "open-source": "オープンソース",
+      "programming": "プログラミング",
+      "science": "科学",
+      "education": "教育",
+      "languages": "語学",
+      "music": "音楽",
+      "art": "アート",
+      "film-tv": "映画・テレビ",
+      "creators": "クリエイター",
+      "community": "コミュニティ"
+    },
+    "card": {
+      "featured": "おすすめ",
+      "noDescription": "まだ説明がありません。",
+      "online": "{{count}}人がオンライン",
+      "members": "メンバー{{count}}人",
+      "join": "参加",
+      "requestToJoin": "参加をリクエスト",
+      "requested": "リクエスト済み",
+      "cancelRequest": "キャンセル",
+      "open": "開く",
+      "onlineHint": "オンライン数は前回の日次集計時点、メンバー数はリアルタイムです",
+      "report": "このスペースを報告"
+    },
+    "settings": {
+      "title": "探索に掲載",
+      "listedHint": "ログイン中のすべての Voxium ユーザーが探索でこのスペースを見つけられます。非公開のスペースにも招待で参加できます。",
+      "audience": "掲載には名前、アイコン、説明、タグ、メンバー数、オンライン数が表示されます。メンバー、メッセージ、音声が表示されることはありません。",
+      "hiddenInvitesLocked": "招待がロックされている間は探索に表示されません。",
+      "goToGeneral": "一般タブで招待のロックを解除",
+      "blockedByAdmin": "管理者によって掲載が無効化されています。",
+      "whoCanJoin": "参加方法",
+      "joinApproval": "参加をリクエスト",
+      "joinApprovalHint": "新しいメンバーはまずリクエストし、モデレーターが個別に承認または却下します。",
+      "joinOpen": "すぐに参加",
+      "joinOpenHint": "スペースを見つけた人は誰でもすぐに参加できます。",
+      "description": "説明",
+      "descriptionPlaceholder": "このスペースは何について、誰のためのものですか？",
+      "descriptionNudge": "説明のあるスペースはより見つけられやすくなります。",
+      "tags": "タグ",
+      "tagsHint": "最大{{max}}個。新しいメンバーはタグで探索を絞り込みます。",
+      "preview": "探索に表示されるカード",
+      "stats": "アクティビティ",
+      "statsMembers": "メンバー：{{count}}",
+      "statsMessages": "今週のメッセージ：{{count}}",
+      "statsOnline": "前回集計時のオンライン：{{count}}",
+      "statsRefreshedAt": "前回の集計：{{when}}",
+      "statsDaily": "アクティビティの数値は1日1回更新され、メンバー数はリアルタイムです。",
+      "statsNever": "アクティビティの数値はまだ計算されていません。1日1回更新されます。",
+      "save": "探索設定を保存",
+      "saved": "探索設定を保存しました",
+      "failedToSave": "探索設定を保存できませんでした",
+      "failedToLoad": "探索情報を読み込めませんでした"
+    }
   }
 }

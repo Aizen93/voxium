@@ -268,7 +268,8 @@
       "general": "일반",
       "members": "멤버",
       "roles": "역할",
-      "limits": "제한"
+      "limits": "제한",
+      "discovery": "탐색"
     },
     "general": {
       "serverName": "서버 이름",
@@ -306,16 +307,11 @@
       "assignRoles": "역할 할당",
       "promoteToAdmin": "관리자로 승격",
       "demoteToMember": "멤버로 강등",
-      "kickMember": "멤버 추방",
       "transferOwnership": "소유권 이전",
-      "kickConfirm": "{{name}}님을 추방하시겠습니까?",
-      "kickDescription": "서버에서 제거되며 다시 참여하려면 새 초대가 필요합니다.",
-      "kick": "추방",
       "transferConfirm": "{{name}}님에게 소유권을 이전하시겠습니까?",
       "transferDescription": "소유자 권한을 잃고 관리자가 됩니다. 이 작업은 되돌릴 수 없습니다.",
       "transfer": "이전",
       "failedToUpdateRole": "역할 업데이트에 실패했습니다",
-      "failedToKick": "멤버 추방에 실패했습니다",
       "failedToTransfer": "소유권 이전에 실패했습니다",
       "failedToUpdateRoles": "역할 업데이트에 실패했습니다",
       "noResults": "검색과 일치하는 멤버가 없습니다",
@@ -367,8 +363,8 @@
       "description": "멤버가 서버 초대 링크를 만들 수 있도록 허용합니다"
     },
     "KICK_MEMBERS": {
-      "name": "멤버 추방",
-      "description": "멤버가 낮은 역할을 가진 다른 멤버를 추방할 수 있도록 허용합니다"
+      "name": "멤버 관리",
+      "description": "낮은 역할의 멤버를 추방·차단하고, 차단을 해제하며, 참여 요청을 승인하거나 거절할 수 있습니다"
     },
     "MANAGE_NICKNAMES": {
       "name": "닉네임 관리",
@@ -485,13 +481,10 @@
     "clearNickname": "지우기",
     "promoteToAdmin": "관리자로 승격",
     "demoteToMember": "멤버로 강등",
-    "confirmKick": "다시 클릭하여 확인",
-    "kick": "추방",
     "assignRoles": "역할 할당",
     "noRolesCreated": "생성된 역할 없음",
     "failedToPromote": "멤버 승격에 실패했습니다",
     "failedToDemote": "멤버 강등에 실패했습니다",
-    "failedToKick": "멤버 추방에 실패했습니다",
     "rolesUpdated": "역할이 업데이트되었습니다",
     "failedToUpdateRoles": "역할 업데이트에 실패했습니다",
     "userMuted": "사용자가 음소거되었습니다",
@@ -588,7 +581,38 @@
     "switcherPlaceholder": "서버로 이동…",
     "switcherEmpty": "이름이 일치하는 서버가 없습니다.",
     "switcherHint": "입력해 필터 · ↑↓ 이동 · Enter 열기",
-    "createOrJoin": "서버 만들기 또는 참여"
+    "createOrJoin": "서버 만들기 또는 참여",
+    "joinRequests": {
+      "title": "참여 요청",
+      "empty": "대기 중인 요청이 없습니다.",
+      "approve": "승인",
+      "decline": "거절",
+      "approved": "{{name}}님이 멤버가 되었습니다",
+      "declined": "{{name}}님의 요청을 거절했습니다",
+      "noMessage": "메시지 없음",
+      "requestedAt": "{{when}} 요청",
+      "failedToLoad": "참여 요청을 불러오지 못했습니다",
+      "failedToApprove": "요청을 승인하지 못했습니다",
+      "failedToDecline": "요청을 거절하지 못했습니다",
+      "pending": "대기 중인 참여 요청 {{count}}건"
+    },
+    "banned": {
+      "title": "차단됨",
+      "empty": "차단된 사용자가 없습니다.",
+      "unban": "차단 해제",
+      "unbanned": "{{name}}님이 다시 참여할 수 있습니다",
+      "by": "{{name}}님이 차단",
+      "noReason": "사유 없음",
+      "at": "{{when}} 차단",
+      "failedToLoad": "차단 목록을 불러오지 못했습니다",
+      "failedToUnban": "차단을 해제하지 못했습니다"
+    },
+    "removeAndBan": "추방 및 차단",
+    "removeAndBanConfirm": "{{name}}님을 추방하고 차단할까요?",
+    "removeAndBanDescription": "이 사용자는 스페이스에서 추방되며, 차단됨 섹션에서 차단을 해제하기 전까지 초대, 직접 참여, 요청 어느 방법으로도 돌아올 수 없습니다.",
+    "banReasonPlaceholder": "사유 (선택 사항, 운영진에게 표시됨)",
+    "removeAndBanned": "{{name}}님을 추방하고 차단했습니다",
+    "removeAndBanFailed": "멤버를 추방하지 못했습니다"
   },
   "channel": {
     "joinVoice": "음성 참여",
@@ -1114,7 +1138,18 @@
     "ticketClosed": "티켓이 닫혀 있습니다. 메시지를 보내려면 다시 열어 주세요.",
     "cannotBanSelf": "자신을 차단할 수 없습니다",
     "cannotBanSuperAdmin": "최고 관리자는 차단할 수 없습니다",
-    "onlySuperAdminCanBan": "최고 관리자만 다른 관리자를 차단할 수 있습니다"
+    "onlySuperAdminCanBan": "최고 관리자만 다른 관리자를 차단할 수 있습니다",
+    "discoveryDisabled": "서버 탐색이 현재 비활성화되어 있습니다",
+    "listingDisabledByAdmin": "관리자가 공개를 비활성화했습니다",
+    "bannedFromServer": "이 스페이스에서 차단되었습니다",
+    "requestDeclinedRecently": "최근에 요청이 거절되었습니다. 나중에 다시 시도하세요.",
+    "joinRequestNotFound": "참여 요청을 찾을 수 없습니다",
+    "banNotFound": "차단 내역을 찾을 수 없습니다",
+    "cannotTransferToBanned": "차단된 사용자에게 소유권을 이전할 수 없습니다",
+    "cannotReportOwnServer": "자신의 스페이스는 신고할 수 없습니다",
+    "noPermissionManageMembers": "멤버를 관리할 권한이 없습니다",
+    "noPermissionKickMembers": "멤버를 추방할 권한이 없습니다",
+    "cannotKickHigherRole": "같거나 더 높은 역할의 멤버는 추방할 수 없습니다"
   },
   "e2e": {
     "badgeTitle": "종단간 암호화됨 — 안전 번호 보기",
@@ -1294,5 +1329,64 @@
     "renamed": "채널 이름이 변경되었습니다",
     "failedToRename": "채널 이름 변경에 실패했습니다",
     "moderationNotSecure": "\"{{name}}\"은(는) 일반 채널입니다 — 사이드바에서 삭제하세요"
+  },
+  "discovery": {
+    "tags": {
+      "gaming": "게임",
+      "esports": "e스포츠",
+      "open-source": "오픈 소스",
+      "programming": "프로그래밍",
+      "science": "과학",
+      "education": "교육",
+      "languages": "언어",
+      "music": "음악",
+      "art": "예술",
+      "film-tv": "영화·TV",
+      "creators": "크리에이터",
+      "community": "커뮤니티"
+    },
+    "card": {
+      "featured": "추천",
+      "noDescription": "아직 설명이 없습니다.",
+      "online": "{{count}}명 온라인",
+      "members": "멤버 {{count}}명",
+      "join": "참여",
+      "requestToJoin": "참여 요청",
+      "requested": "요청됨",
+      "cancelRequest": "취소",
+      "open": "열기",
+      "onlineHint": "마지막 일일 확인 시점의 온라인 수이며, 멤버 수는 실시간입니다",
+      "report": "이 스페이스 신고"
+    },
+    "settings": {
+      "title": "탐색에 공개",
+      "listedHint": "로그인한 모든 Voxium 사용자가 탐색에서 이 스페이스를 찾을 수 있습니다. 숨긴 스페이스에도 초대로는 참여할 수 있습니다.",
+      "audience": "목록에는 이름, 아이콘, 설명, 태그, 멤버 수, 온라인 수가 표시됩니다. 멤버, 메시지, 음성은 절대 표시되지 않습니다.",
+      "hiddenInvitesLocked": "초대가 잠긴 동안에는 탐색에서 숨겨집니다.",
+      "goToGeneral": "일반 탭에서 초대 잠금 해제",
+      "blockedByAdmin": "관리자가 공개를 비활성화했습니다.",
+      "whoCanJoin": "참여 방식",
+      "joinApproval": "참여 요청",
+      "joinApprovalHint": "새 사용자가 먼저 요청하고, 운영진이 각 요청을 승인하거나 거절합니다.",
+      "joinOpen": "바로 참여",
+      "joinOpenHint": "스페이스를 찾은 누구나 즉시 참여할 수 있습니다.",
+      "description": "설명",
+      "descriptionPlaceholder": "이 스페이스는 무엇에 관한 곳이며, 누구를 위한 곳인가요?",
+      "descriptionNudge": "설명이 있는 스페이스가 더 자주 발견됩니다.",
+      "tags": "태그",
+      "tagsHint": "최대 {{max}}개. 새 사용자는 태그로 탐색을 필터링합니다.",
+      "preview": "탐색에 표시되는 카드",
+      "stats": "활동",
+      "statsMembers": "멤버: {{count}}",
+      "statsMessages": "이번 주 메시지: {{count}}",
+      "statsOnline": "마지막 확인 시 온라인: {{count}}",
+      "statsRefreshedAt": "마지막 확인: {{when}}",
+      "statsDaily": "활동 수치는 하루에 한 번 갱신되며, 멤버 수는 실시간입니다.",
+      "statsNever": "활동 수치가 아직 계산되지 않았습니다. 하루에 한 번 갱신됩니다.",
+      "save": "탐색 설정 저장",
+      "saved": "탐색 설정을 저장했습니다",
+      "failedToSave": "탐색 설정을 저장하지 못했습니다",
+      "failedToLoad": "탐색 정보를 불러오지 못했습니다"
+    }
   }
 }

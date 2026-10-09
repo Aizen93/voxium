@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
-import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember } from '@voxium/shared';
+import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
 
 /** Module-level constant so selectors can default without a fresh reference. */
 export const NO_SECURE_MEMBERS: SecureChannelMember[] = [];
@@ -70,7 +70,8 @@ interface ServerState {
   reorderCategories: (serverId: string, order: { id: string; position: number }[]) => Promise<void>;
   reorderChannels: (serverId: string, order: { id: string; position: number; categoryId: string | null }[]) => Promise<void>;
   updateMemberRole: (serverId: string, memberId: string, role: MemberRole) => Promise<void>;
-  kickMember: (serverId: string, memberId: string) => Promise<void>;
+  /** Remove AND ban (every removal is a ban); the reason is optional and shown to moderators. */
+  kickMember: (serverId: string, memberId: string, reason?: string) => Promise<void>;
   transferOwnership: (serverId: string, targetUserId: string) => Promise<void>;
   deleteServer: (serverId: string) => Promise<void>;
   toggleInvitesLock: (serverId: string, locked: boolean) => Promise<void>;
@@ -116,6 +117,26 @@ interface ServerState {
   fetchSecureChannelMembers: (serverId: string, channelId: string) => Promise<SecureChannelMember[]>;
   fetchSecureChannelCount: (serverId: string) => Promise<number>;
   handleChannelMembersUpdated: (payload: { channelId?: unknown; serverId?: unknown; members?: unknown }) => void;
+
+  // Server discovery — the owner side (docs/local/server-discovery-plan.html).
+  // Profile changes land through server:updated, never the PATCH response.
+  /** Pending join requests per server, for the Members tab badge (moderators only). */
+  joinRequestCounts: Record<string, number>;
+  /** The loaded list (one server at a time) and whose it is. */
+  joinRequests: ServerJoinRequest[];
+  joinRequestsServerId: string | null;
+  bans: ServerBan[];
+  updateDiscovery: (serverId: string, fields: { discoverable?: boolean; joinMode?: ServerJoinMode; description?: string | null; tags?: string[] }) => Promise<void>;
+  fetchDiscoveryInfo: (serverId: string) => Promise<ServerDiscoveryInfo>;
+  fetchJoinRequests: (serverId: string) => Promise<void>;
+  approveJoinRequest: (serverId: string, userId: string) => Promise<void>;
+  declineJoinRequest: (serverId: string, userId: string) => Promise<void>;
+  /** server:join_request — appends to the loaded list, bumps the badge. */
+  handleJoinRequest: (serverId: string, request: ServerJoinRequest) => void;
+  /** server:join_request_resolved (any outcome) and our own approve/decline. */
+  handleJoinRequestResolved: (serverId: string, userId: string) => void;
+  fetchBans: (serverId: string) => Promise<void>;
+  unbanMember: (serverId: string, userId: string) => Promise<void>;
 }
 
 // Dedup: prevent redundant mark-as-read API calls when multiple code paths
@@ -516,8 +537,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
     await api.patch(`/servers/${serverId}/members/${memberId}/role`, { role });
   },
 
-  kickMember: async (serverId: string, memberId: string) => {
-    await api.post(`/servers/${serverId}/members/${memberId}/kick`);
+  kickMember: async (serverId: string, memberId: string, reason?: string) => {
+    await api.post(`/servers/${serverId}/members/${memberId}/kick`, reason ? { reason } : {});
   },
 
   transferOwnership: async (serverId: string, targetUserId: string) => {
@@ -752,6 +773,93 @@ export const useServerStore = create<ServerState>((set, get) => ({
   fetchSecureChannelCount: async (serverId: string) => {
     const { data } = await api.get(`/servers/${serverId}/secure-channels/count`);
     return data.data.count as number;
+  },
+
+  // ─── Server discovery (owner side) ─────────────────────────────────────────
+
+  joinRequestCounts: {},
+  joinRequests: [],
+  joinRequestsServerId: null,
+  bans: [],
+
+  updateDiscovery: async (serverId, fields) => {
+    await api.patch(`/servers/${serverId}/discovery`, fields);
+    // Local state updated via server:updated socket event
+  },
+
+  fetchDiscoveryInfo: async (serverId) => {
+    const { data } = await api.get(`/servers/${serverId}`);
+    const d = data.data;
+    return {
+      memberCount: typeof d.memberCount === 'number' ? d.memberCount : 0,
+      onlineCount: typeof d.onlineCount === 'number' ? d.onlineCount : 0,
+      weeklyMessages: typeof d.weeklyMessages === 'number' ? d.weeklyMessages : 0,
+      statsRefreshedAt: d.statsRefreshedAt ?? null,
+      discoveryListed: d.discoveryListed !== false,
+      discoveryBlockedAt: d.discoveryBlockedAt ?? null,
+      featuredAt: d.featuredAt ?? null,
+    };
+  },
+
+  fetchJoinRequests: async (serverId) => {
+    const { data } = await api.get(`/servers/${serverId}/join-requests`);
+    set((state) => ({
+      joinRequests: data.data as ServerJoinRequest[],
+      joinRequestsServerId: serverId,
+      joinRequestCounts: { ...state.joinRequestCounts, [serverId]: typeof data.total === 'number' ? data.total : (data.data as unknown[]).length },
+    }));
+  },
+
+  approveJoinRequest: async (serverId, userId) => {
+    await api.post(`/servers/${serverId}/join-requests/${userId}/approve`);
+    // The resolved event reaches us too (we are in the moderator audience);
+    // dropping the row here keeps the tab honest without waiting for it, and
+    // the handler is idempotent on a row it no longer finds.
+    get().handleJoinRequestResolved(serverId, userId);
+  },
+
+  declineJoinRequest: async (serverId, userId) => {
+    await api.post(`/servers/${serverId}/join-requests/${userId}/decline`);
+    get().handleJoinRequestResolved(serverId, userId);
+  },
+
+  handleJoinRequest: (serverId, request) => {
+    set((state) => {
+      const listed = state.joinRequestsServerId === serverId;
+      const known = listed && state.joinRequests.some((r) => r.id === request.id || r.userId === request.userId);
+      if (known) return state;
+      return {
+        joinRequests: listed ? [...state.joinRequests, request] : state.joinRequests,
+        joinRequestCounts: { ...state.joinRequestCounts, [serverId]: (state.joinRequestCounts[serverId] || 0) + 1 },
+      };
+    });
+  },
+
+  handleJoinRequestResolved: (serverId, userId) => {
+    set((state) => {
+      const listed = state.joinRequestsServerId === serverId;
+      const had = listed && state.joinRequests.some((r) => r.userId === userId);
+      // With the list loaded, only a row we actually drop moves the badge —
+      // our own approve and the socket echo of it must not count twice.
+      if (listed && !had) return state;
+      const next = Math.max(0, (state.joinRequestCounts[serverId] || 0) - 1);
+      const joinRequestCounts = { ...state.joinRequestCounts };
+      if (next === 0) delete joinRequestCounts[serverId]; else joinRequestCounts[serverId] = next;
+      return {
+        joinRequests: had ? state.joinRequests.filter((r) => r.userId !== userId) : state.joinRequests,
+        joinRequestCounts,
+      };
+    });
+  },
+
+  fetchBans: async (serverId) => {
+    const { data } = await api.get(`/servers/${serverId}/bans`);
+    set({ bans: data.data as ServerBan[] });
+  },
+
+  unbanMember: async (serverId, userId) => {
+    await api.delete(`/servers/${serverId}/bans/${userId}`);
+    set((state) => ({ bans: state.bans.filter((b) => !(b.serverId === serverId && b.userId === userId)) }));
   },
 
   handleChannelMembersUpdated: (payload) => {

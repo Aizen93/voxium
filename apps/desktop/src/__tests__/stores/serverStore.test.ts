@@ -274,3 +274,113 @@ describe('secure channels', () => {
     expect(list[0].userId).toBe('u1');
   });
 });
+
+
+// ─── Server discovery — the owner side ──────────────────────────────────────
+
+import type { ServerJoinRequest, ServerBan } from '@voxium/shared';
+
+const mockPatch = api.patch as unknown as Mock;
+const mockDelete = api.delete as unknown as Mock;
+
+const bob = { id: 'u-2', username: 'bob', displayName: 'Bob', avatarUrl: null };
+const req = (userId: string, id = `r-${userId}`): ServerJoinRequest =>
+  ({ id, serverId: 'srv-1', userId, message: null, status: 'pending', createdAt: '2026-10-09T10:00:00.000Z', user: { ...bob, id: userId } });
+
+describe('serverStore — discovery, join requests and bans', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useServerStore.setState({ joinRequestCounts: {}, joinRequests: [], joinRequestsServerId: null, bans: [] });
+  });
+
+  it('updateDiscovery PATCHes the fields and touches no local state (server:updated is the source of truth)', async () => {
+    mockPatch.mockResolvedValue({ data: { data: {} } });
+    useServerStore.setState({ servers: [{ id: 'srv-1', name: 'S', joinMode: 'approval', discoverable: true } as never] });
+    await useServerStore.getState().updateDiscovery('srv-1', { joinMode: 'open', tags: ['gaming'] });
+    expect(mockPatch).toHaveBeenCalledWith('/servers/srv-1/discovery', { joinMode: 'open', tags: ['gaming'] });
+    expect((useServerStore.getState().servers[0] as { joinMode: string }).joinMode).toBe('approval');
+  });
+
+  it('fetchDiscoveryInfo picks the detail fields with safe defaults', async () => {
+    mockGet.mockResolvedValue({ data: { data: { id: 'srv-1', memberCount: 12, onlineCount: 3, weeklyMessages: 40, statsRefreshedAt: '2026-10-09T04:00:00.000Z', discoveryListed: true, discoveryBlockedAt: null, featuredAt: null } } });
+    await expect(useServerStore.getState().fetchDiscoveryInfo('srv-1')).resolves.toEqual({
+      memberCount: 12, onlineCount: 3, weeklyMessages: 40, statsRefreshedAt: '2026-10-09T04:00:00.000Z', discoveryListed: true, discoveryBlockedAt: null, featuredAt: null,
+    });
+    mockGet.mockResolvedValue({ data: { data: { id: 'srv-1' } } });
+    await expect(useServerStore.getState().fetchDiscoveryInfo('srv-1')).resolves.toEqual({
+      memberCount: 0, onlineCount: 0, weeklyMessages: 0, statsRefreshedAt: null, discoveryListed: true, discoveryBlockedAt: null, featuredAt: null,
+    });
+  });
+
+  it('fetchJoinRequests loads the list, remembers whose it is, and sets the badge from the total', async () => {
+    mockGet.mockResolvedValue({ data: { data: [req('u-2')], total: 7 } });
+    await useServerStore.getState().fetchJoinRequests('srv-1');
+    const s = useServerStore.getState();
+    expect(s.joinRequests).toHaveLength(1);
+    expect(s.joinRequestsServerId).toBe('srv-1');
+    expect(s.joinRequestCounts).toEqual({ 'srv-1': 7 });
+  });
+
+  it('handleJoinRequest appends to the loaded list once and bumps the badge; another server only bumps its badge', () => {
+    useServerStore.setState({ joinRequests: [], joinRequestsServerId: 'srv-1' });
+    useServerStore.getState().handleJoinRequest('srv-1', req('u-2'));
+    useServerStore.getState().handleJoinRequest('srv-1', req('u-2')); // socket replay
+    useServerStore.getState().handleJoinRequest('srv-9', req('u-5'));
+    const s = useServerStore.getState();
+    expect(s.joinRequests.map((r) => r.userId)).toEqual(['u-2']);
+    expect(s.joinRequestCounts).toEqual({ 'srv-1': 1, 'srv-9': 1 });
+  });
+
+  it('our own approve drops the row and the badge ONCE — the socket echo of it does not count twice', async () => {
+    mockPost.mockResolvedValue({ data: {} });
+    useServerStore.setState({ joinRequests: [req('u-2'), req('u-3')], joinRequestsServerId: 'srv-1', joinRequestCounts: { 'srv-1': 2 } });
+    await useServerStore.getState().approveJoinRequest('srv-1', 'u-2');
+    expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/join-requests/u-2/approve');
+    expect(useServerStore.getState().joinRequests.map((r) => r.userId)).toEqual(['u-3']);
+    expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 1 });
+    // the resolved event for the same user arrives next
+    useServerStore.getState().handleJoinRequestResolved('srv-1', 'u-2');
+    expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 1 });
+    // decline the other one: the badge key disappears at zero
+    await useServerStore.getState().declineJoinRequest('srv-1', 'u-3');
+    expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/join-requests/u-3/decline');
+    expect(useServerStore.getState().joinRequests).toEqual([]);
+    expect(useServerStore.getState().joinRequestCounts).toEqual({});
+  });
+
+  it('with no list loaded for that server, a resolved event moves the badge alone (and never below zero)', () => {
+    useServerStore.setState({ joinRequestCounts: { 'srv-1': 1 }, joinRequestsServerId: 'srv-9', joinRequests: [] });
+    useServerStore.getState().handleJoinRequestResolved('srv-1', 'u-2');
+    expect(useServerStore.getState().joinRequestCounts).toEqual({});
+    useServerStore.getState().handleJoinRequestResolved('srv-1', 'u-2');
+    expect(useServerStore.getState().joinRequestCounts).toEqual({});
+  });
+
+  it('a failed approve leaves the list and the badge alone', async () => {
+    mockPost.mockRejectedValue(new Error('Join request not found'));
+    useServerStore.setState({ joinRequests: [req('u-2')], joinRequestsServerId: 'srv-1', joinRequestCounts: { 'srv-1': 1 } });
+    await expect(useServerStore.getState().approveJoinRequest('srv-1', 'u-2')).rejects.toThrow();
+    expect(useServerStore.getState().joinRequests).toHaveLength(1);
+    expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 1 });
+  });
+
+  it('fetchBans loads the list; unbanMember DELETEs and drops the row locally (no socket event carries bans)', async () => {
+    const ban: ServerBan = { serverId: 'srv-1', userId: 'u-2', reason: 'spam', createdAt: '2026-10-09T10:00:00.000Z', user: bob, bannedBy: null };
+    mockGet.mockResolvedValue({ data: { data: [ban] } });
+    await useServerStore.getState().fetchBans('srv-1');
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/bans');
+    expect(useServerStore.getState().bans).toEqual([ban]);
+    mockDelete.mockResolvedValue({ data: {} });
+    await useServerStore.getState().unbanMember('srv-1', 'u-2');
+    expect(mockDelete).toHaveBeenCalledWith('/servers/srv-1/bans/u-2');
+    expect(useServerStore.getState().bans).toEqual([]);
+  });
+
+  it('kickMember sends the reason when given and an empty body otherwise', async () => {
+    mockPost.mockResolvedValue({ data: {} });
+    await useServerStore.getState().kickMember('srv-1', 'u-2', 'spam');
+    expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/members/u-2/kick', { reason: 'spam' });
+    await useServerStore.getState().kickMember('srv-1', 'u-2');
+    expect(mockPost).toHaveBeenLastCalledWith('/servers/srv-1/members/u-2/kick', {});
+  });
+});

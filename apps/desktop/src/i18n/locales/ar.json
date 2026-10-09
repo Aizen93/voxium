@@ -268,7 +268,8 @@
       "general": "عام",
       "members": "الأعضاء",
       "roles": "الأدوار",
-      "limits": "الحدود"
+      "limits": "الحدود",
+      "discovery": "الاستكشاف"
     },
     "general": {
       "serverName": "اسم الخادم",
@@ -306,16 +307,11 @@
       "assignRoles": "تعيين الأدوار",
       "promoteToAdmin": "ترقية إلى مدير",
       "demoteToMember": "تخفيض إلى عضو",
-      "kickMember": "طرد العضو",
       "transferOwnership": "نقل الملكية",
-      "kickConfirm": "طرد {{name}}؟",
-      "kickDescription": "سيتم إزالته من الخادم وسيحتاج إلى دعوة جديدة للانضمام مجددًا.",
-      "kick": "طرد",
       "transferConfirm": "نقل الملكية إلى {{name}}؟",
       "transferDescription": "ستفقد امتيازات المالك وتصبح مديرًا. لا يمكنك التراجع عن هذا الإجراء.",
       "transfer": "نقل",
       "failedToUpdateRole": "فشل تحديث الدور",
-      "failedToKick": "فشل طرد العضو",
       "failedToTransfer": "فشل نقل الملكية",
       "failedToUpdateRoles": "فشل تحديث الأدوار",
       "noResults": "لا يوجد أعضاء مطابقون لبحثك",
@@ -367,8 +363,8 @@
       "description": "يسمح للأعضاء بإنشاء روابط دعوة للخادم"
     },
     "KICK_MEMBERS": {
-      "name": "طرد الأعضاء",
-      "description": "يسمح للأعضاء بطرد أعضاء آخرين ذوي أدوار أقل"
+      "name": "إدارة الأعضاء",
+      "description": "يسمح بإزالة الأعضاء ذوي الأدوار الأدنى وحظرهم، ورفع الحظر عنهم، والموافقة على طلبات الانضمام أو رفضها"
     },
     "MANAGE_NICKNAMES": {
       "name": "إدارة الألقاب",
@@ -485,13 +481,10 @@
     "clearNickname": "مسح",
     "promoteToAdmin": "ترقية إلى مدير",
     "demoteToMember": "تخفيض إلى عضو",
-    "confirmKick": "انقر مرة أخرى للتأكيد",
-    "kick": "طرد",
     "assignRoles": "تعيين الأدوار",
     "noRolesCreated": "لم يتم إنشاء أدوار",
     "failedToPromote": "فشل ترقية العضو",
     "failedToDemote": "فشل تخفيض العضو",
-    "failedToKick": "فشل طرد العضو",
     "rolesUpdated": "تم تحديث الأدوار",
     "failedToUpdateRoles": "فشل تحديث الأدوار",
     "userMuted": "تم كتم صوت المستخدم",
@@ -588,7 +581,38 @@
     "switcherPlaceholder": "الانتقال إلى خادم…",
     "switcherEmpty": "لا يوجد خادم بهذا الاسم.",
     "switcherHint": "اكتب للتصفية · ↑↓ للتنقل · Enter للفتح",
-    "createOrJoin": "إنشاء خادم أو الانضمام إليه"
+    "createOrJoin": "إنشاء خادم أو الانضمام إليه",
+    "joinRequests": {
+      "title": "طلبات الانضمام",
+      "empty": "لا توجد طلبات معلّقة.",
+      "approve": "موافقة",
+      "decline": "رفض",
+      "approved": "أصبح {{name}} عضوًا الآن",
+      "declined": "تم رفض طلب {{name}}",
+      "noMessage": "لا توجد رسالة",
+      "requestedAt": "طُلب في {{when}}",
+      "failedToLoad": "تعذّر تحميل طلبات الانضمام",
+      "failedToApprove": "تعذّرت الموافقة على الطلب",
+      "failedToDecline": "تعذّر رفض الطلب",
+      "pending": "{{count}} طلبات انضمام معلّقة"
+    },
+    "banned": {
+      "title": "المحظورون",
+      "empty": "لا يوجد أحد محظور.",
+      "unban": "رفع الحظر",
+      "unbanned": "يمكن لـ {{name}} الانضمام مجددًا",
+      "by": "بواسطة {{name}}",
+      "noReason": "لم يُذكر سبب",
+      "at": "حُظر في {{when}}",
+      "failedToLoad": "تعذّر تحميل قائمة المحظورين",
+      "failedToUnban": "تعذّر رفع الحظر"
+    },
+    "removeAndBan": "إزالة وحظر",
+    "removeAndBanConfirm": "إزالة {{name}} وحظره؟",
+    "removeAndBanDescription": "سيُزال هذا العضو من المساحة ولن يتمكن من العودة — لا بالدعوة ولا مباشرة ولا بالطلب — حتى ترفع عنه الحظر من قسم المحظورين.",
+    "banReasonPlaceholder": "السبب (اختياري، يراه المشرفون)",
+    "removeAndBanned": "تمت إزالة {{name}} وحظره",
+    "removeAndBanFailed": "تعذّرت إزالة العضو"
   },
   "channel": {
     "joinVoice": "الانضمام إلى الصوت",
@@ -1114,7 +1138,18 @@
     "ticketClosed": "التذكرة مغلقة. أعد فتحها لإرسال رسائل.",
     "cannotBanSelf": "لا يمكنك حظر نفسك",
     "cannotBanSuperAdmin": "لا يمكن حظر المشرف الأعلى",
-    "onlySuperAdminCanBan": "المشرفون الأعلى فقط يمكنهم حظر مشرفين آخرين"
+    "onlySuperAdminCanBan": "المشرفون الأعلى فقط يمكنهم حظر مشرفين آخرين",
+    "discoveryDisabled": "استكشاف الخوادم معطّل حاليًا",
+    "listingDisabledByAdmin": "عطّل مسؤول الإدراج",
+    "bannedFromServer": "أنت محظور من هذه المساحة",
+    "requestDeclinedRecently": "رُفض طلبك مؤخرًا. يرجى المحاولة لاحقًا.",
+    "joinRequestNotFound": "طلب الانضمام غير موجود",
+    "banNotFound": "الحظر غير موجود",
+    "cannotTransferToBanned": "لا يمكن نقل الملكية إلى مستخدم محظور",
+    "cannotReportOwnServer": "لا يمكنك الإبلاغ عن مساحتك",
+    "noPermissionManageMembers": "ليست لديك صلاحية إدارة الأعضاء",
+    "noPermissionKickMembers": "ليست لديك صلاحية إزالة الأعضاء",
+    "cannotKickHigherRole": "لا يمكن إزالة عضو بدور مساوٍ أو أعلى"
   },
   "e2e": {
     "badgeTitle": "مشفَّر تشفيرًا تامًا بين الطرفين — عرض رقم الأمان",
@@ -1299,5 +1334,64 @@
     "renamed": "تمت إعادة تسمية القناة",
     "failedToRename": "فشلت إعادة تسمية القناة",
     "moderationNotSecure": "\"{{name}}\" قناة عادية — احذفها من الشريط الجانبي"
+  },
+  "discovery": {
+    "tags": {
+      "gaming": "ألعاب",
+      "esports": "الرياضات الإلكترونية",
+      "open-source": "مفتوح المصدر",
+      "programming": "برمجة",
+      "science": "علوم",
+      "education": "تعليم",
+      "languages": "لغات",
+      "music": "موسيقى",
+      "art": "فن",
+      "film-tv": "أفلام وتلفزيون",
+      "creators": "صنّاع المحتوى",
+      "community": "مجتمع"
+    },
+    "card": {
+      "featured": "مميّز",
+      "noDescription": "لا يوجد وصف بعد.",
+      "online": "{{count}} متصل",
+      "members": "{{count}} عضو",
+      "join": "انضمام",
+      "requestToJoin": "طلب الانضمام",
+      "requested": "تم الطلب",
+      "cancelRequest": "إلغاء",
+      "open": "فتح",
+      "onlineHint": "عدد المتصلين حسب آخر فحص يومي؛ عدد الأعضاء مباشر",
+      "report": "الإبلاغ عن هذه المساحة"
+    },
+    "settings": {
+      "title": "مدرجة في الاستكشاف",
+      "listedHint": "يمكن لأي مستخدم مسجّل الدخول في Voxium العثور على هذه المساحة في الاستكشاف. يمكن الانضمام إلى المساحة المخفية بالدعوة.",
+      "audience": "تعرض البطاقة الاسم والأيقونة والوصف والوسوم وعدد الأعضاء وعدد المتصلين. لا تُعرض الأعضاء ولا الرسائل ولا الصوت أبدًا.",
+      "hiddenInvitesLocked": "مخفية من الاستكشاف ما دامت الدعوات مقفلة.",
+      "goToGeneral": "فتح قفل الدعوات في «عام»",
+      "blockedByAdmin": "عطّل مسؤول الإدراج.",
+      "whoCanJoin": "من يمكنه الانضمام",
+      "joinApproval": "طلب الانضمام",
+      "joinApprovalHint": "يطلب الوافدون الجدد أولًا؛ ويوافق المشرفون على كل طلب أو يرفضونه.",
+      "joinOpen": "الانضمام مباشرة",
+      "joinOpenHint": "يمكن لأي شخص يجد المساحة الانضمام فورًا.",
+      "description": "الوصف",
+      "descriptionPlaceholder": "ما موضوع هذه المساحة، ولمن هي؟",
+      "descriptionNudge": "المساحات ذات الوصف يُعثر عليها أكثر.",
+      "tags": "الوسوم",
+      "tagsHint": "حتى {{max}}. يصفّي الوافدون الجدد الاستكشاف حسب الوسم.",
+      "preview": "بطاقتك في الاستكشاف",
+      "stats": "النشاط",
+      "statsMembers": "الأعضاء: {{count}}",
+      "statsMessages": "رسائل هذا الأسبوع: {{count}}",
+      "statsOnline": "المتصلون عند آخر فحص: {{count}}",
+      "statsRefreshedAt": "آخر فحص: {{when}}",
+      "statsDaily": "تُحدَّث أرقام النشاط مرة يوميًا؛ وعدد الأعضاء مباشر.",
+      "statsNever": "لم تُحسب أرقام النشاط بعد؛ تُحدَّث مرة يوميًا.",
+      "save": "حفظ إعدادات الاستكشاف",
+      "saved": "تم حفظ إعدادات الاستكشاف",
+      "failedToSave": "تعذّر حفظ إعدادات الاستكشاف",
+      "failedToLoad": "تعذّر تحميل بيانات الاستكشاف"
+    }
   }
 }

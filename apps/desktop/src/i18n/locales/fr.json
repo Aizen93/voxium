@@ -268,7 +268,8 @@
       "general": "Général",
       "members": "Membres",
       "roles": "Rôles",
-      "limits": "Limites"
+      "limits": "Limites",
+      "discovery": "Découverte"
     },
     "general": {
       "serverName": "Nom du serveur",
@@ -306,16 +307,11 @@
       "assignRoles": "Attribuer des rôles",
       "promoteToAdmin": "Promouvoir administrateur",
       "demoteToMember": "Rétrograder en membre",
-      "kickMember": "Expulser le membre",
       "transferOwnership": "Transférer la propriété",
-      "kickConfirm": "Expulser {{name}} ?",
-      "kickDescription": "Cette personne sera retirée du serveur et devra obtenir une nouvelle invitation pour le rejoindre.",
-      "kick": "Expulser",
       "transferConfirm": "Transférer la propriété à {{name}} ?",
       "transferDescription": "Vous perdrez les privilèges de propriétaire et deviendrez administrateur. Cette action est irréversible de votre part.",
       "transfer": "Transférer",
       "failedToUpdateRole": "Impossible de mettre à jour le rôle",
-      "failedToKick": "Impossible d'expulser le membre",
       "failedToTransfer": "Impossible de transférer la propriété",
       "failedToUpdateRoles": "Impossible de mettre à jour les rôles",
       "noResults": "Aucun membre ne correspond à votre recherche",
@@ -367,8 +363,8 @@
       "description": "Permet aux membres de créer des liens d'invitation au serveur"
     },
     "KICK_MEMBERS": {
-      "name": "Expulser des membres",
-      "description": "Permet aux membres d'expulser d'autres membres ayant des rôles inférieurs"
+      "name": "Gérer les membres",
+      "description": "Permet de retirer et bannir les membres de rang inférieur, de les débannir, et d’accepter ou refuser les demandes d’adhésion"
     },
     "MANAGE_NICKNAMES": {
       "name": "Gérer les pseudos",
@@ -485,13 +481,10 @@
     "clearNickname": "Effacer",
     "promoteToAdmin": "Promouvoir administrateur",
     "demoteToMember": "Rétrograder en membre",
-    "confirmKick": "Cliquez à nouveau pour confirmer",
-    "kick": "Expulser",
     "assignRoles": "Attribuer des rôles",
     "noRolesCreated": "Aucun rôle créé",
     "failedToPromote": "Impossible de promouvoir le membre",
     "failedToDemote": "Impossible de rétrograder le membre",
-    "failedToKick": "Impossible d'expulser le membre",
     "rolesUpdated": "Rôles mis à jour",
     "failedToUpdateRoles": "Impossible de mettre à jour les rôles",
     "userMuted": "Utilisateur mis en sourdine",
@@ -588,7 +581,38 @@
     "switcherPlaceholder": "Aller à un serveur…",
     "switcherEmpty": "Aucun serveur ne correspond à ce nom.",
     "switcherHint": "Tapez pour filtrer · ↑↓ pour naviguer · Entrée pour ouvrir",
-    "createOrJoin": "Créer ou rejoindre un serveur"
+    "createOrJoin": "Créer ou rejoindre un serveur",
+    "joinRequests": {
+      "title": "Demandes d’adhésion",
+      "empty": "Aucune demande en attente.",
+      "approve": "Accepter",
+      "decline": "Refuser",
+      "approved": "{{name}} est désormais membre",
+      "declined": "Demande de {{name}} refusée",
+      "noMessage": "Pas de message",
+      "requestedAt": "Demandé le {{when}}",
+      "failedToLoad": "Échec du chargement des demandes",
+      "failedToApprove": "Échec de l’acceptation de la demande",
+      "failedToDecline": "Échec du refus de la demande",
+      "pending": "{{count}} demandes en attente"
+    },
+    "banned": {
+      "title": "Bannis",
+      "empty": "Personne n’est banni.",
+      "unban": "Débannir",
+      "unbanned": "{{name}} peut de nouveau rejoindre",
+      "by": "par {{name}}",
+      "noReason": "Aucun motif indiqué",
+      "at": "Banni le {{when}}",
+      "failedToLoad": "Échec du chargement de la liste des bannis",
+      "failedToUnban": "Échec du débannissement"
+    },
+    "removeAndBan": "Retirer et bannir",
+    "removeAndBanConfirm": "Retirer et bannir {{name}} ?",
+    "removeAndBanDescription": "Cette personne sera retirée de l’espace et ne pourra pas revenir, ni par invitation, ni directement, ni sur demande, tant que vous ne l’aurez pas débannie depuis la section Bannis.",
+    "banReasonPlaceholder": "Motif (facultatif, visible par les modérateurs)",
+    "removeAndBanned": "{{name}} a été retiré et banni",
+    "removeAndBanFailed": "Échec du retrait du membre"
   },
   "channel": {
     "joinVoice": "Rejoindre le vocal",
@@ -1114,7 +1138,18 @@
     "ticketClosed": "Le ticket est fermé. Rouvrez-le pour envoyer des messages.",
     "cannotBanSelf": "Impossible de se bannir soi-même",
     "cannotBanSuperAdmin": "Impossible de bannir un super administrateur",
-    "onlySuperAdminCanBan": "Seuls les super administrateurs peuvent bannir d'autres administrateurs"
+    "onlySuperAdminCanBan": "Seuls les super administrateurs peuvent bannir d'autres administrateurs",
+    "discoveryDisabled": "La découverte des serveurs est actuellement désactivée",
+    "listingDisabledByAdmin": "Le référencement est désactivé par un administrateur",
+    "bannedFromServer": "Vous êtes banni de cet espace",
+    "requestDeclinedRecently": "Votre demande a été refusée récemment. Réessayez plus tard.",
+    "joinRequestNotFound": "Demande d’adhésion introuvable",
+    "banNotFound": "Bannissement introuvable",
+    "cannotTransferToBanned": "Impossible de transférer la propriété à un utilisateur banni",
+    "cannotReportOwnServer": "Vous ne pouvez pas signaler votre propre espace",
+    "noPermissionManageMembers": "Vous n’avez pas la permission de gérer les membres",
+    "noPermissionKickMembers": "Vous n’avez pas la permission de retirer des membres",
+    "cannotKickHigherRole": "Impossible de retirer un membre de rang égal ou supérieur"
   },
   "e2e": {
     "badgeTitle": "Chiffré de bout en bout — voir le numéro de sécurité",
@@ -1295,5 +1330,64 @@
     "renamed": "Salon renommé",
     "failedToRename": "Échec du renommage du salon",
     "moderationNotSecure": "« {{name}} » est un salon ordinaire — supprimez-le depuis la barre latérale"
+  },
+  "discovery": {
+    "tags": {
+      "gaming": "Jeux vidéo",
+      "esports": "Esport",
+      "open-source": "Open source",
+      "programming": "Programmation",
+      "science": "Sciences",
+      "education": "Éducation",
+      "languages": "Langues",
+      "music": "Musique",
+      "art": "Art",
+      "film-tv": "Films & séries",
+      "creators": "Créateurs",
+      "community": "Communauté"
+    },
+    "card": {
+      "featured": "À la une",
+      "noDescription": "Pas encore de description.",
+      "online": "{{count}} en ligne",
+      "members": "{{count}} membres",
+      "join": "Rejoindre",
+      "requestToJoin": "Demander à rejoindre",
+      "requested": "Demande envoyée",
+      "cancelRequest": "Annuler",
+      "open": "Ouvrir",
+      "onlineHint": "En ligne lors du dernier relevé quotidien ; le nombre de membres est en direct",
+      "report": "Signaler cet espace"
+    },
+    "settings": {
+      "title": "Visible dans Explorer",
+      "listedHint": "Tout utilisateur Voxium connecté peut trouver cet espace dans Explorer. Un espace masqué reste accessible par invitation.",
+      "audience": "Une fiche montre le nom, l’icône, la description, les tags, le nombre de membres et le nombre en ligne. Les membres, les messages et la voix ne sont jamais affichés.",
+      "hiddenInvitesLocked": "Masqué d’Explorer tant que les invitations sont verrouillées.",
+      "goToGeneral": "Déverrouiller les invitations dans Général",
+      "blockedByAdmin": "Référencement désactivé par un administrateur.",
+      "whoCanJoin": "Qui peut rejoindre",
+      "joinApproval": "Sur demande",
+      "joinApprovalHint": "Les nouveaux venus demandent d’abord ; les modérateurs acceptent ou refusent chaque demande.",
+      "joinOpen": "Rejoindre directement",
+      "joinOpenHint": "Toute personne qui trouve l’espace peut le rejoindre immédiatement.",
+      "description": "Description",
+      "descriptionPlaceholder": "De quoi parle cet espace, et à qui s’adresse-t-il ?",
+      "descriptionNudge": "Les espaces avec une description sont trouvés plus souvent.",
+      "tags": "Tags",
+      "tagsHint": "Jusqu’à {{max}}. Les nouveaux venus filtrent Explorer par tag.",
+      "preview": "Votre fiche dans Explorer",
+      "stats": "Activité",
+      "statsMembers": "Membres : {{count}}",
+      "statsMessages": "Messages cette semaine : {{count}}",
+      "statsOnline": "En ligne au dernier relevé : {{count}}",
+      "statsRefreshedAt": "Dernier relevé : {{when}}",
+      "statsDaily": "Les chiffres d’activité sont actualisés une fois par jour ; le nombre de membres est en direct.",
+      "statsNever": "Les chiffres d’activité n’ont pas encore été calculés ; ils sont actualisés une fois par jour.",
+      "save": "Enregistrer les réglages de découverte",
+      "saved": "Réglages de découverte enregistrés",
+      "failedToSave": "Échec de l’enregistrement des réglages de découverte",
+      "failedToLoad": "Échec du chargement des informations de découverte"
+    }
   }
 }

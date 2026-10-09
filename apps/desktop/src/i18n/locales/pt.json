@@ -268,7 +268,8 @@
       "general": "Geral",
       "members": "Membros",
       "roles": "Cargos",
-      "limits": "Limites"
+      "limits": "Limites",
+      "discovery": "Descoberta"
     },
     "general": {
       "serverName": "Nome do servidor",
@@ -306,16 +307,11 @@
       "assignRoles": "Atribuir cargos",
       "promoteToAdmin": "Promover a administrador",
       "demoteToMember": "Rebaixar a membro",
-      "kickMember": "Expulsar membro",
       "transferOwnership": "Transferir propriedade",
-      "kickConfirm": "Expulsar {{name}}?",
-      "kickDescription": "Será removido do servidor e precisará de um novo convite para voltar.",
-      "kick": "Expulsar",
       "transferConfirm": "Transferir a propriedade para {{name}}?",
       "transferDescription": "Você perderá os privilégios de proprietário e se tornará administrador. Isso não pode ser revertido por você.",
       "transfer": "Transferir",
       "failedToUpdateRole": "Não foi possível atualizar o cargo",
-      "failedToKick": "Não foi possível expulsar o membro",
       "failedToTransfer": "Não foi possível transferir a propriedade",
       "failedToUpdateRoles": "Não foi possível atualizar os cargos",
       "noResults": "Nenhum membro corresponde à sua pesquisa",
@@ -367,8 +363,8 @@
       "description": "Permite que os membros criem links de convite para o servidor"
     },
     "KICK_MEMBERS": {
-      "name": "Expulsar membros",
-      "description": "Permite que os membros expulsem outros membros com cargos inferiores"
+      "name": "Gerenciar membros",
+      "description": "Permite remover e banir membros com cargos inferiores, desbani-los e aprovar ou recusar pedidos de entrada"
     },
     "MANAGE_NICKNAMES": {
       "name": "Gerenciar apelidos",
@@ -485,13 +481,10 @@
     "clearNickname": "Limpar",
     "promoteToAdmin": "Promover a administrador",
     "demoteToMember": "Rebaixar a membro",
-    "confirmKick": "Clique novamente para confirmar",
-    "kick": "Expulsar",
     "assignRoles": "Atribuir cargos",
     "noRolesCreated": "Nenhum cargo criado",
     "failedToPromote": "Não foi possível promover o membro",
     "failedToDemote": "Não foi possível rebaixar o membro",
-    "failedToKick": "Não foi possível expulsar o membro",
     "rolesUpdated": "Cargos atualizados",
     "failedToUpdateRoles": "Não foi possível atualizar os cargos",
     "userMuted": "Usuário silenciado",
@@ -588,7 +581,38 @@
     "switcherPlaceholder": "Ir para um servidor…",
     "switcherEmpty": "Nenhum servidor corresponde a esse nome.",
     "switcherHint": "Escreva para filtrar · ↑↓ para mover · Enter para abrir",
-    "createOrJoin": "Criar ou entrar num servidor"
+    "createOrJoin": "Criar ou entrar num servidor",
+    "joinRequests": {
+      "title": "Pedidos de entrada",
+      "empty": "Nenhum pedido pendente.",
+      "approve": "Aprovar",
+      "decline": "Recusar",
+      "approved": "{{name}} agora é membro",
+      "declined": "Pedido de {{name}} recusado",
+      "noMessage": "Sem mensagem",
+      "requestedAt": "Pedido em {{when}}",
+      "failedToLoad": "Falha ao carregar os pedidos",
+      "failedToApprove": "Falha ao aprovar o pedido",
+      "failedToDecline": "Falha ao recusar o pedido",
+      "pending": "{{count}} pedidos pendentes"
+    },
+    "banned": {
+      "title": "Banidos",
+      "empty": "Ninguém está banido.",
+      "unban": "Desbanir",
+      "unbanned": "{{name}} pode entrar novamente",
+      "by": "por {{name}}",
+      "noReason": "Nenhum motivo informado",
+      "at": "Banido em {{when}}",
+      "failedToLoad": "Falha ao carregar a lista de banidos",
+      "failedToUnban": "Falha ao desbanir"
+    },
+    "removeAndBan": "Remover e banir",
+    "removeAndBanConfirm": "Remover e banir {{name}}?",
+    "removeAndBanDescription": "A pessoa será removida do espaço e não poderá voltar, nem por convite, nem diretamente, nem por pedido, até que você a desbana na seção Banidos.",
+    "banReasonPlaceholder": "Motivo (opcional, visível para os moderadores)",
+    "removeAndBanned": "{{name}} foi removido e banido",
+    "removeAndBanFailed": "Falha ao remover o membro"
   },
   "channel": {
     "joinVoice": "Entrar na voz",
@@ -1114,7 +1138,18 @@
     "ticketClosed": "O ticket está fechado. Reabra-o para enviar mensagens.",
     "cannotBanSelf": "Não é possível banir a si mesmo",
     "cannotBanSuperAdmin": "Não é possível banir um superadministrador",
-    "onlySuperAdminCanBan": "Apenas superadministradores podem banir outros administradores"
+    "onlySuperAdminCanBan": "Apenas superadministradores podem banir outros administradores",
+    "discoveryDisabled": "A descoberta de servidores está desativada no momento",
+    "listingDisabledByAdmin": "A listagem está desativada por um administrador",
+    "bannedFromServer": "Você está banido deste espaço",
+    "requestDeclinedRecently": "Seu pedido foi recusado recentemente. Tente novamente mais tarde.",
+    "joinRequestNotFound": "Pedido de entrada não encontrado",
+    "banNotFound": "Banimento não encontrado",
+    "cannotTransferToBanned": "Não é possível transferir a propriedade para um usuário banido",
+    "cannotReportOwnServer": "Você não pode denunciar o seu próprio espaço",
+    "noPermissionManageMembers": "Você não tem permissão para gerenciar membros",
+    "noPermissionKickMembers": "Você não tem permissão para remover membros",
+    "cannotKickHigherRole": "Não é possível remover um membro com cargo igual ou superior"
   },
   "e2e": {
     "badgeTitle": "Criptografia de ponta a ponta — ver número de segurança",
@@ -1295,5 +1330,64 @@
     "renamed": "Canal renomeado",
     "failedToRename": "Falha ao renomear o canal",
     "moderationNotSecure": "\"{{name}}\" é um canal comum — exclua-o pela barra lateral"
+  },
+  "discovery": {
+    "tags": {
+      "gaming": "Jogos",
+      "esports": "Esports",
+      "open-source": "Código aberto",
+      "programming": "Programação",
+      "science": "Ciência",
+      "education": "Educação",
+      "languages": "Idiomas",
+      "music": "Música",
+      "art": "Arte",
+      "film-tv": "Cinema e TV",
+      "creators": "Criadores",
+      "community": "Comunidade"
+    },
+    "card": {
+      "featured": "Em destaque",
+      "noDescription": "Ainda sem descrição.",
+      "online": "{{count}} online",
+      "members": "{{count}} membros",
+      "join": "Entrar",
+      "requestToJoin": "Pedir para entrar",
+      "requested": "Pedido enviado",
+      "cancelRequest": "Cancelar",
+      "open": "Abrir",
+      "onlineHint": "Online na última verificação diária; o número de membros é ao vivo",
+      "report": "Denunciar este espaço"
+    },
+    "settings": {
+      "title": "Visível em Explorar",
+      "listedHint": "Qualquer usuário do Voxium conectado pode encontrar este espaço em Explorar. Um espaço oculto continua acessível por convite.",
+      "audience": "Uma ficha mostra o nome, o ícone, a descrição, as tags, o número de membros e o número online. Membros, mensagens e voz nunca são exibidos.",
+      "hiddenInvitesLocked": "Oculto de Explorar enquanto os convites estiverem bloqueados.",
+      "goToGeneral": "Desbloquear convites em Geral",
+      "blockedByAdmin": "Listagem desativada por um administrador.",
+      "whoCanJoin": "Quem pode entrar",
+      "joinApproval": "Pedir para entrar",
+      "joinApprovalHint": "Os recém-chegados pedem primeiro; os moderadores aprovam ou recusam cada pedido.",
+      "joinOpen": "Entrar diretamente",
+      "joinOpenHint": "Qualquer pessoa que encontrar o espaço pode entrar na hora.",
+      "description": "Descrição",
+      "descriptionPlaceholder": "Sobre o que é este espaço, e para quem é?",
+      "descriptionNudge": "Espaços com descrição são encontrados com mais frequência.",
+      "tags": "Tags",
+      "tagsHint": "Até {{max}}. Os recém-chegados filtram Explorar por tag.",
+      "preview": "Sua ficha em Explorar",
+      "stats": "Atividade",
+      "statsMembers": "Membros: {{count}}",
+      "statsMessages": "Mensagens esta semana: {{count}}",
+      "statsOnline": "Online na última verificação: {{count}}",
+      "statsRefreshedAt": "Última verificação: {{when}}",
+      "statsDaily": "Os números de atividade são atualizados uma vez por dia; o número de membros é ao vivo.",
+      "statsNever": "Os números de atividade ainda não foram calculados; eles são atualizados uma vez por dia.",
+      "save": "Salvar configurações de descoberta",
+      "saved": "Configurações de descoberta salvas",
+      "failedToSave": "Falha ao salvar as configurações de descoberta",
+      "failedToLoad": "Falha ao carregar os detalhes de descoberta"
+    }
   }
 }

@@ -126,6 +126,19 @@ const ERROR_MAP: Record<string, string> = {
   'Support tickets are currently disabled': 'supportDisabled',
   'Ticket is closed. Reopen it to send messages.': 'ticketClosed',
 
+  // ─── Server discovery / membership moderation ──────────────────────────
+  'Server discovery is currently disabled': 'discoveryDisabled',
+  'Listing is disabled by an administrator': 'listingDisabledByAdmin',
+  'You are banned from this server': 'bannedFromServer',
+  'Your request was declined recently. Please try again later.': 'requestDeclinedRecently',
+  'Join request not found': 'joinRequestNotFound',
+  'Ban not found': 'banNotFound',
+  'Cannot transfer ownership to a banned user': 'cannotTransferToBanned',
+  'You cannot report your own server': 'cannotReportOwnServer',
+  'You do not have permission to manage members': 'noPermissionManageMembers',
+  'You do not have permission to kick members': 'noPermissionKickMembers',
+  'Cannot kick a member with an equal or higher role': 'cannotKickHigherRole',
+
   // ─── Admin ─────────────────────────────────────────────────────────────
   'Cannot ban yourself': 'cannotBanSelf',
   'Cannot ban a super admin': 'cannotBanSuperAdmin',
