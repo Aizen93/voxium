@@ -142,6 +142,14 @@ describe('removeMemberFromServer', () => {
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
   });
 
+  it('a member who left between the caller\'s check and the transaction answers 404 Member, not a 500', async () => {
+    prismaMock.$transaction.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+
+    await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: 'spam' } }))
+      .rejects.toMatchObject({ statusCode: 404, message: 'Member not found' });
+    expect(memberLeft).not.toHaveBeenCalled();
+  });
+
   it('a failed transaction surfaces the error and never broadcasts member:left', async () => {
     prismaMock.$transaction.mockRejectedValue(new Error('db gone'));
 

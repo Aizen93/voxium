@@ -22,7 +22,7 @@ import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL
 import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
-import { recomputeListedForOwner } from '../utils/discoveryListing';
+import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
 
 export const adminRouter = Router();
 
@@ -594,6 +594,10 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
             });
 
             await prisma.$transaction([
+              // This is the one path besides server creation that makes a
+              // member without joinServerMember's ban check: an admin-chosen
+              // heir is an explicit unban, so the row (if any) goes with it.
+              prisma.serverBan.deleteMany({ where: { serverId: action.serverId, userId: action.newOwnerId } }),
               prisma.serverMember.create({
                 data: { userId: action.newOwnerId, serverId: action.serverId, role: 'owner' },
               }),
@@ -631,6 +635,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
             // broadcastMemberJoined, which joins rooms after the transaction.)
             void syncChannelVisibilityRooms(action.serverId, { userId: action.newOwnerId });
           }
+
+          // ownerId decides whose ban state feeds the listing column: the
+          // deleted (often banned) owner's servers were hidden by
+          // recomputeListedForOwner, and the unbanned heir's take their place.
+          await recomputeListed(action.serverId);
 
           // Emit role + server update events
           io.to(`server:${action.serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {

@@ -94,6 +94,11 @@ serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
         data: {
           name,
           ownerId: req.user!.userId,
+          // The creator is the one membership that does not go through
+          // joinServerMember, so the inline member count (server discovery)
+          // is seeded here — the migration backfill only knew about rows that
+          // existed at migration time.
+          memberCount: 1,
           members: {
             create: { userId: req.user!.userId, role: 'owner' },
           },
@@ -569,7 +574,7 @@ serverRouter.post(
 // Server-level moderation stays out of the platform audit log, as kicks do.
 
 // List bans (KICK_MEMBERS)
-serverRouter.get('/:serverId/bans', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+serverRouter.get('/:serverId/bans', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
     const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
@@ -756,6 +761,14 @@ serverRouter.post(
       });
       if (!targetMembership) throw new NotFoundError('Target member');
 
+      // A platform ban keeps the membership row (the admin ban route only
+      // broadcasts member:left), so a banned member is still a valid target
+      // here unless we look. The admin transfer path refuses the same; a
+      // banned owner would hide the server from the directory on the next
+      // recompute, which is not what the transferring owner asked for.
+      const targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, select: { bannedAt: true } });
+      if (targetUser?.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
+
       await prisma.$transaction([
         prisma.server.update({ where: { id: serverId }, data: { ownerId: targetUserId } }),
         prisma.serverMember.update({
@@ -767,6 +780,10 @@ serverRouter.post(
           data: { role: 'admin' },
         }),
       ]);
+
+      // ownerId decides WHOSE ban state is one of the listing column's four
+      // inputs — recompute after the commit (never throws).
+      await recomputeListed(serverId);
 
       const io = getIO();
 

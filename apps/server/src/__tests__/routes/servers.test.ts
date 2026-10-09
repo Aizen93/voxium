@@ -117,12 +117,13 @@ vi.mock('../../websocket/socketServer', () => ({
   })),
 }));
 
-// Rate limiters
+// Rate limiters (memberManage is observable: every new route must carry one)
+const mockRateLimitMemberManage = vi.fn((_req: any, _res: any, next: () => void) => next());
 vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return {
     rateLimitGeneral: passthrough,
-    rateLimitMemberManage: passthrough,
+    rateLimitMemberManage: (...args: any[]) => mockRateLimitMemberManage(...args),
     rateLimitSearch: passthrough,
     rateLimitCategoryManage: passthrough,
     rateLimitMessageSend: passthrough,
@@ -371,6 +372,34 @@ describe('Server Routes', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.name).toBe('My Server');
       expect(res.body.data.memberCount).toBe(1);
+    });
+
+    it('seeds the inline member count with the creator (the one membership that skips joinServerMember)', async () => {
+      const token = makeToken();
+      prismaMock.server.count.mockResolvedValue(0);
+      const txServerCreate = vi.fn().mockResolvedValue({ id: 'srv-new', name: 'My Server', ownerId: 'user-1' });
+      prismaMock.$transaction.mockImplementation(async (cb: Function) => cb({
+        server: {
+          create: txServerCreate,
+          findUniqueOrThrow: vi.fn().mockResolvedValue({
+            id: 'srv-new', name: 'My Server', iconUrl: null, ownerId: 'user-1', invitesLocked: false, createdAt: new Date(),
+            channels: [], categories: [], _count: { members: 1 },
+          }),
+        },
+        category: { create: vi.fn().mockResolvedValue({ id: 'cat-1' }) },
+        channel: { createMany: vi.fn().mockResolvedValue({ count: 2 }) },
+        role: { create: vi.fn().mockResolvedValue({ id: 'role-everyone' }) },
+      }));
+
+      const res = await request(app)
+        .post('/api/v1/servers')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'My Server' });
+
+      expect(res.status).toBe(201);
+      expect(txServerCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({ ownerId: 'user-1', memberCount: 1, members: { create: { userId: 'user-1', role: 'owner' } } }),
+      });
     });
 
     it('returns 400 with empty server name', async () => {
@@ -946,6 +975,8 @@ describe('Server Routes', () => {
       }]);
       expect(res.body.total).toBe(1);
       expect(res.body.hasMore).toBe(false);
+      // every new REST route carries a limiter from middleware/rateLimiter.ts
+      expect(mockRateLimitMemberManage).toHaveBeenCalled();
       expect(prismaMock.serverBan.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: { serverId: 'srv-1' },
         orderBy: { createdAt: 'desc' },
@@ -1187,6 +1218,49 @@ describe('Server Routes', () => {
       // would recompute against the OLD owner
       expect(order[0]).toBe('txn');
       expect(order).toEqual(expect.arrayContaining(['sync:user-2', 'sync:user-1']));
+    });
+
+    it('recomputes the directory listing column AFTER the transfer commits (ownerId decides whose ban state counts)', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockImplementation(({ where }: any) =>
+        Promise.resolve(where.userId_serverId.userId === 'user-1'
+          ? { userId: 'user-1', serverId: 'srv-1', role: 'owner' }
+          : { userId: 'user-2', serverId: 'srv-1', role: 'member' }));
+      const order: string[] = [];
+      prismaMock.$transaction.mockImplementation(async () => { order.push('txn'); return []; });
+      mockRecomputeListed.mockImplementation(async () => { order.push('recompute'); return true; });
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: null, invitesLocked: false, ownerId: 'user-2', createdAt: new Date(), description: null, tags: [], discoverable: true, joinMode: 'approval' });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/transfer-ownership')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ targetUserId: 'user-2' });
+
+      expect(res.status).toBe(200);
+      expect(mockRecomputeListed).toHaveBeenCalledWith('srv-1');
+      expect(order).toEqual(['txn', 'recompute']);
+    });
+
+    it('refuses to transfer to a platform-banned member (a ban keeps the membership row), like the admin path', async () => {
+      const token = makeToken();
+      prismaMock.user.findUnique.mockImplementation(({ where }: any) => Promise.resolve(
+        where.id === 'user-2'
+          ? { id: 'user-2', bannedAt: new Date('2026-01-01T00:00:00Z') }
+          : { id: 'user-1', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0) }));
+      prismaMock.serverMember.findUnique.mockImplementation(({ where }: any) =>
+        Promise.resolve(where.userId_serverId.userId === 'user-1'
+          ? { userId: 'user-1', serverId: 'srv-1', role: 'owner' }
+          : { userId: 'user-2', serverId: 'srv-1', role: 'member' }));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/transfer-ownership')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ targetUserId: 'user-2' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('banned user');
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(mockRecomputeListed).not.toHaveBeenCalled();
     });
   });
 });

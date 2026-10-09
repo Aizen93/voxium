@@ -201,12 +201,16 @@ export const JOIN_REQUEST_PENDING_TTL_DAYS = 30;
 /** Characters that text shown to STRANGERS (a server description, a join
  *  request message, a ban reason) may never carry: control characters and the
  *  bidi-override / zero-width / invisible format characters that let text
- *  visually read as something it is not — the same set
- *  ANNOTATION_TEXT_FORBIDDEN_RE rejects, with the newline (U+000A) allowed
- *  because descriptions are multi-line. Non-global on purpose (`.test()` on a
- *  /g regex mutates lastIndex). */
+ *  visually read as something it is not — ANNOTATION_TEXT_FORBIDDEN_RE's set
+ *  plus the C1 controls, the soft hyphen, the Arabic and Mongolian format
+ *  marks, the line/paragraph separators, the interlinear annotation and
+ *  noncharacter block, and the TAG characters (U+E0000–E007F, invisible text
+ *  carriers — hence the `u` flag, without which no astral code point can be
+ *  matched at all). The newline (U+000A) is allowed because descriptions are
+ *  multi-line. Non-global on purpose (`.test()` on a /g regex mutates
+ *  lastIndex). */
 // eslint-disable-next-line no-control-regex
-export const DISCOVERY_TEXT_FORBIDDEN_RE = /[\u0000-\u0009\u000B-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/;
+export const DISCOVERY_TEXT_FORBIDDEN_RE = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\uFFFE\uFFFF\u{E0000}-\u{E007F}]/u;
 
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
 export type ThemePatternType = (typeof THEME_PATTERN_TYPES)[number];

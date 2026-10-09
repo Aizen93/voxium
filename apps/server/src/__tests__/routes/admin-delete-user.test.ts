@@ -92,6 +92,9 @@ const prismaMock: Record<string, any> = {
   channelRead: {
     upsert: vi.fn().mockResolvedValue({}),
   },
+  serverBan: {
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+  },
   // Supports BOTH forms: the array form (used by the ownership-transfer
   // statements) and the callback/interactive form (used by purge + delete).
   $transaction: vi.fn((arg: any) =>
@@ -209,6 +212,13 @@ vi.mock('../../utils/auditLog', () => ({
 // Feature flags
 vi.mock('../../utils/featureFlags', () => ({
   isFeatureEnabled: vi.fn().mockReturnValue(true),
+}));
+
+// Directory listing column — a transfer changes whose ban state feeds it
+const mockRecomputeListed = vi.fn().mockResolvedValue(true);
+vi.mock('../../utils/discoveryListing', () => ({
+  recomputeListed: (...args: any[]) => mockRecomputeListed(...args),
+  recomputeListedForOwner: vi.fn().mockResolvedValue(0),
 }));
 
 // ─── App setup ──────────────────────────────────────────────────────────────
@@ -407,6 +417,8 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     // The heir was already a member, so their channel:{id} rooms were computed
     // at connect against the old owner — owner status has to be resynced.
     expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-owned', { userId: 'heir-1' });
+    // ...and the listing column follows the new owner's ban state
+    expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
   });
 
   it('transferring to a NON-member creates their membership and moves the inline member count in the same statement', async () => {
@@ -439,6 +451,10 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
       where: { id: 'srv-owned' },
       data: { ownerId: 'heir-1', memberCount: { increment: 1 } },
     });
+    // an admin-chosen heir is an explicit unban — this path creates a member
+    // around joinServerMember's ban check, so the row must not survive it
+    expect(prismaMock.serverBan.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned', userId: 'heir-1' } });
+    expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
     // the deleted account's own membership is decremented inside the delete transaction
     expect(txMock.server.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['srv-owned'] }, memberCount: { gt: 0 } },

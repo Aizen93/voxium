@@ -1,4 +1,5 @@
 import { prisma } from './prisma';
+import { NotFoundError } from './errors';
 import { getRedis } from './redis';
 import { getIO } from '../websocket/socketServer';
 import { broadcastVoiceEvictUser } from '../websocket/voiceCluster';
@@ -69,29 +70,38 @@ export async function removeMemberFromServer(
     });
   }
 
-  await prisma.$transaction([
-    ...(opts.ban
-      ? [
-          prisma.serverBan.upsert({
-            where: { serverId_userId: { serverId, userId } },
-            create: { serverId, userId, bannedById: opts.ban.by, reason: opts.ban.reason },
-            // A re-ban refreshes who, why and when — the latest decision is
-            // the one the Banned section should show.
-            update: { bannedById: opts.ban.by, reason: opts.ban.reason, createdAt: new Date() },
-          }),
-        ]
-      : []),
-    prisma.serverJoinRequest.deleteMany({ where: { serverId, userId } }),
-    prisma.serverMember.delete({
-      where: { userId_serverId: { userId, serverId } },
-    }),
-    // Guarded so inline drift can never push the count negative; the nightly
-    // recount is what makes it exact again.
-    prisma.server.updateMany({
-      where: { id: serverId, memberCount: { gt: 0 } },
-      data: { memberCount: { decrement: 1 } },
-    }),
-  ]);
+  try {
+    await prisma.$transaction([
+      ...(opts.ban
+        ? [
+            prisma.serverBan.upsert({
+              where: { serverId_userId: { serverId, userId } },
+              create: { serverId, userId, bannedById: opts.ban.by, reason: opts.ban.reason },
+              // A re-ban refreshes who, why and when — the latest decision is
+              // the one the Banned section should show.
+              update: { bannedById: opts.ban.by, reason: opts.ban.reason, createdAt: new Date() },
+            }),
+          ]
+        : []),
+      prisma.serverJoinRequest.deleteMany({ where: { serverId, userId } }),
+      prisma.serverMember.delete({
+        where: { userId_serverId: { userId, serverId } },
+      }),
+      // Guarded so inline drift can never push the count negative; the nightly
+      // recount is what makes it exact again.
+      prisma.server.updateMany({
+        where: { id: serverId, memberCount: { gt: 0 } },
+        data: { memberCount: { decrement: 1 } },
+      }),
+    ]);
+  } catch (err) {
+    // The member left (or was removed) between the caller's membership check
+    // and this transaction: serverMember.delete is the only statement here
+    // that can raise P2025. Same answer the pre-check gives — not a 500 that
+    // rolls back the ban the moderator asked for and tells them nothing.
+    if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Member');
+    throw err;
+  }
 
   await broadcastMemberLeft(userId, serverId);
 }

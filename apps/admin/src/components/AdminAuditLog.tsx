@@ -122,6 +122,7 @@ function isSystemActor(log: { action: AuditAction; metadata: Record<string, unkn
 const ALL_ACTIONS: AuditAction[] = [
   'user.ban', 'user.unban', 'user.delete', 'user.role_change',
   'server.delete',
+  'server.discovery_feature', 'server.discovery_unfeature', 'server.discovery_block', 'server.discovery_unblock',
   'ip_ban.create', 'ip_ban.delete',
   'storage.file_delete', 'storage.cleanup_orphans',
   'announcement.create', 'announcement.publish', 'announcement.delete',

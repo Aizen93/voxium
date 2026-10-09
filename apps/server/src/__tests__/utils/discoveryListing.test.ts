@@ -57,10 +57,15 @@ describe('recomputeListed(serverId)', () => {
     });
   });
 
-  it('hides a server whose invites are locked', async () => {
+  it('hides a server whose invites are locked — with the write bound to the inputs it was computed from', async () => {
     server({ invitesLocked: true, discoveryListed: true });
     await expect(recomputeListed('s-1')).resolves.toBe(false);
-    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({ where: { id: 's-1' }, data: { discoveryListed: false } });
+    // Compare-and-set: a concurrent unlock that already recomputed must not
+    // be overwritten by this (now stale) answer; the where misses instead.
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
+      where: { id: 's-1', discoverable: true, invitesLocked: true, discoveryBlockedAt: null, owner: { is: { bannedAt: null } } },
+      data: { discoveryListed: false },
+    });
   });
 
   it('hides a server whose owner is platform-banned, and one an admin blocked, and one the owner unlisted', async () => {
@@ -68,14 +73,28 @@ describe('recomputeListed(serverId)', () => {
       vi.clearAllMocks();
       server({ ...bad, discoveryListed: true });
       await expect(recomputeListed('s-1')).resolves.toBe(false);
-      expect(prismaMock.server.updateMany).toHaveBeenCalledWith({ where: { id: 's-1' }, data: { discoveryListed: false } });
+      expect(prismaMock.server.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { discoveryListed: false } }));
     }
+    // the banned-owner case binds the write to that very ban state
+    expect(prismaMock.server.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ owner: { is: { bannedAt: NOW } } }),
+    }));
+    vi.clearAllMocks();
+    server({ bannedAt: NOW, discoveryListed: true });
+    await recomputeListed('s-1');
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
+      where: { id: 's-1', discoverable: true, invitesLocked: false, discoveryBlockedAt: null, owner: { is: { bannedAt: NOW } } },
+      data: { discoveryListed: false },
+    });
   });
 
   it('relists a server whose inputs all allow it again', async () => {
     server({ discoveryListed: false });
     await expect(recomputeListed('s-1')).resolves.toBe(true);
-    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({ where: { id: 's-1' }, data: { discoveryListed: true } });
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
+      where: { id: 's-1', discoverable: true, invitesLocked: false, discoveryBlockedAt: null, owner: { is: { bannedAt: null } } },
+      data: { discoveryListed: true },
+    });
   });
 
   it('does not write when the column already holds the right value', async () => {
@@ -108,7 +127,7 @@ describe('recomputeListedForOwner(ownerId)', () => {
     await expect(recomputeListedForOwner('o-1')).resolves.toBe(3);
     expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(1);
     expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
-      where: { ownerId: 'o-1', discoveryListed: true },
+      where: { ownerId: 'o-1', discoveryListed: true, owner: { is: { bannedAt: { not: null } } } },
       data: { discoveryListed: false },
     });
   });
@@ -120,7 +139,10 @@ describe('recomputeListedForOwner(ownerId)', () => {
     await expect(recomputeListedForOwner('o-1')).resolves.toBe(2);
     expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(1);
     expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
-      where: { ownerId: 'o-1', discoveryListed: false, discoverable: true, invitesLocked: false, discoveryBlockedAt: null },
+      where: {
+        ownerId: 'o-1', discoveryListed: false, discoverable: true, invitesLocked: false, discoveryBlockedAt: null,
+        owner: { is: { bannedAt: null } },
+      },
       data: { discoveryListed: true },
     });
   });

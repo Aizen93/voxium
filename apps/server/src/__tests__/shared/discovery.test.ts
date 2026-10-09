@@ -92,7 +92,22 @@ describe('Server discovery — shared constants', () => {
     expect(new Set(Object.values(WS_EVENTS)).size).toBe(Object.values(WS_EVENTS).length);
   });
 
-  it('the forbidden-character class is the annotation set minus the newline, and non-global', () => {
+  it('also rejects the bidi, invisible-format and TAG characters the annotation set misses (needs the u flag)', () => {
+    expect(DISCOVERY_TEXT_FORBIDDEN_RE.unicode).toBe(true);
+    const extra = [
+      String.fromCharCode(0x061c), // ARABIC LETTER MARK — Bidi_Control, same family as U+200E/F
+      String.fromCharCode(0x00ad), // soft hyphen
+      String.fromCharCode(0x0085), // NEL, a C1 control
+      String.fromCharCode(0x2029), // paragraph separator
+      String.fromCharCode(0xfff9), // interlinear annotation anchor
+      String.fromCodePoint(0xe0041), // TAG LATIN CAPITAL LETTER A — an invisible text carrier
+    ];
+    for (const ch of extra) expect(DISCOVERY_TEXT_FORBIDDEN_RE.test(`a${ch}b`)).toBe(true);
+    // ordinary astral text (emoji, CJK extension) stays allowed
+    expect(DISCOVERY_TEXT_FORBIDDEN_RE.test('🎉 𠀋 ok')).toBe(false);
+  });
+
+  it('the forbidden-character class covers the annotation set minus the newline, and is non-global', () => {
     expect(DISCOVERY_TEXT_FORBIDDEN_RE.global).toBe(false);
     expect(DISCOVERY_TEXT_FORBIDDEN_RE.test('plain text, accents é, emoji 🎉')).toBe(false);
     expect(DISCOVERY_TEXT_FORBIDDEN_RE.test('line one\nline two')).toBe(false);

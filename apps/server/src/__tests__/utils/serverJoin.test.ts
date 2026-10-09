@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
   serverBan: { findUnique: vi.fn() },
+  serverJoinRequest: { deleteMany: vi.fn() },
   serverMember: { findUnique: vi.fn(), count: vi.fn(), create: vi.fn() },
   server: { update: vi.fn() },
   channel: { findMany: vi.fn() },
@@ -24,6 +25,7 @@ vi.mock('../../utils/memberBroadcast', () => ({ broadcastMemberJoined: (...a: un
 import { joinServerMember } from '../../utils/serverJoin';
 
 const order: string[] = [];
+const REQ = { op: 'request.deleteMany' };
 const CREATE = { op: 'member.create' };
 const UPDATE = { op: 'server.update' };
 
@@ -40,6 +42,7 @@ beforeEach(() => {
   prismaMock.serverMember.count.mockResolvedValue(3);
   // The model mocks return SENTINELS (the PrismaPromises a real client would
   // build) so the transaction's contents and order can be asserted exactly.
+  prismaMock.serverJoinRequest.deleteMany.mockReturnValue(REQ);
   prismaMock.serverMember.create.mockReturnValue(CREATE);
   prismaMock.server.update.mockReturnValue(UPDATE);
   prismaMock.$transaction.mockImplementation(async () => { order.push('txn'); return []; });
@@ -100,13 +103,15 @@ describe('joinServerMember', () => {
     expect(prismaMock.serverMember.count).not.toHaveBeenCalled();
   });
 
-  it('commits the extra writes, the membership row and memberCount + 1 in ONE transaction, extra writes first', async () => {
+  it('commits the extra writes, the request sweep, the membership row and memberCount + 1 in ONE transaction, extra writes first', async () => {
     const INVITE_DELETE = { op: 'invite.delete' };
 
     await joinServerMember('u-1', 's-1', { via: 'invite', extraWrites: [INVITE_DELETE] as never });
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-    expect(prismaMock.$transaction).toHaveBeenCalledWith([INVITE_DELETE, CREATE, UPDATE]);
+    expect(prismaMock.$transaction).toHaveBeenCalledWith([INVITE_DELETE, REQ, CREATE, UPDATE]);
+    // a membership replaces any request the joiner had open or declined
+    expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { serverId: 's-1', userId: 'u-1' } });
     expect(prismaMock.serverMember.create).toHaveBeenCalledWith({ data: { userId: 'u-1', serverId: 's-1' } });
     expect(prismaMock.server.update).toHaveBeenCalledWith({
       where: { id: 's-1' },
@@ -114,9 +119,9 @@ describe('joinServerMember', () => {
     });
   });
 
-  it('works without extra writes (direct discovery join): membership + count only', async () => {
+  it('works without extra writes (direct discovery join): request sweep + membership + count', async () => {
     await joinServerMember('u-1', 's-1', { via: 'discovery' });
-    expect(prismaMock.$transaction).toHaveBeenCalledWith([CREATE, UPDATE]);
+    expect(prismaMock.$transaction).toHaveBeenCalledWith([REQ, CREATE, UPDATE]);
   });
 
   it('broadcasts member:joined exactly once, AFTER the transaction, then seeds reads for non-secure text channels', async () => {

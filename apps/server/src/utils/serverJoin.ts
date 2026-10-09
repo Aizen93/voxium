@@ -62,6 +62,12 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   try {
     await prisma.$transaction([
       ...(opts.extraWrites ?? []),
+      // A membership replaces any request the joiner had open or declined
+      // here (an open-mode join after the owner switched modes, an invite
+      // used while a request was pending). The approval route still passes
+      // its single-row delete as an extra write: THAT one must fail when the
+      // row is gone (double approval), this one is a sweep.
+      prisma.serverJoinRequest.deleteMany({ where: { serverId, userId } }),
       prisma.serverMember.create({
         data: { userId, serverId },
       }),

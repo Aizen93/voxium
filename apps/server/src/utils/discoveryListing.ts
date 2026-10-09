@@ -63,9 +63,23 @@ export async function recomputeListed(serverId: string): Promise<boolean | null>
       ownerBannedAt: server.owner.bannedAt,
     });
     if (listed !== server.discoveryListed) {
+      // Compare-and-set on the inputs the value was computed FROM: two
+      // concurrent input changes (lock, then unlock) would otherwise let the
+      // slower recompute land a stale value over the faster one's — and the
+      // "unchanged, skip" branch above means nobody would rewrite it. A miss
+      // here is fine: the writer that changed the inputs recomputes too.
       // updateMany, not update: a server deleted between the read and the
       // write is a no-op here, not a P2025 to log.
-      await prisma.server.updateMany({ where: { id: serverId }, data: { discoveryListed: listed } });
+      await prisma.server.updateMany({
+        where: {
+          id: serverId,
+          discoverable: server.discoverable,
+          invitesLocked: server.invitesLocked,
+          discoveryBlockedAt: server.discoveryBlockedAt,
+          owner: { is: { bannedAt: server.owner.bannedAt } },
+        },
+        data: { discoveryListed: listed },
+      });
     }
     return listed;
   } catch (err) {
@@ -87,13 +101,19 @@ export async function recomputeListedForOwner(ownerId: string): Promise<number |
     const owner = await prisma.user.findUnique({ where: { id: ownerId }, select: { bannedAt: true } });
     if (!owner) return null;
 
+    // Both writes re-assert the owner's ban state they were computed from
+    // (compare-and-set): a ban and an unban racing each other cannot leave
+    // the slower one's answer on the rows.
     const result = owner.bannedAt
       ? await prisma.server.updateMany({
-          where: { ownerId, discoveryListed: true },
+          where: { ownerId, discoveryListed: true, owner: { is: { bannedAt: { not: null } } } },
           data: { discoveryListed: false },
         })
       : await prisma.server.updateMany({
-          where: { ownerId, discoveryListed: false, discoverable: true, invitesLocked: false, discoveryBlockedAt: null },
+          where: {
+            ownerId, discoveryListed: false, discoverable: true, invitesLocked: false, discoveryBlockedAt: null,
+            owner: { is: { bannedAt: null } },
+          },
           data: { discoveryListed: true },
         });
     return result.count;
