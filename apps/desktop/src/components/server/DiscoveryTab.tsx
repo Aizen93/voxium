@@ -150,10 +150,13 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
             aria-checked={discoverable}
             disabled={blocked}
             onClick={() => { dirty.current.discoverable = true; setDiscoverable((v) => !v); }}
-            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50 ${discoverable ? 'bg-vox-accent-primary' : 'bg-vox-bg-hover border border-vox-border'}`}
+            className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50 ${discoverable ? 'bg-vox-accent-primary' : 'bg-vox-bg-hover border border-vox-border'}`}
             data-testid="discovery-listed-toggle"
           >
-            <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${discoverable ? 'translate-x-5' : 'translate-x-0.5'}`} />
+            {/* The knob flows inside the pill like the app's other switches. An
+                absolutely positioned knob took its static position from the
+                button's centred content and ended up half outside the pill. */}
+            <span className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform mt-0.5 ${discoverable ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
           </button>
         </div>
         <p className="mt-2 text-xs text-vox-text-muted">{t('discovery.settings.audience')}</p>

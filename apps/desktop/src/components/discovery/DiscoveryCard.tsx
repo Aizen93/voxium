@@ -65,7 +65,8 @@ export function DiscoveryCard({ server, preview = false, busy = false, onJoin, o
             )}
           </div>
           <p
-            className={`mt-1 text-xs leading-relaxed ${server.description ? 'text-vox-text-secondary' : 'italic text-vox-text-muted'}`}
+            className={`mt-1 whitespace-pre-line text-xs leading-relaxed ${server.description ? 'text-vox-text-secondary' : 'italic text-vox-text-muted'}`}
+            // the owner's line breaks are kept (whitespace-pre-line); three lines at most, the rest clipped
             style={{ display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
             data-testid="discovery-card-description"
           >
