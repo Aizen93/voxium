@@ -23,7 +23,7 @@ import { DiscoveryCard } from '../../components/discovery/DiscoveryCard';
 const base: DiscoveryServer = {
   id: 'srv-1', name: 'Voxium HQ', iconUrl: null, description: 'Official space.', tags: ['open-source', 'community'],
   memberCount: 318, onlineCount: 42, weeklyMessages: 900, joinMode: 'approval', featured: false,
-  isMember: false, requestPending: false, createdAt: '2026-10-01T00:00:00.000Z', statsRefreshedAt: null,
+  isMember: false, requestPending: false, createdAt: '2026-10-01T00:00:00.000Z', statsRefreshedAt: null, tier: null,
 };
 
 let container: HTMLDivElement;
@@ -62,6 +62,19 @@ describe('DiscoveryCard', () => {
     expect(q('[data-testid="discovery-card-description"]')!.textContent).toBe('discovery.card.noDescription');
     expect(q('[data-testid="discovery-featured"]')).not.toBeNull();
     expect(q('[data-testid="discovery-card-tags"]')).toBeNull();
+  });
+
+  it('wears the activity badge of its tier next to the name, and none without one', () => {
+    render(<DiscoveryCard server={{ ...base, tier: 'gold' }} />);
+    const badge = q('[data-testid="discovery-tier"]')!;
+    expect(badge).not.toBeNull();
+    expect(badge.getAttribute('data-tier')).toBe('gold');
+    expect(badge.getAttribute('title')).toContain('discovery.tier.badgeLabel');
+    render(<DiscoveryCard server={base} />);
+    expect(q('[data-testid="discovery-tier"]')).toBeNull();
+    // a value the client does not know is no badge, not a crash
+    render(<DiscoveryCard server={{ ...base, tier: 'mythic' as unknown as 'gold' }} />);
+    expect(q('[data-testid="discovery-tier"]')).toBeNull();
   });
 
   it('the one button: Request to join (approval) / Join (open) / Requested + Cancel (pending) / Open (member)', () => {

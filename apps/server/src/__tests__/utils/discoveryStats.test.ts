@@ -13,8 +13,13 @@ const prismaMock = vi.hoisted(() => ({
 }));
 vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
 
-const redis = vi.hoisted(() => ({ set: vi.fn(), get: vi.fn(), eval: vi.fn() }));
+const redis = vi.hoisted(() => ({ set: vi.fn(), get: vi.fn(), eval: vi.fn(), exists: vi.fn() }));
 vi.mock('../../utils/redis', () => ({ NODE_ID: () => 'node-under-test', getRedis: () => redis }));
+const refreshTierThresholds = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/discoveryTiers', () => ({
+  DISCOVERY_TIERS_KEY: 'discovery:tiers',
+  refreshTierThresholds: (...a: unknown[]) => refreshTierThresholds(...a),
+}));
 
 import {
   runDiscoveryStatsCycle, startDiscoveryStats, stopDiscoveryStats, pickStaleServerIds, recomputeServerStats,
@@ -37,6 +42,8 @@ beforeEach(() => {
   prismaMock.server.findMany.mockResolvedValue([]);
   prismaMock.server.count.mockResolvedValue(0);
   prismaMock.$queryRaw.mockResolvedValue([]);
+  redis.exists.mockResolvedValue(1);
+  refreshTierThresholds.mockResolvedValue({ computedAt: '2026-10-11T00:00:00.000Z', population: 50, thresholds: null });
   prismaMock.$executeRaw.mockResolvedValue(0);
   prismaMock.serverJoinRequest.deleteMany.mockResolvedValue({ count: 0 });
 });
@@ -254,6 +261,33 @@ describe('housekeeping on the same timer', () => {
     expect(backstop).toContain('UPDATE servers s SET discovery_listed = false');
     expect(backstop).toContain('u.banned_at IS NOT NULL');
     expect(backstop).toContain('s.discovery_listed = true');
+  });
+
+  it('the badge cuts are refreshed with the hourly housekeeping, at once when the key is missing, and otherwise left alone', async () => {
+    vi.useFakeTimers({ now: new Date(2026, 9, 10, 15, 30, 0), toFake: ['Date'] });
+    // the hourly slot
+    redis.set.mockResolvedValue('OK');
+    await runDiscoveryStatsCycle();
+    expect(refreshTierThresholds).toHaveBeenCalledTimes(1);
+
+    // claims held elsewhere, key present: nothing
+    vi.clearAllMocks();
+    redis.exists.mockResolvedValue(1);
+    redis.set.mockImplementation(async (key: string) => (key === DISCOVERY_STATS_LOCK_KEY ? 'OK' : null));
+    await runDiscoveryStatsCycle();
+    expect(refreshTierThresholds).not.toHaveBeenCalled();
+
+    // claims held elsewhere, key MISSING (a fresh Redis): computed right away, best effort
+    vi.clearAllMocks();
+    redis.exists.mockResolvedValue(0);
+    redis.set.mockImplementation(async (key: string) => (key === DISCOVERY_STATS_LOCK_KEY ? 'OK' : null));
+    refreshTierThresholds.mockRejectedValueOnce(new Error('db down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const run = await runDiscoveryStatsCycle();
+    expect(refreshTierThresholds).toHaveBeenCalledTimes(1);
+    expect(run).not.toBeNull(); // the cycle itself succeeded
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Tier cuts refresh failed'), 'db down');
+    warn.mockRestore();
   });
 
   it('the hourly sweep deletes declined requests older than 7 days and pending ones older than 30', async () => {

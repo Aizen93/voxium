@@ -1356,6 +1356,19 @@
     "moderationNotSecure": "„{{name}}“ ist ein regulärer Kanal — lösche ihn stattdessen über die Seitenleiste"
   },
   "discovery": {
+    "tier": {
+      "bronze": "Bronze",
+      "silver": "Silber",
+      "gold": "Gold",
+      "platinum": "Platin",
+      "diamond": "Diamant",
+      "badgeLabel": "{{tier}} · Top {{percent}} % der Spaces nach Aktivität",
+      "score": "Aktivitätswert: {{score}} (online × {{online}} + Nachrichten dieser Woche + Mitglieder)",
+      "next": "Nächste Stufe: {{tier}}, ab einem Wert von {{score}}",
+      "top": "Die höchste Stufe. Darüber gibt es nichts.",
+      "none": "Noch kein Abzeichen. Die aktivere Hälfte der gelisteten Spaces erhält Bronze, das Top-1 % Diamant.",
+      "notYet": "Abzeichen erscheinen, sobald das Verzeichnis genug aktive Spaces hat."
+    },
     "tags": {
       "gaming": "Gaming",
       "esports": "E-Sport",
@@ -1388,6 +1401,7 @@
       "report": "Diesen Space melden"
     },
     "settings": {
+      "badge": "Abzeichen",
       "title": "In Entdecken gelistet",
       "listedHint": "Jeder angemeldete Voxium-Nutzer kann diesen Space in Entdecken finden. Einem versteckten Space kann man weiterhin per Einladung beitreten.",
       "audience": "Ein Eintrag zeigt Name, Icon, Beschreibung, Tags, Mitgliederzahl und Online-Zahl. Mitglieder, Nachrichten und Sprache werden nie angezeigt.",

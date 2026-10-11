@@ -1,6 +1,7 @@
 import { prisma } from './prisma';
 import { getRedis } from './redis';
 import { withClusterLock, wasSkipped, lockToken, releaseLockIfOwned } from './dailySchedule';
+import { refreshTierThresholds, DISCOVERY_TIERS_KEY } from './discoveryTiers';
 import { DISCOVERY_SCORE_WEIGHTS, JOIN_REQUEST_DECLINE_COOLDOWN_DAYS, JOIN_REQUEST_PENDING_TTL_DAYS } from '@voxium/shared';
 
 // The directory's activity figures on a daily cycle
@@ -283,6 +284,15 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
     console.log(`[Discovery] Refreshed ${refreshed} listed server(s) in ${batches} batch(es), ${elapsedMs}ms; backlog older than 48h: ${backlogLabel}`);
   }
 
+  // The badge cuts travel with the hourly housekeeping, and are computed at
+  // once when the key is missing (a fresh Redis) so badges never wait an hour.
+  let tiersMissing = false;
+  try {
+    tiersMissing = (await getRedis().exists(DISCOVERY_TIERS_KEY)) === 0;
+  } catch (err) {
+    console.warn('[Discovery] Could not check the tier cuts (next hour):', err instanceof Error ? err.message : err);
+  }
+
   const claims = await claimHousekeeping();
   if (claims.hourly) {
     try {
@@ -290,6 +300,8 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
       if (swept.declined + swept.pending > 0) {
         console.log(`[Discovery] Swept ${swept.declined} declined and ${swept.pending} stale pending join request(s)`);
       }
+      const cuts = await refreshTierThresholds();
+      console.log(`[Discovery] Tier cuts refreshed over ${cuts.population} active listed server(s)${cuts.thresholds ? '' : ' (below the minimum population: no badges)'}`);
     } catch (err) {
       await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_HOURLY_KEY, claims.hourly)
         .catch((e) => console.warn('[Discovery] Hourly claim release failed (it expires on its own):', e instanceof Error ? e.message : e));
@@ -300,6 +312,13 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
           .catch((e) => console.warn('[Discovery] Daily claim release failed (it expires on its own):', e instanceof Error ? e.message : e));
       }
       throw err;
+    }
+  }
+  if (!claims.hourly && tiersMissing) {
+    try {
+      await refreshTierThresholds();
+    } catch (err) {
+      console.warn('[Discovery] Tier cuts refresh failed (badges wait for the next hour):', err instanceof Error ? err.message : err);
     }
   }
   if (claims.daily) {

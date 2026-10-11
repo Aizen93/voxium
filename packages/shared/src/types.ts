@@ -1,5 +1,5 @@
 import type { AnnotationOp, AnnotationScene, AnnotationLiveEvent } from './annotations.js';
-import type { ServerJoinMode } from './constants.js';
+import type { ServerJoinMode, DiscoveryTier } from './constants.js';
 
 // ─── User ────────────────────────────────────────────────────────────────────
 
@@ -113,6 +113,15 @@ export interface DiscoveryServer {
   createdAt: string;
   /** When the daily cycle last refreshed the activity figures; null until the first pass. */
   statsRefreshedAt: string | null;
+  /** The activity badge: a rank among listed spaces by the same score (DISCOVERY_TIER_TOP_FRACTION); null below Bronze or before the first computation. */
+  tier: DiscoveryTier | null;
+}
+
+/** The score at every tier's cut, as the stats job stores it (Redis `discovery:tiers`). `thresholds` is null below the minimum population. */
+export interface DiscoveryTierThresholds {
+  computedAt: string;
+  population: number;
+  thresholds: Record<DiscoveryTier, number> | null;
 }
 
 export interface DiscoveryPage {
@@ -166,6 +175,13 @@ export interface ServerDiscoveryInfo {
   discoveryListed: boolean;
   discoveryBlockedAt: string | null;
   featuredAt: string | null;
+  /** The Active sort's score: online × 10 + messages this week + members (DISCOVERY_SCORE_WEIGHTS). */
+  activityScore: number;
+  tier: DiscoveryTier | null;
+  /** The next tier up and the score it starts at; null at the top or without cuts. */
+  nextTier: { tier: DiscoveryTier; score: number } | null;
+  /** False while the directory has fewer active spaces than DISCOVERY_TIER_MIN_POPULATION (no badges anywhere). */
+  tiersAvailable: boolean;
 }
 
 // ─── Category ───────────────────────────────────────────────────────────────

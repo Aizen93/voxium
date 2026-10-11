@@ -40,6 +40,7 @@ import { DiscoveryTab } from '../../components/server/DiscoveryTab';
 const INFO: ServerDiscoveryInfo = {
   memberCount: 12, onlineCount: 3, weeklyMessages: 40, statsRefreshedAt: '2026-10-09T04:10:00.000Z',
   discoveryListed: true, discoveryBlockedAt: null, featuredAt: null,
+  activityScore: 84, tier: 'gold', nextTier: { tier: 'platinum', score: 120 }, tiersAvailable: true,
 };
 
 let container: HTMLDivElement;
@@ -103,6 +104,38 @@ describe('DiscoveryTab', () => {
     fetchDiscoveryInfo.mockResolvedValue({ ...INFO, statsRefreshedAt: null });
     await render();
     expect(q('[data-testid="discovery-stats"]')!.textContent).toContain('discovery.settings.statsNever');
+  });
+
+  it('the badge block: the tier with its crest, the score and the next cut; the preview card wears it too', async () => {
+    await render();
+    expect(q('[data-testid="discovery-badge"] [data-testid="discovery-tier"]')!.getAttribute('data-tier')).toBe('gold');
+    expect(q('[data-testid="discovery-badge-tier"]')!.textContent).toContain('discovery.tier.badgeLabel');
+    expect(q('[data-testid="discovery-badge-score"]')!.textContent).toContain('discovery.tier.score');
+    expect(q('[data-testid="discovery-badge-next"]')!.textContent).toContain('discovery.tier.next');
+    expect(q('[data-testid="discovery-card"] [data-testid="discovery-tier"]')).not.toBeNull();
+  });
+
+  it('the badge block at the top tier says so instead of naming a next cut', async () => {
+    fetchDiscoveryInfo.mockResolvedValue({ ...INFO, tier: 'diamond', nextTier: null });
+    await render();
+    expect(q('[data-testid="discovery-badge"] [data-testid="discovery-tier"]')!.getAttribute('data-tier')).toBe('diamond');
+    expect(q('[data-testid="discovery-badge-next"]')!.textContent).toBe('discovery.tier.top');
+  });
+
+  it('the badge block without a badge: the Bronze cut is the target', async () => {
+    fetchDiscoveryInfo.mockResolvedValue({ ...INFO, tier: null, nextTier: { tier: 'bronze', score: 10 } });
+    await render();
+    expect(q('[data-testid="discovery-badge"] [data-testid="discovery-tier"]')).toBeNull();
+    expect(q('[data-testid="discovery-card"] [data-testid="discovery-tier"]')).toBeNull();
+    expect(q('[data-testid="discovery-badge-tier"]')!.textContent).toBe('discovery.tier.none');
+    expect(q('[data-testid="discovery-badge-next"]')!.textContent).toContain('discovery.tier.next');
+  });
+
+  it('the badge block before the directory has cuts: no badge, no target, a word of explanation', async () => {
+    fetchDiscoveryInfo.mockResolvedValue({ ...INFO, tier: null, nextTier: null, tiersAvailable: false });
+    await render();
+    expect(q('[data-testid="discovery-badge-tier"]')!.textContent).toBe('discovery.tier.notYet');
+    expect(q('[data-testid="discovery-badge-next"]')).toBeNull();
   });
 
   it('a blocked server: the toggle is disabled and the administrator notice shows', async () => {

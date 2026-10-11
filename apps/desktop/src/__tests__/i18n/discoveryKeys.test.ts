@@ -4,7 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { DISCOVERY_TAGS, DISCOVERY_SORTS } from '@voxium/shared';
+import { DISCOVERY_TAGS, DISCOVERY_SORTS, DISCOVERY_TIERS } from '@voxium/shared';
 import { DISCOVERY_ERROR_KEYS } from '../../utils/serverErrors';
 
 // A missing translation does not throw — i18next renders the raw key, so a
@@ -23,6 +23,7 @@ const SOURCES = [
   fileURLToPath(new URL('../../stores/serverStore.ts', import.meta.url)),
   // step 4 — the member side
   fileURLToPath(new URL('../../components/discovery/DiscoveryModal.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/discovery/TierBadge.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/discovery/JoinRequestDialog.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/SpacesStrip.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/ServerSwitcher.tsx', import.meta.url)),
@@ -104,6 +105,8 @@ function placeholders(text: string): string[] {
 const TAG_KEYS = DISCOVERY_TAGS.map((tag) => `discovery.tags.${tag}`);
 // Same for the sort labels (`discovery.sort.${sort}` in the Explore modal)
 const SORT_KEYS = DISCOVERY_SORTS.map((sort) => `discovery.sort.${sort}`);
+/** The badge names are template-reached (`discovery.tier.${tier}`) in the card, the tab and the badge. */
+const TIER_KEYS = DISCOVERY_TIERS.map((tier) => `discovery.tier.${tier}`);
 // The report modal picks its title inside a ternary (`t(a ? '…' : b ? '…' : '…')`),
 // which the call regex cannot see either
 const TERNARY_KEYS = ['chat.report.reportSpace'];
@@ -113,7 +116,7 @@ const TERNARY_KEYS = ['chat.report.reportSpace'];
 // here without anyone remembering to copy its key.
 const ERROR_KEYS = DISCOVERY_ERROR_KEYS.map((k) => `serverErrors.${k}`);
 
-const ALL_KEYS = [...keys, ...TAG_KEYS, ...SORT_KEYS, ...TERNARY_KEYS, ...ERROR_KEYS];
+const ALL_KEYS = [...keys, ...TAG_KEYS, ...SORT_KEYS, ...TIER_KEYS, ...TERNARY_KEYS, ...ERROR_KEYS];
 const en = locales.find((l) => l.name === 'en');
 
 describe('server-discovery translation keys', () => {

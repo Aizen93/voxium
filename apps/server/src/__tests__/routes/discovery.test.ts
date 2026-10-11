@@ -140,7 +140,7 @@ describe('GET /discovery/servers', () => {
     expect(res.body.data.servers[0]).toEqual({
       id: 'srv-1', name: 'Server 1', iconUrl: null, description: 'desc', tags: ['gaming'],
       memberCount: 11, onlineCount: 1, weeklyMessages: 3, joinMode: 'approval', featured: false,
-      createdAt: NOW.toISOString(), statsRefreshedAt: null, isMember: false, requestPending: false,
+      createdAt: NOW.toISOString(), statsRefreshedAt: null, tier: null, isMember: false, requestPending: false,
     });
   });
 
@@ -371,7 +371,7 @@ describe('GET /discovery/servers', () => {
     const res = await request(app).get('/api/v1/discovery/servers');
     expect(res.status).toBe(200);
     expect(res.body.data.servers).toHaveLength(1);
-    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(3); // the read, the write, and the tier cuts — each fails open on its own;
     warn.mockRestore();
   });
 
@@ -597,5 +597,27 @@ describe('DELETE /discovery/servers/:serverId/join', () => {
     expect(none.status).toBe(404);
     expect(missing.body).toEqual(none.body);
     expect(emitToModerators).not.toHaveBeenCalled();
+  });
+});
+
+describe('activity badges on the cards', () => {
+  it('stamps the tier from the stored cuts (a tie at the cut is in), caches it with the public page, and none without cuts', async () => {
+    redis.get.mockImplementation(async (key: string) => (key === 'discovery:tiers'
+      ? JSON.stringify({ computedAt: NOW.toISOString(), population: 50, thresholds: { bronze: 10, silver: 20, gold: 40, platinum: 60, diamond: 80 } })
+      : null));
+    prismaMock.server.findMany.mockResolvedValue([row(0), row(1), row(2), row(4), row(8)]);
+
+    let res = await request(app).get('/api/v1/discovery/servers');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.servers.map((s: { tier: string | null }) => s.tier)).toEqual([null, 'bronze', 'silver', 'gold', 'diamond']);
+    expect(redis.get).toHaveBeenCalledWith('discovery:tiers');
+    const pageSet = redis.set.mock.calls.find((c: unknown[]) => String(c[0]).startsWith('discovery:page:'));
+    expect(pageSet).toBeDefined();
+    expect(JSON.parse(pageSet![1] as string).servers[4].tier).toBe('diamond');
+
+    redis.get.mockResolvedValue(null);
+    res = await request(app).get('/api/v1/discovery/servers');
+    expect(res.body.data.servers.every((s: { tier: string | null }) => s.tier === null)).toBe(true);
   });
 });

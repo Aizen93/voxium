@@ -1356,6 +1356,19 @@
     "moderationNotSecure": "« {{name}} » est un salon ordinaire — supprimez-le depuis la barre latérale"
   },
   "discovery": {
+    "tier": {
+      "bronze": "Bronze",
+      "silver": "Argent",
+      "gold": "Or",
+      "platinum": "Platine",
+      "diamond": "Diamant",
+      "badgeLabel": "{{tier}} · top {{percent}} % des espaces par activité",
+      "score": "Score d'activité : {{score}} (en ligne × {{online}} + messages de la semaine + membres)",
+      "next": "Prochain : {{tier}}, à partir d'un score de {{score}}",
+      "top": "Le palier le plus haut. Rien au-dessus.",
+      "none": "Pas encore de badge. La moitié la plus active des espaces listés obtient Bronze ; le top 1 % obtient Diamant.",
+      "notYet": "Les badges apparaissent dès que l'annuaire compte assez d'espaces actifs."
+    },
     "tags": {
       "gaming": "Jeux vidéo",
       "esports": "Esport",
@@ -1388,6 +1401,7 @@
       "report": "Signaler cet espace"
     },
     "settings": {
+      "badge": "Badge",
       "title": "Visible dans Explorer",
       "listedHint": "Tout utilisateur Voxium connecté peut trouver cet espace dans Explorer. Un espace masqué reste accessible par invitation.",
       "audience": "Une fiche montre le nom, l’icône, la description, les tags, le nombre de membres et le nombre en ligne. Les membres, les messages et la voix ne sont jamais affichés.",

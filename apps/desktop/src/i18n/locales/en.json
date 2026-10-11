@@ -1356,6 +1356,19 @@
     "moderationNotSecure": "\"{{name}}\" is a regular channel — delete it from the sidebar instead"
   },
   "discovery": {
+    "tier": {
+      "bronze": "Bronze",
+      "silver": "Silver",
+      "gold": "Gold",
+      "platinum": "Platinum",
+      "diamond": "Diamond",
+      "badgeLabel": "{{tier}} · top {{percent}}% of spaces by activity",
+      "score": "Activity score: {{score}} (online × {{online}} + messages this week + members)",
+      "next": "Next: {{tier}}, from a score of {{score}}",
+      "top": "The top tier. Nothing above it.",
+      "none": "No badge yet. The most active half of listed spaces earn Bronze; the top 1% earn Diamond.",
+      "notYet": "Badges appear once the directory has enough active spaces."
+    },
     "tags": {
       "gaming": "Gaming",
       "esports": "Esports",
@@ -1388,6 +1401,7 @@
       "report": "Report this space"
     },
     "settings": {
+      "badge": "Badge",
       "title": "Listed in Explore",
       "listedHint": "Every signed-in Voxium user can find this space in Explore. A hidden space can still be joined by invite.",
       "audience": "A listing shows the name, icon, description, tags, member count and online count. Members, messages and voice are never shown.",

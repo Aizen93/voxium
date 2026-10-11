@@ -182,6 +182,22 @@ export type DiscoverySort = (typeof DISCOVERY_SORTS)[number];
  *  card prints the three inputs, so the ranking is auditable by anyone. */
 export const DISCOVERY_SCORE_WEIGHTS = { online: 10, messages: 1, members: 1 } as const;
 
+/** Activity badges, from the same score and nothing else: a badge is a RANK
+ *  among the listed spaces that have any activity — the top half earns
+ *  Bronze, the top 1% Diamond. Lowest to highest. The cuts (the score at each
+ *  percentile) are recomputed hourly by the stats job; a tie at a cut is in. */
+export const DISCOVERY_TIERS = ['bronze', 'silver', 'gold', 'platinum', 'diamond'] as const;
+export type DiscoveryTier = (typeof DISCOVERY_TIERS)[number];
+/** The top fraction of active listed spaces each tier covers. */
+export const DISCOVERY_TIER_TOP_FRACTION: Record<DiscoveryTier, number> = {
+  bronze: 0.5, silver: 0.25, gold: 0.1, platinum: 0.03, diamond: 0.01,
+};
+/** No badges at all below this many active listed spaces: six servers have no "top 1%". */
+export const DISCOVERY_TIER_MIN_POPULATION = 10;
+export function isDiscoveryTier(value: unknown): value is DiscoveryTier {
+  return typeof value === 'string' && (DISCOVERY_TIERS as readonly string[]).includes(value);
+}
+
 export const DISCOVERY_PAGE_SIZE = 24;
 export const DISCOVERY_MAX_PAGE_SIZE = 48;
 /** Keyset depth cap — beyond it the answer is "refine your search". */

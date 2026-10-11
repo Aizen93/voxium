@@ -20,6 +20,7 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { removeMemberFromServer } from '../utils/removeMember';
 import { recomputeListed } from '../utils/discoveryListing';
+import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers';
 import { joinServerMember } from '../utils/serverJoin';
 import { serverSelect } from '../utils/serverSelect';
 import { emitToModerators } from '../utils/moderatorAudience';
@@ -675,7 +676,7 @@ serverRouter.get('/:serverId/discovery', rateLimitMemberRead, async (req: Reques
     const server = await prisma.server.findUnique({
       where: { id: serverId },
       select: {
-        onlineCount: true, weeklyMessages: true, statsRefreshedAt: true,
+        onlineCount: true, weeklyMessages: true, statsRefreshedAt: true, activityScore: true,
         discoveryListed: true, discoveryBlockedAt: true, featuredAt: true,
         // the authoritative count, not the inline ranking column
         _count: { select: { members: true } },
@@ -683,6 +684,8 @@ serverRouter.get('/:serverId/discovery', rateLimitMemberRead, async (req: Reques
     });
     if (!server) throw new NotFoundError('Server');
 
+    // The badge and what the next one takes, from the same cuts the cards use
+    const cuts = await getTierThresholds();
     res.json({
       success: true,
       data: {
@@ -693,6 +696,10 @@ serverRouter.get('/:serverId/discovery', rateLimitMemberRead, async (req: Reques
         discoveryListed: server.discoveryListed,
         discoveryBlockedAt: server.discoveryBlockedAt,
         featuredAt: server.featuredAt,
+        activityScore: server.activityScore,
+        tier: tierOf(server.activityScore, cuts),
+        nextTier: nextTierFor(server.activityScore, cuts),
+        tiersAvailable: !!cuts?.thresholds,
       },
     });
   } catch (err) {

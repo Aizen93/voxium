@@ -25,6 +25,12 @@ const mockGetHighestRolePosition = vi.fn().mockResolvedValue(Infinity);
 const mockGetEffectivePermissions = vi.fn().mockResolvedValue({ permissions: '1048575', source: 'owner' });
 const mockFilterVisibleChannels = vi.fn().mockImplementation((_uid: unknown, _sid: unknown, channels: unknown[]) => Promise.resolve(channels));
 
+const mockGetTierThresholds = vi.fn();
+vi.mock('../../utils/discoveryTiers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/discoveryTiers')>()),
+  getTierThresholds: () => mockGetTierThresholds(),
+}));
+
 vi.mock('../../utils/permissionCalculator', () => ({
   hasServerPermission: (...args: unknown[]) => mockHasServerPermission(...args),
   hasChannelPermission: (...args: unknown[]) => mockHasChannelPermission(...args),
@@ -978,9 +984,13 @@ describe('Server Routes', () => {
   describe('GET /api/v1/servers/:serverId/discovery', () => {
     it('answers the owner tab with the listing state, the curation stamps and the authoritative count — MANAGE_SERVER only', async () => {
       prismaMock.server.findUnique.mockResolvedValue({
-        onlineCount: 4, weeklyMessages: 120, statsRefreshedAt: new Date('2026-10-11T04:00:00Z'),
+        onlineCount: 4, weeklyMessages: 120, statsRefreshedAt: new Date('2026-10-11T04:00:00Z'), activityScore: 84,
         discoveryListed: false, discoveryBlockedAt: new Date('2026-10-10T00:00:00Z'), featuredAt: null,
         memberCount: 99, _count: { members: 7 },
+      });
+      mockGetTierThresholds.mockResolvedValue({
+        computedAt: '2026-10-11T04:00:00.000Z', population: 50,
+        thresholds: { bronze: 10, silver: 20, gold: 40, platinum: 100, diamond: 200 },
       });
 
       const res = await request(app).get('/api/v1/servers/srv-1/discovery').set('Authorization', `Bearer ${makeToken()}`);
@@ -989,7 +999,14 @@ describe('Server Routes', () => {
       expect(res.body.data).toEqual({
         memberCount: 7, onlineCount: 4, weeklyMessages: 120, statsRefreshedAt: '2026-10-11T04:00:00.000Z',
         discoveryListed: false, discoveryBlockedAt: '2026-10-10T00:00:00.000Z', featuredAt: null,
+        // the badge from the same cuts the cards use, and what the next one takes
+        activityScore: 84, tier: 'gold', nextTier: { tier: 'platinum', score: 100 }, tiersAvailable: true,
       });
+
+      // no cuts yet (too few active spaces, or a fresh Redis): no badge, no target
+      mockGetTierThresholds.mockResolvedValue(null);
+      const bare = await request(app).get('/api/v1/servers/srv-1/discovery').set('Authorization', `Bearer ${makeToken()}`);
+      expect(bare.body.data).toMatchObject({ activityScore: 84, tier: null, nextTier: null, tiersAvailable: false });
       expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.MANAGE_SERVER);
       expect(mockRateLimitMemberRead).toHaveBeenCalled();
 

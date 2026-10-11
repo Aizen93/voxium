@@ -1356,6 +1356,19 @@
     "moderationNotSecure": "«{{name}}» es un canal normal — elimínalo desde la barra lateral"
   },
   "discovery": {
+    "tier": {
+      "bronze": "Bronce",
+      "silver": "Plata",
+      "gold": "Oro",
+      "platinum": "Platino",
+      "diamond": "Diamante",
+      "badgeLabel": "{{tier}} · top {{percent}} % de espacios por actividad",
+      "score": "Puntuación de actividad: {{score}} (en línea × {{online}} + mensajes de la semana + miembros)",
+      "next": "Siguiente: {{tier}}, a partir de una puntuación de {{score}}",
+      "top": "El nivel más alto. No hay nada por encima.",
+      "none": "Aún sin insignia. La mitad más activa de los espacios listados obtiene Bronce; el 1 % superior, Diamante.",
+      "notYet": "Las insignias aparecen cuando el directorio tiene suficientes espacios activos."
+    },
     "tags": {
       "gaming": "Videojuegos",
       "esports": "Esports",
@@ -1388,6 +1401,7 @@
       "report": "Denunciar este espacio"
     },
     "settings": {
+      "badge": "Insignia",
       "title": "Visible en Explorar",
       "listedHint": "Cualquier usuario de Voxium con sesión iniciada puede encontrar este espacio en Explorar. Un espacio oculto sigue siendo accesible por invitación.",
       "audience": "Una ficha muestra el nombre, el icono, la descripción, las etiquetas, el número de miembros y el número en línea. Los miembros, los mensajes y la voz nunca se muestran.",

@@ -2,6 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { rateLimitDiscoveryBrowse, rateLimitDiscoveryJoin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
+import { getTierThresholds, tierOf } from '../utils/discoveryTiers';
 import { getRedis } from '../utils/redis';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
@@ -10,7 +11,7 @@ import { joinServerMember } from '../utils/serverJoin';
 import { serverSelect } from '../utils/serverSelect';
 import { emitToModerators } from '../utils/moderatorAudience';
 import { encodeDiscoveryCursor, decodeDiscoveryCursor, hashDiscoveryQuery, type DiscoveryCursor } from '../utils/discoveryCursor';
-import {
+import { DiscoveryTierThresholds,
   DISCOVERY_PAGE_SIZE,
   DISCOVERY_MAX_PAGE_SIZE,
   DISCOVERY_MAX_PAGES,
@@ -71,7 +72,7 @@ interface PublicPage {
   totalCapped: number;
 }
 
-function toPublicCard(row: CardRow): PublicCard {
+function toPublicCard(row: CardRow, cuts: DiscoveryTierThresholds | null): PublicCard {
   return {
     id: row.id,
     name: row.name,
@@ -85,6 +86,8 @@ function toPublicCard(row: CardRow): PublicCard {
     featured: row.featuredAt !== null,
     createdAt: row.createdAt.toISOString(),
     statsRefreshedAt: row.statsRefreshedAt ? row.statsRefreshedAt.toISOString() : null,
+    // the badge: a rank by the same score, from the cuts the stats job keeps
+    tier: tierOf(row.activityScore, cuts),
   };
 }
 
@@ -282,9 +285,10 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
         ? encodeDiscoveryCursor({ sort, tag, q: qHash, limit, id: last.id, key: sortKeyOf(sort, last), page: page + 1 })
         : null;
 
+      const cuts = await getTierThresholds();
       publicPage = {
-        featured: featuredRows.map(toPublicCard),
-        servers: pageRows.map(toPublicCard),
+        featured: featuredRows.map((r) => toPublicCard(r, cuts)),
+        servers: pageRows.map((r) => toPublicCard(r, cuts)),
         nextCursor,
         totalCapped,
       };
@@ -330,7 +334,7 @@ async function listedServerOrThrow(serverId: string): Promise<CardRow> {
 discoveryRouter.get('/servers/:serverId', rateLimitDiscoveryBrowse, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const row = await listedServerOrThrow(req.params.serverId);
-    const [card] = await withUserFlags(req.user!.userId, [toPublicCard(row)]);
+    const [card] = await withUserFlags(req.user!.userId, [toPublicCard(row, await getTierThresholds())]);
     res.json({ success: true, data: card });
   } catch (err) {
     next(err);

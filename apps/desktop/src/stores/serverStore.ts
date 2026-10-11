@@ -3,6 +3,7 @@ import axios from 'axios';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
+import { isDiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
 
 /** Module-level constant so selectors can default without a fresh reference. */
@@ -880,6 +881,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
       discoveryListed: d.discoveryListed !== false,
       discoveryBlockedAt: d.discoveryBlockedAt ?? null,
       featuredAt: d.featuredAt ?? null,
+      activityScore: typeof d.activityScore === 'number' ? d.activityScore : 0,
+      tier: isDiscoveryTier(d.tier) ? d.tier : null,
+      nextTier: d.nextTier && isDiscoveryTier(d.nextTier.tier) && typeof d.nextTier.score === 'number'
+        ? { tier: d.nextTier.tier, score: d.nextTier.score }
+        : null,
+      tiersAvailable: d.tiersAvailable === true,
     };
   },
 

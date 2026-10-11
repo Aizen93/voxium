@@ -54,7 +54,7 @@ const mockDelete = api.delete as unknown as Mock;
 
 const card = (id: string, extra: Partial<DiscoveryServer> = {}): DiscoveryServer => ({
   id, name: `Space ${id}`, iconUrl: null, description: 'About it.', tags: ['gaming'], memberCount: 5, onlineCount: 1, weeklyMessages: 9,
-  joinMode: 'approval', featured: false, isMember: false, requestPending: false, createdAt: '2026-10-01T00:00:00.000Z', statsRefreshedAt: null,
+  joinMode: 'approval', featured: false, isMember: false, requestPending: false, createdAt: '2026-10-01T00:00:00.000Z', statsRefreshedAt: null, tier: null,
   ...extra,
 });
 const page = (servers: DiscoveryServer[], extra: Record<string, unknown> = {}) => ({

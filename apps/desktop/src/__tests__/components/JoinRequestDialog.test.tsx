@@ -21,7 +21,7 @@ import { JoinRequestDialog } from '../../components/discovery/JoinRequestDialog'
 
 const server: DiscoveryServer = {
   id: 'srv-1', name: 'Lingua Lounge', iconUrl: null, description: null, tags: [], memberCount: 3, onlineCount: 0, weeklyMessages: 0,
-  joinMode: 'approval', featured: false, isMember: false, requestPending: false, createdAt: '2026-10-01T00:00:00.000Z', statsRefreshedAt: null,
+  joinMode: 'approval', featured: false, isMember: false, requestPending: false, createdAt: '2026-10-01T00:00:00.000Z', statsRefreshedAt: null, tier: null,
 };
 
 let container: HTMLDivElement;

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Lock, ShieldAlert, Eye, EyeOff } from 'lucide-react';
-import { DISCOVERY_TAGS, LIMITS, validateServerDescription, validateDiscoveryTags } from '@voxium/shared';
+import { Lock, ShieldAlert, Eye, EyeOff, Shield } from 'lucide-react';
+import { DISCOVERY_TAGS, DISCOVERY_SCORE_WEIGHTS, LIMITS, validateServerDescription, validateDiscoveryTags } from '@voxium/shared';
 import type { DiscoveryServer, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
 import { DiscoveryCard } from '../discovery/DiscoveryCard';
+import { TierBadge, tierPercent } from '../discovery/TierBadge';
 
 interface Props {
   serverId: string;
@@ -85,6 +86,7 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
       requestPending: false,
       createdAt: server.createdAt,
       statsRefreshedAt: info?.statsRefreshedAt ?? null,
+      tier: info?.tier ?? null,
     };
   }, [server, description, tags, joinMode, info]);
 
@@ -265,6 +267,37 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
         <h3 className="text-sm font-semibold text-vox-text-primary">{t('discovery.settings.preview')}</h3>
         <div className="mt-2 max-w-md">
           <DiscoveryCard server={preview} preview />
+        </div>
+      </section>
+
+      {/* Badge: the rank among listed spaces by the same score, and what the next one takes */}
+      <section className="rounded-lg border border-vox-border bg-vox-bg-secondary px-4 py-3 text-xs text-vox-text-secondary" data-testid="discovery-badge">
+        <h3 className="text-sm font-semibold text-vox-text-primary">{t('discovery.settings.badge')}</h3>
+        <div className="mt-2 flex items-center gap-3">
+          {info?.tier ? (
+            <TierBadge tier={info.tier} size={44} />
+          ) : (
+            <span className="inline-flex h-[50px] w-11 shrink-0 items-center justify-center rounded-lg border border-dashed border-vox-border text-vox-text-muted" aria-hidden="true">
+              <Shield size={18} />
+            </span>
+          )}
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-vox-text-primary" data-testid="discovery-badge-tier">
+              {info?.tier
+                ? t('discovery.tier.badgeLabel', { tier: t(`discovery.tier.${info.tier}`), percent: tierPercent(info.tier) })
+                : info?.tiersAvailable ? t('discovery.tier.none') : t('discovery.tier.notYet')}
+            </p>
+            <p className="mt-0.5" data-testid="discovery-badge-score">
+              {t('discovery.tier.score', { score: info?.activityScore ?? 0, online: DISCOVERY_SCORE_WEIGHTS.online })}
+            </p>
+            {info?.tiersAvailable && (
+              <p className="mt-0.5 text-vox-text-muted" data-testid="discovery-badge-next">
+                {info.nextTier
+                  ? t('discovery.tier.next', { tier: t(`discovery.tier.${info.nextTier.tier}`), score: info.nextTier.score })
+                  : t('discovery.tier.top')}
+              </p>
+            )}
+          </div>
         </div>
       </section>
 

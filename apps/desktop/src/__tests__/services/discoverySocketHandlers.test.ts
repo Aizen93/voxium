@@ -25,7 +25,7 @@ import { useDiscoveryStore } from '../../stores/discoveryStore';
 const server = { id: 'srv-1', name: 'Makhtofi Raiders', iconUrl: null, invitesLocked: false, ownerId: 'o', createdAt: '2026-01-01T00:00:00.000Z' };
 const card = (id: string, extra: Partial<DiscoveryServer> = {}): DiscoveryServer => ({
   id, name: `Space ${id}`, iconUrl: null, description: null, tags: [], memberCount: 1, onlineCount: 0, weeklyMessages: 0,
-  joinMode: 'approval', featured: false, isMember: false, requestPending: true, createdAt: '2026-10-01T00:00:00.000Z', statsRefreshedAt: null,
+  joinMode: 'approval', featured: false, isMember: false, requestPending: true, createdAt: '2026-10-01T00:00:00.000Z', statsRefreshedAt: null, tier: null,
   ...extra,
 });
 const bob = { id: 'u-2', username: 'bob', displayName: 'Bob', avatarUrl: null };

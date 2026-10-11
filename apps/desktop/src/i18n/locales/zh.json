@@ -1354,6 +1354,19 @@
     "moderationNotSecure": "\"{{name}}\"是普通频道——请从侧边栏删除它"
   },
   "discovery": {
+    "tier": {
+      "bronze": "青铜",
+      "silver": "白银",
+      "gold": "黄金",
+      "platinum": "铂金",
+      "diamond": "钻石",
+      "badgeLabel": "{{tier}} · 活跃度前 {{percent}}% 的空间",
+      "score": "活跃度分数：{{score}}（在线 × {{online}} + 本周消息 + 成员）",
+      "next": "下一级：{{tier}}，分数达到 {{score}} 起",
+      "top": "最高等级，没有更高的了。",
+      "none": "暂无徽章。已上架空间中较活跃的一半获得青铜，前 1% 获得钻石。",
+      "notYet": "目录中有足够多的活跃空间后才会显示徽章。"
+    },
     "tags": {
       "gaming": "游戏",
       "esports": "电竞",
@@ -1383,6 +1396,7 @@
       "report": "举报此空间"
     },
     "settings": {
+      "badge": "徽章",
       "title": "在“发现”中展示",
       "listedHint": "所有已登录的 Voxium 用户都能在“发现”中找到此空间。隐藏的空间仍可通过邀请加入。",
       "audience": "列表会显示名称、图标、简介、标签、成员数和在线数。成员、消息和语音绝不会显示。",
