@@ -1153,6 +1153,7 @@
     "noPermissionKickMembers": "Vous n’avez pas la permission de retirer des membres",
     "cannotKickHigherRole": "Impossible de retirer un membre de rang égal ou supérieur",
     "descriptionUnsupportedChars": "La description contient des caractères non pris en charge",
+    "serverNameUnsupportedChars": "Le nom du serveur contient des caractères non pris en charge",
     "descriptionTooLong": "La description ne peut pas dépasser {{max}} caractères",
     "reasonUnsupportedChars": "Le motif contient des caractères non pris en charge",
     "reasonTooLong": "Le motif ne peut pas dépasser {{max}} caractères",

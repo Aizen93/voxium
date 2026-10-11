@@ -1,5 +1,10 @@
 import { createClient } from 'redis';
 
+/** A failed quit must not fail the test, but it must not vanish either. */
+function quitQuietly(redis: { quit(): Promise<unknown> }): Promise<unknown> {
+  return redis.quit().catch((err: unknown) => console.warn('[e2e] redis quit failed:', err instanceof Error ? err.message : String(err)));
+}
+
 /**
  * Reset every rate-limit counter (never `rl:config`, which holds the admin
  * overrides the server loaded at boot).
@@ -32,7 +37,7 @@ export async function clearDiscoveryPageCache(): Promise<void> {
     }
     if (keys.length > 0) await redis.del(keys);
   } finally {
-    await redis.quit().catch(() => {});
+    await quitQuietly(redis);
   }
 }
 
@@ -51,6 +56,6 @@ export async function clearRateLimits(): Promise<void> {
     }
     if (keys.length > 0) await redis.del(keys);
   } finally {
-    await redis.quit().catch(() => {});
+    await quitQuietly(redis);
   }
 }

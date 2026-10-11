@@ -102,6 +102,13 @@ describe('ServerSettingsModal — gating and the Members badge', () => {
     expect(badge.getAttribute('aria-label')).toBe('server.joinRequests.pending:3');
   });
 
+  it('a role-only moderator never lands on General (a MANAGE_SERVER tab): no General tab, the modal opens on Members', async () => {
+    apiWith(Permissions.VIEW_CHANNEL | Permissions.KICK_MEMBERS, 0);
+    await render();
+    expect(container.textContent).not.toContain('serverSettings.tabs.general');
+    expect(q('[data-testid="join-requests"]')).not.toBeNull();
+  });
+
   it('MANAGE_SERVER alone: the Discovery tab shows, nothing is fetched for the badge and none is rendered', async () => {
     apiWith(Permissions.VIEW_CHANNEL | Permissions.MANAGE_SERVER, 3);
     await render();

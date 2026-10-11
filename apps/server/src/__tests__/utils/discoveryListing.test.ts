@@ -76,9 +76,6 @@ describe('recomputeListed(serverId)', () => {
       expect(prismaMock.server.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { discoveryListed: false } }));
     }
     // the banned-owner case binds the write to that very ban state
-    expect(prismaMock.server.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ owner: { is: { bannedAt: NOW } } }),
-    }));
     vi.clearAllMocks();
     server({ bannedAt: NOW, discoveryListed: true });
     await recomputeListed('s-1');

@@ -42,7 +42,7 @@ const setActiveServer = vi.fn().mockResolvedValue(undefined);
 beforeEach(() => {
   vi.clearAllMocks();
   useDiscoveryStore.setState({
-    query: '', tag: '', sort: 'active', featured: [], servers: [], nextCursor: null, totalCapped: 0, browseKey: null,
+    query: '', tag: '', sort: 'active', featured: [], servers: [], nextCursor: null, totalCapped: 0, browseKey: null, browseParams: { q: null, tag: '', sort: 'active' },
     status: 'idle', error: null, loading: false, loadingMore: false, busyServerId: null,
   });
   useServerStore.setState({ servers: [], setActiveServer });
@@ -94,7 +94,7 @@ describe('discoveryStore — browsing', () => {
   });
 
   it('fetchMore follows the cursor with the same filters, appends without duplicates, and is a no-op without a cursor', async () => {
-    useDiscoveryStore.setState({ query: 'raid', tag: 'gaming', sort: 'name', servers: [card('a'), card('b')], nextCursor: 'c1', status: 'ready' });
+    useDiscoveryStore.setState({ query: 'raid', tag: 'gaming', sort: 'name', browseParams: { q: 'raid', tag: 'gaming', sort: 'name' }, servers: [card('a'), card('b')], nextCursor: 'c1', status: 'ready' });
     mockGet.mockResolvedValue(page([card('b'), card('c')], { nextCursor: 'c2' }));
     await useDiscoveryStore.getState().fetchMore();
     expect(mockGet).toHaveBeenCalledWith('/discovery/servers', { params: { sort: 'name', cursor: 'c1', q: 'raid', tag: 'gaming' } });
@@ -103,6 +103,25 @@ describe('discoveryStore — browsing', () => {
     expect(useDiscoveryStore.getState().loadingMore).toBe(false);
 
     useDiscoveryStore.setState({ nextCursor: null });
+    mockGet.mockClear();
+    await useDiscoveryStore.getState().fetchMore();
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it('fetchMore sends the browse the cursor was issued for, not the live query box (a keystroke inside the debounce window)', async () => {
+    useDiscoveryStore.setState({ query: 'raidx', tag: '', sort: 'active', browseParams: { q: 'raid', tag: 'gaming', sort: 'name' }, servers: [card('a')], nextCursor: 'c1', status: 'ready' });
+    mockGet.mockResolvedValue(page([card('b')], { nextCursor: null }));
+    await useDiscoveryStore.getState().fetchMore();
+    // the cursor is HMAC-bound to q/tag/sort: pairing it with the new text would be "Invalid cursor"
+    expect(mockGet).toHaveBeenCalledWith('/discovery/servers', { params: { sort: 'name', cursor: 'c1', q: 'raid', tag: 'gaming' } });
+    // and the first page records what it sent
+    mockGet.mockClear();
+    useDiscoveryStore.setState({ query: 'lounge', tag: 'music', sort: 'members' });
+    mockGet.mockResolvedValue(page([card('c')]));
+    await useDiscoveryStore.getState().fetchFirst();
+    expect(useDiscoveryStore.getState().browseParams).toEqual({ q: 'lounge', tag: 'music', sort: 'members' });
+    // no browse on record (nothing fetched yet): nothing to page
+    useDiscoveryStore.setState({ browseParams: null, nextCursor: 'c9' });
     mockGet.mockClear();
     await useDiscoveryStore.getState().fetchMore();
     expect(mockGet).not.toHaveBeenCalled();
@@ -166,6 +185,18 @@ describe('discoveryStore — browsing', () => {
     expect(useDiscoveryStore.getState().error).toBe('Refine your search');
     expect(useDiscoveryStore.getState().loading).toBe(false);
     expect(warn).toHaveBeenCalled();
+
+    // a failure without a server message (offline, a malformed page) is the
+    // error STATE with no message: the UI shows its localized fallback, never
+    // axios' English "Network Error"
+    mockGet.mockRejectedValue(Object.assign(new Error('Network Error'), { isAxiosError: true, config: {}, toJSON: () => ({}) }));
+    await useDiscoveryStore.getState().fetchFirst();
+    expect(useDiscoveryStore.getState().status).toBe('error');
+    expect(useDiscoveryStore.getState().error).toBeNull();
+    mockGet.mockResolvedValue({ data: { data: { nonsense: true } } });
+    await useDiscoveryStore.getState().fetchFirst();
+    expect(useDiscoveryStore.getState().status).toBe('error');
+    expect(useDiscoveryStore.getState().error).toBeNull();
 
     // fetchMore surfaces its failure to the caller (a toast) and keeps the list
     useDiscoveryStore.setState({ servers: [card('a')], nextCursor: 'c1', status: 'ready' });

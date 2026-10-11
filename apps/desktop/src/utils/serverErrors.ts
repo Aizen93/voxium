@@ -141,6 +141,7 @@ const ERROR_MAP: Record<string, string> = {
   'Cannot kick a member with an equal or higher role': 'cannotKickHigherRole',
   // Shared validators (packages/shared/src/validators.ts) — run client-side
   // before the request AND server-side; the SAME strings reach both paths.
+  'Server name contains unsupported characters': 'serverNameUnsupportedChars',
   'Description contains unsupported characters': 'descriptionUnsupportedChars',
   [`Description must be at most ${LIMITS.SERVER_DESCRIPTION_MAX} characters`]: 'descriptionTooLong',
   'Reason contains unsupported characters': 'reasonUnsupportedChars',
@@ -176,7 +177,7 @@ const ERROR_VARS: Record<string, Record<string, unknown>> = {
 export const DISCOVERY_ERROR_KEYS: readonly string[] = [
   'discoveryDisabled', 'listingDisabledByAdmin', 'bannedFromServer', 'requestDeclinedRecently', 'joinRequestNotFound',
   'banNotFound', 'cannotTransferToBanned', 'cannotReportOwnServer', 'noPermissionManageMembers', 'noPermissionKickMembers',
-  'cannotKickHigherRole', 'descriptionUnsupportedChars', 'descriptionTooLong', 'reasonUnsupportedChars', 'reasonTooLong',
+  'cannotKickHigherRole', 'serverNameUnsupportedChars', 'descriptionUnsupportedChars', 'descriptionTooLong', 'reasonUnsupportedChars', 'reasonTooLong',
   'tagsNotSupported', 'tooManyTags', 'joinMessageUnsupportedChars', 'joinMessageTooLong', 'refineSearch', 'serverNotFound',
 ];
 

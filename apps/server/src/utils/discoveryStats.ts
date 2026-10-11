@@ -226,7 +226,16 @@ export async function correctDrift(): Promise<{ memberCounts: number; listed: nu
     WHERE u.id = s.owner_id AND s.discovery_listed IS DISTINCT FROM (
       s.discoverable AND NOT s.invites_locked AND s.discovery_blocked_at IS NULL AND u.banned_at IS NULL
     )`;
-  return { memberCounts, listed };
+  // The statement above reads banned_at from its own snapshot: a platform ban
+  // that commits while it runs can be written back as "listed" until the next
+  // night. A second, narrow statement on a fresh snapshot closes the direction
+  // that matters (a banned owner's server showing); the other direction, a
+  // server hidden a day longer, is harmless.
+  const bannedBackstop = await prisma.$executeRaw`
+    UPDATE servers s SET discovery_listed = false
+    FROM users u
+    WHERE u.id = s.owner_id AND u.banned_at IS NOT NULL AND s.discovery_listed = true`;
+  return { memberCounts, listed: listed + bannedBackstop };
 }
 
 /**
@@ -284,6 +293,12 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
     } catch (err) {
       await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_HOURLY_KEY, claims.hourly)
         .catch((e) => console.warn('[Discovery] Hourly claim release failed (it expires on its own):', e instanceof Error ? e.message : e));
+      // Both claims were taken up front: the daily work never starts now, so
+      // its claim must not stay held for 20 h on the strength of a failed hour.
+      if (claims.daily) {
+        await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_DAILY_KEY, claims.daily)
+          .catch((e) => console.warn('[Discovery] Daily claim release failed (it expires on its own):', e instanceof Error ? e.message : e));
+      }
       throw err;
     }
   }

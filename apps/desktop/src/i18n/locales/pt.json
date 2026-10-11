@@ -1153,6 +1153,7 @@
     "noPermissionKickMembers": "Você não tem permissão para remover membros",
     "cannotKickHigherRole": "Não é possível remover um membro com cargo igual ou superior",
     "descriptionUnsupportedChars": "A descrição contém caracteres não suportados",
+    "serverNameUnsupportedChars": "O nome do servidor contém caracteres não suportados",
     "descriptionTooLong": "A descrição não pode ter mais de {{max}} caracteres",
     "reasonUnsupportedChars": "O motivo contém caracteres não suportados",
     "reasonTooLong": "O motivo não pode ter mais de {{max}} caracteres",

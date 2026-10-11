@@ -1155,6 +1155,7 @@
     "noPermissionKickMembers": "У вас немає дозволу виганяти учасників",
     "cannotKickHigherRole": "Неможливо вигнати учасника з такою ж або вищою роллю",
     "descriptionUnsupportedChars": "Опис містить неприпустимі символи",
+    "serverNameUnsupportedChars": "Назва сервера містить неприпустимі символи",
     "descriptionTooLong": "Опис не може бути довшим за {{max}} символів",
     "reasonUnsupportedChars": "Причина містить неприпустимі символи",
     "reasonTooLong": "Причина не може бути довшою за {{max}} символів",

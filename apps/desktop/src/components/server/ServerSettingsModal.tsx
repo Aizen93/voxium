@@ -25,7 +25,10 @@ type Tab = 'general' | 'members' | 'roles' | 'limits' | 'discovery';
 
 export function ServerSettingsModal({ serverId, onClose }: Props) {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<Tab>('general');
+  // No tab until the viewer picks one: the default is derived below from
+  // what they may do (General is a MANAGE_SERVER tab; a role-only moderator
+  // reaches the modal through the gear too and lands on Members).
+  const [activeTab, setActiveTab] = useState<Tab | null>(null);
 
   const { servers, roles, fetchEffectivePermissions, fetchJoinRequests } = useServerStore();
   const pendingRequests = useServerStore((s) => s.joinRequestCounts[serverId] ?? 0);
@@ -43,6 +46,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   // Discovery tab: MANAGE_SERVER. Join requests + Banned: KICK_MEMBERS ("Manage members").
   const canManageServer = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_SERVER));
   const canModerateMembers = isOwner || (perms !== null && hasPermission(perms, Permissions.KICK_MEMBERS));
+  const tab: Tab = activeTab ?? (canManageServer ? 'general' : 'members');
 
   // The Members tab badge is fed by the socket events and by the list fetch;
   // until step 4 wires the events, and on the first open of a session, the
@@ -58,7 +62,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className={`relative flex w-full flex-col rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up ${activeTab === 'roles' ? 'max-w-4xl' : 'max-w-2xl'}`} style={{ maxHeight: '80vh' }}>
+      <div className={`relative flex w-full flex-col rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up ${tab === 'roles' ? 'max-w-4xl' : 'max-w-2xl'}`} style={{ maxHeight: '80vh' }}>
         {/* Header */}
         <div className="flex items-center justify-between border-b border-vox-border px-6 py-4">
           <h2 className="text-lg font-bold text-vox-text-primary">{t('serverSettings.title')}</h2>
@@ -73,20 +77,22 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
 
         {/* Tabs */}
         <div className="flex border-b border-vox-border px-6">
-          <button
-            onClick={() => setActiveTab('general')}
-            className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'general'
-                ? 'text-vox-text-primary border-vox-accent-primary'
-                : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
-            }`}
-          >
-            {t('serverSettings.tabs.general')}
-          </button>
+          {canManageServer && (
+            <button
+              onClick={() => setActiveTab('general')}
+              className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                tab === 'general'
+                  ? 'text-vox-text-primary border-vox-accent-primary'
+                  : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+              }`}
+            >
+              {t('serverSettings.tabs.general')}
+            </button>
+          )}
           <button
             onClick={() => setActiveTab('members')}
             className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'members'
+              tab === 'members'
                 ? 'text-vox-text-primary border-vox-accent-primary'
                 : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
             }`}
@@ -106,7 +112,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
             <button
               onClick={() => setActiveTab('discovery')}
               className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-                activeTab === 'discovery'
+                tab === 'discovery'
                   ? 'text-vox-text-primary border-vox-accent-primary'
                   : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
               }`}
@@ -119,7 +125,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
             <button
               onClick={() => setActiveTab('roles')}
               className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-                activeTab === 'roles'
+                tab === 'roles'
                   ? 'text-vox-text-primary border-vox-accent-primary'
                   : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
               }`}
@@ -130,7 +136,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
           <button
             onClick={() => setActiveTab('limits')}
             className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'limits'
+              tab === 'limits'
                 ? 'text-vox-text-primary border-vox-accent-primary'
                 : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
             }`}
@@ -141,13 +147,13 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6">
-          {activeTab === 'general' ? (
+          {tab === 'general' ? (
             <GeneralTab serverId={serverId} onClose={onClose} />
-          ) : activeTab === 'members' ? (
+          ) : tab === 'members' ? (
             <MembersTab serverId={serverId} canModerateMembers={canModerateMembers} />
-          ) : activeTab === 'discovery' ? (
+          ) : tab === 'discovery' ? (
             <DiscoveryTab key={serverId} serverId={serverId} onGoToGeneral={() => setActiveTab('general')} />
-          ) : activeTab === 'roles' ? (
+          ) : tab === 'roles' ? (
             <RoleEditor serverId={serverId} roles={roles} canManageRoles={canManageRoles} />
           ) : (
             <LimitsTab serverId={serverId} />

@@ -1153,6 +1153,7 @@
     "noPermissionKickMembers": "No tienes permiso para expulsar miembros",
     "cannotKickHigherRole": "No se puede expulsar a un miembro con un rol igual o superior",
     "descriptionUnsupportedChars": "La descripción contiene caracteres no admitidos",
+    "serverNameUnsupportedChars": "El nombre del servidor contiene caracteres no admitidos",
     "descriptionTooLong": "La descripción no puede superar los {{max}} caracteres",
     "reasonUnsupportedChars": "El motivo contiene caracteres no admitidos",
     "reasonTooLong": "El motivo no puede superar los {{max}} caracteres",

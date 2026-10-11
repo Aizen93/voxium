@@ -65,6 +65,7 @@ function makeTxMock() {
 let txMock = makeTxMock();
 
 const prismaMock: Record<string, any> = {
+  serverJoinRequest: { findUnique: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]), deleteMany: vi.fn().mockReturnValue({ op: 'request.deleteMany' }) },
   user: {
     findUnique: vi.fn(),
     // Only here so we can prove the delete NEVER runs on the top-level client
@@ -183,6 +184,8 @@ vi.mock('../../utils/sanitize', () => ({
 
 // Member broadcast
 const mockBroadcastMemberLeft = vi.fn().mockResolvedValue(undefined);
+const mockEmitToModerators = vi.fn();
+vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: any[]) => mockEmitToModerators(...a) }));
 vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberJoined: vi.fn().mockResolvedValue(undefined),
   broadcastMemberLeft: (...args: any[]) => mockBroadcastMemberLeft(...args),
@@ -431,6 +434,7 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-owned' }]);
     prismaMock.serverMember.findUnique.mockResolvedValue(null); // heir is not a member yet
     prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+    prismaMock.serverJoinRequest.findUnique.mockResolvedValueOnce({ status: 'pending' }); // the heir had asked to join
     prismaMock.server.findUnique.mockResolvedValue({
       id: 'srv-owned', name: 'Owned', iconUrl: null, ownerId: 'heir-1', invitesLocked: false,
       createdAt: new Date('2026-01-01T00:00:00Z'), description: null, tags: [], discoverable: true, joinMode: 'approval',
@@ -454,6 +458,9 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     // an admin-chosen heir is an explicit unban — this path creates a member
     // around joinServerMember's ban check, so the row must not survive it
     expect(prismaMock.serverBan.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned', userId: 'heir-1' } });
+    // ...and so does a request they had open on this server, settled as joined for the moderators
+    expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned', userId: 'heir-1' } });
+    expect(mockEmitToModerators).toHaveBeenCalledWith('srv-owned', 'server:join_request_resolved', { serverId: 'srv-owned', userId: 'heir-1', outcome: 'joined' });
     expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
     // the deleted account's own membership is decremented inside the delete transaction
     expect(txMock.server.updateMany).toHaveBeenCalledWith({

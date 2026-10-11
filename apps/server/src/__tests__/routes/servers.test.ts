@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { Permissions } from '@voxium/shared';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ const prismaMock: Record<string, any> = {
     count: vi.fn(),
     deleteMany: vi.fn(),
   },
-  serverJoinRequest: {
+  serverJoinRequest: { deleteMany: vi.fn(),
     findMany: vi.fn(),
     count: vi.fn(),
     findUnique: vi.fn(),
@@ -536,6 +537,9 @@ describe('Server Routes', () => {
         categories: [],
         roles: [],
         _count: { members: 3 },
+        // platform-admin curation state and ranking internals ride on the row
+        discoveryBlockedAt: new Date(), featuredAt: null, discoveryListed: false, memberCount: 99,
+        onlineCount: 5, weeklyMessages: 7, activityScore: 50, statsRefreshedAt: new Date(),
       });
 
       const res = await request(app)
@@ -544,7 +548,13 @@ describe('Server Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data.id).toBe('srv-1');
+      // the authoritative count, not the inline ranking column
       expect(res.body.data.memberCount).toBe(3);
+      // a plain member never learns that an admin blocked or featured the
+      // server, nor the stats internals (the owner's Discovery tab has its own endpoint)
+      for (const hidden of ['discoveryBlockedAt', 'featuredAt', 'discoveryListed', 'onlineCount', 'weeklyMessages', 'activityScore', 'statsRefreshedAt']) {
+        expect(res.body.data).not.toHaveProperty(hidden);
+      }
     });
 
     it('returns 404 for non-member', async () => {
@@ -870,7 +880,7 @@ describe('Server Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', expect.anything());
+      expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
       expect(mockRemoveMemberFromServer).toHaveBeenCalledTimes(1);
       // sanitizeText'd: tags stripped, trimmed
       expect(mockRemoveMemberFromServer).toHaveBeenCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: 'spam in every channel' } });
@@ -965,6 +975,34 @@ describe('Server Routes', () => {
 
   // ── PATCH /api/v1/servers/:serverId/discovery ───────────────────────────
 
+  describe('GET /api/v1/servers/:serverId/discovery', () => {
+    it('answers the owner tab with the listing state, the curation stamps and the authoritative count — MANAGE_SERVER only', async () => {
+      prismaMock.server.findUnique.mockResolvedValue({
+        onlineCount: 4, weeklyMessages: 120, statsRefreshedAt: new Date('2026-10-11T04:00:00Z'),
+        discoveryListed: false, discoveryBlockedAt: new Date('2026-10-10T00:00:00Z'), featuredAt: null,
+        memberCount: 99, _count: { members: 7 },
+      });
+
+      const res = await request(app).get('/api/v1/servers/srv-1/discovery').set('Authorization', `Bearer ${makeToken()}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual({
+        memberCount: 7, onlineCount: 4, weeklyMessages: 120, statsRefreshedAt: '2026-10-11T04:00:00.000Z',
+        discoveryListed: false, discoveryBlockedAt: '2026-10-10T00:00:00.000Z', featuredAt: null,
+      });
+      expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.MANAGE_SERVER);
+      expect(mockRateLimitMemberRead).toHaveBeenCalled();
+
+      mockHasServerPermission.mockResolvedValueOnce(false);
+      const denied = await request(app).get('/api/v1/servers/srv-1/discovery').set('Authorization', `Bearer ${makeToken()}`);
+      expect(denied.status).toBe(403);
+
+      prismaMock.server.findUnique.mockResolvedValue(null);
+      const missing = await request(app).get('/api/v1/servers/srv-1/discovery').set('Authorization', `Bearer ${makeToken()}`);
+      expect(missing.status).toBe(404);
+    });
+  });
+
   describe('PATCH /api/v1/servers/:serverId/discovery', () => {
     const UPDATED = { id: 'srv-1', name: 'S', iconUrl: null, invitesLocked: false, ownerId: 'user-1', createdAt: new Date(), description: 'd', tags: ['gaming'], discoverable: true, joinMode: 'open' };
     const patch = (body: unknown) => request(app).patch('/api/v1/servers/srv-1/discovery').set('Authorization', `Bearer ${makeToken()}`).send(body);
@@ -1051,6 +1089,7 @@ describe('Server Routes', () => {
       }));
       // reads carry the READ limiter, not the write budget approve/decline share
       expect(mockRateLimitMemberRead).toHaveBeenCalled();
+      expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
 
       mockHasServerPermission.mockResolvedValueOnce(false);
       const denied = await request(app).get('/api/v1/servers/srv-1/join-requests').set('Authorization', `Bearer ${makeToken()}`);
@@ -1077,6 +1116,9 @@ describe('Server Routes', () => {
 
       expect(res.status).toBe(200);
       expect(mockJoinServerMember).toHaveBeenCalledWith('user-2', 'srv-1', { via: 'approval', extraWrites: [DELETE] });
+      expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
+      // a request names a non-member: the whole server never hears about it
+      expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
       // status-scoped: a decline that committed first leaves a row this delete must not find
       expect(prismaMock.serverJoinRequest.delete).toHaveBeenCalledWith({ where: { id: 'req-1', status: 'pending' } });
       expect(mockTo).toHaveBeenCalledWith('user:user-2');
@@ -1098,6 +1140,24 @@ describe('Server Routes', () => {
       expect(res.status).toBe(403);
     });
 
+    it('approve: a requester who is already a member (joined by another door; the sweep raced or never ran) settles the stale row as joined', async () => {
+      prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ id: 'req-1', status: 'pending' });
+      prismaMock.serverJoinRequest.deleteMany.mockResolvedValue({ count: 1 });
+      const { BadRequestError } = await import('../../utils/errors');
+      mockJoinServerMember.mockRejectedValueOnce(new BadRequestError('You are already a member of this server'));
+
+      const res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/approve').set('Authorization', `Bearer ${makeToken()}`);
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-1', userId: 'user-2', status: 'pending' } });
+      expect(mockEmitToModerators).toHaveBeenCalledWith('srv-1', 'server:join_request_resolved', { serverId: 'srv-1', userId: 'user-2', outcome: 'joined' });
+      expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
+      // the other helper refusals still pass through unchanged
+      mockJoinServerMember.mockRejectedValueOnce(new BadRequestError('This server has reached its member limit (5)'));
+      const full = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/approve').set('Authorization', `Bearer ${makeToken()}`);
+      expect(full.status).toBe(400);
+    });
+
     it('decline: marks the row with decider and time, tells the requester (with the server name) and the moderators', async () => {
       prismaMock.serverJoinRequest.updateMany.mockResolvedValue({ count: 1 });
       prismaMock.server.findUnique.mockResolvedValue({ name: 'S' });
@@ -1111,6 +1171,8 @@ describe('Server Routes', () => {
       });
       expect(mockTo).toHaveBeenCalledWith('user:user-2');
       expect(mockEmit).toHaveBeenCalledWith('server:join_declined', { serverId: 'srv-1', serverName: 'S' });
+      expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
+      expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
       expect(mockEmitToModerators).toHaveBeenCalledWith('srv-1', 'server:join_request_resolved', { serverId: 'srv-1', userId: 'user-2', outcome: 'declined' });
       expect(mockJoinServerMember).not.toHaveBeenCalled();
     });
@@ -1147,6 +1209,7 @@ describe('Server Routes', () => {
       const res = await request(app)
         .get('/api/v1/servers/srv-1/bans')
         .set('Authorization', `Bearer ${token}`);
+      expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
 
       expect(res.status).toBe(200);
       expect(res.body.data).toEqual([{
@@ -1211,6 +1274,7 @@ describe('Server Routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.message).toBe('Member unbanned');
       expect(prismaMock.serverBan.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-1', userId: 'user-2' } });
+      expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
     });
 
     it('returns 404 when there is no ban to lift', async () => {

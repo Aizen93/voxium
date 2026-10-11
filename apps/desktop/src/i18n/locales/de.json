@@ -1153,6 +1153,7 @@
     "noPermissionKickMembers": "Du hast keine Berechtigung, Mitglieder zu entfernen",
     "cannotKickHigherRole": "Ein Mitglied mit gleicher oder höherer Rolle kann nicht entfernt werden",
     "descriptionUnsupportedChars": "Die Beschreibung enthält nicht unterstützte Zeichen",
+    "serverNameUnsupportedChars": "Der Servername enthält nicht unterstützte Zeichen",
     "descriptionTooLong": "Die Beschreibung darf höchstens {{max}} Zeichen lang sein",
     "reasonUnsupportedChars": "Der Grund enthält nicht unterstützte Zeichen",
     "reasonTooLong": "Der Grund darf höchstens {{max}} Zeichen lang sein",

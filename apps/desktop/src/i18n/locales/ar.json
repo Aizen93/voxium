@@ -1157,6 +1157,7 @@
     "noPermissionKickMembers": "ليست لديك صلاحية إزالة الأعضاء",
     "cannotKickHigherRole": "لا يمكن إزالة عضو بدور مساوٍ أو أعلى",
     "descriptionUnsupportedChars": "يحتوي الوصف على أحرف غير مدعومة",
+    "serverNameUnsupportedChars": "يحتوي اسم الخادم على أحرف غير مدعومة",
     "descriptionTooLong": "يجب ألا يتجاوز الوصف {{max}} حرفًا",
     "reasonUnsupportedChars": "يحتوي السبب على أحرف غير مدعومة",
     "reasonTooLong": "يجب ألا يتجاوز السبب {{max}} حرفًا",

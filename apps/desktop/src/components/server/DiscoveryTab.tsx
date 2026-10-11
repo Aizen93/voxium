@@ -61,7 +61,10 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
         if (!cancelled) toast.error(t('discovery.settings.failedToLoad'));
       });
     return () => { cancelled = true; };
-  }, [serverId, fetchDiscoveryInfo, t]);
+    // `server` is replaced on every server:updated (an admin block or unblock
+    // arrives that way, without the block itself on the wire): one GET per
+    // event keeps the notice and the Listed switch honest while the tab is open.
+  }, [serverId, server, fetchDiscoveryInfo, t]);
 
   const blocked = !!info?.discoveryBlockedAt;
 

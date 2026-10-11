@@ -233,6 +233,29 @@ describe('housekeeping on the same timer', () => {
     expect(error).toHaveBeenCalledWith('[Discovery] Stats cycle failed:', 'recount failed');
   });
 
+  it('a failing HOURLY sweep releases the daily claim too — one bad hour must not cancel the night', async () => {
+    vi.useFakeTimers({ now: new Date(2026, 9, 10, DISCOVERY_HOUSEKEEPING_HOUR, 30, 0), toFake: ['Date'] });
+    redis.set.mockResolvedValue('OK');
+    prismaMock.serverJoinRequest.deleteMany.mockRejectedValueOnce(new Error('sweep failed'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await runDiscoveryStatsCycle();
+
+    expect(redis.eval).toHaveBeenCalledWith(expect.stringContaining("redis.call('del'"), expect.objectContaining({ keys: [DISCOVERY_HOUSEKEEPING_HOURLY_KEY] }));
+    expect(redis.eval).toHaveBeenCalledWith(expect.stringContaining("redis.call('del'"), expect.objectContaining({ keys: [DISCOVERY_HOUSEKEEPING_DAILY_KEY] }));
+    // the daily work never started
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('the daily correction ends with a narrow backstop that hides banned owners\' servers on a fresh snapshot', async () => {
+    prismaMock.$executeRaw.mockResolvedValueOnce(0).mockResolvedValueOnce(2).mockResolvedValueOnce(1);
+    await expect(correctDrift()).resolves.toEqual({ memberCounts: 0, listed: 3 });
+    const backstop = sqlOf(prismaMock.$executeRaw.mock.calls[2]);
+    expect(backstop).toContain('UPDATE servers s SET discovery_listed = false');
+    expect(backstop).toContain('u.banned_at IS NOT NULL');
+    expect(backstop).toContain('s.discovery_listed = true');
+  });
+
   it('the hourly sweep deletes declined requests older than 7 days and pending ones older than 30', async () => {
     const now = new Date('2026-10-09T12:00:00Z');
     prismaMock.serverJoinRequest.deleteMany.mockResolvedValueOnce({ count: 2 }).mockResolvedValueOnce({ count: 1 });
@@ -267,7 +290,8 @@ describe('housekeeping on the same timer', () => {
     const run = await runDiscoveryStatsCycle();
     expect(run).toMatchObject({ hourlyHousekeeping: true, dailyHousekeeping: true });
     expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledTimes(2);
-    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
+    // the recount, the listing recompute and the banned-owner backstop
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(3);
     // claimed BEFORE the work (the set precedes the deletes), never stamped after
     const claimAt = redis.set.mock.invocationCallOrder.find((_, i) => redis.set.mock.calls[i][0] === DISCOVERY_HOUSEKEEPING_DAILY_KEY)!;
     expect(claimAt).toBeLessThan(prismaMock.$executeRaw.mock.invocationCallOrder[0]);

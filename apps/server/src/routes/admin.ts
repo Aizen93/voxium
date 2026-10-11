@@ -15,6 +15,7 @@ import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
 import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
+import { emitToModerators } from '../utils/moderatorAudience';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
@@ -423,6 +424,14 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       ? await prisma.ipRecord.findMany({ where: { userId: targetId }, select: { ip: true } })
       : [];
 
+    // A banned account's pending join requests go with the ban: approving
+    // one later would admit an account that cannot sign in. Read first so
+    // the moderators of each server can be told after the commit.
+    const pendingRequests = await prisma.serverJoinRequest.findMany({
+      where: { userId: targetId, status: 'pending' },
+      select: { serverId: true },
+    });
+
     const [, ipBanResult] = await prisma.$transaction([
       prisma.user.update({
         where: { id: targetId },
@@ -436,12 +445,17 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
         data: ipRecords.map((r) => ({ ip: r.ip, reason: sanitizedReason, bannedBy: req.user!.userId })),
         skipDuplicates: true, // already-banned IPs are fine
       }),
+      prisma.serverJoinRequest.deleteMany({ where: { userId: targetId } }),
     ]);
     ipsBanned = ipBanResult.count;
 
     // A banned owner's servers leave the directory without anyone having to
     // think about it (owner.bannedAt is one of the listing column's inputs).
     await recomputeListedForOwner(targetId);
+
+    for (const { serverId } of pendingRequests) {
+      await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId: targetId, outcome: 'cancelled' });
+    }
 
     // Notify servers that user left
     const memberships = await prisma.serverMember.findMany({
@@ -608,11 +622,19 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
               select: { id: true },
             });
 
+            // A request the heir had open on this very server is settled by
+            // the membership, the way joinServerMember settles one.
+            const heirRequest = await prisma.serverJoinRequest.findUnique({
+              where: { serverId_userId: { serverId: action.serverId, userId: action.newOwnerId } },
+              select: { status: true },
+            });
+
             await prisma.$transaction([
               // This is the one path besides server creation that makes a
               // member without joinServerMember's ban check: an admin-chosen
               // heir is an explicit unban, so the row (if any) goes with it.
               prisma.serverBan.deleteMany({ where: { serverId: action.serverId, userId: action.newOwnerId } }),
+              prisma.serverJoinRequest.deleteMany({ where: { serverId: action.serverId, userId: action.newOwnerId } }),
               prisma.serverMember.create({
                 data: { userId: action.newOwnerId, serverId: action.serverId, role: 'owner' },
               }),
@@ -632,6 +654,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
             ]);
 
             await broadcastMemberJoined(action.newOwnerId, action.serverId);
+            if (heirRequest?.status === 'pending') {
+              await emitToModerators(action.serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, {
+                serverId: action.serverId, userId: action.newOwnerId, outcome: 'joined',
+              });
+            }
           } else {
             // Already a member — transfer ownership in transaction
             await prisma.$transaction([
@@ -2410,8 +2437,16 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       });
 
       // Same as the canonical ban route: a banned owner's servers leave the
-      // directory.
+      // directory, and their pending join requests are withdrawn.
       await recomputeListedForOwner(banTarget.id);
+      const bannedPending = await prisma.serverJoinRequest.findMany({
+        where: { userId: banTarget.id, status: 'pending' },
+        select: { serverId: true },
+      });
+      await prisma.serverJoinRequest.deleteMany({ where: { userId: banTarget.id } });
+      for (const { serverId } of bannedPending) {
+        await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId: banTarget.id, outcome: 'cancelled' });
+      }
 
       // Remove the banned user from all server member lists/rooms — same as the
       // canonical ban route. Without this the banned user lingers in member lists.

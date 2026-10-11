@@ -42,6 +42,8 @@ interface DiscoveryState {
   totalCapped: number;
   /** Which browse (q|tag|sort) produced the lists — another one starts from empty. */
   browseKey: string | null;
+  /** The parameters the current page was fetched with: a cursor is bound to them, not to the live query box. */
+  browseParams: { q: string | null; tag: string; sort: DiscoverySort } | null;
   status: DiscoveryStatus;
   /** The raw server message of the last failure, for translateServerError. */
   error: string | null;
@@ -108,6 +110,11 @@ function isFeatureOff(err: unknown): boolean {
 function errorMessage(err: unknown): string {
   if (axios.isAxiosError(err)) return typeof err.response?.data?.error === 'string' ? err.response.data.error : err.message;
   return err instanceof Error ? err.message : 'Failed to load Explore';
+}
+
+/** The server's own message, or null — anything else ('Network Error', a malformed page) gets the localized fallback in the UI. */
+function serverError(err: unknown): string | null {
+  return axios.isAxiosError(err) && typeof err.response?.data?.error === 'string' ? err.response.data.error : null;
 }
 
 /** Monotonic id of the latest fetchFirst, so a slow earlier page cannot land on top of a newer one. */
@@ -194,6 +201,7 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => {
     nextCursor: null,
     totalCapped: 0,
     browseKey: null,
+    browseParams: null,
     status: 'idle',
     error: null,
     loading: false,
@@ -212,9 +220,10 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => {
       // A new browse owns the page state: the previous results must not sit
       // under the new heading, and a Load more superseded by this call must
       // not leave its flag behind (it bails on seq and never writes again).
+      const browseParams = { q: q ?? null, tag, sort };
       set(browseKey === key
-        ? { loading: true, loadingMore: false, error: null }
-        : { loading: true, loadingMore: false, error: null, browseKey: key, featured: [], servers: [], nextCursor: null, totalCapped: 0 });
+        ? { loading: true, loadingMore: false, error: null, browseParams }
+        : { loading: true, loadingMore: false, error: null, browseKey: key, browseParams, featured: [], servers: [], nextCursor: null, totalCapped: 0 });
       try {
         const params: Record<string, string> = { sort };
         if (q) params.q = q;
@@ -239,20 +248,22 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => {
           return;
         }
         console.warn('[Discovery] Failed to load the directory:', errorMessage(err));
-        set({ status: 'error', error: errorMessage(err), loading: false });
+        set({ status: 'error', error: serverError(err), loading: false });
       }
     },
 
     fetchMore: async () => {
-      const { nextCursor, loadingMore, loading, query, tag, sort } = get();
-      if (!nextCursor || loadingMore || loading) return;
+      const { nextCursor, loadingMore, loading, browseParams } = get();
+      if (!nextCursor || loadingMore || loading || !browseParams) return;
       const seq = fetchSeq;
       set({ loadingMore: true });
       try {
-        const params: Record<string, string> = { sort, cursor: nextCursor };
-        const q = searchableQuery(query);
-        if (q) params.q = q;
-        if (tag) params.tag = tag;
+        // The cursor is bound to the browse that issued it (q, tag, sort), not
+        // to the live query box: a keystroke inside the debounce window must
+        // not pair a new q with the old cursor ("Invalid cursor").
+        const params: Record<string, string> = { sort: browseParams.sort, cursor: nextCursor };
+        if (browseParams.q) params.q = browseParams.q;
+        if (browseParams.tag) params.tag = browseParams.tag;
         const { data } = await api.get('/discovery/servers', { params });
         if (seq !== fetchSeq) return; // the browse changed underneath; that page is gone (fetchFirst reset the flag)
         const page: unknown = data.data;
@@ -267,7 +278,7 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => {
       } catch (err) {
         if (seq !== fetchSeq) return;
         console.warn('[Discovery] Failed to load more:', errorMessage(err));
-        set({ loadingMore: false, error: errorMessage(err) });
+        set({ loadingMore: false, error: serverError(err) });
         throw err;
       }
     },

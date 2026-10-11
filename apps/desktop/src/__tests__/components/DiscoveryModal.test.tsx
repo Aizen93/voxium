@@ -88,7 +88,8 @@ beforeEach(() => {
     query: '', tag: '', sort: 'active', featured: [], servers: [], nextCursor: null, totalCapped: 0, browseKey: null,
     status: 'idle', error: null, loading: false, loadingMore: false, busyServerId: null,
   });
-  mockGet.mockResolvedValue(page([card('a'), card('b', { joinMode: 'open' })], { featured: [card('f', { featured: true })], totalCapped: 1000, nextCursor: 'c1' }));
+  // the server's "more than the cap" sentinel is CAP + 1
+  mockGet.mockResolvedValue(page([card('a'), card('b', { joinMode: 'open' })], { featured: [card('f', { featured: true })], totalCapped: 1001, nextCursor: 'c1' }));
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -108,6 +109,13 @@ describe('DiscoveryModal', () => {
     expect(q('[data-testid="discovery-results-heading"]')!.textContent).toContain('discovery.modal.resultsCapped:1000');
     expect(q('[data-testid="discovery-footer"]')!.textContent).toBe('discovery.modal.footer');
     expect(q('[data-testid="discovery-load-more"]')).not.toBeNull();
+  });
+
+  it('exactly the cap is a plain count: "1,000+" only past it', async () => {
+    mockGet.mockResolvedValue(page([card('a')], { totalCapped: 1000 }));
+    await render();
+    expect(q('[data-testid="discovery-results-heading"]')!.textContent).toContain('discovery.modal.results:1000');
+    expect(q('[data-testid="discovery-results-heading"]')!.textContent).not.toContain('resultsCapped');
   });
 
   it('the search fires only at 3+ characters, 300 ms after the last keystroke, and says so below that', async () => {

@@ -36,6 +36,11 @@ export function validatePassword(password: string): string | null {
 export function validateServerName(name: string): string | null {
   if (name.length < LIMITS.SERVER_NAME_MIN) return `Server name must be at least ${LIMITS.SERVER_NAME_MIN} characters`;
   if (name.length > LIMITS.SERVER_NAME_MAX) return `Server name must be at most ${LIMITS.SERVER_NAME_MAX} characters`;
+  // The name is the most visible stranger-facing field of a directory card
+  // and the key of the name sort, the search and the cursor: the same bidi /
+  // zero-width rejection as the description (which may span lines; a name
+  // may not).
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(name) || /[\r\n]/.test(name)) return 'Server name contains unsupported characters';
   return null;
 }
 

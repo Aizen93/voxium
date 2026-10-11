@@ -1152,6 +1152,7 @@
     "noPermissionKickMembers": "メンバーを退出させる権限がありません",
     "cannotKickHigherRole": "同じか上位のロールのメンバーは退出させられません",
     "descriptionUnsupportedChars": "説明にサポートされていない文字が含まれています",
+    "serverNameUnsupportedChars": "サーバー名にサポートされていない文字が含まれています",
     "descriptionTooLong": "説明は{{max}}文字以内にしてください",
     "reasonUnsupportedChars": "理由にサポートされていない文字が含まれています",
     "reasonTooLong": "理由は{{max}}文字以内にしてください",

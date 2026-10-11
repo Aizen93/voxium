@@ -146,7 +146,8 @@ export function DiscoveryModal({ onClose }: Props) {
     onReport: setReportFor,
   });
 
-  const resultsLabel = totalCapped >= DISCOVERY_TOTAL_CAP
+  // countCapped answers at most CAP + 1: exactly CAP matches is a plain count
+  const resultsLabel = totalCapped > DISCOVERY_TOTAL_CAP
     ? t('discovery.modal.resultsCapped', { count: DISCOVERY_TOTAL_CAP })
     : t('discovery.modal.results', { count: totalCapped });
 

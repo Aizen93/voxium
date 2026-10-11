@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
+import { validateServerName,
   DISCOVERY_TAGS,
   DISCOVERY_SCORE_WEIGHTS,
   DISCOVERY_PAGE_SIZE,
@@ -219,5 +219,15 @@ describe('validateDiscoveryQuery', () => {
     expect(validateDiscoveryQuery('  abc  ')).toBeNull();
     expect(validateDiscoveryQuery('x'.repeat(64))).toBeNull();
     expect(validateDiscoveryQuery('x'.repeat(65))).toMatch(/at most 64/);
+  });
+});
+
+describe('validateServerName — the most visible stranger-facing field', () => {
+  it('rejects bidi overrides, zero-width characters and line breaks like the description does', () => {
+    expect(validateServerName('Voxium Support')).toBeNull();
+    expect(validateServerName('Voxium' + String.fromCharCode(0x202e) + ' troppuS')).toBe('Server name contains unsupported characters');
+    expect(validateServerName('Vox' + String.fromCharCode(0x200b) + 'ium')).toBe('Server name contains unsupported characters');
+    expect(validateServerName('Line' + String.fromCharCode(10) + 'break')).toBe('Server name contains unsupported characters');
+    expect(validateServerName('a')).toContain('at least');
   });
 });

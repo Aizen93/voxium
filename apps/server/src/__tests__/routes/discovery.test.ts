@@ -43,7 +43,8 @@ vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
 const redis = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn() }));
 vi.mock('../../utils/redis', () => ({ getRedis: () => redis }));
 
-vi.mock('../../websocket/socketServer', () => ({ getIO: () => ({ to: vi.fn(() => ({ emit: vi.fn() })) }) }));
+const io = vi.hoisted(() => { const emit = vi.fn(); return { emit, to: vi.fn(() => ({ emit })) }; });
+vi.mock('../../websocket/socketServer', () => ({ getIO: () => io }));
 
 const emitToModerators = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: any[]) => emitToModerators(...a) }));
@@ -477,9 +478,12 @@ describe('POST /discovery/servers/:serverId/join', () => {
       prismaMock.serverBan.findUnique.mockResolvedValueOnce({ userId: 'user-1' });
       let res = await request(app).post('/api/v1/discovery/servers/srv-1/join').send({});
       expect(res.status).toBe(403);
+      // the lookups are keyed on THIS server and THIS caller (a swapped key would still answer 403 under a blind mock)
+      expect(prismaMock.serverBan.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { serverId_userId: { serverId: 'srv-1', userId: 'user-1' } } }));
       prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-1' });
       res = await request(app).post('/api/v1/discovery/servers/srv-1/join').send({});
       expect(res.status).toBe(400);
+      expect(prismaMock.serverMember.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { userId_serverId: { userId: 'user-1', serverId: 'srv-1' } } }));
       expect(res.body.error).toContain('already a member');
       expect(prismaMock.serverJoinRequest.create).not.toHaveBeenCalled();
       expect(joinServerMember).not.toHaveBeenCalled();
@@ -510,6 +514,8 @@ describe('POST /discovery/servers/:serverId/join', () => {
           user: { id: 'user-1', username: 'alice', displayName: 'Alice', avatarUrl: null },
         },
       });
+      // never the server room: a request names a non-member to the whole server
+      expect(io.to).not.toHaveBeenCalledWith('server:srv-1');
     });
 
     it('an empty message is stored as null', async () => {

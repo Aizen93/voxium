@@ -8,8 +8,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const prismaMock = vi.hoisted(() => ({
   serverBan: { findUnique: vi.fn() },
   serverJoinRequest: { deleteMany: vi.fn(), findUnique: vi.fn() },
-  serverMember: { findUnique: vi.fn(), count: vi.fn(), create: vi.fn() },
-  server: { update: vi.fn() },
+  serverMember: { findUnique: vi.fn(), count: vi.fn(), create: vi.fn(), deleteMany: vi.fn() },
+  server: { update: vi.fn(), updateMany: vi.fn() },
   channel: { findMany: vi.fn() },
   channelRead: { createMany: vi.fn() },
   $transaction: vi.fn(),
@@ -188,6 +188,36 @@ describe('joinServerMember', () => {
       .rejects.toBe(consumed);
     expect(broadcastMemberJoined).not.toHaveBeenCalled();
     expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
+  });
+
+  it('a kick that commits mid-join (the ban row appears after the first check) rolls the membership back and refuses', async () => {
+    prismaMock.serverBan.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ userId: 'u-1' });
+    prismaMock.serverMember.deleteMany.mockResolvedValue({ count: 1 });
+    prismaMock.server.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.$transaction
+      .mockImplementationOnce(async () => { order.push('txn'); return []; })
+      .mockImplementationOnce(async (fn: (tx: unknown) => Promise<void>) => { order.push('undo'); await fn({ serverMember: prismaMock.serverMember, server: prismaMock.server }); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(joinServerMember('u-1', 's-1', { via: 'invite' })).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(order).toEqual(['txn', 'undo']);
+    expect(prismaMock.serverMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u-1', serverId: 's-1' } });
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({ where: { id: 's-1', memberCount: { gt: 0 } }, data: { memberCount: { decrement: 1 } } });
+    expect(broadcastMemberJoined).not.toHaveBeenCalled();
+    expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('the kick that raced the join can also have removed the row itself: nothing is decremented twice', async () => {
+    prismaMock.serverBan.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ userId: 'u-1' });
+    prismaMock.serverMember.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.$transaction
+      .mockImplementationOnce(async () => [])
+      .mockImplementationOnce(async (fn: (tx: unknown) => Promise<void>) => { await fn({ serverMember: prismaMock.serverMember, server: prismaMock.server }); });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(joinServerMember('u-1', 's-1', { via: 'invite' })).rejects.toMatchObject({ statusCode: 403 });
+    expect(prismaMock.server.updateMany).not.toHaveBeenCalled();
   });
 
   it('maps a concurrent duplicate join (P2002 on the composite key) to "already a member", not a 500', async () => {

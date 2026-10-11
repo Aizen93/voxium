@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import axios from 'axios';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
@@ -44,6 +45,33 @@ async function fetchAllPages<T>(url: string): Promise<{ rows: T[]; total: number
     if (!data.hasMore || chunk.length === 0) break;
   }
   return { rows, total: Math.max(total, rows.length) };
+}
+
+/** Resolutions this client applied itself (approve / decline), so the socket
+ *  echo of them never moves the badge a second time. Keyed serverId:userId. */
+const locallyResolved = new Set<string>();
+
+/**
+ * Approve or decline, then drop the row here without waiting for the socket
+ * echo (we are in the moderator audience, so it comes too and is ignored by
+ * the mark). A 404 is a resolution as well: the row can be gone without any
+ * event (the requester deleted their account, the 30-day sweep) and must not
+ * stay on screen as an undeletable row with a stale badge.
+ */
+async function decideJoinRequest(
+  get: () => { handleJoinRequestResolved: (serverId: string, userId: string) => void },
+  serverId: string,
+  userId: string,
+  action: 'approve' | 'decline',
+): Promise<void> {
+  try {
+    await api.post(`/servers/${serverId}/join-requests/${userId}/${action}`);
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) get().handleJoinRequestResolved(serverId, userId);
+    throw err;
+  }
+  locallyResolved.add(`${serverId}:${userId}`);
+  get().handleJoinRequestResolved(serverId, userId);
 }
 
 const PINNED_KEY = 'voxium_pinned_spaces';
@@ -166,6 +194,8 @@ interface ServerState {
    *  NO_BANS otherwise): a fetch for another server must not show here. */
   joinRequests: ServerJoinRequest[];
   joinRequestsServerId: string | null;
+  /** The loaded rows stop at the page cap while the badge carries the server's total. */
+  joinRequestsTruncated: boolean;
   bans: ServerBan[];
   bansServerId: string | null;
   updateDiscovery: (serverId: string, fields: { discoverable?: boolean; joinMode?: ServerJoinMode; description?: string | null; tags?: string[] }) => Promise<void>;
@@ -828,6 +858,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   joinRequestCounts: {},
   joinRequests: [],
   joinRequestsServerId: null,
+  joinRequestsTruncated: false,
   bans: [],
   bansServerId: null,
 
@@ -837,7 +868,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   fetchDiscoveryInfo: async (serverId) => {
-    const { data } = await api.get(`/servers/${serverId}`);
+    // The owner's endpoint: the member-facing detail route no longer carries
+    // the curation state or the figures.
+    const { data } = await api.get(`/servers/${serverId}/discovery`);
     const d = data.data;
     return {
       memberCount: typeof d.memberCount === 'number' ? d.memberCount : 0,
@@ -854,32 +887,30 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // Claim the list for this server BEFORE the request: a section that
     // opens for another server meanwhile wins, and this response is dropped
     // (same staleness rule as setActiveServer / fetchMembers).
-    set((state) => (state.joinRequestsServerId === serverId ? state : { joinRequests: [], joinRequestsServerId: serverId }));
+    set((state) => (state.joinRequestsServerId === serverId ? state : { joinRequests: [], joinRequestsServerId: serverId, joinRequestsTruncated: false }));
     const { rows, total } = await fetchAllPages<ServerJoinRequest>(`/servers/${serverId}/join-requests`);
     set((state) => {
       if (state.joinRequestsServerId !== serverId) return state;
       return {
         joinRequests: rows,
+        joinRequestsTruncated: total > rows.length,
         joinRequestCounts: { ...state.joinRequestCounts, [serverId]: total },
       };
     });
   },
 
   approveJoinRequest: async (serverId, userId) => {
-    await api.post(`/servers/${serverId}/join-requests/${userId}/approve`);
-    // The resolved event reaches us too (we are in the moderator audience);
-    // dropping the row here keeps the tab honest without waiting for it, and
-    // the handler is idempotent on a row it no longer finds.
-    get().handleJoinRequestResolved(serverId, userId);
+    await decideJoinRequest(get, serverId, userId, 'approve');
   },
 
   declineJoinRequest: async (serverId, userId) => {
-    await api.post(`/servers/${serverId}/join-requests/${userId}/decline`);
-    get().handleJoinRequestResolved(serverId, userId);
+    await decideJoinRequest(get, serverId, userId, 'decline');
   },
 
   handleJoinRequest: (serverId, request) => {
     if (typeof serverId !== 'string' || !isServerJoinRequest(request) || request.serverId !== serverId) return;
+    // A fresh request from someone we resolved earlier: the old mark is spent
+    locallyResolved.delete(`${serverId}:${request.userId}`);
     set((state) => {
       const listed = state.joinRequestsServerId === serverId;
       const known = listed && state.joinRequests.some((r) => r.id === request.id || r.userId === request.userId);
@@ -893,12 +924,19 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   handleJoinRequestResolved: (serverId, userId) => {
     if (typeof serverId !== 'string' || typeof userId !== 'string') return;
+    const key = `${serverId}:${userId}`;
     set((state) => {
       const listed = state.joinRequestsServerId === serverId;
       const had = listed && state.joinRequests.some((r) => r.userId === userId);
-      // With the list loaded, only a row we actually drop moves the badge —
-      // our own approve and the socket echo of it must not count twice.
-      if (listed && !had) return state;
+      if (listed && !had) {
+        // The socket echo of our own approve / decline: that row and its
+        // count already moved when we applied it.
+        if (locallyResolved.delete(key)) return state;
+        // A complete list that never had this user: a stale event, not a row
+        // we are missing. A list cut at the page cap can be missing it, and
+        // then the badge (the server's total) still has to move.
+        if (!state.joinRequestsTruncated) return state;
+      }
       const next = Math.max(0, (state.joinRequestCounts[serverId] || 0) - 1);
       const joinRequestCounts = { ...state.joinRequestCounts };
       if (next === 0) delete joinRequestCounts[serverId]; else joinRequestCounts[serverId] = next;
@@ -916,8 +954,15 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   unbanMember: async (serverId, userId) => {
-    await api.delete(`/servers/${serverId}/bans/${userId}`);
-    set((state) => (state.bansServerId !== serverId ? state : { bans: state.bans.filter((b) => b.userId !== userId) }));
+    const drop = () => set((state) => (state.bansServerId !== serverId ? state : { bans: state.bans.filter((b) => b.userId !== userId) }));
+    try {
+      await api.delete(`/servers/${serverId}/bans/${userId}`);
+    } catch (err) {
+      // No event carries bans: a 404 means another moderator lifted it already
+      if (axios.isAxiosError(err) && err.response?.status === 404) drop();
+      throw err;
+    }
+    drop();
   },
 
   handleChannelMembersUpdated: (payload) => {

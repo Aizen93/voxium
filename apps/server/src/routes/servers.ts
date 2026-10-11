@@ -202,9 +202,17 @@ serverRouter.get('/:serverId', async (req: Request<{ serverId: string }>, res: R
     // Filter channels by VIEW_CHANNEL permission
     const visibleChannels = await filterVisibleChannels(req.user!.userId, serverId, server.channels);
 
+    // Members get the Server shape plus the relations, never the platform
+    // admin's curation state or the ranking internals: the owner's Discovery
+    // tab reads those from its own endpoint (GET /:serverId/discovery).
+    const {
+      discoveryBlockedAt: _blocked, featuredAt: _featured, discoveryListed: _listed, memberCount: _inline,
+      onlineCount: _online, weeklyMessages: _weekly, activityScore: _score, statsRefreshedAt: _stats,
+      ...memberView
+    } = server;
     res.json({
       success: true,
-      data: { ...server, channels: visibleChannels, memberCount: server._count.members },
+      data: { ...memberView, channels: visibleChannels, memberCount: server._count.members },
     });
   } catch (err) {
     next(err);
@@ -317,10 +325,14 @@ serverRouter.get('/:serverId/members/search', rateLimitSearch, async (req: Reque
   }
 });
 
-// NOTE: There is intentionally no direct POST /:serverId/join route. Joining a
-// server MUST go through POST /invites/:code/join, which enforces invite
-// validity, invitesLocked, and maxMembers. A direct join-by-id route would
-// bypass all three (HIGH-6 in the stabilization audit).
+// NOTE: There is no POST /:serverId/join here. Every path that makes a user a
+// member runs through utils/serverJoin.ts joinServerMember() — the invite
+// (POST /invites/:code/join), the open-mode directory join and an approved
+// join request (routes/discovery.ts, the approve route below) — which owns
+// the ban, duplicate and maxMembers checks. invitesLocked is enforced on the
+// invite path directly and on the directory paths through discoveryListed
+// (a locked server is not listed). A bare join-by-id route bypassing the
+// helper was HIGH-6 in the stabilization audit.
 
 // Leave a server
 serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -651,6 +663,43 @@ serverRouter.delete(
 // Discovery profile and switches (MANAGE_SERVER): "Listed in Explore", who
 // can join, description, tags. No stats recompute on write — a relisted
 // server shows its last daily figures and joins the next cycle.
+// The owner's Discovery tab: the listing state, the curation stamps and the
+// figures behind the card. MANAGE_SERVER only — a member gets the Server
+// shape from GET /:serverId and never the platform admin's curation state.
+serverRouter.get('/:serverId/discovery', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const canManageServer = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_SERVER);
+    if (!canManageServer) throw new ForbiddenError('You do not have permission to manage server settings');
+
+    const server = await prisma.server.findUnique({
+      where: { id: serverId },
+      select: {
+        onlineCount: true, weeklyMessages: true, statsRefreshedAt: true,
+        discoveryListed: true, discoveryBlockedAt: true, featuredAt: true,
+        // the authoritative count, not the inline ranking column
+        _count: { select: { members: true } },
+      },
+    });
+    if (!server) throw new NotFoundError('Server');
+
+    res.json({
+      success: true,
+      data: {
+        memberCount: server._count.members,
+        onlineCount: server.onlineCount,
+        weeklyMessages: server.weeklyMessages,
+        statsRefreshedAt: server.statsRefreshedAt,
+        discoveryListed: server.discoveryListed,
+        discoveryBlockedAt: server.discoveryBlockedAt,
+        featuredAt: server.featuredAt,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 serverRouter.patch('/:serverId/discovery', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
@@ -773,8 +822,19 @@ serverRouter.post(
           extraWrites: [prisma.serverJoinRequest.delete({ where: { id: request.id, status: 'pending' } })],
         });
       } catch (err) {
+        const e = err as { code?: unknown; statusCode?: unknown; message?: unknown };
         // P2025 = the row was cancelled, declined or approved by someone else meanwhile
-        if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Join request');
+        if (e?.code === 'P2025') throw new NotFoundError('Join request');
+        // The requester came in by another door (an invite, an ownership
+        // transfer) and the sweep that takes the row with them raced this
+        // request, or never ran: the row is stale, the membership is not.
+        // Settle it here so the Members tab stops offering it.
+        if (e?.statusCode === 400 && typeof e.message === 'string' && e.message.startsWith('You are already a member')) {
+          await prisma.serverJoinRequest.deleteMany({ where: { serverId, userId, status: 'pending' } });
+          await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'joined' });
+          res.json({ success: true, message: 'Join request resolved: already a member' });
+          return;
+        }
         throw err;
       }
 

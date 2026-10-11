@@ -1152,6 +1152,7 @@
     "noPermissionKickMembers": "你没有移除成员的权限",
     "cannotKickHigherRole": "无法移除角色相同或更高的成员",
     "descriptionUnsupportedChars": "描述包含不支持的字符",
+    "serverNameUnsupportedChars": "服务器名称包含不支持的字符",
     "descriptionTooLong": "描述最多 {{max}} 个字符",
     "reasonUnsupportedChars": "原因包含不支持的字符",
     "reasonTooLong": "原因最多 {{max}} 个字符",

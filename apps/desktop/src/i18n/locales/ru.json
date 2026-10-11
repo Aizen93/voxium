@@ -1155,6 +1155,7 @@
     "noPermissionKickMembers": "У вас нет права удалять участников",
     "cannotKickHigherRole": "Нельзя удалить участника с такой же или более высокой ролью",
     "descriptionUnsupportedChars": "Описание содержит недопустимые символы",
+    "serverNameUnsupportedChars": "Название сервера содержит недопустимые символы",
     "descriptionTooLong": "Описание не может быть длиннее {{max}} символов",
     "reasonUnsupportedChars": "Причина содержит недопустимые символы",
     "reasonTooLong": "Причина не может быть длиннее {{max}} символов",

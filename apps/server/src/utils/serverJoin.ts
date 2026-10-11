@@ -99,6 +99,26 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
     throw err;
   }
 
+  // The ban check above and the transaction are separate statements: a kick
+  // that committed between them (ban upsert + member delete, one transaction)
+  // has just been undone by the create. Nothing has been broadcast or joined
+  // yet, so re-read the ban after the commit and compensate: the row and the
+  // counter, only if the row is still ours to remove.
+  const banAfter = await prisma.serverBan.findUnique({
+    where: { serverId_userId: { serverId, userId } },
+    select: { userId: true },
+  });
+  if (banAfter) {
+    await prisma.$transaction(async (tx) => {
+      const { count } = await tx.serverMember.deleteMany({ where: { userId, serverId } });
+      if (count > 0) {
+        await tx.server.updateMany({ where: { id: serverId, memberCount: { gt: 0 } }, data: { memberCount: { decrement: 1 } } });
+      }
+    });
+    console.warn(`[ServerJoin] User ${userId} was banned from ${serverId} mid-join; the membership was rolled back`);
+    throw new ForbiddenError('You are banned from this server');
+  }
+
   console.log(`[ServerJoin] User ${userId} joined server ${serverId} via ${opts.via}`);
 
   // Notify all members and add the joiner's socket(s) to the server room

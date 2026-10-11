@@ -301,11 +301,12 @@ describe('serverStore — discovery, join requests and bans', () => {
     expect((useServerStore.getState().servers[0] as { joinMode: string }).joinMode).toBe('approval');
   });
 
-  it('fetchDiscoveryInfo picks the detail fields with safe defaults', async () => {
+  it('fetchDiscoveryInfo reads the owner endpoint and picks its fields with safe defaults', async () => {
     mockGet.mockResolvedValue({ data: { data: { id: 'srv-1', memberCount: 12, onlineCount: 3, weeklyMessages: 40, statsRefreshedAt: '2026-10-09T04:00:00.000Z', discoveryListed: true, discoveryBlockedAt: null, featuredAt: null } } });
     await expect(useServerStore.getState().fetchDiscoveryInfo('srv-1')).resolves.toEqual({
       memberCount: 12, onlineCount: 3, weeklyMessages: 40, statsRefreshedAt: '2026-10-09T04:00:00.000Z', discoveryListed: true, discoveryBlockedAt: null, featuredAt: null,
     });
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/discovery');
     mockGet.mockResolvedValue({ data: { data: { id: 'srv-1' } } });
     await expect(useServerStore.getState().fetchDiscoveryInfo('srv-1')).resolves.toEqual({
       memberCount: 0, onlineCount: 0, weeklyMessages: 0, statsRefreshedAt: null, discoveryListed: true, discoveryBlockedAt: null, featuredAt: null,
@@ -419,6 +420,57 @@ describe('serverStore — discovery, join requests and bans', () => {
     await expect(useServerStore.getState().approveJoinRequest('srv-1', 'u-2')).rejects.toThrow();
     expect(useServerStore.getState().joinRequests).toHaveLength(1);
     expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 1 });
+  });
+
+  it('a 404 on approve / decline / unban means the row is already gone (no event carries that): drop it locally, still rethrow', async () => {
+    const gone = Object.assign(new Error('Request failed'), { isAxiosError: true, config: {}, toJSON: () => ({}), response: { status: 404, data: { error: 'Join request not found' } } });
+    mockPost.mockRejectedValue(gone);
+    useServerStore.setState({ joinRequests: [req('u-2')], joinRequestsServerId: 'srv-1', joinRequestCounts: { 'srv-1': 1 } });
+    await expect(useServerStore.getState().approveJoinRequest('srv-1', 'u-2')).rejects.toThrow();
+    expect(useServerStore.getState().joinRequests).toEqual([]);
+    expect(useServerStore.getState().joinRequestCounts).toEqual({});
+
+    useServerStore.setState({ joinRequests: [req('u-3')], joinRequestsServerId: 'srv-1', joinRequestCounts: { 'srv-1': 1 } });
+    await expect(useServerStore.getState().declineJoinRequest('srv-1', 'u-3')).rejects.toThrow();
+    expect(useServerStore.getState().joinRequests).toEqual([]);
+
+    const ban: ServerBan = { serverId: 'srv-1', userId: 'u-4', reason: null, createdAt: '2026-10-09T10:00:00.000Z', user: bob, bannedBy: null };
+    useServerStore.setState({ bans: [ban], bansServerId: 'srv-1' });
+    mockDelete.mockRejectedValue(gone);
+    await expect(useServerStore.getState().unbanMember('srv-1', 'u-4')).rejects.toThrow();
+    expect(useServerStore.getState().bans).toEqual([]);
+    // any other failure keeps the rows
+    mockDelete.mockRejectedValue(new Error('500'));
+    useServerStore.setState({ bans: [ban], bansServerId: 'srv-1' });
+    await expect(useServerStore.getState().unbanMember('srv-1', 'u-4')).rejects.toThrow();
+    expect(useServerStore.getState().bans).toEqual([ban]);
+  });
+
+  it('with the list cut at the page cap, a resolution outside the loaded rows still moves the badge; the echo of our own action still does not', async () => {
+    useServerStore.setState({ joinRequests: [req('u-2')], joinRequestsServerId: 'srv-1', joinRequestCounts: { 'srv-1': 1500 }, joinRequestsTruncated: true });
+    // another moderator resolves someone we never loaded
+    useServerStore.getState().handleJoinRequestResolved('srv-1', 'u-999');
+    expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 1499 });
+    expect(useServerStore.getState().joinRequests).toHaveLength(1);
+    // our own approve of a loaded row: once on the action, not again on the echo
+    mockPost.mockResolvedValue({ data: {} });
+    await useServerStore.getState().approveJoinRequest('srv-1', 'u-2');
+    expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 1498 });
+    useServerStore.getState().handleJoinRequestResolved('srv-1', 'u-2');
+    expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 1498 });
+    // a complete list that never had the user: a stale event, nothing moves
+    useServerStore.setState({ joinRequestsTruncated: false });
+    useServerStore.getState().handleJoinRequestResolved('srv-1', 'u-998');
+    expect(useServerStore.getState().joinRequestCounts).toEqual({ 'srv-1': 1498 });
+  });
+
+  it('fetchJoinRequests records whether the loaded rows stop short of the total', async () => {
+    mockGet.mockResolvedValue({ data: { data: [req('u-2')], total: 40, hasMore: false } });
+    await useServerStore.getState().fetchJoinRequests('srv-1');
+    expect(useServerStore.getState().joinRequestsTruncated).toBe(true);
+    mockGet.mockResolvedValue({ data: { data: [req('u-2')], total: 1, hasMore: false } });
+    await useServerStore.getState().fetchJoinRequests('srv-1');
+    expect(useServerStore.getState().joinRequestsTruncated).toBe(false);
   });
 
   it('fetchBans loads the list (scoped to its server); unbanMember DELETEs and drops the row locally (no socket event carries bans)', async () => {
