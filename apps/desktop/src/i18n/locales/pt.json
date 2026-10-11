@@ -1160,7 +1160,8 @@
     "tooManyTags": "São permitidas no máximo {{max}} tags",
     "joinMessageUnsupportedChars": "A mensagem contém caracteres não suportados",
     "joinMessageTooLong": "A mensagem não pode ter mais de {{max}} caracteres",
-    "refineSearch": "Resultados demais — refine sua pesquisa"
+    "refineSearch": "Resultados demais — refine sua pesquisa",
+    "serverNotFound": "Espaço não encontrado"
   },
   "e2e": {
     "badgeTitle": "Criptografia de ponta a ponta — ver número de segurança",
@@ -1424,7 +1425,7 @@
       "tagsLabel": "Tags",
       "allTags": "Todos",
       "featured": "Em destaque",
-      "resultsCapped": "{{count}}+ espaços",
+      "resultsCapped": "{{count, number}}+ espaços",
       "loadMore": "Carregar mais",
       "emptyMatch": "Nenhum espaço público corresponde.",
       "emptyMatchHint": "Tente outra palavra ou outra tag.",
@@ -1451,8 +1452,8 @@
       "joined": "Bem-vindo a {{name}}",
       "requestSent": "Pedido enviado para {{name}}",
       "requestCancelled": "Pedido para {{name}} cancelado",
-      "approved": "{{name}} aprovou seu pedido. Bem-vindo!",
-      "declined": "{{name}} recusou seu pedido de entrada",
+      "approved": "Seu pedido para entrar em {{name}} foi aprovado. Bem-vindo!",
+      "declined": "Seu pedido para entrar em {{name}} foi recusado",
       "newRequest": "{{user}} pediu para entrar em {{server}}",
       "unknownSpace": "um espaço"
     }

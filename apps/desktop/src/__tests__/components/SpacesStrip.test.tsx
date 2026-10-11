@@ -110,7 +110,7 @@ describe('SpacesStrip', () => {
   it('the compass opens Explore, and the switcher hands over to it (closing itself)', () => {
     render();
     expect(document.body.querySelector('[data-testid="explore-open-marker"]')).toBeNull();
-    click(strip().querySelector('[data-testid="discovery-open"]')!);
+    click(strip().querySelector('[data-testid="discovery-explore"]')!);
     expect(document.body.querySelector('[data-testid="explore-open-marker"]')).not.toBeNull();
   });
 

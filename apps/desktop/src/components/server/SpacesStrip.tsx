@@ -316,7 +316,7 @@ export function SpacesStrip() {
           onClick={openExplore}
           aria-label={t('discovery.explore')}
           title={t('discovery.explore')}
-          data-testid="discovery-open"
+          data-testid="discovery-explore"
         >
           <Compass size={13} />
           <span className="hidden sm:inline">{t('discovery.explore')}</span>

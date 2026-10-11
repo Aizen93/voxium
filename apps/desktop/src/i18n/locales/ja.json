@@ -1159,7 +1159,8 @@
     "tooManyTags": "タグは最大{{max}}個までです",
     "joinMessageUnsupportedChars": "メッセージにサポートされていない文字が含まれています",
     "joinMessageTooLong": "メッセージは{{max}}文字以内にしてください",
-    "refineSearch": "結果が多すぎます。検索条件を絞ってください"
+    "refineSearch": "結果が多すぎます。検索条件を絞ってください",
+    "serverNotFound": "スペースが見つかりません"
   },
   "e2e": {
     "badgeTitle": "エンドツーエンド暗号化済み — 安全番号を表示",
@@ -1419,7 +1420,7 @@
       "tagsLabel": "タグ",
       "allTags": "すべて",
       "featured": "注目",
-      "resultsCapped": "{{count}}件以上のスペース",
+      "resultsCapped": "{{count, number}}件以上のスペース",
       "loadMore": "さらに読み込む",
       "emptyMatch": "一致する公開スペースはありません。",
       "emptyMatchHint": "別の言葉やタグで試してください。",
@@ -1445,8 +1446,8 @@
       "joined": "{{name}}へようこそ",
       "requestSent": "{{name}}にリクエストを送信しました",
       "requestCancelled": "{{name}}へのリクエストを取り消しました",
-      "approved": "{{name}}がリクエストを承認しました。ようこそ！",
-      "declined": "{{name}}が参加リクエストを却下しました",
+      "approved": "{{name}}への参加リクエストが承認されました。ようこそ！",
+      "declined": "{{name}}への参加リクエストは却下されました",
       "newRequest": "{{user}}が{{server}}への参加をリクエストしました",
       "unknownSpace": "スペース"
     }

@@ -94,9 +94,9 @@ function resolves(bundle: unknown, key: string): boolean {
 function isPluralIn(bundle: unknown, key: string): boolean {
   return isString(lookup(bundle, `${key}_other`));
 }
-/** `{{name}}` placeholders, as a sorted list. */
+/** `{{name}}` placeholders, as a sorted list — a format suffix (`{{count, number}}`) is part of the same placeholder. */
 function placeholders(text: string): string[] {
-  return [...text.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)].map((m) => m[1]).sort();
+  return [...text.matchAll(/\{\{\s*([A-Za-z0-9_]+)(?:\s*,[^}]*)?\s*\}\}/g)].map((m) => m[1]).sort();
 }
 
 // The tag labels are reached through a template (`discovery.tags.${tag}`),

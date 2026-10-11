@@ -1167,7 +1167,8 @@
     "tooManyTags": "At most {{max}} tags are allowed",
     "joinMessageUnsupportedChars": "Message contains unsupported characters",
     "joinMessageTooLong": "Message must be at most {{max}} characters",
-    "refineSearch": "Too many results — refine your search"
+    "refineSearch": "Too many results — refine your search",
+    "serverNotFound": "Space not found"
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",
@@ -1431,7 +1432,7 @@
       "tagsLabel": "Tags",
       "allTags": "All",
       "featured": "Featured",
-      "resultsCapped": "{{count}}+ spaces",
+      "resultsCapped": "{{count, number}}+ spaces",
       "loadMore": "Load more",
       "emptyMatch": "No public spaces match.",
       "emptyMatchHint": "Try another word or tag.",
@@ -1458,8 +1459,8 @@
       "joined": "Welcome to {{name}}",
       "requestSent": "Request sent to {{name}}",
       "requestCancelled": "Request to {{name}} cancelled",
-      "approved": "{{name}} approved your request. Welcome!",
-      "declined": "{{name}} declined your join request",
+      "approved": "Your request to join {{name}} was approved. Welcome!",
+      "declined": "Your request to join {{name}} was declined",
       "newRequest": "{{user}} asked to join {{server}}",
       "unknownSpace": "a space"
     }

@@ -40,7 +40,7 @@ const setValue = (el: HTMLTextAreaElement, value: string) => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  onSend.mockResolvedValue(undefined);
+  onSend.mockResolvedValue(true);
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -77,8 +77,8 @@ describe('JoinRequestDialog', () => {
     expect(q('[data-testid="join-request-error"]')!.textContent).toBe('');
   });
 
-  it('a refused send keeps the dialog and the draft; busy disables everything', async () => {
-    onSend.mockRejectedValue(new Error('Your request was declined recently. Please try again later.'));
+  it('a refused send (the caller answered false) keeps the dialog and the draft; busy disables everything', async () => {
+    onSend.mockResolvedValue(false);
     await render();
     await act(async () => { setValue(q('[data-testid="join-request-message"]') as HTMLTextAreaElement, 'keep me'); });
     await act(async () => { q('[data-testid="join-request-send"]')!.click(); });
@@ -93,7 +93,7 @@ describe('JoinRequestDialog', () => {
     expect(onSend).toHaveBeenCalledTimes(1);
   });
 
-  it('closes from the X and from a click on the backdrop', async () => {
+  it('closes from the X, from a click on the backdrop, and from Escape — but not mid-send', async () => {
     await render();
     await act(async () => { q('[aria-label="common.close"]')!.click(); });
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -101,5 +101,23 @@ describe('JoinRequestDialog', () => {
       q('[data-testid="join-request-dialog"]')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     });
     expect(onClose).toHaveBeenCalledTimes(2);
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(onClose).toHaveBeenCalledTimes(3);
+    await render(true);
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(onClose).toHaveBeenCalledTimes(3);
+  });
+
+  it('announces the validation error and ties it to the textarea', async () => {
+    await render();
+    const textarea = q('[data-testid="join-request-message"]') as HTMLTextAreaElement;
+    expect(textarea.getAttribute('aria-invalid')).toBe('false');
+    await act(async () => { setValue(textarea, `x${String.fromCharCode(0x200b)}`); });
+    await act(async () => { q('[data-testid="join-request-send"]')!.click(); });
+    const error = q('[data-testid="join-request-error"]')!;
+    expect(error.getAttribute('role')).toBe('alert');
+    expect(error.id).toBe('join-request-error');
+    expect(textarea.getAttribute('aria-invalid')).toBe('true');
+    expect(textarea.getAttribute('aria-describedby')).toBe('join-request-error');
   });
 });

@@ -32,7 +32,7 @@ async function openServer(page: Page, serverName: string) {
 }
 
 async function openExplore(page: Page) {
-  await page.getByTestId('discovery-open').click();
+  await page.getByTestId('discovery-explore').click();
   await expect(page.getByTestId('discovery-modal')).toBeVisible({ timeout: 15_000 });
 }
 
@@ -200,7 +200,7 @@ test.describe('Server discovery — Explore and the request flow', () => {
     await expect(rowB).toHaveCount(0);
 
     // B's strip gains the server with a toast; the card now reads Open
-    await expect(toasts(b.page)).toContainText('approved your request', { timeout: 15_000 });
+    await expect(toasts(b.page)).toContainText('was approved', { timeout: 15_000 });
     await expect(cardB.getByTestId('discovery-open')).toBeVisible({ timeout: 15_000 });
     await closeExplore(b.page);
     await expect(b.page.getByRole('button', { name: serverName, exact: true })).toBeVisible({ timeout: 15_000 });
@@ -219,7 +219,7 @@ test.describe('Server discovery — Explore and the request flow', () => {
     await rowC.getByTestId('join-request-decline').click();
     await expect(rowC).toHaveCount(0);
 
-    await expect(toasts(c.page)).toContainText('declined your join request', { timeout: 15_000 });
+    await expect(toasts(c.page)).toContainText('was declined', { timeout: 15_000 });
     const cardCAfter = c.page.locator(`[data-testid="discovery-card"][data-server-id="${server.id}"]`).first();
     await expect(cardCAfter.getByTestId('discovery-join')).toHaveText('Request to join', { timeout: 15_000 });
     await cardCAfter.getByTestId('discovery-join').click();

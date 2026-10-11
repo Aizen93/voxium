@@ -7,7 +7,7 @@ vi.mock('../../services/api', () => ({
 }));
 
 import { api } from '../../services/api';
-import { useDiscoveryStore, searchableQuery } from '../../stores/discoveryStore';
+import { useDiscoveryStore, searchableQuery, resetDiscoveryModuleState } from '../../stores/discoveryStore';
 import { useServerStore } from '../../stores/serverStore';
 
 /**
@@ -42,7 +42,7 @@ const setActiveServer = vi.fn().mockResolvedValue(undefined);
 beforeEach(() => {
   vi.clearAllMocks();
   useDiscoveryStore.setState({
-    query: '', tag: '', sort: 'active', featured: [], servers: [], nextCursor: null, totalCapped: 0,
+    query: '', tag: '', sort: 'active', featured: [], servers: [], nextCursor: null, totalCapped: 0, browseKey: null,
     status: 'idle', error: null, loading: false, loadingMore: false, busyServerId: null,
   });
   useServerStore.setState({ servers: [], setActiveServer });
@@ -108,16 +108,46 @@ describe('discoveryStore — browsing', () => {
     expect(mockGet).not.toHaveBeenCalled();
   });
 
-  it('a page that arrives after the browse changed is dropped', async () => {
+  it('a page that arrives after the browse changed is dropped — and Load more is NOT left dead', async () => {
     useDiscoveryStore.setState({ servers: [card('a')], nextCursor: 'c1', status: 'ready' });
     const more = deferred();
-    mockGet.mockReturnValueOnce(more.promise).mockResolvedValueOnce(page([card('fresh')]));
+    mockGet.mockReturnValueOnce(more.promise).mockResolvedValueOnce(page([card('fresh')], { nextCursor: 'c2' }));
     const pMore = useDiscoveryStore.getState().fetchMore();
+    expect(useDiscoveryStore.getState().loadingMore).toBe(true);
     await useDiscoveryStore.getState().fetchFirst(); // a new browse
+    expect(useDiscoveryStore.getState().loadingMore).toBe(false); // the new browse owns the flag
     more.resolve(page([card('late')], { nextCursor: 'c9' }));
     await pMore;
     expect(useDiscoveryStore.getState().servers.map((x) => x.id)).toEqual(['fresh']);
+    expect(useDiscoveryStore.getState().nextCursor).toBe('c2');
+    expect(useDiscoveryStore.getState().loadingMore).toBe(false);
+    // the next Load more actually goes out
+    mockGet.mockResolvedValueOnce(page([card('next')]));
+    await useDiscoveryStore.getState().fetchMore();
+    expect(mockGet).toHaveBeenLastCalledWith('/discovery/servers', { params: { sort: 'active', cursor: 'c2' } });
+    expect(useDiscoveryStore.getState().servers.map((x) => x.id)).toEqual(['fresh', 'next']);
+  });
+
+  it('a different browse starts from an empty grid; the same browse (a reopen) keeps the earlier page until the refresh lands', async () => {
+    mockGet.mockResolvedValue(page([card('a')], { nextCursor: 'c1', totalCapped: 5 }));
+    await useDiscoveryStore.getState().fetchFirst();
+    const pending = deferred();
+    mockGet.mockReturnValueOnce(pending.promise);
+    const p1 = useDiscoveryStore.getState().fetchFirst(); // same key: a reopen
+    expect(useDiscoveryStore.getState().servers.map((x) => x.id)).toEqual(['a']);
+    expect(useDiscoveryStore.getState().loading).toBe(true);
+    pending.resolve(page([card('a')]));
+    await p1;
+    useDiscoveryStore.setState({ tag: 'music' });
+    const pending2 = deferred();
+    mockGet.mockReturnValueOnce(pending2.promise);
+    const p2 = useDiscoveryStore.getState().fetchFirst(); // a new key
+    expect(useDiscoveryStore.getState().servers).toEqual([]);
     expect(useDiscoveryStore.getState().nextCursor).toBeNull();
+    expect(useDiscoveryStore.getState().totalCapped).toBe(0);
+    pending2.resolve(page([card('m')]));
+    await p2;
+    expect(useDiscoveryStore.getState().servers.map((x) => x.id)).toEqual(['m']);
   });
 
   it('the flag-off 403 is the "off" state, not an error; any other failure is "error" with the message kept', async () => {
@@ -181,6 +211,25 @@ describe('discoveryStore — the viewer\'s actions', () => {
     expect(useDiscoveryStore.getState().servers[0].memberCount).toBe(2);
   });
 
+  it('join against a server that switched to approval meanwhile: the answer is a pending request, the card reads Requested', async () => {
+    useDiscoveryStore.setState({ servers: [card('a', { joinMode: 'open' })], status: 'ready' });
+    mockPost.mockResolvedValue({ data: { success: true, data: { status: 'pending' } } });
+    await expect(useDiscoveryStore.getState().join('a')).resolves.toBeNull();
+    expect(useServerStore.getState().servers).toEqual([]);
+    expect(setActiveServer).not.toHaveBeenCalled();
+    expect(useDiscoveryStore.getState().servers[0]).toMatchObject({ isMember: false, requestPending: true, memberCount: 1 });
+    expect(useDiscoveryStore.getState().busyServerId).toBeNull();
+  });
+
+  it('request against a server that switched to open meanwhile lands exactly like join', async () => {
+    useDiscoveryStore.setState({ servers: [card('a')], status: 'ready' });
+    mockPost.mockResolvedValue({ data: { success: true, data: server } });
+    await expect(useDiscoveryStore.getState().request('a', 'hi')).resolves.toBe('joined');
+    expect(useServerStore.getState().servers.map((s) => s.id)).toEqual(['srv-a']);
+    expect(setActiveServer).toHaveBeenCalledWith('srv-a');
+    expect(useDiscoveryStore.getState().servers[0]).toMatchObject({ isMember: true, requestPending: false, memberCount: 2 });
+  });
+
   it('a refused join (banned, full) rethrows for the toast and clears the busy mark', async () => {
     useDiscoveryStore.setState({ servers: [card('a', { joinMode: 'open' })], status: 'ready' });
     mockPost.mockRejectedValue(axiosError(403, 'You are banned from this server'));
@@ -227,6 +276,42 @@ describe('discoveryStore — the viewer\'s actions', () => {
     mockDelete.mockRejectedValue(new Error('network'));
     await expect(useDiscoveryStore.getState().cancelRequest('a')).rejects.toThrow('network');
     expect(useDiscoveryStore.getState().servers[0].requestPending).toBe(true);
+  });
+
+  it('follows the strip: a kick / leave / deletion flips the card back and uncounts the viewer; an invite join counts them', () => {
+    useDiscoveryStore.setState({ servers: [card('srv-a', { isMember: true, memberCount: 4 }), card('srv-b', { requestPending: true })], featured: [card('srv-a', { isMember: true, memberCount: 4 })], status: 'ready' });
+    useServerStore.setState({ servers: [server as never] });
+    useServerStore.getState().handleMemberKicked('srv-a');
+    expect(useServerStore.getState().servers).toEqual([]);
+    expect(useDiscoveryStore.getState().servers[0]).toMatchObject({ isMember: false, requestPending: false, memberCount: 3 });
+    expect(useDiscoveryStore.getState().featured[0]).toMatchObject({ isMember: false, memberCount: 3 });
+    // an invite join elsewhere appends to the strip: the card follows
+    useServerStore.setState((s) => ({ servers: [...s.servers, { ...server, id: 'srv-b' } as never] }));
+    expect(useDiscoveryStore.getState().servers[1]).toMatchObject({ isMember: true, requestPending: false, memberCount: 2 });
+    // leftServer is the explicit form (handleOpen's guard)
+    useDiscoveryStore.getState().leftServer('srv-b');
+    expect(useDiscoveryStore.getState().servers[1]).toMatchObject({ isMember: false, memberCount: 1 });
+  });
+
+  it('logout retires the requests in flight: a late page or join never touches the next account', async () => {
+    const pendingPage = deferred();
+    const pendingJoin = deferred();
+    mockGet.mockReturnValueOnce(pendingPage.promise);
+    mockPost.mockReturnValueOnce(pendingJoin.promise);
+    useDiscoveryStore.setState({ servers: [card('a', { joinMode: 'open' })], status: 'ready' });
+    const pFetch = useDiscoveryStore.getState().fetchFirst();
+    const pJoin = useDiscoveryStore.getState().join('a');
+    resetDiscoveryModuleState();
+    useDiscoveryStore.setState({ servers: [], featured: [], status: 'idle', loading: false, busyServerId: null });
+    pendingPage.resolve(page([card('stale')]));
+    pendingJoin.resolve({ data: { success: true, data: server } });
+    await pFetch;
+    await expect(pJoin).resolves.toBeNull();
+    expect(useDiscoveryStore.getState().servers).toEqual([]);
+    expect(useDiscoveryStore.getState().status).toBe('idle');
+    expect(useDiscoveryStore.getState().busyServerId).toBeNull();
+    expect(useServerStore.getState().servers).toEqual([]);
+    expect(setActiveServer).not.toHaveBeenCalled();
   });
 
   it('markRequestResolved: approved makes the card a member, declined only clears the mark; unknown ids change nothing', () => {

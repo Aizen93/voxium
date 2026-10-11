@@ -26,12 +26,14 @@ vi.mock('react-i18next', async (importOriginal) => {
 vi.mock('../../services/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn(), put: vi.fn() },
 }));
-const S = vi.hoisted(() => ({ setActiveServer: vi.fn(), setState: vi.fn() }));
+const S = vi.hoisted(() => ({ setActiveServer: vi.fn(), setState: vi.fn(), servers: [] as Array<{ id: string }> }));
 vi.mock('../../stores/serverStore', () => {
-  const state = () => ({ servers: [], setActiveServer: S.setActiveServer });
+  const state = () => ({ servers: S.servers, setActiveServer: S.setActiveServer });
   const useServerStore = <T,>(sel?: (s: ReturnType<typeof state>) => T) => (sel ? sel(state()) : state());
   useServerStore.getState = state;
   useServerStore.setState = S.setState;
+  // discoveryStore subscribes to the strip at import — the mock never emits
+  useServerStore.subscribe = () => () => {};
   return { useServerStore };
 });
 const T = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }));
@@ -81,8 +83,9 @@ async function render() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  S.servers = [];
   useDiscoveryStore.setState({
-    query: '', tag: '', sort: 'active', featured: [], servers: [], nextCursor: null, totalCapped: 0,
+    query: '', tag: '', sort: 'active', featured: [], servers: [], nextCursor: null, totalCapped: 0, browseKey: null,
     status: 'idle', error: null, loading: false, loadingMore: false, busyServerId: null,
   });
   mockGet.mockResolvedValue(page([card('a'), card('b', { joinMode: 'open' })], { featured: [card('f', { featured: true })], totalCapped: 1000, nextCursor: 'c1' }));
@@ -188,6 +191,60 @@ describe('DiscoveryModal', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('Join against a server that switched to approval meanwhile becomes a request: the card reads Requested, the modal stays', async () => {
+    mockPost.mockResolvedValue({ data: { success: true, data: { status: 'pending' } } });
+    await render();
+    await act(async () => { (cardEl('b').querySelector('[data-testid="discovery-join"]') as HTMLButtonElement).click(); });
+    expect(T.success).toHaveBeenCalledWith('discovery.toasts.requestSent:Space b');
+    expect(S.setActiveServer).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(cardEl('b').querySelector('[data-testid="discovery-requested"]')).not.toBeNull();
+  });
+
+  it('a request against a server that switched to open meanwhile lands the viewer: welcome toast, modal closes', async () => {
+    const server = { id: 'a', name: 'Space a', iconUrl: null, invitesLocked: false, ownerId: 'o', createdAt: 'x' };
+    mockPost.mockResolvedValue({ data: { success: true, data: server } });
+    await render();
+    await act(async () => { (cardEl('a').querySelector('[data-testid="discovery-join"]') as HTMLButtonElement).click(); });
+    await act(async () => { q('[data-testid="join-request-send"]')!.click(); });
+    expect(T.success).toHaveBeenCalledWith('discovery.toasts.joined:Space a');
+    expect(S.setActiveServer).toHaveBeenCalledWith('a');
+    expect(q('[data-testid="join-request-dialog"]')).toBeNull();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed refresh over an earlier page shows an error strip with Retry instead of passing the old cards off as current', async () => {
+    await render();
+    expect(qa('[data-testid="discovery-card"]')).toHaveLength(3);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // the modal was reopened: same browse, the refresh fails
+    mockGet.mockRejectedValue(axiosError(500, 'Internal error'));
+    await act(async () => { await useDiscoveryStore.getState().fetchFirst(); });
+    expect(q('[data-testid="discovery-error-strip"]')).not.toBeNull();
+    expect(q('[data-testid="discovery-error-strip"]')!.getAttribute('role')).toBe('alert');
+    expect(qa('[data-testid="discovery-card"]')).toHaveLength(3); // the earlier page is still there, labelled
+    mockGet.mockResolvedValue(page([card('z')]));
+    await act(async () => { (q('[data-testid="discovery-error-strip"] button') as HTMLButtonElement).click(); });
+    expect(q('[data-testid="discovery-error-strip"]')).toBeNull();
+    expect(qa('[data-testid="discovery-card"]')).toHaveLength(1);
+    warn.mockRestore();
+  });
+
+  it('a filter change starts from an empty grid, so a failure there shows the full error view, never stale cards', async () => {
+    await render();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockGet.mockRejectedValue(axiosError(500, 'Internal error'));
+    await act(async () => { q('[data-testid="discovery-tag-art"]')!.click(); });
+    expect(qa('[data-testid="discovery-card"]')).toHaveLength(0);
+    expect(q('[data-testid="discovery-error"]')).not.toBeNull();
+    warn.mockRestore();
+  });
+
+  it('caps the search box at the longest searchable query', async () => {
+    await render();
+    expect((q('[data-testid="discovery-search"]') as HTMLInputElement).maxLength).toBe(64);
+  });
+
   it('a refused Join toasts the translated reason and keeps the modal', async () => {
     mockPost.mockRejectedValue(axiosError(403, 'You are banned from this server'));
     await render();
@@ -225,6 +282,7 @@ describe('DiscoveryModal', () => {
   });
 
   it('Open switches to a server the viewer is in and closes; the menu opens the server report', async () => {
+    S.servers = [{ id: 'm' }];
     mockGet.mockResolvedValue(page([card('m', { isMember: true })]));
     await render();
     await act(async () => { (cardEl('m').querySelector('[data-testid="discovery-open"]') as HTMLButtonElement).click(); });
@@ -234,12 +292,23 @@ describe('DiscoveryModal', () => {
     expect(q('[data-testid="report-marker"]')!.textContent).toBe('m');
   });
 
-  it('closes on Escape, but not while the request dialog is open', async () => {
+  it('Open on a card the strip no longer holds flips it back to Join instead of activating a server the viewer left', async () => {
+    mockGet.mockResolvedValue(page([card('m', { isMember: true, joinMode: 'open', memberCount: 3 })]));
+    await render();
+    await act(async () => { (cardEl('m').querySelector('[data-testid="discovery-open"]') as HTMLButtonElement).click(); });
+    expect(S.setActiveServer).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(cardEl('m').querySelector('[data-testid="discovery-join"]')!.textContent).toBe('discovery.card.join');
+    expect(cardEl('m').querySelector('[data-testid="discovery-card-members"]')!.textContent).toBe('discovery.card.members:2');
+  });
+
+  it('Escape closes the request dialog first (the modal stays), then the modal', async () => {
     await render();
     await act(async () => { (cardEl('a').querySelector('[data-testid="discovery-join"]') as HTMLButtonElement).click(); });
+    expect(q('[data-testid="join-request-dialog"]')).not.toBeNull();
     await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(q('[data-testid="join-request-dialog"]')).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
-    await act(async () => { q('[data-testid="join-request-dialog"] [aria-label="common.close"]')!.click(); });
     await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
     expect(onClose).toHaveBeenCalledTimes(1);
   });

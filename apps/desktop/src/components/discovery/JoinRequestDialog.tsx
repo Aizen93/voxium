@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { X, UserPlus } from 'lucide-react';
@@ -10,8 +10,8 @@ import { ServerIcon } from '../server/ServerIcon';
 interface Props {
   server: DiscoveryServer;
   busy?: boolean;
-  /** Resolves when the request was sent; rejects with the server's error (the caller toasts). */
-  onSend: (message: string | undefined) => Promise<void>;
+  /** Resolves true once the request was sent (the caller toasts either way and closes the dialog on true). */
+  onSend: (message: string | undefined) => Promise<boolean>;
   onClose: () => void;
 }
 
@@ -26,17 +26,25 @@ export function JoinRequestDialog({ server, busy = false, onSend, onClose }: Pro
   const [message, setMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
 
+  // Escape closes the dialog (the Explore modal behind it deliberately
+  // ignores the key while this one is open) — not mid-send.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [busy, onClose]);
+
   const submit = async () => {
     if (busy) return;
     const trimmed = message.trim();
     const invalid = trimmed ? validateJoinRequestMessage(trimmed) : null;
     if (invalid) { setError(translateServerError(invalid, t)); return; }
     setError(null);
-    try {
-      await onSend(trimmed || undefined);
-    } catch {
-      // toasted by the caller; the dialog stays open with the draft
-    }
+    // A refusal is toasted by the caller and answered with false: the dialog
+    // stays open with the draft.
+    await onSend(trimmed || undefined);
   };
 
   return createPortal(
@@ -76,11 +84,13 @@ export function JoinRequestDialog({ server, busy = false, onSend, onClose }: Pro
           placeholder={t('discovery.request.placeholder')}
           disabled={busy}
           autoFocus
+          aria-invalid={!!error}
+          aria-describedby={error ? 'join-request-error' : undefined}
           className="w-full resize-none rounded-lg border border-vox-border bg-vox-bg-primary px-3 py-2 text-sm text-vox-text-primary placeholder:text-vox-text-muted focus:border-vox-accent-primary focus:outline-none disabled:opacity-60"
           data-testid="join-request-message"
         />
         <div className="mt-1 flex items-center justify-between text-[11px]">
-          <span className="text-vox-accent-danger" data-testid="join-request-error">{error ?? ''}</span>
+          <span id="join-request-error" role="alert" className="text-vox-accent-danger" data-testid="join-request-error">{error ?? ''}</span>
           <span className="text-vox-text-muted">{message.length}/{LIMITS.JOIN_REQUEST_MESSAGE_MAX}</span>
         </div>
 

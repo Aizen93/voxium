@@ -1160,7 +1160,8 @@
     "tooManyTags": "Höchstens {{max}} Tags sind erlaubt",
     "joinMessageUnsupportedChars": "Die Nachricht enthält nicht unterstützte Zeichen",
     "joinMessageTooLong": "Die Nachricht darf höchstens {{max}} Zeichen lang sein",
-    "refineSearch": "Zu viele Ergebnisse — grenze deine Suche ein"
+    "refineSearch": "Zu viele Ergebnisse — grenze deine Suche ein",
+    "serverNotFound": "Space nicht gefunden"
   },
   "e2e": {
     "badgeTitle": "Ende-zu-Ende-verschlüsselt — Sicherheitsnummer anzeigen",
@@ -1424,7 +1425,7 @@
       "tagsLabel": "Tags",
       "allTags": "Alle",
       "featured": "Empfohlen",
-      "resultsCapped": "{{count}}+ Spaces",
+      "resultsCapped": "{{count, number}}+ Spaces",
       "loadMore": "Mehr laden",
       "emptyMatch": "Kein öffentlicher Space passt dazu.",
       "emptyMatchHint": "Versuche ein anderes Wort oder einen anderen Tag.",
@@ -1451,8 +1452,8 @@
       "joined": "Willkommen bei {{name}}",
       "requestSent": "Anfrage an {{name}} gesendet",
       "requestCancelled": "Anfrage an {{name}} zurückgezogen",
-      "approved": "{{name}} hat deine Anfrage angenommen. Willkommen!",
-      "declined": "{{name}} hat deine Beitrittsanfrage abgelehnt",
+      "approved": "Deine Beitrittsanfrage an {{name}} wurde angenommen. Willkommen!",
+      "declined": "Deine Beitrittsanfrage an {{name}} wurde abgelehnt",
       "newRequest": "{{user}} möchte {{server}} beitreten",
       "unknownSpace": "ein Space"
     }

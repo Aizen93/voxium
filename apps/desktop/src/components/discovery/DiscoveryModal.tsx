@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { X, Search, Compass, Loader2, Star, ChevronDown, PowerOff } from 'lucide-react';
-import { DISCOVERY_TAGS, DISCOVERY_SORTS, DISCOVERY_SEARCH_MIN, DISCOVERY_TOTAL_CAP } from '@voxium/shared';
+import { DISCOVERY_TAGS, DISCOVERY_SORTS, DISCOVERY_SEARCH_MIN, DISCOVERY_SEARCH_MAX, DISCOVERY_TOTAL_CAP } from '@voxium/shared';
 import type { DiscoveryServer, DiscoverySort } from '@voxium/shared';
 import { useDiscoveryStore, searchableQuery } from '../../stores/discoveryStore';
 import { useServerStore } from '../../stores/serverStore';
@@ -79,7 +79,12 @@ export function DiscoveryModal({ onClose }: Props) {
 
   const handleJoin = async (server: DiscoveryServer) => {
     try {
-      await useDiscoveryStore.getState().join(server.id);
+      const joined = await useDiscoveryStore.getState().join(server.id);
+      if (!joined) {
+        // the owner switched to approval meanwhile: this click became a request
+        toast.success(t('discovery.toasts.requestSent', { name: server.name }));
+        return;
+      }
       toast.success(t('discovery.toasts.joined', { name: server.name }));
       onClose();
     } catch (err) {
@@ -87,14 +92,22 @@ export function DiscoveryModal({ onClose }: Props) {
     }
   };
 
-  const handleSendRequest = async (server: DiscoveryServer, message: string | undefined) => {
+  /** Resolves true when the dialog may close (sent, or joined outright). */
+  const handleSendRequest = async (server: DiscoveryServer, message: string | undefined): Promise<boolean> => {
     try {
-      await useDiscoveryStore.getState().request(server.id, message);
-      toast.success(t('discovery.toasts.requestSent', { name: server.name }));
+      const outcome = await useDiscoveryStore.getState().request(server.id, message);
       setRequestFor(null);
+      if (outcome === 'joined') {
+        // the owner switched to open meanwhile: the request landed the viewer in the server
+        toast.success(t('discovery.toasts.joined', { name: server.name }));
+        onClose();
+      } else {
+        toast.success(t('discovery.toasts.requestSent', { name: server.name }));
+      }
+      return true;
     } catch (err) {
       toast.error(getTranslatedError(err, t, 'discovery.modal.requestFailed'));
-      throw err;
+      return false;
     }
   };
 
@@ -108,6 +121,13 @@ export function DiscoveryModal({ onClose }: Props) {
   };
 
   const handleOpen = (server: DiscoveryServer) => {
+    // The strip is the truth: a card still marked member for a server the
+    // viewer has since left flips back instead of activating a server they
+    // cannot load.
+    if (!useServerStore.getState().servers.some((s) => s.id === server.id)) {
+      useDiscoveryStore.getState().leftServer(server.id);
+      return;
+    }
     void useServerStore.getState().setActiveServer(server.id);
     onClose();
   };
@@ -168,6 +188,7 @@ export function DiscoveryModal({ onClose }: Props) {
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={t('discovery.modal.searchPlaceholder')}
                 aria-label={t('discovery.modal.searchPlaceholder')}
+                maxLength={DISCOVERY_SEARCH_MAX}
                 className="w-full rounded-lg border border-vox-border bg-vox-bg-floating py-1.5 pl-8 pr-3 text-xs text-vox-text-primary outline-none placeholder:text-vox-text-muted focus:border-vox-accent-primary"
                 data-testid="discovery-search"
                 autoFocus
@@ -211,7 +232,7 @@ export function DiscoveryModal({ onClose }: Props) {
               <p className="text-sm text-vox-text-secondary">{t('discovery.modal.off')}</p>
               <p className="text-xs text-vox-text-muted">{t('discovery.modal.offHint')}</p>
             </div>
-          ) : status === 'error' && servers.length === 0 ? (
+          ) : status === 'error' && servers.length === 0 && featured.length === 0 ? (
             <div className="flex h-48 flex-col items-center justify-center gap-3 text-center" data-testid="discovery-error">
               <p className="text-sm text-vox-text-secondary">{translateServerError(error ?? undefined, t, 'discovery.modal.failedToLoad')}</p>
               <button type="button" onClick={() => void fetchFirst()} className="rounded-lg border border-vox-border px-3 py-1.5 text-xs text-vox-text-secondary hover:bg-vox-bg-hover">
@@ -229,6 +250,17 @@ export function DiscoveryModal({ onClose }: Props) {
             </div>
           ) : (
             <div className="space-y-5">
+              {status === 'error' && (
+                // A refresh failed while an earlier page is still on screen
+                // (the modal was reopened): say so instead of passing the old
+                // cards off as current.
+                <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/5 px-3 py-2 text-xs text-vox-accent-danger" data-testid="discovery-error-strip">
+                  <span>{translateServerError(error ?? undefined, t, 'discovery.modal.failedToLoad')}</span>
+                  <button type="button" onClick={() => void fetchFirst()} className="shrink-0 rounded-md border border-vox-accent-danger/40 px-2 py-1 hover:bg-vox-accent-danger/10">
+                    {t('discovery.modal.retry')}
+                  </button>
+                </div>
+              )}
               {featured.length > 0 && (
                 <section data-testid="discovery-featured-row">
                   <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-vox-accent-warning">
@@ -241,8 +273,9 @@ export function DiscoveryModal({ onClose }: Props) {
                 </section>
               )}
               <section data-testid="discovery-results">
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-vox-text-muted" data-testid="discovery-results-heading">
-                  {t(`discovery.sort.${sort}`)} · {resultsLabel}
+                <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-vox-text-muted" data-testid="discovery-results-heading">
+                  <span>{t(`discovery.sort.${sort}`)} · {resultsLabel}</span>
+                  {loading && <Loader2 size={12} className="animate-spin" aria-hidden />}
                 </h3>
                 {servers.length === 0 ? (
                   <p className="py-6 text-center text-sm text-vox-text-muted" data-testid="discovery-empty">
@@ -258,7 +291,7 @@ export function DiscoveryModal({ onClose }: Props) {
                     <button
                       type="button"
                       onClick={handleLoadMore}
-                      disabled={loadingMore}
+                      disabled={loadingMore || loading}
                       className="rounded-lg border border-vox-border bg-vox-bg-floating px-4 py-1.5 text-xs font-medium text-vox-text-secondary transition-colors hover:bg-vox-bg-hover disabled:opacity-50"
                       data-testid="discovery-load-more"
                     >

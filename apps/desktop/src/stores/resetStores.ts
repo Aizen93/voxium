@@ -9,7 +9,7 @@ import { useE2EStore } from './e2eStore';
 import { useAnnotationStore, resetAnnotationModuleState } from './annotationStore';
 import { useAnnotationLiveStore, resetAnnotationLiveModuleState } from './annotationLiveStore';
 import { useMaskLayoutStore, resetMaskLayoutModuleState } from './maskLayoutStore';
-import { useDiscoveryStore } from './discoveryStore';
+import { useDiscoveryStore, resetDiscoveryModuleState } from './discoveryStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
 import { stopE2EDeviceListWatch } from './e2eStore';
 
@@ -78,6 +78,8 @@ export function resetAccountStores(): void {
   resetAnnotationModuleState();
   resetAnnotationLiveModuleState();
   resetMaskLayoutModuleState();
+  // Explore requests still in flight belong to the account that is leaving
+  resetDiscoveryModuleState();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).

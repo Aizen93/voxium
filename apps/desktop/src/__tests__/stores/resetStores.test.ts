@@ -88,6 +88,7 @@ import { useVoiceStore } from '../../stores/voiceStore';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { useDiscoveryStore } from '../../stores/discoveryStore';
+import { api } from '../../services/api';
 import type { Server, ServerMember, Conversation, Friendship, Message } from '@voxium/shared';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -153,6 +154,18 @@ function populateAccountStores() {
 describe('resetAccountStores (HIGH-14b)', () => {
   beforeEach(() => {
     resetAccountStores();
+  });
+
+  it('retires an Explore page that was in flight at logout — it must not paint the next account\'s first open', async () => {
+    let resolve!: (v: unknown) => void;
+    (api.get as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    const pending = useDiscoveryStore.getState().fetchFirst();
+    resetAccountStores();
+    resolve({ data: { data: { featured: [], servers: [{ id: 'srv-prev', name: 'Previous account', isMember: true, requestPending: false }], nextCursor: null, totalCapped: 1 } } });
+    await pending;
+    expect(useDiscoveryStore.getState().servers).toEqual([]);
+    expect(useDiscoveryStore.getState().status).toBe('idle');
+    expect(useDiscoveryStore.getState().loading).toBe(false);
   });
 
   it('wipes every populated account-scoped store back to its initial state', () => {

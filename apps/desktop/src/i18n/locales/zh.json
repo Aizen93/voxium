@@ -1159,7 +1159,8 @@
     "tooManyTags": "最多允许 {{max}} 个标签",
     "joinMessageUnsupportedChars": "消息包含不支持的字符",
     "joinMessageTooLong": "消息最多 {{max}} 个字符",
-    "refineSearch": "结果过多，请缩小搜索范围"
+    "refineSearch": "结果过多，请缩小搜索范围",
+    "serverNotFound": "未找到该空间"
   },
   "e2e": {
     "badgeTitle": "已端到端加密 — 查看安全码",
@@ -1419,7 +1420,7 @@
       "tagsLabel": "标签",
       "allTags": "全部",
       "featured": "精选",
-      "resultsCapped": "{{count}}+ 个空间",
+      "resultsCapped": "{{count, number}}+ 个空间",
       "loadMore": "加载更多",
       "emptyMatch": "没有匹配的公开空间。",
       "emptyMatchHint": "试试其他词语或标签。",
@@ -1445,8 +1446,8 @@
       "joined": "欢迎来到 {{name}}",
       "requestSent": "已向 {{name}} 发送申请",
       "requestCancelled": "已取消加入 {{name}} 的申请",
-      "approved": "{{name}} 已批准你的申请。欢迎！",
-      "declined": "{{name}} 拒绝了你的加入申请",
+      "approved": "你加入 {{name}} 的申请已获批准。欢迎！",
+      "declined": "你加入 {{name}} 的申请被拒绝了",
       "newRequest": "{{user}} 申请加入 {{server}}",
       "unknownSpace": "某个空间"
     }

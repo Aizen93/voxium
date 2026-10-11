@@ -151,6 +151,8 @@ const ERROR_MAP: Record<string, string> = {
   [`Message must be at most ${LIMITS.JOIN_REQUEST_MESSAGE_MAX} characters`]: 'joinMessageTooLong',
   // Explore paging past the depth cap (DISCOVERY_MAX_PAGES × page size)
   'Refine your search': 'refineSearch',
+  // The opacity answer: a hidden, blocked or deleted server on join / request / report
+  'Server not found': 'serverNotFound',
 
   // ─── Admin ─────────────────────────────────────────────────────────────
   'Cannot ban yourself': 'cannotBanSelf',
@@ -175,7 +177,7 @@ export const DISCOVERY_ERROR_KEYS: readonly string[] = [
   'discoveryDisabled', 'listingDisabledByAdmin', 'bannedFromServer', 'requestDeclinedRecently', 'joinRequestNotFound',
   'banNotFound', 'cannotTransferToBanned', 'cannotReportOwnServer', 'noPermissionManageMembers', 'noPermissionKickMembers',
   'cannotKickHigherRole', 'descriptionUnsupportedChars', 'descriptionTooLong', 'reasonUnsupportedChars', 'reasonTooLong',
-  'tagsNotSupported', 'tooManyTags', 'joinMessageUnsupportedChars', 'joinMessageTooLong', 'refineSearch',
+  'tagsNotSupported', 'tooManyTags', 'joinMessageUnsupportedChars', 'joinMessageTooLong', 'refineSearch', 'serverNotFound',
 ];
 
 /**
