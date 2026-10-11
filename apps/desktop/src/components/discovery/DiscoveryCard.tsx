@@ -95,28 +95,31 @@ export function DiscoveryCard({ server, preview = false, busy = false, onJoin, o
         </div>
       )}
 
-      <div className="mt-auto flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 text-xs text-vox-text-muted" title={t('discovery.card.onlineHint')}>
-          <span className="inline-flex items-center gap-1" data-testid="discovery-card-online">
+      {/* The footer wraps: at three columns the three figures and the button do
+          not fit on one line, and a row that cannot wrap squeezes the button
+          out of the card (and gives the grid a horizontal scrollbar). */}
+      <div className="mt-auto flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-vox-text-muted" title={t('discovery.card.onlineHint')}>
+          <span className="inline-flex items-center gap-1 whitespace-nowrap" data-testid="discovery-card-online">
             <Radio size={12} className="text-vox-accent-success" />
             {t('discovery.card.online', { count: server.onlineCount })}
           </span>
-          <span className="inline-flex items-center gap-1" data-testid="discovery-card-members">
+          <span className="inline-flex items-center gap-1 whitespace-nowrap" data-testid="discovery-card-members">
             <Users size={12} />
             {t('discovery.card.members', { count: server.memberCount })}
           </span>
-          <span className="inline-flex items-center gap-1" data-testid="discovery-card-messages">
+          <span className="inline-flex items-center gap-1 whitespace-nowrap" data-testid="discovery-card-messages">
             <MessageSquare size={12} />
             {t('discovery.card.messages', { count: server.weeklyMessages })}
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
           <button
             type="button"
             onClick={inert ? undefined : action.onClick}
             disabled={inert || !action.onClick}
             aria-disabled={inert || !action.onClick}
-            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-60 ${
+            className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-60 ${
               action.primary
                 ? 'bg-vox-accent-primary text-vox-on-accent hover:bg-vox-accent-hover'
                 : 'border border-vox-border text-vox-text-secondary hover:bg-vox-bg-hover'

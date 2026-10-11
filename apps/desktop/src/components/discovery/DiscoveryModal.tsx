@@ -162,7 +162,7 @@ export function DiscoveryModal({ onClose }: Props) {
     >
       <div
         className="relative flex flex-col overflow-hidden rounded-xl border border-vox-border bg-vox-bg-secondary shadow-2xl"
-        style={{ width: 'min(960px, 94vw)', height: 'min(720px, 90vh)' }}
+        style={{ width: 'min(1200px, 94vw)', height: 'min(880px, 92vh)' }}
       >
         {/* Header */}
         <div className="flex shrink-0 items-center justify-between border-b border-vox-border bg-vox-bg-primary px-5 py-3">
@@ -215,7 +215,10 @@ export function DiscoveryModal({ onClose }: Props) {
               {t('discovery.modal.searchHint', { min: DISCOVERY_SEARCH_MIN })}
             </p>
           )}
-          <div className="flex gap-1.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'thin' }} role="group" aria-label={t('discovery.modal.tagsLabel')} data-testid="discovery-tags">
+          {/* The chips wrap: a scrolling row would need a scrollbar under 28px
+              chips, and the standard scrollbar-width property switches Chromium
+              off the app's themed ::-webkit-scrollbar (the grey native bar). */}
+          <div className="flex flex-wrap gap-1.5" role="group" aria-label={t('discovery.modal.tagsLabel')} data-testid="discovery-tags">
             <TagChip active={tag === ''} onClick={() => setTag('')} testid="discovery-tag-all">{t('discovery.modal.allTags')}</TagChip>
             {DISCOVERY_TAGS.map((item) => (
               <TagChip key={item} active={tag === item} onClick={() => setTag(tag === item ? '' : item)} testid={`discovery-tag-${item}`}>
@@ -226,7 +229,7 @@ export function DiscoveryModal({ onClose }: Props) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto px-5 py-4" style={{ scrollbarWidth: 'thin' }}>
+        <div className="@container flex-1 overflow-y-auto overflow-x-hidden px-5 py-4">
           {status === 'off' ? (
             <div className="flex h-48 flex-col items-center justify-center gap-2 text-center" data-testid="discovery-off">
               <PowerOff size={22} className="text-vox-text-muted" />
@@ -268,7 +271,7 @@ export function DiscoveryModal({ onClose }: Props) {
                     <Star size={12} />
                     {t('discovery.modal.featured')}
                   </h3>
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <div className="grid gap-3 @2xl:grid-cols-2 @5xl:grid-cols-3">
                     {featured.map((server) => <DiscoveryCard key={`featured-${server.id}`} {...cardProps(server)} />)}
                   </div>
                 </section>
@@ -283,7 +286,7 @@ export function DiscoveryModal({ onClose }: Props) {
                     {filtered ? t('discovery.modal.emptyMatch') : t('discovery.modal.emptyNone')}
                   </p>
                 ) : (
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <div className="grid gap-3 @2xl:grid-cols-2 @5xl:grid-cols-3">
                     {servers.map((server) => <DiscoveryCard key={server.id} {...cardProps(server)} />)}
                   </div>
                 )}
