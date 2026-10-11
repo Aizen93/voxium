@@ -1355,6 +1355,10 @@
   },
   "discovery": {
     "tier": {
+      "ladder": "모든 배지",
+      "topFraction": "상위 {{percent}}%",
+      "from": "점수 {{score}}부터",
+      "current": "내 배지",
       "bronze": "브론즈",
       "silver": "실버",
       "gold": "골드",

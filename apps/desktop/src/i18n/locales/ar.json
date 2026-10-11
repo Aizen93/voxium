@@ -1365,6 +1365,10 @@
   },
   "discovery": {
     "tier": {
+      "ladder": "جميع الشارات",
+      "topFraction": "أفضل {{percent}}٪",
+      "from": "بدءًا من {{score}} نقطة",
+      "current": "شارتك",
       "bronze": "برونزي",
       "silver": "فضي",
       "gold": "ذهبي",

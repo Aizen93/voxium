@@ -1357,6 +1357,10 @@
   },
   "discovery": {
     "tier": {
+      "ladder": "Tous les badges",
+      "topFraction": "Top {{percent}} %",
+      "from": "à partir d'un score de {{score}}",
+      "current": "Votre badge",
       "bronze": "Bronze",
       "silver": "Argent",
       "gold": "Or",

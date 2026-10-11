@@ -1357,6 +1357,10 @@
   },
   "discovery": {
     "tier": {
+      "ladder": "All badges",
+      "topFraction": "Top {{percent}}%",
+      "from": "from a score of {{score}}",
+      "current": "Your badge",
       "bronze": "Bronze",
       "silver": "Silver",
       "gold": "Gold",

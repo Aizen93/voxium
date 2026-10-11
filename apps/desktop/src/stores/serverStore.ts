@@ -3,7 +3,8 @@ import axios from 'axios';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
-import { isDiscoveryTier } from '@voxium/shared';
+import { isDiscoveryTier, DISCOVERY_TIERS } from '@voxium/shared';
+import type { DiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
 
 /** Module-level constant so selectors can default without a fresh reference. */
@@ -32,6 +33,11 @@ export function isServerJoinRequest(v: unknown): v is ServerJoinRequest {
   return typeof r.id === 'string' && typeof r.serverId === 'string' && typeof r.userId === 'string'
     && typeof r.createdAt === 'string' && (r.message === null || r.message === undefined || typeof r.message === 'string')
     && isUserSummary(r.user);
+}
+
+/** The score every tier starts at, as the owner endpoint sends it — all five, numeric. */
+function isTierThresholdMap(v: unknown): v is Record<DiscoveryTier, number> {
+  return !!v && typeof v === 'object' && DISCOVERY_TIERS.every((tier) => typeof (v as Record<string, unknown>)[tier] === 'number');
 }
 
 /** Follows `hasMore` through a paginated moderation list, up to the cap. */
@@ -887,6 +893,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
         ? { tier: d.nextTier.tier, score: d.nextTier.score }
         : null,
       tiersAvailable: d.tiersAvailable === true,
+      tierThresholds: isTierThresholdMap(d.tierThresholds) ? d.tierThresholds : null,
     };
   },
 

@@ -700,6 +700,7 @@ serverRouter.get('/:serverId/discovery', rateLimitMemberRead, async (req: Reques
         tier: tierOf(server.activityScore, cuts),
         nextTier: nextTierFor(server.activityScore, cuts),
         tiersAvailable: !!cuts?.thresholds,
+        tierThresholds: cuts?.thresholds ?? null,
       },
     });
   } catch (err) {

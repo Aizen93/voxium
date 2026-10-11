@@ -1357,6 +1357,10 @@
   },
   "discovery": {
     "tier": {
+      "ladder": "Todas las insignias",
+      "topFraction": "Top {{percent}} %",
+      "from": "a partir de una puntuación de {{score}}",
+      "current": "Tu insignia",
       "bronze": "Bronce",
       "silver": "Plata",
       "gold": "Oro",

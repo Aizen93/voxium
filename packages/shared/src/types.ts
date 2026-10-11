@@ -182,6 +182,8 @@ export interface ServerDiscoveryInfo {
   nextTier: { tier: DiscoveryTier; score: number } | null;
   /** False while the directory has fewer active spaces than DISCOVERY_TIER_MIN_POPULATION (no badges anywhere). */
   tiersAvailable: boolean;
+  /** The score every tier starts at, for the ladder; null without cuts. */
+  tierThresholds: Record<DiscoveryTier, number> | null;
 }
 
 // ─── Category ───────────────────────────────────────────────────────────────

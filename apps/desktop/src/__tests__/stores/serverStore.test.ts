@@ -302,20 +302,21 @@ describe('serverStore — discovery, join requests and bans', () => {
   });
 
   it('fetchDiscoveryInfo reads the owner endpoint and picks its fields with safe defaults', async () => {
-    mockGet.mockResolvedValue({ data: { data: { id: 'srv-1', memberCount: 12, onlineCount: 3, weeklyMessages: 40, statsRefreshedAt: '2026-10-09T04:00:00.000Z', discoveryListed: true, discoveryBlockedAt: null, featuredAt: null, activityScore: 84, tier: 'gold', nextTier: { tier: 'platinum', score: 120 }, tiersAvailable: true } } });
+    mockGet.mockResolvedValue({ data: { data: { id: 'srv-1', memberCount: 12, onlineCount: 3, weeklyMessages: 40, statsRefreshedAt: '2026-10-09T04:00:00.000Z', discoveryListed: true, discoveryBlockedAt: null, featuredAt: null, activityScore: 84, tier: 'gold', nextTier: { tier: 'platinum', score: 120 }, tiersAvailable: true, tierThresholds: { bronze: 2, silver: 3, gold: 3, platinum: 5, diamond: 5 } } } });
     await expect(useServerStore.getState().fetchDiscoveryInfo('srv-1')).resolves.toEqual({
       memberCount: 12, onlineCount: 3, weeklyMessages: 40, statsRefreshedAt: '2026-10-09T04:00:00.000Z', discoveryListed: true, discoveryBlockedAt: null, featuredAt: null,
       activityScore: 84, tier: 'gold', nextTier: { tier: 'platinum', score: 120 }, tiersAvailable: true,
+      tierThresholds: { bronze: 2, silver: 3, gold: 3, platinum: 5, diamond: 5 },
     });
     expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/discovery');
     mockGet.mockResolvedValue({ data: { data: { id: 'srv-1' } } });
     await expect(useServerStore.getState().fetchDiscoveryInfo('srv-1')).resolves.toEqual({
       memberCount: 0, onlineCount: 0, weeklyMessages: 0, statsRefreshedAt: null, discoveryListed: true, discoveryBlockedAt: null, featuredAt: null,
-      activityScore: 0, tier: null, nextTier: null, tiersAvailable: false,
+      activityScore: 0, tier: null, nextTier: null, tiersAvailable: false, tierThresholds: null,
     });
     // a tier the client does not know, or a malformed next tier, is dropped — never rendered
-    mockGet.mockResolvedValue({ data: { data: { id: 'srv-1', tier: 'mythic', nextTier: { tier: 'gold' }, tiersAvailable: 'yes' } } });
-    await expect(useServerStore.getState().fetchDiscoveryInfo('srv-1')).resolves.toMatchObject({ tier: null, nextTier: null, tiersAvailable: false });
+    mockGet.mockResolvedValue({ data: { data: { id: 'srv-1', tier: 'mythic', nextTier: { tier: 'gold' }, tiersAvailable: 'yes', tierThresholds: { bronze: 1 } } } });
+    await expect(useServerStore.getState().fetchDiscoveryInfo('srv-1')).resolves.toMatchObject({ tier: null, nextTier: null, tiersAvailable: false, tierThresholds: null });
   });
 
   it('fetchJoinRequests loads the list, remembers whose it is, and sets the badge from the total', async () => {

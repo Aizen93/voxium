@@ -1357,6 +1357,10 @@
   },
   "discovery": {
     "tier": {
+      "ladder": "Todos os emblemas",
+      "topFraction": "Top {{percent}}%",
+      "from": "a partir de uma pontuação de {{score}}",
+      "current": "Seu emblema",
       "bronze": "Bronze",
       "silver": "Prata",
       "gold": "Ouro",

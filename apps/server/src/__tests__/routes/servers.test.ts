@@ -1001,12 +1001,13 @@ describe('Server Routes', () => {
         discoveryListed: false, discoveryBlockedAt: '2026-10-10T00:00:00.000Z', featuredAt: null,
         // the badge from the same cuts the cards use, and what the next one takes
         activityScore: 84, tier: 'gold', nextTier: { tier: 'platinum', score: 100 }, tiersAvailable: true,
+        tierThresholds: { bronze: 10, silver: 20, gold: 40, platinum: 100, diamond: 200 },
       });
 
       // no cuts yet (too few active spaces, or a fresh Redis): no badge, no target
       mockGetTierThresholds.mockResolvedValue(null);
       const bare = await request(app).get('/api/v1/servers/srv-1/discovery').set('Authorization', `Bearer ${makeToken()}`);
-      expect(bare.body.data).toMatchObject({ activityScore: 84, tier: null, nextTier: null, tiersAvailable: false });
+      expect(bare.body.data).toMatchObject({ activityScore: 84, tier: null, nextTier: null, tiersAvailable: false, tierThresholds: null });
       expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.MANAGE_SERVER);
       expect(mockRateLimitMemberRead).toHaveBeenCalled();
 

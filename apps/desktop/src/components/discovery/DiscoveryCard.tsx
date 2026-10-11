@@ -56,7 +56,7 @@ export function DiscoveryCard({ server, preview = false, busy = false, onJoin, o
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h3 className="truncate text-sm font-semibold text-vox-text-primary" data-testid="discovery-card-name">{server.name}</h3>
-            {isDiscoveryTier(server.tier) && <TierBadge tier={server.tier} size={22} />}
+            {isDiscoveryTier(server.tier) && <TierBadge tier={server.tier} size={30} />}
             {server.featured && (
               <span
                 className="inline-flex shrink-0 items-center gap-1 rounded-full bg-vox-accent-warning/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-vox-accent-warning"

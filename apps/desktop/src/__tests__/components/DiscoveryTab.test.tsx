@@ -41,6 +41,7 @@ const INFO: ServerDiscoveryInfo = {
   memberCount: 12, onlineCount: 3, weeklyMessages: 40, statsRefreshedAt: '2026-10-09T04:10:00.000Z',
   discoveryListed: true, discoveryBlockedAt: null, featuredAt: null,
   activityScore: 84, tier: 'gold', nextTier: { tier: 'platinum', score: 120 }, tiersAvailable: true,
+  tierThresholds: { bronze: 2, silver: 3, gold: 3, platinum: 5, diamond: 5 },
 };
 
 let container: HTMLDivElement;
@@ -108,7 +109,7 @@ describe('DiscoveryTab', () => {
 
   it('the badge block: the tier with its crest, the score and the next cut; the preview card wears it too', async () => {
     await render();
-    expect(q('[data-testid="discovery-badge"] [data-testid="discovery-tier"]')!.getAttribute('data-tier')).toBe('gold');
+    expect(q('[data-testid="discovery-badge-summary"] [data-testid="discovery-tier"]')!.getAttribute('data-tier')).toBe('gold');
     expect(q('[data-testid="discovery-badge-tier"]')!.textContent).toContain('discovery.tier.badgeLabel');
     expect(q('[data-testid="discovery-badge-score"]')!.textContent).toContain('discovery.tier.score');
     expect(q('[data-testid="discovery-badge-next"]')!.textContent).toContain('discovery.tier.next');
@@ -118,24 +119,44 @@ describe('DiscoveryTab', () => {
   it('the badge block at the top tier says so instead of naming a next cut', async () => {
     fetchDiscoveryInfo.mockResolvedValue({ ...INFO, tier: 'diamond', nextTier: null });
     await render();
-    expect(q('[data-testid="discovery-badge"] [data-testid="discovery-tier"]')!.getAttribute('data-tier')).toBe('diamond');
+    expect(q('[data-testid="discovery-badge-summary"] [data-testid="discovery-tier"]')!.getAttribute('data-tier')).toBe('diamond');
     expect(q('[data-testid="discovery-badge-next"]')!.textContent).toBe('discovery.tier.top');
   });
 
   it('the badge block without a badge: the Bronze cut is the target', async () => {
     fetchDiscoveryInfo.mockResolvedValue({ ...INFO, tier: null, nextTier: { tier: 'bronze', score: 10 } });
     await render();
-    expect(q('[data-testid="discovery-badge"] [data-testid="discovery-tier"]')).toBeNull();
+    expect(q('[data-testid="discovery-badge-summary"] [data-testid="discovery-tier"]')).toBeNull();
     expect(q('[data-testid="discovery-card"] [data-testid="discovery-tier"]')).toBeNull();
     expect(q('[data-testid="discovery-badge-tier"]')!.textContent).toBe('discovery.tier.none');
     expect(q('[data-testid="discovery-badge-next"]')!.textContent).toContain('discovery.tier.next');
   });
 
   it('the badge block before the directory has cuts: no badge, no target, a word of explanation', async () => {
-    fetchDiscoveryInfo.mockResolvedValue({ ...INFO, tier: null, nextTier: null, tiersAvailable: false });
+    fetchDiscoveryInfo.mockResolvedValue({ ...INFO, tier: null, nextTier: null, tiersAvailable: false, tierThresholds: null });
     await render();
     expect(q('[data-testid="discovery-badge-tier"]')!.textContent).toBe('discovery.tier.notYet');
     expect(q('[data-testid="discovery-badge-next"]')).toBeNull();
+    // the ladder still explains every badge, without a starting score
+    expect(container.querySelectorAll('[data-testid="discovery-tier-ladder"] li')).toHaveLength(5);
+    expect(q('[data-testid="discovery-tier-ladder"]')!.textContent).not.toContain('discovery.tier.from');
+    expect(q('[data-testid="discovery-tier-ladder"] [aria-current]')).toBeNull();
+  });
+
+  it('the ladder lists all five badges with their crest, name, top fraction and starting score, and marks the current one', async () => {
+    await render();
+    const items = Array.from(container.querySelectorAll('[data-testid="discovery-tier-ladder"] li'));
+    expect(items.map((li) => li.querySelector('[data-testid="discovery-tier"]')!.getAttribute('data-tier'))).toEqual(['bronze', 'silver', 'gold', 'platinum', 'diamond']);
+    for (const tier of ['bronze', 'silver', 'gold', 'platinum', 'diamond']) {
+      const li = q(`[data-testid="discovery-tier-ladder-${tier}"]`)!;
+      expect(li.textContent).toContain(`discovery.tier.${tier}`);
+      expect(li.textContent).toContain('discovery.tier.topFraction');
+      expect(li.textContent).toContain('discovery.tier.from');
+    }
+    const current = q('[data-testid="discovery-tier-ladder"] [aria-current="true"]')!;
+    expect(current.getAttribute('data-testid')).toBe('discovery-tier-ladder-gold');
+    expect(current.textContent).toContain('discovery.tier.current');
+    expect(container.querySelectorAll('[data-testid="discovery-tier-ladder"] [aria-current]')).toHaveLength(1);
   });
 
   it('a blocked server: the toggle is disabled and the administrator notice shows', async () => {

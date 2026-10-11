@@ -1361,6 +1361,10 @@
   },
   "discovery": {
     "tier": {
+      "ladder": "Все значки",
+      "topFraction": "Топ {{percent}} %",
+      "from": "от {{score}} очков",
+      "current": "Ваш значок",
       "bronze": "Бронза",
       "silver": "Серебро",
       "gold": "Золото",

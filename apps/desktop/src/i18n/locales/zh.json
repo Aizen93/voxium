@@ -1355,6 +1355,10 @@
   },
   "discovery": {
     "tier": {
+      "ladder": "全部徽章",
+      "topFraction": "前 {{percent}}%",
+      "from": "分数达到 {{score}} 起",
+      "current": "你的徽章",
       "bronze": "青铜",
       "silver": "白银",
       "gold": "黄金",

@@ -1357,6 +1357,10 @@
   },
   "discovery": {
     "tier": {
+      "ladder": "Alle Abzeichen",
+      "topFraction": "Top {{percent}} %",
+      "from": "ab einem Wert von {{score}}",
+      "current": "Dein Abzeichen",
       "bronze": "Bronze",
       "silver": "Silber",
       "gold": "Gold",
