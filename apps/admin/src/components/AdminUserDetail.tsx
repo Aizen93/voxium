@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Ban, ShieldOff, Trash2, Globe, ShieldCheck, ShieldMinus, Heart, Sparkles, Crown } from 'lucide-react';
+import { ArrowLeft, Ban, ShieldOff, Trash2, Globe, ShieldCheck, ShieldMinus, Heart, Sparkles, Crown, Server as ServerIcon } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
+import type { OwnedServerInfo } from '../stores/adminStore';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { AdminDeleteUserModal } from './AdminDeleteUserModal';
+import { DirectoryChips } from './DirectoryChips';
 import { toast } from '../stores/toastStore';
 
 interface Props {
@@ -12,7 +14,7 @@ interface Props {
 }
 
 export function AdminUserDetail({ userId, onBack }: Props) {
-  const { selectedUser, fetchUserDetail, banUser, unbanUser, deleteUser, updateUserRole, toggleSupporter } = useAdminStore();
+  const { selectedUser, fetchUserDetail, fetchUserOwnedServers, banUser, unbanUser, deleteUser, updateUserRole, toggleSupporter } = useAdminStore();
   const currentUser = useAuthStore((s) => s.user);
   const isSuperAdmin = currentUser?.role === 'superadmin';
   const [confirmAction, setConfirmAction] = useState<'ban' | 'unban' | 'delete' | 'deleteWithTransfer' | 'promote' | 'demote' | null>(null);
@@ -22,6 +24,21 @@ export function AdminUserDetail({ userId, onBack }: Props) {
   useEffect(() => {
     fetchUserDetail(userId);
   }, [userId, fetchUserDetail]);
+
+  // The servers this user owns, with what each one shows in Explore. Loaded
+  // beside the detail (a separate endpoint the delete-user flow shares).
+  const [ownedServers, setOwnedServers] = useState<OwnedServerInfo[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setOwnedServers(null);
+    fetchUserOwnedServers(userId)
+      .then((list) => { if (!cancelled) setOwnedServers(list); })
+      .catch((err) => {
+        console.error('Failed to load owned servers:', err);
+        if (!cancelled) { setOwnedServers([]); toast.error('Failed to load owned servers'); }
+      });
+    return () => { cancelled = true; };
+  }, [userId, fetchUserOwnedServers]);
 
   if (!selectedUser) {
     return (
@@ -239,6 +256,38 @@ export function AdminUserDetail({ userId, onBack }: Props) {
                   {record.country && <span className="text-vox-text-muted text-xs truncate">{record.country}</span>}
                 </span>
                 <span className="text-vox-text-muted text-xs shrink-0">{new Date(record.lastSeenAt).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Owned servers: the directory profile and state of each */}
+      {ownedServers && ownedServers.length > 0 && (
+        <div className="rounded-lg bg-vox-bg-secondary border border-vox-border p-4" data-testid="owned-servers-panel">
+          <h3 className="text-sm font-semibold text-vox-text-primary mb-3 flex items-center gap-2">
+            <ServerIcon size={14} /> Owned Servers
+          </h3>
+          <div className="space-y-3">
+            {ownedServers.map((server) => (
+              <div key={server.id} className="flex flex-col gap-1 border-b border-vox-border/50 pb-3 last:border-0 last:pb-0" data-testid="owned-server-row">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium text-vox-text-primary truncate">{server.name}</span>
+                  <span className="text-xs text-vox-text-muted shrink-0">
+                    {server.memberCount} {server.memberCount === 1 ? 'member' : 'members'}
+                  </span>
+                </div>
+                <DirectoryChips server={server} />
+                <p className="text-xs text-vox-text-secondary whitespace-pre-wrap" data-testid="owned-server-description">
+                  {server.description ?? <span className="italic text-vox-text-muted">No description</span>}
+                </p>
+                {server.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1" data-testid="owned-server-tags">
+                    {server.tags.map((tag) => (
+                      <span key={tag} className="px-1.5 py-0.5 rounded bg-vox-bg-hover text-[10px] text-vox-text-secondary">{tag}</span>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>

@@ -394,6 +394,18 @@ erDiagram
         string ownerId FK
         string iconUrl
         boolean invitesLocked
+        string description
+        string tags
+        boolean discoverable
+        string joinMode
+        datetime featuredAt
+        datetime discoveryBlockedAt
+        boolean discoveryListed
+        int memberCount
+        int onlineCount
+        int weeklyMessages
+        int activityScore
+        datetime statsRefreshedAt
     }
 
     ServerMember {
@@ -445,6 +457,25 @@ erDiagram
         string serverId FK
         string createdBy FK
         datetime expiresAt
+    }
+
+    ServerBan {
+        string serverId PK
+        string userId PK
+        string bannedById FK
+        string reason
+        datetime createdAt
+    }
+
+    ServerJoinRequest {
+        string id PK
+        string serverId FK
+        string userId FK
+        string message
+        string status
+        string decidedById FK
+        datetime decidedAt
+        datetime createdAt
     }
 
     ChannelRead {
@@ -533,6 +564,10 @@ erDiagram
     User ||--o{ MessageReaction : "has many"
     Server ||--o{ Invite : "has many"
     User ||--o{ Invite : "creates"
+    Server ||--o{ ServerBan : "bans"
+    User ||--o{ ServerBan : "banned from"
+    Server ||--o{ ServerJoinRequest : "receives"
+    User ||--o{ ServerJoinRequest : "sends"
     User ||--o{ ChannelRead : "has many"
     Channel ||--o{ ChannelRead : "has many"
     User ||--o{ Conversation : "user1"
@@ -563,6 +598,12 @@ erDiagram
 - `conversations(user1Id, user2Id)` UNIQUE — Conversation dedup
 - `conversation_reads(userId, conversationId)` COMPOSITE PK — DM read positions
 - `invites(code)` PK — Invite lookup
+- `servers(discovery_listed, discovery_activity_score DESC, id DESC)` and one more per directory sort (`member_count`, `created_at`, `name`) — every Explore page is a single index range scan under a keyset cursor
+- `servers(discovery_listed, discovery_stats_at)` — the stats cycle picks the stalest listed servers first
+- `servers(featured_at)` — the Featured row
+- `servers USING GIN (tags)` — tag filter; `servers USING GIN (name gin_trgm_ops)` — substring name search
+- `server_bans(server_id, user_id)` COMPOSITE PK — the ban check on every join path; `server_bans(user_id)`
+- `server_join_requests(server_id, user_id)` UNIQUE — one request per user per server; `(server_id, status)`, `(status, created_at)`, `(status, decided_at)` — moderator lists and the two sweeps
 - `roles(serverId, position)` — Role hierarchy ordering
 - `roles(serverId, name)` UNIQUE — Role name uniqueness per server
 - `channel_permission_overrides(channelId, roleId)` UNIQUE — One override per role per channel
@@ -675,6 +716,8 @@ sequenceDiagram
 - `friend:request_received` / `friend:request_accepted` / `friend:removed`
 - `member:role_updated` / `member:kicked`
 - `server:deleted`
+- `server:join_request` / `server:join_request_resolved` (the moderator audience only: `user:{id}` rooms of KICK_MEMBERS / ADMINISTRATOR holders and the owner, never `server:{id}`)
+- `server:join_approved` / `server:join_declined` (the requester's `user:{id}` room)
 - `category:created` / `category:updated` / `category:deleted`
 - `channel:updated`
 
@@ -1079,14 +1122,17 @@ Redis-backed feature flag system for toggling features without redeployment:
 
 ```
 Redis Hash: feature:flags
-┌─────────────────┬─────────┐
-│ registration    │ true    │  ← Gate: POST /auth/register
-│ invites         │ true    │  ← Gate: POST /invites/servers/:id, POST /invites/:code/join
-│ server_creation │ true    │  ← Gate: POST /servers
-│ voice           │ true    │  ← Gate: voice:join socket event
-│ dm_voice        │ true    │  ← Gate: dm:voice:join socket event
-│ support         │ true    │  ← Gate: POST /support/open
-└─────────────────┴─────────┘
+┌───────────────────┬─────────┐
+│ registration      │ true    │  ← Gate: POST /auth/register
+│ invites           │ true    │  ← Gate: POST /invites/servers/:id, POST /invites/:code/join
+│ server_creation   │ true    │  ← Gate: POST /servers
+│ voice             │ true    │  ← Gate: voice:join socket event
+│ dm_voice          │ true    │  ← Gate: dm:voice:join socket event
+│ support           │ true    │  ← Gate: POST /support/open
+│ community_funding │ false   │  ← Landing page: the community funding section
+│ annotations_v2    │ true    │  ← Screen-share annotation wire v2 (server-first rollout)
+│ server_discovery  │ true    │  ← Gate: every /discovery route (Explore); invites, bans, memberships keep working
+└───────────────────┴─────────┘
 ```
 
 - Defaults defined in `featureFlags.ts`, overrides persisted to Redis `feature:flags` hash
@@ -1097,7 +1143,7 @@ Redis Hash: feature:flags
 
 ### Rate Limit Registry
 
-All 18 rate limiters are registered in a central `DEFAULTS` record with admin-editable overrides:
+Every rate limiter is registered in a central `DEFAULTS` record with admin-editable overrides:
 
 ```
 Redis Hash: rl:config
@@ -1119,6 +1165,20 @@ Per-server invite control independent of the global `invites` feature flag:
 - Owners and admins can toggle via `PATCH /servers/:id/invites-lock`
 - Checked on invite creation and invite join (returns 403 when locked)
 - Broadcast to all members via `server:updated` socket event
+- One of the four inputs of the directory listing column (below): locking invites hides the server from Explore
+
+### Server Discovery (Explore)
+
+A searchable, hand-curated directory of servers with join requests (plan and decisions in `docs/local/server-discovery-plan.html`, git-ignored; the invariants are in CLAUDE.md under "Server Discovery").
+
+- **Listed by default, approval-first.** Every server is listed unless its owner hides it (`discoverable`), its invites are locked, a platform admin blocked it (`discoveryBlockedAt`) or its owner is platform-banned — the four inputs of the materialised `discoveryListed` column, recomputed by `utils/discoveryListing.ts` at every write site so the listing query never joins. The join mode is `approval` (join requests, decided by KICK_MEMBERS holders and the owner) or `open`.
+- **Profile.** An optional description (≤ 300 characters) and up to 5 tags from a fixed vocabulary of 12 (labels translated in all 11 locales), edited in Server settings → Discovery (MANAGE_SERVER) and broadcast over `server:updated`.
+- **API** (`routes/discovery.ts`, behind the `server_discovery` flag, sign-in required): `GET /discovery/servers?q&tag&sort&cursor&limit` → `{ featured, servers, nextCursor, totalCapped }` (sorts `active` / `members` / `newest` / `name`; 3-character search minimum; 24 per page, 48 max; 1,200-row depth cap; a 60 s Redis cache of the public part of each page with the viewer's `isMember` / `requestPending` computed fresh), `GET /discovery/servers/:id`, `POST /discovery/servers/:id/join` (open mode joins; approval mode creates a pending request, 202) and `DELETE …/join` (cancel). Owner side in `routes/servers.ts`: `PATCH /servers/:id/discovery`, join-request list / approve / decline, bans list / unban. Admin: `PATCH /admin/servers/:id/discovery` (feature / block, audited) and `GET /admin/servers?listed=1`.
+- **Membership helpers.** `utils/serverJoin.ts` (`joinServerMember`) and `utils/removeMember.ts` (`removeMemberFromServer`) are the only paths in and out of a server after creation: every removal writes a `ServerBan` (lifted from the Members tab), every join checks it first, and both maintain `Server.memberCount` inline in the same transaction.
+- **Scale.** One composite index per sort, signed keyset cursors (`utils/discoveryCursor.ts`), no joins on the listing query, capped totals; measured at one million listed servers with no sequential scan on the request path (`docs/local/discovery-measurement-2026-10-09.md`).
+- **Statistics.** `utils/discoveryStats.ts` refreshes `onlineCount` / `weeklyMessages` / `activityScore` for the stalest listed servers in bounded batches every 5 minutes under a cluster lock (every listed server within 24 h, 48 h under backlog, which is logged); nothing runs on the message path, and the Active weights are one shared constant printed on the card.
+- **Safety.** Opacity (a hidden id answers 404 on every directory endpoint, byte-identical to a nonexistent one), `discoveryBrowse` 60/min and `discoveryJoin` 10/h per user, one pending request per server per user, a 7-day cooldown after a decline, join-request events only to the moderator audience (`utils/moderatorAudience.ts`), report-from-card (`POST /reports` with `type: 'server'`: a snapshot of the listing, the owner as the reported user), admin Feature / Block with audit rows, and the `server_discovery` kill switch.
+- **Client.** `components/discovery/DiscoveryModal.tsx` (Explore, reached from the spaces strip compass, the server switcher's no-match offer and the create/join modal), `stores/discoveryStore.ts` (reconciled against the spaces strip), `components/server/DiscoveryTab.tsx` with the join-request and banned sections of Server settings, and the four socket handlers in `services/discoverySocketHandlers.ts`.
 
 ---
 
@@ -1135,10 +1195,10 @@ apps/admin/
 │   ├── components/
 │   │   ├── AdminLayout.tsx         # Sidebar nav + content router
 │   │   ├── AdminDashboard.tsx      # Stats cards + REST metrics + SFU stats + charts
-│   │   ├── AdminReports.tsx        # Moderation queue (pending/resolved/dismissed)
+│   │   ├── AdminReports.tsx        # Moderation queue (message / user / server reports; "Block from directory" shortcut)
 │   │   ├── AdminSupportTickets.tsx # Support ticket queue + chat panel
 │   │   ├── AdminUserList.tsx       # Paginated user management
-│   │   ├── AdminServerList.tsx     # Paginated server management + global/per-server resource limits
+│   │   ├── AdminServerList.tsx     # Paginated server management + resource limits + directory curation (chips, "Listed only", Feature/Block)
 │   │   ├── AdminBanList.tsx        # User bans + IP bans
 │   │   ├── AdminAnnouncements.tsx  # Global/targeted announcements
 │   │   ├── AdminStorage.tsx        # S3 storage stats (avatars, server icons, attachments, orphans) + file browser with type/status filters + delete/cleanup actions

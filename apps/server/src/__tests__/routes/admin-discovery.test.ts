@@ -219,3 +219,39 @@ describe('GET /admin/servers — directory columns and the listed filter', () =>
     expect(prismaMock.server.count).toHaveBeenCalledWith({ where: { discoveryListed: true } });
   });
 });
+
+describe('GET /admin/users/:userId/owned-servers — directory state per owned server', () => {
+  it('returns description, tags and the listing/curation state next to the member list', async () => {
+    prismaMock.user.findUnique
+      .mockResolvedValueOnce({ id: 'admin-1', role: 'admin', bannedAt: null, tokenVersion: 0, emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0) })
+      .mockResolvedValueOnce({ id: 'o-1' });
+    prismaMock.server.findMany.mockResolvedValue([{
+      id: 'srv-1', name: 'S', iconUrl: null,
+      description: 'EU evenings', tags: ['gaming'], discoverable: true, discoveryListed: false, joinMode: 'open',
+      featuredAt: null, discoveryBlockedAt: NOW, invitesLocked: false,
+      _count: { members: 2 },
+      members: [{ userId: 'm-1', role: 'member', user: { username: 'm', displayName: 'M' } }],
+    }]);
+
+    const res = await request(app).get('/api/v1/admin/users/o-1/owned-servers').set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.server.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { ownerId: 'o-1' },
+      select: expect.objectContaining({ description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true, featuredAt: true, discoveryBlockedAt: true, invitesLocked: true }),
+    }));
+    expect(res.body.data[0]).toMatchObject({
+      id: 'srv-1', memberCount: 2, description: 'EU evenings', tags: ['gaming'], discoverable: true, discoveryListed: false,
+      joinMode: 'open', featuredAt: null, discoveryBlockedAt: NOW.toISOString(), invitesLocked: false,
+      members: [{ userId: 'm-1', username: 'm', displayName: 'M', role: 'member' }],
+    });
+  });
+
+  it('is 404 for an unknown user', async () => {
+    prismaMock.user.findUnique
+      .mockResolvedValueOnce({ id: 'admin-1', role: 'admin', bannedAt: null, tokenVersion: 0, emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0) })
+      .mockResolvedValueOnce(null);
+    const res = await request(app).get('/api/v1/admin/users/nope/owned-servers').set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(404);
+  });
+});

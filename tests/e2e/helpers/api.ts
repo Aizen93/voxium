@@ -268,3 +268,18 @@ export async function tryJoinServerViaInvite(request: APIRequestContext, token: 
   const body = await res.json().catch(() => ({}));
   return { status: res.status(), error: body.error as string | undefined };
 }
+
+/** The raw status + body of an owner discovery PATCH — for asserting a refusal (an admin block). */
+export async function trySetServerDiscovery(
+  request: APIRequestContext,
+  token: string,
+  serverId: string,
+  fields: { description?: string | null; tags?: string[]; joinMode?: 'approval' | 'open'; discoverable?: boolean },
+) {
+  const res = await request.patch(`${API_URL}/servers/${serverId}/discovery`, {
+    data: fields,
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const body = await res.json().catch(() => ({}));
+  return { status: res.status(), error: body.error as string | undefined };
+}

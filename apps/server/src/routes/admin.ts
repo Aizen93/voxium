@@ -350,6 +350,10 @@ adminRouter.get('/users/:userId/owned-servers', async (req: Request<{ userId: st
         id: true,
         name: true,
         iconUrl: true,
+        // Directory state (server discovery): what this owner shows the
+        // world, and whether it is currently in Explore
+        description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true,
+        featuredAt: true, discoveryBlockedAt: true, invitesLocked: true,
         _count: { select: { members: true } },
         members: {
           where: { userId: { not: user.id } },
@@ -369,6 +373,14 @@ adminRouter.get('/users/:userId/owned-servers', async (req: Request<{ userId: st
       name: s.name,
       iconUrl: s.iconUrl,
       memberCount: s._count.members,
+      description: s.description,
+      tags: s.tags,
+      discoverable: s.discoverable,
+      discoveryListed: s.discoveryListed,
+      joinMode: s.joinMode,
+      featuredAt: s.featuredAt,
+      discoveryBlockedAt: s.discoveryBlockedAt,
+      invitesLocked: s.invitesLocked,
       members: s.members.map((m) => ({
         userId: m.userId,
         username: m.user.username,

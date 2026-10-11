@@ -15,7 +15,7 @@ export function PrivacyContent() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Privacy Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: August 23, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 11, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -59,6 +59,13 @@ export function PrivacyContent() {
             <li>Maintaining online presence and unread message tracking</li>
             <li>Preventing abuse: blocking automated registrations, enforcing bans and rate limits</li>
           </ul>
+          <p className="mt-3">
+            <strong className="text-vox-text-primary">Server directory (Explore).</strong> Servers are listed in
+            Explore by default, and a server&apos;s owner can hide it at any time from its settings. A listing shows
+            the server&apos;s name, icon, description, tags, member count and a daily online count to all signed-in
+            users, and nothing about individual members. Sending a join request shares your public profile
+            (username, display name, avatar) and the message you write with that server&apos;s moderators only.
+          </p>
           <p className="mt-3">
             We do <strong className="text-vox-text-primary">not</strong> sell your data, serve ads, profile you, or use
             your content for training machine learning models.

@@ -2,9 +2,12 @@ import type { Page, APIRequestContext, Browser } from '@playwright/test';
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import {
-  registerUser, createServer, createInvite, setServerDiscovery, kickMember, unbanMember, tryJoinServerViaInvite,
+  registerUser, createServer, createInvite, setServerDiscovery, trySetServerDiscovery, kickMember, unbanMember, tryJoinServerViaInvite,
 } from './helpers/api';
+import { promoteToSuperAdmin } from './helpers/db';
 import { clearRateLimits } from './helpers/rateLimits';
+
+const ADMIN_URL = 'http://localhost:8082';
 
 // Live two/three-client test of server discovery (docs/local/server-discovery-plan.html,
 // "Playwright server-discovery.spec.ts"):
@@ -15,6 +18,10 @@ import { clearRateLimits } from './helpers/rateLimits';
 //   (b) approval mode → a request with a message → the owner sees it under
 //       Members → Join requests and approves → the strip gains the server with
 //       a toast; a second requester is declined → toast + the cooldown refusal.
+//   (c) admin curation (step 5): Feature from the admin server list → the
+//       Featured row in Explore → a report from the card reaches the queue with
+//       the listing snapshot → Block from the report → the owner cannot relist
+//       and the card is gone → Unblock → the owner relists → the audit log.
 // Member counts (live) are asserted; activity figures (daily) never are.
 
 /** The app shell is up (the spaces strip rendered). A cold Vite dev server
@@ -228,5 +235,126 @@ test.describe('Server discovery — Explore and the request flow', () => {
 
     await b.context.close();
     await c.context.close();
+  });
+
+  test('admin curation: Feature → Featured row, report from the card → queue, Block → owner cannot relist, Unblock, audit log', async ({ page, request, browser }) => {
+    test.setTimeout(240_000);
+
+    const stamp = Date.now().toString(36);
+    const serverName = `Pixel Forge ${stamp}`;
+    const owner = testUser('disca');
+    const dataOwner = await registerUser(request, owner);
+    const server = await createServer(request, dataOwner.accessToken, serverName);
+    await setServerDiscovery(request, dataOwner.accessToken, server.id, { description: 'Indie game art, weekly critiques.', tags: ['art'] });
+    await injectAuth(page, dataOwner);
+    await waitForApp(page);
+
+    // ── A platform admin signs in to the dashboard ──
+    const adminUser = testUser('adm');
+    const adminData = await registerUser(request, adminUser);
+    await promoteToSuperAdmin(adminData.user.id);
+    const adminContext = await browser.newContext();
+    const admin = await adminContext.newPage();
+    admin.on('pageerror', (err) => console.log('[pageerror admin]', err.message));
+    await admin.goto(`${ADMIN_URL}/login`);
+    await admin.getByPlaceholder('admin@example.com').fill(adminUser.email);
+    await admin.getByPlaceholder('Password').fill(adminUser.password);
+    await admin.getByRole('button', { name: 'Sign In' }).click();
+    await expect(admin.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 });
+
+    // ── Servers → "Listed only" → search → the row reads Listed / approval → Feature ──
+    await admin.getByRole('button', { name: 'Servers' }).click();
+    await admin.getByTestId('servers-listed-only').check();
+    await admin.getByPlaceholder('Search servers...').fill(serverName);
+    await admin.getByRole('button', { name: 'Search', exact: true }).click();
+    const row = admin.locator('tbody tr', { hasText: serverName });
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await expect(row.getByTestId('directory-chip-listed')).toBeVisible();
+    await expect(row.getByTestId('directory-join-mode')).toHaveText('approval');
+    await row.getByTestId('server-feature').click();
+    const featureModal = admin.locator('.fixed', { hasText: 'Feature in Explore' });
+    await expect(featureModal).toContainText(serverName);
+    await featureModal.getByRole('button', { name: 'Feature', exact: true }).click();
+    await expect(row.getByTestId('directory-chip-featured')).toBeVisible({ timeout: 15_000 });
+
+    // ── B sees it in the Featured row of Explore ──
+    const b = await newUserPage(browser, request, 'discob');
+    await clearRateLimits();
+    await openExplore(b.page);
+    // The public part of a page is cached for a minute per sort/tag/query and
+    // the earlier tests browsed under the default sort: read a fresh page.
+    await b.page.getByTestId('discovery-sort').selectOption('newest');
+    const featuredCard = b.page.getByTestId('discovery-featured-row').locator(`[data-testid="discovery-card"][data-server-id="${server.id}"]`);
+    await expect(featuredCard).toBeVisible({ timeout: 15_000 });
+    await expect(featuredCard.getByTestId('discovery-featured')).toBeVisible();
+    await expect(featuredCard.getByTestId('discovery-card-description')).toHaveText('Indie game art, weekly critiques.');
+
+    // ── B reports the listing from the card ──
+    const reportReason = `Listing misrepresents the space ${stamp}`;
+    await featuredCard.getByTestId('discovery-report').click();
+    const reportModal = b.page.getByTestId('report-modal');
+    await expect(reportModal).toBeVisible();
+    await reportModal.locator('textarea').fill(reportReason);
+    await reportModal.getByRole('button', { name: 'Submit Report' }).click();
+    await expect(toasts(b.page)).toContainText('Report submitted', { timeout: 15_000 });
+    await expect(reportModal).toHaveCount(0);
+
+    // ── The admin finds the server report, with the snapshot, and blocks from it ──
+    await admin.getByRole('button', { name: 'Reports' }).click();
+    await admin.locator('button', { hasText: /^Pending$/ }).first().click();
+    const reportRow = admin.locator('tbody tr', { hasText: reportReason });
+    await expect(reportRow).toBeVisible({ timeout: 15_000 });
+    await expect(reportRow.getByTestId('report-owner-label')).toHaveText('server owner');
+    await expect(reportRow).toContainText(owner.username);
+    await reportRow.getByTestId('report-toggle-content').click();
+    await expect(reportRow.getByTestId('report-content')).toContainText(serverName);
+    await expect(reportRow.getByTestId('report-content')).toContainText('Indie game art, weekly critiques.');
+    await reportRow.getByTestId('report-block-server').click();
+    const blockModal = admin.locator('.fixed', { hasText: 'Block from directory' });
+    await expect(blockModal).toContainText(serverName);
+    await blockModal.getByRole('button', { name: 'Block', exact: true }).click();
+    await expect(blockModal).toHaveCount(0, { timeout: 15_000 });
+    // the report is still open: the shortcut never resolves it
+    await expect(reportRow.getByTestId('report-block-server')).toBeVisible();
+
+    // ── The owner cannot relist, and the card is gone for B ──
+    const refused = await trySetServerDiscovery(request, dataOwner.accessToken, server.id, { discoverable: true });
+    expect(refused.status).toBe(403);
+    expect(refused.error).toContain('disabled by an administrator');
+    // a query nobody searched before misses the page cache
+    await b.page.getByTestId('discovery-search').fill(`Forge ${stamp}`);
+    await expect(b.page.getByTestId('discovery-results')).toBeVisible({ timeout: 15_000 });
+    await expect(b.page.locator(`[data-testid="discovery-card"][data-server-id="${server.id}"]`)).toHaveCount(0, { timeout: 15_000 });
+    // the owner's own settings say why
+    await page.getByRole('button', { name: serverName, exact: true }).click({ timeout: 15_000 });
+    await page.getByLabel('Server Settings').click();
+    await page.getByTestId('tab-discovery').click();
+    await expect(page.getByTestId('discovery-blocked-notice')).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('dialog').getByLabel('Close').first().click();
+
+    // ── Unblock: the chip reads Hidden (unblock never relists) and the owner relists by hand ──
+    await admin.getByRole('button', { name: 'Servers' }).click();
+    // the "Listed only" filter is remembered and would hide a blocked server
+    await admin.getByTestId('servers-listed-only').uncheck();
+    const rowAgain = admin.locator('tbody tr', { hasText: serverName });
+    await expect(rowAgain.getByTestId('directory-chip-blocked')).toBeVisible({ timeout: 15_000 });
+    await rowAgain.getByTestId('server-unblock').click();
+    const unblockModal = admin.locator('.fixed', { hasText: 'Unblock from directory' });
+    await unblockModal.getByRole('button', { name: 'Unblock', exact: true }).click();
+    await expect(rowAgain.getByTestId('directory-chip-hidden')).toBeVisible({ timeout: 15_000 });
+    await setServerDiscovery(request, dataOwner.accessToken, server.id, { discoverable: true });
+    await admin.getByRole('button', { name: 'Search', exact: true }).click();
+    await expect(admin.locator('tbody tr', { hasText: serverName }).getByTestId('directory-chip-listed')).toBeVisible({ timeout: 15_000 });
+
+    // ── Every curation action is in the audit log (a block also unfeatures) ──
+    await admin.getByRole('button', { name: 'Audit Log' }).click();
+    const auditTable = admin.locator('table');
+    await expect(auditTable.getByText('Server Featured').first()).toBeVisible({ timeout: 15_000 });
+    await expect(auditTable.getByText('Server Blocked from Directory').first()).toBeVisible();
+    await expect(auditTable.getByText('Server Unfeatured').first()).toBeVisible();
+    await expect(auditTable.getByText('Server Unblocked from Directory').first()).toBeVisible();
+
+    await b.context.close();
+    await adminContext.close();
   });
 });
