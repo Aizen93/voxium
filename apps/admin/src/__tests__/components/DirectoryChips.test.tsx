@@ -11,7 +11,7 @@ import { DirectoryChips, directoryChips, type DirectoryState } from '../../compo
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const base: DirectoryState = {
-  discoverable: true, discoveryListed: true, featuredAt: null, discoveryBlockedAt: null, invitesLocked: false, joinMode: 'approval',
+  discoverable: true, discoveryListed: true, featuredAt: null, discoveryBlockedAt: null, invitesLocked: false, ownerBannedAt: null, joinMode: 'approval',
 };
 const keys = (s: Partial<DirectoryState>) => directoryChips({ ...base, ...s }).map((c) => c.key);
 
@@ -31,8 +31,16 @@ describe('directoryChips', () => {
     expect(keys({ discoveryListed: false, discoverable: false })).toEqual(['hidden']);
     expect(keys({ discoveryListed: false, discoverable: false, invitesLocked: true })).toEqual(['hidden']);
     expect(keys({ discoveryListed: false, invitesLocked: true })).toEqual(['hidden-invites-locked']);
-    // discoverable, unlocked, not blocked, still not listed: the only input left is the owner ban
-    expect(keys({ discoveryListed: false })).toEqual(['hidden-owner-banned']);
+    expect(keys({ discoveryListed: false, ownerBannedAt: '2026-10-11T00:00:00.000Z' })).toEqual(['hidden-owner-banned']);
+    // discoverable, unlocked, not blocked, owner not banned, still not listed:
+    // the column disagrees with its inputs — a recompute is pending, and the
+    // chip must not blame the owner for it
+    expect(keys({ discoveryListed: false })).toEqual(['hidden-recompute-pending']);
+  });
+
+  it('Featured is its own stamp: a hidden featured server keeps the chip (it returns to the row when relisted)', () => {
+    expect(keys({ discoveryListed: false, discoverable: false, featuredAt: '2026-10-11T00:00:00.000Z' })).toEqual(['hidden', 'featured']);
+    expect(keys({ discoveryListed: false, invitesLocked: true, featuredAt: '2026-10-11T00:00:00.000Z' })).toEqual(['hidden-invites-locked', 'featured']);
   });
 });
 

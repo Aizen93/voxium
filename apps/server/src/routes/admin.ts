@@ -354,6 +354,7 @@ adminRouter.get('/users/:userId/owned-servers', async (req: Request<{ userId: st
         // world, and whether it is currently in Explore
         description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true,
         featuredAt: true, discoveryBlockedAt: true, invitesLocked: true,
+        owner: { select: { bannedAt: true } },
         _count: { select: { members: true } },
         members: {
           where: { userId: { not: user.id } },
@@ -381,6 +382,7 @@ adminRouter.get('/users/:userId/owned-servers', async (req: Request<{ userId: st
       featuredAt: s.featuredAt,
       discoveryBlockedAt: s.discoveryBlockedAt,
       invitesLocked: s.invitesLocked,
+      ownerBannedAt: s.owner.bannedAt,
       members: s.members.map((m) => ({
         userId: m.userId,
         username: m.user.username,
@@ -865,7 +867,7 @@ adminRouter.get('/servers', async (req: Request, res: Response, next: NextFuncti
           id: true, name: true, iconUrl: true, ownerId: true, createdAt: true,
           description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true,
           featuredAt: true, discoveryBlockedAt: true, invitesLocked: true,
-          owner: { select: { username: true } },
+          owner: { select: { username: true, bannedAt: true } },
           _count: { select: { members: true, channels: true } },
         },
         orderBy: { createdAt: 'desc' },
@@ -921,6 +923,7 @@ adminRouter.get('/servers', async (req: Request, res: Response, next: NextFuncti
       featuredAt: s.featuredAt,
       discoveryBlockedAt: s.discoveryBlockedAt,
       invitesLocked: s.invitesLocked,
+      ownerBannedAt: s.owner.bannedAt,
     }));
 
     res.json({ success: true, data, total, page, limit, hasMore: page * limit < total });

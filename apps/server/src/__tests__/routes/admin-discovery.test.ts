@@ -197,7 +197,7 @@ describe('GET /admin/servers — directory columns and the listed filter', () =>
   it('selects and returns the directory state per row', async () => {
     prismaMock.server.findMany.mockResolvedValue([{
       ...SERVER_SHAPE, discoveryListed: true, featuredAt: NOW, discoveryBlockedAt: null,
-      owner: { username: 'owner' }, _count: { members: 3, channels: 2 },
+      owner: { username: 'owner', bannedAt: NOW }, _count: { members: 3, channels: 2 },
     }]);
     prismaMock.server.count.mockResolvedValue(1);
 
@@ -206,10 +206,11 @@ describe('GET /admin/servers — directory columns and the listed filter', () =>
     expect(res.status).toBe(200);
     expect(prismaMock.server.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {},
-      select: expect.objectContaining({ discoverable: true, discoveryListed: true, joinMode: true, featuredAt: true, discoveryBlockedAt: true, invitesLocked: true, description: true, tags: true }),
+      select: expect.objectContaining({ discoverable: true, discoveryListed: true, joinMode: true, featuredAt: true, discoveryBlockedAt: true, invitesLocked: true, description: true, tags: true, owner: { select: { username: true, bannedAt: true } } }),
     }));
     expect(res.body.data[0]).toMatchObject({
       id: 'srv-1', discoverable: true, discoveryListed: true, joinMode: 'approval', featuredAt: NOW.toISOString(), discoveryBlockedAt: null, invitesLocked: false, tags: [],
+      ownerBannedAt: NOW.toISOString(),
     });
   });
 
@@ -229,6 +230,7 @@ describe('GET /admin/users/:userId/owned-servers — directory state per owned s
       id: 'srv-1', name: 'S', iconUrl: null,
       description: 'EU evenings', tags: ['gaming'], discoverable: true, discoveryListed: false, joinMode: 'open',
       featuredAt: null, discoveryBlockedAt: NOW, invitesLocked: false,
+      owner: { bannedAt: null },
       _count: { members: 2 },
       members: [{ userId: 'm-1', role: 'member', user: { username: 'm', displayName: 'M' } }],
     }]);
@@ -238,11 +240,11 @@ describe('GET /admin/users/:userId/owned-servers — directory state per owned s
     expect(res.status).toBe(200);
     expect(prismaMock.server.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { ownerId: 'o-1' },
-      select: expect.objectContaining({ description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true, featuredAt: true, discoveryBlockedAt: true, invitesLocked: true }),
+      select: expect.objectContaining({ description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true, featuredAt: true, discoveryBlockedAt: true, invitesLocked: true, owner: { select: { bannedAt: true } } }),
     }));
     expect(res.body.data[0]).toMatchObject({
       id: 'srv-1', memberCount: 2, description: 'EU evenings', tags: ['gaming'], discoverable: true, discoveryListed: false,
-      joinMode: 'open', featuredAt: null, discoveryBlockedAt: NOW.toISOString(), invitesLocked: false,
+      joinMode: 'open', featuredAt: null, discoveryBlockedAt: NOW.toISOString(), invitesLocked: false, ownerBannedAt: null,
       members: [{ userId: 'm-1', username: 'm', displayName: 'M', role: 'member' }],
     });
   });

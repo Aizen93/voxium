@@ -303,7 +303,7 @@ export function AdminReports() {
       {blockModal && blockServerId && (
         <AdminConfirmModal
           title="Block from directory"
-          message={`Hide "${listingName(blockModal)}" from Explore and stop its owner from relisting it until an admin unblocks it (Servers tab)? The report stays open: resolve or dismiss it separately.`}
+          message={`Hide "${listingName(blockModal)}" from Explore and stop its owner from relisting it until an admin unblocks it (Servers tab)? If it is featured it loses its Featured spot, which Unblock does not restore. The report stays open: resolve or dismiss it separately.`}
           confirmLabel="Block"
           onConfirm={async () => {
             try {

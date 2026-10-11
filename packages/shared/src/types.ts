@@ -694,6 +694,8 @@ export interface AdminServer {
   featuredAt: string | null;
   discoveryBlockedAt: string | null;
   invitesLocked: boolean;
+  /** The fourth listing input: a platform-banned owner hides every server they own. */
+  ownerBannedAt: string | null;
 }
 
 /** What GET /admin/export/servers returns per row — the pre-directory columns only. */

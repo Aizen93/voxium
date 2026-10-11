@@ -5,7 +5,7 @@ import {
   registerUser, createServer, createInvite, setServerDiscovery, trySetServerDiscovery, kickMember, unbanMember, tryJoinServerViaInvite,
 } from './helpers/api';
 import { promoteToSuperAdmin } from './helpers/db';
-import { clearRateLimits } from './helpers/rateLimits';
+import { clearRateLimits, clearDiscoveryPageCache } from './helpers/rateLimits';
 
 const ADMIN_URL = 'http://localhost:8082';
 
@@ -259,11 +259,11 @@ test.describe('Server discovery — Explore and the request flow', () => {
     await admin.goto(`${ADMIN_URL}/login`);
     await admin.getByPlaceholder('admin@example.com').fill(adminUser.email);
     await admin.getByPlaceholder('Password').fill(adminUser.password);
-    await admin.getByRole('button', { name: 'Sign In' }).click();
+    await admin.getByRole('button', { name: 'Sign In', exact: true }).click();
     await expect(admin.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 });
 
     // ── Servers → "Listed only" → search → the row reads Listed / approval → Feature ──
-    await admin.getByRole('button', { name: 'Servers' }).click();
+    await admin.getByRole('button', { name: 'Servers', exact: true }).click();
     await admin.getByTestId('servers-listed-only').check();
     await admin.getByPlaceholder('Search servers...').fill(serverName);
     await admin.getByRole('button', { name: 'Search', exact: true }).click();
@@ -280,9 +280,10 @@ test.describe('Server discovery — Explore and the request flow', () => {
     // ── B sees it in the Featured row of Explore ──
     const b = await newUserPage(browser, request, 'discob');
     await clearRateLimits();
+    // The public part of a page is cached for a minute per sort/tag/query:
+    // drop it so this attempt (or a retry inside the minute) reads fresh.
+    await clearDiscoveryPageCache();
     await openExplore(b.page);
-    // The public part of a page is cached for a minute per sort/tag/query and
-    // the earlier tests browsed under the default sort: read a fresh page.
     await b.page.getByTestId('discovery-sort').selectOption('newest');
     const featuredCard = b.page.getByTestId('discovery-featured-row').locator(`[data-testid="discovery-card"][data-server-id="${server.id}"]`);
     await expect(featuredCard).toBeVisible({ timeout: 15_000 });
@@ -300,7 +301,7 @@ test.describe('Server discovery — Explore and the request flow', () => {
     await expect(reportModal).toHaveCount(0);
 
     // ── The admin finds the server report, with the snapshot, and blocks from it ──
-    await admin.getByRole('button', { name: 'Reports' }).click();
+    await admin.getByRole('button', { name: 'Reports', exact: true }).click();
     await admin.locator('button', { hasText: /^Pending$/ }).first().click();
     const reportRow = admin.locator('tbody tr', { hasText: reportReason });
     await expect(reportRow).toBeVisible({ timeout: 15_000 });
@@ -333,7 +334,7 @@ test.describe('Server discovery — Explore and the request flow', () => {
     await page.getByRole('dialog').getByLabel('Close').first().click();
 
     // ── Unblock: the chip reads Hidden (unblock never relists) and the owner relists by hand ──
-    await admin.getByRole('button', { name: 'Servers' }).click();
+    await admin.getByRole('button', { name: 'Servers', exact: true }).click();
     // the "Listed only" filter is remembered and would hide a blocked server
     await admin.getByTestId('servers-listed-only').uncheck();
     const rowAgain = admin.locator('tbody tr', { hasText: serverName });
@@ -346,13 +347,13 @@ test.describe('Server discovery — Explore and the request flow', () => {
     await admin.getByRole('button', { name: 'Search', exact: true }).click();
     await expect(admin.locator('tbody tr', { hasText: serverName }).getByTestId('directory-chip-listed')).toBeVisible({ timeout: 15_000 });
 
-    // ── Every curation action is in the audit log (a block also unfeatures) ──
-    await admin.getByRole('button', { name: 'Audit Log' }).click();
-    const auditTable = admin.locator('table');
-    await expect(auditTable.getByText('Server Featured').first()).toBeVisible({ timeout: 15_000 });
-    await expect(auditTable.getByText('Server Blocked from Directory').first()).toBeVisible();
-    await expect(auditTable.getByText('Server Unfeatured').first()).toBeVisible();
-    await expect(auditTable.getByText('Server Unblocked from Directory').first()).toBeVisible();
+    // ── Every curation action is in the audit log, on THIS server's rows (a block also unfeatures) ──
+    await admin.getByRole('button', { name: 'Audit Log', exact: true }).click();
+    const auditRows = admin.locator('table tbody tr', { hasText: server.id });
+    await expect(auditRows.filter({ hasText: 'Server Featured' })).toHaveCount(1, { timeout: 15_000 });
+    await expect(auditRows.filter({ hasText: 'Server Blocked from Directory' })).toHaveCount(1);
+    await expect(auditRows.filter({ hasText: 'Server Unfeatured' })).toHaveCount(1);
+    await expect(auditRows.filter({ hasText: 'Server Unblocked from Directory' })).toHaveCount(1);
 
     await b.context.close();
     await adminContext.close();

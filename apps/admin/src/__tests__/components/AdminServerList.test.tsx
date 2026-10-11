@@ -43,7 +43,7 @@ function server(over: Partial<AdminServer>): AdminServer {
   return {
     id: 'srv', name: 'Server', iconUrl: null, ownerId: 'o', ownerUsername: 'owner', memberCount: 3, channelCount: 2, messageCount: 10,
     createdAt: '2026-10-01T00:00:00.000Z', description: null, tags: [], discoverable: true, discoveryListed: true, joinMode: 'approval',
-    featuredAt: null, discoveryBlockedAt: null, invitesLocked: false, ...over,
+    featuredAt: null, discoveryBlockedAt: null, invitesLocked: false, ownerBannedAt: null, ...over,
   };
 }
 const LISTED = server({ id: 'listed', name: 'Raid Night', joinMode: 'open' });
@@ -150,6 +150,35 @@ describe('AdminServerList — directory column and curation', () => {
     await act(async () => { (rowOf('listed').querySelector('[data-testid="server-block"]') as HTMLButtonElement).click(); });
     await act(async () => { buttonByText('Block').click(); });
     expect(toast.error).toHaveBeenLastCalledWith('Failed to update the directory state');
+  });
+
+  it('the confirm copy says what happens to Featured: a block drops it, and unfeaturing a hidden server explains why', async () => {
+    store.servers = [
+      server({ id: 'featured', name: 'Lingua Lounge', featuredAt: '2026-10-10T00:00:00.000Z' }),
+      server({ id: 'hiddenfeat', name: 'Night Owls', featuredAt: '2026-10-10T00:00:00.000Z', discoverable: false, discoveryListed: false }),
+    ];
+    await render();
+    // the hidden featured row still shows the stamp and offers Unfeature
+    expect(rowOf('hiddenfeat').querySelector('[data-testid="directory-chip-hidden"]')).not.toBeNull();
+    expect(rowOf('hiddenfeat').querySelector('[data-testid="directory-chip-featured"]')).not.toBeNull();
+    await act(async () => { (rowOf('hiddenfeat').querySelector('[data-testid="server-unfeature"]') as HTMLButtonElement).click(); });
+    expect(document.body.textContent).toContain('returns to the Featured row the moment it is listed again');
+    expect(document.body.textContent).not.toContain('It stays listed');
+    await act(async () => { qa('button').find((b) => b.textContent?.trim() === 'Cancel')!.click(); });
+
+    await act(async () => { (rowOf('featured').querySelector('[data-testid="server-unfeature"]') as HTMLButtonElement).click(); });
+    expect(document.body.textContent).toContain('It stays listed');
+    await act(async () => { qa('button').find((b) => b.textContent?.trim() === 'Cancel')!.click(); });
+
+    await act(async () => { (rowOf('featured').querySelector('[data-testid="server-block"]') as HTMLButtonElement).click(); });
+    expect(document.body.textContent).toContain('loses its Featured spot');
+    await act(async () => { qa('button').find((b) => b.textContent?.trim() === 'Cancel')!.click(); });
+
+    // a server that is not featured gets no such warning
+    store.servers = [LISTED];
+    await act(async () => { root.render(<AdminServerList />); });
+    await act(async () => { (rowOf('listed').querySelector('[data-testid="server-block"]') as HTMLButtonElement).click(); });
+    expect(document.body.textContent).not.toContain('loses its Featured spot');
   });
 
   it('"Listed only" sets the filter and refetches the first page; a curation then refetches too', async () => {

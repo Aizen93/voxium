@@ -17,7 +17,7 @@ function server(over: Partial<AdminServer>): AdminServer {
   return {
     id: 'srv', name: 'Server', iconUrl: null, ownerId: 'o', ownerUsername: 'owner', memberCount: 3, channelCount: 2, messageCount: 10,
     createdAt: '2026-10-01T00:00:00.000Z', description: null, tags: [], discoverable: true, discoveryListed: true, joinMode: 'approval',
-    featuredAt: null, discoveryBlockedAt: null, invitesLocked: false, ...over,
+    featuredAt: null, discoveryBlockedAt: null, invitesLocked: false, ownerBannedAt: null, ...over,
   };
 }
 
@@ -29,6 +29,7 @@ beforeEach(() => {
 
 describe('adminStore — servers and directory curation', () => {
   it('fetchServers sends listed=1 only while the filter is on', async () => {
+    api.get.mockResolvedValue({ data: { data: [server({ id: 'x' })], total: 20 } });
     await useAdminStore.getState().fetchServers(2);
     expect(api.get).toHaveBeenLastCalledWith('/admin/servers', { params: { page: 2, limit: 12, search: '' } });
 
@@ -40,6 +41,42 @@ describe('adminStore — servers and directory curation', () => {
     useAdminStore.getState().setServersListedOnly(false);
     await useAdminStore.getState().fetchServers();
     expect(api.get).toHaveBeenLastCalledWith('/admin/servers', { params: { page: 1, limit: 12, search: 'raid' } });
+  });
+
+  it('a slower earlier fetch never paints over a newer one (Search vs "Listed only" overlap)', async () => {
+    let resolveFirst!: (v: unknown) => void;
+    api.get.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
+    const first = useAdminStore.getState().fetchServers(1);
+    useAdminStore.getState().setServersListedOnly(true);
+    api.get.mockResolvedValueOnce({ data: { data: [server({ id: 'listed-only' })], total: 1 } });
+    await useAdminStore.getState().fetchServers(1);
+    expect(useAdminStore.getState().servers.map((s) => s.id)).toEqual(['listed-only']);
+    expect(useAdminStore.getState().loading).toBe(false);
+
+    resolveFirst({ data: { data: [server({ id: 'stale' })], total: 5 } });
+    await first;
+    expect(useAdminStore.getState().servers.map((s) => s.id)).toEqual(['listed-only']);
+    expect(useAdminStore.getState().serversTotal).toBe(1);
+    expect(useAdminStore.getState().loading).toBe(false);
+  });
+
+  it('a refetch that lands past the end shows the last page that still has rows', async () => {
+    useAdminStore.setState({ serversPage: 3 });
+    api.get
+      .mockResolvedValueOnce({ data: { data: [], total: 13 } })
+      .mockResolvedValueOnce({ data: { data: [server({ id: 'p2' })], total: 13 } });
+    await useAdminStore.getState().fetchServers();
+    expect(api.get).toHaveBeenNthCalledWith(1, '/admin/servers', { params: { page: 3, limit: 12, search: '' } });
+    expect(api.get).toHaveBeenNthCalledWith(2, '/admin/servers', { params: { page: 2, limit: 12, search: '' } });
+    expect(useAdminStore.getState().serversPage).toBe(2);
+    expect(useAdminStore.getState().servers.map((s) => s.id)).toEqual(['p2']);
+    expect(useAdminStore.getState().loading).toBe(false);
+
+    // an empty FIRST page is simply empty
+    api.get.mockResolvedValueOnce({ data: { data: [], total: 0 } });
+    await useAdminStore.getState().fetchServers(1);
+    expect(useAdminStore.getState().servers).toEqual([]);
+    expect(api.get).toHaveBeenCalledTimes(3);
   });
 
   it('setServerDiscovery PATCHes and patches the loaded row in place, leaving the others alone', async () => {

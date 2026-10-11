@@ -18,6 +18,10 @@ let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
 let metricsReconnectUnsub: (() => void) | null = null;
 let metricsRetryTimer: ReturnType<typeof setInterval> | null = null;
 
+// The server list has two fetch triggers (Search and "Listed only") plus the
+// refetch after a curation: only the latest request may paint the table.
+let serversFetchSeq = 0;
+
 // Module-level refs for reports subscription cleanup
 let reportsHandler: ((data: { total: number }) => void) | null = null;
 let reportsReconnectUnsub: (() => void) | null = null;
@@ -55,6 +59,7 @@ export interface OwnedServerInfo {
   featuredAt: string | null;
   discoveryBlockedAt: string | null;
   invitesLocked: boolean;
+  ownerBannedAt: string | null;
 }
 
 /** What PATCH /admin/servers/:id/discovery answers: the curation inputs and the recomputed listing. */
@@ -522,18 +527,29 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   fetchServers: async (page?: number) => {
     const state = get();
     const p = page ?? state.serversPage;
+    const seq = ++serversFetchSeq;
     set({ loading: true });
     try {
       const { data } = await api.get('/admin/servers', {
         params: { page: p, limit: 12, search: state.serversSearch, ...(state.serversListedOnly ? { listed: '1' } : {}) },
       });
+      // A slower earlier answer must not paint over a newer filter or search
+      if (seq !== serversFetchSeq) return;
+      // A refetch can land past the end ("Listed only" page 3 held one
+      // server, now blocked): show the last page that still has rows.
+      const lastPage = Math.max(1, Math.ceil(data.total / 12));
+      if (data.data.length === 0 && p > lastPage) {
+        await get().fetchServers(lastPage);
+        return;
+      }
       set({ servers: data.data, serversTotal: data.total, serversPage: p });
     } catch (err) {
+      if (seq !== serversFetchSeq) return;
       // Fetchers must not reject unhandled — surface and log instead
       console.error('Failed to fetch servers:', err);
       toast.error('Failed to load servers');
     } finally {
-      set({ loading: false });
+      if (seq === serversFetchSeq) set({ loading: false });
     }
   },
 

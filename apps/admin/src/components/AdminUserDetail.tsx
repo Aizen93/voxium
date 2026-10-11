@@ -28,6 +28,10 @@ export function AdminUserDetail({ userId, onBack }: Props) {
   // The servers this user owns, with what each one shows in Explore. Loaded
   // beside the detail (a separate endpoint the delete-user flow shares).
   const [ownedServers, setOwnedServers] = useState<OwnedServerInfo[] | null>(null);
+  // A platform ban / unban from this page changes every owned server's
+  // listing (the owner's ban is one of its inputs): reload the panel too.
+  const [ownedReload, setOwnedReload] = useState(0);
+  const reloadOwnedServers = () => setOwnedReload((n) => n + 1);
   useEffect(() => {
     let cancelled = false;
     setOwnedServers(null);
@@ -38,7 +42,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
         if (!cancelled) { setOwnedServers([]); toast.error('Failed to load owned servers'); }
       });
     return () => { cancelled = true; };
-  }, [userId, fetchUserOwnedServers]);
+  }, [userId, fetchUserOwnedServers, ownedReload]);
 
   if (!selectedUser) {
     return (
@@ -323,6 +327,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
                     setBanIps(false);
                     setConfirmAction(null);
                     fetchUserDetail(userId);
+                    reloadOwnedServers();
                   } catch { toast.error('Failed to ban user'); }
                 }}
                 className="px-4 py-2 text-sm rounded-md bg-vox-accent-danger text-white hover:bg-red-600"
@@ -346,6 +351,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
               await unbanUser(selectedUser!.id);
               toast.success('User unbanned');
               fetchUserDetail(userId);
+              reloadOwnedServers();
             } catch { toast.error('Failed to unban user'); }
             setConfirmAction(null);
           }}

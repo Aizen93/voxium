@@ -23,23 +23,28 @@ const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; descriptio
 type CurationAction = 'feature' | 'unfeature' | 'block' | 'unblock';
 const CURATION: Record<CurationAction, {
   title: string; confirmLabel: string; variant: 'danger' | 'primary';
-  patch: { featured?: boolean; blocked?: boolean }; done: string; message: (name: string) => string;
+  patch: { featured?: boolean; blocked?: boolean }; done: string; message: (server: AdminServer) => string;
 }> = {
   feature: {
     title: 'Feature in Explore', confirmLabel: 'Feature', variant: 'primary', patch: { featured: true }, done: 'Server featured',
-    message: (n) => `Show "${n}" in the Featured row on the first page of Explore? Featured is hand-picked and never changes the ranked list.`,
+    message: (s) => `Show "${s.name}" in the Featured row on the first page of Explore? Featured is hand-picked and never changes the ranked list.`,
   },
   unfeature: {
     title: 'Remove from Featured', confirmLabel: 'Unfeature', variant: 'primary', patch: { featured: false }, done: 'Server unfeatured',
-    message: (n) => `Take "${n}" out of the Featured row? It stays listed.`,
+    // Only this action clears the stamp: a hidden featured server would come
+    // back to the Featured row the moment its owner relists it.
+    message: (s) => s.discoveryListed
+      ? `Take "${s.name}" out of the Featured row? It stays listed.`
+      : `Take "${s.name}" out of the Featured row? It is hidden right now; without this it returns to the Featured row the moment it is listed again.`,
   },
   block: {
     title: 'Block from directory', confirmLabel: 'Block', variant: 'danger', patch: { blocked: true }, done: 'Server blocked from the directory',
-    message: (n) => `Hide "${n}" from Explore and stop its owner from relisting it until an admin unblocks it? Members, invites and the server itself are not affected.`,
+    message: (s) => `Hide "${s.name}" from Explore and stop its owner from relisting it until an admin unblocks it? Members, invites and the server itself are not affected.`
+      + (s.featuredAt ? ' It also loses its Featured spot, which Unblock does not restore.' : ''),
   },
   unblock: {
     title: 'Unblock from directory', confirmLabel: 'Unblock', variant: 'primary', patch: { blocked: false }, done: 'Server unblocked. Its owner can relist it from Server settings.',
-    message: (n) => `Lift the directory block on "${n}"? It does not relist by itself: the owner switches it back on from Server settings, Discovery tab.`,
+    message: (s) => `Lift the directory block on "${s.name}"? It does not relist by itself: the owner switches it back on from Server settings, Discovery tab.`,
   },
 };
 
@@ -230,7 +235,7 @@ export function AdminServerList() {
       {curation && (
         <AdminConfirmModal
           title={CURATION[curation.action].title}
-          message={CURATION[curation.action].message(curation.server.name)}
+          message={CURATION[curation.action].message(curation.server)}
           confirmLabel={CURATION[curation.action].confirmLabel}
           variant={CURATION[curation.action].variant}
           onConfirm={async () => {

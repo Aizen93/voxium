@@ -37,7 +37,7 @@ const USER = {
 function owned(over: Partial<OwnedServerInfo>): OwnedServerInfo {
   return {
     id: 's', name: 'Server', iconUrl: null, memberCount: 1, members: [], description: null, tags: [], discoverable: true,
-    discoveryListed: true, joinMode: 'approval', featuredAt: null, discoveryBlockedAt: null, invitesLocked: false, ...over,
+    discoveryListed: true, joinMode: 'approval', featuredAt: null, discoveryBlockedAt: null, invitesLocked: false, ownerBannedAt: null, ...over,
   };
 }
 
@@ -84,6 +84,29 @@ describe('AdminUserDetail — owned servers', () => {
     expect(rows[1].querySelector('[data-testid="directory-chip-hidden"]')).not.toBeNull();
     expect(rows[1].querySelector('[data-testid="owned-server-description"]')!.textContent).toBe('No description');
     expect(rows[1].querySelector('[data-testid="owned-server-tags"]')).toBeNull();
+  });
+
+  it('reloads the panel after a ban and after an unban (the owner ban is a listing input)', async () => {
+    store.banUser.mockResolvedValue(undefined);
+    store.unbanUser.mockResolvedValue(undefined);
+    await render();
+    expect(store.fetchUserOwnedServers).toHaveBeenCalledTimes(1);
+    const buttonByText = (text: string) => qa('button').find((b) => b.textContent?.trim() === text) as HTMLButtonElement;
+    await act(async () => { buttonByText('Ban User').click(); });
+    store.fetchUserOwnedServers.mockResolvedValue([owned({ id: 's-1', name: 'Raid Night', discoveryListed: false, ownerBannedAt: '2026-10-11T00:00:00.000Z' })]);
+    await act(async () => { buttonByText('Ban').click(); });
+    expect(store.banUser).toHaveBeenCalledWith('u-1', undefined, false);
+    expect(store.fetchUserOwnedServers).toHaveBeenCalledTimes(2);
+    expect(q('[data-testid="directory-chip-hidden-owner-banned"]')).not.toBeNull();
+
+    store.selectedUser = { ...USER, bannedAt: '2026-10-11T00:00:00.000Z' };
+    await act(async () => { root.render(<AdminUserDetail userId="u-1" onBack={() => {}} />); });
+    await act(async () => { buttonByText('Unban').click(); });
+    store.fetchUserOwnedServers.mockResolvedValue([owned({ id: 's-1', name: 'Raid Night' })]);
+    await act(async () => { qa('.fixed button').find((b) => b.textContent?.trim() === 'Unban')!.click(); });
+    expect(store.unbanUser).toHaveBeenCalledWith('u-1');
+    expect(store.fetchUserOwnedServers).toHaveBeenCalledTimes(3);
+    expect(q('[data-testid="directory-chip-listed"]')).not.toBeNull();
   });
 
   it('shows no panel when the user owns nothing', async () => {

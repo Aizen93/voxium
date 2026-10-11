@@ -17,6 +17,25 @@ import { createClient } from 'redis';
  * Raising the product's limit to suit the harness would be fixing the wrong
  * thing, so the harness resets its own counter instead.
  */
+/**
+ * Drop the directory's 60 s page cache (`discovery:page:*`) so the next
+ * Explore read is fresh. Not an `rl:` key, so `clearRateLimits()` leaves it:
+ * a retry inside the minute would otherwise read the previous attempt's page.
+ */
+export async function clearDiscoveryPageCache(): Promise<void> {
+  const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+  try {
+    await redis.connect();
+    const keys: string[] = [];
+    for await (const batch of redis.scanIterator({ MATCH: 'discovery:page:*', COUNT: 100 })) {
+      for (const key of batch) keys.push(key);
+    }
+    if (keys.length > 0) await redis.del(keys);
+  } finally {
+    await redis.quit().catch(() => {});
+  }
+}
+
 export async function clearRateLimits(): Promise<void> {
   const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
   try {

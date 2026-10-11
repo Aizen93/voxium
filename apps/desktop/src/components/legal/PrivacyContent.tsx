@@ -61,10 +61,13 @@ export function PrivacyContent() {
           </ul>
           <p className="mt-3">
             <strong className="text-vox-text-primary">Server directory (Explore).</strong> Servers are listed in
-            Explore by default, and a server&apos;s owner can hide it at any time from its settings. A listing shows
-            the server&apos;s name, icon, description, tags, member count and a daily online count to all signed-in
-            users, and nothing about individual members. Sending a join request shares your public profile
-            (username, display name, avatar) and the message you write with that server&apos;s moderators only.
+            Explore by default, and a server&apos;s managers can hide it at any time from its settings. A listing
+            shows the server&apos;s name, icon, description, tags, join mode, creation date and member count, its
+            online and weekly-message counts from the last daily check (with the time of that check), and whether
+            it is featured, to signed-in users with a verified email who have accepted these terms, and nothing
+            about individual members. Sending a join request shares your public profile (username, display name,
+            avatar) and the message you write with that server&apos;s moderators only (see section 6 for how long
+            a request is kept).
           </p>
           <p className="mt-3">
             We do <strong className="text-vox-text-primary">not</strong> sell your data, serve ads, profile you, or use
@@ -126,6 +129,12 @@ export function PrivacyContent() {
             <li><strong className="text-vox-text-primary">Message attachments</strong> are deleted 3 days after upload</li>
             <li><strong className="text-vox-text-primary">Connection data</strong> (IP addresses) is deleted after 180 days without activity from that address</li>
             <li><strong className="text-vox-text-primary">Accounts whose email is never verified</strong> are deleted 7 days after registration</li>
+            <li>
+              <strong className="text-vox-text-primary">Join requests</strong> to a server are deleted 30 days after
+              being sent if nobody has decided on them; a declined request is kept for 7 days, so the same server
+              is not asked again straight away, then deleted
+            </li>
+            <li><strong className="text-vox-text-primary">Removals from a server</strong> are recorded as a ban on that server until one of its moderators lifts it</li>
             <li><strong className="text-vox-text-primary">Undelivered encryption key material</strong> is deleted after 30 days</li>
             <li><strong className="text-vox-text-primary">Everything else</strong> is kept for as long as your account exists. Deleting your account (Settings → Security) deletes your profile, your messages, your devices' keys and your consent records with it</li>
           </ul>

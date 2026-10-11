@@ -1,9 +1,9 @@
 import type { AdminServer } from '@voxium/shared';
 
 /** The four inputs of the listing column plus the two curation stamps and the join mode. */
-export type DirectoryState = Pick<AdminServer, 'discoverable' | 'discoveryListed' | 'featuredAt' | 'discoveryBlockedAt' | 'invitesLocked' | 'joinMode'>;
+export type DirectoryState = Pick<AdminServer, 'discoverable' | 'discoveryListed' | 'featuredAt' | 'discoveryBlockedAt' | 'invitesLocked' | 'ownerBannedAt' | 'joinMode'>;
 
-export type DirectoryChipKey = 'listed' | 'featured' | 'blocked' | 'hidden' | 'hidden-invites-locked' | 'hidden-owner-banned';
+export type DirectoryChipKey = 'listed' | 'featured' | 'blocked' | 'hidden' | 'hidden-invites-locked' | 'hidden-owner-banned' | 'hidden-recompute-pending';
 
 export interface DirectoryChip {
   key: DirectoryChipKey;
@@ -18,21 +18,30 @@ const CHIP: Record<DirectoryChipKey, DirectoryChip> = {
   hidden: { key: 'hidden', label: 'Hidden', className: 'bg-gray-500/20 text-gray-400' },
   'hidden-invites-locked': { key: 'hidden-invites-locked', label: 'Hidden: invites locked', className: 'bg-gray-500/20 text-gray-400' },
   'hidden-owner-banned': { key: 'hidden-owner-banned', label: 'Hidden: owner banned', className: 'bg-vox-accent-danger/20 text-vox-accent-danger' },
+  'hidden-recompute-pending': { key: 'hidden-recompute-pending', label: 'Hidden: recompute pending', className: 'bg-gray-500/20 text-gray-400' },
 };
 
 /**
  * The directory chips for one server, read off the materialised listing
  * column and its inputs. Blocked wins (a block forces the owner switch off
- * too); a listed server may also be Featured; a hidden one says WHY it is
- * hidden, in the order the listing inputs are checked: the owner switch,
- * the invites lock, and (the only input left) the owner platform ban.
+ * and clears Featured); otherwise Listed, or WHY it is hidden in the order
+ * the listing inputs are checked (the owner switch, the invites lock, the
+ * owner platform ban) — and when none of the four inputs explains a hidden
+ * row, the column is waiting for a recompute (it logs and leaves the stale
+ * value for the nightly correction). Featured is a curation stamp of its
+ * own: only the admin PATCH clears it, so a hidden featured server returns
+ * to the Featured row the moment it is listed again — the chip stays.
  */
 export function directoryChips(s: DirectoryState): DirectoryChip[] {
   if (s.discoveryBlockedAt) return [CHIP.blocked];
-  if (s.discoveryListed) return s.featuredAt ? [CHIP.listed, CHIP.featured] : [CHIP.listed];
-  if (!s.discoverable) return [CHIP.hidden];
-  if (s.invitesLocked) return [CHIP['hidden-invites-locked']];
-  return [CHIP['hidden-owner-banned']];
+  const chips: DirectoryChip[] = [];
+  if (s.discoveryListed) chips.push(CHIP.listed);
+  else if (!s.discoverable) chips.push(CHIP.hidden);
+  else if (s.invitesLocked) chips.push(CHIP['hidden-invites-locked']);
+  else if (s.ownerBannedAt) chips.push(CHIP['hidden-owner-banned']);
+  else chips.push(CHIP['hidden-recompute-pending']);
+  if (s.featuredAt) chips.push(CHIP.featured);
+  return chips;
 }
 
 export function DirectoryChips({ server, showJoinMode = true }: { server: DirectoryState; showJoinMode?: boolean }) {
