@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "清除",
     "cancel": "取消",
     "save": "保存",
     "delete": "删除",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "登录失败。请检查网络连接后重试。",
       "title": "欢迎回来！",
       "subtitle": "登录以继续使用 Voxium",
       "email": "邮箱",
@@ -45,6 +47,7 @@
       "createOne": "立即注册"
     },
     "register": {
+      "registrationFailed": "注册失败。请检查网络连接后重试。",
       "title": "创建账号",
       "subtitle": "加入 Voxium 社区",
       "username": "用户名",
@@ -170,6 +173,8 @@
       "failed": "无法删除您的账户，请重试。"
     },
     "security": {
+      "hidePasswords": "隐藏密码",
+      "showPasswords": "显示密码",
       "changePassword": "修改密码",
       "currentPassword": "当前密码",
       "newPassword": "新密码",
@@ -535,6 +540,9 @@
     "failedToToggleReaction": "表情更改失败"
   },
   "messageInput": {
+    "emojiPicker": "表情符号选择器",
+    "removeAttachment": "移除附件",
+    "sendMessage": "发送消息",
     "replyingTo": "回复",
     "cancelReply": "取消回复",
     "dropToUpload": "拖放文件以上传",
@@ -882,6 +890,7 @@
     "loadingAudio": "加载音频中..."
   },
   "support": {
+    "sendMessage": "发送消息",
     "title": "客服",
     "open": "开放",
     "inProgress": "处理中",
@@ -894,6 +903,8 @@
     "failedToReopen": "工单重新打开失败"
   },
   "invite": {
+    "failedToJoin": "无法加入服务器。请检查网络连接后重试。",
+    "invalidOrExpired": "此邀请无效或已过期。",
     "youveBeenInvited": "你收到了邀请！",
     "loadingInvite": "加载邀请中...",
     "goHome": "返回首页",

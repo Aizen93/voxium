@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "Effacer",
     "cancel": "Annuler",
     "save": "Enregistrer",
     "delete": "Supprimer",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "La connexion a échoué. Vérifiez votre connexion et réessayez.",
       "title": "Bon retour !",
       "subtitle": "Connectez-vous pour continuer sur Voxium",
       "email": "E-mail",
@@ -45,6 +47,7 @@
       "createOne": "Créer un compte"
     },
     "register": {
+      "registrationFailed": "L'inscription a échoué. Vérifiez votre connexion et réessayez.",
       "title": "Créer un compte",
       "subtitle": "Rejoignez la communauté Voxium",
       "username": "Nom d'utilisateur",
@@ -170,6 +173,8 @@
       "failed": "Impossible de supprimer votre compte. Veuillez réessayer."
     },
     "security": {
+      "hidePasswords": "Masquer les mots de passe",
+      "showPasswords": "Afficher les mots de passe",
       "changePassword": "Changer le mot de passe",
       "currentPassword": "Mot de passe actuel",
       "newPassword": "Nouveau mot de passe",
@@ -535,6 +540,9 @@
     "failedToToggleReaction": "Impossible de basculer la réaction"
   },
   "messageInput": {
+    "emojiPicker": "Sélecteur d'emoji",
+    "removeAttachment": "Retirer la pièce jointe",
+    "sendMessage": "Envoyer le message",
     "replyingTo": "En réponse à",
     "cancelReply": "Annuler la réponse",
     "dropToUpload": "Déposez les fichiers pour les envoyer",
@@ -883,6 +891,7 @@
     "loadingAudio": "Chargement de l'audio…"
   },
   "support": {
+    "sendMessage": "Envoyer le message",
     "title": "Support",
     "open": "Ouvert",
     "inProgress": "En cours",
@@ -895,6 +904,8 @@
     "failedToReopen": "Impossible de rouvrir le ticket"
   },
   "invite": {
+    "failedToJoin": "Impossible de rejoindre le serveur. Vérifiez votre connexion et réessayez.",
+    "invalidOrExpired": "Cette invitation est invalide ou a expiré.",
     "youveBeenInvited": "Vous avez été invité !",
     "loadingInvite": "Chargement de l'invitation…",
     "goHome": "Retour à l'accueil",

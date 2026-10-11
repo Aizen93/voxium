@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "クリア",
     "cancel": "キャンセル",
     "save": "保存",
     "delete": "削除",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "サインインに失敗しました。接続を確認してもう一度お試しください。",
       "title": "おかえりなさい！",
       "subtitle": "Voxium にサインインしてください",
       "email": "メールアドレス",
@@ -45,6 +47,7 @@
       "createOne": "アカウントを作成"
     },
     "register": {
+      "registrationFailed": "登録に失敗しました。接続を確認してもう一度お試しください。",
       "title": "アカウントを作成",
       "subtitle": "Voxium コミュニティに参加しましょう",
       "username": "ユーザー名",
@@ -170,6 +173,8 @@
       "failed": "アカウントを削除できませんでした。もう一度お試しください。"
     },
     "security": {
+      "hidePasswords": "パスワードを非表示",
+      "showPasswords": "パスワードを表示",
       "changePassword": "パスワードを変更",
       "currentPassword": "現在のパスワード",
       "newPassword": "新しいパスワード",
@@ -535,6 +540,9 @@
     "failedToToggleReaction": "リアクションの変更に失敗しました"
   },
   "messageInput": {
+    "emojiPicker": "絵文字ピッカー",
+    "removeAttachment": "添付ファイルを削除",
+    "sendMessage": "メッセージを送信",
     "replyingTo": "返信先",
     "cancelReply": "返信をキャンセル",
     "dropToUpload": "ファイルをドロップしてアップロード",
@@ -882,6 +890,7 @@
     "loadingAudio": "音声を読み込み中..."
   },
   "support": {
+    "sendMessage": "メッセージを送信",
     "title": "サポート",
     "open": "オープン",
     "inProgress": "対応中",
@@ -894,6 +903,8 @@
     "failedToReopen": "チケットの再開に失敗しました"
   },
   "invite": {
+    "failedToJoin": "サーバーに参加できませんでした。接続を確認してもう一度お試しください。",
+    "invalidOrExpired": "この招待は無効か、有効期限が切れています。",
     "youveBeenInvited": "招待されました！",
     "loadingInvite": "招待を読み込み中...",
     "goHome": "ホームへ",

@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "Löschen",
     "cancel": "Abbrechen",
     "save": "Speichern",
     "delete": "Löschen",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "Anmeldung fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.",
       "title": "Willkommen zurück!",
       "subtitle": "Melde dich an, um mit Voxium fortzufahren",
       "email": "E-Mail",
@@ -45,6 +47,7 @@
       "createOne": "Erstelle eins"
     },
     "register": {
+      "registrationFailed": "Registrierung fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.",
       "title": "Konto erstellen",
       "subtitle": "Werde Teil der Voxium-Community",
       "username": "Benutzername",
@@ -170,6 +173,8 @@
       "failed": "Dein Konto konnte nicht gelöscht werden. Bitte versuche es erneut."
     },
     "security": {
+      "hidePasswords": "Passwörter ausblenden",
+      "showPasswords": "Passwörter anzeigen",
       "changePassword": "Passwort ändern",
       "currentPassword": "Aktuelles Passwort",
       "newPassword": "Neues Passwort",
@@ -535,6 +540,9 @@
     "failedToToggleReaction": "Reaktion konnte nicht geändert werden"
   },
   "messageInput": {
+    "emojiPicker": "Emoji-Auswahl",
+    "removeAttachment": "Anhang entfernen",
+    "sendMessage": "Nachricht senden",
     "replyingTo": "Antwort an",
     "cancelReply": "Antwort abbrechen",
     "dropToUpload": "Dateien zum Hochladen ablegen",
@@ -883,6 +891,7 @@
     "loadingAudio": "Audio wird geladen..."
   },
   "support": {
+    "sendMessage": "Nachricht senden",
     "title": "Support",
     "open": "Offen",
     "inProgress": "In Bearbeitung",
@@ -895,6 +904,8 @@
     "failedToReopen": "Ticket konnte nicht wieder geöffnet werden"
   },
   "invite": {
+    "failedToJoin": "Dem Server konnte nicht beigetreten werden. Prüfe deine Verbindung und versuche es erneut.",
+    "invalidOrExpired": "Diese Einladung ist ungültig oder abgelaufen.",
     "youveBeenInvited": "Du wurdest eingeladen!",
     "loadingInvite": "Einladung wird geladen...",
     "goHome": "Zur Startseite",

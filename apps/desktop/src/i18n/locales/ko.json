@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "지우기",
     "cancel": "취소",
     "save": "저장",
     "delete": "삭제",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "로그인에 실패했습니다. 연결을 확인하고 다시 시도하세요.",
       "title": "다시 오신 것을 환영합니다!",
       "subtitle": "Voxium에 로그인하세요",
       "email": "이메일",
@@ -45,6 +47,7 @@
       "createOne": "계정 만들기"
     },
     "register": {
+      "registrationFailed": "가입에 실패했습니다. 연결을 확인하고 다시 시도하세요.",
       "title": "계정 만들기",
       "subtitle": "Voxium 커뮤니티에 참여하세요",
       "username": "사용자 이름",
@@ -170,6 +173,8 @@
       "failed": "계정을 삭제하지 못했습니다. 다시 시도해 주세요."
     },
     "security": {
+      "hidePasswords": "비밀번호 숨기기",
+      "showPasswords": "비밀번호 표시",
       "changePassword": "비밀번호 변경",
       "currentPassword": "현재 비밀번호",
       "newPassword": "새 비밀번호",
@@ -535,6 +540,9 @@
     "failedToToggleReaction": "반응 변경에 실패했습니다"
   },
   "messageInput": {
+    "emojiPicker": "이모지 선택",
+    "removeAttachment": "첨부 파일 제거",
+    "sendMessage": "메시지 보내기",
     "replyingTo": "답장 대상",
     "cancelReply": "답장 취소",
     "dropToUpload": "파일을 놓아 업로드",
@@ -882,6 +890,7 @@
     "loadingAudio": "오디오 로딩 중..."
   },
   "support": {
+    "sendMessage": "메시지 보내기",
     "title": "지원",
     "open": "열림",
     "inProgress": "진행 중",
@@ -894,6 +903,8 @@
     "failedToReopen": "티켓 다시 열기에 실패했습니다"
   },
   "invite": {
+    "failedToJoin": "서버에 참여할 수 없습니다. 연결을 확인하고 다시 시도하세요.",
+    "invalidOrExpired": "이 초대는 유효하지 않거나 만료되었습니다.",
     "youveBeenInvited": "초대를 받았습니다!",
     "loadingInvite": "초대 로딩 중...",
     "goHome": "홈으로",

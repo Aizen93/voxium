@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "Limpar",
     "cancel": "Cancelar",
     "save": "Salvar",
     "delete": "Excluir",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "Falha ao entrar. Verifique sua conexão e tente novamente.",
       "title": "Bem-vindo de volta!",
       "subtitle": "Entre para continuar no Voxium",
       "email": "E-mail",
@@ -45,6 +47,7 @@
       "createOne": "Criar uma"
     },
     "register": {
+      "registrationFailed": "Falha no cadastro. Verifique sua conexão e tente novamente.",
       "title": "Criar uma conta",
       "subtitle": "Junte-se à comunidade Voxium",
       "username": "Nome de usuário",
@@ -170,6 +173,8 @@
       "failed": "Não foi possível excluir sua conta. Tente novamente."
     },
     "security": {
+      "hidePasswords": "Ocultar senhas",
+      "showPasswords": "Mostrar senhas",
       "changePassword": "Alterar senha",
       "currentPassword": "Senha atual",
       "newPassword": "Nova senha",
@@ -535,6 +540,9 @@
     "failedToToggleReaction": "Não foi possível alterar a reação"
   },
   "messageInput": {
+    "emojiPicker": "Seletor de emoji",
+    "removeAttachment": "Remover anexo",
+    "sendMessage": "Enviar mensagem",
     "replyingTo": "Respondendo a",
     "cancelReply": "Cancelar resposta",
     "dropToUpload": "Solte os arquivos para enviar",
@@ -883,6 +891,7 @@
     "loadingAudio": "Carregando áudio..."
   },
   "support": {
+    "sendMessage": "Enviar mensagem",
     "title": "Suporte",
     "open": "Aberto",
     "inProgress": "Em andamento",
@@ -895,6 +904,8 @@
     "failedToReopen": "Não foi possível reabrir o ticket"
   },
   "invite": {
+    "failedToJoin": "Não foi possível entrar no servidor. Verifique sua conexão e tente novamente.",
+    "invalidOrExpired": "Este convite é inválido ou expirou.",
     "youveBeenInvited": "Você foi convidado!",
     "loadingInvite": "Carregando convite...",
     "goHome": "Ir para o início",

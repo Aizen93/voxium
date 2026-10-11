@@ -32,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "Sign-in failed. Check your connection and try again.",
       "title": "Welcome back!",
       "subtitle": "Sign in to continue to Voxium",
       "email": "Email",
@@ -46,6 +47,7 @@
       "createOne": "Create one"
     },
     "register": {
+      "registrationFailed": "Registration failed. Check your connection and try again.",
       "title": "Create an account",
       "subtitle": "Join the Voxium community",
       "username": "Username",
@@ -902,6 +904,8 @@
     "sendMessage": "Send message"
   },
   "invite": {
+    "failedToJoin": "Could not join the server. Check your connection and try again.",
+    "invalidOrExpired": "This invite is invalid or has expired.",
     "youveBeenInvited": "You've been invited!",
     "loadingInvite": "Loading invite...",
     "goHome": "Go Home",

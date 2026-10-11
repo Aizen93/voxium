@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "Borrar",
     "cancel": "Cancelar",
     "save": "Guardar",
     "delete": "Eliminar",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "No se pudo iniciar sesión. Comprueba tu conexión e inténtalo de nuevo.",
       "title": "¡Bienvenido de nuevo!",
       "subtitle": "Inicia sesión para continuar en Voxium",
       "email": "Correo electrónico",
@@ -45,6 +47,7 @@
       "createOne": "Crear una"
     },
     "register": {
+      "registrationFailed": "No se pudo completar el registro. Comprueba tu conexión e inténtalo de nuevo.",
       "title": "Crear una cuenta",
       "subtitle": "Únete a la comunidad de Voxium",
       "username": "Nombre de usuario",
@@ -170,6 +173,8 @@
       "failed": "No se pudo eliminar tu cuenta. Inténtalo de nuevo."
     },
     "security": {
+      "hidePasswords": "Ocultar contraseñas",
+      "showPasswords": "Mostrar contraseñas",
       "changePassword": "Cambiar contraseña",
       "currentPassword": "Contraseña actual",
       "newPassword": "Nueva contraseña",
@@ -535,6 +540,9 @@
     "failedToToggleReaction": "No se pudo cambiar la reacción"
   },
   "messageInput": {
+    "emojiPicker": "Selector de emojis",
+    "removeAttachment": "Quitar el archivo adjunto",
+    "sendMessage": "Enviar mensaje",
     "replyingTo": "Respondiendo a",
     "cancelReply": "Cancelar respuesta",
     "dropToUpload": "Suelta los archivos para subirlos",
@@ -883,6 +891,7 @@
     "loadingAudio": "Cargando audio..."
   },
   "support": {
+    "sendMessage": "Enviar mensaje",
     "title": "Soporte",
     "open": "Abierto",
     "inProgress": "En progreso",
@@ -895,6 +904,8 @@
     "failedToReopen": "No se pudo reabrir el ticket"
   },
   "invite": {
+    "failedToJoin": "No se pudo unir al servidor. Comprueba tu conexión e inténtalo de nuevo.",
+    "invalidOrExpired": "Esta invitación no es válida o ha caducado.",
     "youveBeenInvited": "¡Has sido invitado!",
     "loadingInvite": "Cargando invitación...",
     "goHome": "Ir al inicio",

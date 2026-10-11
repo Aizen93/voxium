@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "مسح",
     "cancel": "إلغاء",
     "save": "حفظ",
     "delete": "حذف",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "فشل تسجيل الدخول. تحقق من اتصالك وحاول مرة أخرى.",
       "title": "مرحبًا بعودتك!",
       "subtitle": "سجّل الدخول للمتابعة إلى Voxium",
       "email": "البريد الإلكتروني",
@@ -45,6 +47,7 @@
       "createOne": "أنشئ حسابًا"
     },
     "register": {
+      "registrationFailed": "فشل التسجيل. تحقق من اتصالك وحاول مرة أخرى.",
       "title": "إنشاء حساب",
       "subtitle": "انضم إلى مجتمع Voxium",
       "username": "اسم المستخدم",
@@ -170,6 +173,8 @@
       "failed": "تعذّر حذف حسابك. يرجى المحاولة مرة أخرى."
     },
     "security": {
+      "hidePasswords": "إخفاء كلمات المرور",
+      "showPasswords": "إظهار كلمات المرور",
       "changePassword": "تغيير كلمة المرور",
       "currentPassword": "كلمة المرور الحالية",
       "newPassword": "كلمة المرور الجديدة",
@@ -535,6 +540,9 @@
     "failedToToggleReaction": "فشل تغيير التفاعل"
   },
   "messageInput": {
+    "emojiPicker": "منتقي الرموز التعبيرية",
+    "removeAttachment": "إزالة المرفق",
+    "sendMessage": "إرسال الرسالة",
     "replyingTo": "رد على",
     "cancelReply": "إلغاء الرد",
     "dropToUpload": "أسقط الملفات لرفعها",
@@ -887,6 +895,7 @@
     "loadingAudio": "جارٍ تحميل الصوت..."
   },
   "support": {
+    "sendMessage": "إرسال الرسالة",
     "title": "الدعم",
     "open": "مفتوح",
     "inProgress": "قيد المعالجة",
@@ -899,6 +908,8 @@
     "failedToReopen": "فشل إعادة فتح التذكرة"
   },
   "invite": {
+    "failedToJoin": "تعذّر الانضمام إلى الخادم. تحقق من اتصالك وحاول مرة أخرى.",
+    "invalidOrExpired": "هذه الدعوة غير صالحة أو منتهية الصلاحية.",
     "youveBeenInvited": "لقد تمت دعوتك!",
     "loadingInvite": "جارٍ تحميل الدعوة...",
     "goHome": "الرئيسية",
