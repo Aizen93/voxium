@@ -2,7 +2,7 @@ import type { Page, APIRequestContext, Browser } from '@playwright/test';
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import {
-  registerUser, createServer, createInvite, setServerDiscovery, trySetServerDiscovery, kickMember, unbanMember, tryJoinServerViaInvite,
+  API_URL, registerUser, createServer, createInvite, joinServerViaInvite, setServerDiscovery, trySetServerDiscovery, kickMember, unbanMember, tryJoinServerViaInvite,
 } from './helpers/api';
 import { promoteToSuperAdmin } from './helpers/db';
 import { clearRateLimits, clearDiscoveryPageCache } from './helpers/rateLimits';
@@ -358,5 +358,50 @@ test.describe('Server discovery — Explore and the request flow', () => {
 
     await b.context.close();
     await adminContext.close();
+  });
+
+  test('readmission: remove-and-ban, unban, request, approve — the owner sees the member again, live and after a reload', async ({ page, request }) => {
+    test.setTimeout(120_000);
+    const stamp = Date.now().toString(36);
+    const serverName = `Rejoin Lab ${stamp}`;
+    const dataOwner = await registerUser(request, testUser('rjo'));
+    const server = await createServer(request, dataOwner.accessToken, serverName);
+    const b = await registerUser(request, testUser('rjb'));
+    await joinServerViaInvite(request, b.accessToken, await createInvite(request, dataOwner.accessToken, server.id));
+
+    await injectAuth(page, dataOwner);
+    await openServer(page, serverName);
+    const people = page.getByTestId('people-panel');
+    await expect(people.getByText(b.user.username, { exact: true })).toBeVisible({ timeout: 15_000 });
+
+    // Removed: gone from the panel live
+    await kickMember(request, dataOwner.accessToken, server.id, b.user.id, 'repro');
+    await expect(people.getByText(b.user.username, { exact: true })).toHaveCount(0, { timeout: 15_000 });
+
+    // Unbanned, asks again (approval is the default join mode)
+    await unbanMember(request, dataOwner.accessToken, server.id, b.user.id);
+    const asked = await request.post(`${API_URL}/discovery/servers/${server.id}/join`, {
+      headers: { Authorization: `Bearer ${b.accessToken}` },
+      data: { message: `let me back in ${stamp}` },
+    });
+    expect(asked.status()).toBe(202);
+
+    // Approved from Members → Join requests: listed again in the tab, in the panel, and after a reload
+    await expect(toasts(page)).toContainText(`asked to join ${serverName}`, { timeout: 15_000 });
+    await page.getByLabel('Server Settings').click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: /^Members/ }).click();
+    const row = page.getByTestId('join-request-row').filter({ hasText: b.user.username });
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await row.getByTestId('join-request-approve').click();
+    await expect(toasts(page)).toContainText('is now a member', { timeout: 15_000 });
+    await expect(row).toHaveCount(0);
+    await expect(dialog.getByText(b.user.username, { exact: true })).toBeVisible({ timeout: 15_000 });
+    await dialog.getByLabel('Close').first().click();
+    await expect(people.getByText(b.user.username, { exact: true })).toBeVisible({ timeout: 15_000 });
+
+    await page.reload();
+    await openServer(page, serverName);
+    await expect(people.getByText(b.user.username, { exact: true })).toBeVisible({ timeout: 15_000 });
   });
 });

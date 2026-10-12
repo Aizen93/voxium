@@ -15,6 +15,7 @@ vi.mock('../../services/api', () => ({
 
 import { useServerStore } from '../../stores/serverStore';
 import { api } from '../../services/api';
+import { LIMITS } from '@voxium/shared';
 import type { Channel, ServerMember } from '@voxium/shared';
 
 const mockGet = api.get as unknown as Mock;
@@ -134,6 +135,77 @@ describe('serverStore — staleness guards (MED-11)', () => {
       await useServerStore.getState().fetchMembers('srv-D');
 
       expect(useServerStore.getState().members).toEqual(freshMembers);
+    });
+  });
+
+  describe('fetchMembers pagination', () => {
+    const row = (id: string, serverId = 'srv-P') => ({ userId: id, serverId, role: 'member', user: { id, username: id } });
+
+    it('follows hasMore to the last page, one request per page, and shows every member', async () => {
+      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
+      mockGet
+        .mockResolvedValueOnce({ data: { data: [row('u-1'), row('u-2')], total: 3, hasMore: true } })
+        .mockResolvedValueOnce({ data: { data: [row('u-3')], total: 3, hasMore: false } });
+
+      await useServerStore.getState().fetchMembers('srv-P');
+
+      expect(mockGet).toHaveBeenCalledTimes(2);
+      expect(mockGet).toHaveBeenNthCalledWith(1, '/servers/srv-P/members', { params: { page: 1, limit: LIMITS.MEMBERS_PER_PAGE } });
+      expect(mockGet).toHaveBeenNthCalledWith(2, '/servers/srv-P/members', { params: { page: 2, limit: LIMITS.MEMBERS_PER_PAGE } });
+      expect(useServerStore.getState().members.map((m) => m.userId)).toEqual(['u-1', 'u-2', 'u-3']);
+    });
+
+    it('a response without hasMore is the whole list (one request)', async () => {
+      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
+      mockGet.mockResolvedValueOnce({ data: { data: [row('u-1')] } });
+
+      await useServerStore.getState().fetchMembers('srv-P');
+
+      expect(mockGet).toHaveBeenCalledTimes(1);
+      expect(useServerStore.getState().members.map((m) => m.userId)).toEqual(['u-1']);
+    });
+
+    it('a member that shifted across a page boundary is listed once', async () => {
+      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
+      mockGet
+        .mockResolvedValueOnce({ data: { data: [row('u-1'), row('u-2')], total: 3, hasMore: true } })
+        .mockResolvedValueOnce({ data: { data: [row('u-2'), row('u-3')], total: 3, hasMore: false } });
+
+      await useServerStore.getState().fetchMembers('srv-P');
+
+      expect(useServerStore.getState().members.map((m) => m.userId)).toEqual(['u-1', 'u-2', 'u-3']);
+    });
+
+    it('the first page shows at once; a server switch before the next page discards the rest', async () => {
+      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
+      const second = deferred();
+      mockGet
+        .mockResolvedValueOnce({ data: { data: [row('u-1')], total: 2, hasMore: true } })
+        .mockReturnValueOnce(second.promise);
+
+      const fetching = useServerStore.getState().fetchMembers('srv-P');
+      await vi.waitFor(() => expect(useServerStore.getState().members.map((m) => m.userId)).toEqual(['u-1']));
+
+      useServerStore.setState({ activeServerId: 'srv-Q', members: [staleMember] });
+      second.resolve({ data: { data: [row('u-2')], total: 2, hasMore: false } });
+      await fetching;
+
+      expect(useServerStore.getState().members).toEqual([staleMember]);
+    });
+
+    it('stops at the page ceiling and says the list is incomplete', async () => {
+      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let n = 0;
+      mockGet.mockImplementation(async () => ({ data: { data: [row(`u-${++n}`)], total: 999_999, hasMore: true } }));
+
+      await useServerStore.getState().fetchMembers('srv-P');
+
+      expect(mockGet).toHaveBeenCalledTimes(50);
+      expect(useServerStore.getState().members).toHaveLength(50);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('incomplete');
+      warn.mockRestore();
     });
   });
 

@@ -261,7 +261,9 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
         },
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: { joinedAt: 'asc' },
+        // userId breaks ties: members seeded or imported in one statement share
+        // a joinedAt, and a page boundary inside a tie duplicates or skips rows
+        orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }],
       }),
       prisma.serverMember.count({ where: { serverId } }),
     ]);

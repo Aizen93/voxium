@@ -1360,6 +1360,26 @@ describe('Server Routes', () => {
       expect(res.body.total).toBe(1);
       expect(res.body.hasMore).toBe(false);
     });
+
+    it('pages past the first hundred in a stable order (join date, then user id) and reports hasMore', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+      prismaMock.serverMember.count.mockResolvedValue(166);
+
+      const first = await request(app).get('/api/v1/servers/srv-1/members').set('Authorization', `Bearer ${token}`);
+      expect(first.status).toBe(200);
+      expect(first.body.hasMore).toBe(true);
+      expect(prismaMock.serverMember.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
+        skip: 0, take: 100, orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }],
+      }));
+
+      const second = await request(app).get('/api/v1/servers/srv-1/members?page=2').set('Authorization', `Bearer ${token}`);
+      expect(second.status).toBe(200);
+      expect(second.body.page).toBe(2);
+      expect(second.body.hasMore).toBe(false);
+      expect(prismaMock.serverMember.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ skip: 100, take: 100 }));
+    });
   });
 
   // ── PATCH /api/v1/servers/:serverId/members/:memberId/role ──────────────

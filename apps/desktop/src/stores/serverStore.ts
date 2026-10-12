@@ -3,7 +3,7 @@ import axios from 'axios';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
-import { isDiscoveryTier, DISCOVERY_TIERS } from '@voxium/shared';
+import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS } from '@voxium/shared';
 import type { DiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
 
@@ -80,6 +80,9 @@ async function decideJoinRequest(
   locallyResolved.add(`${serverId}:${userId}`);
   get().handleJoinRequestResolved(serverId, userId);
 }
+
+/** Pages of LIMITS.MEMBERS_PER_PAGE fetchMembers will follow before giving up (and saying so). */
+const MEMBER_PAGES_MAX = 50;
 
 const PINNED_KEY = 'voxium_pinned_spaces';
 
@@ -457,11 +460,31 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   fetchMembers: async (serverId: string) => {
     try {
-      const { data } = await api.get(`/servers/${serverId}/members`);
-      // Staleness guard — a slow response for the previous server must not
-      // overwrite the member list of the server now being viewed
-      if (get().activeServerId !== serverId) return;
-      set({ members: data.data });
+      // The endpoint pages by join date (LIMITS.MEMBERS_PER_PAGE a page). A
+      // single page hid every member past the first hundred: on a large
+      // server the newest joiners — and anyone removed and readmitted, who
+      // lands at the end by join date — were absent from the People panel
+      // and the Members tab while they could talk freely. Follow `hasMore`
+      // to the end and show each page as it lands.
+      const seen = new Set<string>();
+      const all: ServerMember[] = [];
+      for (let page = 1; page <= MEMBER_PAGES_MAX; page++) {
+        const { data } = await api.get(`/servers/${serverId}/members`, { params: { page, limit: LIMITS.MEMBERS_PER_PAGE } });
+        // Staleness guard — a slow response for the previous server must not
+        // overwrite the member list of the server now being viewed
+        if (get().activeServerId !== serverId) return;
+        for (const m of data.data as ServerMember[]) {
+          if (!seen.has(m.userId)) {
+            seen.add(m.userId);
+            all.push(m);
+          }
+        }
+        set({ members: [...all] });
+        if (!data.hasMore) return;
+        if (page === MEMBER_PAGES_MAX) {
+          console.warn(`[Members] Stopped after ${MEMBER_PAGES_MAX} pages; the member list of ${serverId} is incomplete (${typeof data.total === 'number' ? data.total : '?'} members)`);
+        }
+      }
     } catch (err) {
       console.error('Failed to fetch members:', err);
       if (get().activeServerId === serverId) {
