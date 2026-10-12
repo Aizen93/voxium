@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * The SPA shell is the ONLY HTML crawlers and link previews ever see, so its
@@ -64,6 +65,19 @@ describe('index.html SEO contract', () => {
     // communities, self-hosting always free. "Free forever" / "nothing to
     // buy" style claims contradict the planned Plus and server tiers.
     expect(html).not.toMatch(/forever|nothing to buy|always be free|free for everyone/i);
+  });
+
+  it('the translated landing copy makes no such promise either', () => {
+    // The shell check above never saw the locale strings: "No subscription."
+    // sat in landing.cta.subtitle for months while the roadmap planned Plus
+    // and server tiers. The English source is the one translators follow.
+    const en = JSON.parse(readFileSync(fileURLToPath(new URL('../../i18n/locales/en.json', import.meta.url)), 'utf8')) as { landing: unknown };
+    const flat = (v: unknown): string[] => (typeof v === 'string' ? [v] : v && typeof v === 'object' ? Object.values(v as object).flatMap(flat) : []);
+    const texts = flat(en.landing);
+    expect(texts.length).toBeGreaterThan(20);
+    for (const text of texts) {
+      expect(text, text).not.toMatch(/forever|nothing to buy|always be free|free for everyone|no subscriptions?/i);
+    }
   });
 
   it('makes no open-source claim — Voxium is source-available (VCL-1.0)', () => {
