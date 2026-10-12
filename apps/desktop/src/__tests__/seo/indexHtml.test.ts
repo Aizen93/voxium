@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 /**
  * The SPA shell is the ONLY HTML crawlers and link previews ever see, so its
@@ -71,7 +70,7 @@ describe('index.html SEO contract', () => {
     // The shell check above never saw the locale strings: "No subscription."
     // sat in landing.cta.subtitle for months while the roadmap planned Plus
     // and server tiers. The English source is the one translators follow.
-    const en = JSON.parse(readFileSync(fileURLToPath(new URL('../../i18n/locales/en.json', import.meta.url)), 'utf8')) as { landing: unknown };
+    const en = JSON.parse(readFileSync(resolve(ROOT, 'src/i18n/locales/en.json'), 'utf8')) as { landing: unknown };
     const flat = (v: unknown): string[] => (typeof v === 'string' ? [v] : v && typeof v === 'object' ? Object.values(v as object).flatMap(flat) : []);
     const texts = flat(en.landing);
     expect(texts.length).toBeGreaterThan(20);
