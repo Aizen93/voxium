@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  /* Inter, the app's own self-hosted font files (@fontsource/inter) */
+  @font-face { font-family: 'Inter'; font-weight: 500; font-style: normal; font-display: block;
+    src: url('../../node_modules/@fontsource/inter/files/inter-latin-500-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Inter'; font-weight: 600; font-style: normal; font-display: block;
+    src: url('../../node_modules/@fontsource/inter/files/inter-latin-600-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Inter'; font-weight: 700; font-style: normal; font-display: block;
+    src: url('../../node_modules/@fontsource/inter/files/inter-latin-700-normal.woff2') format('woff2'); }
+
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: #141424;                 /* --vox-bg-primary, brand dark theme */
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    color: #e4e6f2;                      /* --vox-text-primary */
+    position: relative;
+  }
+  /* One soft glow behind the crest, nothing else: a flat field compresses small */
+  .glow {
+    position: absolute; left: 50%; top: 46%; width: 720px; height: 720px;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(circle, rgba(91,91,247,0.22) 0%, rgba(91,91,247,0.08) 38%, rgba(20,20,36,0) 66%);
+  }
+  /* The safe square: everything lives inside the central 630x630 — the crop
+     messengers take for their small thumbnail — with margins to spare. */
+  .stack {
+    position: absolute; left: 0; right: 0; top: 0; bottom: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 0; text-align: center;
+  }
+  .logo { width: 164px; height: 164px; filter: drop-shadow(0 18px 44px rgba(91,91,247,0.38)); }
+  .wordmark {
+    margin-top: 20px; font-weight: 700; font-size: 92px; line-height: 1; letter-spacing: -0.025em;
+    color: #ffffff;
+  }
+  .tagline {
+    margin-top: 18px; font-weight: 600; font-size: 32px; line-height: 1.3; letter-spacing: -0.01em;
+    color: #e4e6f2;
+  }
+  .tagline .accent { color: #8f8ffb; }   /* --vox-accent-primary, lifted for contrast on the dark field */
+  .chips { margin-top: 24px; display: flex; gap: 10px; }
+  .chip {
+    font-weight: 500; font-size: 17px; line-height: 1; letter-spacing: 0;
+    color: #a3a6c2;                      /* --vox-text-secondary */
+    padding: 11px 14px; border-radius: 999px;
+    border: 1.5px solid rgba(91,91,247,0.45);
+    background: rgba(91,91,247,0.10);
+  }
+</style>
+</head>
+<body>
+  <div class="glow"></div>
+  <div class="stack">
+    <!-- apps/desktop/public/logo_static.svg, verbatim -->
+    <svg class="logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+      <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stop-color="#5B21B6"/>
+          <stop offset="100%" stop-color="#3B82F6"/>
+        </linearGradient>
+        <linearGradient id="v" x1="180" y1="140" x2="332" y2="380" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stop-color="#E0E7FF"/>
+          <stop offset="100%" stop-color="#FFFFFF"/>
+        </linearGradient>
+        <linearGradient id="wave" x1="300" y1="160" x2="420" y2="350" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stop-color="#A78BFA"/>
+          <stop offset="100%" stop-color="#60A5FA"/>
+        </linearGradient>
+      </defs>
+      <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+      <path d="M148 148 L256 372 L322 224" stroke="url(#v)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M340 200 C370 230, 370 290, 340 320" stroke="url(#wave)" stroke-width="24" stroke-linecap="round" fill="none" opacity="0.9"/>
+      <path d="M380 168 C425 215, 425 305, 380 352" stroke="url(#wave)" stroke-width="20" stroke-linecap="round" fill="none" opacity="0.6"/>
+      <path d="M418 140 C478 200, 478 320, 418 380" stroke="url(#wave)" stroke-width="16" stroke-linecap="round" fill="none" opacity="0.35"/>
+    </svg>
+    <div class="wordmark">Voxium</div>
+    <div class="tagline">Privacy-first <span class="accent">voice &amp; text</span><br>for communities</div>
+    <div class="chips">
+      <span class="chip">Self-hostable</span>
+      <span class="chip">E2E encrypted</span>
+      <span class="chip">No tracking</span>
+    </div>
+  </div>
+</body>
+</html>
