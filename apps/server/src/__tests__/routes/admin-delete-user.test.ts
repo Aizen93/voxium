@@ -47,6 +47,11 @@ function makeTxMock() {
         return {};
       }),
     },
+    // The inline member counts (server discovery) move with the cascade, in
+    // the same transaction as the delete.
+    server: {
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    },
     // The E2E tables purgeE2EMaterial touches — present so the REAL purge can
     // be driven against this client, not just the observing mock.
     e2EKeyShare: { deleteMany: deleteMany() },
@@ -60,6 +65,7 @@ function makeTxMock() {
 let txMock = makeTxMock();
 
 const prismaMock: Record<string, any> = {
+  serverJoinRequest: { findUnique: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]), deleteMany: vi.fn().mockReturnValue({ op: 'request.deleteMany' }) },
   user: {
     findUnique: vi.fn(),
     // Only here so we can prove the delete NEVER runs on the top-level client
@@ -86,6 +92,9 @@ const prismaMock: Record<string, any> = {
   },
   channelRead: {
     upsert: vi.fn().mockResolvedValue({}),
+  },
+  serverBan: {
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
   },
   // Supports BOTH forms: the array form (used by the ownership-transfer
   // statements) and the callback/interactive form (used by purge + delete).
@@ -175,6 +184,8 @@ vi.mock('../../utils/sanitize', () => ({
 
 // Member broadcast
 const mockBroadcastMemberLeft = vi.fn().mockResolvedValue(undefined);
+const mockEmitToModerators = vi.fn();
+vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: any[]) => mockEmitToModerators(...a) }));
 vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberJoined: vi.fn().mockResolvedValue(undefined),
   broadcastMemberLeft: (...args: any[]) => mockBroadcastMemberLeft(...args),
@@ -204,6 +215,13 @@ vi.mock('../../utils/auditLog', () => ({
 // Feature flags
 vi.mock('../../utils/featureFlags', () => ({
   isFeatureEnabled: vi.fn().mockReturnValue(true),
+}));
+
+// Directory listing column — a transfer changes whose ban state feeds it
+const mockRecomputeListed = vi.fn().mockResolvedValue(true);
+vi.mock('../../utils/discoveryListing', () => ({
+  recomputeListed: (...args: any[]) => mockRecomputeListed(...args),
+  recomputeListedForOwner: vi.fn().mockResolvedValue(0),
 }));
 
 // ─── App setup ──────────────────────────────────────────────────────────────
@@ -402,6 +420,55 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     // The heir was already a member, so their channel:{id} rooms were computed
     // at connect against the old owner — owner status has to be resynced.
     expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-owned', { userId: 'heir-1' });
+    // ...and the listing column follows the new owner's ban state
+    expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
+  });
+
+  it('transferring to a NON-member creates their membership and moves the inline member count in the same statement', async () => {
+    mockUsers({
+      'admin-1': { role: 'admin' },
+      'target-1': { role: 'user' },
+      'heir-1': { role: 'user' },
+    });
+    prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-owned', name: 'Owned' }]);
+    prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-owned' }]);
+    prismaMock.serverMember.findUnique.mockResolvedValue(null); // heir is not a member yet
+    prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+    prismaMock.serverJoinRequest.findUnique.mockResolvedValueOnce({ status: 'pending' }); // the heir had asked to join
+    prismaMock.server.findUnique.mockResolvedValue({
+      id: 'srv-owned', name: 'Owned', iconUrl: null, ownerId: 'heir-1', invitesLocked: false,
+      createdAt: new Date('2026-01-01T00:00:00Z'), description: null, tags: [], discoverable: true, joinMode: 'approval',
+    });
+
+    const res = await request(app)
+      .delete('/api/v1/admin/users/target-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        serverActions: [{ serverId: 'srv-owned', action: 'transfer', newOwnerId: 'heir-1' }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.serverMember.create).toHaveBeenCalledWith({
+      data: { userId: 'heir-1', serverId: 'srv-owned', role: 'owner' },
+    });
+    expect(prismaMock.server.update).toHaveBeenCalledWith({
+      where: { id: 'srv-owned' },
+      data: { ownerId: 'heir-1', memberCount: { increment: 1 } },
+    });
+    // an admin-chosen heir is an explicit unban — this path creates a member
+    // around joinServerMember's ban check, so the row must not survive it
+    expect(prismaMock.serverBan.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned', userId: 'heir-1' } });
+    // ...and so does a request they had open on this server, settled as joined for the moderators
+    expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned', userId: 'heir-1' } });
+    expect(mockEmitToModerators).toHaveBeenCalledWith('srv-owned', 'server:join_request_resolved', { serverId: 'srv-owned', userId: 'heir-1', outcome: 'joined' });
+    expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
+    // the deleted account's own membership is decremented inside the delete transaction
+    expect(txMock.server.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['srv-owned'] }, memberCount: { gt: 0 } },
+      data: { memberCount: { decrement: 1 } },
+    });
+    expect(txMock.server.updateMany.mock.invocationCallOrder[0]).toBeLessThan(txMock.user.delete.mock.invocationCallOrder[0]);
+    expectAtomicPurgeAndDelete('target-1');
   });
 
   it('purges the TARGET user, never the acting admin', async () => {

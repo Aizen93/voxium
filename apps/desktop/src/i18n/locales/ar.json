@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "مسح",
     "cancel": "إلغاء",
     "save": "حفظ",
     "delete": "حذف",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "فشل تسجيل الدخول. تحقق من اتصالك وحاول مرة أخرى.",
       "title": "مرحبًا بعودتك!",
       "subtitle": "سجّل الدخول للمتابعة إلى Voxium",
       "email": "البريد الإلكتروني",
@@ -45,6 +47,7 @@
       "createOne": "أنشئ حسابًا"
     },
     "register": {
+      "registrationFailed": "فشل التسجيل. تحقق من اتصالك وحاول مرة أخرى.",
       "title": "إنشاء حساب",
       "subtitle": "انضم إلى مجتمع Voxium",
       "username": "اسم المستخدم",
@@ -170,6 +173,8 @@
       "failed": "تعذّر حذف حسابك. يرجى المحاولة مرة أخرى."
     },
     "security": {
+      "hidePasswords": "إخفاء كلمات المرور",
+      "showPasswords": "إظهار كلمات المرور",
       "changePassword": "تغيير كلمة المرور",
       "currentPassword": "كلمة المرور الحالية",
       "newPassword": "كلمة المرور الجديدة",
@@ -268,7 +273,8 @@
       "general": "عام",
       "members": "الأعضاء",
       "roles": "الأدوار",
-      "limits": "الحدود"
+      "limits": "الحدود",
+      "discovery": "الاستكشاف"
     },
     "general": {
       "serverName": "اسم الخادم",
@@ -306,16 +312,11 @@
       "assignRoles": "تعيين الأدوار",
       "promoteToAdmin": "ترقية إلى مدير",
       "demoteToMember": "تخفيض إلى عضو",
-      "kickMember": "طرد العضو",
       "transferOwnership": "نقل الملكية",
-      "kickConfirm": "طرد {{name}}؟",
-      "kickDescription": "سيتم إزالته من الخادم وسيحتاج إلى دعوة جديدة للانضمام مجددًا.",
-      "kick": "طرد",
       "transferConfirm": "نقل الملكية إلى {{name}}؟",
       "transferDescription": "ستفقد امتيازات المالك وتصبح مديرًا. لا يمكنك التراجع عن هذا الإجراء.",
       "transfer": "نقل",
       "failedToUpdateRole": "فشل تحديث الدور",
-      "failedToKick": "فشل طرد العضو",
       "failedToTransfer": "فشل نقل الملكية",
       "failedToUpdateRoles": "فشل تحديث الأدوار",
       "noResults": "لا يوجد أعضاء مطابقون لبحثك",
@@ -367,8 +368,8 @@
       "description": "يسمح للأعضاء بإنشاء روابط دعوة للخادم"
     },
     "KICK_MEMBERS": {
-      "name": "طرد الأعضاء",
-      "description": "يسمح للأعضاء بطرد أعضاء آخرين ذوي أدوار أقل"
+      "name": "إدارة الأعضاء",
+      "description": "يسمح بإزالة الأعضاء ذوي الأدوار الأدنى وحظرهم، ورفع الحظر عنهم، والموافقة على طلبات الانضمام أو رفضها"
     },
     "MANAGE_NICKNAMES": {
       "name": "إدارة الألقاب",
@@ -485,13 +486,10 @@
     "clearNickname": "مسح",
     "promoteToAdmin": "ترقية إلى مدير",
     "demoteToMember": "تخفيض إلى عضو",
-    "confirmKick": "انقر مرة أخرى للتأكيد",
-    "kick": "طرد",
     "assignRoles": "تعيين الأدوار",
     "noRolesCreated": "لم يتم إنشاء أدوار",
     "failedToPromote": "فشل ترقية العضو",
     "failedToDemote": "فشل تخفيض العضو",
-    "failedToKick": "فشل طرد العضو",
     "rolesUpdated": "تم تحديث الأدوار",
     "failedToUpdateRoles": "فشل تحديث الأدوار",
     "userMuted": "تم كتم صوت المستخدم",
@@ -542,6 +540,9 @@
     "failedToToggleReaction": "فشل تغيير التفاعل"
   },
   "messageInput": {
+    "emojiPicker": "منتقي الرموز التعبيرية",
+    "removeAttachment": "إزالة المرفق",
+    "sendMessage": "إرسال الرسالة",
     "replyingTo": "رد على",
     "cancelReply": "إلغاء الرد",
     "dropToUpload": "أسقط الملفات لرفعها",
@@ -588,7 +589,43 @@
     "switcherPlaceholder": "الانتقال إلى خادم…",
     "switcherEmpty": "لا يوجد خادم بهذا الاسم.",
     "switcherHint": "اكتب للتصفية · ↑↓ للتنقل · Enter للفتح",
-    "createOrJoin": "إنشاء خادم أو الانضمام إليه"
+    "createOrJoin": "إنشاء خادم أو الانضمام إليه",
+    "joinRequests": {
+      "title": "طلبات الانضمام",
+      "empty": "لا توجد طلبات معلّقة.",
+      "approve": "موافقة",
+      "decline": "رفض",
+      "approved": "أصبح {{name}} عضوًا الآن",
+      "declined": "تم رفض طلب {{name}}",
+      "noMessage": "لا توجد رسالة",
+      "requestedAt": "طُلب في {{when}}",
+      "failedToLoad": "تعذّر تحميل طلبات الانضمام",
+      "failedToApprove": "تعذّرت الموافقة على الطلب",
+      "failedToDecline": "تعذّر رفض الطلب",
+      "pending_zero": "لا طلبات انضمام معلّقة",
+      "pending_one": "طلب انضمام واحد معلّق",
+      "pending_two": "طلبا انضمام معلّقان",
+      "pending_few": "{{count}} طلبات انضمام معلّقة",
+      "pending_many": "{{count}} طلب انضمام معلّقًا",
+      "pending_other": "{{count}} طلب انضمام معلّق"
+    },
+    "banned": {
+      "title": "المحظورون",
+      "empty": "لا يوجد أحد محظور.",
+      "unban": "رفع الحظر",
+      "unbanned": "يمكن لـ {{name}} الانضمام مجددًا",
+      "by": "بواسطة {{name}}",
+      "noReason": "لم يُذكر سبب",
+      "at": "حُظر في {{when}}",
+      "failedToLoad": "تعذّر تحميل قائمة المحظورين",
+      "failedToUnban": "تعذّر رفع الحظر"
+    },
+    "removeAndBan": "إزالة وحظر",
+    "removeAndBanConfirm": "إزالة {{name}} وحظره؟",
+    "removeAndBanDescription": "سيُزال هذا العضو من المساحة ولن يتمكن من العودة — لا بالدعوة ولا مباشرة ولا بالطلب — حتى ترفع عنه الحظر من قسم المحظورين.",
+    "banReasonPlaceholder": "السبب (اختياري، يراه المشرفون)",
+    "removeAndBanned": "تمت إزالة {{name}} وحظره",
+    "removeAndBanFailed": "تعذّرت إزالة العضو"
   },
   "channel": {
     "joinVoice": "الانضمام إلى الصوت",
@@ -646,7 +683,8 @@
       "submitReport": "إرسال البلاغ",
       "submitting": "جارٍ الإرسال...",
       "submitted": "تم إرسال البلاغ. شكرًا لك!",
-      "failedToSubmit": "فشل إرسال البلاغ"
+      "failedToSubmit": "فشل إرسال البلاغ",
+      "reportSpace": "الإبلاغ عن المساحة"
     },
     "search": {
       "searchIn": "البحث في {{name}}",
@@ -857,6 +895,7 @@
     "loadingAudio": "جارٍ تحميل الصوت..."
   },
   "support": {
+    "sendMessage": "إرسال الرسالة",
     "title": "الدعم",
     "open": "مفتوح",
     "inProgress": "قيد المعالجة",
@@ -869,6 +908,8 @@
     "failedToReopen": "فشل إعادة فتح التذكرة"
   },
   "invite": {
+    "failedToJoin": "تعذّر الانضمام إلى الخادم. تحقق من اتصالك وحاول مرة أخرى.",
+    "invalidOrExpired": "هذه الدعوة غير صالحة أو منتهية الصلاحية.",
     "youveBeenInvited": "لقد تمت دعوتك!",
     "loadingInvite": "جارٍ تحميل الدعوة...",
     "goHome": "الرئيسية",
@@ -989,7 +1030,7 @@
     },
     "cta": {
       "title": "مستعد لتجربة التواصل بشكل جديد؟",
-      "subtitle": "انضم إلى ثورة التواصل المفتوح. لا بطاقة ائتمان. لا اشتراك.",
+      "subtitle": "انضم إلى ثورة التواصل المفتوح. لا بطاقة ائتمان. لا جدار دفع.",
       "getStarted": "ابدأ الآن، مجاناً",
       "downloadApp": "حمّل التطبيق"
     },
@@ -1114,7 +1155,29 @@
     "ticketClosed": "التذكرة مغلقة. أعد فتحها لإرسال رسائل.",
     "cannotBanSelf": "لا يمكنك حظر نفسك",
     "cannotBanSuperAdmin": "لا يمكن حظر المشرف الأعلى",
-    "onlySuperAdminCanBan": "المشرفون الأعلى فقط يمكنهم حظر مشرفين آخرين"
+    "onlySuperAdminCanBan": "المشرفون الأعلى فقط يمكنهم حظر مشرفين آخرين",
+    "discoveryDisabled": "استكشاف الخوادم معطّل حاليًا",
+    "listingDisabledByAdmin": "عطّل أحد المسؤولين الإدراج",
+    "bannedFromServer": "أنت محظور من هذه المساحة",
+    "requestDeclinedRecently": "رُفض طلبك مؤخرًا. يرجى المحاولة لاحقًا.",
+    "joinRequestNotFound": "طلب الانضمام غير موجود",
+    "banNotFound": "الحظر غير موجود",
+    "cannotTransferToBanned": "لا يمكن نقل الملكية إلى مستخدم محظور",
+    "cannotReportOwnServer": "لا يمكنك الإبلاغ عن مساحتك",
+    "noPermissionManageMembers": "ليست لديك صلاحية إدارة الأعضاء",
+    "noPermissionKickMembers": "ليست لديك صلاحية إزالة الأعضاء",
+    "cannotKickHigherRole": "لا يمكن إزالة عضو بدور مساوٍ أو أعلى",
+    "descriptionUnsupportedChars": "يحتوي الوصف على أحرف غير مدعومة",
+    "serverNameUnsupportedChars": "يحتوي اسم الخادم على أحرف غير مدعومة",
+    "descriptionTooLong": "يجب ألا يتجاوز الوصف {{max}} حرفًا",
+    "reasonUnsupportedChars": "يحتوي السبب على أحرف غير مدعومة",
+    "reasonTooLong": "يجب ألا يتجاوز السبب {{max}} حرفًا",
+    "tagsNotSupported": "يجب اختيار الوسوم من القائمة المدعومة",
+    "tooManyTags": "يُسمح بـ {{max}} وسوم كحد أقصى",
+    "joinMessageUnsupportedChars": "تحتوي الرسالة على أحرف غير مدعومة",
+    "joinMessageTooLong": "يجب ألا تتجاوز الرسالة {{max}} حرفًا",
+    "refineSearch": "نتائج كثيرة جدًا — حدّد بحثك",
+    "serverNotFound": "المساحة غير موجودة"
   },
   "e2e": {
     "badgeTitle": "مشفَّر تشفيرًا تامًا بين الطرفين — عرض رقم الأمان",
@@ -1299,5 +1362,155 @@
     "renamed": "تمت إعادة تسمية القناة",
     "failedToRename": "فشلت إعادة تسمية القناة",
     "moderationNotSecure": "\"{{name}}\" قناة عادية — احذفها من الشريط الجانبي"
+  },
+  "discovery": {
+    "tier": {
+      "ladder": "جميع الشارات",
+      "topFraction": "أفضل {{percent}}٪",
+      "from": "بدءًا من {{score}} نقطة",
+      "current": "شارتك",
+      "bronze": "برونزي",
+      "silver": "فضي",
+      "gold": "ذهبي",
+      "platinum": "بلاتيني",
+      "diamond": "ماسي",
+      "badgeLabel": "{{tier}} · أفضل {{percent}}٪ من المساحات حسب النشاط",
+      "score": "نقاط النشاط: {{score}} (متصلون × {{online}} + رسائل هذا الأسبوع + الأعضاء)",
+      "next": "التالي: {{tier}}، بدءًا من {{score}} نقطة",
+      "top": "أعلى مستوى. لا شيء فوقه.",
+      "none": "لا شارة بعد. النصف الأكثر نشاطًا من المساحات المدرجة يحصل على البرونزي؛ وأفضل 1٪ يحصل على الماسي.",
+      "notYet": "تظهر الشارات عندما يضم الدليل ما يكفي من المساحات النشطة."
+    },
+    "tags": {
+      "gaming": "ألعاب",
+      "esports": "الرياضات الإلكترونية",
+      "open-source": "مفتوح المصدر",
+      "programming": "برمجة",
+      "science": "علوم",
+      "education": "تعليم",
+      "languages": "لغات",
+      "music": "موسيقى",
+      "art": "فن",
+      "film-tv": "أفلام وتلفزيون",
+      "creators": "صنّاع المحتوى",
+      "community": "مجتمع"
+    },
+    "card": {
+      "menu": "المزيد من الإجراءات",
+      "featured": "مميّز",
+      "noDescription": "لا يوجد وصف بعد.",
+      "online_zero": "لا أحد متصل",
+      "online_one": "متصل واحد",
+      "online_two": "متصلان",
+      "online_few": "{{count}} متصلين",
+      "online_many": "{{count}} متصلًا",
+      "online_other": "{{count}} متصل",
+      "members_zero": "لا أعضاء",
+      "members_one": "عضو واحد",
+      "members_two": "عضوان",
+      "members_few": "{{count}} أعضاء",
+      "members_many": "{{count}} عضوًا",
+      "members_other": "{{count}} عضو",
+      "messages_zero": "لا رسائل هذا الأسبوع",
+      "messages_one": "رسالة واحدة هذا الأسبوع",
+      "messages_two": "رسالتان هذا الأسبوع",
+      "messages_few": "{{count}} رسائل هذا الأسبوع",
+      "messages_many": "{{count}} رسالة هذا الأسبوع",
+      "messages_other": "{{count}} رسالة هذا الأسبوع",
+      "join": "انضمام",
+      "requestToJoin": "طلب الانضمام",
+      "requested": "تم الطلب",
+      "cancelRequest": "إلغاء",
+      "open": "فتح",
+      "onlineHint": "عدد المتصلين حسب آخر فحص يومي؛ عدد الأعضاء مباشر",
+      "report": "الإبلاغ عن هذه المساحة"
+    },
+    "settings": {
+      "badge": "الشارة",
+      "title": "مدرجة في الاستكشاف",
+      "listedHint": "يمكن لأي مستخدم مسجّل الدخول في Voxium العثور على هذه المساحة في الاستكشاف. يمكن الانضمام إلى المساحة المخفية بالدعوة.",
+      "audience": "تعرض البطاقة الاسم والأيقونة والوصف والوسوم وعدد الأعضاء وعدد المتصلين. لا تُعرض الأعضاء ولا الرسائل ولا الصوت أبدًا.",
+      "hiddenInvitesLocked": "مخفية من الاستكشاف ما دامت الدعوات مقفلة.",
+      "goToGeneral": "فتح قفل الدعوات في «عام»",
+      "blockedByAdmin": "عطّل أحد المسؤولين الإدراج.",
+      "whoCanJoin": "من يمكنه الانضمام",
+      "joinApproval": "طلب الانضمام",
+      "joinApprovalHint": "يطلب الوافدون الجدد أولًا؛ ويوافق المشرفون على كل طلب أو يرفضونه.",
+      "joinOpen": "الانضمام مباشرة",
+      "joinOpenHint": "يمكن لأي شخص يجد المساحة الانضمام فورًا.",
+      "description": "الوصف",
+      "descriptionPlaceholder": "ما موضوع هذه المساحة، ولمن هي؟",
+      "descriptionNudge": "المساحات ذات الوصف يُعثر عليها أكثر.",
+      "tags": "الوسوم",
+      "tagsHint": "حتى {{max}}. يصفّي الوافدون الجدد الاستكشاف حسب الوسم.",
+      "preview": "بطاقتك في الاستكشاف",
+      "stats": "النشاط",
+      "statsMembers": "الأعضاء: {{count}}",
+      "statsMessages": "رسائل هذا الأسبوع: {{count}}",
+      "statsOnline": "المتصلون عند آخر فحص: {{count}}",
+      "statsRefreshedAt": "آخر فحص: {{when}}",
+      "statsDaily": "تُحدَّث أرقام النشاط مرة يوميًا؛ وعدد الأعضاء مباشر.",
+      "statsNever": "لم تُحسب أرقام النشاط بعد؛ تُحدَّث مرة يوميًا.",
+      "save": "حفظ إعدادات الاستكشاف",
+      "saved": "تم حفظ إعدادات الاستكشاف",
+      "failedToSave": "تعذّر حفظ إعدادات الاستكشاف",
+      "failedToLoad": "تعذّر تحميل بيانات الاستكشاف"
+    },
+    "explore": "استكشاف",
+    "browsePublic": "تصفّح المساحات العامة",
+    "noInvite": "لا تملك دعوة؟",
+    "switcherExplore": "استكشاف المساحات العامة",
+    "sort": {
+      "active": "الأكثر نشاطًا",
+      "members": "الأكثر أعضاءً",
+      "newest": "الأحدث",
+      "name": "الاسم"
+    },
+    "modal": {
+      "title": "استكشاف",
+      "subtitle": "مساحات عامة يمكن لأي شخص على Voxium العثور عليها والانضمام إليها",
+      "searchPlaceholder": "ابحث في المساحات العامة…",
+      "searchHint": "اكتب {{min}} أحرف أو أكثر للبحث",
+      "sortLabel": "ترتيب",
+      "sortPrefix": "الترتيب: ",
+      "tagsLabel": "الوسوم",
+      "allTags": "الكل",
+      "featured": "مميّزة",
+      "resultsCapped": "أكثر من {{count, number}} مساحة",
+      "loadMore": "تحميل المزيد",
+      "emptyMatch": "لا توجد مساحات عامة مطابقة.",
+      "emptyMatchHint": "جرّب كلمة أو وسمًا آخر.",
+      "emptyNone": "لا يوجد شيء مدرج بعد.",
+      "off": "الاستكشاف متوقف حاليًا.",
+      "offHint": "عطّل أحد المسؤولين الدليل. لا تزال الدعوات تعمل.",
+      "failedToLoad": "تعذّر تحميل الاستكشاف",
+      "retry": "إعادة المحاولة",
+      "footer": "تُحدَّث أرقام النشاط مرة يوميًا؛ أما عدد الأعضاء فهو مباشر.",
+      "joinFailed": "تعذّر الانضمام إلى المساحة",
+      "requestFailed": "تعذّر إرسال الطلب",
+      "cancelFailed": "تعذّر إلغاء الطلب",
+      "results_zero": "لا مساحات",
+      "results_one": "مساحة واحدة",
+      "results_two": "مساحتان",
+      "results_few": "{{count}} مساحات",
+      "results_many": "{{count}} مساحة",
+      "results_other": "{{count}} مساحة"
+    },
+    "request": {
+      "title": "طلب الانضمام إلى {{name}}",
+      "description": "سيرى المشرفون اسمك وصورتك الرمزية وهذه الرسالة.",
+      "messageLabel": "رسالة (اختياري)",
+      "placeholder": "اذكر سبب رغبتك في الانضمام…",
+      "send": "إرسال الطلب"
+    },
+    "toasts": {
+      "joined": "مرحبًا بك في {{name}}",
+      "requestSent": "أُرسل الطلب إلى {{name}}",
+      "requestCancelled": "أُلغي طلب الانضمام إلى {{name}}",
+      "approved": "تمت الموافقة على طلبك للانضمام إلى {{name}}. مرحبًا بك!",
+      "declined": "رُفض طلبك للانضمام إلى {{name}}",
+      "newRequest": "طلب {{user}} الانضمام إلى {{server}}",
+      "unknownSpace": "مساحة"
+    }
   }
 }

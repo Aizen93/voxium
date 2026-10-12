@@ -24,6 +24,7 @@ import { roleRouter } from './routes/roles';
 import { secureChannelRouter } from './routes/secureChannels';
 import { themeRouter } from './routes/themes';
 import { e2eRouter } from './routes/e2e';
+import { discoveryRouter } from './routes/discovery';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 import { trustsProxy, trustedProxyHops } from './utils/trustProxy';
@@ -234,6 +235,7 @@ api.use('/admin', adminRouter);
 api.use('/support', supportRouter);
 api.use('/themes', themeRouter);
 api.use('/e2e', e2eRouter);
+api.use('/discovery', discoveryRouter);
 
 app.use('/api/v1', api);
 

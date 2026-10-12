@@ -1,5 +1,10 @@
 import { createClient } from 'redis';
 
+/** A failed quit must not fail the test, but it must not vanish either. */
+function quitQuietly(redis: { quit(): Promise<unknown> }): Promise<unknown> {
+  return redis.quit().catch((err: unknown) => console.warn('[e2e] redis quit failed:', err instanceof Error ? err.message : String(err)));
+}
+
 /**
  * Reset every rate-limit counter (never `rl:config`, which holds the admin
  * overrides the server loaded at boot).
@@ -17,6 +22,25 @@ import { createClient } from 'redis';
  * Raising the product's limit to suit the harness would be fixing the wrong
  * thing, so the harness resets its own counter instead.
  */
+/**
+ * Drop the directory's 60 s page cache (`discovery:page:*`) so the next
+ * Explore read is fresh. Not an `rl:` key, so `clearRateLimits()` leaves it:
+ * a retry inside the minute would otherwise read the previous attempt's page.
+ */
+export async function clearDiscoveryPageCache(): Promise<void> {
+  const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+  try {
+    await redis.connect();
+    const keys: string[] = [];
+    for await (const batch of redis.scanIterator({ MATCH: 'discovery:page:*', COUNT: 100 })) {
+      for (const key of batch) keys.push(key);
+    }
+    if (keys.length > 0) await redis.del(keys);
+  } finally {
+    await quitQuietly(redis);
+  }
+}
+
 export async function clearRateLimits(): Promise<void> {
   const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
   try {
@@ -32,6 +56,6 @@ export async function clearRateLimits(): Promise<void> {
     }
     if (keys.length > 0) await redis.del(keys);
   } finally {
-    await redis.quit().catch(() => {});
+    await quitQuietly(redis);
   }
 }

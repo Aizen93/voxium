@@ -210,6 +210,23 @@ describe('ServerSwitcher', () => {
     render();
     type('zzzzz');
     expect(document.body.textContent).toContain('server.switcherEmpty');
+    // no Explore hand-over offered without a parent that can open it
+    expect(document.body.querySelector('[data-testid="switcher-explore"]')).toBeNull();
+  });
+
+  it('offers Explore when nothing matches and a parent can open it — closing itself first', () => {
+    const onExplore = vi.fn();
+    act(() => {
+      root.render(<ServerSwitcher onClose={onClose} onExplore={onExplore} />);
+    });
+    expect(document.body.querySelector('[data-testid="switcher-explore"]')).toBeNull(); // rows exist
+    type('zzzzz');
+    const offer = document.body.querySelector('[data-testid="switcher-explore"]') as HTMLButtonElement;
+    expect(offer.textContent).toBe('discovery.switcherExplore');
+    act(() => { offer.click(); });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onExplore).toHaveBeenCalledTimes(1);
+    expect(setActiveServer).not.toHaveBeenCalled();
   });
 
   it('closes on Escape without switching anything', () => {

@@ -2,28 +2,69 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { validateServerName, validateNickname, LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, permissionsToString } from '@voxium/shared';
-import type { MemberRole, Server } from '@voxium/shared';
-import type { Socket } from 'socket.io';
-import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
-import { broadcastMemberLeft, joinServerRoom } from '../utils/memberBroadcast';
+import {
+  validateServerName, validateNickname, validateBanReason, validateServerDescription, validateDiscoveryTags, dedupeDiscoveryTags,
+  LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, SERVER_JOIN_MODES, permissionsToString,
+} from '@voxium/shared';
+import type { MemberRole, Server, ServerBan, ServerJoinRequest } from '@voxium/shared';
+import { joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
-import { rateLimitMemberManage, rateLimitSearch } from '../middleware/rateLimiter';
+import { rateLimitMemberManage, rateLimitMemberRead, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
-import { leaveCurrentVoiceChannel } from '../websocket/voiceHandler';
-import { broadcastServerVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
-import { getRedis } from '../utils/redis';
+import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { purgeSecureChannelState } from '../utils/secureChannelLifecycle';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
+import { removeMemberFromServer } from '../utils/removeMember';
+import { recomputeListed } from '../utils/discoveryListing';
+import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers';
+import { joinServerMember } from '../utils/serverJoin';
+import { serverSelect } from '../utils/serverSelect';
+import { emitToModerators } from '../utils/moderatorAudience';
 
 export const serverRouter = Router();
 
 serverRouter.use(authenticate, requireVerifiedEmail, requireConsent);
+
+const requestUserSelect = { id: true, username: true, displayName: true, avatarUrl: true } as const;
+
+/** API shape of a join request (ServerJoinRequest in the shared types). */
+function formatJoinRequest(row: {
+  id: string; serverId: string; userId: string; message: string | null; status: string; createdAt: Date;
+  user: { id: string; username: string; displayName: string; avatarUrl: string | null };
+}): ServerJoinRequest {
+  return {
+    id: row.id,
+    serverId: row.serverId,
+    userId: row.userId,
+    message: row.message,
+    status: row.status as ServerJoinRequest['status'],
+    createdAt: row.createdAt.toISOString(),
+    user: row.user,
+  };
+}
+
+/** API shape of a ban row (ServerBan in the shared types). */
+function formatBan(ban: {
+  serverId: string;
+  userId: string;
+  reason: string | null;
+  createdAt: Date;
+  user: { id: string; username: string; displayName: string; avatarUrl: string | null };
+  bannedBy: { id: string; username: string; displayName: string } | null;
+}): ServerBan {
+  return {
+    serverId: ban.serverId,
+    userId: ban.userId,
+    reason: ban.reason,
+    createdAt: ban.createdAt.toISOString(),
+    user: ban.user,
+    bannedBy: ban.bannedBy,
+  };
+}
 
 // List servers the user is a member of
 serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
@@ -32,7 +73,7 @@ serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) =>
       where: { userId: req.user!.userId },
       include: {
         server: {
-          select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
+          select: serverSelect,
         },
       },
       orderBy: { joinedAt: 'asc' },
@@ -68,6 +109,11 @@ serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
         data: {
           name,
           ownerId: req.user!.userId,
+          // The creator is the one membership that does not go through
+          // joinServerMember, so the inline member count (server discovery)
+          // is seeded here — the migration backfill only knew about rows that
+          // existed at migration time.
+          memberCount: 1,
           members: {
             create: { userId: req.user!.userId, role: 'owner' },
           },
@@ -157,9 +203,17 @@ serverRouter.get('/:serverId', async (req: Request<{ serverId: string }>, res: R
     // Filter channels by VIEW_CHANNEL permission
     const visibleChannels = await filterVisibleChannels(req.user!.userId, serverId, server.channels);
 
+    // Members get the Server shape plus the relations, never the platform
+    // admin's curation state or the ranking internals: the owner's Discovery
+    // tab reads those from its own endpoint (GET /:serverId/discovery).
+    const {
+      discoveryBlockedAt: _blocked, featuredAt: _featured, discoveryListed: _listed, memberCount: _inline,
+      onlineCount: _online, weeklyMessages: _weekly, activityScore: _score, statsRefreshedAt: _stats,
+      ...memberView
+    } = server;
     res.json({
       success: true,
-      data: { ...server, channels: visibleChannels, memberCount: server._count.members },
+      data: { ...memberView, channels: visibleChannels, memberCount: server._count.members },
     });
   } catch (err) {
     next(err);
@@ -207,7 +261,9 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
         },
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: { joinedAt: 'asc' },
+        // userId breaks ties: members seeded or imported in one statement share
+        // a joinedAt, and a page boundary inside a tie duplicates or skips rows
+        orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }],
       }),
       prisma.serverMember.count({ where: { serverId } }),
     ]);
@@ -272,10 +328,14 @@ serverRouter.get('/:serverId/members/search', rateLimitSearch, async (req: Reque
   }
 });
 
-// NOTE: There is intentionally no direct POST /:serverId/join route. Joining a
-// server MUST go through POST /invites/:code/join, which enforces invite
-// validity, invitesLocked, and maxMembers. A direct join-by-id route would
-// bypass all three (HIGH-6 in the stabilization audit).
+// NOTE: There is no POST /:serverId/join here. Every path that makes a user a
+// member runs through utils/serverJoin.ts joinServerMember() — the invite
+// (POST /invites/:code/join), the open-mode directory join and an approved
+// join request (routes/discovery.ts, the approve route below) — which owns
+// the ban, duplicate and maxMembers checks. invitesLocked is enforced on the
+// invite path directly and on the directory paths through discoveryListed
+// (a locked server is not listed). A bare join-by-id route bypassing the
+// helper was HIGH-6 in the stabilization audit.
 
 // Leave a server
 serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -288,44 +348,10 @@ serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>,
     if (!membership) throw new NotFoundError('Server membership');
     if (membership.role === 'owner') throw new ForbiddenError('Server owner cannot leave. Transfer ownership first.');
 
-    // Secure channels first: channels they created die with them (with events
-    // to their members), other memberships are removed so remaining members
-    // rotate keys. Must run BEFORE the ServerMember delete.
-    await purgeSecureChannelState(req.user!.userId, serverId);
-
-    // Leaving the server force-leaves its voice too (parity with kick — a
-    // departed member must not keep a live media session). Cross-node via the
-    // Redis reverse lookup + cluster eviction fan-out.
-    try {
-      const redis = getRedis();
-      const voiceChannelId = await redis.get(`voice:user:${req.user!.userId}`);
-      if (voiceChannelId) {
-        const voiceServerId = await redis.get(`voice:channel:server:${voiceChannelId}`);
-        if (voiceServerId === serverId) {
-          await broadcastVoiceEvictUser(getIO(), voiceChannelId, req.user!.userId);
-        }
-      }
-    } catch (err) {
-      console.warn('[Servers] Voice eviction on self-leave failed (reaper will catch up):', err);
-    }
-
-    // Clean up ChannelRead records for this server's channels
-    const textChannelIds = await prisma.channel.findMany({
-      where: { serverId, type: 'text' },
-      select: { id: true },
-    });
-    if (textChannelIds.length > 0) {
-      await prisma.channelRead.deleteMany({
-        where: { userId: req.user!.userId, channelId: { in: textChannelIds.map((c) => c.id) } },
-      });
-    }
-
-    await prisma.serverMember.delete({
-      where: { userId_serverId: { userId: req.user!.userId, serverId } },
-    });
-
-    // Remove the leaver's socket(s) from the server room and notify remaining members
-    await broadcastMemberLeft(req.user!.userId, serverId);
+    // The teardown (voice eviction, secure-channel purge, read markers, the
+    // membership + count transaction, member:left) is removeMemberFromServer's.
+    // No ban: a voluntary leave can come back by invite or through Explore.
+    await removeMemberFromServer(req.user!.userId, serverId);
 
     res.json({ success: true, message: 'Left server' });
   } catch (err) {
@@ -375,7 +401,7 @@ serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res:
 
     const updated = await prisma.server.update({
       where: { id: serverId },
-      select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
+      select: serverSelect,
       data: updateData,
     });
 
@@ -408,9 +434,14 @@ serverRouter.patch('/:serverId/invites-lock', rateLimitMemberManage, async (req:
 
     const updated = await prisma.server.update({
       where: { id: serverId },
-      select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
+      select: serverSelect,
       data: { invitesLocked: locked },
     });
+
+    // invitesLocked is one of the four inputs of the directory's materialised
+    // eligibility column: locked means "not taking members", so the server
+    // leaves Explore (and comes back on unlock). Never throws.
+    await recomputeListed(serverId);
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
 
@@ -511,7 +542,9 @@ serverRouter.patch(
   }
 );
 
-// Kick a member (owner or admin, must outrank target)
+// Remove a member AND ban them (owner or admin, must outrank target).
+// Every removal is a ban since server discovery: the undo is the unban below.
+// The path stays /kick — the client already calls it; only the label changed.
 serverRouter.post(
   '/:serverId/members/:memberId/kick',
   rateLimitMemberManage,
@@ -520,6 +553,19 @@ serverRouter.post(
       const { serverId, memberId } = req.params;
 
       if (memberId === req.user!.userId) throw new BadRequestError('Cannot kick yourself');
+
+      // Optional ban reason, shown to the moderators in the Banned section.
+      // Validated before any permission work so a bad body is a cheap 400.
+      // (Express 5: req.body is undefined when no JSON body was sent.)
+      let reason: string | null = null;
+      const rawReason: unknown = req.body?.reason;
+      if (rawReason !== undefined && rawReason !== null) {
+        if (typeof rawReason !== 'string') throw new BadRequestError('reason must be a string');
+        const sanitized = sanitizeText(rawReason);
+        const reasonErr = validateBanReason(sanitized);
+        if (reasonErr) throw new BadRequestError(reasonErr);
+        reason = sanitized.length > 0 ? sanitized : null;
+      }
 
       const canKick = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
       if (!canKick) throw new ForbiddenError('You do not have permission to kick members');
@@ -536,52 +582,309 @@ serverRouter.post(
         throw new ForbiddenError('Cannot kick a member with an equal or higher role');
       }
 
-      // Force-leave the kicked user from voice if they're in a voice channel on
-      // THIS server. Scoped to the member's own sockets via their per-user room
-      // instead of fetching every socket on every node.
-      const io = getIO();
-      const memberSockets = await io.in(`user:${memberId}`).fetchSockets();
-      for (const s of memberSockets) {
-        if (s.data.voiceChannelId) {
-          // Verify the voice channel belongs to the server the user is being kicked from
-          const voiceChannel = await prisma.channel.findUnique({
-            where: { id: s.data.voiceChannelId as string },
-            select: { serverId: true },
-          });
-          if (voiceChannel?.serverId === serverId) {
-            leaveCurrentVoiceChannel(io, s as unknown as Socket<ClientToServerEvents, ServerToClientEvents>, memberId);
-          }
-        }
-      }
-
-      // Secure channels: kicked creator's channels are deleted, other secure
-      // memberships removed (remaining members rotate keys). BEFORE the
-      // ServerMember delete.
-      await purgeSecureChannelState(memberId, serverId);
-
-      // Clean up ChannelRead records for this server's channels
-      const textChannelIds = await prisma.channel.findMany({
-        where: { serverId, type: 'text' },
-        select: { id: true },
-      });
-      if (textChannelIds.length > 0) {
-        await prisma.channelRead.deleteMany({
-          where: { userId: memberId, channelId: { in: textChannelIds.map((c) => c.id) } },
-        });
-      }
-
-      await prisma.serverMember.delete({
-        where: { userId_serverId: { userId: memberId, serverId } },
-      });
-
-      // Remove kicked user's socket from server room and notify remaining members
-      await broadcastMemberLeft(memberId, serverId);
+      // The teardown — voice eviction, secure-channel purge, read markers,
+      // and one transaction with the ban row, the join-request delete, the
+      // membership delete and the member count — lives in
+      // removeMemberFromServer, nowhere else.
+      await removeMemberFromServer(memberId, serverId, { ban: { by: req.user!.userId, reason } });
 
       // Emit member:kicked directly to the kicked user's per-user room
       // (they're already out of the server room)
-      io.to(`user:${memberId}`).emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
+      getIO().to(`user:${memberId}`).emit(WS_EVENTS.MEMBER_KICKED, { serverId, userId: memberId });
 
-      res.json({ success: true, message: 'Member kicked' });
+      res.json({ success: true, message: 'Member removed and banned' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ─── Server bans (every removal is a ban; unban is the undo) ─────────────────
+// Server-level moderation stays out of the platform audit log, as kicks do.
+
+// List bans (KICK_MEMBERS)
+serverRouter.get('/:serverId/bans', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(LIMITS.MEMBERS_PER_PAGE, Math.max(1, parseInt(req.query.limit as string, 10) || LIMITS.MEMBERS_PER_PAGE));
+
+    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+    if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+    const [bans, total] = await Promise.all([
+      prisma.serverBan.findMany({
+        where: { serverId },
+        include: {
+          user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          bannedBy: { select: { id: true, username: true, displayName: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.serverBan.count({ where: { serverId } }),
+    ]);
+
+    res.json({
+      success: true,
+      data: bans.map(formatBan),
+      total,
+      page,
+      limit,
+      hasMore: page * limit < total,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Unban (KICK_MEMBERS). The user can then join again by invite, directly or
+// by request — nothing is restored, the door is simply open.
+serverRouter.delete(
+  '/:serverId/bans/:userId',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string; userId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId, userId } = req.params;
+
+      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+      if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+      const { count } = await prisma.serverBan.deleteMany({ where: { serverId, userId } });
+      if (count === 0) throw new NotFoundError('Ban');
+
+      res.json({ success: true, message: 'Member unbanned' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ─── Server discovery: the owner side ────────────────────────────────────────
+
+// Discovery profile and switches (MANAGE_SERVER): "Listed in Explore", who
+// can join, description, tags. No stats recompute on write — a relisted
+// server shows its last daily figures and joins the next cycle.
+// The owner's Discovery tab: the listing state, the curation stamps and the
+// figures behind the card. MANAGE_SERVER only — a member gets the Server
+// shape from GET /:serverId and never the platform admin's curation state.
+serverRouter.get('/:serverId/discovery', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const canManageServer = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_SERVER);
+    if (!canManageServer) throw new ForbiddenError('You do not have permission to manage server settings');
+
+    const server = await prisma.server.findUnique({
+      where: { id: serverId },
+      select: {
+        onlineCount: true, weeklyMessages: true, statsRefreshedAt: true, activityScore: true,
+        discoveryListed: true, discoveryBlockedAt: true, featuredAt: true,
+        // the authoritative count, not the inline ranking column
+        _count: { select: { members: true } },
+      },
+    });
+    if (!server) throw new NotFoundError('Server');
+
+    // The badge and what the next one takes, from the same cuts the cards use
+    const cuts = await getTierThresholds();
+    res.json({
+      success: true,
+      data: {
+        memberCount: server._count.members,
+        onlineCount: server.onlineCount,
+        weeklyMessages: server.weeklyMessages,
+        statsRefreshedAt: server.statsRefreshedAt,
+        discoveryListed: server.discoveryListed,
+        discoveryBlockedAt: server.discoveryBlockedAt,
+        featuredAt: server.featuredAt,
+        activityScore: server.activityScore,
+        tier: tierOf(server.activityScore, cuts),
+        nextTier: nextTierFor(server.activityScore, cuts),
+        tiersAvailable: !!cuts?.thresholds,
+        tierThresholds: cuts?.thresholds ?? null,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+serverRouter.patch('/:serverId/discovery', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+
+    const server = await prisma.server.findUnique({
+      where: { id: serverId },
+      select: { id: true, discoveryBlockedAt: true },
+    });
+    if (!server) throw new NotFoundError('Server');
+
+    const canManageServer = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_SERVER);
+    if (!canManageServer) throw new ForbiddenError('You do not have permission to manage server settings');
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const updateData: { discoverable?: boolean; joinMode?: string; description?: string | null; tags?: string[] } = {};
+
+    if (body.discoverable !== undefined) {
+      if (typeof body.discoverable !== 'boolean') throw new BadRequestError('discoverable must be a boolean');
+      // Block is the operator's last word: the owner cannot relist until unblocked.
+      if (body.discoverable && server.discoveryBlockedAt) throw new ForbiddenError('Listing is disabled by an administrator');
+      updateData.discoverable = body.discoverable;
+    }
+    if (body.joinMode !== undefined) {
+      if (typeof body.joinMode !== 'string' || !(SERVER_JOIN_MODES as readonly string[]).includes(body.joinMode)) {
+        throw new BadRequestError('joinMode must be "approval" or "open"');
+      }
+      updateData.joinMode = body.joinMode;
+    }
+    if (body.description !== undefined) {
+      if (body.description !== null && typeof body.description !== 'string') throw new BadRequestError('description must be a string');
+      const sanitized = body.description === null ? '' : sanitizeText(body.description);
+      const descErr = validateServerDescription(sanitized);
+      if (descErr) throw new BadRequestError(descErr);
+      updateData.description = sanitized.length > 0 ? sanitized : null;
+    }
+    if (body.tags !== undefined) {
+      const tagsErr = validateDiscoveryTags(body.tags);
+      if (tagsErr) throw new BadRequestError(tagsErr);
+      updateData.tags = dedupeDiscoveryTags(body.tags as string[]);
+    }
+    if (Object.keys(updateData).length === 0) throw new BadRequestError('No fields to update');
+
+    const updated = await prisma.server.update({
+      where: { id: serverId },
+      select: serverSelect,
+      data: updateData,
+    });
+
+    // discoverable is one of the listing column's four inputs (never throws)
+    await recomputeListed(serverId);
+
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
+
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Pending join requests, oldest first (KICK_MEMBERS)
+serverRouter.get('/:serverId/join-requests', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(LIMITS.MEMBERS_PER_PAGE, Math.max(1, parseInt(req.query.limit as string, 10) || LIMITS.MEMBERS_PER_PAGE));
+
+    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+    if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+    const where = { serverId, status: 'pending' } as const;
+    const [requests, total] = await Promise.all([
+      prisma.serverJoinRequest.findMany({
+        where,
+        include: { user: { select: requestUserSelect } },
+        orderBy: { createdAt: 'asc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.serverJoinRequest.count({ where }),
+    ]);
+
+    res.json({
+      success: true,
+      data: requests.map(formatJoinRequest),
+      total,
+      page,
+      limit,
+      hasMore: page * limit < total,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Approve a join request (KICK_MEMBERS): the join helper runs with the row
+// delete as its extra write, so ban, member-limit and duplicate checks all
+// apply at approval time, and a double approval fails on the missing row.
+serverRouter.post(
+  '/:serverId/join-requests/:userId/approve',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string; userId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId, userId } = req.params;
+
+      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+      if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+      const request = await prisma.serverJoinRequest.findUnique({
+        where: { serverId_userId: { serverId, userId } },
+        select: { id: true, status: true },
+      });
+      if (!request || request.status !== 'pending') throw new NotFoundError('Join request');
+
+      try {
+        await joinServerMember(userId, serverId, {
+          via: 'approval',
+          // status in the where: a decline that commits between the read
+          // above and this transaction leaves a row this delete must NOT
+          // find, so the approval fails instead of admitting a declined user
+          extraWrites: [prisma.serverJoinRequest.delete({ where: { id: request.id, status: 'pending' } })],
+        });
+      } catch (err) {
+        const e = err as { code?: unknown; statusCode?: unknown; message?: unknown };
+        // P2025 = the row was cancelled, declined or approved by someone else meanwhile
+        if (e?.code === 'P2025') throw new NotFoundError('Join request');
+        // The requester came in by another door (an invite, an ownership
+        // transfer) and the sweep that takes the row with them raced this
+        // request, or never ran: the row is stale, the membership is not.
+        // Settle it here so the Members tab stops offering it.
+        if (e?.statusCode === 400 && typeof e.message === 'string' && e.message.startsWith('You are already a member')) {
+          await prisma.serverJoinRequest.deleteMany({ where: { serverId, userId, status: 'pending' } });
+          await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'joined' });
+          res.json({ success: true, message: 'Join request resolved: already a member' });
+          return;
+        }
+        throw err;
+      }
+
+      const server = await prisma.server.findUnique({ where: { id: serverId }, select: serverSelect });
+      const io = getIO();
+      if (server) {
+        io.to(`user:${userId}`).emit(WS_EVENTS.SERVER_JOIN_APPROVED, { server: server as unknown as Server });
+      }
+      await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'approved' });
+
+      res.json({ success: true, message: 'Join request approved' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Decline a join request (KICK_MEMBERS). The row stays as the cooldown
+// marker; the sweep removes it after JOIN_REQUEST_DECLINE_COOLDOWN_DAYS.
+serverRouter.post(
+  '/:serverId/join-requests/:userId/decline',
+  rateLimitMemberManage,
+  async (req: Request<{ serverId: string; userId: string }>, res: Response, next: NextFunction) => {
+    try {
+      const { serverId, userId } = req.params;
+
+      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+      if (!canManage) throw new ForbiddenError('You do not have permission to manage members');
+
+      const { count } = await prisma.serverJoinRequest.updateMany({
+        where: { serverId, userId, status: 'pending' },
+        data: { status: 'declined', decidedById: req.user!.userId, decidedAt: new Date() },
+      });
+      if (count === 0) throw new NotFoundError('Join request');
+
+      const server = await prisma.server.findUnique({ where: { id: serverId }, select: { name: true } });
+      getIO().to(`user:${userId}`).emit(WS_EVENTS.SERVER_JOIN_DECLINED, { serverId, serverName: server?.name ?? '' });
+      await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'declined' });
+
+      res.json({ success: true, message: 'Join request declined' });
     } catch (err) {
       next(err);
     }
@@ -717,6 +1020,14 @@ serverRouter.post(
       });
       if (!targetMembership) throw new NotFoundError('Target member');
 
+      // A platform ban keeps the membership row (the admin ban route only
+      // broadcasts member:left), so a banned member is still a valid target
+      // here unless we look. The admin transfer path refuses the same; a
+      // banned owner would hide the server from the directory on the next
+      // recompute, which is not what the transferring owner asked for.
+      const targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, select: { bannedAt: true } });
+      if (targetUser?.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
+
       await prisma.$transaction([
         prisma.server.update({ where: { id: serverId }, data: { ownerId: targetUserId } }),
         prisma.serverMember.update({
@@ -728,6 +1039,10 @@ serverRouter.post(
           data: { role: 'admin' },
         }),
       ]);
+
+      // ownerId decides WHOSE ban state is one of the listing column's four
+      // inputs — recompute after the commit (never throws).
+      await recomputeListed(serverId);
 
       const io = getIO();
 
@@ -758,7 +1073,7 @@ serverRouter.post(
       // Emit server:updated with new ownerId
       const updatedServer = await prisma.server.findUnique({
         where: { id: serverId },
-        select: { id: true, name: true, iconUrl: true, invitesLocked: true, ownerId: true, createdAt: true },
+        select: serverSelect,
       });
       if (updatedServer) {
         io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updatedServer as unknown as Server);

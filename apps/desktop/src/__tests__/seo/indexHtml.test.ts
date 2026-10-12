@@ -66,6 +66,29 @@ describe('index.html SEO contract', () => {
     expect(html).not.toMatch(/forever|nothing to buy|always be free|free for everyone/i);
   });
 
+  // The claims the roadmap cannot keep (ROADMAP.md §9). Used for the locale
+  // scan below; the shell check above keeps its own literal.
+  const FORBIDDEN_CLAIMS = /forever|nothing to buy|always be free|free for everyone|no subscriptions?\b/i;
+
+  it('the guard itself catches the phrase that lived in the locales', () => {
+    expect('Join the open communication revolution. No credit card. No subscription.').toMatch(FORBIDDEN_CLAIMS);
+    expect('No subscriptions, ever.').toMatch(FORBIDDEN_CLAIMS);
+    expect('Join the open communication revolution. No credit card. No paywall.').not.toMatch(FORBIDDEN_CLAIMS);
+  });
+
+  it('the translated landing copy makes no such promise either', () => {
+    // The shell check above never saw the locale strings: "No subscription."
+    // sat in landing.cta.subtitle for months while the roadmap planned Plus
+    // and server tiers. The English source is the one translators follow.
+    const en = JSON.parse(readFileSync(resolve(ROOT, 'src/i18n/locales/en.json'), 'utf8')) as { landing: unknown };
+    const flat = (v: unknown): string[] => (typeof v === 'string' ? [v] : v && typeof v === 'object' ? Object.values(v as object).flatMap(flat) : []);
+    const texts = flat(en.landing);
+    expect(texts.length).toBeGreaterThan(20);
+    for (const text of texts) {
+      expect(text, text).not.toMatch(FORBIDDEN_CLAIMS);
+    }
+  });
+
   it('makes no open-source claim — Voxium is source-available (VCL-1.0)', () => {
     // Since the relicense from AGPL (NOTICE.md), "open source" would be an
     // openwashing claim the license cannot back. Say "source-available".

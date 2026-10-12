@@ -1,10 +1,12 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Search, Trash2, Settings2, RotateCcw, Save, X } from 'lucide-react';
+import { Search, Trash2, Settings2, RotateCcw, Save, X, Star, StarOff, Ban, ShieldOff } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
+import { DirectoryChips } from './DirectoryChips';
 import { toast } from '../stores/toastStore';
-import type { ResourceLimits, ServerResourceLimits } from '@voxium/shared';
+import { apiErrorMessage } from '../utils/apiError';
+import type { AdminServer, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
 
 const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; description: string; min: number; max: number }> = [
   { key: 'maxChannelsPerServer', label: 'Max Channels / Server', description: 'Maximum text + voice channels per server', min: 1, max: 500 },
@@ -13,10 +15,43 @@ const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; descriptio
   { key: 'maxMembersPerServer', label: 'Max Members / Server', description: 'Maximum members per server (0 = unlimited)', min: 0, max: 100000 },
 ];
 
+// Directory curation (server discovery). Featured is a hand-picked row on the
+// first page of Explore and never changes the ranked list; Block hides the
+// server and the owner cannot relist until an admin unblocks (hiding alone
+// invites a relist war). Unblock does not relist: the owner switches it back
+// on. Every action is audited server-side.
+type CurationAction = 'feature' | 'unfeature' | 'block' | 'unblock';
+const CURATION: Record<CurationAction, {
+  title: string; confirmLabel: string; variant: 'danger' | 'primary';
+  patch: { featured?: boolean; blocked?: boolean }; done: string; message: (server: AdminServer) => string;
+}> = {
+  feature: {
+    title: 'Feature in Explore', confirmLabel: 'Feature', variant: 'primary', patch: { featured: true }, done: 'Server featured',
+    message: (s) => `Show "${s.name}" in the Featured row on the first page of Explore? Featured is hand-picked and never changes the ranked list.`,
+  },
+  unfeature: {
+    title: 'Remove from Featured', confirmLabel: 'Unfeature', variant: 'primary', patch: { featured: false }, done: 'Server unfeatured',
+    // Only this action clears the stamp: a hidden featured server would come
+    // back to the Featured row the moment its owner relists it.
+    message: (s) => s.discoveryListed
+      ? `Take "${s.name}" out of the Featured row? It stays listed.`
+      : `Take "${s.name}" out of the Featured row? It is hidden right now; without this it returns to the Featured row the moment it is listed again.`,
+  },
+  block: {
+    title: 'Block from directory', confirmLabel: 'Block', variant: 'danger', patch: { blocked: true }, done: 'Server blocked from the directory',
+    message: (s) => `Hide "${s.name}" from Explore and stop its owner from relisting it until an admin unblocks it? Members, invites and the server itself are not affected.`
+      + (s.featuredAt ? ' It also loses its Featured spot, which Unblock does not restore.' : ''),
+  },
+  unblock: {
+    title: 'Unblock from directory', confirmLabel: 'Unblock', variant: 'primary', patch: { blocked: false }, done: 'Server unblocked. Its owner can relist it from Server settings.',
+    message: (s) => `Lift the directory block on "${s.name}"? It does not relist by itself: the owner switches it back on from Server settings, Discovery tab.`,
+  },
+};
+
 export function AdminServerList() {
   const {
-    servers, serversTotal, serversPage, serversSearch, loading,
-    fetchServers, setServersSearch, deleteServer,
+    servers, serversTotal, serversPage, serversSearch, serversListedOnly, loading,
+    fetchServers, setServersSearch, setServersListedOnly, setServerDiscovery, deleteServer,
     globalLimits, serverLimits, serverLimitsServerId,
     fetchGlobalLimits, updateGlobalLimits,
     fetchServerLimits, updateServerLimits, resetServerLimits,
@@ -25,6 +60,7 @@ export function AdminServerList() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [editingServer, setEditingServer] = useState<{ id: string; name: string } | null>(null);
   const [showGlobalLimits, setShowGlobalLimits] = useState(false);
+  const [curation, setCuration] = useState<{ server: AdminServer; action: CurationAction } | null>(null);
 
   useEffect(() => {
     fetchServers(1);
@@ -44,22 +80,63 @@ export function AdminServerList() {
   const columns = [
     { key: 'name', label: 'Name' },
     { key: 'owner', label: 'Owner' },
+    { key: 'directory', label: 'Directory', width: '180px' },
     { key: 'members', label: 'Members', width: '80px' },
     { key: 'channels', label: 'Channels', width: '80px' },
     { key: 'messages', label: 'Messages', width: '100px' },
     { key: 'created', label: 'Created', width: '120px' },
-    { key: 'actions', label: '', width: '90px' },
+    { key: 'actions', label: '', width: '150px' },
   ];
 
   const rows = servers.map((server) => ({
     name: <span className="text-vox-text-primary font-medium">{server.name}</span>,
     owner: server.ownerUsername,
+    directory: <DirectoryChips server={server} />,
     members: server.memberCount,
     channels: server.channelCount,
     messages: server.messageCount.toLocaleString(),
     created: new Date(server.createdAt).toLocaleDateString(),
     actions: (
       <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+        {server.featuredAt ? (
+          <button
+            onClick={() => setCuration({ server, action: 'unfeature' })}
+            className="p-1 rounded text-purple-400 hover:text-vox-text-primary"
+            title="Remove from Featured"
+            data-testid="server-unfeature"
+          >
+            <StarOff size={14} />
+          </button>
+        ) : (
+          <button
+            onClick={() => setCuration({ server, action: 'feature' })}
+            disabled={!server.discoveryListed}
+            className="p-1 rounded text-vox-text-muted hover:text-purple-400 disabled:opacity-30 disabled:cursor-not-allowed"
+            title={server.discoveryListed ? 'Feature in Explore' : 'Only listed servers can be featured'}
+            data-testid="server-feature"
+          >
+            <Star size={14} />
+          </button>
+        )}
+        {server.discoveryBlockedAt ? (
+          <button
+            onClick={() => setCuration({ server, action: 'unblock' })}
+            className="p-1 rounded text-orange-400 hover:text-vox-text-primary"
+            title="Unblock from directory"
+            data-testid="server-unblock"
+          >
+            <ShieldOff size={14} />
+          </button>
+        ) : (
+          <button
+            onClick={() => setCuration({ server, action: 'block' })}
+            className="p-1 rounded text-vox-text-muted hover:text-orange-400"
+            title="Block from directory"
+            data-testid="server-block"
+          >
+            <Ban size={14} />
+          </button>
+        )}
         <button
           onClick={() => openServerLimits({ id: server.id, name: server.name })}
           className="p-1 rounded text-vox-text-muted hover:text-vox-accent-info"
@@ -117,6 +194,16 @@ export function AdminServerList() {
             className="w-full rounded-md bg-vox-bg-hover border border-vox-border text-sm text-vox-text-primary pl-9 pr-3 py-2 placeholder:text-vox-text-muted focus:outline-none focus:border-vox-accent-primary"
           />
         </div>
+        <label className="flex items-center gap-2 px-3 text-xs text-vox-text-secondary whitespace-nowrap select-none" title="Only servers currently in Explore">
+          <input
+            type="checkbox"
+            checked={serversListedOnly}
+            onChange={(e) => { setServersListedOnly(e.target.checked); fetchServers(1); }}
+            className="rounded"
+            data-testid="servers-listed-only"
+          />
+          Listed only
+        </label>
         <button onClick={handleSearch} className="px-4 py-2 text-sm rounded-md bg-vox-accent-primary text-white hover:bg-vox-accent-hover transition-colors">
           Search
         </button>
@@ -142,6 +229,29 @@ export function AdminServerList() {
           onSave={(limits) => updateServerLimits(editingServer.id, limits)}
           onReset={() => resetServerLimits(editingServer.id)}
           onClose={() => setEditingServer(null)}
+        />
+      )}
+
+      {curation && (
+        <AdminConfirmModal
+          title={CURATION[curation.action].title}
+          message={CURATION[curation.action].message(curation.server)}
+          confirmLabel={CURATION[curation.action].confirmLabel}
+          variant={CURATION[curation.action].variant}
+          onConfirm={async () => {
+            const spec = CURATION[curation.action];
+            try {
+              await setServerDiscovery(curation.server.id, spec.patch);
+              toast.success(spec.done);
+              // "Listed only": a blocked server no longer belongs on the page
+              if (serversListedOnly) await fetchServers();
+            } catch (err) {
+              // the server says why (e.g. "Only listed servers can be featured")
+              toast.error(apiErrorMessage(err, 'Failed to update the directory state'));
+            }
+            setCuration(null);
+          }}
+          onCancel={() => setCuration(null)}
         />
       )}
 

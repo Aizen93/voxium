@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
-import type { AdminUser, AdminIpRecord, AdminServer, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
+import type { ServerJoinMode, AdminUser, AdminIpRecord, AdminServer, AdminServerExport, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
 
 // Untyped socket interface for admin-specific events not in the shared event maps
 interface AdminSocket {
@@ -17,6 +17,10 @@ interface AdminSocket {
 let metricsHandler: ((data: AdminMetricsSnapshot) => void) | null = null;
 let metricsReconnectUnsub: (() => void) | null = null;
 let metricsRetryTimer: ReturnType<typeof setInterval> | null = null;
+
+// The server list has two fetch triggers (Search and "Listed only") plus the
+// refetch after a curation: only the latest request may paint the table.
+let serversFetchSeq = 0;
 
 // Module-level refs for reports subscription cleanup
 let reportsHandler: ((data: { total: number }) => void) | null = null;
@@ -46,7 +50,20 @@ export interface OwnedServerInfo {
   iconUrl: string | null;
   memberCount: number;
   members: Array<{ userId: string; username: string; displayName: string; role: string }>;
+  // Directory state (server discovery): what this owner shows in Explore
+  description: string | null;
+  tags: string[];
+  discoverable: boolean;
+  discoveryListed: boolean;
+  joinMode: ServerJoinMode;
+  featuredAt: string | null;
+  discoveryBlockedAt: string | null;
+  invitesLocked: boolean;
+  ownerBannedAt: string | null;
 }
+
+/** What PATCH /admin/servers/:id/discovery answers: the curation inputs and the recomputed listing. */
+export type ServerDiscoveryState = Pick<AdminServer, 'id' | 'discoverable' | 'discoveryListed' | 'featuredAt' | 'discoveryBlockedAt'>;
 
 export interface ServerAction {
   serverId: string;
@@ -76,6 +93,8 @@ interface AdminState {
   // Servers
   servers: AdminServer[];
   serversTotal: number;
+  /** "Listed only": narrow the server list to what currently appears in Explore. */
+  serversListedOnly: boolean;
   serversPage: number;
   serversSearch: string;
 
@@ -185,6 +204,9 @@ interface AdminState {
 
   fetchServers: (page?: number) => Promise<void>;
   setServersSearch: (search: string) => void;
+  setServersListedOnly: (listedOnly: boolean) => void;
+  /** Directory curation: feature / unfeature, block / unblock (audited server-side). */
+  setServerDiscovery: (serverId: string, patch: { featured?: boolean; blocked?: boolean }) => Promise<ServerDiscoveryState>;
   deleteServer: (serverId: string) => Promise<void>;
 
   fetchBans: (page?: number) => Promise<void>;
@@ -249,7 +271,7 @@ interface AdminState {
 
   // Export
   exportUsers: () => Promise<AdminUser[]>;
-  exportServers: () => Promise<AdminServer[]>;
+  exportServers: () => Promise<AdminServerExport[]>;
   exportBans: () => Promise<BanRecord[]>;
   exportIpBans: () => Promise<IpBanRecord[]>;
 }
@@ -271,6 +293,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   selectedUser: null,
   servers: [],
   serversTotal: 0,
+  serversListedOnly: false,
   serversPage: 1,
   serversSearch: '',
   bans: [],
@@ -504,22 +527,45 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   fetchServers: async (page?: number) => {
     const state = get();
     const p = page ?? state.serversPage;
+    const seq = ++serversFetchSeq;
     set({ loading: true });
     try {
       const { data } = await api.get('/admin/servers', {
-        params: { page: p, limit: 12, search: state.serversSearch },
+        params: { page: p, limit: 12, search: state.serversSearch, ...(state.serversListedOnly ? { listed: '1' } : {}) },
       });
+      // A slower earlier answer must not paint over a newer filter or search
+      if (seq !== serversFetchSeq) return;
+      // A refetch can land past the end ("Listed only" page 3 held one
+      // server, now blocked): show the last page that still has rows.
+      const lastPage = Math.max(1, Math.ceil(data.total / 12));
+      if (data.data.length === 0 && p > lastPage) {
+        await get().fetchServers(lastPage);
+        return;
+      }
       set({ servers: data.data, serversTotal: data.total, serversPage: p });
     } catch (err) {
+      if (seq !== serversFetchSeq) return;
       // Fetchers must not reject unhandled — surface and log instead
       console.error('Failed to fetch servers:', err);
       toast.error('Failed to load servers');
     } finally {
-      set({ loading: false });
+      if (seq === serversFetchSeq) set({ loading: false });
     }
   },
 
   setServersSearch: (search) => set({ serversSearch: search }),
+
+  setServersListedOnly: (listedOnly) => set({ serversListedOnly: listedOnly }),
+
+  setServerDiscovery: async (serverId, patch) => {
+    const { data } = await api.patch(`/admin/servers/${serverId}/discovery`, patch);
+    const next = data.data as ServerDiscoveryState;
+    // The list is not live: patch the loaded row in place so the chips and
+    // the action buttons follow without a round trip. (A "Listed only" view
+    // refetches from the component so a blocked server drops out of it.)
+    set((s) => ({ servers: s.servers.map((srv) => (srv.id === serverId ? { ...srv, ...next } : srv)) }));
+    return next;
+  },
 
   deleteServer: async (serverId) => {
     await api.delete(`/admin/servers/${serverId}`);

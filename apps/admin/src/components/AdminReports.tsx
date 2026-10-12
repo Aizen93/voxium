@@ -1,8 +1,10 @@
 import { useEffect, useCallback, useState } from 'react';
-import { Flag, MessageSquare, User } from 'lucide-react';
+import { Flag, MessageSquare, User, Server as ServerIcon, Ban } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
+import { toast } from '../stores/toastStore';
+import { apiErrorMessage, isNotFound } from '../utils/apiError';
 import type { Report } from '@voxium/shared';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -14,12 +16,19 @@ const STATUS_COLORS: Record<string, string> = {
 const TYPE_ICONS: Record<string, typeof MessageSquare> = {
   message: MessageSquare,
   user: User,
+  server: ServerIcon,
 };
+
+/** A server report snapshots the listing as "name\n\ndescription": the first line names it. */
+function listingName(report: Report): string {
+  const first = report.messageContent?.split('\n')[0]?.trim();
+  return first || 'this server';
+}
 
 export function AdminReports() {
   const {
     reports, reportsTotal, reportsPage, reportsFilter,
-    fetchReports, setReportsFilter, resolveReport, dismissReport,
+    fetchReports, setReportsFilter, resolveReport, dismissReport, setServerDiscovery,
     subscribeReports, unsubscribeReports,
   } = useAdminStore();
 
@@ -28,6 +37,10 @@ export function AdminReports() {
   const [banOnResolve, setBanOnResolve] = useState(false);
   const [deleteOnResolve, setDeleteOnResolve] = useState(false);
   const [dismissModal, setDismissModal] = useState<Report | null>(null);
+  // "Block from directory" shortcut on a server report: hides the listing
+  // and stops the owner relisting; the report itself stays open.
+  const [blockModal, setBlockModal] = useState<Report | null>(null);
+  const blockServerId = blockModal?.serverId ?? null;
   const [expandedReport, setExpandedReport] = useState<string | null>(null);
 
   useEffect(() => {
@@ -75,7 +88,7 @@ export function AdminReports() {
     { key: 'reason', label: 'Reason' },
     { key: 'status', label: 'Status', width: '100px' },
     { key: 'created', label: 'Created', width: '140px' },
-    { key: 'actions', label: 'Actions', width: '180px' },
+    { key: 'actions', label: 'Actions', width: '240px' },
   ];
 
   const rows = reports.map((report) => {
@@ -91,17 +104,25 @@ export function AdminReports() {
         <span className="text-vox-text-primary text-xs font-medium">{report.reporterUsername}</span>
       ),
       reported: (
-        <span className="text-vox-text-primary text-xs font-medium">{report.reportedUsername}</span>
+        <span className="text-vox-text-primary text-xs font-medium">
+          {report.reportedUsername}
+          {report.type === 'server' && (
+            <span className="block text-[10px] font-normal text-vox-text-muted" data-testid="report-owner-label">server owner</span>
+          )}
+        </span>
       ),
       reason: (
         <div>
           <span className="text-xs text-vox-text-secondary line-clamp-2">{report.reason}</span>
-          {report.type === 'message' && report.messageContent && (
+          {(report.type === 'message' || report.type === 'server') && report.messageContent && (
             <button
               onClick={(e) => { e.stopPropagation(); setExpandedReport(expandedReport === report.id ? null : report.id); }}
               className="text-[10px] text-vox-accent-primary hover:underline mt-0.5"
+              data-testid="report-toggle-content"
             >
-              {expandedReport === report.id ? 'Hide message' : 'Show message'}
+              {report.type === 'server'
+                ? (expandedReport === report.id ? 'Hide listing' : 'Show listing')
+                : (expandedReport === report.id ? 'Hide message' : 'Show message')}
             </button>
           )}
           {expandedReport === report.id && report.messageContent && (
@@ -118,7 +139,12 @@ export function AdminReports() {
                   server cannot verify this text against the stored message.
                 </div>
               )}
-              {report.messageContent}
+              {report.type === 'server' && (
+                <div className="mb-1 font-medium text-vox-text-secondary">
+                  Listing as reported (name and description at the time)
+                </div>
+              )}
+              <span className="whitespace-pre-wrap" data-testid="report-content">{report.messageContent}</span>
             </div>
           )}
         </div>
@@ -145,6 +171,16 @@ export function AdminReports() {
           >
             Dismiss
           </button>
+          {report.type === 'server' && report.serverId && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setBlockModal(report); }}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 transition-colors"
+              title="Block from directory"
+              data-testid="report-block-server"
+            >
+              <Ban size={11} /> Block
+            </button>
+          )}
         </div>
       ) : (
         <span className="text-xs text-vox-text-muted">
@@ -205,7 +241,7 @@ export function AdminReports() {
           message={
             <div className="space-y-3">
               <p className="text-sm text-vox-text-secondary">
-                Reported user: <strong>{resolveModal.reportedUsername}</strong>
+                {resolveModal.type === 'server' ? 'Server owner' : 'Reported user'}: <strong>{resolveModal.reportedUsername}</strong>
               </p>
               <p className="text-sm text-vox-text-secondary">
                 Reason: {resolveModal.reason}
@@ -238,7 +274,9 @@ export function AdminReports() {
                   onChange={(e) => setBanOnResolve(e.target.checked)}
                   className="rounded"
                 />
-                Ban reported user
+                {resolveModal.type === 'server'
+                  ? 'Ban the server owner (a platform ban also hides every server they own)'
+                  : 'Ban reported user'}
               </label>
             </div>
           }
@@ -258,6 +296,25 @@ export function AdminReports() {
           variant="primary"
           onConfirm={handleDismiss}
           onCancel={() => setDismissModal(null)}
+        />
+      )}
+
+      {/* Block-from-directory shortcut (server reports) */}
+      {blockModal && blockServerId && (
+        <AdminConfirmModal
+          title="Block from directory"
+          message={`Hide "${listingName(blockModal)}" from Explore and stop its owner from relisting it until an admin unblocks it (Servers tab)? If it is featured it loses its Featured spot, which Unblock does not restore. The report stays open: resolve or dismiss it separately.`}
+          confirmLabel="Block"
+          onConfirm={async () => {
+            try {
+              await setServerDiscovery(blockServerId, { blocked: true });
+              toast.success('Server blocked from the directory');
+            } catch (err) {
+              toast.error(isNotFound(err) ? 'That server no longer exists' : apiErrorMessage(err, 'Failed to block the server'));
+            }
+            setBlockModal(null);
+          }}
+          onCancel={() => setBlockModal(null)}
         />
       )}
     </div>

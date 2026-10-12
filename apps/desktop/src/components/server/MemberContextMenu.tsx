@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { useServerStore } from '../../stores/serverStore';
-import { getTranslatedError } from '../../utils/serverErrors';
+import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import type { ServerMember, VoiceUser } from '@voxium/shared';
-import { Shield, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, ArrowRightLeft, Pencil } from 'lucide-react';
+import { Shield, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, ArrowRightLeft, Pencil, UserX } from 'lucide-react';
 import { outranksRole } from '../../utils/roles';
+import { LIMITS, validateBanReason } from '@voxium/shared';
 
 interface Props {
   member: ServerMember;
@@ -23,6 +24,8 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
   const { members, activeServerId, roles, channels } = useServerStore();
   const { channelUsers, serverMuteUser, serverDeafenUser, forceMoveUser } = useVoiceStore();
   const [confirmAction, setConfirmAction] = useState<'kick' | null>(null);
+  const [banReason, setBanReason] = useState('');
+  const [removing, setRemoving] = useState(false);
   const [showRoles, setShowRoles] = useState(false);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
   const [savingRoles, setSavingRoles] = useState(false);
@@ -79,9 +82,11 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
     };
   }, [onClose]);
 
-  // Adjust position to stay within viewport
+  // Adjust position to stay within viewport — re-measured whenever the menu
+  // grows (the reason panel, the nickname input), before paint, so a menu
+  // opened near the bottom edge does not push its confirm button off-screen.
   const [adjustedPos, setAdjustedPos] = useState(position);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (menuRef.current) {
       const rect = menuRef.current.getBoundingClientRect();
       let x = position.x;
@@ -92,7 +97,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       if (y < 0) y = 8;
       setAdjustedPos({ x, y });
     }
-  }, [position]);
+  }, [position, confirmAction, showNicknameInput]);
 
   if (!currentMember || !activeServerId) return null;
 
@@ -126,16 +131,27 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
     }
   }
 
+  // Every removal is a ban (server discovery): the first click opens the
+  // reason panel, the confirm sends it. The undo is the Members tab's Banned
+  // section, which the panel says.
   async function handleKick() {
     if (confirmAction !== 'kick') {
       setConfirmAction('kick');
       return;
     }
+    if (removing) return;
+    const reason = banReason.trim();
+    const invalid = reason ? validateBanReason(reason) : null;
+    if (invalid) { toast.error(translateServerError(invalid, t)); return; }
+    setRemoving(true);
     try {
-      await useServerStore.getState().kickMember(activeServerId!, member.userId);
+      await useServerStore.getState().kickMember(activeServerId!, member.userId, reason || undefined);
+      toast.success(t('server.removeAndBanned', { name: member.nickname || member.user.displayName }));
       onClose();
     } catch (err) {
-      toast.error(getTranslatedError(err, t, 'contextMenu.failedToKick'));
+      toast.error(getTranslatedError(err, t, 'server.removeAndBanFailed'));
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -360,15 +376,50 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       {canKick && (
         <>
           <div className="my-1 border-t border-vox-border" />
-          <button
-            onClick={handleKick}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
-          >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M13 7a4 4 0 11-8 0 4 4 0 018 0zM9 14a6 6 0 00-6 6v1h12v-1a6 6 0 00-6-6zM21 12h-6" />
-            </svg>
-            {confirmAction === 'kick' ? t('contextMenu.confirmKick') : t('contextMenu.kick')}
-          </button>
+          {confirmAction !== 'kick' ? (
+            <button
+              onClick={handleKick}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
+              data-testid="menu-remove-and-ban"
+            >
+              <UserX size={16} />
+              {t('server.removeAndBan')}
+            </button>
+          ) : (
+            <div className="px-2 pb-1" data-testid="menu-remove-and-ban-confirm">
+              <p className="mb-1.5 text-[11px] text-vox-text-muted">{t('server.removeAndBanDescription')}</p>
+              <input
+                type="text"
+                value={banReason}
+                maxLength={LIMITS.SERVER_BAN_REASON_MAX}
+                onChange={(e) => setBanReason(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleKick(); }}
+                disabled={removing}
+                placeholder={t('server.banReasonPlaceholder')}
+                className="w-full rounded border border-vox-border bg-vox-bg-secondary px-2 py-1 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-danger disabled:opacity-50"
+                autoFocus
+                data-testid="menu-ban-reason"
+              />
+              <div className="mt-1 flex gap-1">
+                <button
+                  onClick={handleKick}
+                  disabled={removing}
+                  className="flex-1 rounded bg-vox-accent-danger px-2 py-1 text-xs font-medium text-white hover:bg-vox-accent-danger/80 transition-colors disabled:opacity-50"
+                  data-testid="menu-remove-and-ban-submit"
+                >
+                  {t('server.removeAndBan')}
+                </button>
+                <button
+                  onClick={() => { setConfirmAction(null); setBanReason(''); }}
+                  disabled={removing}
+                  className="flex-1 rounded px-2 py-1 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors disabled:opacity-50"
+                  data-testid="menu-remove-and-ban-cancel"
+                >
+                  {t('common.cancel')}
+                </button>
+              </div>
+            </div>
+          )}
         </>
       )}
 

@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "クリア",
     "cancel": "キャンセル",
     "save": "保存",
     "delete": "削除",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "サインインに失敗しました。接続を確認してもう一度お試しください。",
       "title": "おかえりなさい！",
       "subtitle": "Voxium にサインインしてください",
       "email": "メールアドレス",
@@ -45,6 +47,7 @@
       "createOne": "アカウントを作成"
     },
     "register": {
+      "registrationFailed": "登録に失敗しました。接続を確認してもう一度お試しください。",
       "title": "アカウントを作成",
       "subtitle": "Voxium コミュニティに参加しましょう",
       "username": "ユーザー名",
@@ -170,6 +173,8 @@
       "failed": "アカウントを削除できませんでした。もう一度お試しください。"
     },
     "security": {
+      "hidePasswords": "パスワードを非表示",
+      "showPasswords": "パスワードを表示",
       "changePassword": "パスワードを変更",
       "currentPassword": "現在のパスワード",
       "newPassword": "新しいパスワード",
@@ -268,7 +273,8 @@
       "general": "一般",
       "members": "メンバー",
       "roles": "ロール",
-      "limits": "制限"
+      "limits": "制限",
+      "discovery": "探索"
     },
     "general": {
       "serverName": "サーバー名",
@@ -306,16 +312,11 @@
       "assignRoles": "ロールを割り当て",
       "promoteToAdmin": "管理者に昇格",
       "demoteToMember": "メンバーに降格",
-      "kickMember": "メンバーをキック",
       "transferOwnership": "所有権を移譲",
-      "kickConfirm": "{{name}} をキックしますか？",
-      "kickDescription": "サーバーから削除され、再参加するには新しい招待が必要になります。",
-      "kick": "キック",
       "transferConfirm": "{{name}} に所有権を移譲しますか？",
       "transferDescription": "オーナー権限を失い、管理者になります。この操作は自分では取り消せません。",
       "transfer": "移譲",
       "failedToUpdateRole": "ロールの更新に失敗しました",
-      "failedToKick": "メンバーのキックに失敗しました",
       "failedToTransfer": "所有権の移譲に失敗しました",
       "failedToUpdateRoles": "ロールの更新に失敗しました",
       "noResults": "検索に一致するメンバーがいません",
@@ -367,8 +368,8 @@
       "description": "メンバーがサーバーの招待リンクを作成できるようにします"
     },
     "KICK_MEMBERS": {
-      "name": "メンバーをキック",
-      "description": "メンバーが下位のロールを持つ他のメンバーをキックできるようにします"
+      "name": "メンバー管理",
+      "description": "下位ロールのメンバーの強制退出とBAN、BAN解除、参加リクエストの承認・却下を許可します"
     },
     "MANAGE_NICKNAMES": {
       "name": "ニックネームの管理",
@@ -485,13 +486,10 @@
     "clearNickname": "クリア",
     "promoteToAdmin": "管理者に昇格",
     "demoteToMember": "メンバーに降格",
-    "confirmKick": "もう一度クリックして確認",
-    "kick": "キック",
     "assignRoles": "ロールを割り当て",
     "noRolesCreated": "ロールが作成されていません",
     "failedToPromote": "メンバーの昇格に失敗しました",
     "failedToDemote": "メンバーの降格に失敗しました",
-    "failedToKick": "メンバーのキックに失敗しました",
     "rolesUpdated": "ロールが更新されました",
     "failedToUpdateRoles": "ロールの更新に失敗しました",
     "userMuted": "ユーザーをミュートしました",
@@ -542,6 +540,9 @@
     "failedToToggleReaction": "リアクションの変更に失敗しました"
   },
   "messageInput": {
+    "emojiPicker": "絵文字ピッカー",
+    "removeAttachment": "添付ファイルを削除",
+    "sendMessage": "メッセージを送信",
     "replyingTo": "返信先",
     "cancelReply": "返信をキャンセル",
     "dropToUpload": "ファイルをドロップしてアップロード",
@@ -588,7 +589,38 @@
     "switcherPlaceholder": "サーバーを検索…",
     "switcherEmpty": "一致するサーバーはありません。",
     "switcherHint": "入力で絞り込み · ↑↓ で移動 · Enter で開く",
-    "createOrJoin": "サーバーを作成または参加"
+    "createOrJoin": "サーバーを作成または参加",
+    "joinRequests": {
+      "title": "参加リクエスト",
+      "empty": "保留中のリクエストはありません。",
+      "approve": "承認",
+      "decline": "却下",
+      "approved": "{{name}}がメンバーになりました",
+      "declined": "{{name}}のリクエストを却下しました",
+      "noMessage": "メッセージなし",
+      "requestedAt": "{{when}}にリクエスト",
+      "failedToLoad": "参加リクエストを読み込めませんでした",
+      "failedToApprove": "リクエストを承認できませんでした",
+      "failedToDecline": "リクエストを却下できませんでした",
+      "pending_other": "保留中の参加リクエスト{{count}}件"
+    },
+    "banned": {
+      "title": "BAN済み",
+      "empty": "BANされているユーザーはいません。",
+      "unban": "BAN解除",
+      "unbanned": "{{name}}は再び参加できます",
+      "by": "{{name}}がBAN",
+      "noReason": "理由なし",
+      "at": "{{when}}にBAN",
+      "failedToLoad": "BANリストを読み込めませんでした",
+      "failedToUnban": "BANを解除できませんでした"
+    },
+    "removeAndBan": "退出させてBAN",
+    "removeAndBanConfirm": "{{name}}を退出させてBANしますか？",
+    "removeAndBanDescription": "このユーザーはスペースから退出させられ、「BAN済み」セクションでBANを解除するまで、招待・直接参加・リクエストのいずれでも戻ることはできません。",
+    "banReasonPlaceholder": "理由（任意、モデレーターに表示されます）",
+    "removeAndBanned": "{{name}}を退出させてBANしました",
+    "removeAndBanFailed": "メンバーを退出させられませんでした"
   },
   "channel": {
     "joinVoice": "ボイスに参加",
@@ -646,7 +678,8 @@
       "submitReport": "報告を送信",
       "submitting": "送信中...",
       "submitted": "報告が送信されました。ありがとうございます！",
-      "failedToSubmit": "報告の送信に失敗しました"
+      "failedToSubmit": "報告の送信に失敗しました",
+      "reportSpace": "スペースを報告"
     },
     "search": {
       "searchIn": "{{name}} で検索",
@@ -857,6 +890,7 @@
     "loadingAudio": "音声を読み込み中..."
   },
   "support": {
+    "sendMessage": "メッセージを送信",
     "title": "サポート",
     "open": "オープン",
     "inProgress": "対応中",
@@ -869,6 +903,8 @@
     "failedToReopen": "チケットの再開に失敗しました"
   },
   "invite": {
+    "failedToJoin": "サーバーに参加できませんでした。接続を確認してもう一度お試しください。",
+    "invalidOrExpired": "この招待は無効か、有効期限が切れています。",
     "youveBeenInvited": "招待されました！",
     "loadingInvite": "招待を読み込み中...",
     "goHome": "ホームへ",
@@ -989,7 +1025,7 @@
     },
     "cta": {
       "title": "新しいコミュニケーションを体験する準備はできましたか？",
-      "subtitle": "オープンなコミュニケーション革命に参加しましょう。クレジットカード不要。サブスクリプション不要。",
+      "subtitle": "オープンなコミュニケーション革命に参加しましょう。クレジットカード不要。有料の壁はありません。",
       "getStarted": "始める、無料です",
       "downloadApp": "アプリをダウンロード"
     },
@@ -1114,7 +1150,29 @@
     "ticketClosed": "チケットはクローズされています。メッセージを送るには再オープンしてください。",
     "cannotBanSelf": "自分自身をBANすることはできません",
     "cannotBanSuperAdmin": "スーパー管理者はBANできません",
-    "onlySuperAdminCanBan": "他の管理者をBANできるのはスーパー管理者のみです"
+    "onlySuperAdminCanBan": "他の管理者をBANできるのはスーパー管理者のみです",
+    "discoveryDisabled": "サーバー探索は現在無効です",
+    "listingDisabledByAdmin": "管理者によって掲載が無効化されています",
+    "bannedFromServer": "このスペースからBANされています",
+    "requestDeclinedRecently": "リクエストは最近却下されました。しばらくしてからもう一度お試しください。",
+    "joinRequestNotFound": "参加リクエストが見つかりません",
+    "banNotFound": "BANが見つかりません",
+    "cannotTransferToBanned": "BANされたユーザーには所有権を譲渡できません",
+    "cannotReportOwnServer": "自分のスペースは報告できません",
+    "noPermissionManageMembers": "メンバーを管理する権限がありません",
+    "noPermissionKickMembers": "メンバーを退出させる権限がありません",
+    "cannotKickHigherRole": "同じか上位のロールのメンバーは退出させられません",
+    "descriptionUnsupportedChars": "説明にサポートされていない文字が含まれています",
+    "serverNameUnsupportedChars": "サーバー名にサポートされていない文字が含まれています",
+    "descriptionTooLong": "説明は{{max}}文字以内にしてください",
+    "reasonUnsupportedChars": "理由にサポートされていない文字が含まれています",
+    "reasonTooLong": "理由は{{max}}文字以内にしてください",
+    "tagsNotSupported": "タグは対応リストから選んでください",
+    "tooManyTags": "タグは最大{{max}}個までです",
+    "joinMessageUnsupportedChars": "メッセージにサポートされていない文字が含まれています",
+    "joinMessageTooLong": "メッセージは{{max}}文字以内にしてください",
+    "refineSearch": "結果が多すぎます。検索条件を絞ってください",
+    "serverNotFound": "スペースが見つかりません"
   },
   "e2e": {
     "badgeTitle": "エンドツーエンド暗号化済み — 安全番号を表示",
@@ -1294,5 +1352,135 @@
     "renamed": "チャンネル名を変更しました",
     "failedToRename": "チャンネル名の変更に失敗しました",
     "moderationNotSecure": "「{{name}}」は通常のチャンネルです — サイドバーから削除してください"
+  },
+  "discovery": {
+    "tier": {
+      "ladder": "すべてのバッジ",
+      "topFraction": "上位 {{percent}}%",
+      "from": "スコア {{score}} から",
+      "current": "あなたのバッジ",
+      "bronze": "ブロンズ",
+      "silver": "シルバー",
+      "gold": "ゴールド",
+      "platinum": "プラチナ",
+      "diamond": "ダイヤモンド",
+      "badgeLabel": "{{tier}} · アクティビティ上位 {{percent}}% のスペース",
+      "score": "アクティビティスコア: {{score}}（オンライン × {{online}} + 今週のメッセージ + メンバー）",
+      "next": "次: {{tier}}、スコア {{score}} から",
+      "top": "最高ティアです。これより上はありません。",
+      "none": "バッジはまだありません。掲載スペースのうち活発な上位半分がブロンズ、上位1%がダイヤモンドになります。",
+      "notYet": "バッジはディレクトリに十分なアクティブなスペースが集まると表示されます。"
+    },
+    "tags": {
+      "gaming": "ゲーム",
+      "esports": "eスポーツ",
+      "open-source": "オープンソース",
+      "programming": "プログラミング",
+      "science": "科学",
+      "education": "教育",
+      "languages": "語学",
+      "music": "音楽",
+      "art": "アート",
+      "film-tv": "映画・テレビ",
+      "creators": "クリエイター",
+      "community": "コミュニティ"
+    },
+    "card": {
+      "menu": "その他の操作",
+      "featured": "おすすめ",
+      "noDescription": "まだ説明がありません。",
+      "online_other": "{{count}}人がオンライン",
+      "members_other": "メンバー{{count}}人",
+      "messages_other": "今週のメッセージ{{count}}件",
+      "join": "参加",
+      "requestToJoin": "参加をリクエスト",
+      "requested": "リクエスト済み",
+      "cancelRequest": "キャンセル",
+      "open": "開く",
+      "onlineHint": "オンライン数は前回の日次集計時点、メンバー数はリアルタイムです",
+      "report": "このスペースを報告"
+    },
+    "settings": {
+      "badge": "バッジ",
+      "title": "探索に掲載",
+      "listedHint": "ログイン中のすべての Voxium ユーザーが探索でこのスペースを見つけられます。非公開のスペースにも招待で参加できます。",
+      "audience": "掲載には名前、アイコン、説明、タグ、メンバー数、オンライン数が表示されます。メンバー、メッセージ、音声が表示されることはありません。",
+      "hiddenInvitesLocked": "招待がロックされている間は探索に表示されません。",
+      "goToGeneral": "一般タブで招待のロックを解除",
+      "blockedByAdmin": "管理者によって掲載が無効化されています。",
+      "whoCanJoin": "参加方法",
+      "joinApproval": "参加をリクエスト",
+      "joinApprovalHint": "新しいメンバーはまずリクエストし、モデレーターが個別に承認または却下します。",
+      "joinOpen": "すぐに参加",
+      "joinOpenHint": "スペースを見つけた人は誰でもすぐに参加できます。",
+      "description": "説明",
+      "descriptionPlaceholder": "このスペースは何について、誰のためのものですか？",
+      "descriptionNudge": "説明のあるスペースはより見つけられやすくなります。",
+      "tags": "タグ",
+      "tagsHint": "最大{{max}}個。新しいメンバーはタグで探索を絞り込みます。",
+      "preview": "探索に表示されるカード",
+      "stats": "アクティビティ",
+      "statsMembers": "メンバー：{{count}}",
+      "statsMessages": "今週のメッセージ：{{count}}",
+      "statsOnline": "前回集計時のオンライン：{{count}}",
+      "statsRefreshedAt": "前回の集計：{{when}}",
+      "statsDaily": "アクティビティの数値は1日1回更新され、メンバー数はリアルタイムです。",
+      "statsNever": "アクティビティの数値はまだ計算されていません。1日1回更新されます。",
+      "save": "探索設定を保存",
+      "saved": "探索設定を保存しました",
+      "failedToSave": "探索設定を保存できませんでした",
+      "failedToLoad": "探索情報を読み込めませんでした"
+    },
+    "explore": "探索",
+    "browsePublic": "公開スペースを見る",
+    "noInvite": "招待がない場合は",
+    "switcherExplore": "公開スペースを探索",
+    "sort": {
+      "active": "活発な順",
+      "members": "メンバー数順",
+      "newest": "新着順",
+      "name": "名前順"
+    },
+    "modal": {
+      "title": "探索",
+      "subtitle": "Voxiumの誰もが見つけて参加できる公開スペース",
+      "searchPlaceholder": "公開スペースを検索…",
+      "searchHint": "{{min}}文字以上入力すると検索できます",
+      "sortLabel": "並び替え",
+      "sortPrefix": "並び替え：",
+      "tagsLabel": "タグ",
+      "allTags": "すべて",
+      "featured": "注目",
+      "resultsCapped": "{{count, number}}件以上のスペース",
+      "loadMore": "さらに読み込む",
+      "emptyMatch": "一致する公開スペースはありません。",
+      "emptyMatchHint": "別の言葉やタグで試してください。",
+      "emptyNone": "まだ何も掲載されていません。",
+      "off": "探索は現在オフになっています。",
+      "offHint": "管理者がディレクトリを無効にしました。招待は引き続き利用できます。",
+      "failedToLoad": "探索を読み込めませんでした",
+      "retry": "再試行",
+      "footer": "アクティビティの数値は1日1回更新され、メンバー数はリアルタイムです。",
+      "joinFailed": "スペースに参加できませんでした",
+      "requestFailed": "リクエストを送信できませんでした",
+      "cancelFailed": "リクエストを取り消せませんでした",
+      "results_other": "{{count}}件のスペース"
+    },
+    "request": {
+      "title": "{{name}}への参加をリクエスト",
+      "description": "モデレーターにはあなたの名前、アバター、このメッセージが表示されます。",
+      "messageLabel": "メッセージ（任意）",
+      "placeholder": "参加したい理由を書いてください…",
+      "send": "リクエストを送信"
+    },
+    "toasts": {
+      "joined": "{{name}}へようこそ",
+      "requestSent": "{{name}}にリクエストを送信しました",
+      "requestCancelled": "{{name}}へのリクエストを取り消しました",
+      "approved": "{{name}}への参加リクエストが承認されました。ようこそ！",
+      "declined": "{{name}}への参加リクエストは却下されました",
+      "newRequest": "{{user}}が{{server}}への参加をリクエストしました",
+      "unknownSpace": "スペース"
+    }
   }
 }

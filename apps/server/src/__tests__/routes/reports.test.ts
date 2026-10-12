@@ -29,6 +29,7 @@ vi.mock('../../websocket/socketServer', () => ({
 vi.mock('../../utils/prisma', () => ({
   prisma: {
     user: { findUnique: vi.fn() },
+    server: { findUnique: vi.fn() },
     report: { findFirst: vi.fn(), create: vi.fn(), count: vi.fn().mockResolvedValue(0) },
     serverMember: { findUnique: vi.fn() },
     channelMember: { findUnique: vi.fn() },
@@ -258,5 +259,85 @@ describe('Report Routes — E2E message reports', () => {
 
     expect(res.status).toBe(404);
     expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Server reports (directory listings) ────────────────────────────────────
+
+describe('Report Routes — type: server', () => {
+  const REASON = 'This listing is spam and misleading';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
+    vi.mocked(prisma.report.create).mockResolvedValue({} as any);
+    vi.mocked(prisma.report.count).mockResolvedValue(1 as any);
+  });
+
+  it('requires serverId (and not reportedUserId — the owner is resolved from the listing)', async () => {
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', reason: REASON });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/serverId/);
+  });
+
+  it('answers a hidden server exactly like a nonexistent one, before any report lookup', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValueOnce(null as any);
+    const missing = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'zzz', reason: REASON });
+    vi.mocked(prisma.server.findUnique).mockResolvedValueOnce({ id: 'srv-1', name: 'S', description: 'd', ownerId: 'owner-1', discoveryListed: false } as any);
+    const hidden = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+    expect(missing.status).toBe(404);
+    expect(hidden.status).toBe(404);
+    expect(hidden.body).toEqual(missing.body);
+    expect(prisma.report.findFirst).not.toHaveBeenCalled();
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses the owner reporting their own server', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'user-1', discoveryListed: true } as any);
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/own server/);
+  });
+
+  it('dedupes on (reporter, server, pending)', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
+    vi.mocked(prisma.report.findFirst).mockResolvedValue({ id: 'rep-1' } as any);
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+    expect(res.status).toBe(400);
+    expect(prisma.report.findFirst).toHaveBeenCalledWith({
+      where: { reporterId: 'user-1', serverId: 'srv-1', type: 'server', status: 'pending' },
+      select: { id: true },
+    });
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+
+  it('files the report against the owner with the name + description snapshot (contentSource server) and notifies admins', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'Shady Lounge', description: 'Totally legit', ownerId: 'owner-1', discoveryListed: true } as any);
+
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+
+    expect(res.status).toBe(201);
+    expect(prisma.report.create).toHaveBeenCalledWith({
+      data: {
+        type: 'server',
+        reason: REASON,
+        reporterId: 'user-1',
+        reportedUserId: 'owner-1',
+        messageId: null,
+        messageContent: 'Shady Lounge\n\nTotally legit',
+        contentSource: 'server',
+        channelId: null,
+        conversationId: null,
+        serverId: 'srv-1',
+      },
+    });
+    expect(mockTo).toHaveBeenCalledWith('admin:reports');
+    expect(mockEmit).toHaveBeenCalledWith('report:new', { total: 1 });
+  });
+
+  it('a server without a description snapshots the name alone', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'Quiet', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
+    await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+    expect(prisma.report.create).toHaveBeenCalledWith({ data: expect.objectContaining({ messageContent: 'Quiet' }) });
   });
 });

@@ -18,6 +18,7 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
 const prismaMock: Record<string, any> = {
+  serverJoinRequest: { findMany: vi.fn().mockResolvedValue([]), deleteMany: vi.fn().mockReturnValue({ op: 'request.deleteMany' }) },
   user: {
     findUnique: vi.fn(),
     findMany: vi.fn().mockResolvedValue([]),
@@ -117,6 +118,8 @@ vi.mock('../../utils/sanitize', () => ({
 
 // Member broadcast
 const mockBroadcastMemberLeft = vi.fn().mockResolvedValue(undefined);
+const mockEmitToModerators = vi.fn();
+vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: any[]) => mockEmitToModerators(...a) }));
 vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberJoined: vi.fn().mockResolvedValue(undefined),
   broadcastMemberLeft: (...args: any[]) => mockBroadcastMemberLeft(...args),
@@ -138,6 +141,13 @@ vi.mock('../../utils/auditLog', () => ({
 // Feature flags
 vi.mock('../../utils/featureFlags', () => ({
   isFeatureEnabled: vi.fn().mockReturnValue(true),
+}));
+
+// Directory listing column (owner.bannedAt is one of its four inputs)
+const mockRecomputeListedForOwner = vi.fn().mockResolvedValue(0);
+vi.mock('../../utils/discoveryListing', () => ({
+  recomputeListed: vi.fn().mockResolvedValue(true),
+  recomputeListedForOwner: (...args: any[]) => mockRecomputeListedForOwner(...args),
 }));
 
 // ─── App setup ──────────────────────────────────────────────────────────────
@@ -204,11 +214,11 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     // ipsBanned in the message comes from createMany's { count }
     expect(res.body.message).toContain('2 IP(s)');
 
-    // Exactly one transaction, holding both statements (user update + IP bans)
+    // Exactly one transaction, holding the three statements (user update + IP bans + the join-request withdrawal)
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     const txnOps = prismaMock.$transaction.mock.calls[0][0];
     expect(Array.isArray(txnOps)).toBe(true);
-    expect(txnOps).toHaveLength(2);
+    expect(txnOps).toHaveLength(3);
 
     // Both statements were built for the transaction (invoked before $transaction resolved)
     expect(prismaMock.user.update).toHaveBeenCalledWith({
@@ -226,6 +236,48 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
       ],
       skipDuplicates: true,
     });
+  });
+
+  it('withdraws the banned account\'s pending join requests in the ban transaction and tells each server\'s moderators', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.serverJoinRequest.findMany.mockResolvedValueOnce([{ serverId: 's-9' }]);
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.serverJoinRequest.findMany).toHaveBeenCalledWith({ where: { userId: 'target-1', status: 'pending' }, select: { serverId: true } });
+    expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
+    expect(prismaMock.$transaction.mock.calls[0][0]).toContain(prismaMock.serverJoinRequest.deleteMany.mock.results[0].value);
+    expect(mockEmitToModerators).toHaveBeenCalledWith('s-9', 'server:join_request_resolved', { serverId: 's-9', userId: 'target-1', outcome: 'cancelled' });
+  });
+
+  it('hides every server the banned user owns from the directory, after the ban committed', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    const order: string[] = [];
+    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => { order.push('txn'); return Promise.all(ops); });
+    mockRecomputeListedForOwner.mockImplementation(async () => { order.push('recompute'); return 2; });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(200);
+    expect(mockRecomputeListedForOwner).toHaveBeenCalledWith('target-1');
+    expect(order).toEqual(['txn', 'recompute']);
+  });
+
+  it('does not touch the directory when the ban is refused', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'superadmin' } });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
   });
 });
 
@@ -312,6 +364,35 @@ describe('POST /admin/users/:userId/unban — shared-IP-aware release (MED-13)',
       where: { id: 'target-1' },
       data: { bannedAt: null, banReason: null },
     });
+  });
+
+  it('brings the unbanned user\'s eligible servers back to the directory, after the unban committed', async () => {
+    mockUnbanTarget();
+    prismaMock.ipRecord.findMany.mockResolvedValue([]);
+    const order: string[] = [];
+    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => { order.push('txn'); return Promise.all(ops); });
+    mockRecomputeListedForOwner.mockImplementation(async () => { order.push('recompute'); return 1; });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockRecomputeListedForOwner).toHaveBeenCalledWith('target-1');
+    expect(order).toEqual(['txn', 'recompute']);
+  });
+
+  it('does not touch the directory when the user is not banned (400)', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user', bannedAt: null } });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
   });
 });
 

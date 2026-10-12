@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "Löschen",
     "cancel": "Abbrechen",
     "save": "Speichern",
     "delete": "Löschen",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "Anmeldung fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.",
       "title": "Willkommen zurück!",
       "subtitle": "Melde dich an, um mit Voxium fortzufahren",
       "email": "E-Mail",
@@ -45,6 +47,7 @@
       "createOne": "Erstelle eins"
     },
     "register": {
+      "registrationFailed": "Registrierung fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.",
       "title": "Konto erstellen",
       "subtitle": "Werde Teil der Voxium-Community",
       "username": "Benutzername",
@@ -170,6 +173,8 @@
       "failed": "Dein Konto konnte nicht gelöscht werden. Bitte versuche es erneut."
     },
     "security": {
+      "hidePasswords": "Passwörter ausblenden",
+      "showPasswords": "Passwörter anzeigen",
       "changePassword": "Passwort ändern",
       "currentPassword": "Aktuelles Passwort",
       "newPassword": "Neues Passwort",
@@ -268,7 +273,8 @@
       "general": "Allgemein",
       "members": "Mitglieder",
       "roles": "Rollen",
-      "limits": "Limits"
+      "limits": "Limits",
+      "discovery": "Entdecken"
     },
     "general": {
       "serverName": "Servername",
@@ -306,16 +312,11 @@
       "assignRoles": "Rollen zuweisen",
       "promoteToAdmin": "Zum Administrator befördern",
       "demoteToMember": "Zum Mitglied herabstufen",
-      "kickMember": "Mitglied entfernen",
       "transferOwnership": "Eigentümerschaft übertragen",
-      "kickConfirm": "{{name}} entfernen?",
-      "kickDescription": "Das Mitglied wird vom Server entfernt und benötigt eine neue Einladung, um wieder beizutreten.",
-      "kick": "Entfernen",
       "transferConfirm": "Eigentümerschaft an {{name}} übertragen?",
       "transferDescription": "Du verlierst die Eigentümerrechte und wirst zum Administrator. Dies kann von dir nicht rückgängig gemacht werden.",
       "transfer": "Übertragen",
       "failedToUpdateRole": "Rolle konnte nicht aktualisiert werden",
-      "failedToKick": "Mitglied konnte nicht entfernt werden",
       "failedToTransfer": "Eigentümerschaft konnte nicht übertragen werden",
       "failedToUpdateRoles": "Rollen konnten nicht aktualisiert werden",
       "noResults": "Keine Mitglieder entsprechen deiner Suche",
@@ -367,8 +368,8 @@
       "description": "Erlaubt Mitgliedern, Server-Einladungslinks zu erstellen"
     },
     "KICK_MEMBERS": {
-      "name": "Mitglieder entfernen",
-      "description": "Erlaubt Mitgliedern, andere Mitglieder mit niedrigeren Rollen zu entfernen"
+      "name": "Mitglieder verwalten",
+      "description": "Erlaubt, Mitglieder mit niedrigeren Rollen zu entfernen und zu bannen, sie zu entbannen und Beitrittsanfragen anzunehmen oder abzulehnen"
     },
     "MANAGE_NICKNAMES": {
       "name": "Spitznamen verwalten",
@@ -485,13 +486,10 @@
     "clearNickname": "Löschen",
     "promoteToAdmin": "Zum Administrator befördern",
     "demoteToMember": "Zum Mitglied herabstufen",
-    "confirmKick": "Erneut klicken zum Bestätigen",
-    "kick": "Entfernen",
     "assignRoles": "Rollen zuweisen",
     "noRolesCreated": "Keine Rollen erstellt",
     "failedToPromote": "Mitglied konnte nicht befördert werden",
     "failedToDemote": "Mitglied konnte nicht herabgestuft werden",
-    "failedToKick": "Mitglied konnte nicht entfernt werden",
     "rolesUpdated": "Rollen aktualisiert",
     "failedToUpdateRoles": "Rollen konnten nicht aktualisiert werden",
     "userMuted": "Benutzer stummgeschaltet",
@@ -542,6 +540,9 @@
     "failedToToggleReaction": "Reaktion konnte nicht geändert werden"
   },
   "messageInput": {
+    "emojiPicker": "Emoji-Auswahl",
+    "removeAttachment": "Anhang entfernen",
+    "sendMessage": "Nachricht senden",
     "replyingTo": "Antwort an",
     "cancelReply": "Antwort abbrechen",
     "dropToUpload": "Dateien zum Hochladen ablegen",
@@ -588,7 +589,39 @@
     "switcherPlaceholder": "Zu einem Server springen…",
     "switcherEmpty": "Kein Server passt zu diesem Namen.",
     "switcherHint": "Tippen zum Filtern · ↑↓ zum Wechseln · Enter zum Öffnen",
-    "createOrJoin": "Server erstellen oder beitreten"
+    "createOrJoin": "Server erstellen oder beitreten",
+    "joinRequests": {
+      "title": "Beitrittsanfragen",
+      "empty": "Keine offenen Anfragen.",
+      "approve": "Annehmen",
+      "decline": "Ablehnen",
+      "approved": "{{name}} ist jetzt Mitglied",
+      "declined": "Anfrage von {{name}} abgelehnt",
+      "noMessage": "Keine Nachricht",
+      "requestedAt": "Angefragt am {{when}}",
+      "failedToLoad": "Beitrittsanfragen konnten nicht geladen werden",
+      "failedToApprove": "Anfrage konnte nicht angenommen werden",
+      "failedToDecline": "Anfrage konnte nicht abgelehnt werden",
+      "pending_one": "{{count}} offene Beitrittsanfrage",
+      "pending_other": "{{count}} offene Beitrittsanfragen"
+    },
+    "banned": {
+      "title": "Gebannt",
+      "empty": "Niemand ist gebannt.",
+      "unban": "Entbannen",
+      "unbanned": "{{name}} kann wieder beitreten",
+      "by": "von {{name}}",
+      "noReason": "Kein Grund angegeben",
+      "at": "Gebannt am {{when}}",
+      "failedToLoad": "Liste der Gebannten konnte nicht geladen werden",
+      "failedToUnban": "Entbannen fehlgeschlagen"
+    },
+    "removeAndBan": "Entfernen und bannen",
+    "removeAndBanConfirm": "{{name}} entfernen und bannen?",
+    "removeAndBanDescription": "Die Person wird aus dem Space entfernt und kann nicht zurückkehren – weder per Einladung noch direkt oder auf Anfrage –, bis du sie im Abschnitt Gebannt entbannst.",
+    "banReasonPlaceholder": "Grund (optional, für Moderatoren sichtbar)",
+    "removeAndBanned": "{{name}} wurde entfernt und gebannt",
+    "removeAndBanFailed": "Mitglied konnte nicht entfernt werden"
   },
   "channel": {
     "joinVoice": "Sprachkanal beitreten",
@@ -646,7 +679,8 @@
       "submitReport": "Meldung absenden",
       "submitting": "Wird gesendet...",
       "submitted": "Meldung gesendet. Vielen Dank!",
-      "failedToSubmit": "Meldung konnte nicht gesendet werden"
+      "failedToSubmit": "Meldung konnte nicht gesendet werden",
+      "reportSpace": "Space melden"
     },
     "search": {
       "searchIn": "Suche in {{name}}",
@@ -857,6 +891,7 @@
     "loadingAudio": "Audio wird geladen..."
   },
   "support": {
+    "sendMessage": "Nachricht senden",
     "title": "Support",
     "open": "Offen",
     "inProgress": "In Bearbeitung",
@@ -869,6 +904,8 @@
     "failedToReopen": "Ticket konnte nicht wieder geöffnet werden"
   },
   "invite": {
+    "failedToJoin": "Dem Server konnte nicht beigetreten werden. Prüfe deine Verbindung und versuche es erneut.",
+    "invalidOrExpired": "Diese Einladung ist ungültig oder abgelaufen.",
     "youveBeenInvited": "Du wurdest eingeladen!",
     "loadingInvite": "Einladung wird geladen...",
     "goHome": "Zur Startseite",
@@ -989,7 +1026,7 @@
     },
     "cta": {
       "title": "Bereit, Kommunikation neu zu erleben?",
-      "subtitle": "Schliess dich der offenen Kommunikationsrevolution an. Keine Kreditkarte. Kein Abo.",
+      "subtitle": "Schließ dich der offenen Kommunikationsrevolution an. Keine Kreditkarte. Keine Paywall.",
       "getStarted": "Loslegen, Kostenlos",
       "downloadApp": "App herunterladen"
     },
@@ -1114,7 +1151,29 @@
     "ticketClosed": "Das Ticket ist geschlossen. Öffne es erneut, um Nachrichten zu senden.",
     "cannotBanSelf": "Du kannst dich nicht selbst sperren",
     "cannotBanSuperAdmin": "Ein Superadministrator kann nicht gesperrt werden",
-    "onlySuperAdminCanBan": "Nur Superadministratoren können andere Administratoren sperren"
+    "onlySuperAdminCanBan": "Nur Superadministratoren können andere Administratoren sperren",
+    "discoveryDisabled": "Die Server-Entdeckung ist derzeit deaktiviert",
+    "listingDisabledByAdmin": "Die Listung ist von einem Administrator deaktiviert",
+    "bannedFromServer": "Du bist aus diesem Space gebannt",
+    "requestDeclinedRecently": "Deine Anfrage wurde kürzlich abgelehnt. Bitte versuche es später erneut.",
+    "joinRequestNotFound": "Beitrittsanfrage nicht gefunden",
+    "banNotFound": "Bann nicht gefunden",
+    "cannotTransferToBanned": "Der Besitz kann nicht an einen gebannten Nutzer übertragen werden",
+    "cannotReportOwnServer": "Du kannst deinen eigenen Space nicht melden",
+    "noPermissionManageMembers": "Du hast keine Berechtigung, Mitglieder zu verwalten",
+    "noPermissionKickMembers": "Du hast keine Berechtigung, Mitglieder zu entfernen",
+    "cannotKickHigherRole": "Ein Mitglied mit gleicher oder höherer Rolle kann nicht entfernt werden",
+    "descriptionUnsupportedChars": "Die Beschreibung enthält nicht unterstützte Zeichen",
+    "serverNameUnsupportedChars": "Der Servername enthält nicht unterstützte Zeichen",
+    "descriptionTooLong": "Die Beschreibung darf höchstens {{max}} Zeichen lang sein",
+    "reasonUnsupportedChars": "Der Grund enthält nicht unterstützte Zeichen",
+    "reasonTooLong": "Der Grund darf höchstens {{max}} Zeichen lang sein",
+    "tagsNotSupported": "Tags müssen aus der vorgegebenen Liste gewählt werden",
+    "tooManyTags": "Höchstens {{max}} Tags sind erlaubt",
+    "joinMessageUnsupportedChars": "Die Nachricht enthält nicht unterstützte Zeichen",
+    "joinMessageTooLong": "Die Nachricht darf höchstens {{max}} Zeichen lang sein",
+    "refineSearch": "Zu viele Ergebnisse — grenze deine Suche ein",
+    "serverNotFound": "Space nicht gefunden"
   },
   "e2e": {
     "badgeTitle": "Ende-zu-Ende-verschlüsselt — Sicherheitsnummer anzeigen",
@@ -1295,5 +1354,139 @@
     "renamed": "Kanal umbenannt",
     "failedToRename": "Kanal konnte nicht umbenannt werden",
     "moderationNotSecure": "„{{name}}“ ist ein regulärer Kanal — lösche ihn stattdessen über die Seitenleiste"
+  },
+  "discovery": {
+    "tier": {
+      "ladder": "Alle Abzeichen",
+      "topFraction": "Top {{percent}} %",
+      "from": "ab einem Wert von {{score}}",
+      "current": "Dein Abzeichen",
+      "bronze": "Bronze",
+      "silver": "Silber",
+      "gold": "Gold",
+      "platinum": "Platin",
+      "diamond": "Diamant",
+      "badgeLabel": "{{tier}} · Top {{percent}} % der Spaces nach Aktivität",
+      "score": "Aktivitätswert: {{score}} (online × {{online}} + Nachrichten dieser Woche + Mitglieder)",
+      "next": "Nächste Stufe: {{tier}}, ab einem Wert von {{score}}",
+      "top": "Die höchste Stufe. Darüber gibt es nichts.",
+      "none": "Noch kein Abzeichen. Die aktivere Hälfte der gelisteten Spaces erhält Bronze, das Top-1 % Diamant.",
+      "notYet": "Abzeichen erscheinen, sobald das Verzeichnis genug aktive Spaces hat."
+    },
+    "tags": {
+      "gaming": "Gaming",
+      "esports": "E-Sport",
+      "open-source": "Open Source",
+      "programming": "Programmierung",
+      "science": "Wissenschaft",
+      "education": "Bildung",
+      "languages": "Sprachen",
+      "music": "Musik",
+      "art": "Kunst",
+      "film-tv": "Film & TV",
+      "creators": "Creator",
+      "community": "Community"
+    },
+    "card": {
+      "menu": "Weitere Aktionen",
+      "featured": "Empfohlen",
+      "noDescription": "Noch keine Beschreibung.",
+      "online_one": "{{count}} online",
+      "online_other": "{{count}} online",
+      "members_one": "{{count}} Mitglied",
+      "members_other": "{{count}} Mitglieder",
+      "messages_one": "{{count}} Nachricht diese Woche",
+      "messages_other": "{{count}} Nachrichten diese Woche",
+      "join": "Beitreten",
+      "requestToJoin": "Beitritt anfragen",
+      "requested": "Angefragt",
+      "cancelRequest": "Abbrechen",
+      "open": "Öffnen",
+      "onlineHint": "Online bei der letzten täglichen Prüfung; die Mitgliederzahl ist live",
+      "report": "Diesen Space melden"
+    },
+    "settings": {
+      "badge": "Abzeichen",
+      "title": "In Entdecken gelistet",
+      "listedHint": "Jeder angemeldete Voxium-Nutzer kann diesen Space in Entdecken finden. Einem versteckten Space kann man weiterhin per Einladung beitreten.",
+      "audience": "Ein Eintrag zeigt Name, Icon, Beschreibung, Tags, Mitgliederzahl und Online-Zahl. Mitglieder, Nachrichten und Sprache werden nie angezeigt.",
+      "hiddenInvitesLocked": "Aus Entdecken ausgeblendet, solange Einladungen gesperrt sind.",
+      "goToGeneral": "Einladungen unter Allgemein entsperren",
+      "blockedByAdmin": "Listung von einem Administrator deaktiviert.",
+      "whoCanJoin": "Wer darf beitreten",
+      "joinApproval": "Beitritt auf Anfrage",
+      "joinApprovalHint": "Neue fragen zuerst; Moderatoren nehmen jede Anfrage an oder lehnen sie ab.",
+      "joinOpen": "Direkt beitreten",
+      "joinOpenHint": "Wer den Space findet, kann sofort beitreten.",
+      "description": "Beschreibung",
+      "descriptionPlaceholder": "Worum geht es in diesem Space, und für wen ist er?",
+      "descriptionNudge": "Spaces mit Beschreibung werden häufiger gefunden.",
+      "tags": "Tags",
+      "tagsHint": "Bis zu {{max}}. Neue filtern Entdecken nach Tag.",
+      "preview": "Dein Eintrag in Entdecken",
+      "stats": "Aktivität",
+      "statsMembers": "Mitglieder: {{count}}",
+      "statsMessages": "Nachrichten diese Woche: {{count}}",
+      "statsOnline": "Online bei der letzten Prüfung: {{count}}",
+      "statsRefreshedAt": "Letzte Prüfung: {{when}}",
+      "statsDaily": "Die Aktivitätszahlen werden einmal täglich aktualisiert; die Mitgliederzahl ist live.",
+      "statsNever": "Die Aktivitätszahlen wurden noch nicht berechnet; sie werden einmal täglich aktualisiert.",
+      "save": "Entdecken-Einstellungen speichern",
+      "saved": "Entdecken-Einstellungen gespeichert",
+      "failedToSave": "Entdecken-Einstellungen konnten nicht gespeichert werden",
+      "failedToLoad": "Entdecken-Details konnten nicht geladen werden"
+    },
+    "explore": "Entdecken",
+    "browsePublic": "Öffentliche Spaces durchsuchen",
+    "noInvite": "Keine Einladung?",
+    "switcherExplore": "Öffentliche Spaces entdecken",
+    "sort": {
+      "active": "Aktivste",
+      "members": "Meiste Mitglieder",
+      "newest": "Neueste",
+      "name": "Name"
+    },
+    "modal": {
+      "title": "Entdecken",
+      "subtitle": "Öffentliche Spaces, die jeder auf Voxium finden und beitreten kann",
+      "searchPlaceholder": "Öffentliche Spaces suchen …",
+      "searchHint": "Mindestens {{min}} Zeichen eingeben, um zu suchen",
+      "sortLabel": "Sortieren",
+      "sortPrefix": "Sortierung: ",
+      "tagsLabel": "Tags",
+      "allTags": "Alle",
+      "featured": "Empfohlen",
+      "resultsCapped": "{{count, number}}+ Spaces",
+      "loadMore": "Mehr laden",
+      "emptyMatch": "Kein öffentlicher Space passt dazu.",
+      "emptyMatchHint": "Versuche ein anderes Wort oder einen anderen Tag.",
+      "emptyNone": "Noch ist nichts gelistet.",
+      "off": "Entdecken ist gerade ausgeschaltet.",
+      "offHint": "Ein Administrator hat das Verzeichnis deaktiviert. Einladungen funktionieren weiterhin.",
+      "failedToLoad": "Entdecken konnte nicht geladen werden",
+      "retry": "Erneut versuchen",
+      "footer": "Aktivitätszahlen werden einmal täglich aktualisiert; Mitgliederzahlen sind live.",
+      "joinFailed": "Beitritt zum Space fehlgeschlagen",
+      "requestFailed": "Anfrage konnte nicht gesendet werden",
+      "cancelFailed": "Anfrage konnte nicht zurückgezogen werden",
+      "results_one": "{{count}} Space",
+      "results_other": "{{count}} Spaces"
+    },
+    "request": {
+      "title": "Beitritt zu {{name}} anfragen",
+      "description": "Moderatoren sehen deinen Namen, dein Profilbild und diese Nachricht.",
+      "messageLabel": "Nachricht (optional)",
+      "placeholder": "Sag, warum du beitreten möchtest …",
+      "send": "Anfrage senden"
+    },
+    "toasts": {
+      "joined": "Willkommen bei {{name}}",
+      "requestSent": "Anfrage an {{name}} gesendet",
+      "requestCancelled": "Anfrage an {{name}} zurückgezogen",
+      "approved": "Deine Beitrittsanfrage an {{name}} wurde angenommen. Willkommen!",
+      "declined": "Deine Beitrittsanfrage an {{name}} wurde abgelehnt",
+      "newRequest": "{{user}} möchte {{server}} beitreten",
+      "unknownSpace": "ein Space"
+    }
   }
 }

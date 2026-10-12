@@ -66,6 +66,7 @@ async function main() {
     data: {
       name: 'Voxium Community',
       ownerId: alice.id,
+      memberCount: 3, // the inline count the directory sorts on (server discovery)
       members: {
         createMany: {
           data: [

@@ -83,6 +83,10 @@ model User {
   e2eMessageKeyBackups  E2EMessageKeyBackup[]
   secureChannelsCreated Channel[]       @relation("SecureChannelCreator")
   channelMemberships    ChannelMember[]
+  serverBans            ServerBan[]         @relation("ServerBanUser")
+  serverBansIssued      ServerBan[]         @relation("ServerBanActor")
+  joinRequests          ServerJoinRequest[] @relation("JoinRequestUser")
+  joinRequestsDecided   ServerJoinRequest[] @relation("JoinRequestDecider")
 
   @@map("users")
 }
@@ -98,6 +102,34 @@ model Server {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
+  // ─── Server discovery (docs/local/server-discovery-plan.html) ──────────────
+  /// Directory profile. sanitizeText'd, <= LIMITS.SERVER_DESCRIPTION_MAX; optional.
+  description        String?
+  /// Values from DISCOVERY_TAGS only, <= LIMITS.DISCOVERY_MAX_TAGS, deduped.
+  tags               String[]  @default([])
+  /// "Listed in Explore" — the owner's switch. Off hides the server.
+  discoverable       Boolean   @default(true)
+  /// "approval" (join requests, the default) | "open" (join directly).
+  joinMode           String    @default("approval") @map("join_mode")
+  /// Platform-admin curation: a separate Featured row, never mixed into the ranking.
+  featuredAt         DateTime? @map("featured_at")
+  /// Platform-admin block: hidden, and the discovery PATCH refuses to relist while set.
+  discoveryBlockedAt DateTime? @map("discovery_blocked_at")
+  /// Materialised: discoverable AND NOT invitesLocked AND discoveryBlockedAt IS NULL
+  /// AND owner.bannedAt IS NULL. Every write that changes one of those inputs
+  /// calls recomputeListed() (utils/discoveryListing.ts); the nightly pass
+  /// corrects drift. One column so the listing query never joins.
+  discoveryListed    Boolean   @default(true) @map("discovery_listed")
+  /// Maintained inline by joinServerMember() / removeMemberFromServer() — the
+  /// one LIVE figure on a card; the nightly pass recounts. Ranking only:
+  /// ServerDetail.memberCount keeps using _count.
+  memberCount        Int       @default(0) @map("member_count")
+  /// Daily-cycle snapshots written by the discovery stats job, never on write.
+  onlineCount        Int       @default(0) @map("discovery_online_count")
+  weeklyMessages     Int       @default(0) @map("discovery_weekly_messages")
+  activityScore      Int       @default(0) @map("discovery_activity_score")
+  statsRefreshedAt   DateTime? @map("discovery_stats_at")
+
   // Restrict, NOT Cascade: deleting a user must never silently destroy every
   // community they own. The admin delete-user flow transfers or explicitly
   // deletes owned servers first; any other user.delete() now fails safe.
@@ -108,8 +140,73 @@ model Server {
   roles      Role[]
   invites    Invite[]
   limits     ServerLimits?
+  bans         ServerBan[]
+  joinRequests ServerJoinRequest[]
 
+  // One index per directory sort, each ending in id so a keyset cursor is a
+  // single index range scan at any table size. No partial indexes: Prisma
+  // cannot express them and `migrate dev` would read them as drift.
+  @@index([discoveryListed, activityScore(sort: Desc), id(sort: Desc)])
+  @@index([discoveryListed, memberCount(sort: Desc), id(sort: Desc)])
+  @@index([discoveryListed, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([discoveryListed, name, id])
+  // The rolling stats refresh picks the stalest listed servers first
+  @@index([discoveryListed, statsRefreshedAt])
+  @@index([featuredAt])
+  // Tag filter
+  @@index([tags(ops: ArrayOps)], type: Gin)
+  // Substring name search — the same pg_trgm mechanism message search uses
+  // (extension installed by migration 20260705120000_search_trgm_and_owner_restrict)
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "servers_name_trgm_idx")
   @@map("servers")
+}
+
+// ─── Server Bans ─────────────────────────────────────────────────────────────
+
+/// Every removal from a server is a ban (plan: "kick is ban"). The row is what
+/// joinServerMember() refuses on — invite, direct join and approved request
+/// alike — and the undo is DELETE /servers/:id/bans/:userId.
+model ServerBan {
+  serverId   String   @map("server_id")
+  userId     String   @map("user_id")
+  bannedById String?  @map("banned_by_id")
+  reason     String? // sanitizeText'd, <= LIMITS.SERVER_BAN_REASON_MAX
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  server   Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  user     User   @relation("ServerBanUser", fields: [userId], references: [id], onDelete: Cascade)
+  bannedBy User?  @relation("ServerBanActor", fields: [bannedById], references: [id], onDelete: SetNull)
+
+  @@id([serverId, userId])
+  @@index([userId])
+  @@map("server_bans")
+}
+
+// ─── Server Join Requests ────────────────────────────────────────────────────
+
+/// A request to join an approval-mode server. Approval DELETES the row (the
+/// membership replaces it); a decline keeps it as the cooldown marker until the
+/// sweep removes it after JOIN_REQUEST_DECLINE_COOLDOWN_DAYS.
+model ServerJoinRequest {
+  id          String    @id @default(cuid())
+  serverId    String    @map("server_id")
+  userId      String    @map("user_id")
+  message     String? // sanitizeText'd, <= LIMITS.JOIN_REQUEST_MESSAGE_MAX; optional
+  status      String    @default("pending") // "pending" | "declined"
+  decidedById String?   @map("decided_by_id")
+  decidedAt   DateTime? @map("decided_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  server    Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  user      User   @relation("JoinRequestUser", fields: [userId], references: [id], onDelete: Cascade)
+  decidedBy User?  @relation("JoinRequestDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+
+  @@unique([serverId, userId])
+  @@index([serverId, status])
+  @@index([userId])
+  @@index([status, createdAt]) // pending TTL sweep
+  @@index([status, decidedAt]) // declined cooldown sweep
+  @@map("server_join_requests")
 }
 
 // ─── Server Resource Limits ─────────────────────────────────────────────────

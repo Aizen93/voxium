@@ -269,3 +269,20 @@
     animation-name: vox-reaction-fade;
   }
 }
+
+/* Activity badge (Explore cards, the owner's Discovery tab): a shine sweeps
+   the crest on hover. The rect starts off the left of the viewBox and crosses
+   it; it stays parked outside otherwise, and never moves under reduced motion. */
+.vox-tier-badge .vox-tier-shine {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .vox-tier-badge:hover .vox-tier-shine {
+    opacity: 1;
+    animation: vox-tier-shine 1.1s ease-in-out;
+  }
+}
+@keyframes vox-tier-shine {
+  from { transform: translateX(0) skewX(-20deg); }
+  to { transform: translateX(120px) skewX(-20deg); }
+}

@@ -64,7 +64,7 @@ export function MemberSidebar() {
   const online = members.length - groups.offline.length;
 
   return (
-    <div className="panel flex h-full w-[272px] flex-none flex-col bg-vox-bg-secondary">
+    <div className="panel flex h-full w-[272px] flex-none flex-col bg-vox-bg-secondary" data-testid="people-panel">
       {/* Header */}
       <div className="flex h-[54px] flex-none items-center gap-2 border-b border-vox-border px-4">
         <span className="text-[14px] font-semibold tracking-[-0.01em] text-vox-text-primary">{t('people.title')}</span>

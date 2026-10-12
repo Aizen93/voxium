@@ -32,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "Sign-in failed. Check your connection and try again.",
       "title": "Welcome back!",
       "subtitle": "Sign in to continue to Voxium",
       "email": "Email",
@@ -46,6 +47,7 @@
       "createOne": "Create one"
     },
     "register": {
+      "registrationFailed": "Registration failed. Check your connection and try again.",
       "title": "Create an account",
       "subtitle": "Join the Voxium community",
       "username": "Username",
@@ -271,7 +273,8 @@
       "general": "General",
       "members": "Members",
       "roles": "Roles",
-      "limits": "Limits"
+      "limits": "Limits",
+      "discovery": "Discovery"
     },
     "general": {
       "serverName": "Server Name",
@@ -309,16 +312,11 @@
       "assignRoles": "Assign Roles",
       "promoteToAdmin": "Promote to Admin",
       "demoteToMember": "Demote to Member",
-      "kickMember": "Kick member",
       "transferOwnership": "Transfer ownership",
-      "kickConfirm": "Kick {{name}}?",
-      "kickDescription": "They will be removed from the server and will need a new invite to rejoin.",
-      "kick": "Kick",
       "transferConfirm": "Transfer ownership to {{name}}?",
       "transferDescription": "You will lose owner privileges and become an admin. This cannot be undone by you.",
       "transfer": "Transfer",
       "failedToUpdateRole": "Failed to update role",
-      "failedToKick": "Failed to kick member",
       "failedToTransfer": "Failed to transfer ownership",
       "failedToUpdateRoles": "Failed to update roles",
       "noResults": "No members match your search",
@@ -370,8 +368,8 @@
       "description": "Allows members to create server invite links"
     },
     "KICK_MEMBERS": {
-      "name": "Kick Members",
-      "description": "Allows members to kick other members with lower roles"
+      "name": "Manage members",
+      "description": "Allows members to remove and ban members with lower roles, unban them, and approve or decline join requests"
     },
     "MANAGE_NICKNAMES": {
       "name": "Manage Nicknames",
@@ -488,13 +486,10 @@
     "clearNickname": "Clear",
     "promoteToAdmin": "Promote to Admin",
     "demoteToMember": "Demote to Member",
-    "confirmKick": "Click again to confirm",
-    "kick": "Kick",
     "assignRoles": "Assign Roles",
     "noRolesCreated": "No roles created",
     "failedToPromote": "Failed to promote member",
     "failedToDemote": "Failed to demote member",
-    "failedToKick": "Failed to kick member",
     "rolesUpdated": "Roles updated",
     "failedToUpdateRoles": "Failed to update roles",
     "userMuted": "User muted",
@@ -594,7 +589,39 @@
     "switcherPlaceholder": "Jump to a server…",
     "switcherEmpty": "No server matches that name.",
     "switcherHint": "Type to filter · ↑↓ to move · Enter to open",
-    "createOrJoin": "Create or join a server"
+    "createOrJoin": "Create or join a server",
+    "joinRequests": {
+      "title": "Join requests",
+      "empty": "No pending requests.",
+      "approve": "Approve",
+      "decline": "Decline",
+      "approved": "{{name}} is now a member",
+      "declined": "Request from {{name}} declined",
+      "noMessage": "No message",
+      "requestedAt": "Requested {{when}}",
+      "failedToLoad": "Failed to load join requests",
+      "failedToApprove": "Failed to approve the request",
+      "failedToDecline": "Failed to decline the request",
+      "pending_one": "{{count}} pending join request",
+      "pending_other": "{{count}} pending join requests"
+    },
+    "banned": {
+      "title": "Banned",
+      "empty": "Nobody is banned.",
+      "unban": "Unban",
+      "unbanned": "{{name}} can join again",
+      "by": "by {{name}}",
+      "noReason": "No reason given",
+      "at": "Banned {{when}}",
+      "failedToLoad": "Failed to load the banned list",
+      "failedToUnban": "Failed to unban"
+    },
+    "removeAndBan": "Remove and ban",
+    "removeAndBanConfirm": "Remove and ban {{name}}?",
+    "removeAndBanDescription": "They will be removed from the space and cannot return, by invite, directly or by request, until you unban them from the Banned section.",
+    "banReasonPlaceholder": "Reason (optional, shown to moderators)",
+    "removeAndBanned": "{{name}} was removed and banned",
+    "removeAndBanFailed": "Failed to remove the member"
   },
   "channel": {
     "joinVoice": "Join voice",
@@ -652,7 +679,8 @@
       "submitReport": "Submit Report",
       "submitting": "Submitting...",
       "submitted": "Report submitted. Thank you!",
-      "failedToSubmit": "Failed to submit report"
+      "failedToSubmit": "Failed to submit report",
+      "reportSpace": "Report Space"
     },
     "search": {
       "searchIn": "Search in {{name}}",
@@ -876,6 +904,8 @@
     "sendMessage": "Send message"
   },
   "invite": {
+    "failedToJoin": "Could not join the server. Check your connection and try again.",
+    "invalidOrExpired": "This invite is invalid or has expired.",
     "youveBeenInvited": "You've been invited!",
     "loadingInvite": "Loading invite...",
     "goHome": "Go Home",
@@ -996,7 +1026,7 @@
     },
     "cta": {
       "title": "Ready to experience communication, reimagined?",
-      "subtitle": "Join the open communication revolution. No credit card. No subscription.",
+      "subtitle": "Join the open communication revolution. No credit card. No paywall.",
       "getStarted": "Get Started, It's Free",
       "downloadApp": "Download the App"
     },
@@ -1121,7 +1151,29 @@
     "ticketClosed": "Ticket is closed. Reopen it to send messages.",
     "cannotBanSelf": "Cannot ban yourself",
     "cannotBanSuperAdmin": "Cannot ban a super admin",
-    "onlySuperAdminCanBan": "Only super admins can ban other admins"
+    "onlySuperAdminCanBan": "Only super admins can ban other admins",
+    "discoveryDisabled": "Server discovery is currently disabled",
+    "listingDisabledByAdmin": "Listing is disabled by an administrator",
+    "bannedFromServer": "You are banned from this space",
+    "requestDeclinedRecently": "Your request was declined recently. Please try again later.",
+    "joinRequestNotFound": "Join request not found",
+    "banNotFound": "Ban not found",
+    "cannotTransferToBanned": "Cannot transfer ownership to a banned user",
+    "cannotReportOwnServer": "You cannot report your own space",
+    "noPermissionManageMembers": "You do not have permission to manage members",
+    "noPermissionKickMembers": "You do not have permission to remove members",
+    "cannotKickHigherRole": "Cannot remove a member with an equal or higher role",
+    "descriptionUnsupportedChars": "Description contains unsupported characters",
+    "serverNameUnsupportedChars": "Server name contains unsupported characters",
+    "descriptionTooLong": "Description must be at most {{max}} characters",
+    "reasonUnsupportedChars": "Reason contains unsupported characters",
+    "reasonTooLong": "Reason must be at most {{max}} characters",
+    "tagsNotSupported": "Tags must be chosen from the supported list",
+    "tooManyTags": "At most {{max}} tags are allowed",
+    "joinMessageUnsupportedChars": "Message contains unsupported characters",
+    "joinMessageTooLong": "Message must be at most {{max}} characters",
+    "refineSearch": "Too many results — refine your search",
+    "serverNotFound": "Space not found"
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",
@@ -1302,5 +1354,139 @@
     "renamed": "Channel renamed",
     "failedToRename": "Failed to rename channel",
     "moderationNotSecure": "\"{{name}}\" is a regular channel — delete it from the sidebar instead"
+  },
+  "discovery": {
+    "tier": {
+      "ladder": "All badges",
+      "topFraction": "Top {{percent}}%",
+      "from": "from a score of {{score}}",
+      "current": "Your badge",
+      "bronze": "Bronze",
+      "silver": "Silver",
+      "gold": "Gold",
+      "platinum": "Platinum",
+      "diamond": "Diamond",
+      "badgeLabel": "{{tier}} · top {{percent}}% of spaces by activity",
+      "score": "Activity score: {{score}} (online × {{online}} + messages this week + members)",
+      "next": "Next: {{tier}}, from a score of {{score}}",
+      "top": "The top tier. Nothing above it.",
+      "none": "No badge yet. The most active half of listed spaces earn Bronze; the top 1% earn Diamond.",
+      "notYet": "Badges appear once the directory has enough active spaces."
+    },
+    "tags": {
+      "gaming": "Gaming",
+      "esports": "Esports",
+      "open-source": "Open source",
+      "programming": "Programming",
+      "science": "Science",
+      "education": "Education",
+      "languages": "Languages",
+      "music": "Music",
+      "art": "Art",
+      "film-tv": "Film & TV",
+      "creators": "Creators",
+      "community": "Community"
+    },
+    "card": {
+      "menu": "More actions",
+      "featured": "Featured",
+      "noDescription": "No description yet.",
+      "online_one": "{{count}} online",
+      "online_other": "{{count}} online",
+      "members_one": "{{count}} member",
+      "members_other": "{{count}} members",
+      "messages_one": "{{count}} message this week",
+      "messages_other": "{{count}} messages this week",
+      "join": "Join",
+      "requestToJoin": "Request to join",
+      "requested": "Requested",
+      "cancelRequest": "Cancel",
+      "open": "Open",
+      "onlineHint": "Online at the last daily check; the member count is live",
+      "report": "Report this space"
+    },
+    "settings": {
+      "badge": "Badge",
+      "title": "Listed in Explore",
+      "listedHint": "Every signed-in Voxium user can find this space in Explore. A hidden space can still be joined by invite.",
+      "audience": "A listing shows the name, icon, description, tags, member count and online count. Members, messages and voice are never shown.",
+      "hiddenInvitesLocked": "Hidden from Explore while invites are locked.",
+      "goToGeneral": "Unlock invites in General",
+      "blockedByAdmin": "Listing disabled by an administrator.",
+      "whoCanJoin": "Who can join",
+      "joinApproval": "Request to join",
+      "joinApprovalHint": "Newcomers ask first; moderators approve or decline each request.",
+      "joinOpen": "Join directly",
+      "joinOpenHint": "Anyone who finds the space can join at once.",
+      "description": "Description",
+      "descriptionPlaceholder": "What is this space about, and who is it for?",
+      "descriptionNudge": "Spaces with a description are found more often.",
+      "tags": "Tags",
+      "tagsHint": "Up to {{max}}. Newcomers filter Explore by tag.",
+      "preview": "Your card in Explore",
+      "stats": "Activity",
+      "statsMembers": "Members: {{count}}",
+      "statsMessages": "Messages this week: {{count}}",
+      "statsOnline": "Online at the last check: {{count}}",
+      "statsRefreshedAt": "Last check: {{when}}",
+      "statsDaily": "Activity figures refresh once a day; the member count is live.",
+      "statsNever": "Activity figures have not been computed yet; they refresh once a day.",
+      "save": "Save discovery settings",
+      "saved": "Discovery settings saved",
+      "failedToSave": "Failed to save discovery settings",
+      "failedToLoad": "Failed to load discovery details"
+    },
+    "explore": "Explore",
+    "browsePublic": "Browse public spaces",
+    "noInvite": "No invite?",
+    "switcherExplore": "Explore public spaces",
+    "sort": {
+      "active": "Most active",
+      "members": "Most members",
+      "newest": "Newest",
+      "name": "Name"
+    },
+    "modal": {
+      "title": "Explore",
+      "subtitle": "Public spaces anyone on Voxium can find and join",
+      "searchPlaceholder": "Search public spaces…",
+      "searchHint": "Type {{min}} characters or more to search",
+      "sortLabel": "Sort",
+      "sortPrefix": "Sort: ",
+      "tagsLabel": "Tags",
+      "allTags": "All",
+      "featured": "Featured",
+      "resultsCapped": "{{count, number}}+ spaces",
+      "loadMore": "Load more",
+      "emptyMatch": "No public spaces match.",
+      "emptyMatchHint": "Try another word or tag.",
+      "emptyNone": "Nothing is listed yet.",
+      "off": "Explore is turned off right now.",
+      "offHint": "An administrator has disabled the directory. Invites still work.",
+      "failedToLoad": "Failed to load Explore",
+      "retry": "Try again",
+      "footer": "Activity figures update once a day; member counts are live.",
+      "joinFailed": "Failed to join the space",
+      "requestFailed": "Failed to send the request",
+      "cancelFailed": "Failed to cancel the request",
+      "results_one": "{{count}} space",
+      "results_other": "{{count}} spaces"
+    },
+    "request": {
+      "title": "Request to join {{name}}",
+      "description": "Moderators will see your name, your avatar and this message.",
+      "messageLabel": "Message (optional)",
+      "placeholder": "Say why you would like to join…",
+      "send": "Send request"
+    },
+    "toasts": {
+      "joined": "Welcome to {{name}}",
+      "requestSent": "Request sent to {{name}}",
+      "requestCancelled": "Request to {{name}} cancelled",
+      "approved": "Your request to join {{name}} was approved. Welcome!",
+      "declined": "Your request to join {{name}} was declined",
+      "newRequest": "{{user}} asked to join {{server}}",
+      "unknownSpace": "a space"
+    }
   }
 }

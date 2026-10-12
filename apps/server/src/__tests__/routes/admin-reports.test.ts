@@ -18,6 +18,7 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
 const prismaMock: Record<string, any> = {
+  serverJoinRequest: { findMany: vi.fn().mockResolvedValue([]), deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
   user: {
     findUnique: vi.fn(),
     update: vi.fn().mockResolvedValue({}),
@@ -103,6 +104,8 @@ vi.mock('../../utils/sanitize', () => ({
 
 // Member broadcast
 const mockBroadcastMemberLeft = vi.fn().mockResolvedValue(undefined);
+const mockEmitToModerators = vi.fn();
+vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: any[]) => mockEmitToModerators(...a) }));
 vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberJoined: vi.fn().mockResolvedValue(undefined),
   broadcastMemberLeft: (...args: any[]) => mockBroadcastMemberLeft(...args),
@@ -124,6 +127,13 @@ vi.mock('../../utils/auditLog', () => ({
 // Feature flags
 vi.mock('../../utils/featureFlags', () => ({
   isFeatureEnabled: vi.fn().mockReturnValue(true),
+}));
+
+// Directory listing column (a report-resolve ban is the third place bannedAt is set)
+const mockRecomputeListedForOwner = vi.fn().mockResolvedValue(0);
+vi.mock('../../utils/discoveryListing', () => ({
+  recomputeListed: vi.fn().mockResolvedValue(true),
+  recomputeListedForOwner: (...args: any[]) => mockRecomputeListedForOwner(...args),
 }));
 
 // ─── App setup ──────────────────────────────────────────────────────────────
@@ -186,6 +196,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
     mockPendingReport('target-1');
     prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's1' }, { serverId: 's2' }]);
+    prismaMock.serverJoinRequest.findMany.mockResolvedValueOnce([{ serverId: 's3' }]);
 
     const res = await request(app)
       .post('/api/v1/admin/reports/rep-1/resolve')
@@ -202,6 +213,25 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     // Same as the canonical ban route: banned user leaves every member list/room
     expect(mockBroadcastMemberLeft).toHaveBeenCalledWith('target-1', 's1');
     expect(mockBroadcastMemberLeft).toHaveBeenCalledWith('target-1', 's2');
+    // ...and, same as the canonical ban route, their servers leave the directory
+    expect(mockRecomputeListedForOwner).toHaveBeenCalledWith('target-1');
+    // ...and their pending join requests are withdrawn, the moderators told
+    expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
+    expect(mockEmitToModerators).toHaveBeenCalledWith('s3', 'server:join_request_resolved', { serverId: 's3', userId: 'target-1', outcome: 'cancelled' });
+  });
+
+  it('resolving WITHOUT a ban leaves the directory alone', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    mockPendingReport('target-1');
+
+    const res = await request(app)
+      .post('/api/v1/admin/reports/rep-1/resolve')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ resolution: 'Not actionable' });
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
   });
 
   it('admin CANNOT ban a peer admin via report resolution (only superadmins can)', async () => {

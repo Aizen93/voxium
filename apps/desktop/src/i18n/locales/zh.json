@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "清除",
     "cancel": "取消",
     "save": "保存",
     "delete": "删除",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "登录失败。请检查网络连接后重试。",
       "title": "欢迎回来！",
       "subtitle": "登录以继续使用 Voxium",
       "email": "邮箱",
@@ -45,6 +47,7 @@
       "createOne": "立即注册"
     },
     "register": {
+      "registrationFailed": "注册失败。请检查网络连接后重试。",
       "title": "创建账号",
       "subtitle": "加入 Voxium 社区",
       "username": "用户名",
@@ -170,6 +173,8 @@
       "failed": "无法删除您的账户，请重试。"
     },
     "security": {
+      "hidePasswords": "隐藏密码",
+      "showPasswords": "显示密码",
       "changePassword": "修改密码",
       "currentPassword": "当前密码",
       "newPassword": "新密码",
@@ -268,7 +273,8 @@
       "general": "常规",
       "members": "成员",
       "roles": "角色",
-      "limits": "限制"
+      "limits": "限制",
+      "discovery": "发现"
     },
     "general": {
       "serverName": "服务器名称",
@@ -306,16 +312,11 @@
       "assignRoles": "分配角色",
       "promoteToAdmin": "提升为管理员",
       "demoteToMember": "降级为成员",
-      "kickMember": "踢出成员",
       "transferOwnership": "转让所有权",
-      "kickConfirm": "确定要踢出 {{name}} 吗？",
-      "kickDescription": "该成员将被移出服务器，需要新的邀请才能重新加入。",
-      "kick": "踢出",
       "transferConfirm": "确定将所有权转让给 {{name}} 吗？",
       "transferDescription": "你将失去所有者权限并成为管理员。此操作无法由你撤销。",
       "transfer": "转让",
       "failedToUpdateRole": "角色更新失败",
-      "failedToKick": "踢出成员失败",
       "failedToTransfer": "所有权转让失败",
       "failedToUpdateRoles": "角色更新失败",
       "noResults": "没有匹配搜索的成员",
@@ -367,8 +368,8 @@
       "description": "允许成员创建服务器邀请链接"
     },
     "KICK_MEMBERS": {
-      "name": "踢出成员",
-      "description": "允许成员踢出拥有较低角色的其他成员"
+      "name": "管理成员",
+      "description": "允许移除并封禁角色较低的成员、解除封禁，以及批准或拒绝加入申请"
     },
     "MANAGE_NICKNAMES": {
       "name": "管理昵称",
@@ -485,13 +486,10 @@
     "clearNickname": "清除",
     "promoteToAdmin": "提升为管理员",
     "demoteToMember": "降级为成员",
-    "confirmKick": "再次点击确认",
-    "kick": "踢出",
     "assignRoles": "分配角色",
     "noRolesCreated": "未创建角色",
     "failedToPromote": "成员提升失败",
     "failedToDemote": "成员降级失败",
-    "failedToKick": "踢出成员失败",
     "rolesUpdated": "角色已更新",
     "failedToUpdateRoles": "角色更新失败",
     "userMuted": "用户已静音",
@@ -542,6 +540,9 @@
     "failedToToggleReaction": "表情更改失败"
   },
   "messageInput": {
+    "emojiPicker": "表情符号选择器",
+    "removeAttachment": "移除附件",
+    "sendMessage": "发送消息",
     "replyingTo": "回复",
     "cancelReply": "取消回复",
     "dropToUpload": "拖放文件以上传",
@@ -588,7 +589,38 @@
     "switcherPlaceholder": "跳转到服务器…",
     "switcherEmpty": "没有名称匹配的服务器。",
     "switcherHint": "输入以筛选 · ↑↓ 移动 · Enter 打开",
-    "createOrJoin": "创建或加入服务器"
+    "createOrJoin": "创建或加入服务器",
+    "joinRequests": {
+      "title": "加入申请",
+      "empty": "没有待处理的申请。",
+      "approve": "批准",
+      "decline": "拒绝",
+      "approved": "{{name}} 已成为成员",
+      "declined": "已拒绝 {{name}} 的申请",
+      "noMessage": "无留言",
+      "requestedAt": "申请于 {{when}}",
+      "failedToLoad": "加载加入申请失败",
+      "failedToApprove": "批准申请失败",
+      "failedToDecline": "拒绝申请失败",
+      "pending_other": "{{count}} 个待处理的加入申请"
+    },
+    "banned": {
+      "title": "已封禁",
+      "empty": "没有被封禁的用户。",
+      "unban": "解除封禁",
+      "unbanned": "{{name}} 可以再次加入",
+      "by": "由 {{name}} 封禁",
+      "noReason": "未填写原因",
+      "at": "封禁于 {{when}}",
+      "failedToLoad": "加载封禁列表失败",
+      "failedToUnban": "解除封禁失败"
+    },
+    "removeAndBan": "移除并封禁",
+    "removeAndBanConfirm": "要移除并封禁 {{name}} 吗？",
+    "removeAndBanDescription": "该用户将被移出此空间，并且在你于“已封禁”区域解除封禁之前，无法通过邀请、直接加入或申请再次进入。",
+    "banReasonPlaceholder": "原因（可选，管理人员可见）",
+    "removeAndBanned": "已移除并封禁 {{name}}",
+    "removeAndBanFailed": "移除成员失败"
   },
   "channel": {
     "joinVoice": "加入语音",
@@ -646,7 +678,8 @@
       "submitReport": "提交举报",
       "submitting": "提交中...",
       "submitted": "举报已提交，谢谢！",
-      "failedToSubmit": "举报提交失败"
+      "failedToSubmit": "举报提交失败",
+      "reportSpace": "举报空间"
     },
     "search": {
       "searchIn": "在 {{name}} 中搜索",
@@ -857,6 +890,7 @@
     "loadingAudio": "加载音频中..."
   },
   "support": {
+    "sendMessage": "发送消息",
     "title": "客服",
     "open": "开放",
     "inProgress": "处理中",
@@ -869,6 +903,8 @@
     "failedToReopen": "工单重新打开失败"
   },
   "invite": {
+    "failedToJoin": "无法加入服务器。请检查网络连接后重试。",
+    "invalidOrExpired": "此邀请无效或已过期。",
     "youveBeenInvited": "你收到了邀请！",
     "loadingInvite": "加载邀请中...",
     "goHome": "返回首页",
@@ -989,7 +1025,7 @@
     },
     "cta": {
       "title": "准备好体验全新的通信方式了吗？",
-      "subtitle": "加入开放通信革命。无需信用卡。无需订阅。",
+      "subtitle": "加入开放通信革命。无需信用卡。没有付费墙。",
       "getStarted": "开始使用，完全免费",
       "downloadApp": "下载应用"
     },
@@ -1114,7 +1150,29 @@
     "ticketClosed": "工单已关闭。重新打开后才能发送消息。",
     "cannotBanSelf": "不能封禁自己",
     "cannotBanSuperAdmin": "无法封禁超级管理员",
-    "onlySuperAdminCanBan": "只有超级管理员才能封禁其他管理员"
+    "onlySuperAdminCanBan": "只有超级管理员才能封禁其他管理员",
+    "discoveryDisabled": "服务器发现功能当前已停用",
+    "listingDisabledByAdmin": "管理员已停用展示",
+    "bannedFromServer": "你已被此空间封禁",
+    "requestDeclinedRecently": "你的申请最近被拒绝了，请稍后再试。",
+    "joinRequestNotFound": "未找到加入申请",
+    "banNotFound": "未找到封禁记录",
+    "cannotTransferToBanned": "无法将所有权转让给被封禁的用户",
+    "cannotReportOwnServer": "不能举报自己的空间",
+    "noPermissionManageMembers": "你没有管理成员的权限",
+    "noPermissionKickMembers": "你没有移除成员的权限",
+    "cannotKickHigherRole": "无法移除角色相同或更高的成员",
+    "descriptionUnsupportedChars": "描述包含不支持的字符",
+    "serverNameUnsupportedChars": "服务器名称包含不支持的字符",
+    "descriptionTooLong": "描述最多 {{max}} 个字符",
+    "reasonUnsupportedChars": "原因包含不支持的字符",
+    "reasonTooLong": "原因最多 {{max}} 个字符",
+    "tagsNotSupported": "标签必须从支持的列表中选择",
+    "tooManyTags": "最多允许 {{max}} 个标签",
+    "joinMessageUnsupportedChars": "消息包含不支持的字符",
+    "joinMessageTooLong": "消息最多 {{max}} 个字符",
+    "refineSearch": "结果过多，请缩小搜索范围",
+    "serverNotFound": "未找到该空间"
   },
   "e2e": {
     "badgeTitle": "已端到端加密 — 查看安全码",
@@ -1294,5 +1352,135 @@
     "renamed": "频道已重命名",
     "failedToRename": "重命名频道失败",
     "moderationNotSecure": "\"{{name}}\"是普通频道——请从侧边栏删除它"
+  },
+  "discovery": {
+    "tier": {
+      "ladder": "全部徽章",
+      "topFraction": "前 {{percent}}%",
+      "from": "分数达到 {{score}} 起",
+      "current": "你的徽章",
+      "bronze": "青铜",
+      "silver": "白银",
+      "gold": "黄金",
+      "platinum": "铂金",
+      "diamond": "钻石",
+      "badgeLabel": "{{tier}} · 活跃度前 {{percent}}% 的空间",
+      "score": "活跃度分数：{{score}}（在线 × {{online}} + 本周消息 + 成员）",
+      "next": "下一级：{{tier}}，分数达到 {{score}} 起",
+      "top": "最高等级，没有更高的了。",
+      "none": "暂无徽章。已上架空间中较活跃的一半获得青铜，前 1% 获得钻石。",
+      "notYet": "目录中有足够多的活跃空间后才会显示徽章。"
+    },
+    "tags": {
+      "gaming": "游戏",
+      "esports": "电竞",
+      "open-source": "开源",
+      "programming": "编程",
+      "science": "科学",
+      "education": "教育",
+      "languages": "语言",
+      "music": "音乐",
+      "art": "艺术",
+      "film-tv": "影视",
+      "creators": "创作者",
+      "community": "社区"
+    },
+    "card": {
+      "menu": "更多操作",
+      "featured": "精选",
+      "noDescription": "暂无简介。",
+      "online_other": "{{count}} 人在线",
+      "members_other": "{{count}} 位成员",
+      "messages_other": "本周 {{count}} 条消息",
+      "join": "加入",
+      "requestToJoin": "申请加入",
+      "requested": "已申请",
+      "cancelRequest": "取消",
+      "open": "打开",
+      "onlineHint": "在线人数为上次每日统计的结果，成员数为实时数据",
+      "report": "举报此空间"
+    },
+    "settings": {
+      "badge": "徽章",
+      "title": "在“发现”中展示",
+      "listedHint": "所有已登录的 Voxium 用户都能在“发现”中找到此空间。隐藏的空间仍可通过邀请加入。",
+      "audience": "列表会显示名称、图标、简介、标签、成员数和在线数。成员、消息和语音绝不会显示。",
+      "hiddenInvitesLocked": "邀请锁定期间，此空间不会在“发现”中展示。",
+      "goToGeneral": "前往“常规”解锁邀请",
+      "blockedByAdmin": "管理员已停用展示。",
+      "whoCanJoin": "谁可以加入",
+      "joinApproval": "申请加入",
+      "joinApprovalHint": "新成员先提出申请，由管理人员逐一批准或拒绝。",
+      "joinOpen": "直接加入",
+      "joinOpenHint": "任何找到此空间的人都可以立即加入。",
+      "description": "简介",
+      "descriptionPlaceholder": "这个空间是关于什么的？面向哪些人？",
+      "descriptionNudge": "有简介的空间更容易被找到。",
+      "tags": "标签",
+      "tagsHint": "最多 {{max}} 个。新成员会按标签筛选“发现”。",
+      "preview": "你在“发现”中的卡片",
+      "stats": "活跃度",
+      "statsMembers": "成员：{{count}}",
+      "statsMessages": "本周消息：{{count}}",
+      "statsOnline": "上次统计时在线：{{count}}",
+      "statsRefreshedAt": "上次统计：{{when}}",
+      "statsDaily": "活跃度数据每天更新一次；成员数为实时数据。",
+      "statsNever": "活跃度数据尚未计算；每天更新一次。",
+      "save": "保存发现设置",
+      "saved": "发现设置已保存",
+      "failedToSave": "保存发现设置失败",
+      "failedToLoad": "加载发现信息失败"
+    },
+    "explore": "发现",
+    "browsePublic": "浏览公开空间",
+    "noInvite": "没有邀请？",
+    "switcherExplore": "发现公开空间",
+    "sort": {
+      "active": "最活跃",
+      "members": "成员最多",
+      "newest": "最新",
+      "name": "名称"
+    },
+    "modal": {
+      "title": "发现",
+      "subtitle": "Voxium 上任何人都能找到并加入的公开空间",
+      "searchPlaceholder": "搜索公开空间…",
+      "searchHint": "输入至少 {{min}} 个字符即可搜索",
+      "sortLabel": "排序",
+      "sortPrefix": "排序：",
+      "tagsLabel": "标签",
+      "allTags": "全部",
+      "featured": "精选",
+      "resultsCapped": "{{count, number}}+ 个空间",
+      "loadMore": "加载更多",
+      "emptyMatch": "没有匹配的公开空间。",
+      "emptyMatchHint": "试试其他词语或标签。",
+      "emptyNone": "还没有任何空间被列出。",
+      "off": "“发现”目前已关闭。",
+      "offHint": "管理员已禁用目录。邀请仍然可用。",
+      "failedToLoad": "无法加载“发现”",
+      "retry": "重试",
+      "footer": "活跃度数据每天更新一次；成员数为实时数据。",
+      "joinFailed": "无法加入该空间",
+      "requestFailed": "无法发送申请",
+      "cancelFailed": "无法取消申请",
+      "results_other": "{{count}} 个空间"
+    },
+    "request": {
+      "title": "申请加入 {{name}}",
+      "description": "版主将看到你的名称、头像和这条消息。",
+      "messageLabel": "留言（可选）",
+      "placeholder": "说说你为什么想加入…",
+      "send": "发送申请"
+    },
+    "toasts": {
+      "joined": "欢迎来到 {{name}}",
+      "requestSent": "已向 {{name}} 发送申请",
+      "requestCancelled": "已取消加入 {{name}} 的申请",
+      "approved": "你加入 {{name}} 的申请已获批准。欢迎！",
+      "declined": "你加入 {{name}} 的申请被拒绝了",
+      "newRequest": "{{user}} 申请加入 {{server}}",
+      "unknownSpace": "某个空间"
+    }
   }
 }

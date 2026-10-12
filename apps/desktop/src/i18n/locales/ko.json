@@ -1,5 +1,6 @@
 {
   "common": {
+    "clear": "지우기",
     "cancel": "취소",
     "save": "저장",
     "delete": "삭제",
@@ -31,6 +32,7 @@
   },
   "auth": {
     "login": {
+      "loginFailed": "로그인에 실패했습니다. 연결을 확인하고 다시 시도하세요.",
       "title": "다시 오신 것을 환영합니다!",
       "subtitle": "Voxium에 로그인하세요",
       "email": "이메일",
@@ -45,6 +47,7 @@
       "createOne": "계정 만들기"
     },
     "register": {
+      "registrationFailed": "가입에 실패했습니다. 연결을 확인하고 다시 시도하세요.",
       "title": "계정 만들기",
       "subtitle": "Voxium 커뮤니티에 참여하세요",
       "username": "사용자 이름",
@@ -170,6 +173,8 @@
       "failed": "계정을 삭제하지 못했습니다. 다시 시도해 주세요."
     },
     "security": {
+      "hidePasswords": "비밀번호 숨기기",
+      "showPasswords": "비밀번호 표시",
       "changePassword": "비밀번호 변경",
       "currentPassword": "현재 비밀번호",
       "newPassword": "새 비밀번호",
@@ -268,7 +273,8 @@
       "general": "일반",
       "members": "멤버",
       "roles": "역할",
-      "limits": "제한"
+      "limits": "제한",
+      "discovery": "탐색"
     },
     "general": {
       "serverName": "서버 이름",
@@ -306,16 +312,11 @@
       "assignRoles": "역할 할당",
       "promoteToAdmin": "관리자로 승격",
       "demoteToMember": "멤버로 강등",
-      "kickMember": "멤버 추방",
       "transferOwnership": "소유권 이전",
-      "kickConfirm": "{{name}}님을 추방하시겠습니까?",
-      "kickDescription": "서버에서 제거되며 다시 참여하려면 새 초대가 필요합니다.",
-      "kick": "추방",
       "transferConfirm": "{{name}}님에게 소유권을 이전하시겠습니까?",
       "transferDescription": "소유자 권한을 잃고 관리자가 됩니다. 이 작업은 되돌릴 수 없습니다.",
       "transfer": "이전",
       "failedToUpdateRole": "역할 업데이트에 실패했습니다",
-      "failedToKick": "멤버 추방에 실패했습니다",
       "failedToTransfer": "소유권 이전에 실패했습니다",
       "failedToUpdateRoles": "역할 업데이트에 실패했습니다",
       "noResults": "검색과 일치하는 멤버가 없습니다",
@@ -367,8 +368,8 @@
       "description": "멤버가 서버 초대 링크를 만들 수 있도록 허용합니다"
     },
     "KICK_MEMBERS": {
-      "name": "멤버 추방",
-      "description": "멤버가 낮은 역할을 가진 다른 멤버를 추방할 수 있도록 허용합니다"
+      "name": "멤버 관리",
+      "description": "낮은 역할의 멤버를 추방·차단하고, 차단을 해제하며, 참여 요청을 승인하거나 거절할 수 있습니다"
     },
     "MANAGE_NICKNAMES": {
       "name": "닉네임 관리",
@@ -485,13 +486,10 @@
     "clearNickname": "지우기",
     "promoteToAdmin": "관리자로 승격",
     "demoteToMember": "멤버로 강등",
-    "confirmKick": "다시 클릭하여 확인",
-    "kick": "추방",
     "assignRoles": "역할 할당",
     "noRolesCreated": "생성된 역할 없음",
     "failedToPromote": "멤버 승격에 실패했습니다",
     "failedToDemote": "멤버 강등에 실패했습니다",
-    "failedToKick": "멤버 추방에 실패했습니다",
     "rolesUpdated": "역할이 업데이트되었습니다",
     "failedToUpdateRoles": "역할 업데이트에 실패했습니다",
     "userMuted": "사용자가 음소거되었습니다",
@@ -542,6 +540,9 @@
     "failedToToggleReaction": "반응 변경에 실패했습니다"
   },
   "messageInput": {
+    "emojiPicker": "이모지 선택",
+    "removeAttachment": "첨부 파일 제거",
+    "sendMessage": "메시지 보내기",
     "replyingTo": "답장 대상",
     "cancelReply": "답장 취소",
     "dropToUpload": "파일을 놓아 업로드",
@@ -588,7 +589,38 @@
     "switcherPlaceholder": "서버로 이동…",
     "switcherEmpty": "이름이 일치하는 서버가 없습니다.",
     "switcherHint": "입력해 필터 · ↑↓ 이동 · Enter 열기",
-    "createOrJoin": "서버 만들기 또는 참여"
+    "createOrJoin": "서버 만들기 또는 참여",
+    "joinRequests": {
+      "title": "참여 요청",
+      "empty": "대기 중인 요청이 없습니다.",
+      "approve": "승인",
+      "decline": "거절",
+      "approved": "{{name}}님이 멤버가 되었습니다",
+      "declined": "{{name}}님의 요청을 거절했습니다",
+      "noMessage": "메시지 없음",
+      "requestedAt": "{{when}} 요청",
+      "failedToLoad": "참여 요청을 불러오지 못했습니다",
+      "failedToApprove": "요청을 승인하지 못했습니다",
+      "failedToDecline": "요청을 거절하지 못했습니다",
+      "pending_other": "대기 중인 참여 요청 {{count}}건"
+    },
+    "banned": {
+      "title": "차단됨",
+      "empty": "차단된 사용자가 없습니다.",
+      "unban": "차단 해제",
+      "unbanned": "{{name}}님이 다시 참여할 수 있습니다",
+      "by": "{{name}}님이 차단",
+      "noReason": "사유 없음",
+      "at": "{{when}} 차단",
+      "failedToLoad": "차단 목록을 불러오지 못했습니다",
+      "failedToUnban": "차단을 해제하지 못했습니다"
+    },
+    "removeAndBan": "추방 및 차단",
+    "removeAndBanConfirm": "{{name}}님을 추방하고 차단할까요?",
+    "removeAndBanDescription": "이 사용자는 스페이스에서 추방되며, 차단됨 섹션에서 차단을 해제하기 전까지 초대, 직접 참여, 요청 어느 방법으로도 돌아올 수 없습니다.",
+    "banReasonPlaceholder": "사유 (선택 사항, 운영진에게 표시됨)",
+    "removeAndBanned": "{{name}}님을 추방하고 차단했습니다",
+    "removeAndBanFailed": "멤버를 추방하지 못했습니다"
   },
   "channel": {
     "joinVoice": "음성 참여",
@@ -646,7 +678,8 @@
       "submitReport": "신고 제출",
       "submitting": "제출 중...",
       "submitted": "신고가 제출되었습니다. 감사합니다!",
-      "failedToSubmit": "신고 제출에 실패했습니다"
+      "failedToSubmit": "신고 제출에 실패했습니다",
+      "reportSpace": "스페이스 신고"
     },
     "search": {
       "searchIn": "{{name}}에서 검색",
@@ -857,6 +890,7 @@
     "loadingAudio": "오디오 로딩 중..."
   },
   "support": {
+    "sendMessage": "메시지 보내기",
     "title": "지원",
     "open": "열림",
     "inProgress": "진행 중",
@@ -869,6 +903,8 @@
     "failedToReopen": "티켓 다시 열기에 실패했습니다"
   },
   "invite": {
+    "failedToJoin": "서버에 참여할 수 없습니다. 연결을 확인하고 다시 시도하세요.",
+    "invalidOrExpired": "이 초대는 유효하지 않거나 만료되었습니다.",
     "youveBeenInvited": "초대를 받았습니다!",
     "loadingInvite": "초대 로딩 중...",
     "goHome": "홈으로",
@@ -989,7 +1025,7 @@
     },
     "cta": {
       "title": "새롭게 재탄생한 커뮤니케이션을 경험할 준비가 되셨나요?",
-      "subtitle": "오픈 커뮤니케이션 혁명에 동참하세요. 신용카드 필요 없음. 구독 필요 없음.",
+      "subtitle": "오픈 커뮤니케이션 혁명에 동참하세요. 신용카드 필요 없음. 유료 장벽 없음.",
       "getStarted": "시작하기, 무료입니다",
       "downloadApp": "앱 다운로드"
     },
@@ -1114,7 +1150,29 @@
     "ticketClosed": "티켓이 닫혀 있습니다. 메시지를 보내려면 다시 열어 주세요.",
     "cannotBanSelf": "자신을 차단할 수 없습니다",
     "cannotBanSuperAdmin": "최고 관리자는 차단할 수 없습니다",
-    "onlySuperAdminCanBan": "최고 관리자만 다른 관리자를 차단할 수 있습니다"
+    "onlySuperAdminCanBan": "최고 관리자만 다른 관리자를 차단할 수 있습니다",
+    "discoveryDisabled": "서버 탐색이 현재 비활성화되어 있습니다",
+    "listingDisabledByAdmin": "관리자가 공개를 비활성화했습니다",
+    "bannedFromServer": "이 스페이스에서 차단되었습니다",
+    "requestDeclinedRecently": "최근에 요청이 거절되었습니다. 나중에 다시 시도하세요.",
+    "joinRequestNotFound": "참여 요청을 찾을 수 없습니다",
+    "banNotFound": "차단 내역을 찾을 수 없습니다",
+    "cannotTransferToBanned": "차단된 사용자에게 소유권을 이전할 수 없습니다",
+    "cannotReportOwnServer": "자신의 스페이스는 신고할 수 없습니다",
+    "noPermissionManageMembers": "멤버를 관리할 권한이 없습니다",
+    "noPermissionKickMembers": "멤버를 추방할 권한이 없습니다",
+    "cannotKickHigherRole": "같거나 더 높은 역할의 멤버는 추방할 수 없습니다",
+    "descriptionUnsupportedChars": "설명에 지원되지 않는 문자가 포함되어 있습니다",
+    "serverNameUnsupportedChars": "서버 이름에 지원되지 않는 문자가 포함되어 있습니다",
+    "descriptionTooLong": "설명은 최대 {{max}}자까지 입력할 수 있습니다",
+    "reasonUnsupportedChars": "사유에 지원되지 않는 문자가 포함되어 있습니다",
+    "reasonTooLong": "사유는 최대 {{max}}자까지 입력할 수 있습니다",
+    "tagsNotSupported": "태그는 지원 목록에서 선택해야 합니다",
+    "tooManyTags": "태그는 최대 {{max}}개까지 가능합니다",
+    "joinMessageUnsupportedChars": "메시지에 지원되지 않는 문자가 포함되어 있습니다",
+    "joinMessageTooLong": "메시지는 최대 {{max}}자까지 입력할 수 있습니다",
+    "refineSearch": "결과가 너무 많습니다. 검색어를 더 구체적으로 입력하세요",
+    "serverNotFound": "스페이스를 찾을 수 없습니다"
   },
   "e2e": {
     "badgeTitle": "종단간 암호화됨 — 안전 번호 보기",
@@ -1294,5 +1352,135 @@
     "renamed": "채널 이름이 변경되었습니다",
     "failedToRename": "채널 이름 변경에 실패했습니다",
     "moderationNotSecure": "\"{{name}}\"은(는) 일반 채널입니다 — 사이드바에서 삭제하세요"
+  },
+  "discovery": {
+    "tier": {
+      "ladder": "모든 배지",
+      "topFraction": "상위 {{percent}}%",
+      "from": "점수 {{score}}부터",
+      "current": "내 배지",
+      "bronze": "브론즈",
+      "silver": "실버",
+      "gold": "골드",
+      "platinum": "플래티넘",
+      "diamond": "다이아몬드",
+      "badgeLabel": "{{tier}} · 활동 기준 상위 {{percent}}% 스페이스",
+      "score": "활동 점수: {{score}} (온라인 × {{online}} + 이번 주 메시지 + 멤버)",
+      "next": "다음: {{tier}}, 점수 {{score}}부터",
+      "top": "최고 티어입니다. 그 위는 없습니다.",
+      "none": "아직 배지가 없습니다. 등록된 스페이스 중 활동적인 상위 절반은 브론즈, 상위 1%는 다이아몬드를 받습니다.",
+      "notYet": "디렉터리에 활동적인 스페이스가 충분해지면 배지가 표시됩니다."
+    },
+    "tags": {
+      "gaming": "게임",
+      "esports": "e스포츠",
+      "open-source": "오픈 소스",
+      "programming": "프로그래밍",
+      "science": "과학",
+      "education": "교육",
+      "languages": "언어",
+      "music": "음악",
+      "art": "예술",
+      "film-tv": "영화·TV",
+      "creators": "크리에이터",
+      "community": "커뮤니티"
+    },
+    "card": {
+      "menu": "추가 작업",
+      "featured": "추천",
+      "noDescription": "아직 설명이 없습니다.",
+      "online_other": "{{count}}명 온라인",
+      "members_other": "멤버 {{count}}명",
+      "messages_other": "이번 주 메시지 {{count}}개",
+      "join": "참여",
+      "requestToJoin": "참여 요청",
+      "requested": "요청됨",
+      "cancelRequest": "취소",
+      "open": "열기",
+      "onlineHint": "마지막 일일 확인 시점의 온라인 수이며, 멤버 수는 실시간입니다",
+      "report": "이 스페이스 신고"
+    },
+    "settings": {
+      "badge": "배지",
+      "title": "탐색에 공개",
+      "listedHint": "로그인한 모든 Voxium 사용자가 탐색에서 이 스페이스를 찾을 수 있습니다. 숨긴 스페이스에도 초대로는 참여할 수 있습니다.",
+      "audience": "목록에는 이름, 아이콘, 설명, 태그, 멤버 수, 온라인 수가 표시됩니다. 멤버, 메시지, 음성은 절대 표시되지 않습니다.",
+      "hiddenInvitesLocked": "초대가 잠긴 동안에는 탐색에서 숨겨집니다.",
+      "goToGeneral": "일반 탭에서 초대 잠금 해제",
+      "blockedByAdmin": "관리자가 공개를 비활성화했습니다.",
+      "whoCanJoin": "참여 방식",
+      "joinApproval": "참여 요청",
+      "joinApprovalHint": "새 사용자가 먼저 요청하고, 운영진이 각 요청을 승인하거나 거절합니다.",
+      "joinOpen": "바로 참여",
+      "joinOpenHint": "스페이스를 찾은 누구나 즉시 참여할 수 있습니다.",
+      "description": "설명",
+      "descriptionPlaceholder": "이 스페이스는 무엇에 관한 곳이며, 누구를 위한 곳인가요?",
+      "descriptionNudge": "설명이 있는 스페이스가 더 자주 발견됩니다.",
+      "tags": "태그",
+      "tagsHint": "최대 {{max}}개. 새 사용자는 태그로 탐색을 필터링합니다.",
+      "preview": "탐색에 표시되는 카드",
+      "stats": "활동",
+      "statsMembers": "멤버: {{count}}",
+      "statsMessages": "이번 주 메시지: {{count}}",
+      "statsOnline": "마지막 확인 시 온라인: {{count}}",
+      "statsRefreshedAt": "마지막 확인: {{when}}",
+      "statsDaily": "활동 수치는 하루에 한 번 갱신되며, 멤버 수는 실시간입니다.",
+      "statsNever": "활동 수치가 아직 계산되지 않았습니다. 하루에 한 번 갱신됩니다.",
+      "save": "탐색 설정 저장",
+      "saved": "탐색 설정을 저장했습니다",
+      "failedToSave": "탐색 설정을 저장하지 못했습니다",
+      "failedToLoad": "탐색 정보를 불러오지 못했습니다"
+    },
+    "explore": "탐색",
+    "browsePublic": "공개 스페이스 둘러보기",
+    "noInvite": "초대가 없나요?",
+    "switcherExplore": "공개 스페이스 탐색",
+    "sort": {
+      "active": "활발한 순",
+      "members": "멤버 많은 순",
+      "newest": "최신순",
+      "name": "이름순"
+    },
+    "modal": {
+      "title": "탐색",
+      "subtitle": "Voxium의 누구나 찾고 참여할 수 있는 공개 스페이스",
+      "searchPlaceholder": "공개 스페이스 검색…",
+      "searchHint": "{{min}}자 이상 입력하면 검색됩니다",
+      "sortLabel": "정렬",
+      "sortPrefix": "정렬: ",
+      "tagsLabel": "태그",
+      "allTags": "전체",
+      "featured": "추천",
+      "resultsCapped": "{{count, number}}개 이상의 스페이스",
+      "loadMore": "더 보기",
+      "emptyMatch": "일치하는 공개 스페이스가 없습니다.",
+      "emptyMatchHint": "다른 단어나 태그로 시도해 보세요.",
+      "emptyNone": "아직 등록된 스페이스가 없습니다.",
+      "off": "탐색이 현재 꺼져 있습니다.",
+      "offHint": "관리자가 디렉터리를 비활성화했습니다. 초대는 계속 사용할 수 있습니다.",
+      "failedToLoad": "탐색을 불러오지 못했습니다",
+      "retry": "다시 시도",
+      "footer": "활동 수치는 하루에 한 번 갱신되며, 멤버 수는 실시간입니다.",
+      "joinFailed": "스페이스에 참여하지 못했습니다",
+      "requestFailed": "요청을 보내지 못했습니다",
+      "cancelFailed": "요청을 취소하지 못했습니다",
+      "results_other": "스페이스 {{count}}개"
+    },
+    "request": {
+      "title": "{{name}} 참여 요청",
+      "description": "모더레이터에게 이름, 아바타, 이 메시지가 표시됩니다.",
+      "messageLabel": "메시지 (선택)",
+      "placeholder": "참여하고 싶은 이유를 적어 주세요…",
+      "send": "요청 보내기"
+    },
+    "toasts": {
+      "joined": "{{name}}에 오신 것을 환영합니다",
+      "requestSent": "{{name}}에 요청을 보냈습니다",
+      "requestCancelled": "{{name}} 요청을 취소했습니다",
+      "approved": "{{name}} 참여 요청이 승인되었습니다. 환영합니다!",
+      "declined": "{{name}} 참여 요청이 거절되었습니다",
+      "newRequest": "{{user}}님이 {{server}} 참여를 요청했습니다",
+      "unknownSpace": "스페이스"
+    }
   }
 }

@@ -1,4 +1,5 @@
 import type { AnnotationOp, AnnotationScene, AnnotationLiveEvent } from './annotations.js';
+import type { ServerJoinMode, DiscoveryTier } from './constants.js';
 
 // ─── User ────────────────────────────────────────────────────────────────────
 
@@ -66,6 +67,14 @@ export interface Server {
   invitesLocked: boolean;
   ownerId: string;
   createdAt: string;
+  // Directory profile (docs/local/server-discovery-plan.html). Every select
+  // that spells out invitesLocked/ownerId/createdAt carries these too.
+  description: string | null;
+  tags: string[];
+  /** "Listed in Explore" — the owner's switch; eligibility also needs invites
+   *  unlocked, no admin block and an unbanned owner (materialised server-side). */
+  discoverable: boolean;
+  joinMode: ServerJoinMode;
 }
 
 export interface ServerSummary {
@@ -82,6 +91,99 @@ export interface ServerDetail extends Server {
 
 export interface CreateServerRequest {
   name: string;
+}
+
+// ─── Server discovery ───────────────────────────────────────────────────────
+
+/** One directory card. The three activity inputs are printed on the card —
+ *  they ARE the ranking. memberCount is live; the rest is a daily snapshot. */
+export interface DiscoveryServer {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  description: string | null;
+  tags: string[];
+  memberCount: number;
+  onlineCount: number;
+  weeklyMessages: number;
+  joinMode: ServerJoinMode;
+  featured: boolean;
+  isMember: boolean;
+  requestPending: boolean;
+  createdAt: string;
+  /** When the daily cycle last refreshed the activity figures; null until the first pass. */
+  statsRefreshedAt: string | null;
+  /** The activity badge: a rank among listed spaces by the same score (DISCOVERY_TIER_TOP_FRACTION); null below Bronze or before the first computation. */
+  tier: DiscoveryTier | null;
+}
+
+/** The score at every tier's cut, as the stats job stores it (Redis `discovery:tiers`). `thresholds` is null below the minimum population. */
+export interface DiscoveryTierThresholds {
+  computedAt: string;
+  population: number;
+  thresholds: Record<DiscoveryTier, number> | null;
+}
+
+export interface DiscoveryPage {
+  /** Only on the first page without a query — a separate row, never mixed into the ranked list. */
+  featured: DiscoveryServer[];
+  servers: DiscoveryServer[];
+  nextCursor: string | null;
+  /** Capped at DISCOVERY_TOTAL_CAP (the client shows "1,000+"). */
+  totalCapped: number;
+}
+
+/** A user summary carried by bans and join requests. */
+export interface ServerMemberSummary {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+}
+
+export interface ServerBan {
+  serverId: string;
+  userId: string;
+  reason: string | null;
+  createdAt: string;
+  user: ServerMemberSummary;
+  bannedBy: { id: string; username: string; displayName: string } | null;
+}
+
+export type ServerJoinRequestStatus = 'pending' | 'declined';
+
+export interface ServerJoinRequest {
+  id: string;
+  serverId: string;
+  userId: string;
+  message: string | null;
+  status: ServerJoinRequestStatus;
+  createdAt: string;
+  user: ServerMemberSummary;
+}
+
+/** 'joined' = the requester got in by another door (invite, open-mode join) and the request was swept. */
+export type ServerJoinRequestOutcome = 'approved' | 'declined' | 'cancelled' | 'joined';
+
+/** What the owner's Discovery tab reads from GET /servers/:id — the live
+ *  member count, the daily activity snapshot and the curation/block state. */
+export interface ServerDiscoveryInfo {
+  memberCount: number;
+  onlineCount: number;
+  weeklyMessages: number;
+  statsRefreshedAt: string | null;
+  discoveryListed: boolean;
+  discoveryBlockedAt: string | null;
+  featuredAt: string | null;
+  /** The Active sort's score: online × 10 + messages this week + members (DISCOVERY_SCORE_WEIGHTS). */
+  activityScore: number;
+  tier: DiscoveryTier | null;
+  /** The next tier up and the score it starts at; null at the top or without cuts. */
+  nextTier: { tier: DiscoveryTier; score: number } | null;
+  /** False while the directory has fewer active spaces than DISCOVERY_TIER_MIN_POPULATION (no badges anywhere). */
+  tiersAvailable: boolean;
+  /** The score every tier starts at, for the ladder; null without cuts. */
+  tierThresholds: Record<DiscoveryTier, number> | null;
 }
 
 // ─── Category ───────────────────────────────────────────────────────────────
@@ -383,6 +485,12 @@ export interface ServerToClientEvents {
   'member:nickname_updated': (data: { serverId: string; userId: string; nickname: string | null }) => void;
   'member:kicked': (data: { serverId: string; userId: string }) => void;
   'server:deleted': (data: { serverId: string }) => void;
+  // Server discovery join requests (moderator audience only — never server:{id})
+  'server:join_request': (data: { serverId: string; request: ServerJoinRequest }) => void;
+  'server:join_request_resolved': (data: { serverId: string; userId: string; outcome: ServerJoinRequestOutcome }) => void;
+  // To the requester's user:{id} room
+  'server:join_approved': (data: { server: Server }) => void;
+  'server:join_declined': (data: { serverId: string; serverName: string }) => void;
   'voice:screen_share:start': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:stop': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:state': (data: { channelId: string; sharingUserId: string | null }) => void;
@@ -594,7 +702,22 @@ export interface AdminServer {
   channelCount: number;
   messageCount: number;
   createdAt: string;
+  // Directory state (server discovery)
+  description: string | null;
+  tags: string[];
+  discoverable: boolean;
+  /** The materialised eligibility: discoverable AND invites unlocked AND not blocked AND owner not banned. */
+  discoveryListed: boolean;
+  joinMode: ServerJoinMode;
+  featuredAt: string | null;
+  discoveryBlockedAt: string | null;
+  invitesLocked: boolean;
+  /** The fourth listing input: a platform-banned owner hides every server they own. */
+  ownerBannedAt: string | null;
 }
+
+/** What GET /admin/export/servers returns per row — the pre-directory columns only. */
+export type AdminServerExport = Pick<AdminServer, 'id' | 'name' | 'iconUrl' | 'ownerId' | 'ownerUsername' | 'memberCount' | 'channelCount' | 'messageCount' | 'createdAt'>;
 
 export interface BanRecord {
   id: string;
@@ -733,7 +856,8 @@ export interface StorageTopUploader {
 // ─── Reports ────────────────────────────────────────────────────────────────
 
 export type ReportStatus = 'pending' | 'resolved' | 'dismissed';
-export type ReportType = 'message' | 'user';
+/** 'server' = a directory listing (the owner is the reported user; name and description snapshot in messageContent). */
+export type ReportType = 'message' | 'user' | 'server';
 
 export interface Report {
   id: string;
@@ -840,6 +964,8 @@ export interface CommunityTheme extends CommunityThemeData {
 export type AuditAction =
   | 'user.ban' | 'user.unban' | 'user.delete' | 'user.role_change'
   | 'server.delete'
+  | 'server.discovery_feature' | 'server.discovery_unfeature'
+  | 'server.discovery_block' | 'server.discovery_unblock'
   | 'ip_ban.create' | 'ip_ban.delete'
   | 'storage.file_delete' | 'storage.cleanup_orphans'
   | 'registration.hygiene_sweep'

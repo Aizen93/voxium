@@ -15,13 +15,16 @@ import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
 import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
+import { emitToModerators } from '../utils/moderatorAudience';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode, Server } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
+import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
+import { serverSelect } from '../utils/serverSelect';
 
 export const adminRouter = Router();
 
@@ -348,6 +351,11 @@ adminRouter.get('/users/:userId/owned-servers', async (req: Request<{ userId: st
         id: true,
         name: true,
         iconUrl: true,
+        // Directory state (server discovery): what this owner shows the
+        // world, and whether it is currently in Explore
+        description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true,
+        featuredAt: true, discoveryBlockedAt: true, invitesLocked: true,
+        owner: { select: { bannedAt: true } },
         _count: { select: { members: true } },
         members: {
           where: { userId: { not: user.id } },
@@ -367,6 +375,15 @@ adminRouter.get('/users/:userId/owned-servers', async (req: Request<{ userId: st
       name: s.name,
       iconUrl: s.iconUrl,
       memberCount: s._count.members,
+      description: s.description,
+      tags: s.tags,
+      discoverable: s.discoverable,
+      discoveryListed: s.discoveryListed,
+      joinMode: s.joinMode,
+      featuredAt: s.featuredAt,
+      discoveryBlockedAt: s.discoveryBlockedAt,
+      invitesLocked: s.invitesLocked,
+      ownerBannedAt: s.owner.bannedAt,
       members: s.members.map((m) => ({
         userId: m.userId,
         username: m.user.username,
@@ -407,6 +424,14 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       ? await prisma.ipRecord.findMany({ where: { userId: targetId }, select: { ip: true } })
       : [];
 
+    // A banned account's pending join requests go with the ban: approving
+    // one later would admit an account that cannot sign in. Read first so
+    // the moderators of each server can be told after the commit.
+    const pendingRequests = await prisma.serverJoinRequest.findMany({
+      where: { userId: targetId, status: 'pending' },
+      select: { serverId: true },
+    });
+
     const [, ipBanResult] = await prisma.$transaction([
       prisma.user.update({
         where: { id: targetId },
@@ -420,8 +445,17 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
         data: ipRecords.map((r) => ({ ip: r.ip, reason: sanitizedReason, bannedBy: req.user!.userId })),
         skipDuplicates: true, // already-banned IPs are fine
       }),
+      prisma.serverJoinRequest.deleteMany({ where: { userId: targetId } }),
     ]);
     ipsBanned = ipBanResult.count;
+
+    // A banned owner's servers leave the directory without anyone having to
+    // think about it (owner.bannedAt is one of the listing column's inputs).
+    await recomputeListedForOwner(targetId);
+
+    for (const { serverId } of pendingRequests) {
+      await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId: targetId, outcome: 'cancelled' });
+    }
 
     // Notify servers that user left
     const memberships = await prisma.serverMember.findMany({
@@ -496,6 +530,10 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
         ? [prisma.ipBan.deleteMany({ where: { ip: { in: ipsToRelease } } })]
         : []),
     ]);
+
+    // Their servers come back to the directory where the per-server inputs
+    // (discoverable, invites unlocked, not admin-blocked) still allow it.
+    await recomputeListedForOwner(req.params.userId);
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -584,7 +622,19 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
               select: { id: true },
             });
 
+            // A request the heir had open on this very server is settled by
+            // the membership, the way joinServerMember settles one.
+            const heirRequest = await prisma.serverJoinRequest.findUnique({
+              where: { serverId_userId: { serverId: action.serverId, userId: action.newOwnerId } },
+              select: { status: true },
+            });
+
             await prisma.$transaction([
+              // This is the one path besides server creation that makes a
+              // member without joinServerMember's ban check: an admin-chosen
+              // heir is an explicit unban, so the row (if any) goes with it.
+              prisma.serverBan.deleteMany({ where: { serverId: action.serverId, userId: action.newOwnerId } }),
+              prisma.serverJoinRequest.deleteMany({ where: { serverId: action.serverId, userId: action.newOwnerId } }),
               prisma.serverMember.create({
                 data: { userId: action.newOwnerId, serverId: action.serverId, role: 'owner' },
               }),
@@ -595,13 +645,20 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
                   create: { userId: action.newOwnerId!, channelId: ch.id, lastReadAt: new Date() },
                 })
               ),
+              // The heir becomes a member here, so the inline member count
+              // (server discovery) moves in the same transaction.
               prisma.server.update({
                 where: { id: action.serverId },
-                data: { ownerId: action.newOwnerId },
+                data: { ownerId: action.newOwnerId, memberCount: { increment: 1 } },
               }),
             ]);
 
             await broadcastMemberJoined(action.newOwnerId, action.serverId);
+            if (heirRequest?.status === 'pending') {
+              await emitToModerators(action.serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, {
+                serverId: action.serverId, userId: action.newOwnerId, outcome: 'joined',
+              });
+            }
           } else {
             // Already a member — transfer ownership in transaction
             await prisma.$transaction([
@@ -621,6 +678,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
             void syncChannelVisibilityRooms(action.serverId, { userId: action.newOwnerId });
           }
 
+          // ownerId decides whose ban state feeds the listing column: the
+          // deleted (often banned) owner's servers were hidden by
+          // recomputeListedForOwner, and the unbanned heir's take their place.
+          await recomputeListed(action.serverId);
+
           // Emit role + server update events
           io.to(`server:${action.serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
             serverId: action.serverId,
@@ -630,11 +692,15 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
           const updatedServer = await prisma.server.findUnique({
             where: { id: action.serverId },
-            select: { id: true, name: true, iconUrl: true, ownerId: true, invitesLocked: true, createdAt: true },
+            select: {
+              id: true, name: true, iconUrl: true, ownerId: true, invitesLocked: true, createdAt: true,
+              description: true, tags: true, discoverable: true, joinMode: true,
+            },
           });
           if (updatedServer) {
             io.to(`server:${action.serverId}`).emit(WS_EVENTS.SERVER_UPDATED, {
               ...updatedServer,
+              joinMode: updatedServer.joinMode as ServerJoinMode,
               createdAt: updatedServer.createdAt.toISOString(),
             });
           }
@@ -818,13 +884,17 @@ adminRouter.get('/servers', async (req: Request, res: Response, next: NextFuncti
     if (search) {
       where.name = { contains: search, mode: 'insensitive' };
     }
+    // Directory view: only servers that currently appear in Explore
+    if (req.query.listed === '1') where.discoveryListed = true;
 
     const [servers, total] = await Promise.all([
       prisma.server.findMany({
         where,
         select: {
           id: true, name: true, iconUrl: true, ownerId: true, createdAt: true,
-          owner: { select: { username: true } },
+          description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true,
+          featuredAt: true, discoveryBlockedAt: true, invitesLocked: true,
+          owner: { select: { username: true, bannedAt: true } },
           _count: { select: { members: true, channels: true } },
         },
         orderBy: { createdAt: 'desc' },
@@ -872,9 +942,89 @@ adminRouter.get('/servers', async (req: Request, res: Response, next: NextFuncti
       channelCount: s._count.channels,
       messageCount: serverMessageCounts.get(s.id) || 0,
       createdAt: s.createdAt,
+      description: s.description,
+      tags: s.tags,
+      discoverable: s.discoverable,
+      discoveryListed: s.discoveryListed,
+      joinMode: s.joinMode,
+      featuredAt: s.featuredAt,
+      discoveryBlockedAt: s.discoveryBlockedAt,
+      invitesLocked: s.invitesLocked,
+      ownerBannedAt: s.owner.bannedAt,
     }));
 
     res.json({ success: true, data, total, page, limit, hasMore: page * limit < total });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Directory curation: feature / unfeature, block / unblock. Curated means a
+// person chose it; Featured never jumps the ranked list. Block hides the
+// server and the owner cannot relist until unblocked (hiding alone invites a
+// relist war). Every change is audited.
+adminRouter.patch('/servers/:serverId/discovery', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.featured !== undefined && typeof body.featured !== 'boolean') throw new BadRequestError('featured must be a boolean');
+    if (body.blocked !== undefined && typeof body.blocked !== 'boolean') throw new BadRequestError('blocked must be a boolean');
+    if (body.featured === undefined && body.blocked === undefined) throw new BadRequestError('Provide featured and/or blocked');
+
+    const server = await prisma.server.findUnique({
+      where: { id: serverId },
+      select: { id: true, discoveryListed: true, featuredAt: true, discoveryBlockedAt: true },
+    });
+    if (!server) throw new NotFoundError('Server');
+
+    const data: { featuredAt?: Date | null; discoveryBlockedAt?: Date | null; discoverable?: boolean } = {};
+    const actions: Array<'server.discovery_feature' | 'server.discovery_unfeature' | 'server.discovery_block' | 'server.discovery_unblock'> = [];
+
+    if (body.blocked === true) {
+      data.discoverable = false;
+      data.featuredAt = null;
+      data.discoveryBlockedAt = server.discoveryBlockedAt ?? new Date();
+      if (!server.discoveryBlockedAt) actions.push('server.discovery_block');
+      if (server.featuredAt) actions.push('server.discovery_unfeature');
+    } else if (body.blocked === false) {
+      data.discoveryBlockedAt = null;
+      if (server.discoveryBlockedAt) actions.push('server.discovery_unblock');
+    }
+
+    if (body.featured === true) {
+      if (body.blocked === true) throw new BadRequestError('A blocked server cannot be featured');
+      // Only listed servers can be featured — a Featured row of hidden
+      // servers would be a list of 404s
+      if (!server.discoveryListed) throw new BadRequestError('Only listed servers can be featured');
+      if (!server.featuredAt) {
+        data.featuredAt = new Date();
+        actions.push('server.discovery_feature');
+      }
+    } else if (body.featured === false && body.blocked !== true) {
+      data.featuredAt = null;
+      if (server.featuredAt) actions.push('server.discovery_unfeature');
+    }
+
+    const updated = await prisma.server.update({
+      where: { id: serverId },
+      data,
+      select: { ...serverSelect, discoveryListed: true, featuredAt: true, discoveryBlockedAt: true },
+    });
+
+    // discoveryBlockedAt / discoverable are inputs of the listing column (never throws)
+    const discoveryListed = (await recomputeListed(serverId)) ?? updated.discoveryListed;
+
+    const { discoveryListed: _ignored, featuredAt, discoveryBlockedAt, ...serverShape } = updated;
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, serverShape as unknown as Server);
+
+    for (const action of actions) {
+      logAuditEvent({ actorId: req.user!.userId, action, targetType: 'server', targetId: serverId });
+    }
+
+    res.json({
+      success: true,
+      data: { id: serverId, discoverable: updated.discoverable, discoveryListed, featuredAt, discoveryBlockedAt },
+    });
   } catch (err) {
     next(err);
   }
@@ -2285,6 +2435,18 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         where: { id: banTarget.id },
         data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
       });
+
+      // Same as the canonical ban route: a banned owner's servers leave the
+      // directory, and their pending join requests are withdrawn.
+      await recomputeListedForOwner(banTarget.id);
+      const bannedPending = await prisma.serverJoinRequest.findMany({
+        where: { userId: banTarget.id, status: 'pending' },
+        select: { serverId: true },
+      });
+      await prisma.serverJoinRequest.deleteMany({ where: { userId: banTarget.id } });
+      for (const { serverId } of bannedPending) {
+        await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId: banTarget.id, outcome: 'cancelled' });
+      }
 
       // Remove the banned user from all server member lists/rooms — same as the
       // canonical ban route. Without this the banned user lingers in member lists.

@@ -8,23 +8,30 @@ import { ImageUploadButton } from '../common/ImageUploadButton';
 import { X, Lock, Unlock } from 'lucide-react';
 import type { ServerMember, MemberRole, ResourceLimits } from '@voxium/shared';
 import { outranksRole } from '../../utils/roles';
-import { Permissions, permissionsFromString, hasPermission } from '@voxium/shared';
+import { Permissions, permissionsFromString, hasPermission, LIMITS, validateBanReason } from '@voxium/shared';
 import { RoleEditor } from './RoleEditor';
+import { DiscoveryTab } from './DiscoveryTab';
+import { JoinRequestsSection } from './JoinRequestsSection';
+import { BannedSection } from './BannedSection';
 import { api } from '../../services/api';
-import { getTranslatedError } from '../../utils/serverErrors';
+import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
 
 interface Props {
   serverId: string;
   onClose: () => void;
 }
 
-type Tab = 'general' | 'members' | 'roles' | 'limits';
+type Tab = 'general' | 'members' | 'roles' | 'limits' | 'discovery';
 
 export function ServerSettingsModal({ serverId, onClose }: Props) {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<Tab>('general');
+  // No tab until the viewer picks one: the default is derived below from
+  // what they may do (General is a MANAGE_SERVER tab; a role-only moderator
+  // reaches the modal through the gear too and lands on Members).
+  const [activeTab, setActiveTab] = useState<Tab | null>(null);
 
-  const { servers, roles, fetchEffectivePermissions } = useServerStore();
+  const { servers, roles, fetchEffectivePermissions, fetchJoinRequests } = useServerStore();
+  const pendingRequests = useServerStore((s) => s.joinRequestCounts[serverId] ?? 0);
   const currentUser = useAuthStore((s) => s.user);
   const server = servers.find((s) => s.id === serverId);
   const isOwner = server?.ownerId === currentUser?.id;
@@ -34,14 +41,28 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
     fetchEffectivePermissions(serverId).then(setEffectivePerms).catch((err) => { console.warn('[ServerSettings] Failed to fetch permissions:', err); });
   }, [serverId, fetchEffectivePermissions]);
 
-  const canManageRoles = isOwner || (effectivePerms !== null && hasPermission(permissionsFromString(effectivePerms), Permissions.MANAGE_ROLES));
+  const perms = effectivePerms !== null ? permissionsFromString(effectivePerms) : null;
+  const canManageRoles = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_ROLES));
+  // Discovery tab: MANAGE_SERVER. Join requests + Banned: KICK_MEMBERS ("Manage members").
+  const canManageServer = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_SERVER));
+  const canModerateMembers = isOwner || (perms !== null && hasPermission(perms, Permissions.KICK_MEMBERS));
+  const tab: Tab = activeTab ?? (canManageServer ? 'general' : 'members');
+
+  // The Members tab badge is fed by the socket events and by the list fetch;
+  // until step 4 wires the events, and on the first open of a session, the
+  // count is only known once the list has been fetched — do it as soon as
+  // we know the viewer may moderate, not when they reach the tab.
+  useEffect(() => {
+    if (!canModerateMembers) return;
+    fetchJoinRequests(serverId).catch((err) => { console.warn('[ServerSettings] Failed to fetch join requests:', err); });
+  }, [serverId, canModerateMembers, fetchJoinRequests]);
 
   if (!server) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className={`relative flex w-full flex-col rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up ${activeTab === 'roles' ? 'max-w-4xl' : 'max-w-2xl'}`} style={{ maxHeight: '80vh' }}>
+      <div className={`relative flex w-full flex-col rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up ${tab === 'roles' ? 'max-w-4xl' : 'max-w-2xl'}`} style={{ maxHeight: '80vh' }}>
         {/* Header */}
         <div className="flex items-center justify-between border-b border-vox-border px-6 py-4">
           <h2 className="text-lg font-bold text-vox-text-primary">{t('serverSettings.title')}</h2>
@@ -56,31 +77,55 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
 
         {/* Tabs */}
         <div className="flex border-b border-vox-border px-6">
-          <button
-            onClick={() => setActiveTab('general')}
-            className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'general'
-                ? 'text-vox-text-primary border-vox-accent-primary'
-                : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
-            }`}
-          >
-            {t('serverSettings.tabs.general')}
-          </button>
+          {canManageServer && (
+            <button
+              onClick={() => setActiveTab('general')}
+              className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                tab === 'general'
+                  ? 'text-vox-text-primary border-vox-accent-primary'
+                  : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+              }`}
+            >
+              {t('serverSettings.tabs.general')}
+            </button>
+          )}
           <button
             onClick={() => setActiveTab('members')}
             className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'members'
+              tab === 'members'
                 ? 'text-vox-text-primary border-vox-accent-primary'
                 : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
             }`}
           >
             {t('serverSettings.tabs.members')}
+            {canModerateMembers && pendingRequests > 0 && (
+              <span
+                className="ml-1.5 rounded-full bg-vox-accent-primary px-1.5 text-[10px] font-semibold text-vox-on-accent"
+                aria-label={t('server.joinRequests.pending', { count: pendingRequests })}
+                data-testid="members-tab-badge"
+              >
+                {pendingRequests}
+              </span>
+            )}
           </button>
+          {canManageServer && (
+            <button
+              onClick={() => setActiveTab('discovery')}
+              className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                tab === 'discovery'
+                  ? 'text-vox-text-primary border-vox-accent-primary'
+                  : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+              }`}
+              data-testid="tab-discovery"
+            >
+              {t('serverSettings.tabs.discovery')}
+            </button>
+          )}
           {canManageRoles && (
             <button
               onClick={() => setActiveTab('roles')}
               className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-                activeTab === 'roles'
+                tab === 'roles'
                   ? 'text-vox-text-primary border-vox-accent-primary'
                   : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
               }`}
@@ -91,7 +136,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
           <button
             onClick={() => setActiveTab('limits')}
             className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'limits'
+              tab === 'limits'
                 ? 'text-vox-text-primary border-vox-accent-primary'
                 : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
             }`}
@@ -102,11 +147,13 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6">
-          {activeTab === 'general' ? (
+          {tab === 'general' ? (
             <GeneralTab serverId={serverId} onClose={onClose} />
-          ) : activeTab === 'members' ? (
-            <MembersTab serverId={serverId} />
-          ) : activeTab === 'roles' ? (
+          ) : tab === 'members' ? (
+            <MembersTab serverId={serverId} canModerateMembers={canModerateMembers} />
+          ) : tab === 'discovery' ? (
+            <DiscoveryTab key={serverId} serverId={serverId} onGoToGeneral={() => setActiveTab('general')} />
+          ) : tab === 'roles' ? (
             <RoleEditor serverId={serverId} roles={roles} canManageRoles={canManageRoles} />
           ) : (
             <LimitsTab serverId={serverId} />
@@ -391,12 +438,14 @@ function SecureChannelsSection({ serverId }: { serverId: string }) {
   );
 }
 
-function MembersTab({ serverId }: { serverId: string }) {
+function MembersTab({ serverId, canModerateMembers }: { serverId: string; canModerateMembers: boolean }) {
   const { t } = useTranslation();
   const { members, roles, assignMemberRoles } = useServerStore();
   const currentUser = useAuthStore((s) => s.user);
   const currentMember = members.find((m) => m.userId === currentUser?.id);
   const [confirmAction, setConfirmAction] = useState<{ type: 'kick' | 'transfer'; userId: string } | null>(null);
+  const [banReason, setBanReason] = useState('');
+  const [removing, setRemoving] = useState(false);
   const [expandedMember, setExpandedMember] = useState<string | null>(null);
   const [savingRoles, setSavingRoles] = useState(false);
   const [search, setSearch] = useState('');
@@ -440,13 +489,22 @@ function MembersTab({ serverId }: { serverId: string }) {
     }
   }
 
-  async function handleKick(memberId: string) {
+  async function handleKick(memberId: string, name: string) {
+    if (removing) return;
+    const reason = banReason.trim();
+    const invalid = reason ? validateBanReason(reason) : null;
+    if (invalid) { toast.error(translateServerError(invalid, t)); return; }
+    setRemoving(true);
     try {
-      await useServerStore.getState().kickMember(serverId, memberId);
+      await useServerStore.getState().kickMember(serverId, memberId, reason || undefined);
+      toast.success(t('server.removeAndBanned', { name }));
       setConfirmAction(null);
+      setBanReason('');
       setExpandedMember(null);
     } catch (err) {
-      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToKick'));
+      toast.error(getTranslatedError(err, t, 'server.removeAndBanFailed'));
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -485,6 +543,14 @@ function MembersTab({ serverId }: { serverId: string }) {
 
   return (
     <div className="space-y-3">
+      {/* Moderation: join requests to decide, bans to lift (KICK_MEMBERS) */}
+      {canModerateMembers && (
+        <>
+          <JoinRequestsSection serverId={serverId} />
+          <BannedSection serverId={serverId} />
+        </>
+      )}
+
       {/* Search + Filter bar */}
       <div className="flex gap-2">
         <div className="relative flex-1">
@@ -670,23 +736,37 @@ function MembersTab({ serverId }: { serverId: string }) {
                     <div className="space-y-2 pt-1 border-t border-vox-border/30">
                       {/* Confirmation dialog */}
                       {isConfirmingKick && (
-                        <div className="rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/5 p-3">
+                        <div className="rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/5 p-3" data-testid="remove-and-ban-confirm">
                           <p className="text-xs text-vox-text-primary font-medium mb-1">
-                            {t('serverSettings.members.kickConfirm', { name: member.nickname || member.user.displayName })}
+                            {t('server.removeAndBanConfirm', { name: member.nickname || member.user.displayName })}
                           </p>
                           <p className="text-[11px] text-vox-text-muted mb-2.5">
-                            {t('serverSettings.members.kickDescription')}
+                            {t('server.removeAndBanDescription')}
                           </p>
+                          <input
+                            type="text"
+                            value={banReason}
+                            maxLength={LIMITS.SERVER_BAN_REASON_MAX}
+                            onChange={(e) => setBanReason(e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                            disabled={removing}
+                            placeholder={t('server.banReasonPlaceholder')}
+                            className="mb-2.5 w-full rounded-md border border-vox-border bg-vox-bg-secondary px-2.5 py-1.5 text-xs text-vox-text-primary placeholder:text-vox-text-muted focus:border-vox-accent-danger focus:outline-none"
+                            data-testid="ban-reason-input"
+                          />
                           <div className="flex items-center gap-2">
                             <button
-                              onClick={(e) => { e.stopPropagation(); handleKick(member.userId); }}
-                              className="rounded-md bg-vox-accent-danger px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-danger/80 transition-colors"
+                              onClick={(e) => { e.stopPropagation(); handleKick(member.userId, member.nickname || member.user.displayName); }}
+                              disabled={removing}
+                              className="rounded-md bg-vox-accent-danger px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-danger/80 transition-colors disabled:opacity-50"
+                              data-testid="remove-and-ban-submit"
                             >
-                              {t('serverSettings.members.kick')}
+                              {t('server.removeAndBan')}
                             </button>
                             <button
-                              onClick={(e) => { e.stopPropagation(); setConfirmAction(null); }}
-                              className="rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
+                              onClick={(e) => { e.stopPropagation(); setConfirmAction(null); setBanReason(''); }}
+                              disabled={removing}
+                              className="rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors disabled:opacity-50"
                             >
                               {t('common.cancel')}
                             </button>
@@ -724,10 +804,11 @@ function MembersTab({ serverId }: { serverId: string }) {
                         <div className="flex items-center gap-2">
                           {showKick && (
                             <button
-                              onClick={(e) => { e.stopPropagation(); setConfirmAction({ type: 'kick', userId: member.userId }); }}
+                              onClick={(e) => { e.stopPropagation(); setBanReason(''); setConfirmAction({ type: 'kick', userId: member.userId }); }}
                               className="rounded-md px-3 py-1.5 text-xs font-medium text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
+                              data-testid="remove-and-ban"
                             >
-                              {t('serverSettings.members.kickMember')}
+                              {t('server.removeAndBan')}
                             </button>
                           )}
                           {showTransfer && (

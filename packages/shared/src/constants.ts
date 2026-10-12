@@ -56,6 +56,11 @@ export const LIMITS = {
   THEME_MAX_PER_USER: 10,
   THEMES_PER_PAGE: 20,
   THEME_SVG_MAX_SIZE: 10_000, // 10KB max for custom SVG patterns
+  // Server discovery (docs/local/server-discovery-plan.html)
+  SERVER_DESCRIPTION_MAX: 300,
+  DISCOVERY_MAX_TAGS: 5,
+  SERVER_BAN_REASON_MAX: 300,
+  JOIN_REQUEST_MESSAGE_MAX: 300,
 } as const;
 
 /**
@@ -149,6 +154,79 @@ export const ANNOTATION_LIVE_POINTER_FADE_MS = 700;
 // saw, over the final ANNOTATION_FADE_OUT_MS. No timestamp travels.
 export const ANNOTATION_FADE_AFTER_MS = 3_000;
 export const ANNOTATION_FADE_OUT_MS = 800;
+
+// ─── Server discovery ────────────────────────────────────────────────────────
+// Decisions and reasons: docs/local/server-discovery-plan.html.
+
+/** The tag vocabulary. Fixed and lowercase on purpose: free-text tags need
+ *  moderation and cannot be translated or indexed cleanly. Grows by PR, and
+ *  every entry ships with a `discovery.tags.*` label in all 11 locales. */
+export const DISCOVERY_TAGS = [
+  'gaming', 'esports', 'open-source', 'programming', 'science', 'education',
+  'languages', 'music', 'art', 'film-tv', 'creators', 'community',
+] as const;
+export type DiscoveryTag = (typeof DISCOVERY_TAGS)[number];
+
+/** Who may join a listed server: approval-first (the default — with every
+ *  server listed by default, no community becomes an open door overnight)
+ *  or open (Join lands in the server at once). */
+export const SERVER_JOIN_MODES = ['approval', 'open'] as const;
+export type ServerJoinMode = (typeof SERVER_JOIN_MODES)[number];
+
+/** The four transparent sorts. Nothing is personalised. */
+export const DISCOVERY_SORTS = ['active', 'members', 'newest', 'name'] as const;
+export type DiscoverySort = (typeof DISCOVERY_SORTS)[number];
+
+/** Active = online × 10 + messages in 7 days × 1 + members × 1. The ONE place
+ *  the weights live: the stats job interpolates them into its UPDATE and the
+ *  card prints the three inputs, so the ranking is auditable by anyone. */
+export const DISCOVERY_SCORE_WEIGHTS = { online: 10, messages: 1, members: 1 } as const;
+
+/** Activity badges, from the same score and nothing else: a badge is a RANK
+ *  among the listed spaces that have any activity — the top half earns
+ *  Bronze, the top 1% Diamond. Lowest to highest. The cuts (the score at each
+ *  percentile) are recomputed hourly by the stats job; a tie at a cut is in. */
+export const DISCOVERY_TIERS = ['bronze', 'silver', 'gold', 'platinum', 'diamond'] as const;
+export type DiscoveryTier = (typeof DISCOVERY_TIERS)[number];
+/** The top fraction of active listed spaces each tier covers. */
+export const DISCOVERY_TIER_TOP_FRACTION: Record<DiscoveryTier, number> = {
+  bronze: 0.5, silver: 0.25, gold: 0.1, platinum: 0.03, diamond: 0.01,
+};
+/** No badges at all below this many active listed spaces: six servers have no "top 1%". */
+export const DISCOVERY_TIER_MIN_POPULATION = 10;
+export function isDiscoveryTier(value: unknown): value is DiscoveryTier {
+  return typeof value === 'string' && (DISCOVERY_TIERS as readonly string[]).includes(value);
+}
+
+export const DISCOVERY_PAGE_SIZE = 24;
+export const DISCOVERY_MAX_PAGE_SIZE = 48;
+/** Keyset depth cap — beyond it the answer is "refine your search". */
+export const DISCOVERY_MAX_PAGES = 50;
+/** Totals are never a full count: count over a subquery limited to CAP + 1
+ *  rows, shown as "1,000+". */
+export const DISCOVERY_TOTAL_CAP = 1000;
+/** 3 characters so the trigram index is usable; 64 bounds the ILIKE pattern. */
+export const DISCOVERY_SEARCH_MIN = 3;
+export const DISCOVERY_SEARCH_MAX = 64;
+
+/** A declined request is the cooldown marker; the sweep deletes it after this. */
+export const JOIN_REQUEST_DECLINE_COOLDOWN_DAYS = 7;
+/** Pending requests older than this are deleted; the user can ask again. */
+export const JOIN_REQUEST_PENDING_TTL_DAYS = 30;
+
+/** Characters that text shown to STRANGERS (a server description, a join
+ *  request message, a ban reason) may never carry: control characters and the
+ *  bidi-override / zero-width / invisible format characters that let text
+ *  visually read as something it is not — ANNOTATION_TEXT_FORBIDDEN_RE's set
+ *  plus the C1 controls, the soft hyphen, the Arabic and Mongolian format
+ *  marks, the line/paragraph separators, the interlinear annotation and
+ *  noncharacter block, and the TAG characters (U+E0000–E007F, invisible text
+ *  carriers — hence the `u` flag, without which no astral code point can be
+ *  matched at all). The newline (U+000A) is allowed because descriptions are
+ *  multi-line. Non-global on purpose (`.test()` on a /g regex mutates
+ *  lastIndex). */
+// eslint-disable-next-line no-control-regex
+export const DISCOVERY_TEXT_FORBIDDEN_RE = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\uFFFE\uFFFF\u{E0000}-\u{E007F}]/u;
 
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
 export type ThemePatternType = (typeof THEME_PATTERN_TYPES)[number];
@@ -246,6 +324,13 @@ export const WS_EVENTS = {
   MEMBER_ROLE_UPDATED: 'member:role_updated',
   MEMBER_KICKED: 'member:kicked',
   SERVER_DELETED: 'server:deleted',
+  // Server discovery join requests. The first two go ONLY to the moderator
+  // audience (user:{id} rooms of KICK_MEMBERS / ADMINISTRATOR holders + the
+  // owner — never server:{id}); the last two go to the requester's user room.
+  SERVER_JOIN_REQUEST: 'server:join_request',
+  SERVER_JOIN_REQUEST_RESOLVED: 'server:join_request_resolved',
+  SERVER_JOIN_APPROVED: 'server:join_approved',
+  SERVER_JOIN_DECLINED: 'server:join_declined',
   VOICE_SERVER_MUTE: 'voice:server_mute',
   VOICE_SERVER_DEAFEN: 'voice:server_deafen',
   VOICE_FORCE_MOVE: 'voice:force_move',
