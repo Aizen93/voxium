@@ -1392,6 +1392,7 @@
       "community": "Сообщество"
     },
     "card": {
+      "menu": "Ещё действия",
       "featured": "Рекомендуем",
       "noDescription": "Описания пока нет.",
       "online_one": "{{count}} онлайн",

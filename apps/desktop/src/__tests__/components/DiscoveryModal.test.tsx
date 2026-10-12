@@ -296,7 +296,9 @@ describe('DiscoveryModal', () => {
     await act(async () => { (cardEl('m').querySelector('[data-testid="discovery-open"]') as HTMLButtonElement).click(); });
     expect(S.setActiveServer).toHaveBeenCalledWith('m');
     expect(onClose).toHaveBeenCalledTimes(1);
-    await act(async () => { (cardEl('m').querySelector('[data-testid="discovery-report"]') as HTMLButtonElement).click(); });
+    // the report action sits in the card's "…" menu
+    await act(async () => { (cardEl('m').querySelector('[data-testid="discovery-card-menu"]') as HTMLButtonElement).click(); });
+    await act(async () => { (document.body.querySelector('[data-testid="discovery-report"]') as HTMLButtonElement).click(); });
     expect(q('[data-testid="report-marker"]')!.textContent).toBe('m');
   });
 

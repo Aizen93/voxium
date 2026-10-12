@@ -1,9 +1,10 @@
 import { useTranslation } from 'react-i18next';
-import { Star, Users, Radio, MessageSquare } from 'lucide-react';
+import { Star, Users, Radio, MessageSquare, Flag } from 'lucide-react';
 import { isDiscoveryTier } from '@voxium/shared';
 import type { DiscoveryServer } from '@voxium/shared';
 import { ServerIcon } from '../server/ServerIcon';
 import { TierBadge } from './TierBadge';
+import { DiscoveryCardMenu } from './DiscoveryCardMenu';
 
 /**
  * One directory card — the SAME component in Explore and in the owner's
@@ -77,15 +78,12 @@ export function DiscoveryCard({ server, preview = false, busy = false, onJoin, o
           </p>
         </div>
         {!preview && onReport && (
-          <button
-            type="button"
-            onClick={() => onReport(server)}
-            className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary"
-            aria-label={t('discovery.card.report')}
-            data-testid="discovery-report"
-          >
-            …
-          </button>
+          <DiscoveryCardMenu
+            label={t('discovery.card.menu')}
+            items={[
+              { key: 'report', label: t('discovery.card.report'), icon: Flag, danger: true, testid: 'discovery-report', onSelect: () => onReport(server) },
+            ]}
+          />
         )}
       </div>
 

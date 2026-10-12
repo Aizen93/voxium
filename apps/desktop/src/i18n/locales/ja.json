@@ -1386,6 +1386,7 @@
       "community": "コミュニティ"
     },
     "card": {
+      "menu": "その他の操作",
       "featured": "おすすめ",
       "noDescription": "まだ説明がありません。",
       "online_other": "{{count}}人がオンライン",

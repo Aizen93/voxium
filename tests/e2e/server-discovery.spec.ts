@@ -292,7 +292,8 @@ test.describe('Server discovery — Explore and the request flow', () => {
 
     // ── B reports the listing from the card ──
     const reportReason = `Listing misrepresents the space ${stamp}`;
-    await featuredCard.getByTestId('discovery-report').click();
+    await featuredCard.getByTestId('discovery-card-menu').click();
+    await b.page.getByTestId('discovery-report').click();
     const reportModal = b.page.getByTestId('report-modal');
     await expect(reportModal).toBeVisible();
     await reportModal.locator('textarea').fill(reportReason);

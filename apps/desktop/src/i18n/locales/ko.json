@@ -1386,6 +1386,7 @@
       "community": "커뮤니티"
     },
     "card": {
+      "menu": "추가 작업",
       "featured": "추천",
       "noDescription": "아직 설명이 없습니다.",
       "online_other": "{{count}}명 온라인",

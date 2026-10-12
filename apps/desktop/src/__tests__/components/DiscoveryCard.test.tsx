@@ -114,14 +114,61 @@ describe('DiscoveryCard', () => {
     expect(btn.disabled).toBe(true);
     act(() => { btn.click(); });
     expect(onJoin).not.toHaveBeenCalled();
-    expect(q('[data-testid="discovery-report"]')).toBeNull();
+    expect(q('[data-testid="discovery-card-menu"]')).toBeNull();
   });
 
-  it('renders the report action only when a handler is given, and at most five tags', () => {
-    const onReport = vi.fn();
-    render(<DiscoveryCard server={{ ...base, tags: ['gaming', 'esports', 'music', 'art', 'science', 'community'] }} onReport={onReport} />);
-    act(() => { q('[data-testid="discovery-report"]')!.click(); });
-    expect(onReport).toHaveBeenCalledTimes(1);
+  it('renders the "…" menu only when a handler is given, and at most five tags', () => {
+    render(<DiscoveryCard server={{ ...base, tags: ['gaming', 'esports', 'music', 'art', 'science', 'community'] }} />);
+    expect(q('[data-testid="discovery-card-menu"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid="discovery-card-tags"] span')).toHaveLength(5);
+    render(<DiscoveryCard server={base} onReport={vi.fn()} />);
+    expect(q('[data-testid="discovery-card-menu"]')).not.toBeNull();
+  });
+
+  it('the "…" menu is a list: it opens under the button, Report is one entry, choosing it reports and closes', () => {
+    const onReport = vi.fn();
+    render(<DiscoveryCard server={base} onReport={onReport} />);
+    const button = q('[data-testid="discovery-card-menu"]') as HTMLButtonElement;
+    expect(button.getAttribute('aria-haspopup')).toBe('menu');
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.body.querySelector('[data-testid="discovery-card-menu-list"]')).toBeNull();
+
+    act(() => { button.click(); });
+    const list = document.body.querySelector('[data-testid="discovery-card-menu-list"]')!;
+    expect(list).not.toBeNull();
+    expect(list.getAttribute('role')).toBe('menu');
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    const items = list.querySelectorAll('[role="menuitem"]');
+    expect(items).toHaveLength(1);
+    expect(items[0].getAttribute('data-testid')).toBe('discovery-report');
+    expect(items[0].textContent).toContain('discovery.card.report');
+
+    act(() => { (items[0] as HTMLButtonElement).click(); });
+    expect(onReport).toHaveBeenCalledWith(base);
+    expect(document.body.querySelector('[data-testid="discovery-card-menu-list"]')).toBeNull();
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('the menu closes on Escape (and keeps the key from the Explore modal) and on a press outside', () => {
+    render(<DiscoveryCard server={base} onReport={vi.fn()} />);
+    const button = q('[data-testid="discovery-card-menu"]') as HTMLButtonElement;
+    act(() => { button.click(); });
+    expect(document.body.querySelector('[data-testid="discovery-card-menu-list"]')).not.toBeNull();
+    // a bubble-phase listener (how the Explore modal listens) must not see the Escape the menu consumed
+    const outer = vi.fn();
+    document.addEventListener('keydown', outer);
+    act(() => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    document.removeEventListener('keydown', outer);
+    expect(outer).not.toHaveBeenCalled();
+    expect(document.body.querySelector('[data-testid="discovery-card-menu-list"]')).toBeNull();
+
+    act(() => { button.click(); });
+    expect(document.body.querySelector('[data-testid="discovery-card-menu-list"]')).not.toBeNull();
+    act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
+    expect(document.body.querySelector('[data-testid="discovery-card-menu-list"]')).toBeNull();
+    // a press on the button itself toggles rather than closing-then-reopening
+    act(() => { button.click(); });
+    act(() => { button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
+    expect(document.body.querySelector('[data-testid="discovery-card-menu-list"]')).not.toBeNull();
   });
 });

@@ -1392,6 +1392,7 @@
       "community": "Спільнота"
     },
     "card": {
+      "menu": "Більше дій",
       "featured": "Рекомендовано",
       "noDescription": "Опису ще немає.",
       "online_one": "{{count}} онлайн",

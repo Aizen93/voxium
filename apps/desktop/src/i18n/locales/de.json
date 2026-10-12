@@ -1388,6 +1388,7 @@
       "community": "Community"
     },
     "card": {
+      "menu": "Weitere Aktionen",
       "featured": "Empfohlen",
       "noDescription": "Noch keine Beschreibung.",
       "online_one": "{{count}} online",
