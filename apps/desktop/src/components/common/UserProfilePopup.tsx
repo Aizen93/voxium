@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { useServerStore } from '../../stores/serverStore';
+import { useMember } from '../../hooks/useMember';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
@@ -58,7 +59,9 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     offline: t('userProfile.status.offline'),
   };
 
-  const member = useServerStore((s) => s.members.find((m) => m.userId === userId));
+  // The membership row (nickname, roles) — asked for when the client has
+  // none, which on a big server is anyone outside the People panel's slice
+  const member = useMember(userId);
   const channels = useServerStore((s) => s.channels);
   const channelUsers = useVoiceStore((s) => s.channelUsers);
 

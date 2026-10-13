@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
-import { useServerStore } from '../../stores/serverStore';
+import { useServerStore, type ServerSettingsTab } from '../../stores/serverStore';
+import { useConnectionStatus } from '../../hooks/useConnectionStatus';
+import { withOwnPresence } from '../../utils/peopleGroups';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
@@ -248,6 +250,12 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
 }) {
   const { t } = useTranslation();
   const members = useServerStore((s) => s.members);
+  // A participant with no row (outside a big server's slice): fetched, batched
+  useEffect(() => {
+    const known = new Set(members.map((m) => m.userId));
+    const missing = voiceUsers.filter((vu) => !known.has(vu.id)).map((vu) => vu.id);
+    if (missing.length) useServerStore.getState().ensureMembers(missing);
+  }, [voiceUsers, members]);
 
   return (
     <div className="space-y-0.5 px-1.5">
@@ -412,12 +420,23 @@ function CategoryOverlay({ category }: { category: Category }) {
 
 export function ChannelSidebar() {
   const { t } = useTranslation();
-  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, unreadCounts, reorderCategories, reorderChannels, fetchEffectivePermissions, leaveSecureChannel } = useServerStore();
+  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, people, unreadCounts, reorderCategories, reorderChannels, fetchEffectivePermissions, leaveSecureChannel } = useServerStore();
   const { joinChannel, activeChannelId: voiceChannelId, channelUsers } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showServerSettings, setShowServerSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<ServerSettingsTab | undefined>(undefined);
+  const connectionStatus = useConnectionStatus();
+  // Another panel asked for the settings on a tab (the People panel's
+  // "Browse all members"): this sidebar owns the modal, so it opens it
+  const settingsRequest = useServerStore((s) => s.settingsRequest);
+  useEffect(() => {
+    if (!settingsRequest || settingsRequest.serverId !== activeServerId) return;
+    setSettingsTab(settingsRequest.tab);
+    setShowServerSettings(true);
+    useServerStore.getState().clearSettingsRequest();
+  }, [settingsRequest, activeServerId]);
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [createChannelCategoryId, setCreateChannelCategoryId] = useState<string | null>(null);
   const [newChannelName, setNewChannelName] = useState('');
@@ -809,7 +828,12 @@ export function ChannelSidebar() {
 
   // ─── Render ───────────────────────────────────────────────────────────
 
-  const onlineCount = members.filter((m) => m.user.status && m.user.status !== 'offline').length;
+  // Everyone loaded: count the rows (our own reads online while the socket is
+  // up — nobody echoes our presence to us); the online slice of a big server:
+  // the server's figure, moved by the events since
+  const onlineCount = people.full
+    ? withOwnPresence(members, user?.id, connectionStatus === 'connected').filter((m) => m.user.status && m.user.status !== 'offline').length
+    : people.onlineCount;
 
   return (
     <div className="flex h-full w-full flex-col bg-vox-channel">
@@ -1089,7 +1113,7 @@ export function ChannelSidebar() {
         <InviteModal serverId={activeServerId} onClose={() => setShowInviteModal(false)} />
       )}
       {showServerSettings && activeServerId && (
-        <ServerSettingsModal serverId={activeServerId} onClose={() => setShowServerSettings(false)} />
+        <ServerSettingsModal serverId={activeServerId} initialTab={settingsTab} onClose={() => { setShowServerSettings(false); setSettingsTab(undefined); }} />
       )}
 
       {/* Channel right-click context menu */}

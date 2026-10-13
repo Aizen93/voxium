@@ -322,7 +322,9 @@
       "noResults": "لا يوجد أعضاء مطابقون لبحثك",
       "noMembers": "لم يتم العثور على أعضاء",
       "owner": "المالك",
-      "admin": "مدير"
+      "admin": "مدير",
+      "loadMore": "تحميل المزيد",
+      "failedToLoad": "تعذر تحميل الأعضاء"
     },
     "limits": {
       "description": "حدود الموارد لهذا الخادم. يتم تكوينها من قبل مديري المنصة.",
@@ -1300,7 +1302,14 @@
     "inVoiceStatus": "في القناة الصوتية",
     "dnd": "عدم الإزعاج",
     "awayStatus": "بعيد",
-    "offlineStatus": "غير متصل"
+    "offlineStatus": "غير متصل",
+    "moreOnline_zero": "ولا أحد آخر متصل",
+    "moreOnline_one": "وشخص آخر متصل",
+    "moreOnline_two": "وشخصان آخران متصلان",
+    "moreOnline_few": "و{{count}} آخرين متصلين",
+    "moreOnline_many": "و{{count}} آخرين متصلين",
+    "moreOnline_other": "و{{count}} آخرين متصلين",
+    "browseAll": "تصفح جميع الأعضاء"
   },
   "search": {
     "placeholder": "البحث في الرسائل…"

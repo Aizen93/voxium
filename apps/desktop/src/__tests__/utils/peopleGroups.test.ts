@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { groupPeopleByPresence, voicePresenceKind } from '../../utils/peopleGroups';
+import { groupPeopleByPresence, presentCount, voicePresenceKind, withOwnPresence } from '../../utils/peopleGroups';
 import type { Channel, ServerMember, VoiceUser } from '@voxium/shared';
 
 const member = (id: string, name: string, status: string, nickname: string | null = null): ServerMember =>
@@ -85,6 +85,39 @@ describe('groupPeopleByPresence', () => {
     const noStatus = [member('u9', 'Nostatus', undefined as unknown as string)];
     const groups = groupPeopleByPresence(noStatus, [], new Map());
     expect(groups.offline.map((m) => m.userId)).toEqual(['u9']);
+  });
+
+  it('with includeOffline false (a big server: the rows are the online slice) offline rows are left out entirely', () => {
+    const groups = groupPeopleByPresence(members, [voiceChannel('vc1', 'Lounge')], new Map([['vc1', [vu('u5')]]]), { includeOffline: false });
+    expect(groups.offline).toEqual([]);
+    expect(groups.active.map((m) => m.userId)).toEqual(['u1', 'u2']);
+    expect(groups.away.map((m) => m.userId)).toEqual(['u3', 'u4']);
+    // someone in voice is present whatever their stored status says
+    expect(groups.voiceSections[0].entries.map((e) => e.member.userId)).toEqual(['u5']);
+    expect(presentCount(groups)).toBe(5);
+  });
+
+  it('presentCount is the rows in voice, active and away — never the offline ones', () => {
+    expect(presentCount(groupPeopleByPresence(members, [], new Map()))).toBe(4);
+  });
+});
+
+describe('withOwnPresence', () => {
+  const rows = [member('u1', 'Alice', 'offline'), member('u2', 'Bob', 'online')];
+
+  it('reads the viewer\'s offline row as online while connected, in a copy that leaves the other rows alone', () => {
+    const next = withOwnPresence(rows, 'u1', true);
+    expect(next).not.toBe(rows);
+    expect(next[0].user.status).toBe('online');
+    expect(next[1]).toBe(rows[1]);
+    expect(rows[0].user.status).toBe('offline');
+  });
+
+  it('is the same array when nothing has to change: disconnected, no viewer, the viewer absent, or already online', () => {
+    expect(withOwnPresence(rows, 'u1', false)).toBe(rows);
+    expect(withOwnPresence(rows, undefined, true)).toBe(rows);
+    expect(withOwnPresence(rows, 'u9', true)).toBe(rows);
+    expect(withOwnPresence(rows, 'u2', true)).toBe(rows);
   });
 });
 

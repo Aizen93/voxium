@@ -322,7 +322,9 @@
       "noResults": "Жоден учасник не відповідає вашому запиту",
       "noMembers": "Учасників не знайдено",
       "owner": "Власник",
-      "admin": "Адміністратор"
+      "admin": "Адміністратор",
+      "loadMore": "Завантажити ще",
+      "failedToLoad": "Не вдалося завантажити учасників"
     },
     "limits": {
       "description": "Ліміти ресурсів для цього сервера. Налаштовуються адміністраторами платформи.",
@@ -1298,7 +1300,12 @@
     "inVoiceStatus": "У голосовому",
     "dnd": "Не турбувати",
     "awayStatus": "Відійшов",
-    "offlineStatus": "Не в мережі"
+    "offlineStatus": "Не в мережі",
+    "moreOnline_one": "і ще {{count}} в мережі",
+    "moreOnline_few": "і ще {{count}} в мережі",
+    "moreOnline_many": "і ще {{count}} в мережі",
+    "moreOnline_other": "і ще {{count}} в мережі",
+    "browseAll": "Усі учасники"
   },
   "search": {
     "placeholder": "Пошук повідомлень…"

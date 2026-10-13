@@ -322,7 +322,9 @@
       "noResults": "Keine Mitglieder entsprechen deiner Suche",
       "noMembers": "Keine Mitglieder gefunden",
       "owner": "Eigentümer",
-      "admin": "Administrator"
+      "admin": "Administrator",
+      "loadMore": "Mehr laden",
+      "failedToLoad": "Mitglieder konnten nicht geladen werden"
     },
     "limits": {
       "description": "Ressourcenlimits für diesen Server. Diese werden von Plattform-Administratoren konfiguriert.",
@@ -1296,7 +1298,10 @@
     "inVoiceStatus": "Im Sprachkanal",
     "dnd": "Nicht stören",
     "awayStatus": "Abwesend",
-    "offlineStatus": "Offline"
+    "offlineStatus": "Offline",
+    "moreOnline_one": "und {{count}} weitere Person online",
+    "moreOnline_other": "und {{count}} weitere online",
+    "browseAll": "Alle Mitglieder durchsuchen"
   },
   "search": {
     "placeholder": "Nachrichten suchen…"

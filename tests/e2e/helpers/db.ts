@@ -188,3 +188,42 @@ export async function disconnectDb() {
     prisma = null;
   }
 }
+
+/**
+ * Seed `count` verified, consented, OFFLINE members straight into a server —
+ * the way a big community looks to the member-list code — and keep the
+ * server's inline member count honest. Returns the usernames (all start with
+ * `prefix`, so `deleteSeededUsers(prefix)` can remove them).
+ */
+export async function seedServerMembers(serverId: string, count: number, prefix: string): Promise<string[]> {
+  const db = getPrisma();
+  const now = new Date();
+  const users = await db.user.createManyAndReturn({
+    data: Array.from({ length: count }, (_, i) => {
+      const username = `${prefix}${i.toString(36).padStart(3, '0')}`;
+      return {
+        username,
+        displayName: username,
+        email: `${username}@test.local`,
+        emailCanonical: `${username}@test.local`,
+        password: 'seeded-no-login',
+        emailVerified: true,
+        emailVerifiedAt: now,
+        termsAcceptedAt: now,
+        privacyAcceptedAt: now,
+        status: 'offline',
+      };
+    }),
+    select: { id: true, username: true },
+  });
+  await db.serverMember.createMany({ data: users.map((u) => ({ userId: u.id, serverId, role: 'member' })) });
+  await db.server.update({ where: { id: serverId }, data: { memberCount: { increment: users.length } } });
+  return users.map((u) => u.username);
+}
+
+/** Remove the users `seedServerMembers` created (memberships cascade). */
+export async function deleteSeededUsers(prefix: string): Promise<number> {
+  const db = getPrisma();
+  const { count } = await db.user.deleteMany({ where: { username: { startsWith: prefix } } });
+  return count;
+}

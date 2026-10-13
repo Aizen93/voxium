@@ -322,7 +322,9 @@
       "noResults": "Aucun membre ne correspond à votre recherche",
       "noMembers": "Aucun membre trouvé",
       "owner": "Propriétaire",
-      "admin": "Administrateur"
+      "admin": "Administrateur",
+      "loadMore": "Charger plus",
+      "failedToLoad": "Impossible de charger les membres"
     },
     "limits": {
       "description": "Limites de ressources pour ce serveur. Elles sont configurées par les administrateurs de la plateforme.",
@@ -1296,7 +1298,10 @@
     "inVoiceStatus": "En vocal",
     "dnd": "Ne pas déranger",
     "awayStatus": "Absent",
-    "offlineStatus": "Hors ligne"
+    "offlineStatus": "Hors ligne",
+    "moreOnline_one": "et {{count}} autre en ligne",
+    "moreOnline_other": "et {{count}} autres en ligne",
+    "browseAll": "Parcourir tous les membres"
   },
   "search": {
     "placeholder": "Rechercher des messages…"
