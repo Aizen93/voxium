@@ -152,7 +152,9 @@ export async function cacheSentChannelPlaintext(
 /**
  * Client-side search of a secure channel: the server is structurally blind to
  * ciphertext, so results come from this device's plaintext cache. Authors are
- * resolved from the server member list (channel members are server members).
+ * resolved from the channel's own member list first (it names everyone in
+ * the channel), then from the server's known rows — on a big server those
+ * are only the People panel's slice plus what was looked up.
  */
 export async function searchEncryptedChannelHistory(
   channelId: string,
@@ -163,12 +165,15 @@ export async function searchEncryptedChannelHistory(
   const { useAuthStore } = await import('../../stores/authStore');
   const { useServerStore } = await import('../../stores/serverStore');
   const me = useAuthStore.getState().user;
-  const members = useServerStore.getState().members;
+  const { members, secureChannelMembers } = useServerStore.getState();
+  const channelMembers = secureChannelMembers[channelId] ?? [];
 
   const hits = (await getE2EService(userId).searchDecrypted(e2eChannelScope(channelId), query))
     .filter((hit) => hit.createdAt);
   return hits.map((hit) => {
-    const member = hit.authorId ? members.find((m) => m.userId === hit.authorId) : undefined;
+    const member = hit.authorId
+      ? channelMembers.find((m) => m.userId === hit.authorId) ?? members.find((m) => m.userId === hit.authorId)
+      : undefined;
     const author = hit.authorId === userId && me
       ? { id: me.id, username: me.username, displayName: me.displayName, avatarUrl: me.avatarUrl }
       : member

@@ -19,6 +19,7 @@ import { SupporterBadge } from '../common/SupporterBadge';
 import { ReportModal } from './ReportModal';
 import { useAuthStore } from '../../stores/authStore';
 import { useServerStore } from '../../stores/serverStore';
+import { useMember } from '../../hooks/useMember';
 
 interface Props {
   message: Message;
@@ -141,8 +142,11 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   const currentUserId = useAuthStore((s) => s.user?.id);
   const isMentioned = !!(message.mentions && currentUserId && message.mentions.some((m) => m.id === currentUserId));
 
-  // Look up member for nickname and role color (only applies in server context)
-  const members = useServerStore((s) => s.members);
+  // The author's membership row, for the nickname and the role color (server
+  // context only). On a big server the client may not hold it: the hook asks
+  // for it, batched, and the message renders with the author it carries
+  // until the row lands.
+  const authorMember = useMember(channelId ? message.author.id : undefined) ?? null;
   // Messages in a SECURE channel cannot be reported: their content is not
   // the server's to read, so there is nothing a platform moderator could act
   // on — the members deal with each other, and a member who wants the channel
@@ -152,10 +156,6 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   // (A primitive selector: `.find(...)?.secure === true` never allocates.)
   const inSecureChannel = useServerStore(
     (s) => channelId !== undefined && s.channels.find((c) => c.id === channelId)?.secure === true,
-  );
-  const authorMember = useMemo(
-    () => channelId ? members.find((m) => m.userId === message.author.id) ?? null : null,
-    [members, channelId, message.author.id],
   );
   const authorDisplayName = authorMember?.nickname || message.author.displayName;
   const authorRoleColor = useMemo(

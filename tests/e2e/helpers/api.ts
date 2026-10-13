@@ -283,3 +283,14 @@ export async function trySetServerDiscovery(
   const body = await res.json().catch(() => ({}));
   return { status: res.status(), error: body.error as string | undefined };
 }
+
+/** Delete a server (owner only) — used by tests that seeded a large membership to leave the dev DB tidy. */
+export async function deleteServer(request: APIRequestContext, token: string, serverId: string) {
+  const res = await request.delete(`${API_URL}/servers/${serverId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok()) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Delete server failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
+}

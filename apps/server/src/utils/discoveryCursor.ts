@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { DISCOVERY_SORTS, DISCOVERY_MAX_PAGE_SIZE, type DiscoverySort } from '@voxium/shared';
+import { encodeSignedCursor, decodeSignedCursor } from './signedCursor';
 
 /**
  * The directory pages with KEYSET cursors, never OFFSET: page 40 costs the
@@ -18,8 +19,9 @@ import { DISCOVERY_SORTS, DISCOVERY_MAX_PAGE_SIZE, type DiscoverySort } from '@v
  * deleted, hidden or re-ranked between two pages (an activity score is
  * rewritten by the stats cycle, a member count moves on every join).
  *
- * The key derives from JWT_SECRET like the registration PoW key: boot
- * already refuses to start without it, and no second secret to rotate.
+ * The signing lives in signedCursor.ts (one implementation for every
+ * listing, each under its own scope); this module owns the discovery
+ * payload and its validation.
  */
 export interface DiscoveryCursor {
   sort: DiscoverySort;
@@ -37,17 +39,8 @@ export interface DiscoveryCursor {
   page: number;
 }
 
-const CURSOR_MAX_LEN = 512;
 const KEY_MAX_LEN = 256;
-const TOKEN_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
-
-function cursorKey(): Buffer {
-  return crypto.createHash('sha256').update(`voxium-discovery-cursor:${process.env.JWT_SECRET!}`).digest();
-}
-
-function sign(payload: string): string {
-  return crypto.createHmac('sha256', cursorKey()).update(payload).digest('base64url');
-}
+const SCOPE = 'discovery';
 
 /** sha1 hex of a search query — the cursor binding and the cache key both use it. */
 export function hashDiscoveryQuery(q: string): string {
@@ -55,8 +48,7 @@ export function hashDiscoveryQuery(q: string): string {
 }
 
 export function encodeDiscoveryCursor(cursor: DiscoveryCursor): string {
-  const payload = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
-  return `${payload}.${sign(payload)}`;
+  return encodeSignedCursor(SCOPE, cursor);
 }
 
 function validKey(sort: DiscoverySort, key: unknown): key is string | number {
@@ -83,25 +75,8 @@ export function decodeDiscoveryCursor(
   token: string,
   expected: { sort: DiscoverySort; tag: string; q: string; limit: number },
 ): DiscoveryCursor | null {
-  // Charset first: only base64url and one dot can be ours, and it keeps the
-  // signature compare on equal BYTE lengths (a multi-byte character has the
-  // same string length as an ASCII one and would make timingSafeEqual throw).
-  if (typeof token !== 'string' || token.length === 0 || token.length > CURSOR_MAX_LEN || !TOKEN_RE.test(token)) return null;
-  const dot = token.indexOf('.');
-  const payload = token.slice(0, dot);
-  const mac = Buffer.from(token.slice(dot + 1), 'utf8');
-  const good = Buffer.from(sign(payload), 'utf8');
-  if (mac.length !== good.length) return null;
-  if (!crypto.timingSafeEqual(mac, good)) return null;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== 'object' || parsed === null) return null;
-  const c = parsed as Record<string, unknown>;
+  const c = decodeSignedCursor(SCOPE, token);
+  if (!c) return null;
   if (typeof c.sort !== 'string' || !(DISCOVERY_SORTS as readonly string[]).includes(c.sort)) return null;
   const sort = c.sort as DiscoverySort;
   if (typeof c.tag !== 'string' || typeof c.q !== 'string' || typeof c.id !== 'string' || c.id.length === 0) return null;

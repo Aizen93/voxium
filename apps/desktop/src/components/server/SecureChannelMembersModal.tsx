@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useMemberSearch, memberMatches } from '../../hooks/useMemberSearch';
 import { useTranslation } from 'react-i18next';
 import { useServerStore, NO_SECURE_MEMBERS } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Lock, UserPlus, UserMinus, Crown } from 'lucide-react';
+import { X, Lock, UserPlus, UserMinus, Crown, Search } from 'lucide-react';
 import { E2E_LIMITS } from '@voxium/shared';
 import { getTranslatedError } from '../../utils/serverErrors';
 
@@ -35,6 +36,7 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
   const [error, setError] = useState('');
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
   const [showInvitePicker, setShowInvitePicker] = useState(false);
+  const [inviteQuery, setInviteQuery] = useState('');
   const [name, setName] = useState(channelName);
   const [renaming, setRenaming] = useState(false);
 
@@ -65,9 +67,12 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
 
   const isCreator = channelMembers.some((m) => m.userId === user?.id && m.isCreator);
   const memberIds = useMemo(() => new Set(channelMembers.map((m) => m.userId)), [channelMembers]);
+  // No text: the rows the client holds (everyone, on a small server). Text:
+  // the server's search — the rows here are only a slice of a big server.
+  const searched = useMemberSearch(serverId, inviteQuery);
   const invitable = useMemo(
-    () => serverMembers.filter((m) => !memberIds.has(m.userId)),
-    [serverMembers, memberIds],
+    () => (searched ?? serverMembers.filter((m) => memberMatches(m, inviteQuery))).filter((m) => !memberIds.has(m.userId)),
+    [searched, serverMembers, memberIds, inviteQuery],
   );
   const atCap = channelMembers.length >= E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP;
 
@@ -191,6 +196,19 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
               </button>
             )}
 
+            {isCreator && showInvitePicker && (
+              <div className="relative mb-2">
+                <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-vox-text-muted" />
+                <input
+                  type="text"
+                  className="input w-full pl-8 text-sm"
+                  placeholder={t('secureChannel.searchMembers')}
+                  value={inviteQuery}
+                  onChange={(e) => setInviteQuery(e.target.value)}
+                  data-testid="secure-invite-search"
+                />
+              </div>
+            )}
             {isCreator && showInvitePicker && (
               <div className="max-h-48 overflow-y-auto rounded-lg border border-vox-border">
                 {invitable.length === 0 && (

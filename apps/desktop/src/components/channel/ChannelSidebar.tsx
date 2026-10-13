@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { useServerStore } from '../../stores/serverStore';
+import { useConnectionStatus } from '../../hooks/useConnectionStatus';
+import { headerOnlineCount } from '../../utils/peopleGroups';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
@@ -248,6 +250,12 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
 }) {
   const { t } = useTranslation();
   const members = useServerStore((s) => s.members);
+  // A participant with no row (outside a big server's slice): fetched, batched
+  useEffect(() => {
+    const known = new Set(members.map((m) => m.userId));
+    const missing = voiceUsers.filter((vu) => !known.has(vu.id)).map((vu) => vu.id);
+    if (missing.length) useServerStore.getState().ensureMembers(missing);
+  }, [voiceUsers, members]);
 
   return (
     <div className="space-y-0.5 px-1.5">
@@ -412,12 +420,13 @@ function CategoryOverlay({ category }: { category: Category }) {
 
 export function ChannelSidebar() {
   const { t } = useTranslation();
-  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, unreadCounts, reorderCategories, reorderChannels, fetchEffectivePermissions, leaveSecureChannel } = useServerStore();
+  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, people, unreadCounts, reorderCategories, reorderChannels, fetchEffectivePermissions, leaveSecureChannel } = useServerStore();
   const { joinChannel, activeChannelId: voiceChannelId, channelUsers } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showServerSettings, setShowServerSettings] = useState(false);
+  const connectionStatus = useConnectionStatus();
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [createChannelCategoryId, setCreateChannelCategoryId] = useState<string | null>(null);
   const [newChannelName, setNewChannelName] = useState('');
@@ -809,7 +818,11 @@ export function ChannelSidebar() {
 
   // ─── Render ───────────────────────────────────────────────────────────
 
-  const onlineCount = members.filter((m) => m.user.status && m.user.status !== 'offline').length;
+  // The People panel's rule: the rows when everyone is loaded, the server's
+  // figure for a big server's slice, never below the rows that read online
+  // (our own reads online while the socket is up — nobody echoes our
+  // presence to us)
+  const onlineCount = headerOnlineCount(members, people, user?.id, connectionStatus === 'connected');
 
   return (
     <div className="flex h-full w-full flex-col bg-vox-channel">

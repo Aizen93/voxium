@@ -322,7 +322,10 @@
       "noResults": "Nenhum membro corresponde à sua pesquisa",
       "noMembers": "Nenhum membro encontrado",
       "owner": "Proprietário",
-      "admin": "Administrador"
+      "admin": "Administrador",
+      "loadMore": "Carregar mais",
+      "failedToLoad": "Não foi possível carregar os membros",
+      "retry": "Tentar novamente"
     },
     "limits": {
       "description": "Limites de recursos para este servidor. Configurados pelos administradores da plataforma.",
@@ -1296,7 +1299,11 @@
     "inVoiceStatus": "Em voz",
     "dnd": "Não perturbe",
     "awayStatus": "Ausente",
-    "offlineStatus": "Offline"
+    "offlineStatus": "Offline",
+    "moreOnline_one": "e mais {{count}} online",
+    "moreOnline_other": "e mais {{count}} online",
+    "browseAll": "Ver todos os membros",
+    "directoryTitle": "Todos os membros"
   },
   "search": {
     "placeholder": "Pesquisar mensagens…"

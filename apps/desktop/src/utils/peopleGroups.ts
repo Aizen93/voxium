@@ -1,4 +1,5 @@
 import type { Channel, ServerMember, VoiceUser } from '@voxium/shared';
+import type { PeopleState } from '../stores/serverStore';
 
 /**
  * Presence-first grouping for the People panel (2026 redesign):
@@ -26,11 +27,20 @@ export interface PeopleGroups {
 const byName = (a: ServerMember, b: ServerMember) =>
   (a.nickname || a.user.displayName).localeCompare(b.nickname || b.user.displayName);
 
+export interface PeopleGroupOptions {
+  /** False on a big server: the loaded rows are the online slice, and an
+   *  offline row among them (someone who went offline since, a looked-up
+   *  author) is not listed — the directory is where offline members live. */
+  includeOffline?: boolean;
+}
+
 export function groupPeopleByPresence(
   members: ServerMember[],
   channels: Channel[],
   channelUsers: Map<string, VoiceUser[]>,
+  options: PeopleGroupOptions = {},
 ): PeopleGroups {
+  const includeOffline = options.includeOffline !== false;
   const memberById = new Map(members.map((m) => [m.userId, m]));
   const inVoiceIds = new Set<string>();
 
@@ -60,13 +70,45 @@ export function groupPeopleByPresence(
     const status = m.user.status || 'offline';
     if (status === 'online') active.push(m);
     else if (status === 'idle' || status === 'dnd') away.push(m);
-    else offline.push(m);
+    else if (includeOffline) offline.push(m);
   }
   active.sort(byName);
   away.sort(byName);
   offline.sort(byName);
 
   return { voiceSections, active, away, offline };
+}
+
+/**
+ * The viewer's OWN presence is connection-driven (the rule UserCard follows):
+ * the server marks them online when their socket connects and never echoes
+ * that presence back to them, so a slice fetched in the same breath as the
+ * connect can still carry their row as offline. While the socket is
+ * connected, their row reads online — the same array when nothing changes.
+ */
+export function withOwnPresence(members: ServerMember[], selfId: string | undefined, connected: boolean): ServerMember[] {
+  if (!connected || !selfId) return members;
+  const i = members.findIndex((m) => m.userId === selfId);
+  if (i < 0 || (members[i].user.status || 'offline') !== 'offline') return members;
+  const next = members.slice();
+  next[i] = { ...members[i], user: { ...members[i].user, status: 'online' } };
+  return next;
+}
+
+/**
+ * The "N online" figure of the channel sidebar header. With everyone loaded
+ * the rows are the truth; with the online slice of a big server it is the
+ * server's figure, moved by the events since — never below the rows that
+ * read online here, the viewer's own among them.
+ */
+export function headerOnlineCount(members: ServerMember[], people: PeopleState, selfId: string | undefined, connected: boolean): number {
+  const present = withOwnPresence(members, selfId, connected).filter((m) => (m.user.status || 'offline') !== 'offline').length;
+  return people.full ? present : Math.max(people.onlineCount, present);
+}
+
+/** How many of the loaded rows the panel shows as present (in voice, active or away). */
+export function presentCount(groups: PeopleGroups): number {
+  return groups.voiceSections.reduce((n, s) => n + s.entries.length, 0) + groups.active.length + groups.away.length;
 }
 
 /** The rich presence line under a voice participant's name. */

@@ -33,6 +33,7 @@ vi.mock('../../components/server/RoleEditor', () => ({ RoleEditor: () => null })
 vi.mock('../../components/server/DiscoveryTab', () => ({ DiscoveryTab: () => <div data-testid="discovery-tab" /> }));
 vi.mock('../../components/server/JoinRequestsSection', () => ({ JoinRequestsSection: () => <div data-testid="join-requests" /> }));
 vi.mock('../../components/server/BannedSection', () => ({ BannedSection: () => <div data-testid="banned-section" /> }));
+vi.mock('../../components/server/MembersDirectory', () => ({ MembersDirectory: () => <div data-testid="members-directory" /> }));
 
 import { api } from '../../services/api';
 import { useServerStore } from '../../stores/serverStore';

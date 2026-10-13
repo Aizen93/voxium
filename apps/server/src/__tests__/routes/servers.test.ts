@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { Permissions } from '@voxium/shared';
+import { Permissions, MEMBER_LIST } from '@voxium/shared';
+import { encodeMemberCursor, decodeMemberCursor } from '../../utils/memberCursor';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -108,6 +109,7 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
   },
   $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -134,12 +136,14 @@ vi.mock('../../websocket/socketServer', () => ({
 // Rate limiters (memberManage is observable: every new route must carry one)
 const mockRateLimitMemberManage = vi.fn((_req: any, _res: any, next: () => void) => next());
 const mockRateLimitMemberRead = vi.fn((_req: any, _res: any, next: () => void) => next());
+const mockRateLimitMemberLookup = vi.fn((_req: any, _res: any, next: () => void) => next());
 vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return {
     rateLimitGeneral: passthrough,
     rateLimitMemberManage: (...args: any[]) => mockRateLimitMemberManage(...args),
     rateLimitMemberRead: (...args: any[]) => mockRateLimitMemberRead(...args),
+    rateLimitMemberLookup: (...args: any[]) => mockRateLimitMemberLookup(...args),
     rateLimitSearch: passthrough,
     rateLimitCategoryManage: passthrough,
     rateLimitMessageSend: passthrough,
@@ -1318,67 +1322,359 @@ describe('Server Routes', () => {
     });
   });
 
-  // ── GET /api/v1/servers/:serverId/members ───────────────────────────────
+  // ── GET /api/v1/servers/:serverId/members — the directory ───────────────
+
+  /** A member row as Prisma returns it with memberRowInclude. */
+  const memberRow = (userId: string, extra: Record<string, unknown> = {}, user: Record<string, unknown> = {}) => ({
+    userId, serverId: 'srv-1', role: 'member', nickname: null, joinedAt: new Date('2026-10-01T00:00:00.000Z'),
+    user: {
+      id: userId, username: userId, displayName: userId.toUpperCase(), avatarUrl: null, bio: null, status: 'offline', role: 'user',
+      isSupporter: false, supporterTier: null, createdAt: new Date('2026-01-01T00:00:00.000Z'), ...user,
+    },
+    memberRoles: [{ role: { id: 'role-1', serverId: 'srv-1', name: 'Mod', color: '#fff', position: 1, permissions: '0', isDefault: false, createdAt: new Date('2026-01-01T00:00:00.000Z') } }],
+    ...extra,
+  });
+  // Render a tagged-template $queryRaw call as SQL text, recursing into nested Prisma.sql fragments
+  const render = (strings: readonly string[], values: unknown[]): string => strings.map((str, i) => {
+    if (i >= values.length) return str;
+    const v = values[i] as { strings?: readonly string[]; values?: unknown[] };
+    return str + (v && typeof v === 'object' && v.strings && v.values ? render(v.strings, v.values) : '?');
+  }).join('');
+  const sqlOf = (i: number) => { const [strings, ...values] = prismaMock.$queryRaw.mock.calls[i]; return render(strings, values).replace(/\s+/g, ' ').trim(); };
+  const flat = (v: any): unknown[] => Array.isArray(v) ? v.flatMap(flat)
+    : v && typeof v === 'object' && 'values' in v && 'strings' in v ? (v.values as unknown[]).flatMap(flat) : [v];
+  const valuesOf = (i: number) => { const [, ...values] = prismaMock.$queryRaw.mock.calls[i]; return flat(values); };
+  const RANK = "CASE sm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END";
+  const key = (user_id: string, rank = 2, joined_at = new Date('2026-10-01T00:00:00.000Z')) => ({ user_id, rank, joined_at });
 
   describe('GET /api/v1/servers/:serverId/members', () => {
-    it('returns paginated members', async () => {
-      const token = makeToken();
-      // First call = membership check, second call = member list
-      prismaMock.serverMember.findUnique.mockResolvedValue({
-        userId: 'user-1',
-        serverId: 'srv-1',
-        role: 'member',
-      });
-      prismaMock.serverMember.findMany.mockResolvedValue([
-        {
-          userId: 'user-1',
-          serverId: 'srv-1',
-          role: 'owner',
-          joinedAt: new Date(),
-          user: {
-            id: 'user-1',
-            username: 'testuser',
-            displayName: 'Test User',
-            avatarUrl: null,
-            bio: null,
-            status: 'online',
-            isSupporter: false,
-            supporterTier: null,
-            createdAt: new Date(),
-          },
-          memberRoles: [],
-        },
-      ]);
-      prismaMock.serverMember.count.mockResolvedValue(1);
-
-      const res = await request(app)
-        .get('/api/v1/servers/srv-1/members')
-        .set('Authorization', `Bearer ${token}`);
-
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-      expect(res.body.total).toBe(1);
-      expect(res.body.hasMore).toBe(false);
+    beforeEach(() => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      prismaMock.server.findUnique.mockResolvedValue({ memberCount: 3 });
     });
 
-    it('pages past the first hundred in a stable order (join date, then user id) and reports hasMore', async () => {
-      const token = makeToken();
-      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
-      prismaMock.serverMember.findMany.mockResolvedValue([]);
+    it('answers 404 to a non-member, before any list query', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      const res = await request(app).get('/api/v1/servers/srv-1/members').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(404);
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+      expect(prismaMock.serverMember.findMany).not.toHaveBeenCalled();
+    });
+
+    it('legacy page mode (?page=N, the pre-directory client): join order, skip/take, page and hasMore — rows flattened', async () => {
+      prismaMock.serverMember.findMany.mockResolvedValue([memberRow('user-1', { role: 'owner' })]);
       prismaMock.serverMember.count.mockResolvedValue(166);
 
-      const first = await request(app).get('/api/v1/servers/srv-1/members').set('Authorization', `Bearer ${token}`);
+      const first = await request(app).get('/api/v1/servers/srv-1/members?page=1').set('Authorization', `Bearer ${makeToken()}`);
       expect(first.status).toBe(200);
+      expect(first.body.total).toBe(166);
+      expect(first.body.page).toBe(1);
       expect(first.body.hasMore).toBe(true);
+      expect(first.body.data).toHaveLength(1);
+      expect(first.body.data[0]).toMatchObject({ userId: 'user-1', role: 'owner', joinedAt: '2026-10-01T00:00:00.000Z' });
+      expect(first.body.data[0].roles).toEqual([expect.objectContaining({ id: 'role-1', name: 'Mod', createdAt: '2026-01-01T00:00:00.000Z' })]);
+      expect(first.body.data[0].memberRoles).toBeUndefined();
       expect(prismaMock.serverMember.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
         skip: 0, take: 100, orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }],
       }));
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
 
-      const second = await request(app).get('/api/v1/servers/srv-1/members?page=2').set('Authorization', `Bearer ${token}`);
-      expect(second.status).toBe(200);
+      const second = await request(app).get('/api/v1/servers/srv-1/members?page=2').set('Authorization', `Bearer ${makeToken()}`);
       expect(second.body.page).toBe(2);
       expect(second.body.hasMore).toBe(false);
       expect(prismaMock.serverMember.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ skip: 100, take: 100 }));
+    });
+
+    it('first page: keys from one ordered query (owner, admins, then join date; LIMIT limit + 1), rows by id put back in key order, the unfiltered total is the inline count', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([key('owner-1', 0), key('user-2'), key('user-3')]);
+      // Prisma returns the rows in ITS order; the page must follow the keys
+      prismaMock.serverMember.findMany.mockResolvedValue([memberRow('user-3'), memberRow('owner-1', { role: 'owner' }), memberRow('user-2')]);
+
+      const res = await request(app).get('/api/v1/servers/srv-1/members').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(mockRateLimitMemberRead).toHaveBeenCalled();
+      expect(res.body.data.map((m: { userId: string }) => m.userId)).toEqual(['owner-1', 'user-2', 'user-3']);
+      expect(res.body.total).toBe(3);
+      expect(res.body.hasMore).toBe(false);
+      expect(res.body.nextCursor).toBeNull();
+      expect(res.body.page).toBeUndefined();
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
+      const sql = sqlOf(0);
+      expect(sql).toContain(`SELECT sm.user_id, ${RANK} AS rank, sm.joined_at FROM server_members sm`);
+      expect(sql).toContain(`ORDER BY ${RANK}, sm.joined_at, sm.user_id LIMIT ?`);
+      expect(sql).not.toContain('AND (');
+      expect(sql).not.toContain('ILIKE');
+      expect(valuesOf(0)).toEqual(['srv-1', 101]);
+      expect(prismaMock.serverMember.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { serverId: 'srv-1', userId: { in: ['owner-1', 'user-2', 'user-3'] } } }));
+      expect(prismaMock.server.findUnique).toHaveBeenCalledWith({ where: { id: 'srv-1' }, select: { memberCount: true } });
+    });
+
+    it('a full page issues a signed cursor carrying the last KEY (rank, join date, id) — the position the key query ordered by, even when the row fetch sees a later role change; the next page is a strictly-after row comparison', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([key('owner-1', 0), key('user-2', 2, new Date('2026-10-02T00:00:00.000Z')), key('user-3')]);
+      // the row fetch sees user-2 promoted meanwhile: the cursor still says rank 2
+      prismaMock.serverMember.findMany.mockResolvedValue([
+        memberRow('owner-1', { role: 'owner' }), memberRow('user-2', { role: 'admin', joinedAt: new Date('2026-10-09T00:00:00.000Z') }),
+      ]);
+      prismaMock.server.findUnique.mockResolvedValue({ memberCount: 500 });
+
+      const first = await request(app).get('/api/v1/servers/srv-1/members?limit=2').set('Authorization', `Bearer ${makeToken()}`);
+      expect(first.status).toBe(200);
+      expect(first.body.hasMore).toBe(true);
+      expect(first.body.data).toHaveLength(2);
+      expect(first.body.total).toBe(500);
+      expect(valuesOf(0)).toEqual(['srv-1', 3]);
+      const cursor = first.body.nextCursor as string;
+      expect(decodeMemberCursor(cursor, { serverId: 'srv-1', q: '', role: '', limit: 2 })).toEqual({
+        serverId: 'srv-1', q: '', role: '', limit: 2, rank: 2, joinedAt: '2026-10-02T00:00:00.000Z', id: 'user-2',
+      });
+
+      prismaMock.$queryRaw.mockResolvedValueOnce([key('user-3')]);
+      prismaMock.serverMember.findMany.mockResolvedValue([memberRow('user-3')]);
+      const second = await request(app).get(`/api/v1/servers/srv-1/members?limit=2&cursor=${encodeURIComponent(cursor)}`).set('Authorization', `Bearer ${makeToken()}`);
+      expect(second.status).toBe(200);
+      expect(second.body.hasMore).toBe(false);
+      expect(second.body.nextCursor).toBeNull();
+      expect(second.body.data.map((m: { userId: string }) => m.userId)).toEqual(['user-3']);
+      const sql = sqlOf(1);
+      expect(sql).toContain(`AND (${RANK}, sm.joined_at, sm.user_id) > (?::int, ?::timestamp, ?) ORDER BY ${RANK}, sm.joined_at, sm.user_id LIMIT ?`);
+      expect(valuesOf(1)).toEqual(['srv-1', 2, '2026-10-02T00:00:00.000Z', 'user-2', 3]);
+    });
+
+    it('refuses a cursor it did not issue, or issued for another page size, query or filter (400, never a silent first page)', async () => {
+      const token = makeToken();
+      const good = encodeMemberCursor({ serverId: 'srv-1', q: '', role: '', limit: 100, rank: 2, joinedAt: '2026-10-02T00:00:00.000Z', id: 'user-2' });
+      for (const bad of ['garbage', good.slice(0, -2) + 'xx', good]) {
+        // the last one is a valid cursor sent with a different limit
+        const url = bad === good ? `/api/v1/servers/srv-1/members?limit=50&cursor=${encodeURIComponent(bad)}` : `/api/v1/servers/srv-1/members?cursor=${encodeURIComponent(bad)}`;
+        const res = await request(app).get(url).set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Invalid cursor');
+      }
+      const otherServer = await request(app).get(`/api/v1/servers/srv-2/members?cursor=${encodeURIComponent(good)}`).set('Authorization', `Bearer ${token}`);
+      expect(otherServer.status).toBe(400);
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('search text: username, display name and nickname ILIKE with the pattern escaped and bound; the total is a count over the same filter; too long is 400', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([key('user-2')]).mockResolvedValueOnce([{ n: 7 }]);
+      prismaMock.serverMember.findMany.mockResolvedValue([memberRow('user-2')]);
+
+      const res = await request(app).get('/api/v1/servers/srv-1/members?q=' + encodeURIComponent(' 50%_x\\ ')).set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body.total).toBe(7);
+      expect(sqlOf(0)).toContain('AND (u.username ILIKE ? OR u.display_name ILIKE ? OR sm.nickname ILIKE ?) ORDER BY');
+      expect(valuesOf(0)).toEqual(['srv-1', '%50\\%\\_x\\\\%', '%50\\%\\_x\\\\%', '%50\\%\\_x\\\\%', 101]);
+      expect(sqlOf(1)).toContain('SELECT COUNT(*)::int AS n FROM server_members sm JOIN users u ON u.id = sm.user_id WHERE sm.server_id = ? AND (u.username ILIKE ?');
+      expect(prismaMock.server.findUnique).not.toHaveBeenCalled();
+
+      const long = await request(app).get('/api/v1/servers/srv-1/members?q=' + 'a'.repeat(101)).set('Authorization', `Bearer ${makeToken()}`);
+      expect(long.status).toBe(400);
+    });
+
+    it('role filters: owner/admin on the coarse role, none as NOT EXISTS, a role id as EXISTS on member_roles; anything else is 400', async () => {
+      const token = makeToken();
+      prismaMock.$queryRaw.mockResolvedValue([]);
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+      await request(app).get('/api/v1/servers/srv-1/members?role=owner').set('Authorization', `Bearer ${token}`);
+      expect(sqlOf(0)).toContain('WHERE sm.server_id = ? AND sm.role = ? ORDER BY');
+      expect(valuesOf(0)).toEqual(['srv-1', 'owner', 101]);
+      await request(app).get('/api/v1/servers/srv-1/members?role=none').set('Authorization', `Bearer ${token}`);
+      expect(sqlOf(2)).toContain('AND NOT EXISTS (SELECT 1 FROM member_roles mr WHERE mr.user_id = sm.user_id AND mr.server_id = sm.server_id) ORDER BY');
+      await request(app).get('/api/v1/servers/srv-1/members?role=role-1').set('Authorization', `Bearer ${token}`);
+      expect(sqlOf(4)).toContain('AND EXISTS (SELECT 1 FROM member_roles mr WHERE mr.user_id = sm.user_id AND mr.server_id = sm.server_id AND mr.role_id = ?) ORDER BY');
+      expect(valuesOf(4)).toEqual(['srv-1', 'role-1', 101]);
+      // a filter means the total is counted, not read from the server row
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(6);
+      expect(prismaMock.server.findUnique).not.toHaveBeenCalled();
+
+      const bad = await request(app).get('/api/v1/servers/srv-1/members?role=' + encodeURIComponent("x'; drop")).set('Authorization', `Bearer ${token}`);
+      expect(bad.status).toBe(400);
+      expect(bad.body.error).toBe('Invalid role filter');
+    });
+
+    it('refuses search text with a control character (a NUL would be a 500 from Postgres, not a 400)', async () => {
+      const res = await request(app).get('/api/v1/servers/srv-1/members?q=ab%00c').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Invalid search text');
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('a repeated q is not a string: unfiltered, never a crash', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([]);
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+      const res = await request(app).get('/api/v1/servers/srv-1/members?q=a&q=b').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(sqlOf(0)).not.toContain('ILIKE');
+    });
+
+    it('legacy mode: page 0, a negative page and nonsense all read as page 1; a cursor next to a page number takes the keyset branch', async () => {
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+      prismaMock.serverMember.count.mockResolvedValue(0);
+      for (const page of ['0', '-3', 'abc']) {
+        const res = await request(app).get(`/api/v1/servers/srv-1/members?page=${page}`).set('Authorization', `Bearer ${makeToken()}`);
+        expect(res.status, page).toBe(200);
+        expect(res.body.page, page).toBe(1);
+        expect(prismaMock.serverMember.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ skip: 0 }));
+      }
+      const mixed = await request(app).get('/api/v1/servers/srv-1/members?page=2&cursor=garbage').set('Authorization', `Bearer ${makeToken()}`);
+      expect(mixed.status).toBe(400);
+      expect(mixed.body.error).toBe('Invalid cursor');
+    });
+
+    it('clamps the page size to MEMBERS_PER_PAGE and refuses nonsense quietly (default size)', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([]);
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+      await request(app).get('/api/v1/servers/srv-1/members?limit=5000').set('Authorization', `Bearer ${makeToken()}`);
+      expect(valuesOf(0)).toEqual(['srv-1', 101]);
+      await request(app).get('/api/v1/servers/srv-1/members?limit=abc').set('Authorization', `Bearer ${makeToken()}`);
+      expect(valuesOf(1)).toEqual(['srv-1', 101]);
+    });
+  });
+
+  // ── GET /api/v1/servers/:serverId/members/online — the People panel ─────
+
+  describe('GET /api/v1/servers/:serverId/members/online', () => {
+    const me = memberRow('user-1', { role: 'owner' }, { status: 'online' });
+
+    it('answers 404 to a non-member (the viewer row IS the membership check) and carries the member-read limiter', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      const res = await request(app).get('/api/v1/servers/srv-1/members/online').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(404);
+      expect(mockRateLimitMemberRead).toHaveBeenCalled();
+      expect(prismaMock.serverMember.findMany).not.toHaveBeenCalled();
+    });
+
+    it('small server: everyone, offline included, in join order — full, with the online count', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(me);
+      prismaMock.server.findUnique.mockResolvedValue({ memberCount: 3 });
+      prismaMock.serverMember.findMany.mockResolvedValue([me, memberRow('user-2', {}, { status: 'idle' }), memberRow('user-3')]);
+
+      const res = await request(app).get('/api/v1/servers/srv-1/members/online').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ full: true, truncated: false, memberCount: 3, onlineCount: 2 });
+      expect(res.body.data.map((m: { userId: string }) => m.userId)).toEqual(['user-1', 'user-2', 'user-3']);
+      expect(prismaMock.serverMember.findMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.serverMember.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { serverId: 'srv-1' }, orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }], take: MEMBER_LIST.PEOPLE_MAX_ROWS + 1,
+      }));
+      expect(prismaMock.serverMember.count).not.toHaveBeenCalled();
+    });
+
+    it('big server: the online members only — owner and admins first, then members by join date up to the cap; the viewer is added when the cap cut them; truncated says more are online', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(me);
+      prismaMock.server.findUnique.mockResolvedValue({ memberCount: 10_000 });
+      const admin = memberRow('admin-1', { role: 'admin' }, { status: 'online' });
+      prismaMock.serverMember.findMany
+        .mockResolvedValueOnce([admin])                                                       // staff online
+        .mockResolvedValueOnce([memberRow('user-7', {}, { status: 'dnd' }), memberRow('user-8', {}, { status: 'online' })]); // members online
+      prismaMock.serverMember.count.mockResolvedValue(777);
+
+      const res = await request(app).get('/api/v1/servers/srv-1/members/online').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ full: false, truncated: true, memberCount: 10_000, onlineCount: 777 });
+      expect(res.body.data.map((m: { userId: string }) => m.userId)).toEqual(['user-1', 'admin-1', 'user-7', 'user-8']);
+      const online = { status: { not: 'offline' } };
+      expect(prismaMock.serverMember.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        where: { serverId: 'srv-1', role: { in: ['owner', 'admin'] }, user: online }, take: MEMBER_LIST.PEOPLE_MAX_ROWS,
+      }));
+      expect(prismaMock.serverMember.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        where: { serverId: 'srv-1', role: 'member', user: online }, take: MEMBER_LIST.PEOPLE_MAX_ROWS - 1,
+      }));
+      expect(prismaMock.serverMember.count).toHaveBeenCalledWith({ where: { serverId: 'srv-1', user: online } });
+    });
+
+    it('big server: a viewer already in the slice is not repeated, and a slice that holds every online member is not truncated', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(me);
+      prismaMock.server.findUnique.mockResolvedValue({ memberCount: 10_000 });
+      prismaMock.serverMember.findMany.mockResolvedValueOnce([me]).mockResolvedValueOnce([memberRow('user-8', {}, { status: 'online' })]);
+      prismaMock.serverMember.count.mockResolvedValue(2);
+
+      const res = await request(app).get('/api/v1/servers/srv-1/members/online').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.body.data.map((m: { userId: string }) => m.userId)).toEqual(['user-1', 'user-8']);
+      expect(res.body.truncated).toBe(false);
+    });
+
+    it('a stale inline count below the cap cannot hand out a cut list: more rows than the cap fall through to the online slice', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(me);
+      prismaMock.server.findUnique.mockResolvedValue({ memberCount: 3 });
+      const tooMany = Array.from({ length: MEMBER_LIST.PEOPLE_MAX_ROWS + 1 }, (_, i) => memberRow(`u-${i}`));
+      prismaMock.serverMember.findMany.mockResolvedValueOnce(tooMany).mockResolvedValueOnce([me]).mockResolvedValueOnce([]);
+      prismaMock.serverMember.count.mockResolvedValue(1);
+
+      const res = await request(app).get('/api/v1/servers/srv-1/members/online').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body.full).toBe(false);
+      expect(res.body.data).toHaveLength(1);
+      // not the stale 3: at least the cap + 1 rows it has just seen
+      expect(res.body.memberCount).toBe(MEMBER_LIST.PEOPLE_MAX_ROWS + 1);
+      expect(prismaMock.serverMember.findMany).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  // ── GET /api/v1/servers/:serverId/members/lookup ────────────────────────
+
+  describe('GET /api/v1/servers/:serverId/members/lookup', () => {
+    it('returns the rows of the ids that are members (deduplicated), nothing for the rest, under its own limiter', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.findMany.mockResolvedValue([memberRow('user-2')]);
+
+      const res = await request(app).get('/api/v1/servers/srv-1/members/lookup?ids=user-2,%20user-9%20,user-2').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.map((m: { userId: string }) => m.userId)).toEqual(['user-2']);
+      expect(res.body.data[0].roles[0].name).toBe('Mod');
+      expect(prismaMock.serverMember.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { serverId: 'srv-1', userId: { in: ['user-2', 'user-9'] } } }));
+      expect(mockRateLimitMemberLookup).toHaveBeenCalled();
+    });
+
+    it('refuses an empty list, more than LOOKUP_MAX_IDS ids and an id outside the id charset (400)', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      for (const ids of ['', ',,', Array.from({ length: MEMBER_LIST.LOOKUP_MAX_IDS + 1 }, (_, i) => `u${i}`).join(','), 'ok,not ok']) {
+        const res = await request(app).get('/api/v1/servers/srv-1/members/lookup?ids=' + encodeURIComponent(ids)).set('Authorization', `Bearer ${token}`);
+        expect(res.status, ids.slice(0, 20)).toBe(400);
+      }
+      expect(prismaMock.serverMember.findMany).not.toHaveBeenCalled();
+    });
+
+    it('answers 404 to a non-member', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      const res = await request(app).get('/api/v1/servers/srv-1/members/lookup?ids=user-2').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(404);
+      expect(prismaMock.serverMember.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── GET /api/v1/servers/:serverId/members/search ────────────────────────
+
+  describe('GET /api/v1/servers/:serverId/members/search', () => {
+    it('matches username, display name and nickname; takes the default size, and a limit clamped to SEARCH_MAX', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+      const token = makeToken();
+
+      await request(app).get('/api/v1/servers/srv-1/members/search?q=al').set('Authorization', `Bearer ${token}`);
+      expect(prismaMock.serverMember.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
+        where: { serverId: 'srv-1', OR: [
+          { user: { username: { contains: 'al', mode: 'insensitive' } } },
+          { user: { displayName: { contains: 'al', mode: 'insensitive' } } },
+          { nickname: { contains: 'al', mode: 'insensitive' } },
+        ] },
+        take: MEMBER_LIST.SEARCH_DEFAULT,
+      }));
+      await request(app).get('/api/v1/servers/srv-1/members/search?q=al&limit=500').set('Authorization', `Bearer ${token}`);
+      expect(prismaMock.serverMember.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: MEMBER_LIST.SEARCH_MAX }));
+
+      const empty = await request(app).get('/api/v1/servers/srv-1/members/search?q=').set('Authorization', `Bearer ${token}`);
+      expect(empty.body.data).toEqual([]);
+      // a repeated q is an array, not a string: nothing to search, never a crash
+      const repeated = await request(app).get('/api/v1/servers/srv-1/members/search?q=a&q=b').set('Authorization', `Bearer ${token}`);
+      expect(repeated.status).toBe(200);
+      expect(repeated.body.data).toEqual([]);
+      expect(prismaMock.serverMember.findMany).toHaveBeenCalledTimes(2);
+      const control = await request(app).get('/api/v1/servers/srv-1/members/search?q=a%00b').set('Authorization', `Bearer ${token}`);
+      expect(control.status).toBe(400);
     });
   });
 

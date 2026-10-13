@@ -159,6 +159,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitUpload: passthroughMiddleware,
   rateLimitFriendRequest: passthroughMiddleware,
   rateLimitMemberManage: passthroughMiddleware,
+  rateLimitMemberLookup: passthroughMiddleware,
   rateLimitCategoryManage: passthroughMiddleware,
   rateLimitSearch: passthroughMiddleware,
   rateLimitStats: passthroughMiddleware,

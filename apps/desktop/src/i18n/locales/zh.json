@@ -322,7 +322,10 @@
       "noResults": "没有匹配搜索的成员",
       "noMembers": "未找到成员",
       "owner": "所有者",
-      "admin": "管理员"
+      "admin": "管理员",
+      "loadMore": "加载更多",
+      "failedToLoad": "无法加载成员",
+      "retry": "重试"
     },
     "limits": {
       "description": "此服务器的资源限制。由平台管理员配置。",
@@ -1295,7 +1298,10 @@
     "inVoiceStatus": "语音中",
     "dnd": "请勿打扰",
     "awayStatus": "离开",
-    "offlineStatus": "离线"
+    "offlineStatus": "离线",
+    "moreOnline_other": "还有 {{count}} 人在线",
+    "browseAll": "浏览所有成员",
+    "directoryTitle": "所有成员"
   },
   "search": {
     "placeholder": "搜索消息…"

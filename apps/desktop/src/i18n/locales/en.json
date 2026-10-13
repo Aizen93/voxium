@@ -322,7 +322,10 @@
       "noResults": "No members match your search",
       "noMembers": "No members found",
       "owner": "Owner",
-      "admin": "Admin"
+      "admin": "Admin",
+      "loadMore": "Load more",
+      "failedToLoad": "Failed to load members",
+      "retry": "Retry"
     },
     "limits": {
       "description": "Resource limits for this server. These are configured by platform administrators.",
@@ -1296,7 +1299,11 @@
     "inVoiceStatus": "In voice",
     "dnd": "Do not disturb",
     "awayStatus": "Away",
-    "offlineStatus": "Offline"
+    "offlineStatus": "Offline",
+    "moreOnline_one": "and {{count}} more online",
+    "moreOnline_other": "and {{count}} more online",
+    "browseAll": "Browse all members",
+    "directoryTitle": "All members"
   },
   "search": {
     "placeholder": "Search messages…"

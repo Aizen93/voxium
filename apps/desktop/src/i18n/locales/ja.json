@@ -322,7 +322,10 @@
       "noResults": "検索に一致するメンバーがいません",
       "noMembers": "メンバーが見つかりません",
       "owner": "オーナー",
-      "admin": "管理者"
+      "admin": "管理者",
+      "loadMore": "さらに読み込む",
+      "failedToLoad": "メンバーを読み込めませんでした",
+      "retry": "再試行"
     },
     "limits": {
       "description": "このサーバーのリソース制限です。プラットフォーム管理者によって設定されています。",
@@ -1295,7 +1298,10 @@
     "inVoiceStatus": "ボイス中",
     "dnd": "取り込み中",
     "awayStatus": "離席中",
-    "offlineStatus": "オフライン"
+    "offlineStatus": "オフライン",
+    "moreOnline_other": "他に{{count}}人がオンライン",
+    "browseAll": "すべてのメンバーを見る",
+    "directoryTitle": "すべてのメンバー"
   },
   "search": {
     "placeholder": "メッセージを検索…"

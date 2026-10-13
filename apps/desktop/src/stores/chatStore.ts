@@ -186,9 +186,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // the client; real attachment metadata travels inside the ciphertext.
         const prepared = await prepareOutgoingChannelMessage(channelId, content, e2eAttachments);
         if (prepared.notReadyUserIds.length > 0) {
-          const members = useServerStore.getState().members;
+          // The channel's own member list names everyone in it; the server's
+          // known rows are only a slice of a big server
+          const { members, secureChannelMembers } = useServerStore.getState();
+          const channelMembers = secureChannelMembers[channelId] ?? [];
           const names = prepared.notReadyUserIds
-            .map((id) => members.find((m) => m.userId === id)?.user.displayName ?? id)
+            .map((id) => channelMembers.find((m) => m.userId === id)?.user.displayName
+              ?? members.find((m) => m.userId === id)?.user.displayName ?? id)
             .join(', ');
           toast.error(i18n.t('secureChannel.membersNotReady', { names }));
         }
