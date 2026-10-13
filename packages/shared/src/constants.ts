@@ -207,8 +207,10 @@ export const MEMBER_LIST = {
   /** Up to this many members the People panel loads everyone, offline
    *  included. Above it the panel loads the online members only, and this is
    *  also where the online slice stops (staff and the viewer first, then by
-   *  join date) — the rest is reported as a count. */
-  PEOPLE_MAX_ROWS: 500,
+   *  join date) — the rest is reported as a count. 250: a mid-sized
+   *  community's offline tail is already a list nobody scrolls, and the
+   *  directory has it. */
+  PEOPLE_MAX_ROWS: 250,
   /** Ids one batched member lookup accepts. */
   LOOKUP_MAX_IDS: 100,
   /** Rows a member search returns at most; the mention autocomplete asks for the default. */

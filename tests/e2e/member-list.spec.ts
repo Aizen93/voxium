@@ -3,6 +3,7 @@ import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import { registerUser, createServer, createInvite, joinServerViaInvite, deleteServer } from './helpers/api';
 import { seedServerMembers, deleteSeededUsers } from './helpers/db';
+import { MEMBER_LIST } from '@voxium/shared';
 
 // Live test of the member lists on a BIG server (CLAUDE.md "Server Membership"):
 //   (a) the People panel is a presence view — on a server past the panel cap
@@ -16,8 +17,8 @@ import { seedServerMembers, deleteSeededUsers } from './helpers/db';
 // The membership is seeded straight into the database: registering five
 // hundred users through the API would take minutes and burn every budget.
 
-/** The panel cap the server applies (MEMBER_LIST.PEOPLE_MAX_ROWS); the seed goes past it. */
-const PEOPLE_MAX_ROWS = 500;
+/** The panel cap the server applies; the seed goes past it. */
+const PEOPLE_MAX_ROWS = MEMBER_LIST.PEOPLE_MAX_ROWS;
 const PAGE = 100;
 
 async function waitForApp(page: Page) {
