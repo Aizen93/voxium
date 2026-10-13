@@ -613,6 +613,31 @@ export interface ServerMember {
   roles?: Role[];
 }
 
+/**
+ * GET /servers/:id/members/online — the People panel's slice. `full` means
+ * the server is small enough that every member is here, offline included;
+ * otherwise only members whose status is not offline, with the viewer and
+ * the owner/admins first, and `truncated` when online members exist beyond
+ * the cap (`onlineCount` is the server's figure either way).
+ */
+export interface ServerPeople {
+  data: ServerMember[];
+  memberCount: number;
+  onlineCount: number;
+  full: boolean;
+  truncated: boolean;
+}
+
+/** GET /servers/:id/members (keyset mode) — one page of the directory. */
+export interface MemberDirectoryPage {
+  data: ServerMember[];
+  /** Members matching the filter (the whole membership when unfiltered). */
+  total: number;
+  hasMore: boolean;
+  /** Opaque, signed; hand it back as `cursor` for the next page. */
+  nextCursor: string | null;
+}
+
 // ─── Roles & Permissions ────────────────────────────────────────────────────
 
 export interface Role {

@@ -4,13 +4,15 @@ import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import {
   validateServerName, validateNickname, validateBanReason, validateServerDescription, validateDiscoveryTags, dedupeDiscoveryTags,
-  LIMITS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, SERVER_JOIN_MODES, permissionsToString,
+  LIMITS, MEMBER_LIST, MEMBER_DIRECTORY_ROLE_FILTERS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, SERVER_JOIN_MODES, permissionsToString,
 } from '@voxium/shared';
-import type { MemberRole, Server, ServerBan, ServerJoinRequest } from '@voxium/shared';
+import type { MemberRole, Server, ServerBan, ServerJoinRequest, ServerMember, ServerPeople, MemberDirectoryPage } from '@voxium/shared';
+import { Prisma } from '../generated/prisma/client';
+import { encodeMemberCursor, decodeMemberCursor, hashMemberQuery, memberRoleRank } from '../utils/memberCursor';
 import { joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
-import { rateLimitMemberManage, rateLimitMemberRead, rateLimitSearch } from '../middleware/rateLimiter';
+import { rateLimitMemberManage, rateLimitMemberRead, rateLimitMemberLookup, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
@@ -236,67 +238,266 @@ serverRouter.get('/:serverId/limits', async (req: Request<{ serverId: string }>,
   }
 });
 
-// Get server members
+// ─── Member lists ───────────────────────────────────────────────────────────
+//
+// Two views, two contracts (CLAUDE.md "Server Membership"):
+//   GET /:serverId/members          the DIRECTORY (Server settings → Members):
+//                                   server-paged by keyset cursor, searched and
+//                                   filtered server-side — the one place every
+//                                   member of a big server can be found.
+//   GET /:serverId/members/online   the People panel's PRESENCE slice: everyone
+//                                   while the server is small, the online
+//                                   members (capped, staff and the viewer
+//                                   first) above MEMBER_LIST.PEOPLE_MAX_ROWS.
+//   GET /:serverId/members/lookup   rows for up to LOOKUP_MAX_IDS ids — what the
+//                                   client asks for a message author, a voice
+//                                   participant or a presence event it has no
+//                                   row for. Non-members are simply absent.
+//   GET /:serverId/members/search   name search for pickers and the mention
+//                                   autocomplete.
+
+const memberRowInclude = {
+  user: {
+    select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, role: true, isSupporter: true, supporterTier: true, createdAt: true },
+  },
+  memberRoles: { include: { role: true } },
+} as const;
+
+type MemberRow = Prisma.ServerMemberGetPayload<{ include: typeof memberRowInclude }>;
+
+/** The API shape of a member row: `memberRoles` flattened to `roles`. */
+function formatMemberRow(m: MemberRow): ServerMember {
+  const { memberRoles, ...rest } = m;
+  return {
+    ...rest,
+    role: rest.role as MemberRole,
+    joinedAt: rest.joinedAt.toISOString(),
+    user: {
+      ...rest.user,
+      role: rest.user.role as ServerMember['user']['role'],
+      status: rest.user.status as ServerMember['user']['status'],
+      supporterTier: rest.user.supporterTier as ServerMember['user']['supporterTier'],
+      createdAt: rest.user.createdAt.toISOString(),
+    },
+    roles: memberRoles.map((mr) => ({ ...mr.role, createdAt: mr.role.createdAt.toISOString() })),
+  };
+}
+
+/** ILIKE pattern with `%`, `_` and `\` escaped (Prisma escapes its own `contains`; raw SQL does not). */
+function likePattern(q: string): string {
+  return `%${q.replace(/[\\%_]/g, '\\$&')}%`;
+}
+
+/** Owner first, admins next, then everyone — the directory's first sort key. */
+const MEMBER_RANK = Prisma.sql`CASE sm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END`;
+
+/** The directory's WHERE for a server, a search text and a role filter (`sm` = server_members, `u` = users). */
+function directoryWhere(serverId: string, q: string, role: string): Prisma.Sql {
+  const parts: Prisma.Sql[] = [Prisma.sql`sm.server_id = ${serverId}`];
+  if (q) {
+    const pattern = likePattern(q);
+    parts.push(Prisma.sql`(u.username ILIKE ${pattern} OR u.display_name ILIKE ${pattern} OR sm.nickname ILIKE ${pattern})`);
+  }
+  if (role === 'owner' || role === 'admin') {
+    parts.push(Prisma.sql`sm.role = ${role}`);
+  } else if (role === 'none') {
+    parts.push(Prisma.sql`NOT EXISTS (SELECT 1 FROM member_roles mr WHERE mr.user_id = sm.user_id AND mr.server_id = sm.server_id)`);
+  } else if (role) {
+    parts.push(Prisma.sql`EXISTS (SELECT 1 FROM member_roles mr WHERE mr.user_id = sm.user_id AND mr.server_id = sm.server_id AND mr.role_id = ${role})`);
+  }
+  return Prisma.join(parts, ' AND ');
+}
+
+const ROLE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+// Get server members — the directory
 serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
-    const page = parseInt(req.query.page as string, 10) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, LIMITS.MEMBERS_PER_PAGE);
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || LIMITS.MEMBERS_PER_PAGE, 1), LIMITS.MEMBERS_PER_PAGE);
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
     });
     if (!membership) throw new NotFoundError('Server');
 
-    const [members, total] = await Promise.all([
-      prisma.serverMember.findMany({
-        where: { serverId },
-        include: {
-          user: {
-            select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, isSupporter: true, supporterTier: true, createdAt: true },
-          },
-          memberRoles: {
-            include: { role: true },
-          },
-        },
-        skip: (page - 1) * limit,
-        take: limit,
-        // userId breaks ties: members seeded or imported in one statement share
-        // a joinedAt, and a page boundary inside a tie duplicates or skips rows
-        orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }],
-      }),
-      prisma.serverMember.count({ where: { serverId } }),
+    // Clients from before the directory page by NUMBER (`?page=N`) in join
+    // order and read `page`/`hasMore`; they keep working unchanged until
+    // they update. Everything else is the keyset directory below.
+    if (req.query.cursor === undefined && req.query.page !== undefined) {
+      const page = Math.max(parseInt(req.query.page as string, 10) || 1, 1);
+      const [members, total] = await Promise.all([
+        prisma.serverMember.findMany({
+          where: { serverId },
+          include: memberRowInclude,
+          skip: (page - 1) * limit,
+          take: limit,
+          // userId breaks ties: members seeded or imported in one statement share
+          // a joinedAt, and a page boundary inside a tie duplicates or skips rows
+          orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }],
+        }),
+        prisma.serverMember.count({ where: { serverId } }),
+      ]);
+      res.json({ success: true, data: members.map(formatMemberRow), total, page, limit, hasMore: page * limit < total });
+      return;
+    }
+
+    const qRaw = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (qRaw.length > MEMBER_LIST.QUERY_MAX) throw new BadRequestError('Search text is too long');
+    const role = typeof req.query.role === 'string' ? req.query.role : '';
+    if (role && !(MEMBER_DIRECTORY_ROLE_FILTERS as readonly string[]).includes(role) && !ROLE_ID_RE.test(role)) {
+      throw new BadRequestError('Invalid role filter');
+    }
+    const expected = { serverId, q: hashMemberQuery(qRaw), role, limit };
+    let cursor = null;
+    if (req.query.cursor !== undefined) {
+      cursor = decodeMemberCursor(req.query.cursor, expected);
+      if (!cursor) throw new BadRequestError('Invalid cursor');
+    }
+
+    // The page's KEYS come from one ordered query (the rank, join date and id
+    // predicate is a row comparison, so it is "strictly after" in the same
+    // order the page is sorted by); the rows with their user and roles come
+    // from Prisma by id and are put back in that order. A member removed
+    // between the two is simply absent from the page.
+    const where = directoryWhere(serverId, qRaw, role);
+    const keys = await prisma.$queryRaw<Array<{ user_id: string }>>`
+      SELECT sm.user_id FROM server_members sm
+      JOIN users u ON u.id = sm.user_id
+      WHERE ${where}
+        ${cursor ? Prisma.sql`AND (${MEMBER_RANK}, sm.joined_at, sm.user_id) > (${cursor.rank}::int, ${cursor.joinedAt}::timestamp, ${cursor.id})` : Prisma.empty}
+      ORDER BY ${MEMBER_RANK}, sm.joined_at, sm.user_id
+      LIMIT ${limit + 1}`;
+    const hasMore = keys.length > limit;
+    const ids = keys.slice(0, limit).map((k) => k.user_id);
+
+    const [rows, total] = await Promise.all([
+      ids.length
+        ? prisma.serverMember.findMany({ where: { serverId, userId: { in: ids } }, include: memberRowInclude })
+        : Promise.resolve([] as MemberRow[]),
+      // Unfiltered, the total is the server's inline count (maintained by the
+      // two membership helpers); a filter needs its own count.
+      qRaw || role
+        ? prisma.$queryRaw<Array<{ n: number }>>`
+            SELECT COUNT(*)::int AS n FROM server_members sm JOIN users u ON u.id = sm.user_id WHERE ${where}`
+          .then((r) => r[0]?.n ?? 0)
+        : prisma.server.findUnique({ where: { id: serverId }, select: { memberCount: true } }).then((srv) => srv?.memberCount ?? 0),
     ]);
+    const byId = new Map(rows.map((r) => [r.userId, r]));
+    const data = ids.map((id) => byId.get(id)).filter((r): r is MemberRow => r !== undefined).map(formatMemberRow);
 
-    // Flatten memberRoles to roles array for the response
-    const membersWithRoles = members.map((m) => ({
-      ...m,
-      roles: m.memberRoles.map((mr) => mr.role),
-      memberRoles: undefined,
-    }));
-
-    res.json({
-      success: true,
-      data: membersWithRoles,
-      total,
-      page,
-      limit,
-      hasMore: page * limit < total,
-    });
+    const last = data[data.length - 1];
+    const page: MemberDirectoryPage = {
+      data,
+      total: Math.max(total, data.length),
+      hasMore,
+      nextCursor: hasMore && last
+        ? encodeMemberCursor({ ...expected, rank: memberRoleRank(last.role), joinedAt: last.joinedAt, id: last.userId })
+        : null,
+    };
+    res.json({ success: true, ...page });
   } catch (err) {
     next(err);
   }
 });
 
-// Search server members by username/displayName (for @mention autocomplete)
+// The People panel's slice
+serverRouter.get('/:serverId/members/online', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const userId = req.user!.userId;
+    const cap = MEMBER_LIST.PEOPLE_MAX_ROWS;
+
+    // The membership check doubles as the viewer's own row: it is always on
+    // the panel, whatever the DB says their status is right now.
+    const me = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId, serverId } },
+      include: memberRowInclude,
+    });
+    if (!me) throw new NotFoundError('Server');
+    const server = await prisma.server.findUnique({ where: { id: serverId }, select: { memberCount: true } });
+    if (!server) throw new NotFoundError('Server');
+
+    const orderBy = [{ joinedAt: 'asc' }, { userId: 'asc' }] as const;
+
+    if (server.memberCount <= cap) {
+      // Small server: everyone, offline included — take one more than the cap
+      // so a count that lags the truth (it is corrected nightly) cannot hand
+      // out a silently cut list; past the cap this falls through to the slice.
+      const rows = await prisma.serverMember.findMany({ where: { serverId }, include: memberRowInclude, orderBy: [...orderBy], take: cap + 1 });
+      if (rows.length <= cap) {
+        const data = rows.map(formatMemberRow);
+        const people: ServerPeople = {
+          data,
+          memberCount: data.length,
+          onlineCount: data.filter((m) => m.user.status !== 'offline').length,
+          full: true,
+          truncated: false,
+        };
+        res.json({ success: true, ...people });
+        return;
+      }
+    }
+
+    // Big server: the online members only. Owner and admins first (they are
+    // few and the panel's role colours make them the landmarks), then the
+    // rest by join date up to the cap; the viewer is added if the cap cut
+    // them or their status lags.
+    const online = { status: { not: 'offline' } };
+    const [staff, onlineCount] = await Promise.all([
+      prisma.serverMember.findMany({ where: { serverId, role: { in: ['owner', 'admin'] }, user: online }, include: memberRowInclude, orderBy: [...orderBy], take: cap }),
+      prisma.serverMember.count({ where: { serverId, user: online } }),
+    ]);
+    const rest = staff.length < cap
+      ? await prisma.serverMember.findMany({ where: { serverId, role: 'member', user: online }, include: memberRowInclude, orderBy: [...orderBy], take: cap - staff.length })
+      : [];
+    const rows = [...staff, ...rest];
+    if (!rows.some((r) => r.userId === userId)) rows.unshift(me);
+    const people: ServerPeople = {
+      data: rows.map(formatMemberRow),
+      memberCount: server.memberCount,
+      onlineCount,
+      full: false,
+      truncated: onlineCount > staff.length + rest.length,
+    };
+    res.json({ success: true, ...people });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Rows for a handful of ids (non-members are absent, never an error)
+serverRouter.get('/:serverId/members/lookup', rateLimitMemberLookup, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const raw = typeof req.query.ids === 'string' ? req.query.ids : '';
+    const ids = [...new Set(raw.split(',').map((id) => id.trim()).filter(Boolean))];
+    if (ids.length === 0 || ids.length > MEMBER_LIST.LOOKUP_MAX_IDS || ids.some((id) => !ROLE_ID_RE.test(id))) {
+      throw new BadRequestError(`ids must name 1 to ${MEMBER_LIST.LOOKUP_MAX_IDS} users`);
+    }
+
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId: req.user!.userId, serverId } },
+    });
+    if (!membership) throw new NotFoundError('Server');
+
+    const rows = await prisma.serverMember.findMany({ where: { serverId, userId: { in: ids } }, include: memberRowInclude });
+    res.json({ success: true, data: rows.map(formatMemberRow) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Search server members by username/displayName/nickname (mention autocomplete, member pickers)
 serverRouter.get('/:serverId/members/search', rateLimitSearch, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
     const q = (req.query.q as string || '').trim();
-    if (!q || q.length > 100) {
+    if (!q || q.length > MEMBER_LIST.QUERY_MAX) {
       res.json({ success: true, data: [] });
       return;
     }
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || MEMBER_LIST.SEARCH_DEFAULT, 1), MEMBER_LIST.SEARCH_MAX);
 
     const membership = await prisma.serverMember.findUnique({
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
@@ -306,19 +507,18 @@ serverRouter.get('/:serverId/members/search', rateLimitSearch, async (req: Reque
     const members = await prisma.serverMember.findMany({
       where: {
         serverId,
-        user: {
-          OR: [
-            { username: { contains: q, mode: 'insensitive' } },
-            { displayName: { contains: q, mode: 'insensitive' } },
-          ],
-        },
+        OR: [
+          { user: { username: { contains: q, mode: 'insensitive' } } },
+          { user: { displayName: { contains: q, mode: 'insensitive' } } },
+          { nickname: { contains: q, mode: 'insensitive' } },
+        ],
       },
       include: {
         user: {
           select: { id: true, username: true, displayName: true, avatarUrl: true, status: true },
         },
       },
-      take: 8,
+      take: limit,
       orderBy: { joinedAt: 'asc' },
     });
 

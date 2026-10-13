@@ -198,6 +198,29 @@ export function isDiscoveryTier(value: unknown): value is DiscoveryTier {
   return typeof value === 'string' && (DISCOVERY_TIERS as readonly string[]).includes(value);
 }
 
+/**
+ * Member lists. Two views, two contracts: the People panel is a PRESENCE
+ * view (everyone while the server is small, the online slice above that),
+ * Server settings → Members is a server-paged DIRECTORY.
+ */
+export const MEMBER_LIST = {
+  /** Up to this many members the People panel loads everyone, offline
+   *  included. Above it the panel loads the online members only, and this is
+   *  also where the online slice stops (staff and the viewer first, then by
+   *  join date) — the rest is reported as a count. */
+  PEOPLE_MAX_ROWS: 500,
+  /** Ids one batched member lookup accepts. */
+  LOOKUP_MAX_IDS: 100,
+  /** Rows a member search returns at most; the mention autocomplete asks for the default. */
+  SEARCH_MAX: 20,
+  SEARCH_DEFAULT: 8,
+  /** Directory search text, in characters. */
+  QUERY_MAX: 100,
+} as const;
+
+/** Directory role filters besides a role id: the coarse roles and "no role". */
+export const MEMBER_DIRECTORY_ROLE_FILTERS = ['owner', 'admin', 'none'] as const;
+
 export const DISCOVERY_PAGE_SIZE = 24;
 export const DISCOVERY_MAX_PAGE_SIZE = 48;
 /** Keyset depth cap — beyond it the answer is "refine your search". */

@@ -88,6 +88,12 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // Reads of the moderation lists (join requests, bans): the client follows
   // pages and refetches on open, so they must not share the write budget.
   memberRead:     { keyPrefix: 'rl:memberrd',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Member Lists Read' },
+  // Batched member lookups by id (GET /servers/:id/members/lookup): the
+  // client coalesces unknown ids (message authors, voice participants, a
+  // presence event for someone outside the loaded slice) into one request per
+  // debounce window, so a busy big server can legitimately ask a few times a
+  // second — its own budget, so chat scrolling never starves the panel reads.
+  memberLookup:   { keyPrefix: 'rl:memberlk',  points: 120, duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Member Lookup' },
   categoryManage: { keyPrefix: 'rl:category',  points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Category Manage' },
   search:         { keyPrefix: 'rl:search',    points: 15,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Search' },
   stats:          { keyPrefix: 'rl:stats',     points: 30,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Stats' },
@@ -569,6 +575,7 @@ export const rateLimitUpload = createMiddleware('upload', byUserId);
 export const rateLimitFriendRequest = createMiddleware('friendRequest', byUserId);
 export const rateLimitMemberManage = createMiddleware('memberManage', byUserId);
 export const rateLimitMemberRead = createMiddleware('memberRead', byUserId);
+export const rateLimitMemberLookup = createMiddleware('memberLookup', byUserId);
 export const rateLimitCategoryManage = createMiddleware('categoryManage', byUserId);
 export const rateLimitSearch = createMiddleware('search', byUserId);
 export const rateLimitStats = createMiddleware('stats', byIp);
