@@ -16,7 +16,7 @@ interface DMState {
   clearActiveConversation: () => void;
   openDM: (userId: string) => Promise<string>;
   addConversation: (conversation: Conversation) => void;
-  updateLastMessage: (conversationId: string, message: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string }) => void;
+  updateLastMessage: (conversationId: string, message: NonNullable<Conversation['lastMessage']>) => void;
   incrementDMUnread: (conversationId: string) => void;
   clearDMUnread: (conversationId: string) => void;
   initDMUnreadCounts: (unreads: DMUnreadCount[]) => void;
@@ -169,7 +169,7 @@ export const useDMStore = create<DMState>((set, get) => ({
   },
 
 
-  updateLastMessage: (conversationId: string, message: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string }) => {
+  updateLastMessage: (conversationId: string, message: NonNullable<Conversation['lastMessage']>) => {
     set((state) => {
       const updated = state.conversations.map((c) =>
         c.id === conversationId ? { ...c, lastMessage: message } : c

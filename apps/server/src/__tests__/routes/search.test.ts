@@ -44,34 +44,15 @@ function createApp() {
   return app;
 }
 
-describe('Search routes — DM search excludes E2E messages', () => {
+describe('Search routes — there is no server-side DM search', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('always filters encrypted messages out of DM search', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
-      id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2',
-    } as any);
-    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([]);
-
+  it('answers 404 for the removed DM route and touches no table (every DM is ciphertext; search is local)', async () => {
     const res = await request(createApp()).get('/api/v1/search/dm/conv-1/messages?q=secret');
-
-    expect(res.status).toBe(200);
-    expect(prisma.message.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ encrypted: false, conversationId: 'conv-1' }),
-      })
-    );
-  });
-
-  it('still denies non-participants', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
-      id: 'conv-1', user1Id: 'other-1', user2Id: 'other-2',
-    } as any);
-
-    const res = await request(createApp()).get('/api/v1/search/dm/conv-1/messages?q=secret');
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
+    expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
     expect(prisma.message.findMany).not.toHaveBeenCalled();
   });
 });

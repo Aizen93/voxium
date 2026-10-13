@@ -360,7 +360,9 @@ export interface Conversation {
   user1Id: string;
   user2Id: string;
   participant: MessageAuthor; // the OTHER user (populated at query time)
-  lastMessage: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string } | null;
+  /** `type` decides whether an unencrypted preview may be shown at all: only
+   *  a system notice can be plaintext since the 2.0 cutover. */
+  lastMessage: { id: string; content: string; encrypted?: boolean; type?: Message['type']; createdAt: string; authorId: string } | null;
   /** E2E DMs: when this conversation started being encrypted. Always set —
    *  conversations are born encrypted (docs/e2e-always-on-plan.md §4.2), so
    *  this is status, never a flag to branch "is encryption on?" against. */

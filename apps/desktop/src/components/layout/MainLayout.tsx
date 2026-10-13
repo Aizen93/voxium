@@ -390,9 +390,13 @@ export function MainLayout() {
         const dmStore = useDMStore.getState();
         const activeConvId = dmStore.activeConversationId;
 
-        // E2E DMs arrive as ciphertext — decrypt (or resolve from the local
-        // cache) before the message touches any store, preview, or notification
-        if (message.encrypted) {
+        // Every DM goes through the decrypt gate before it touches any store,
+        // preview or notification — never only the ones flagged encrypted. The
+        // flag is the server's word: an `encrypted: false` user row is the
+        // forgery the gate exists to refuse (only system notices are plaintext
+        // since the 2.0 cutover), and skipping the gate on it was the leftover
+        // plaintext branch.
+        {
           const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
           message = await decryptMessageForDisplay(message);
         }
@@ -408,6 +412,7 @@ export function MainLayout() {
               id: message.id,
               content: message.content,
               encrypted: message.encrypted,
+              type: message.type,
               createdAt: message.createdAt,
               authorId: message.author?.id,
             });
@@ -438,8 +443,9 @@ export function MainLayout() {
       },
       dmMessageUpdate: async (message: Message) => {
         // E2E edits arrive as fresh ciphertext — decrypt before the store
-        // (the plaintext cache is versioned by editedAt)
-        if (message.encrypted) {
+        // (the plaintext cache is versioned by editedAt). Same gate as a new
+        // message, whatever the flag says.
+        {
           const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
           message = await decryptMessageForDisplay(message);
         }

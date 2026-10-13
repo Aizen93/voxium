@@ -6,7 +6,7 @@ import { useSupportStore } from '../../stores/supportStore';
 import { Avatar } from '../common/Avatar';
 import { MessageSquare, Users, X, LifeBuoy } from 'lucide-react';
 import { clsx } from 'clsx';
-import { parseE2EEnvelope } from '@voxium/shared';
+import { dmPreviewText } from '../../utils/dmPreview';
 import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { toast } from '../../stores/toastStore';
 import { StaffBadge } from '../common/StaffBadge';
@@ -163,11 +163,12 @@ export function DMList() {
                         parser, not of the string's first characters: a
                         display-layer sniff for a payload format is the wrong
                         layer, and it is what let a structured plaintext
-                        payload — file key and all — through to the DOM. */}
-                    {conv.lastMessage.encrypted &&
-                     (!conv.lastMessage.content || parseE2EEnvelope(conv.lastMessage.content) !== null)
-                      ? `🔒 ${t('e2e.encryptedMessage')}`
-                      : conv.lastMessage.content}
+                        payload — file key and all — through to the DOM.
+                        An UNENCRYPTED preview is shown only for a system
+                        notice ("Voice call started"): every user DM is
+                        encrypted since the 2.0 cutover, so plaintext on a
+                        user row is the server's word, not the sender's. */}
+                    {dmPreviewText(conv.lastMessage) ?? `🔒 ${t('e2e.encryptedMessage')}`}
                   </p>
                 )}
               </div>
