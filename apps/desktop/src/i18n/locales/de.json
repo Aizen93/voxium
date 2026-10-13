@@ -1302,7 +1302,8 @@
     "offlineStatus": "Offline",
     "moreOnline_one": "und {{count}} weitere Person online",
     "moreOnline_other": "und {{count}} weitere online",
-    "browseAll": "Alle Mitglieder durchsuchen"
+    "browseAll": "Alle Mitglieder durchsuchen",
+    "directoryTitle": "Alle Mitglieder"
   },
   "search": {
     "placeholder": "Nachrichten suchen…"

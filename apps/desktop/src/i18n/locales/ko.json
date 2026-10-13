@@ -1300,7 +1300,8 @@
     "awayStatus": "자리 비움",
     "offlineStatus": "오프라인",
     "moreOnline_other": "외 {{count}}명 온라인",
-    "browseAll": "모든 멤버 보기"
+    "browseAll": "모든 멤버 보기",
+    "directoryTitle": "모든 멤버"
   },
   "search": {
     "placeholder": "메시지 검색…"

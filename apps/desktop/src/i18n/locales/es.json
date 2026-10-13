@@ -1302,7 +1302,8 @@
     "offlineStatus": "Desconectado",
     "moreOnline_one": "y {{count}} más en línea",
     "moreOnline_other": "y {{count}} más en línea",
-    "browseAll": "Ver todos los miembros"
+    "browseAll": "Ver todos los miembros",
+    "directoryTitle": "Todos los miembros"
   },
   "search": {
     "placeholder": "Buscar mensajes…"

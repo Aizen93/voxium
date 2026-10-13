@@ -1310,7 +1310,8 @@
     "moreOnline_few": "و{{count}} آخرين متصلين",
     "moreOnline_many": "و{{count}} آخرين متصلين",
     "moreOnline_other": "و{{count}} آخرين متصلين",
-    "browseAll": "تصفح جميع الأعضاء"
+    "browseAll": "تصفح جميع الأعضاء",
+    "directoryTitle": "جميع الأعضاء"
   },
   "search": {
     "placeholder": "البحث في الرسائل…"

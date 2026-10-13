@@ -587,13 +587,6 @@ describe('serverStore — the member directory', () => {
     await expect(useServerStore.getState().fetchDirectory('srv-1', { q: '', role: null })).rejects.toThrow('500');
     expect(useServerStore.getState().directory).toMatchObject({ serverId: 'srv-1', loading: false, error: true, rows: [] });
   });
-
-  it('a settings request names the server and the tab until the sidebar clears it', () => {
-    useServerStore.getState().requestServerSettings('srv-1', 'members');
-    expect(useServerStore.getState().settingsRequest).toEqual({ serverId: 'srv-1', tab: 'members' });
-    useServerStore.getState().clearSettingsRequest();
-    expect(useServerStore.getState().settingsRequest).toBeNull();
-  });
 });
 
 describe('serverStore — pinned spaces', () => {

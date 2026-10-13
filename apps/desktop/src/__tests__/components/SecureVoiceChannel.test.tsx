@@ -45,8 +45,6 @@ vi.mock('../../stores/serverStore', () => {
     deleteCategory: vi.fn(),
     members: [],
     people: { full: true, truncated: false, onlineCount: 0, memberCount: 0, loaded: true },
-    settingsRequest: null,
-    clearSettingsRequest: vi.fn(),
     ensureMembers: vi.fn(),
     roles: [],
     unreadCounts: {},

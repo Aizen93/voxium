@@ -91,8 +91,6 @@ async function decideJoinRequest(
 // → Members) is a separate, server-paged list that shares the same rows'
 // live updates.
 
-export type ServerSettingsTab = 'general' | 'members' | 'roles' | 'limits' | 'discovery';
-
 export interface PeopleState {
   /** Every member is loaded, offline included (the server is small). */
   full: boolean;
@@ -270,10 +268,6 @@ interface ServerState {
   members: ServerMember[];
   people: PeopleState;
   directory: DirectoryState;
-  /** A component outside the sidebar asked for Server settings on a tab (the
-   *  People panel's "Browse all members"); the sidebar that owns the modal
-   *  opens it and clears this. */
-  settingsRequest: { serverId: string; tab: ServerSettingsTab } | null;
   roles: Role[];
   isLoading: boolean;
   unreadCounts: Record<string, number>;
@@ -310,8 +304,6 @@ interface ServerState {
   /** Server settings → Members: the first page for a search text and a role filter. */
   fetchDirectory: (serverId: string, filter: { q: string; role: string | null }) => Promise<void>;
   fetchDirectoryMore: (serverId: string) => Promise<void>;
-  requestServerSettings: (serverId: string, tab: ServerSettingsTab) => void;
-  clearSettingsRequest: () => void;
   incrementUnread: (channelId: string, serverId: string) => void;
   clearUnread: (channelId: string) => void;
   initUnreadCounts: (unreads: UnreadCount[]) => void;
@@ -426,7 +418,6 @@ export const useServerStore = create<ServerState>((set, get) => ({
   members: [],
   people: EMPTY_PEOPLE,
   directory: EMPTY_DIRECTORY,
-  settingsRequest: null,
   roles: [],
   isLoading: false,
   unreadCounts: {},
@@ -813,9 +804,6 @@ export const useServerStore = create<ServerState>((set, get) => ({
       throw err;
     }
   },
-
-  requestServerSettings: (serverId, tab) => set({ settingsRequest: { serverId, tab } }),
-  clearSettingsRequest: () => set({ settingsRequest: null }),
 
   incrementUnread: (channelId: string, serverId: string) => {
     set((state) => ({

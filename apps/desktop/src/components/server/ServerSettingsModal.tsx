@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
-import { useServerStore, type ServerSettingsTab } from '../../stores/serverStore';
+import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { ImageUploadButton } from '../common/ImageUploadButton';
@@ -18,18 +18,16 @@ import { getTranslatedError } from '../../utils/serverErrors';
 interface Props {
   serverId: string;
   onClose: () => void;
-  /** Open on this tab (the People panel's "Browse all members" asks for Members). */
-  initialTab?: ServerSettingsTab;
 }
 
-type Tab = ServerSettingsTab;
+type Tab = 'general' | 'members' | 'roles' | 'limits' | 'discovery';
 
-export function ServerSettingsModal({ serverId, onClose, initialTab }: Props) {
+export function ServerSettingsModal({ serverId, onClose }: Props) {
   const { t } = useTranslation();
   // No tab until the viewer picks one: the default is derived below from
   // what they may do (General is a MANAGE_SERVER tab; a role-only moderator
   // reaches the modal through the gear too and lands on Members).
-  const [activeTab, setActiveTab] = useState<Tab | null>(initialTab ?? null);
+  const [activeTab, setActiveTab] = useState<Tab | null>(null);
 
   const { servers, roles, fetchEffectivePermissions, fetchJoinRequests } = useServerStore();
   const pendingRequests = useServerStore((s) => s.joinRequestCounts[serverId] ?? 0);

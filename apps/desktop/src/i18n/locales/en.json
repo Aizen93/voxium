@@ -1302,7 +1302,8 @@
     "offlineStatus": "Offline",
     "moreOnline_one": "and {{count}} more online",
     "moreOnline_other": "and {{count}} more online",
-    "browseAll": "Browse all members"
+    "browseAll": "Browse all members",
+    "directoryTitle": "All members"
   },
   "search": {
     "placeholder": "Search messages…"

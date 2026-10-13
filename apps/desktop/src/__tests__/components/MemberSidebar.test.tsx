@@ -20,7 +20,7 @@ vi.mock('react-i18next', async (importOriginal) => {
   return { ...actual, useTranslation: () => ({ t }) };
 });
 
-const S = vi.hoisted(() => ({ requestServerSettings: vi.fn(), ensureMembers: vi.fn() }));
+const S = vi.hoisted(() => ({ ensureMembers: vi.fn() }));
 let members: ServerMember[] = [];
 let channels: Channel[] = [];
 let people: PeopleState = { full: true, truncated: false, onlineCount: 0, memberCount: 0, loaded: true };
@@ -52,6 +52,8 @@ vi.mock('../../components/common/UserHoverTarget', () => ({
   UserHoverTarget: ({ children }: { children?: ReactNode }) => <>{children}</>,
 }));
 vi.mock('../../components/server/MemberContextMenu', () => ({ MemberContextMenu: () => null }));
+// The directory's own fetches are not this test's business
+vi.mock('../../components/server/MembersDirectory', () => ({ MembersDirectory: ({ serverId }: { serverId: string }) => <div data-testid="members-directory" data-server={serverId} /> }));
 
 import { MemberSidebar } from '../../components/server/MemberSidebar';
 
@@ -127,15 +129,23 @@ describe('MemberSidebar — a big server (the online slice)', () => {
     people = { full: false, truncated: false, onlineCount: 640, memberCount: 12_000, loaded: true };
   });
 
-  it('shows no offline row; the Offline section is the count of the members not here and a way into the directory', async () => {
+  it('shows no offline row; the Offline section is the count of the members not here and a way into the directory — a plain dialog, never Server settings', async () => {
     await render();
     expect(names()).toEqual(['BOB', 'ME', 'CAROL']);
     expect(labels()).toEqual(['people.active · 2', 'people.away · 1', 'people.offline · 11360']);
     expect(q('[data-testid="people-online-count"]')!.textContent).toBe('640');
     const browse = q('[data-testid="people-browse-all"]')!;
     expect(browse.textContent).toBe('people.browseAll');
+    expect(q('[data-testid="members-dialog"]')).toBeNull();
     await act(async () => { browse.click(); });
-    expect(S.requestServerSettings).toHaveBeenCalledWith('srv-1', 'members');
+    const dialog = q('[data-testid="members-dialog"]')!;
+    expect(dialog.getAttribute('role')).toBe('dialog');
+    expect(dialog.textContent).toContain('people.directoryTitle');
+    expect(dialog.textContent).toContain('12000');
+    expect(q('[data-testid="members-directory"]')!.getAttribute('data-server')).toBe('srv-1');
+    // Escape closes it
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(q('[data-testid="members-dialog"]')).toBeNull();
   });
 
   it('a slice cut at the cap says how many more are online; a complete slice does not', async () => {

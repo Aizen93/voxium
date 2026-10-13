@@ -80,10 +80,13 @@ test.describe('Member lists — big servers', () => {
       await expect(people.getByTestId('people-online-count')).toHaveText('2');
       await expect(people.getByText(`Offline · ${total - 2}`)).toBeVisible();
 
-      // ── (b) the directory, from the panel's link ──
+      // ── (b) the directory, from the panel's link: a plain dialog, never Server settings ──
       await browse.click();
-      const dialog = page.getByRole('dialog');
+      const dialog = page.getByTestId('members-dialog');
+      await expect(dialog).toBeVisible({ timeout: 15_000 });
       await expect(dialog.getByTestId('members-directory')).toBeVisible({ timeout: 15_000 });
+      await expect(dialog.getByTestId('join-requests')).toHaveCount(0);
+      await expect(dialog.getByTestId('tab-discovery')).toHaveCount(0);
       const rows = dialog.getByTestId('member-row');
       await expect(rows).toHaveCount(PAGE, { timeout: 15_000 });
       // owner first, then by join date: bob joined before the seed

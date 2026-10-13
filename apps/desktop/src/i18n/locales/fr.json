@@ -1302,7 +1302,8 @@
     "offlineStatus": "Hors ligne",
     "moreOnline_one": "et {{count}} autre en ligne",
     "moreOnline_other": "et {{count}} autres en ligne",
-    "browseAll": "Parcourir tous les membres"
+    "browseAll": "Parcourir tous les membres",
+    "directoryTitle": "Tous les membres"
   },
   "search": {
     "placeholder": "Rechercher des messages…"

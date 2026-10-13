@@ -8,6 +8,7 @@ import { useVoiceStore } from '../../stores/voiceStore';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { MemberContextMenu } from './MemberContextMenu';
+import { MembersDialog } from './MembersDialog';
 import { clsx } from 'clsx';
 import type { ServerMember, VoiceUser } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
@@ -28,9 +29,10 @@ interface ContextMenuState {
  * It is a PRESENCE view, not the member list (CLAUDE.md "Server Membership"):
  * on a small server every member is loaded and the Offline section lists
  * them; on a big one only the online members are, the Offline section
- * collapses to a count and a way into the directory (Server settings →
- * Members), and when the online members outnumber the slice the panel says
- * how many more are online.
+ * collapses to a count and a way into the directory (a plain "All members"
+ * dialog, for every member — never Server settings, which is the
+ * administration surface), and when the online members outnumber the slice
+ * the panel says how many more are online.
  */
 export function MemberSidebar() {
   const { t } = useTranslation();
@@ -41,6 +43,7 @@ export function MemberSidebar() {
   // Our own row reads online while the socket is up (nobody echoes our presence to us)
   const members = useMemo(() => withOwnPresence(knownMembers, selfId, connected), [knownMembers, selfId, connected]);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [showDirectory, setShowDirectory] = useState(false);
 
   // A voice participant with no row yet (a big server, someone outside the
   // slice): ask for it, so the In voice section can show them
@@ -167,7 +170,7 @@ export function MemberSidebar() {
           <PeopleSection label={`${t('people.offline')} · ${offlineHidden}`}>
             <button
               type="button"
-              onClick={() => { if (activeServerId) useServerStore.getState().requestServerSettings(activeServerId, 'members'); }}
+              onClick={() => setShowDirectory(true)}
               className="flex w-full items-center rounded-lg px-2 py-1.5 text-left text-[12.5px] font-medium text-vox-accent-primary transition-colors hover:bg-vox-bg-hover"
               data-testid="people-browse-all"
             >
@@ -183,6 +186,10 @@ export function MemberSidebar() {
           position={contextMenu.position}
           onClose={() => setContextMenu(null)}
         />
+      )}
+
+      {showDirectory && activeServerId && (
+        <MembersDialog serverId={activeServerId} onClose={() => setShowDirectory(false)} />
       )}
     </div>
   );

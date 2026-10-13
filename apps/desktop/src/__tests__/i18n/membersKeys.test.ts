@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 const SOURCES = [
   fileURLToPath(new URL('../../components/server/MemberSidebar.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/MembersDirectory.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/server/MembersDialog.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/ServerSettingsModal.tsx', import.meta.url)),
 ];
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
@@ -66,6 +67,7 @@ describe('member-list translation keys', () => {
   it('finds the translation calls it is supposed to check', () => {
     expect(locales.length).toBe(11);
     expect(keys).toContain('people.browseAll');                     // the panel's way into the directory
+    expect(keys).toContain('people.directoryTitle');                // the directory dialog
     expect(keys).toContain('people.moreOnline');                    // the cut slice's footer
     expect(keys).toContain('serverSettings.members.loadMore');      // the directory's next page
     expect(keys).toContain('serverSettings.members.failedToLoad');  // its failure toast

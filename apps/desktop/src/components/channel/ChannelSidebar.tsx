@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
-import { useServerStore, type ServerSettingsTab } from '../../stores/serverStore';
+import { useServerStore } from '../../stores/serverStore';
 import { useConnectionStatus } from '../../hooks/useConnectionStatus';
 import { headerOnlineCount } from '../../utils/peopleGroups';
 import { getTranslatedError } from '../../utils/serverErrors';
@@ -426,17 +426,7 @@ export function ChannelSidebar() {
   const { user } = useAuthStore();
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showServerSettings, setShowServerSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<ServerSettingsTab | undefined>(undefined);
   const connectionStatus = useConnectionStatus();
-  // Another panel asked for the settings on a tab (the People panel's
-  // "Browse all members"): this sidebar owns the modal, so it opens it
-  const settingsRequest = useServerStore((s) => s.settingsRequest);
-  useEffect(() => {
-    if (!settingsRequest || settingsRequest.serverId !== activeServerId) return;
-    setSettingsTab(settingsRequest.tab);
-    setShowServerSettings(true);
-    useServerStore.getState().clearSettingsRequest();
-  }, [settingsRequest, activeServerId]);
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [createChannelCategoryId, setCreateChannelCategoryId] = useState<string | null>(null);
   const [newChannelName, setNewChannelName] = useState('');
@@ -1112,7 +1102,7 @@ export function ChannelSidebar() {
         <InviteModal serverId={activeServerId} onClose={() => setShowInviteModal(false)} />
       )}
       {showServerSettings && activeServerId && (
-        <ServerSettingsModal serverId={activeServerId} initialTab={settingsTab} onClose={() => { setShowServerSettings(false); setSettingsTab(undefined); }} />
+        <ServerSettingsModal serverId={activeServerId} onClose={() => setShowServerSettings(false)} />
       )}
 
       {/* Channel right-click context menu */}

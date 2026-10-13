@@ -1306,7 +1306,8 @@
     "moreOnline_few": "и ещё {{count}} в сети",
     "moreOnline_many": "и ещё {{count}} в сети",
     "moreOnline_other": "и ещё {{count}} в сети",
-    "browseAll": "Все участники"
+    "browseAll": "Все участники",
+    "directoryTitle": "Все участники"
   },
   "search": {
     "placeholder": "Поиск сообщений…"

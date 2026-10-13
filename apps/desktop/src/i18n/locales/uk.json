@@ -1306,7 +1306,8 @@
     "moreOnline_few": "і ще {{count}} в мережі",
     "moreOnline_many": "і ще {{count}} в мережі",
     "moreOnline_other": "і ще {{count}} в мережі",
-    "browseAll": "Усі учасники"
+    "browseAll": "Усі учасники",
+    "directoryTitle": "Усі учасники"
   },
   "search": {
     "placeholder": "Пошук повідомлень…"

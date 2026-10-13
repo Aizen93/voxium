@@ -1300,7 +1300,8 @@
     "awayStatus": "離席中",
     "offlineStatus": "オフライン",
     "moreOnline_other": "他に{{count}}人がオンライン",
-    "browseAll": "すべてのメンバーを見る"
+    "browseAll": "すべてのメンバーを見る",
+    "directoryTitle": "すべてのメンバー"
   },
   "search": {
     "placeholder": "メッセージを検索…"
