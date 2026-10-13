@@ -3,7 +3,7 @@ import axios from 'axios';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
-import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS } from '@voxium/shared';
+import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST } from '@voxium/shared';
 import type { DiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
 
@@ -81,8 +81,146 @@ async function decideJoinRequest(
   get().handleJoinRequestResolved(serverId, userId);
 }
 
-/** Pages of LIMITS.MEMBERS_PER_PAGE fetchMembers will follow before giving up (and saying so). */
-const MEMBER_PAGES_MAX = 50;
+// ─── Member lists ───────────────────────────────────────────────────────────
+//
+// `members` is every member row this client KNOWS for the active server: the
+// People panel's slice (GET /members/online — everyone on a small server, the
+// online members on a big one) plus whatever the batched lookup fetched for a
+// message author, a voice participant or a presence event. `people` says how
+// that slice relates to the whole membership; the directory (Server settings
+// → Members) is a separate, server-paged list that shares the same rows'
+// live updates.
+
+export type ServerSettingsTab = 'general' | 'members' | 'roles' | 'limits' | 'discovery';
+
+export interface PeopleState {
+  /** Every member is loaded, offline included (the server is small). */
+  full: boolean;
+  /** Online members exist beyond the loaded slice (the cap cut them). */
+  truncated: boolean;
+  /** The server's figures at load time, moved by the live events since. */
+  onlineCount: number;
+  memberCount: number;
+  loaded: boolean;
+}
+export const EMPTY_PEOPLE: PeopleState = { full: true, truncated: false, onlineCount: 0, memberCount: 0, loaded: false };
+
+export interface DirectoryState {
+  /** Whose list this is — a component renders it only when the id is its own. */
+  serverId: string | null;
+  rows: ServerMember[];
+  /** Members matching the filter (the whole membership when unfiltered). */
+  total: number;
+  nextCursor: string | null;
+  hasMore: boolean;
+  q: string;
+  /** 'owner' | 'admin' | 'none' | a role id | null for all */
+  role: string | null;
+  loading: boolean;
+  error: boolean;
+}
+export const EMPTY_DIRECTORY: DirectoryState = { serverId: null, rows: [], total: 0, nextCursor: null, hasMore: false, q: '', role: null, loading: false, error: false };
+
+/** How long unknown ids are collected before one lookup request goes out. */
+export const MEMBER_LOOKUP_DEBOUNCE_MS = 300;
+/** After a failed lookup, how long before the next one may go out. */
+const MEMBER_LOOKUP_BACKOFF_MS = 10_000;
+/** Known rows past this many: offline rows are dropped, oldest first (the viewer is online while here). */
+const MEMBER_CACHE_MAX = MEMBER_LIST.PEOPLE_MAX_ROWS * 3;
+
+/** Ids the server answered are NOT members of the active server (a presence
+ *  event names everyone we share any server with) — asked once, never again
+ *  until the server changes or they join. */
+const lookupMisses = new Set<string>();
+/** Ids queued for the next lookup, or in flight. */
+const lookupPending = new Set<string>();
+let lookupTimer: ReturnType<typeof setTimeout> | null = null;
+let lookupBackoffUntil = 0;
+/** Bumped by every first-page directory fetch so a slower earlier response is dropped. */
+let directoryGeneration = 0;
+
+/** Forget the lookup queue and the misses: on a server switch, and at logout. */
+export function resetMemberLookupState(): void {
+  lookupMisses.clear();
+  lookupPending.clear();
+  if (lookupTimer) { clearTimeout(lookupTimer); lookupTimer = null; }
+  lookupBackoffUntil = 0;
+  directoryGeneration++;
+}
+
+function isOnline(m: ServerMember): boolean {
+  return (m.user.status || 'offline') !== 'offline';
+}
+
+/** The same row patched in the known rows and the directory (one of them may not hold it). */
+function patchRows(rows: ServerMember[], userId: string, patch: (m: ServerMember) => ServerMember): ServerMember[] {
+  let changed = false;
+  const next = rows.map((m) => { if (m.userId !== userId) return m; changed = true; return patch(m); });
+  return changed ? next : rows;
+}
+function patchMemberEverywhere(state: { members: ServerMember[]; directory: DirectoryState }, userId: string, patch: (m: ServerMember) => ServerMember) {
+  const members = patchRows(state.members, userId, patch);
+  const rows = patchRows(state.directory.rows, userId, patch);
+  return { members, directory: rows === state.directory.rows ? state.directory : { ...state.directory, rows } };
+}
+
+/** Rows a lookup or a directory page brought in, merged into the known rows (fresher data wins). */
+function mergeKnownMembers(state: { members: ServerMember[]; people: PeopleState }, rows: ServerMember[]) {
+  const byId = new Map(state.members.map((m) => [m.userId, m]));
+  let onlineCount = state.people.onlineCount;
+  for (const row of rows) {
+    // A member found online that the slice did not hold came online after the
+    // load (the slice held every online member) — count them. A TRUNCATED
+    // slice already counted the members it cut, so never there.
+    if (!byId.has(row.userId) && !state.people.full && !state.people.truncated && isOnline(row)) onlineCount++;
+    byId.set(row.userId, row);
+  }
+  let members = [...byId.values()];
+  if (members.length > MEMBER_CACHE_MAX) {
+    let excess = members.length - MEMBER_CACHE_MAX;
+    members = members.filter((m) => {
+      if (excess <= 0 || isOnline(m)) return true;
+      excess--;
+      return false;
+    });
+  }
+  return { members, people: onlineCount === state.people.onlineCount ? state.people : { ...state.people, onlineCount } };
+}
+
+/** A member row from a `member:joined` payload (role and nickname are the join defaults). */
+function memberFromJoin(serverId: string, user: PublicUser): ServerMember {
+  return {
+    userId: user.id,
+    serverId,
+    role: 'member',
+    nickname: null,
+    joinedAt: new Date().toISOString(),
+    roles: [],
+    user: {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      avatarUrl: user.avatarUrl,
+      bio: user.bio ?? null,
+      status: user.status || 'online',
+      role: user.role || 'user',
+      isSupporter: user.isSupporter ?? false,
+      supporterTier: user.supporterTier ?? null,
+      createdAt: user.createdAt,
+    },
+  };
+}
+
+/** One page of the directory as the API sends it, with safe defaults. */
+function directoryPage(data: { data?: unknown; total?: unknown; nextCursor?: unknown; hasMore?: unknown }) {
+  const rows = Array.isArray(data.data) ? (data.data as ServerMember[]) : [];
+  return {
+    rows,
+    total: typeof data.total === 'number' ? data.total : rows.length,
+    nextCursor: typeof data.nextCursor === 'string' ? data.nextCursor : null,
+    hasMore: data.hasMore === true,
+  };
+}
 
 const PINNED_KEY = 'voxium_pinned_spaces';
 
@@ -107,6 +245,12 @@ interface ServerState {
   categories: Category[];
   activeChannelId: string | null;
   members: ServerMember[];
+  people: PeopleState;
+  directory: DirectoryState;
+  /** A component outside the sidebar asked for Server settings on a tab (the
+   *  People panel's "Browse all members"); the sidebar that owns the modal
+   *  opens it and clears this. */
+  settingsRequest: { serverId: string; tab: ServerSettingsTab } | null;
   roles: Role[];
   isLoading: boolean;
   unreadCounts: Record<string, number>;
@@ -134,7 +278,17 @@ interface ServerState {
   createCategory: (serverId: string, name: string) => Promise<Category>;
   deleteCategory: (serverId: string, categoryId: string) => Promise<void>;
   renameCategory: (serverId: string, categoryId: string, name: string) => Promise<void>;
-  fetchMembers: (serverId: string) => Promise<void>;
+  /** The People panel's slice (replaces `members` and `people`). */
+  fetchPeople: (serverId: string) => Promise<void>;
+  /** Fetch the rows of members this client has no row for — coalesced into
+   *  one request per MEMBER_LOOKUP_DEBOUNCE_MS, at most LOOKUP_MAX_IDS each;
+   *  ids the server does not return are remembered as non-members. */
+  ensureMembers: (userIds: string[]) => void;
+  /** Server settings → Members: the first page for a search text and a role filter. */
+  fetchDirectory: (serverId: string, filter: { q: string; role: string | null }) => Promise<void>;
+  fetchDirectoryMore: (serverId: string) => Promise<void>;
+  requestServerSettings: (serverId: string, tab: ServerSettingsTab) => void;
+  clearSettingsRequest: () => void;
   incrementUnread: (channelId: string, serverId: string) => void;
   clearUnread: (channelId: string) => void;
   initUnreadCounts: (unreads: UnreadCount[]) => void;
@@ -247,6 +401,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
   categories: [],
   activeChannelId: null,
   members: [],
+  people: EMPTY_PEOPLE,
+  directory: EMPTY_DIRECTORY,
+  settingsRequest: null,
   roles: [],
   isLoading: false,
   unreadCounts: {},
@@ -269,7 +426,14 @@ export const useServerStore = create<ServerState>((set, get) => ({
       get().markChannelRead(prevChannelId);
     }
 
-    set({ activeServerId: serverId, isLoading: true });
+    // The known rows and the lookup memory belong to the server being left:
+    // kept, they would answer for the next server until its slice lands.
+    if (get().activeServerId !== serverId) {
+      resetMemberLookupState();
+      set({ activeServerId: serverId, isLoading: true, members: [], people: EMPTY_PEOPLE });
+    } else {
+      set({ isLoading: true });
+    }
     try {
       const { data } = await api.get(`/servers/${serverId}`);
 
@@ -297,8 +461,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
         get().markChannelRead(firstTextChannel.id);
       }
 
-      // Fetch members in the background
-      get().fetchMembers(serverId);
+      // Fetch the People panel's slice in the background
+      get().fetchPeople(serverId);
     } catch (err) {
       console.error('Failed to fetch server:', err);
       // Only surface the failure if this server is still the one being viewed
@@ -358,46 +522,80 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   updateMemberStatus: (userId: string, status: UserStatus) => {
-    set((state) => ({
-      members: state.members.map((m) =>
-        m.userId === userId ? { ...m, user: { ...m.user, status } } : m
-      ),
-    }));
+    // presence:update names everyone we share ANY server with and carries no
+    // serverId; the rows here are the active server's.
+    let lookup = false;
+    set((state) => {
+      const row = state.members.find((m) => m.userId === userId);
+      const online = status !== 'offline';
+      if (!row) {
+        // On a big server the slice holds the online members only: someone we
+        // have no row for coming online may be one of ours — the lookup says
+        // (and counts them). With the slice cut at the cap they cannot be
+        // shown anyway; on a small server everyone is already here.
+        lookup = online && state.people.loaded && !state.people.full && !state.people.truncated;
+        return state;
+      }
+      const delta = (online ? 1 : 0) - (isOnline(row) ? 1 : 0);
+      return {
+        ...patchMemberEverywhere(state, userId, (m) => ({ ...m, user: { ...m.user, status } })),
+        people: delta === 0 ? state.people : { ...state.people, onlineCount: Math.max(0, state.people.onlineCount + delta) },
+      };
+    });
+    if (lookup) get().ensureMembers([userId]);
   },
 
   addMember: (serverId: string, user: PublicUser) => {
     if (get().activeServerId !== serverId) return;
+    // A readmitted member was a lookup miss while they were out
+    lookupMisses.delete(user.id);
     set((state) => {
       if (state.members.some((m) => m.userId === user.id)) return state;
-      const newMember: ServerMember = {
-        userId: user.id,
-        serverId,
-        role: 'member',
-        nickname: null,
-        joinedAt: new Date().toISOString(),
-        roles: [],
-        user: {
-          id: user.id,
-          username: user.username,
-          displayName: user.displayName,
-          avatarUrl: user.avatarUrl,
-          bio: user.bio ?? null,
-          status: user.status || 'online',
-          role: user.role || 'user',
-          isSupporter: user.isSupporter ?? false,
-          supporterTier: user.supporterTier ?? null,
-          createdAt: user.createdAt,
-        },
+      const newMember = memberFromJoin(serverId, user);
+      const d = state.directory;
+      const unfiltered = d.serverId === serverId && !d.q && !d.role;
+      // The directory ends with the newest joiner: append only when the list
+      // is complete, or the row would come again with the next page.
+      const directory = !unfiltered ? d : {
+        ...d,
+        total: d.total + 1,
+        rows: !d.hasMore && !d.rows.some((m) => m.userId === user.id) ? [...d.rows, newMember] : d.rows,
       };
-      return { members: [...state.members, newMember] };
+      return {
+        members: [...state.members, newMember],
+        people: {
+          ...state.people,
+          memberCount: state.people.memberCount + 1,
+          onlineCount: state.people.onlineCount + (isOnline(newMember) ? 1 : 0),
+        },
+        directory,
+      };
     });
   },
 
   removeMember: (serverId: string, userId: string) => {
     if (get().activeServerId !== serverId) return;
-    set((state) => ({
-      members: state.members.filter((m) => m.userId !== userId),
-    }));
+    set((state) => {
+      const row = state.members.find((m) => m.userId === userId);
+      const d = state.directory;
+      const listed = d.serverId === serverId;
+      const directory = !listed ? d : {
+        ...d,
+        rows: d.rows.filter((m) => m.userId !== userId),
+        // Unfiltered, the total is the membership; filtered, we cannot tell
+        // whether they counted
+        total: !d.q && !d.role ? Math.max(0, d.total - 1) : d.total,
+      };
+      return {
+        members: row ? state.members.filter((m) => m.userId !== userId) : state.members,
+        people: {
+          ...state.people,
+          memberCount: Math.max(0, state.people.memberCount - 1),
+          onlineCount: row && isOnline(row) ? Math.max(0, state.people.onlineCount - 1) : state.people.onlineCount,
+        },
+        directory,
+      };
+    });
   },
 
   addChannel: (channel: Channel) => {
@@ -458,33 +656,25 @@ export const useServerStore = create<ServerState>((set, get) => ({
     await api.patch(`/servers/${serverId}/categories/${categoryId}`, { name });
   },
 
-  fetchMembers: async (serverId: string) => {
+  fetchPeople: async (serverId: string) => {
     try {
-      // The endpoint pages by join date (LIMITS.MEMBERS_PER_PAGE a page). A
-      // single page hid every member past the first hundred: on a large
-      // server the newest joiners — and anyone removed and readmitted, who
-      // lands at the end by join date — were absent from the People panel
-      // and the Members tab while they could talk freely. Follow `hasMore`
-      // to the end and show each page as it lands.
-      const seen = new Set<string>();
-      const all: ServerMember[] = [];
-      for (let page = 1; page <= MEMBER_PAGES_MAX; page++) {
-        const { data } = await api.get(`/servers/${serverId}/members`, { params: { page, limit: LIMITS.MEMBERS_PER_PAGE } });
-        // Staleness guard — a slow response for the previous server must not
-        // overwrite the member list of the server now being viewed
-        if (get().activeServerId !== serverId) return;
-        for (const m of data.data as ServerMember[]) {
-          if (!seen.has(m.userId)) {
-            seen.add(m.userId);
-            all.push(m);
-          }
-        }
-        set({ members: [...all] });
-        if (!data.hasMore) return;
-        if (page === MEMBER_PAGES_MAX) {
-          console.warn(`[Members] Stopped after ${MEMBER_PAGES_MAX} pages; the member list of ${serverId} is incomplete (${typeof data.total === 'number' ? data.total : '?'} members)`);
-        }
-      }
+      const { data } = await api.get(`/servers/${serverId}/members/online`);
+      // Staleness guard — a slow response for the previous server must not
+      // overwrite the member list of the server now being viewed
+      if (get().activeServerId !== serverId) return;
+      const rows = Array.isArray(data.data) ? (data.data as ServerMember[]) : [];
+      // A fresh slice: the lookup memory was about the old one
+      resetMemberLookupState();
+      set({
+        members: rows,
+        people: {
+          full: data.full !== false,
+          truncated: data.truncated === true,
+          onlineCount: typeof data.onlineCount === 'number' ? data.onlineCount : rows.filter(isOnline).length,
+          memberCount: typeof data.memberCount === 'number' ? data.memberCount : rows.length,
+          loaded: true,
+        },
+      });
     } catch (err) {
       console.error('Failed to fetch members:', err);
       if (get().activeServerId === serverId) {
@@ -492,6 +682,96 @@ export const useServerStore = create<ServerState>((set, get) => ({
       }
     }
   },
+
+  ensureMembers: (userIds: string[]) => {
+    if (!get().activeServerId) return;
+    const known = new Set(get().members.map((m) => m.userId));
+    let queued = false;
+    for (const id of userIds) {
+      if (!id || known.has(id) || lookupMisses.has(id) || lookupPending.has(id)) continue;
+      lookupPending.add(id);
+      queued = true;
+    }
+    if (!queued || lookupTimer) return;
+    const delay = Math.max(MEMBER_LOOKUP_DEBOUNCE_MS, lookupBackoffUntil - Date.now());
+    lookupTimer = setTimeout(() => { lookupTimer = null; void flushMemberLookups(); }, delay);
+
+    async function flushMemberLookups(): Promise<void> {
+      const serverId = get().activeServerId;
+      const ids = [...lookupPending].slice(0, MEMBER_LIST.LOOKUP_MAX_IDS);
+      if (!serverId || ids.length === 0) { lookupPending.clear(); return; }
+      try {
+        const { data } = await api.get(`/servers/${serverId}/members/lookup`, { params: { ids: ids.join(',') } });
+        // A server switch meanwhile reset the queue; these rows are the old server's
+        if (get().activeServerId !== serverId) return;
+        const rows = Array.isArray(data.data) ? (data.data as ServerMember[]) : [];
+        const found = new Set(rows.map((r) => r.userId));
+        for (const id of ids) {
+          lookupPending.delete(id);
+          if (!found.has(id)) lookupMisses.add(id);
+        }
+        if (rows.length) {
+          set((state) => mergeKnownMembers(state, rows));
+        }
+      } catch (err) {
+        console.warn('[Members] Lookup failed:', err);
+        // Not misses: a later event may ask again, after the back-off
+        for (const id of ids) lookupPending.delete(id);
+        lookupBackoffUntil = Date.now() + MEMBER_LOOKUP_BACKOFF_MS;
+      } finally {
+        if (lookupPending.size > 0 && !lookupTimer && get().activeServerId === serverId) {
+          lookupTimer = setTimeout(() => { lookupTimer = null; void flushMemberLookups(); }, Math.max(MEMBER_LOOKUP_DEBOUNCE_MS, lookupBackoffUntil - Date.now()));
+        }
+      }
+    }
+  },
+
+  fetchDirectory: async (serverId, { q, role }) => {
+    const generation = ++directoryGeneration;
+    set({ directory: { serverId, rows: [], total: 0, nextCursor: null, hasMore: false, q, role, loading: true, error: false } });
+    try {
+      const { data } = await api.get(`/servers/${serverId}/members`, {
+        params: { limit: LIMITS.MEMBERS_PER_PAGE, ...(q ? { q } : {}), ...(role ? { role } : {}) },
+      });
+      // A newer first page (another server, another search) owns the list now
+      if (generation !== directoryGeneration) return;
+      const page = directoryPage(data);
+      set((state) => ({
+        directory: { ...state.directory, ...page, loading: false },
+        ...mergeKnownMembers(state, page.rows),
+      }));
+    } catch (err) {
+      if (generation === directoryGeneration) set((state) => ({ directory: { ...state.directory, loading: false, error: true } }));
+      throw err;
+    }
+  },
+
+  fetchDirectoryMore: async (serverId) => {
+    const d = get().directory;
+    if (d.serverId !== serverId || !d.nextCursor || d.loading) return;
+    const generation = directoryGeneration;
+    set({ directory: { ...d, loading: true, error: false } });
+    try {
+      const { data } = await api.get(`/servers/${serverId}/members`, {
+        params: { limit: LIMITS.MEMBERS_PER_PAGE, cursor: d.nextCursor, ...(d.q ? { q: d.q } : {}), ...(d.role ? { role: d.role } : {}) },
+      });
+      if (generation !== directoryGeneration) return;
+      const page = directoryPage(data);
+      set((state) => {
+        const seen = new Set(state.directory.rows.map((m) => m.userId));
+        return {
+          directory: { ...state.directory, ...page, rows: [...state.directory.rows, ...page.rows.filter((m) => !seen.has(m.userId))], loading: false },
+          ...mergeKnownMembers(state, page.rows),
+        };
+      });
+    } catch (err) {
+      if (generation === directoryGeneration) set((state) => ({ directory: { ...state.directory, loading: false, error: true } }));
+      throw err;
+    }
+  },
+
+  requestServerSettings: (serverId, tab) => set({ settingsRequest: { serverId, tab } }),
+  clearSettingsRequest: () => set({ settingsRequest: null }),
 
   incrementUnread: (channelId: string, serverId: string) => {
     set((state) => ({
@@ -587,19 +867,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   updateMemberAvatar: (userId: string, avatarUrl: string | null) => {
-    set((state) => ({
-      members: state.members.map((m) =>
-        m.userId === userId ? { ...m, user: { ...m.user, avatarUrl } } : m
-      ),
-    }));
+    set((state) => patchMemberEverywhere(state, userId, (m) => ({ ...m, user: { ...m.user, avatarUrl } })));
   },
 
   updateMemberProfile: (userId: string, fields: Record<string, unknown>) => {
-    set((state) => ({
-      members: state.members.map((m) =>
-        m.userId === userId ? { ...m, user: { ...m.user, ...fields } } : m
-      ),
-    }));
+    set((state) => patchMemberEverywhere(state, userId, (m) => ({ ...m, user: { ...m.user, ...fields } })));
   },
 
   reorderCategories: async (serverId: string, order: { id: string; position: number }[]) => {
@@ -665,20 +937,19 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   handleMemberRoleUpdated: (serverId: string, userId: string, role: MemberRole) => {
     if (get().activeServerId !== serverId) return;
-    set((state) => ({
-      members: state.members.map((m) =>
-        m.userId === userId ? { ...m, role } : m
-      ),
-    }));
+    set((state) => patchMemberEverywhere(state, userId, (m) => ({ ...m, role })));
   },
 
   handleMemberKicked: (serverId: string) => {
+    if (get().activeServerId === serverId) resetMemberLookupState();
     set((state) => ({
       servers: state.servers.filter((s) => s.id !== serverId),
       activeServerId: state.activeServerId === serverId ? null : state.activeServerId,
       channels: state.activeServerId === serverId ? [] : state.channels,
       categories: state.activeServerId === serverId ? [] : state.categories,
       members: state.activeServerId === serverId ? [] : state.members,
+      people: state.activeServerId === serverId ? EMPTY_PEOPLE : state.people,
+      directory: state.directory.serverId === serverId ? EMPTY_DIRECTORY : state.directory,
       activeChannelId: state.activeServerId === serverId ? null : state.activeChannelId,
     }));
   },
@@ -700,12 +971,15 @@ export const useServerStore = create<ServerState>((set, get) => ({
         }
       }
 
+      if (isActive) resetMemberLookupState();
       return {
         servers: state.servers.filter((s) => s.id !== serverId),
         activeServerId: isActive ? null : state.activeServerId,
         channels: isActive ? [] : state.channels,
         categories: isActive ? [] : state.categories,
         members: isActive ? [] : state.members,
+        people: isActive ? EMPTY_PEOPLE : state.people,
+        directory: state.directory.serverId === serverId ? EMPTY_DIRECTORY : state.directory,
         roles: isActive ? [] : state.roles,
         activeChannelId: isActive ? null : state.activeChannelId,
         unreadCounts: newUnreadCounts,
@@ -765,13 +1039,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   handleRoleDeleted: (serverId: string, roleId: string) => {
     if (get().activeServerId !== serverId) return;
+    const strip = (m: ServerMember): ServerMember => ({ ...m, roles: m.roles?.filter((r) => r.id !== roleId) });
     set((state) => ({
       roles: state.roles.filter((r) => r.id !== roleId),
       // Remove role from members
-      members: state.members.map((m) => ({
-        ...m,
-        roles: m.roles?.filter((r) => r.id !== roleId),
-      })),
+      members: state.members.map(strip),
+      directory: state.directory.serverId === serverId ? { ...state.directory, rows: state.directory.rows.map(strip) } : state.directory,
     }));
   },
 
@@ -789,11 +1062,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     if (get().activeServerId !== serverId) return;
     const allRoles = get().roles;
     const assignedRoles = allRoles.filter((r) => roleIds.includes(r.id));
-    set((state) => ({
-      members: state.members.map((m) =>
-        m.userId === userId ? { ...m, roles: assignedRoles } : m
-      ),
-    }));
+    set((state) => patchMemberEverywhere(state, userId, (m) => ({ ...m, roles: assignedRoles })));
   },
 
   // ─── Channel Permissions ──────────────────────────────────────────────────
@@ -829,11 +1098,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   handleNicknameUpdated: (serverId: string, userId: string, nickname: string | null) => {
     if (get().activeServerId !== serverId) return;
-    set((state) => ({
-      members: state.members.map((m) =>
-        m.userId === userId ? { ...m, nickname } : m
-      ),
-    }));
+    set((state) => patchMemberEverywhere(state, userId, (m) => ({ ...m, nickname })));
   },
 
   // ─── Secure channels ────────────────────────────────────────────────────────

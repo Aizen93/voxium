@@ -1,4 +1,4 @@
-import { useServerStore } from './serverStore';
+import { useServerStore, resetMemberLookupState } from './serverStore';
 import { useChatStore } from './chatStore';
 import { useDMStore } from './dmStore';
 import { useFriendStore } from './friendStore';
@@ -80,6 +80,8 @@ export function resetAccountStores(): void {
   resetMaskLayoutModuleState();
   // Explore requests still in flight belong to the account that is leaving
   resetDiscoveryModuleState();
+  // The member lookup queue and its misses are the old account's servers'
+  resetMemberLookupState();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 
 // ─── Mock the API client with controllable promises ─────────────────────────
@@ -13,10 +13,10 @@ vi.mock('../../services/api', () => ({
   },
 }));
 
-import { useServerStore } from '../../stores/serverStore';
+import { useServerStore, EMPTY_PEOPLE, EMPTY_DIRECTORY, resetMemberLookupState, MEMBER_LOOKUP_DEBOUNCE_MS } from '../../stores/serverStore';
 import { api } from '../../services/api';
-import { LIMITS } from '@voxium/shared';
-import type { Channel, ServerMember } from '@voxium/shared';
+import { LIMITS, MEMBER_LIST } from '@voxium/shared';
+import type { Channel, ServerMember, PublicUser } from '@voxium/shared';
 
 const mockGet = api.get as unknown as Mock;
 const mockPost = api.post as unknown as Mock;
@@ -39,6 +39,7 @@ describe('serverStore — staleness guards (MED-11)', () => {
     vi.clearAllMocks();
     // markChannelRead fire-and-forget POSTs need a real promise to .catch() on
     mockPost.mockResolvedValue({ data: { data: {} } });
+    resetMemberLookupState();
     useServerStore.setState({
       servers: [],
       activeServerId: null,
@@ -46,6 +47,8 @@ describe('serverStore — staleness guards (MED-11)', () => {
       categories: [],
       activeChannelId: null,
       members: [],
+      people: EMPTY_PEOPLE,
+      directory: EMPTY_DIRECTORY,
       roles: [],
       isLoading: false,
       unreadCounts: {},
@@ -106,106 +109,48 @@ describe('serverStore — staleness guards (MED-11)', () => {
     });
   });
 
-  describe('fetchMembers race', () => {
-    it('discards a slow members response for a server no longer being viewed', async () => {
+  describe('fetchPeople race', () => {
+    it('discards a slow people response for a server no longer being viewed', async () => {
       useServerStore.setState({ activeServerId: 'srv-A', members: [staleMember] });
 
       const pending = deferred();
       mockGet.mockReturnValueOnce(pending.promise);
 
-      const fetchPromise = useServerStore.getState().fetchMembers('srv-A');
+      const fetchPromise = useServerStore.getState().fetchPeople('srv-A');
 
-      // User switches servers while srv-A's members request is in flight
+      // User switches servers while srv-A's request is in flight
       useServerStore.setState({ activeServerId: 'srv-B' });
 
       pending.resolve({
-        data: { data: [{ userId: 'u-A', serverId: 'srv-A', role: 'member', user: { id: 'u-A', username: 'a' } }] },
+        data: { data: [{ userId: 'u-A', serverId: 'srv-A', role: 'member', user: { id: 'u-A', username: 'a' } }], full: true, onlineCount: 0, memberCount: 1 },
       });
       await fetchPromise;
 
       expect(useServerStore.getState().members).toEqual([staleMember]);
+      expect(useServerStore.getState().people.loaded).toBe(false);
     });
 
-    it('control: applies the members response when the server is still active', async () => {
+    it('control: applies the slice and its figures when the server is still active', async () => {
       useServerStore.setState({ activeServerId: 'srv-D' });
 
-      const freshMembers = [{ userId: 'u-D', serverId: 'srv-D', role: 'member', user: { id: 'u-D', username: 'd' } }];
-      mockGet.mockResolvedValueOnce({ data: { data: freshMembers } });
+      const freshMembers = [{ userId: 'u-D', serverId: 'srv-D', role: 'member', user: { id: 'u-D', username: 'd', status: 'online' } }];
+      mockGet.mockResolvedValueOnce({ data: { data: freshMembers, full: false, truncated: true, onlineCount: 640, memberCount: 12_000 } });
 
-      await useServerStore.getState().fetchMembers('srv-D');
+      await useServerStore.getState().fetchPeople('srv-D');
 
+      expect(mockGet).toHaveBeenCalledWith('/servers/srv-D/members/online');
       expect(useServerStore.getState().members).toEqual(freshMembers);
-    });
-  });
-
-  describe('fetchMembers pagination', () => {
-    const row = (id: string, serverId = 'srv-P') => ({ userId: id, serverId, role: 'member', user: { id, username: id } });
-
-    it('follows hasMore to the last page, one request per page, and shows every member', async () => {
-      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
-      mockGet
-        .mockResolvedValueOnce({ data: { data: [row('u-1'), row('u-2')], total: 3, hasMore: true } })
-        .mockResolvedValueOnce({ data: { data: [row('u-3')], total: 3, hasMore: false } });
-
-      await useServerStore.getState().fetchMembers('srv-P');
-
-      expect(mockGet).toHaveBeenCalledTimes(2);
-      expect(mockGet).toHaveBeenNthCalledWith(1, '/servers/srv-P/members', { params: { page: 1, limit: LIMITS.MEMBERS_PER_PAGE } });
-      expect(mockGet).toHaveBeenNthCalledWith(2, '/servers/srv-P/members', { params: { page: 2, limit: LIMITS.MEMBERS_PER_PAGE } });
-      expect(useServerStore.getState().members.map((m) => m.userId)).toEqual(['u-1', 'u-2', 'u-3']);
+      expect(useServerStore.getState().people).toEqual({ full: false, truncated: true, onlineCount: 640, memberCount: 12_000, loaded: true });
     });
 
-    it('a response without hasMore is the whole list (one request)', async () => {
-      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
-      mockGet.mockResolvedValueOnce({ data: { data: [row('u-1')] } });
-
-      await useServerStore.getState().fetchMembers('srv-P');
-
-      expect(mockGet).toHaveBeenCalledTimes(1);
-      expect(useServerStore.getState().members.map((m) => m.userId)).toEqual(['u-1']);
-    });
-
-    it('a member that shifted across a page boundary is listed once', async () => {
-      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
-      mockGet
-        .mockResolvedValueOnce({ data: { data: [row('u-1'), row('u-2')], total: 3, hasMore: true } })
-        .mockResolvedValueOnce({ data: { data: [row('u-2'), row('u-3')], total: 3, hasMore: false } });
-
-      await useServerStore.getState().fetchMembers('srv-P');
-
-      expect(useServerStore.getState().members.map((m) => m.userId)).toEqual(['u-1', 'u-2', 'u-3']);
-    });
-
-    it('the first page shows at once; a server switch before the next page discards the rest', async () => {
-      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
-      const second = deferred();
-      mockGet
-        .mockResolvedValueOnce({ data: { data: [row('u-1')], total: 2, hasMore: true } })
-        .mockReturnValueOnce(second.promise);
-
-      const fetching = useServerStore.getState().fetchMembers('srv-P');
-      await vi.waitFor(() => expect(useServerStore.getState().members.map((m) => m.userId)).toEqual(['u-1']));
-
-      useServerStore.setState({ activeServerId: 'srv-Q', members: [staleMember] });
-      second.resolve({ data: { data: [row('u-2')], total: 2, hasMore: false } });
-      await fetching;
-
-      expect(useServerStore.getState().members).toEqual([staleMember]);
-    });
-
-    it('stops at the page ceiling and says the list is incomplete', async () => {
-      useServerStore.setState({ activeServerId: 'srv-P', members: [] });
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      let n = 0;
-      mockGet.mockImplementation(async () => ({ data: { data: [row(`u-${++n}`)], total: 999_999, hasMore: true } }));
-
-      await useServerStore.getState().fetchMembers('srv-P');
-
-      expect(mockGet).toHaveBeenCalledTimes(50);
-      expect(useServerStore.getState().members).toHaveLength(50);
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn.mock.calls[0][0]).toContain('incomplete');
-      warn.mockRestore();
+    it('a response without the figures is a full list (every row counts itself)', async () => {
+      useServerStore.setState({ activeServerId: 'srv-D' });
+      mockGet.mockResolvedValueOnce({ data: { data: [
+        { userId: 'u-1', serverId: 'srv-D', role: 'owner', user: { id: 'u-1', username: 'a', status: 'online' } },
+        { userId: 'u-2', serverId: 'srv-D', role: 'member', user: { id: 'u-2', username: 'b', status: 'offline' } },
+      ] } });
+      await useServerStore.getState().fetchPeople('srv-D');
+      expect(useServerStore.getState().people).toEqual({ full: true, truncated: false, onlineCount: 1, memberCount: 2, loaded: true });
     });
   });
 
@@ -220,8 +165,8 @@ describe('serverStore — staleness guards (MED-11)', () => {
         if (url === '/servers/srv-C') {
           return Promise.resolve({ data: { data: { channels: [chC], categories: [catC], roles: [roleC] } } });
         }
-        if (url === '/servers/srv-C/members') {
-          return Promise.resolve({ data: { data: [memberC] } });
+        if (url === '/servers/srv-C/members/online') {
+          return Promise.resolve({ data: { data: [memberC], full: true, onlineCount: 0, memberCount: 1 } });
         }
         return Promise.reject(new Error(`unexpected GET ${url}`));
       });
@@ -240,6 +185,320 @@ describe('serverStore — staleness guards (MED-11)', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(useServerStore.getState().members).toEqual([memberC]);
     });
+
+    it('switching servers drops the previous server\'s rows at once — they must not answer for the next one', async () => {
+      useServerStore.setState({ activeServerId: 'srv-B', members: [staleMember], people: { ...EMPTY_PEOPLE, loaded: true, memberCount: 1 } });
+      mockGet.mockImplementation(() => new Promise(() => {}));
+      void useServerStore.getState().setActiveServer('srv-C');
+      expect(useServerStore.getState().members).toEqual([]);
+      expect(useServerStore.getState().people).toEqual(EMPTY_PEOPLE);
+    });
+  });
+});
+
+// ─── The member cache, presence and the directory ───────────────────────────
+
+const row = (id: string, extra: Partial<ServerMember> = {}, user: Partial<PublicUser> = {}): ServerMember => ({
+  userId: id, serverId: 'srv-1', role: 'member', nickname: null, joinedAt: '2026-10-01T00:00:00.000Z', roles: [],
+  user: { id, username: id, displayName: id.toUpperCase(), avatarUrl: null, bio: null, status: 'offline', role: 'user', isSupporter: false, supporterTier: null, createdAt: '2026-01-01T00:00:00.000Z', ...user } as PublicUser,
+  ...extra,
+});
+const joiner = (id: string, status: PublicUser['status'] = 'online'): PublicUser =>
+  ({ id, username: id, displayName: id.toUpperCase(), avatarUrl: null, bio: null, status, role: 'user', isSupporter: false, supporterTier: null, createdAt: '2026-01-01T00:00:00.000Z' }) as PublicUser;
+const ids = (rows: ServerMember[]) => rows.map((m) => m.userId);
+
+describe('serverStore — member lookups (ensureMembers)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    resetMemberLookupState();
+    useServerStore.setState({ activeServerId: 'srv-1', members: [row('me', { role: 'owner' }, { status: 'online' })], people: { full: false, truncated: false, onlineCount: 1, memberCount: 5000, loaded: true }, directory: EMPTY_DIRECTORY });
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('collects unknown ids for one debounce window and asks for them in ONE request; known ids and repeats are not asked', async () => {
+    mockGet.mockResolvedValueOnce({ data: { data: [row('u-2', {}, { status: 'online' }), row('u-3')] } });
+    const store = useServerStore.getState();
+    store.ensureMembers(['u-2', 'me']);
+    store.ensureMembers(['u-3', 'u-2', '']);
+    expect(mockGet).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/members/lookup', { params: { ids: 'u-2,u-3' } });
+    expect(ids(useServerStore.getState().members)).toEqual(['me', 'u-2', 'u-3']);
+    // the online one came online after the slice was loaded: counted
+    expect(useServerStore.getState().people.onlineCount).toBe(2);
+  });
+
+  it('an id the server did not return is a non-member: remembered, never asked again until the server changes', async () => {
+    mockGet.mockResolvedValue({ data: { data: [] } });
+    useServerStore.getState().ensureMembers(['ghost']);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    useServerStore.getState().ensureMembers(['ghost']);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS * 2);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    // a join clears the mark
+    useServerStore.getState().addMember('srv-1', joiner('ghost', 'offline'));
+    useServerStore.setState({ members: useServerStore.getState().members.filter((m) => m.userId !== 'ghost') });
+    useServerStore.getState().ensureMembers(['ghost']);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(2);
+  });
+
+  it('splits more than LOOKUP_MAX_IDS ids over consecutive requests', async () => {
+    mockGet.mockResolvedValue({ data: { data: [] } });
+    useServerStore.getState().ensureMembers(Array.from({ length: MEMBER_LIST.LOOKUP_MAX_IDS + 5 }, (_, i) => `u-${i}`));
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect((mockGet.mock.calls[0][1] as { params: { ids: string } }).params.ids.split(',')).toHaveLength(MEMBER_LIST.LOOKUP_MAX_IDS);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect((mockGet.mock.calls[1][1] as { params: { ids: string } }).params.ids.split(',')).toHaveLength(5);
+  });
+
+  it('a failed lookup is logged, not remembered as misses, and the next one waits out a back-off', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockGet.mockRejectedValueOnce(new Error('503'));
+    useServerStore.getState().ensureMembers(['u-2']);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    mockGet.mockResolvedValue({ data: { data: [row('u-2')] } });
+    useServerStore.getState().ensureMembers(['u-2']);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(ids(useServerStore.getState().members)).toContain('u-2');
+    warn.mockRestore();
+  });
+
+  it('rows that land after a server switch are dropped', async () => {
+    const pending = deferred();
+    mockGet.mockReturnValueOnce(pending.promise);
+    useServerStore.getState().ensureMembers(['u-2']);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    resetMemberLookupState();
+    useServerStore.setState({ activeServerId: 'srv-2', members: [] });
+    pending.resolve({ data: { data: [row('u-2')] } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useServerStore.getState().members).toEqual([]);
+  });
+
+  it('does nothing without an active server', () => {
+    useServerStore.setState({ activeServerId: null });
+    useServerStore.getState().ensureMembers(['u-2']);
+    vi.advanceTimersByTime(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it('a lookup for someone the cut slice already counted does not count them twice', async () => {
+    useServerStore.setState({ people: { full: false, truncated: true, onlineCount: 900, memberCount: 5000, loaded: true } });
+    mockGet.mockResolvedValueOnce({ data: { data: [row('u-2', {}, { status: 'online' })] } });
+    useServerStore.getState().ensureMembers(['u-2']);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(useServerStore.getState().people.onlineCount).toBe(900);
+  });
+});
+
+describe('serverStore — presence on the slice', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    resetMemberLookupState();
+    useServerStore.setState({
+      activeServerId: 'srv-1',
+      members: [row('me', { role: 'owner' }, { status: 'online' }), row('u-2', {}, { status: 'online' }), row('u-3')],
+      people: { full: false, truncated: false, onlineCount: 2, memberCount: 5000, loaded: true },
+      directory: { ...EMPTY_DIRECTORY, serverId: 'srv-1', rows: [row('u-2', {}, { status: 'online' })], total: 5000 },
+    });
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('a known member going offline or online moves the row (in the directory too) and the count by one', () => {
+    useServerStore.getState().updateMemberStatus('u-2', 'offline');
+    expect(useServerStore.getState().members[1].user.status).toBe('offline');
+    expect(useServerStore.getState().directory.rows[0].user.status).toBe('offline');
+    expect(useServerStore.getState().people.onlineCount).toBe(1);
+    useServerStore.getState().updateMemberStatus('u-3', 'idle');
+    expect(useServerStore.getState().people.onlineCount).toBe(2);
+    // idle → dnd is still online: no move
+    useServerStore.getState().updateMemberStatus('u-3', 'dnd');
+    expect(useServerStore.getState().people.onlineCount).toBe(2);
+  });
+
+  it('an unknown user coming online on a big server is looked up — and counted only once the server says they are a member', async () => {
+    mockGet.mockResolvedValueOnce({ data: { data: [row('u-9', {}, { status: 'online' })] } });
+    useServerStore.getState().updateMemberStatus('u-9', 'online');
+    expect(useServerStore.getState().people.onlineCount).toBe(2);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/members/lookup', { params: { ids: 'u-9' } });
+    expect(ids(useServerStore.getState().members)).toContain('u-9');
+    expect(useServerStore.getState().people.onlineCount).toBe(3);
+  });
+
+  it('no lookup for an unknown user going offline, on a small server (everyone is loaded), on a cut slice, or before the slice loaded', async () => {
+    useServerStore.getState().updateMemberStatus('u-9', 'offline');
+    useServerStore.setState({ people: { full: true, truncated: false, onlineCount: 2, memberCount: 3, loaded: true } });
+    useServerStore.getState().updateMemberStatus('u-9', 'online');
+    useServerStore.setState({ people: { full: false, truncated: true, onlineCount: 900, memberCount: 5000, loaded: true } });
+    useServerStore.getState().updateMemberStatus('u-9', 'online');
+    useServerStore.setState({ people: EMPTY_PEOPLE });
+    useServerStore.getState().updateMemberStatus('u-9', 'online');
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS * 2);
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+});
+
+describe('serverStore — joins and leaves move the rows and the figures', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetMemberLookupState();
+    useServerStore.setState({
+      activeServerId: 'srv-1',
+      members: [row('me', { role: 'owner' }, { status: 'online' }), row('u-2', {}, { status: 'online' })],
+      people: { full: true, truncated: false, onlineCount: 2, memberCount: 2, loaded: true },
+      directory: { ...EMPTY_DIRECTORY, serverId: 'srv-1', rows: [row('me', { role: 'owner' }), row('u-2')], total: 2 },
+    });
+  });
+
+  it('member:joined adds the row, counts them (online or not) and appends to a complete, unfiltered directory', () => {
+    useServerStore.getState().addMember('srv-1', joiner('u-3', 'offline'));
+    const state = useServerStore.getState();
+    expect(ids(state.members)).toEqual(['me', 'u-2', 'u-3']);
+    expect(state.people).toMatchObject({ memberCount: 3, onlineCount: 2 });
+    expect(ids(state.directory.rows)).toEqual(['me', 'u-2', 'u-3']);
+    expect(state.directory.total).toBe(3);
+    // a repeat of the event changes nothing
+    useServerStore.getState().addMember('srv-1', joiner('u-3', 'offline'));
+    expect(useServerStore.getState().people.memberCount).toBe(3);
+    // another server's join is not ours
+    useServerStore.getState().addMember('srv-2', joiner('u-4'));
+    expect(useServerStore.getState().people.memberCount).toBe(3);
+  });
+
+  it('member:joined on a directory that has more pages, or a filtered one, moves only what it can', () => {
+    useServerStore.setState({ directory: { ...useServerStore.getState().directory, hasMore: true, nextCursor: 'c' } });
+    useServerStore.getState().addMember('srv-1', joiner('u-3'));
+    expect(ids(useServerStore.getState().directory.rows)).toEqual(['me', 'u-2']);
+    expect(useServerStore.getState().directory.total).toBe(3);
+    useServerStore.setState({ directory: { ...useServerStore.getState().directory, hasMore: false, q: 'al' } });
+    useServerStore.getState().addMember('srv-1', joiner('u-4'));
+    expect(ids(useServerStore.getState().directory.rows)).toEqual(['me', 'u-2']);
+    expect(useServerStore.getState().directory.total).toBe(3);
+  });
+
+  it('member:left drops the row from both lists and the figures; an unknown leaver still counts', () => {
+    useServerStore.getState().removeMember('srv-1', 'u-2');
+    let state = useServerStore.getState();
+    expect(ids(state.members)).toEqual(['me']);
+    expect(ids(state.directory.rows)).toEqual(['me']);
+    expect(state.people).toMatchObject({ memberCount: 1, onlineCount: 1 });
+    expect(state.directory.total).toBe(1);
+    useServerStore.getState().removeMember('srv-1', 'u-unknown');
+    state = useServerStore.getState();
+    expect(state.people).toMatchObject({ memberCount: 0, onlineCount: 1 });
+    expect(state.directory.total).toBe(0);
+  });
+
+  it('role, roles, nickname and profile changes land in both lists; a deleted role leaves both', () => {
+    const store = useServerStore.getState();
+    useServerStore.setState({ roles: [{ id: 'r-1', serverId: 'srv-1', name: 'Mod', color: '#f00', position: 1, permissions: '0', isDefault: false, createdAt: '' }] });
+    store.handleMemberRoleUpdated('srv-1', 'u-2', 'admin');
+    store.handleMemberRolesUpdated('srv-1', 'u-2', ['r-1']);
+    store.handleNicknameUpdated('srv-1', 'u-2', 'Deuce');
+    store.updateMemberProfile('u-2', { displayName: 'Two' });
+    store.updateMemberAvatar('u-2', 'avatars/u-2.webp');
+    for (const list of [useServerStore.getState().members, useServerStore.getState().directory.rows]) {
+      const m = list.find((x) => x.userId === 'u-2')!;
+      expect(m).toMatchObject({ role: 'admin', nickname: 'Deuce' });
+      expect(m.roles?.map((r) => r.id)).toEqual(['r-1']);
+      expect(m.user).toMatchObject({ displayName: 'Two', avatarUrl: 'avatars/u-2.webp' });
+    }
+    store.handleRoleDeleted('srv-1', 'r-1');
+    expect(useServerStore.getState().members[1].roles).toEqual([]);
+    expect(useServerStore.getState().directory.rows[1].roles).toEqual([]);
+    // untouched rows keep their identity (no needless re-renders)
+    expect(useServerStore.getState().members[0]).toBe(useServerStore.getState().members[0]);
+  });
+
+  it('being kicked from, or losing, the active server clears the rows, the figures and that server\'s directory', () => {
+    useServerStore.getState().handleMemberKicked('srv-1');
+    let state = useServerStore.getState();
+    expect(state.members).toEqual([]);
+    expect(state.people).toEqual(EMPTY_PEOPLE);
+    expect(state.directory).toEqual(EMPTY_DIRECTORY);
+
+    useServerStore.setState({ activeServerId: 'srv-1', members: [row('me')], people: { ...EMPTY_PEOPLE, loaded: true }, directory: { ...EMPTY_DIRECTORY, serverId: 'srv-1' } });
+    useServerStore.getState().handleServerDeleted('srv-1');
+    state = useServerStore.getState();
+    expect(state.members).toEqual([]);
+    expect(state.people).toEqual(EMPTY_PEOPLE);
+    expect(state.directory).toEqual(EMPTY_DIRECTORY);
+  });
+});
+
+describe('serverStore — the member directory', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetMemberLookupState();
+    useServerStore.setState({ activeServerId: 'srv-1', members: [row('me', { role: 'owner' }, { status: 'online' })], people: { full: false, truncated: false, onlineCount: 1, memberCount: 300, loaded: true }, directory: EMPTY_DIRECTORY });
+  });
+
+  it('fetchDirectory loads the first page for a filter (the params it sends), remembers whose list it is and merges the rows into the known rows', async () => {
+    mockGet.mockResolvedValueOnce({ data: { data: [row('me', { role: 'owner' }), row('u-2')], total: 300, hasMore: true, nextCursor: 'cur-1' } });
+    await useServerStore.getState().fetchDirectory('srv-1', { q: 'al', role: 'owner' });
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/members', { params: { limit: LIMITS.MEMBERS_PER_PAGE, q: 'al', role: 'owner' } });
+    const d = useServerStore.getState().directory;
+    expect(d).toMatchObject({ serverId: 'srv-1', total: 300, hasMore: true, nextCursor: 'cur-1', q: 'al', role: 'owner', loading: false, error: false });
+    expect(ids(d.rows)).toEqual(['me', 'u-2']);
+    expect(ids(useServerStore.getState().members)).toEqual(['me', 'u-2']);
+  });
+
+  it('an unfiltered fetch sends no q or role', async () => {
+    mockGet.mockResolvedValueOnce({ data: { data: [], total: 0, hasMore: false, nextCursor: null } });
+    await useServerStore.getState().fetchDirectory('srv-1', { q: '', role: null });
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/members', { params: { limit: LIMITS.MEMBERS_PER_PAGE } });
+  });
+
+  it('fetchDirectoryMore follows the cursor with the same filter, appends without repeats, and is a no-op while loading or at the end', async () => {
+    useServerStore.setState({ directory: { ...EMPTY_DIRECTORY, serverId: 'srv-1', rows: [row('u-2')], total: 300, hasMore: true, nextCursor: 'cur-1', q: 'al', role: null } });
+    mockGet.mockResolvedValueOnce({ data: { data: [row('u-2'), row('u-3')], total: 300, hasMore: false, nextCursor: null } });
+    await useServerStore.getState().fetchDirectoryMore('srv-1');
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/members', { params: { limit: LIMITS.MEMBERS_PER_PAGE, cursor: 'cur-1', q: 'al' } });
+    expect(ids(useServerStore.getState().directory.rows)).toEqual(['u-2', 'u-3']);
+    expect(useServerStore.getState().directory.hasMore).toBe(false);
+    await useServerStore.getState().fetchDirectoryMore('srv-1');
+    await useServerStore.getState().fetchDirectoryMore('srv-9');
+    expect(mockGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('a slower first page is dropped when a newer one was asked for (typing), and a "more" page that outlived a new first page too', async () => {
+    const slow = deferred();
+    const fast = deferred();
+    mockGet.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise);
+    const first = useServerStore.getState().fetchDirectory('srv-1', { q: 'a', role: null });
+    const second = useServerStore.getState().fetchDirectory('srv-1', { q: 'al', role: null });
+    fast.resolve({ data: { data: [row('u-2')], total: 1, hasMore: false, nextCursor: null } });
+    await second;
+    slow.resolve({ data: { data: [row('u-7'), row('u-8')], total: 2, hasMore: true, nextCursor: 'x' } });
+    await first;
+    expect(useServerStore.getState().directory).toMatchObject({ q: 'al', total: 1, hasMore: false });
+    expect(ids(useServerStore.getState().directory.rows)).toEqual(['u-2']);
+  });
+
+  it('a failed page marks the error, clears loading and rethrows so the section can toast', async () => {
+    mockGet.mockRejectedValueOnce(new Error('500'));
+    await expect(useServerStore.getState().fetchDirectory('srv-1', { q: '', role: null })).rejects.toThrow('500');
+    expect(useServerStore.getState().directory).toMatchObject({ serverId: 'srv-1', loading: false, error: true, rows: [] });
+  });
+
+  it('a settings request names the server and the tab until the sidebar clears it', () => {
+    useServerStore.getState().requestServerSettings('srv-1', 'members');
+    expect(useServerStore.getState().settingsRequest).toEqual({ serverId: 'srv-1', tab: 'members' });
+    useServerStore.getState().clearSettingsRequest();
+    expect(useServerStore.getState().settingsRequest).toBeNull();
   });
 });
 

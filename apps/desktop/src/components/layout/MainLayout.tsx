@@ -138,7 +138,7 @@ export function MainLayout() {
       // (socket events are lost during background disconnects)
       useDMStore.getState().fetchConversations();
       if (serverState.activeServerId) {
-        serverState.fetchMembers(serverState.activeServerId);
+        serverState.fetchPeople(serverState.activeServerId);
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -853,7 +853,7 @@ export function MainLayout() {
       useServerStore.getState().fetchServers();
       const serverId = useServerStore.getState().activeServerId;
       if (serverId) {
-        useServerStore.getState().fetchMembers(serverId);
+        useServerStore.getState().fetchPeople(serverId);
       }
       // Re-fetch DM conversations
       useDMStore.getState().fetchConversations();
