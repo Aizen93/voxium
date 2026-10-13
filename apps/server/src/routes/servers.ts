@@ -8,7 +8,7 @@ import {
 } from '@voxium/shared';
 import type { MemberRole, Server, ServerBan, ServerJoinRequest, ServerMember, ServerPeople, MemberDirectoryPage } from '@voxium/shared';
 import { Prisma } from '../generated/prisma/client';
-import { encodeMemberCursor, decodeMemberCursor, hashMemberQuery, memberRoleRank } from '../utils/memberCursor';
+import { encodeMemberCursor, decodeMemberCursor, hashMemberQuery } from '../utils/memberCursor';
 import { joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
@@ -308,10 +308,16 @@ function directoryWhere(serverId: string, q: string, role: string): Prisma.Sql {
   return Prisma.join(parts, ' AND ');
 }
 
-const ROLE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** The charset of every id a client may hand us (cuids, role ids, user ids). */
+const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** A C0 control character (a NUL among them) in search text: Postgres refuses
+ *  the parameter, which would be a 500 with a stack trace instead of a 400. */
+const CONTROL_CHAR_RE = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}]`);
 
-// Get server members — the directory
-serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+// Get server members — the directory. The heaviest of the four reads (an
+// ILIKE scan of the server's members when searched): the member-read budget,
+// never the shared global one alone.
+serverRouter.get('/:serverId/members', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
     const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || LIMITS.MEMBERS_PER_PAGE, 1), LIMITS.MEMBERS_PER_PAGE);
@@ -344,8 +350,9 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
 
     const qRaw = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     if (qRaw.length > MEMBER_LIST.QUERY_MAX) throw new BadRequestError('Search text is too long');
+    if (CONTROL_CHAR_RE.test(qRaw)) throw new BadRequestError('Invalid search text');
     const role = typeof req.query.role === 'string' ? req.query.role : '';
-    if (role && !(MEMBER_DIRECTORY_ROLE_FILTERS as readonly string[]).includes(role) && !ROLE_ID_RE.test(role)) {
+    if (role && !(MEMBER_DIRECTORY_ROLE_FILTERS as readonly string[]).includes(role) && !OPAQUE_ID_RE.test(role)) {
       throw new BadRequestError('Invalid role filter');
     }
     const expected = { serverId, q: hashMemberQuery(qRaw), role, limit };
@@ -360,16 +367,20 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
     // order the page is sorted by); the rows with their user and roles come
     // from Prisma by id and are put back in that order. A member removed
     // between the two is simply absent from the page.
+    // The key query also returns the sort key of every row, so the cursor is
+    // built from the LAST KEY — the position this ORDER BY used — and not
+    // from the row fetch, which is a second read and could see a role change.
     const where = directoryWhere(serverId, qRaw, role);
-    const keys = await prisma.$queryRaw<Array<{ user_id: string }>>`
-      SELECT sm.user_id FROM server_members sm
+    const keys = await prisma.$queryRaw<Array<{ user_id: string; rank: number; joined_at: Date }>>`
+      SELECT sm.user_id, ${MEMBER_RANK} AS rank, sm.joined_at FROM server_members sm
       JOIN users u ON u.id = sm.user_id
       WHERE ${where}
         ${cursor ? Prisma.sql`AND (${MEMBER_RANK}, sm.joined_at, sm.user_id) > (${cursor.rank}::int, ${cursor.joinedAt}::timestamp, ${cursor.id})` : Prisma.empty}
       ORDER BY ${MEMBER_RANK}, sm.joined_at, sm.user_id
       LIMIT ${limit + 1}`;
     const hasMore = keys.length > limit;
-    const ids = keys.slice(0, limit).map((k) => k.user_id);
+    const pageKeys = keys.slice(0, limit);
+    const ids = pageKeys.map((k) => k.user_id);
 
     const [rows, total] = await Promise.all([
       ids.length
@@ -386,13 +397,13 @@ serverRouter.get('/:serverId/members', async (req: Request<{ serverId: string }>
     const byId = new Map(rows.map((r) => [r.userId, r]));
     const data = ids.map((id) => byId.get(id)).filter((r): r is MemberRow => r !== undefined).map(formatMemberRow);
 
-    const last = data[data.length - 1];
+    const lastKey = pageKeys[pageKeys.length - 1];
     const page: MemberDirectoryPage = {
       data,
       total: Math.max(total, data.length),
       hasMore,
-      nextCursor: hasMore && last
-        ? encodeMemberCursor({ ...expected, rank: memberRoleRank(last.role), joinedAt: last.joinedAt, id: last.userId })
+      nextCursor: hasMore && lastKey
+        ? encodeMemberCursor({ ...expected, rank: Number(lastKey.rank), joinedAt: new Date(lastKey.joined_at).toISOString(), id: lastKey.user_id })
         : null,
     };
     res.json({ success: true, ...page });
@@ -419,6 +430,7 @@ serverRouter.get('/:serverId/members/online', rateLimitMemberRead, async (req: R
     if (!server) throw new NotFoundError('Server');
 
     const orderBy = [{ joinedAt: 'asc' }, { userId: 'asc' }] as const;
+    let memberCount = server.memberCount;
 
     if (server.memberCount <= cap) {
       // Small server: everyone, offline included — take one more than the cap
@@ -437,6 +449,8 @@ serverRouter.get('/:serverId/members/online', rateLimitMemberRead, async (req: R
         res.json({ success: true, ...people });
         return;
       }
+      // The inline count was below the truth: carry what was just seen
+      memberCount = Math.max(memberCount, rows.length);
     }
 
     // Big server: the online members only. Owner and admins first (they are
@@ -455,7 +469,7 @@ serverRouter.get('/:serverId/members/online', rateLimitMemberRead, async (req: R
     if (!rows.some((r) => r.userId === userId)) rows.unshift(me);
     const people: ServerPeople = {
       data: rows.map(formatMemberRow),
-      memberCount: server.memberCount,
+      memberCount,
       onlineCount,
       full: false,
       truncated: onlineCount > staff.length + rest.length,
@@ -472,7 +486,7 @@ serverRouter.get('/:serverId/members/lookup', rateLimitMemberLookup, async (req:
     const { serverId } = req.params;
     const raw = typeof req.query.ids === 'string' ? req.query.ids : '';
     const ids = [...new Set(raw.split(',').map((id) => id.trim()).filter(Boolean))];
-    if (ids.length === 0 || ids.length > MEMBER_LIST.LOOKUP_MAX_IDS || ids.some((id) => !ROLE_ID_RE.test(id))) {
+    if (ids.length === 0 || ids.length > MEMBER_LIST.LOOKUP_MAX_IDS || ids.some((id) => !OPAQUE_ID_RE.test(id))) {
       throw new BadRequestError(`ids must name 1 to ${MEMBER_LIST.LOOKUP_MAX_IDS} users`);
     }
 
@@ -492,11 +506,12 @@ serverRouter.get('/:serverId/members/lookup', rateLimitMemberLookup, async (req:
 serverRouter.get('/:serverId/members/search', rateLimitSearch, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
-    const q = (req.query.q as string || '').trim();
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     if (!q || q.length > MEMBER_LIST.QUERY_MAX) {
       res.json({ success: true, data: [] });
       return;
     }
+    if (CONTROL_CHAR_RE.test(q)) throw new BadRequestError('Invalid search text');
     const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || MEMBER_LIST.SEARCH_DEFAULT, 1), MEMBER_LIST.SEARCH_MAX);
 
     const membership = await prisma.serverMember.findUnique({

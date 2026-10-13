@@ -5,12 +5,9 @@ import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
 import type { ServerMember, MemberRole } from '@voxium/shared';
-import { LIMITS, validateBanReason } from '@voxium/shared';
+import { LIMITS, MEMBER_LIST, MEMBER_DIRECTORY_ROLE_FILTERS, validateBanReason } from '@voxium/shared';
 import { outranksRole } from '../../utils/roles';
 import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
-
-/** How long typing settles before the search goes to the server. */
-export const DIRECTORY_SEARCH_DEBOUNCE_MS = 300;
 
 /** Module-level constant so a selector for another server's list never allocates. */
 const NO_ROWS: ServerMember[] = [];
@@ -29,6 +26,7 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
   const rows = directory.serverId === serverId ? directory.rows : NO_ROWS;
   const loading = directory.serverId === serverId && directory.loading;
   const hasMore = directory.serverId === serverId && directory.hasMore;
+  const failed = directory.serverId === serverId && directory.error;
   const matching = directory.serverId === serverId ? directory.total : 0;
   const memberCount = useServerStore((s) => s.people.memberCount);
   const roles = useServerStore((s) => s.roles);
@@ -56,7 +54,7 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
   useEffect(() => {
     const next = search.trim();
     if (next === query) return;
-    const timer = setTimeout(() => setQuery(next), DIRECTORY_SEARCH_DEBOUNCE_MS);
+    const timer = setTimeout(() => setQuery(next), MEMBER_LIST.TYPING_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [search, query]);
 
@@ -69,6 +67,10 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
 
   const loadMore = () => {
     fetchDirectoryMore(serverId)
+      .catch((err) => toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToLoad')));
+  };
+  const retry = () => {
+    fetchDirectory(serverId, { q: query, role: roleFilter })
       .catch((err) => toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToLoad')));
   };
 
@@ -160,7 +162,7 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
             type="text"
             placeholder={t('serverSettings.members.searchPlaceholder')}
             value={search}
-            maxLength={100}
+            maxLength={MEMBER_LIST.QUERY_MAX}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full rounded-lg border border-vox-border bg-vox-bg-primary pl-8 pr-3 py-1.5 text-sm text-vox-text-primary placeholder:text-vox-text-muted focus:outline-none focus:border-vox-accent-primary"
             data-testid="members-search"
@@ -173,8 +175,9 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
           data-testid="members-role-filter"
         >
           <option value="">{t('serverSettings.members.allRoles')}</option>
-          <option value="owner">{t('serverSettings.members.owners')}</option>
-          <option value="admin">{t('serverSettings.members.admins')}</option>
+          {MEMBER_DIRECTORY_ROLE_FILTERS.filter((f) => f !== 'none').map((f) => (
+            <option key={f} value={f}>{t(f === 'owner' ? 'serverSettings.members.owners' : 'serverSettings.members.admins')}</option>
+          ))}
           {assignableRoles.map((r) => (
             <option key={r.id} value={r.id}>{r.name}</option>
           ))}
@@ -431,7 +434,20 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
           );
         })}
 
-        {rows.length === 0 && !loading && (
+        {rows.length === 0 && !loading && failed && (
+          <div className="flex flex-col items-center gap-2 py-8" data-testid="members-error">
+            <p className="text-sm text-vox-text-muted">{t('serverSettings.members.failedToLoad')}</p>
+            <button
+              type="button"
+              onClick={retry}
+              className="rounded-md border border-vox-border px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover"
+              data-testid="members-retry"
+            >
+              {t('serverSettings.members.retry')}
+            </button>
+          </div>
+        )}
+        {rows.length === 0 && !loading && !failed && (
           <p className="text-center text-sm text-vox-text-muted py-8" data-testid="members-empty">
             {filtered ? t('serverSettings.members.noResults') : t('serverSettings.members.noMembers')}
           </p>

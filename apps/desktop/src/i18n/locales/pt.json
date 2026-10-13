@@ -324,7 +324,8 @@
       "owner": "Proprietário",
       "admin": "Administrador",
       "loadMore": "Carregar mais",
-      "failedToLoad": "Não foi possível carregar os membros"
+      "failedToLoad": "Não foi possível carregar os membros",
+      "retry": "Tentar novamente"
     },
     "limits": {
       "description": "Limites de recursos para este servidor. Configurados pelos administradores da plataforma.",

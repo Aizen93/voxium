@@ -13,7 +13,7 @@ vi.mock('../../services/api', () => ({
   },
 }));
 
-import { useServerStore, EMPTY_PEOPLE, EMPTY_DIRECTORY, resetMemberLookupState, MEMBER_LOOKUP_DEBOUNCE_MS } from '../../stores/serverStore';
+import { useServerStore, EMPTY_PEOPLE, EMPTY_DIRECTORY, resetMemberLookupState, retireDirectory, MEMBER_LOOKUP_DEBOUNCE_MS } from '../../stores/serverStore';
 import { api } from '../../services/api';
 import { LIMITS, MEMBER_LIST } from '@voxium/shared';
 import type { Channel, ServerMember, PublicUser } from '@voxium/shared';
@@ -257,7 +257,7 @@ describe('serverStore — member lookups (ensureMembers)', () => {
     expect((mockGet.mock.calls[1][1] as { params: { ids: string } }).params.ids.split(',')).toHaveLength(5);
   });
 
-  it('a failed lookup is logged, not remembered as misses, and the next one waits out a back-off', async () => {
+  it('a failed lookup is logged and retried by itself after the back-off — nobody re-asks for a row they are already waiting on', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockGet.mockRejectedValueOnce(new Error('503'));
     useServerStore.getState().ensureMembers(['u-2']);
@@ -265,7 +265,6 @@ describe('serverStore — member lookups (ensureMembers)', () => {
     expect(mockGet).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(1);
     mockGet.mockResolvedValue({ data: { data: [row('u-2')] } });
-    useServerStore.getState().ensureMembers(['u-2']);
     await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
     expect(mockGet).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(10_000);
@@ -274,12 +273,70 @@ describe('serverStore — member lookups (ensureMembers)', () => {
     warn.mockRestore();
   });
 
+  it('three failures in a row drop the queue (a server that keeps failing is not asked forever)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockGet.mockRejectedValue(new Error('503'));
+    useServerStore.getState().ensureMembers(['u-2']);
+    for (let i = 0; i < 3; i++) await vi.advanceTimersByTimeAsync(10_000 + MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockGet).toHaveBeenCalledTimes(3);
+    expect(warn.mock.calls[2][0]).toContain('giving up');
+    warn.mockRestore();
+  });
+
+  it('ids queued while the slice is in flight still go out once it lands (minus the ones the slice now holds)', async () => {
+    const slice = deferred();
+    mockGet.mockReturnValueOnce(slice.promise);
+    const loading = useServerStore.getState().fetchPeople('srv-1');
+    useServerStore.getState().ensureMembers(['u-author', 'u-in-slice']);
+    mockGet.mockResolvedValueOnce({ data: { data: [row('u-author')] } });
+    slice.resolve({ data: { data: [row('me', { role: 'owner' }, { status: 'online' }), row('u-in-slice')], full: false, truncated: false, onlineCount: 1, memberCount: 5000 } });
+    await loading;
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockGet).toHaveBeenLastCalledWith('/servers/srv-1/members/lookup', { params: { ids: 'u-author' } });
+    expect(ids(useServerStore.getState().members)).toEqual(['me', 'u-in-slice', 'u-author']);
+  });
+
+  it('ids a request is already out for are not asked again by a second flush', async () => {
+    const slow = deferred();
+    mockGet.mockReturnValueOnce(slow.promise);
+    useServerStore.getState().ensureMembers(['u-2']);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    mockGet.mockResolvedValueOnce({ data: { data: [row('u-3')] } });
+    useServerStore.getState().ensureMembers(['u-3', 'u-2']);
+    await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockGet).toHaveBeenLastCalledWith('/servers/srv-1/members/lookup', { params: { ids: 'u-3' } });
+    slow.resolve({ data: { data: [row('u-2')] } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ids(useServerStore.getState().members)).toEqual(['me', 'u-3', 'u-2']);
+  });
+
+  it('a page or a lookup never overwrites the status a presence event already moved (either ordering)', async () => {
+    useServerStore.setState({ members: [row('me', { role: 'owner' }, { status: 'online' }), row('x', {}, { status: 'online' })], people: { full: false, truncated: false, onlineCount: 10, memberCount: 5000, loaded: true } });
+    // the page was read while x was online; x goes offline before it lands
+    const page = deferred();
+    mockGet.mockReturnValueOnce(page.promise);
+    const loading = useServerStore.getState().fetchDirectory('srv-1', { q: '', role: null });
+    useServerStore.getState().updateMemberStatus('x', 'offline');
+    expect(useServerStore.getState().people.onlineCount).toBe(9);
+    page.resolve({ data: { data: [row('x', {}, { status: 'online' })], total: 5000, hasMore: false, nextCursor: null } });
+    await loading;
+    expect(useServerStore.getState().members.find((m) => m.userId === 'x')!.user.status).toBe('offline');
+    useServerStore.getState().updateMemberStatus('x', 'online');
+    expect(useServerStore.getState().people.onlineCount).toBe(10);
+  });
+
   it('rows that land after a server switch are dropped', async () => {
     const pending = deferred();
     mockGet.mockReturnValueOnce(pending.promise);
     useServerStore.getState().ensureMembers(['u-2']);
     await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
     resetMemberLookupState();
+    retireDirectory();
     useServerStore.setState({ activeServerId: 'srv-2', members: [] });
     pending.resolve({ data: { data: [row('u-2')] } });
     await vi.advanceTimersByTimeAsync(0);
@@ -325,6 +382,13 @@ describe('serverStore — presence on the slice', () => {
     expect(useServerStore.getState().people.onlineCount).toBe(2);
     // idle → dnd is still online: no move
     useServerStore.getState().updateMemberStatus('u-3', 'dnd');
+    expect(useServerStore.getState().people.onlineCount).toBe(2);
+  });
+
+  it('a presence event for a row the directory holds without a twin among the known rows still patches it', () => {
+    useServerStore.setState({ directory: { ...useServerStore.getState().directory, rows: [row('only-dir', {}, { status: 'online' })] } });
+    useServerStore.getState().updateMemberStatus('only-dir', 'offline');
+    expect(useServerStore.getState().directory.rows[0].user.status).toBe('offline');
     expect(useServerStore.getState().people.onlineCount).toBe(2);
   });
 
@@ -480,12 +544,42 @@ describe('serverStore — the member directory', () => {
     mockGet.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise);
     const first = useServerStore.getState().fetchDirectory('srv-1', { q: 'a', role: null });
     const second = useServerStore.getState().fetchDirectory('srv-1', { q: 'al', role: null });
-    fast.resolve({ data: { data: [row('u-2')], total: 1, hasMore: false, nextCursor: null } });
+    fast.resolve({ data: { data: [row('u-2')], total: 1, hasMore: true, nextCursor: 'cur-al' } });
     await second;
     slow.resolve({ data: { data: [row('u-7'), row('u-8')], total: 2, hasMore: true, nextCursor: 'x' } });
     await first;
-    expect(useServerStore.getState().directory).toMatchObject({ q: 'al', total: 1, hasMore: false });
+    expect(useServerStore.getState().directory).toMatchObject({ q: 'al', total: 1, hasMore: true });
     expect(ids(useServerStore.getState().directory.rows)).toEqual(['u-2']);
+
+    // Load more for "al" is in flight when the user types "ali": the more-page lands and is dropped
+    const more = deferred();
+    const third = deferred();
+    mockGet.mockReturnValueOnce(more.promise).mockReturnValueOnce(third.promise);
+    const moreLoading = useServerStore.getState().fetchDirectoryMore('srv-1');
+    const thirdLoading = useServerStore.getState().fetchDirectory('srv-1', { q: 'ali', role: null });
+    third.resolve({ data: { data: [row('u-9')], total: 1, hasMore: false, nextCursor: null } });
+    await thirdLoading;
+    more.resolve({ data: { data: [row('u-3')], total: 1, hasMore: false, nextCursor: null } });
+    await moreLoading;
+    expect(useServerStore.getState().directory).toMatchObject({ q: 'ali', loading: false, hasMore: false });
+    expect(ids(useServerStore.getState().directory.rows)).toEqual(['u-9']);
+  });
+
+  it('a slice refetch for the same server (reconnect, tab return) leaves a directory page in flight alone: it lands, loading clears, the next page can follow', async () => {
+    const page = deferred();
+    const slice = deferred();
+    mockGet.mockReturnValueOnce(page.promise).mockReturnValueOnce(slice.promise);
+    const pageLoading = useServerStore.getState().fetchDirectory('srv-1', { q: '', role: null });
+    const sliceLoading = useServerStore.getState().fetchPeople('srv-1');
+    slice.resolve({ data: { data: [row('me', { role: 'owner' }, { status: 'online' })], full: false, truncated: false, onlineCount: 1, memberCount: 300 } });
+    await sliceLoading;
+    page.resolve({ data: { data: [row('me', { role: 'owner' }), row('u-2')], total: 300, hasMore: true, nextCursor: 'cur-1' } });
+    await pageLoading;
+    expect(useServerStore.getState().directory).toMatchObject({ serverId: 'srv-1', loading: false, hasMore: true, nextCursor: 'cur-1' });
+    expect(ids(useServerStore.getState().directory.rows)).toEqual(['me', 'u-2']);
+    mockGet.mockResolvedValueOnce({ data: { data: [row('u-3')], total: 300, hasMore: false, nextCursor: null } });
+    await useServerStore.getState().fetchDirectoryMore('srv-1');
+    expect(ids(useServerStore.getState().directory.rows)).toEqual(['me', 'u-2', 'u-3']);
   });
 
   it('a failed page marks the error, clears loading and rethrows so the section can toast', async () => {

@@ -216,6 +216,8 @@ export const MEMBER_LIST = {
   SEARCH_DEFAULT: 8,
   /** Directory search text, in characters. */
   QUERY_MAX: 100,
+  /** How long typing settles before a member search goes to the server. */
+  TYPING_DEBOUNCE_MS: 300,
 } as const;
 
 /** Directory role filters besides a role id: the coarse roles and "no role". */

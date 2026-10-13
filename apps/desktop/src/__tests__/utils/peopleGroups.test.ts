@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { groupPeopleByPresence, presentCount, voicePresenceKind, withOwnPresence } from '../../utils/peopleGroups';
+import { groupPeopleByPresence, headerOnlineCount, presentCount, voicePresenceKind, withOwnPresence } from '../../utils/peopleGroups';
 import type { Channel, ServerMember, VoiceUser } from '@voxium/shared';
 
 const member = (id: string, name: string, status: string, nickname: string | null = null): ServerMember =>
@@ -118,6 +118,24 @@ describe('withOwnPresence', () => {
     expect(withOwnPresence(rows, undefined, true)).toBe(rows);
     expect(withOwnPresence(rows, 'u9', true)).toBe(rows);
     expect(withOwnPresence(rows, 'u2', true)).toBe(rows);
+  });
+});
+
+describe('headerOnlineCount', () => {
+  const rows = [member('u1', 'Alice', 'offline'), member('u2', 'Bob', 'online'), member('u3', 'Carol', 'offline')];
+  const people = (full: boolean, onlineCount: number) => ({ full, truncated: false, onlineCount, memberCount: 3, loaded: true });
+
+  it('everyone loaded: the rows are the truth, the viewer\'s own reading online while connected', () => {
+    expect(headerOnlineCount(rows, people(true, 99), 'u1', true)).toBe(2);
+    expect(headerOnlineCount(rows, people(true, 99), 'u1', false)).toBe(1);
+    expect(headerOnlineCount(rows, people(true, 99), undefined, true)).toBe(1);
+  });
+
+  it('the online slice of a big server: the server\'s figure, never below the rows that read online here', () => {
+    expect(headerOnlineCount(rows, people(false, 640), 'u1', true)).toBe(640);
+    // the slice was fetched before the connect wrote the viewer online: 0 from the server, 2 on screen
+    expect(headerOnlineCount(rows, people(false, 0), 'u1', true)).toBe(2);
+    expect(headerOnlineCount(rows, people(false, 0), 'u1', false)).toBe(1);
   });
 });
 

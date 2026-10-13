@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useMemberSearch } from '../../hooks/useMemberSearch';
+import { useMemberSearch, memberMatches } from '../../hooks/useMemberSearch';
 import { useTranslation } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -37,19 +37,10 @@ export function SecureChannelCreateModal({ serverId, onClose }: Props) {
   // No text: the rows the client holds (everyone, on a small server). Text:
   // the server's search — the rows here are only a slice of a big server.
   const results = useMemberSearch(serverId, query);
-  const candidates = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const source = results ?? members;
-    return source
-      .filter((m) => m.userId !== user?.id)
-      .filter(
-        (m) =>
-          !q || results ||
-          m.user.displayName.toLowerCase().includes(q) ||
-          m.user.username.toLowerCase().includes(q) ||
-          (m.nickname ?? '').toLowerCase().includes(q),
-      );
-  }, [members, results, user?.id, query]);
+  const candidates = useMemo(
+    () => (results ?? members.filter((m) => memberMatches(m, query))).filter((m) => m.userId !== user?.id),
+    [members, results, user?.id, query],
+  );
 
   const toggle = (userId: string) => {
     setSelected((prev) => {

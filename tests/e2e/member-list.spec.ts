@@ -31,6 +31,15 @@ async function openServer(page: Page, serverName: string) {
 }
 
 test.describe('Member lists — big servers', () => {
+  // A `finally` in the test body does not run when the test times out; the
+  // seeded accounts are verified, so no sweep would ever remove them
+  let cleanup: (() => Promise<void>) | null = null;
+  test.afterEach(async () => {
+    const run = cleanup;
+    cleanup = null;
+    if (run) await run();
+  });
+
   test('the People panel shows the online slice and a way into the directory; the directory pages, searches and filters', async ({ page, request, browser }) => {
     test.setTimeout(180_000);
     const stamp = Date.now().toString(36);
@@ -38,12 +47,16 @@ test.describe('Member lists — big servers', () => {
     const seedPrefix = `seed${stamp}`;
     const owner = await registerUser(request, testUser('bigo'));
     const server = await createServer(request, owner.accessToken, serverName);
+    cleanup = async () => {
+      await deleteSeededUsers(seedPrefix);
+      await deleteServer(request, owner.accessToken, server.id).catch((err) => console.warn('[e2e] server cleanup failed:', err));
+    };
     const bob = await registerUser(request, testUser('bigb'));
     await joinServerViaInvite(request, bob.accessToken, await createInvite(request, owner.accessToken, server.id));
     const seeded = await seedServerMembers(server.id, PEOPLE_MAX_ROWS + 20, seedPrefix);
     const total = seeded.length + 2;
 
-    try {
+    {
       // ── (a) the panel: the owner online; bob and the seeded members offline, so not listed ──
       await injectAuth(page, owner);
       await openServer(page, serverName);
@@ -105,9 +118,6 @@ test.describe('Member lists — big servers', () => {
       await expect(dialog.getByTestId('members-count')).toHaveText(`${total} of ${total} members`);
 
       await bobContext.close();
-    } finally {
-      await deleteSeededUsers(seedPrefix);
-      await deleteServer(request, owner.accessToken, server.id).catch(() => {});
     }
   });
 

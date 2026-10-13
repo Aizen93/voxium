@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
 import { Mic, MicOff, Headphones, HeadphoneOff, Settings, LogOut } from 'lucide-react';
 import { useAuthStore } from '../../stores/authStore';
-import { getConnectionStatus, onConnectionStatusChange } from '../../services/socket';
+import { useConnectionStatus } from '../../hooks/useConnectionStatus';
 import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -38,8 +38,7 @@ export function UserCard() {
   // this socket connects. authStore's user.status is the DB snapshot from the
   // login fetch — taken BEFORE the socket connected and never updated since —
   // so rendering it pins the dot to "offline" forever.
-  const [connection, setConnection] = useState(getConnectionStatus);
-  useEffect(() => onConnectionStatusChange(setConnection), []);
+  const connection = useConnectionStatus();
   const ownStatus = connection === 'connected' ? 'online' : 'offline';
 
   const iconBtn = (active: boolean) =>

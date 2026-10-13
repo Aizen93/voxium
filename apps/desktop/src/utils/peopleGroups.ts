@@ -1,4 +1,5 @@
 import type { Channel, ServerMember, VoiceUser } from '@voxium/shared';
+import type { PeopleState } from '../stores/serverStore';
 
 /**
  * Presence-first grouping for the People panel (2026 redesign):
@@ -92,6 +93,17 @@ export function withOwnPresence(members: ServerMember[], selfId: string | undefi
   const next = members.slice();
   next[i] = { ...members[i], user: { ...members[i].user, status: 'online' } };
   return next;
+}
+
+/**
+ * The "N online" figure of the channel sidebar header. With everyone loaded
+ * the rows are the truth; with the online slice of a big server it is the
+ * server's figure, moved by the events since — never below the rows that
+ * read online here, the viewer's own among them.
+ */
+export function headerOnlineCount(members: ServerMember[], people: PeopleState, selfId: string | undefined, connected: boolean): number {
+  const present = withOwnPresence(members, selfId, connected).filter((m) => (m.user.status || 'offline') !== 'offline').length;
+  return people.full ? present : Math.max(people.onlineCount, present);
 }
 
 /** How many of the loaded rows the panel shows as present (in voice, active or away). */

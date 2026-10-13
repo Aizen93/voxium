@@ -42,7 +42,9 @@ vi.mock('../../stores/authStore', () => {
 });
 vi.mock('../../stores/toastStore', () => ({ toast: { success: S.toastSuccess, error: S.toastError, info: vi.fn(), warning: vi.fn() } }));
 
-import { MembersDirectory, DIRECTORY_SEARCH_DEBOUNCE_MS } from '../../components/server/MembersDirectory';
+import { MEMBER_LIST } from '@voxium/shared';
+import { MembersDirectory } from '../../components/server/MembersDirectory';
+const DIRECTORY_SEARCH_DEBOUNCE_MS = MEMBER_LIST.TYPING_DEBOUNCE_MS;
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -138,6 +140,43 @@ describe('MembersDirectory', () => {
     await render();
     await act(async () => { await Promise.resolve(); });
     expect(S.toastError).toHaveBeenCalledWith('serverSettings.members.failedToLoad');
+  });
+
+  it('a failed first page is an error state with a retry, never "No members found"; retry asks for the same filter again', async () => {
+    directory = listed([], { total: 0, error: true });
+    await render();
+    expect(q('[data-testid="members-empty"]')).toBeNull();
+    expect(q('[data-testid="members-error"]')!.textContent).toContain('serverSettings.members.failedToLoad');
+    S.fetchDirectory.mockClear();
+    await act(async () => { q('[data-testid="members-retry"]')!.click(); });
+    expect(S.fetchDirectory).toHaveBeenCalledWith('srv-1', { q: '', role: null });
+  });
+
+  it('the next page loads by itself when the end of the list scrolls into view', async () => {
+    type Entry = { isIntersecting: boolean };
+    let trigger: ((entries: Entry[]) => void) | null = null;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    class FakeObserver {
+      constructor(cb: (entries: Entry[]) => void) { trigger = cb; }
+      observe = observe;
+      disconnect = disconnect;
+    }
+    (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = FakeObserver;
+    try {
+      await render();
+      expect(observe).toHaveBeenCalledTimes(1);
+      await act(async () => { trigger!([{ isIntersecting: false }]); });
+      expect(S.fetchDirectoryMore).not.toHaveBeenCalled();
+      await act(async () => { trigger!([{ isIntersecting: true }]); });
+      expect(S.fetchDirectoryMore).toHaveBeenCalledWith('srv-1');
+      // no next page: the observer is gone
+      directory = listed([row('me', 'owner')]);
+      await render();
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+    }
   });
 
   it('the owner expands a member row, confirms a removal with a reason, and the store is told', async () => {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useMemberSearch } from '../../hooks/useMemberSearch';
+import { useMemberSearch, memberMatches } from '../../hooks/useMemberSearch';
 import { useTranslation } from 'react-i18next';
 import { useServerStore, NO_SECURE_MEMBERS } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -71,8 +71,8 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
   // the server's search — the rows here are only a slice of a big server.
   const searched = useMemberSearch(serverId, inviteQuery);
   const invitable = useMemo(
-    () => (searched ?? serverMembers).filter((m) => !memberIds.has(m.userId)),
-    [searched, serverMembers, memberIds],
+    () => (searched ?? serverMembers.filter((m) => memberMatches(m, inviteQuery))).filter((m) => !memberIds.has(m.userId)),
+    [searched, serverMembers, memberIds, inviteQuery],
   );
   const atCap = channelMembers.length >= E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP;
 

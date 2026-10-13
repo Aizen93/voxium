@@ -132,19 +132,34 @@ const MEMBER_CACHE_MAX = MEMBER_LIST.PEOPLE_MAX_ROWS * 3;
  *  event names everyone we share any server with) — asked once, never again
  *  until the server changes or they join. */
 const lookupMisses = new Set<string>();
-/** Ids queued for the next lookup, or in flight. */
+/** Ids queued for the next lookup. A failed request leaves them here (the
+ *  retry goes out after the back-off); only a success or a miss removes one. */
 const lookupPending = new Set<string>();
+/** Ids a request is out for right now — not taken again by a second flush. */
+const lookupInFlight = new Set<string>();
 let lookupTimer: ReturnType<typeof setTimeout> | null = null;
 let lookupBackoffUntil = 0;
-/** Bumped by every first-page directory fetch so a slower earlier response is dropped. */
+/** Consecutive failed lookups; past MEMBER_LOOKUP_MAX_FAILURES the queue is dropped. */
+let lookupFailures = 0;
+const MEMBER_LOOKUP_MAX_FAILURES = 3;
+/** Bumped by every first-page directory fetch so a slower earlier response is
+ *  dropped, and when the directory's server is left (switch, removal, logout). */
 let directoryGeneration = 0;
 
-/** Forget the lookup queue and the misses: on a server switch, and at logout. */
+/** Forget the lookup queue and the misses: on a server switch, and at logout.
+ *  NOT on a slice refetch — ids queued while the slice was in flight must
+ *  still go out, and nothing re-asks for them (useMember only asks once). */
 export function resetMemberLookupState(): void {
   lookupMisses.clear();
   lookupPending.clear();
+  lookupInFlight.clear();
   if (lookupTimer) { clearTimeout(lookupTimer); lookupTimer = null; }
   lookupBackoffUntil = 0;
+  lookupFailures = 0;
+}
+
+/** A directory page still in flight belongs to a server we are leaving: drop it when it lands. */
+export function retireDirectory(): void {
   directoryGeneration++;
 }
 
@@ -169,10 +184,18 @@ function mergeKnownMembers(state: { members: ServerMember[]; people: PeopleState
   const byId = new Map(state.members.map((m) => [m.userId, m]));
   let onlineCount = state.people.onlineCount;
   for (const row of rows) {
+    const prev = byId.get(row.userId);
+    if (prev) {
+      // Presence events are the live authority for status: a page or a
+      // lookup is a DB snapshot that may predate the event that already
+      // moved the count. Take the fresher profile, keep the status we hold.
+      byId.set(row.userId, { ...row, user: { ...row.user, status: prev.user.status } });
+      continue;
+    }
     // A member found online that the slice did not hold came online after the
     // load (the slice held every online member) — count them. A TRUNCATED
     // slice already counted the members it cut, so never there.
-    if (!byId.has(row.userId) && !state.people.full && !state.people.truncated && isOnline(row)) onlineCount++;
+    if (!state.people.full && !state.people.truncated && isOnline(row)) onlineCount++;
     byId.set(row.userId, row);
   }
   let members = [...byId.values()];
@@ -430,6 +453,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // kept, they would answer for the next server until its slice lands.
     if (get().activeServerId !== serverId) {
       resetMemberLookupState();
+      retireDirectory();
       set({ activeServerId: serverId, isLoading: true, members: [], people: EMPTY_PEOPLE });
     } else {
       set({ isLoading: true });
@@ -534,7 +558,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
         // (and counts them). With the slice cut at the cap they cannot be
         // shown anyway; on a small server everyone is already here.
         lookup = online && state.people.loaded && !state.people.full && !state.people.truncated;
-        return state;
+        // A row the directory holds without a twin here (pruned from the
+        // known rows) still follows the event
+        const rows = patchRows(state.directory.rows, userId, (m) => ({ ...m, user: { ...m.user, status } }));
+        return rows === state.directory.rows ? state : { directory: { ...state.directory, rows } };
       }
       const delta = (online ? 1 : 0) - (isOnline(row) ? 1 : 0);
       return {
@@ -663,8 +690,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
       // overwrite the member list of the server now being viewed
       if (get().activeServerId !== serverId) return;
       const rows = Array.isArray(data.data) ? (data.data as ServerMember[]) : [];
-      // A fresh slice: the lookup memory was about the old one
-      resetMemberLookupState();
+      // The lookup queue stays: ids asked for while this was in flight still
+      // go out (the flush skips the ones the fresh slice now holds), and the
+      // misses are still non-members. A directory page in flight is still
+      // this server's.
       set({
         members: rows,
         people: {
@@ -688,18 +717,23 @@ export const useServerStore = create<ServerState>((set, get) => ({
     const known = new Set(get().members.map((m) => m.userId));
     let queued = false;
     for (const id of userIds) {
-      if (!id || known.has(id) || lookupMisses.has(id) || lookupPending.has(id)) continue;
+      if (!id || known.has(id) || lookupMisses.has(id) || lookupPending.has(id) || lookupInFlight.has(id)) continue;
       lookupPending.add(id);
       queued = true;
     }
     if (!queued || lookupTimer) return;
-    const delay = Math.max(MEMBER_LOOKUP_DEBOUNCE_MS, lookupBackoffUntil - Date.now());
-    lookupTimer = setTimeout(() => { lookupTimer = null; void flushMemberLookups(); }, delay);
+    lookupTimer = setTimeout(() => { lookupTimer = null; void flushMemberLookups(); }, Math.max(MEMBER_LOOKUP_DEBOUNCE_MS, lookupBackoffUntil - Date.now()));
 
     async function flushMemberLookups(): Promise<void> {
       const serverId = get().activeServerId;
-      const ids = [...lookupPending].slice(0, MEMBER_LIST.LOOKUP_MAX_IDS);
-      if (!serverId || ids.length === 0) { lookupPending.clear(); return; }
+      if (!serverId) { lookupPending.clear(); return; }
+      // Ids a request is already out for are not taken again; ids a fresh
+      // slice brought in meanwhile need no request at all
+      const known = new Set(get().members.map((m) => m.userId));
+      for (const id of lookupPending) if (known.has(id)) lookupPending.delete(id);
+      const ids = [...lookupPending].filter((id) => !lookupInFlight.has(id)).slice(0, MEMBER_LIST.LOOKUP_MAX_IDS);
+      if (ids.length === 0) return;
+      for (const id of ids) lookupInFlight.add(id);
       try {
         const { data } = await api.get(`/servers/${serverId}/members/lookup`, { params: { ids: ids.join(',') } });
         // A server switch meanwhile reset the queue; these rows are the old server's
@@ -710,16 +744,26 @@ export const useServerStore = create<ServerState>((set, get) => ({
           lookupPending.delete(id);
           if (!found.has(id)) lookupMisses.add(id);
         }
+        lookupFailures = 0;
         if (rows.length) {
           set((state) => mergeKnownMembers(state, rows));
         }
       } catch (err) {
-        console.warn('[Members] Lookup failed:', err);
-        // Not misses: a later event may ask again, after the back-off
-        for (const id of ids) lookupPending.delete(id);
+        // Not misses, and still queued: the retry goes out after the back-off
+        // (nothing re-asks for a row it is already waiting on). A server that
+        // keeps failing is not asked forever.
+        lookupFailures++;
         lookupBackoffUntil = Date.now() + MEMBER_LOOKUP_BACKOFF_MS;
+        if (lookupFailures >= MEMBER_LOOKUP_MAX_FAILURES) {
+          console.warn(`[Members] Lookup failed ${lookupFailures} times, giving up on ${lookupPending.size} id(s):`, err);
+          lookupPending.clear();
+          lookupFailures = 0;
+        } else {
+          console.warn('[Members] Lookup failed, retrying after the back-off:', err);
+        }
       } finally {
-        if (lookupPending.size > 0 && !lookupTimer && get().activeServerId === serverId) {
+        for (const id of ids) lookupInFlight.delete(id);
+        if (lookupPending.size > lookupInFlight.size && !lookupTimer && get().activeServerId === serverId) {
           lookupTimer = setTimeout(() => { lookupTimer = null; void flushMemberLookups(); }, Math.max(MEMBER_LOOKUP_DEBOUNCE_MS, lookupBackoffUntil - Date.now()));
         }
       }
@@ -942,6 +986,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   handleMemberKicked: (serverId: string) => {
     if (get().activeServerId === serverId) resetMemberLookupState();
+    if (get().directory.serverId === serverId) retireDirectory();
     set((state) => ({
       servers: state.servers.filter((s) => s.id !== serverId),
       activeServerId: state.activeServerId === serverId ? null : state.activeServerId,
@@ -972,6 +1017,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       }
 
       if (isActive) resetMemberLookupState();
+      if (state.directory.serverId === serverId) retireDirectory();
       return {
         servers: state.servers.filter((s) => s.id !== serverId),
         activeServerId: isActive ? null : state.activeServerId,
@@ -1188,7 +1234,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   fetchJoinRequests: async (serverId) => {
     // Claim the list for this server BEFORE the request: a section that
     // opens for another server meanwhile wins, and this response is dropped
-    // (same staleness rule as setActiveServer / fetchMembers).
+    // (same staleness rule as setActiveServer / fetchPeople).
     set((state) => (state.joinRequestsServerId === serverId ? state : { joinRequests: [], joinRequestsServerId: serverId, joinRequestsTruncated: false }));
     const { rows, total } = await fetchAllPages<ServerJoinRequest>(`/servers/${serverId}/join-requests`);
     set((state) => {

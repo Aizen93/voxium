@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { useServerStore, type ServerSettingsTab } from '../../stores/serverStore';
 import { useConnectionStatus } from '../../hooks/useConnectionStatus';
-import { withOwnPresence } from '../../utils/peopleGroups';
+import { headerOnlineCount } from '../../utils/peopleGroups';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
@@ -828,12 +828,11 @@ export function ChannelSidebar() {
 
   // ─── Render ───────────────────────────────────────────────────────────
 
-  // Everyone loaded: count the rows (our own reads online while the socket is
-  // up — nobody echoes our presence to us); the online slice of a big server:
-  // the server's figure, moved by the events since
-  const onlineCount = people.full
-    ? withOwnPresence(members, user?.id, connectionStatus === 'connected').filter((m) => m.user.status && m.user.status !== 'offline').length
-    : people.onlineCount;
+  // The People panel's rule: the rows when everyone is loaded, the server's
+  // figure for a big server's slice, never below the rows that read online
+  // (our own reads online while the socket is up — nobody echoes our
+  // presence to us)
+  const onlineCount = headerOnlineCount(members, people, user?.id, connectionStatus === 'connected');
 
   return (
     <div className="flex h-full w-full flex-col bg-vox-channel">

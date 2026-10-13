@@ -1345,6 +1345,7 @@ describe('Server Routes', () => {
     : v && typeof v === 'object' && 'values' in v && 'strings' in v ? (v.values as unknown[]).flatMap(flat) : [v];
   const valuesOf = (i: number) => { const [, ...values] = prismaMock.$queryRaw.mock.calls[i]; return flat(values); };
   const RANK = "CASE sm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END";
+  const key = (user_id: string, rank = 2, joined_at = new Date('2026-10-01T00:00:00.000Z')) => ({ user_id, rank, joined_at });
 
   describe('GET /api/v1/servers/:serverId/members', () => {
     beforeEach(() => {
@@ -1385,12 +1386,13 @@ describe('Server Routes', () => {
     });
 
     it('first page: keys from one ordered query (owner, admins, then join date; LIMIT limit + 1), rows by id put back in key order, the unfiltered total is the inline count', async () => {
-      prismaMock.$queryRaw.mockResolvedValueOnce([{ user_id: 'owner-1' }, { user_id: 'user-2' }, { user_id: 'user-3' }]);
+      prismaMock.$queryRaw.mockResolvedValueOnce([key('owner-1', 0), key('user-2'), key('user-3')]);
       // Prisma returns the rows in ITS order; the page must follow the keys
       prismaMock.serverMember.findMany.mockResolvedValue([memberRow('user-3'), memberRow('owner-1', { role: 'owner' }), memberRow('user-2')]);
 
       const res = await request(app).get('/api/v1/servers/srv-1/members').set('Authorization', `Bearer ${makeToken()}`);
       expect(res.status).toBe(200);
+      expect(mockRateLimitMemberRead).toHaveBeenCalled();
       expect(res.body.data.map((m: { userId: string }) => m.userId)).toEqual(['owner-1', 'user-2', 'user-3']);
       expect(res.body.total).toBe(3);
       expect(res.body.hasMore).toBe(false);
@@ -1399,6 +1401,7 @@ describe('Server Routes', () => {
 
       expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
       const sql = sqlOf(0);
+      expect(sql).toContain(`SELECT sm.user_id, ${RANK} AS rank, sm.joined_at FROM server_members sm`);
       expect(sql).toContain(`ORDER BY ${RANK}, sm.joined_at, sm.user_id LIMIT ?`);
       expect(sql).not.toContain('AND (');
       expect(sql).not.toContain('ILIKE');
@@ -1407,10 +1410,11 @@ describe('Server Routes', () => {
       expect(prismaMock.server.findUnique).toHaveBeenCalledWith({ where: { id: 'srv-1' }, select: { memberCount: true } });
     });
 
-    it('a full page issues a signed cursor carrying the last row (rank, join date, id); the next page is a strictly-after row comparison', async () => {
-      prismaMock.$queryRaw.mockResolvedValueOnce([{ user_id: 'owner-1' }, { user_id: 'user-2' }, { user_id: 'user-3' }]);
+    it('a full page issues a signed cursor carrying the last KEY (rank, join date, id) — the position the key query ordered by, even when the row fetch sees a later role change; the next page is a strictly-after row comparison', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([key('owner-1', 0), key('user-2', 2, new Date('2026-10-02T00:00:00.000Z')), key('user-3')]);
+      // the row fetch sees user-2 promoted meanwhile: the cursor still says rank 2
       prismaMock.serverMember.findMany.mockResolvedValue([
-        memberRow('owner-1', { role: 'owner' }), memberRow('user-2', { joinedAt: new Date('2026-10-02T00:00:00.000Z') }),
+        memberRow('owner-1', { role: 'owner' }), memberRow('user-2', { role: 'admin', joinedAt: new Date('2026-10-09T00:00:00.000Z') }),
       ]);
       prismaMock.server.findUnique.mockResolvedValue({ memberCount: 500 });
 
@@ -1425,7 +1429,7 @@ describe('Server Routes', () => {
         serverId: 'srv-1', q: '', role: '', limit: 2, rank: 2, joinedAt: '2026-10-02T00:00:00.000Z', id: 'user-2',
       });
 
-      prismaMock.$queryRaw.mockResolvedValueOnce([{ user_id: 'user-3' }]);
+      prismaMock.$queryRaw.mockResolvedValueOnce([key('user-3')]);
       prismaMock.serverMember.findMany.mockResolvedValue([memberRow('user-3')]);
       const second = await request(app).get(`/api/v1/servers/srv-1/members?limit=2&cursor=${encodeURIComponent(cursor)}`).set('Authorization', `Bearer ${makeToken()}`);
       expect(second.status).toBe(200);
@@ -1453,7 +1457,7 @@ describe('Server Routes', () => {
     });
 
     it('search text: username, display name and nickname ILIKE with the pattern escaped and bound; the total is a count over the same filter; too long is 400', async () => {
-      prismaMock.$queryRaw.mockResolvedValueOnce([{ user_id: 'user-2' }]).mockResolvedValueOnce([{ n: 7 }]);
+      prismaMock.$queryRaw.mockResolvedValueOnce([key('user-2')]).mockResolvedValueOnce([{ n: 7 }]);
       prismaMock.serverMember.findMany.mockResolvedValue([memberRow('user-2')]);
 
       const res = await request(app).get('/api/v1/servers/srv-1/members?q=' + encodeURIComponent(' 50%_x\\ ')).set('Authorization', `Bearer ${makeToken()}`);
@@ -1488,6 +1492,35 @@ describe('Server Routes', () => {
       const bad = await request(app).get('/api/v1/servers/srv-1/members?role=' + encodeURIComponent("x'; drop")).set('Authorization', `Bearer ${token}`);
       expect(bad.status).toBe(400);
       expect(bad.body.error).toBe('Invalid role filter');
+    });
+
+    it('refuses search text with a control character (a NUL would be a 500 from Postgres, not a 400)', async () => {
+      const res = await request(app).get('/api/v1/servers/srv-1/members?q=ab%00c').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Invalid search text');
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('a repeated q is not a string: unfiltered, never a crash', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([]);
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+      const res = await request(app).get('/api/v1/servers/srv-1/members?q=a&q=b').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(sqlOf(0)).not.toContain('ILIKE');
+    });
+
+    it('legacy mode: page 0, a negative page and nonsense all read as page 1; a cursor next to a page number takes the keyset branch', async () => {
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+      prismaMock.serverMember.count.mockResolvedValue(0);
+      for (const page of ['0', '-3', 'abc']) {
+        const res = await request(app).get(`/api/v1/servers/srv-1/members?page=${page}`).set('Authorization', `Bearer ${makeToken()}`);
+        expect(res.status, page).toBe(200);
+        expect(res.body.page, page).toBe(1);
+        expect(prismaMock.serverMember.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ skip: 0 }));
+      }
+      const mixed = await request(app).get('/api/v1/servers/srv-1/members?page=2&cursor=garbage').set('Authorization', `Bearer ${makeToken()}`);
+      expect(mixed.status).toBe(400);
+      expect(mixed.body.error).toBe('Invalid cursor');
     });
 
     it('clamps the page size to MEMBERS_PER_PAGE and refuses nonsense quietly (default size)', async () => {
@@ -1574,6 +1607,8 @@ describe('Server Routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.full).toBe(false);
       expect(res.body.data).toHaveLength(1);
+      // not the stale 3: at least the cap + 1 rows it has just seen
+      expect(res.body.memberCount).toBe(MEMBER_LIST.PEOPLE_MAX_ROWS + 1);
       expect(prismaMock.serverMember.findMany).toHaveBeenCalledTimes(3);
     });
   });
@@ -1633,7 +1668,13 @@ describe('Server Routes', () => {
 
       const empty = await request(app).get('/api/v1/servers/srv-1/members/search?q=').set('Authorization', `Bearer ${token}`);
       expect(empty.body.data).toEqual([]);
+      // a repeated q is an array, not a string: nothing to search, never a crash
+      const repeated = await request(app).get('/api/v1/servers/srv-1/members/search?q=a&q=b').set('Authorization', `Bearer ${token}`);
+      expect(repeated.status).toBe(200);
+      expect(repeated.body.data).toEqual([]);
       expect(prismaMock.serverMember.findMany).toHaveBeenCalledTimes(2);
+      const control = await request(app).get('/api/v1/servers/srv-1/members/search?q=a%00b').set('Authorization', `Bearer ${token}`);
+      expect(control.status).toBe(400);
     });
   });
 

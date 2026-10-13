@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { useServerStore } from '../../stores/serverStore';
 import { useMember } from '../../hooks/useMember';
+import { MEMBER_LOOKUP_DEBOUNCE_MS } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
@@ -62,6 +63,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   // The membership row (nickname, roles) — asked for when the client has
   // none, which on a big server is anyone outside the People panel's slice
   const member = useMember(userId);
+  const activeServerId = useServerStore((s) => s.activeServerId);
   const channels = useServerStore((s) => s.channels);
   const channelUsers = useVoiceStore((s) => s.channelUsers);
 
@@ -75,10 +77,19 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
 
   useEffect(() => {
     if (member) return;
-    api.get(`/users/${userId}`).then((res) => {
-      if (res.data?.data) setFetchedUser(res.data.data);
-    }).catch((err) => { console.warn('[UserProfilePopup] Failed to fetch user:', err); });
-  }, [userId, member]);
+    let cancelled = false;
+    const fetchProfile = () => {
+      api.get(`/users/${userId}`).then((res) => {
+        if (!cancelled && res.data?.data) setFetchedUser(res.data.data);
+      }).catch((err) => { console.warn('[UserProfilePopup] Failed to fetch user:', err); });
+    };
+    // In a server the membership lookup is already on its way (batched): give
+    // it the debounce window before asking for the public profile, so one
+    // hover is one request for a member and two only for a non-member
+    if (!activeServerId) { fetchProfile(); return; }
+    const timer = setTimeout(fetchProfile, MEMBER_LOOKUP_DEBOUNCE_MS * 2);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [userId, member, activeServerId]);
 
   // Find voice channel this user is in
   let voiceChannelName: string | null = null;
@@ -132,7 +143,9 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   const hasPosition = position !== null;
   useEffect(() => {
     if (hasPosition) updatePosition();
-  }, [hasPosition]); // intentionally excludes updatePosition — it calls setPosition which would loop
+    // Re-measure when the content changes height: the membership row (roles,
+    // "joined" line) or the public profile landing after the first paint
+  }, [hasPosition, member, fetchedUser]); // intentionally excludes updatePosition — it calls setPosition which would loop
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
