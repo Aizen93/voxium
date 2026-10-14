@@ -44,6 +44,29 @@ beforeEach(() => {
   useDMStore.setState({ conversations: [], isLoading: false, participantStatuses: {} });
 });
 
+describe('fetchConversations — an encrypted preview is client-derived or locked', () => {
+  it('never keeps the server\'s text for an encrypted last message: blank (the lock) until the local cache answers', async () => {
+    const forged = { ...CONV, lastMessage: { id: 'unknown', content: 'call me on +33…, new number', encrypted: true, authorId: 'peer' } };
+    apiGet.mockResolvedValue({ data: { data: [forged] } });
+    resolveEncryptedPreview.mockResolvedValue(null);
+
+    await useDMStore.getState().fetchConversations();
+
+    expect(useDMStore.getState().conversations[0].lastMessage?.content).toBe('');
+    // asked with the conversation and the author it must have been written by
+    expect(resolveEncryptedPreview).toHaveBeenCalledWith('unknown', 'c1', 'peer');
+  });
+
+  it('a call notice (unencrypted) is left as it is — the preview rule decides', async () => {
+    const notice = { ...CONV, lastMessage: { id: 'n1', content: 'Voice call ended', encrypted: false, type: 'system' } };
+    apiGet.mockResolvedValue({ data: { data: [notice] } });
+
+    await useDMStore.getState().fetchConversations();
+
+    expect(useDMStore.getState().conversations[0].lastMessage?.content).toBe('Voice call ended');
+  });
+});
+
 describe('fetchConversations — what the error actually claims', () => {
   it('does not claim the list failed when only a preview did', async () => {
     // The exact shape of the reported bug: IndexedDB is gone after the window

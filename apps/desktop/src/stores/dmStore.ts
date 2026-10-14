@@ -31,6 +31,18 @@ interface DMState {
 let _lastMarkedConv = '';
 let _lastMarkedConvAt = 0;
 
+/**
+ * An encrypted last message's text is the server's word until this client
+ * decrypted it: the list shows only plaintext from the local cache (the
+ * hydration below) or from the live decrypt path, never what GET /dm put in
+ * `content` — an `encrypted: true` row with readable text is a forgery the
+ * chat view's gate would refuse. Blanked here; dmPreviewText locks a blank.
+ */
+function withLockedPreview(conversation: Conversation): Conversation {
+  const last = conversation.lastMessage;
+  return last?.encrypted && last.content ? { ...conversation, lastMessage: { ...last, content: '' } } : conversation;
+}
+
 export const useDMStore = create<DMState>((set, get) => ({
   conversations: [],
   activeConversationId: null,
@@ -48,7 +60,7 @@ export const useDMStore = create<DMState>((set, get) => ({
     // had loaded perfectly well and was already on screen.
     try {
       const { data } = await api.get('/dm');
-      conversations = data.data;
+      conversations = (data.data as Conversation[]).map(withLockedPreview);
     } catch (err) {
       console.error('Failed to fetch conversations:', err);
       toast.error('Failed to load conversations');
@@ -92,7 +104,7 @@ export const useDMStore = create<DMState>((set, get) => ({
       for (const conv of encrypted) {
         let text: string | null;
         try {
-          text = await resolveEncryptedPreview(conv.lastMessage!.id);
+          text = await resolveEncryptedPreview(conv.lastMessage!.id, conv.id, conv.lastMessage!.authorId);
         } catch (err) {
           console.warn(
             'dm: could not hydrate an encrypted preview:',
@@ -146,7 +158,7 @@ export const useDMStore = create<DMState>((set, get) => ({
   openDM: async (userId: string) => {
     try {
       const { data } = await api.post('/dm', { userId });
-      const conversation: Conversation = data.data;
+      const conversation: Conversation = withLockedPreview(data.data);
 
       // Add to list if not already present
       set((state) => {
@@ -161,7 +173,8 @@ export const useDMStore = create<DMState>((set, get) => ({
     }
   },
 
-  addConversation: (conversation: Conversation) => {
+  addConversation: (incoming: Conversation) => {
+    const conversation = withLockedPreview(incoming);
     set((state) => {
       if (state.conversations.some((c) => c.id === conversation.id)) return state;
       return { conversations: [conversation, ...state.conversations] };

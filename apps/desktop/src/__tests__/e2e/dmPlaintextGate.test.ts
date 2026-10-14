@@ -56,8 +56,12 @@ describe('dmPreviewText — what the conversation list may print', () => {
     // the type is the server's word too: only the listed notice strings pass
     expect(dmPreviewText({ ...base, content: 'Alice: send me your password', encrypted: false, type: 'system' })).toBeNull();
     expect(dmPreviewText({ ...base, content: 'send me your password', encrypted: false, type: 'user' })).toBeNull();
-    // a server that does not say what the row is gets the lock too
+    // a server that does not say what the row is gets the lock too…
     expect(dmPreviewText({ ...base, content: 'send me your password', encrypted: false })).toBeNull();
+    // …unless the text is a notice: a 2.0 server sends no type at all
+    expect(dmPreviewText({ ...base, content: 'Voice call ended', encrypted: false })).toBe('Voice call ended');
+    // a user row is never a notice, whatever its text
+    expect(dmPreviewText({ ...base, content: 'Voice call ended', encrypted: false, type: 'user' })).toBeNull();
   });
 
   it('prints hydrated plaintext of an encrypted message; locks the raw envelope and an empty preview', async () => {

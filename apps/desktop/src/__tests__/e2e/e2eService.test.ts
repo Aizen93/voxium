@@ -1039,9 +1039,22 @@ describe('E2EService (client crypto core)', () => {
     expect(third.text).toBe('edited text');
 
     // version-checked reads reject the stale version, unversioned reads serve latest
-    expect(await bob.service.getCachedPlaintext('m1', null)).toBeNull();
-    expect(await bob.service.getCachedPlaintext('m1', '2026-07-12T10:00:00.000Z')).toBe('edited text');
-    expect(await bob.service.getCachedPlaintext('m1')).toBe('edited text');
+    expect(await bob.service.getCachedPlaintext('m1', { scope: 'c1', editedAt: null })).toBeNull();
+    expect(await bob.service.getCachedPlaintext('m1', { scope: 'c1', editedAt: '2026-07-12T10:00:00.000Z' })).toBe('edited text');
+    expect(await bob.service.getCachedPlaintext('m1', { scope: 'c1' })).toBe('edited text');
+
+    // the entry answers only for the scope and the author that wrote it: a
+    // server relabelling the id into another container, or the author, gets
+    // nothing from the cache
+    expect(await bob.service.getCachedPlaintext('m1', { scope: 'c2' })).toBeNull();
+    expect(await bob.service.getCachedPlaintext('m1', { scope: 'ch:c1' })).toBeNull();
+    expect(await bob.service.getCachedPlaintext('m1', { scope: 'c1', authorId: bob.userId })).toBeNull();
+    expect(await bob.service.getCachedPlaintext('m1', { scope: 'c1', authorId: alice.userId })).toBe('edited text');
+    // and the decrypt path's cache hit does not vouch for a relabelled author
+    const relabelled = await bob.service.decryptMessage({
+      id: 'm1', conversationId: 'c1', authorId: bob.userId, content: edited, editedAt: '2026-07-12T10:00:00.000Z',
+    });
+    expect(relabelled.text).not.toBe('edited text');
 
     // sender side: own edit cached under the new version
     await alice.service.cachePlaintext('m1', 'c1', 'edited text', '2026-07-12T10:00:00.000Z');

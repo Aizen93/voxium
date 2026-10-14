@@ -396,10 +396,8 @@ export function MainLayout() {
         // forgery the gate exists to refuse (only system notices are plaintext
         // since the 2.0 cutover), and skipping the gate on it was the leftover
         // plaintext branch.
-        {
-          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
-          message = await decryptMessageForDisplay(message);
-        }
+        const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+        message = await decryptMessageForDisplay(message);
 
         // Update last message in conversation list
         if (message.conversationId) {
@@ -445,10 +443,8 @@ export function MainLayout() {
         // E2E edits arrive as fresh ciphertext — decrypt before the store
         // (the plaintext cache is versioned by editedAt). Same gate as a new
         // message, whatever the flag says.
-        {
-          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
-          message = await decryptMessageForDisplay(message);
-        }
+        const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+        message = await decryptMessageForDisplay(message);
         const activeConvId = useDMStore.getState().activeConversationId;
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().updateMessage(message);

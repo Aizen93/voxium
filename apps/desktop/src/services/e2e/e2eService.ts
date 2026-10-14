@@ -2736,14 +2736,24 @@ export class E2EService {
   }
 
   /**
-   * Read cached plaintext. Pass `editedAt` to require that exact version
-   * (edits produce new ciphertext under the same id); omit it to accept
-   * whichever version is cached (e.g. reply previews).
+   * Read cached plaintext for a message id the SERVER named. The entry answers
+   * only for the scope (conversation id, or `ch:{channelId}`) it was decrypted
+   * under and, when it recorded one, for the author who wrote it — otherwise a
+   * server that relabels an authentic message's author, or moves its id into
+   * another container, would have the cache vouch for the forgery that the
+   * ratchet's own bindings (decryptGroupMessage) refuse. Pass `editedAt` to
+   * require that exact version (edits produce new ciphertext under the same
+   * id); omit it to accept whichever version is cached (e.g. reply previews).
    */
-  async getCachedPlaintext(messageId: string, editedAt?: string | null): Promise<string | null> {
+  async getCachedPlaintext(
+    messageId: string,
+    expect: { scope: string; authorId?: string; editedAt?: string | null },
+  ): Promise<string | null> {
     const cached = await this.vault.getPlaintext(messageId);
     if (!cached || cached.failed) return null;
-    if (editedAt !== undefined && (cached.editedAt ?? null) !== (editedAt ?? null)) return null;
+    if (cached.conversationId !== expect.scope) return null;
+    if (expect.authorId !== undefined && cached.authorId !== undefined && cached.authorId !== expect.authorId) return null;
+    if (expect.editedAt !== undefined && (cached.editedAt ?? null) !== (expect.editedAt ?? null)) return null;
     return cached.text;
   }
 
@@ -2768,7 +2778,16 @@ export class E2EService {
     // secure-channel message (or vice versa) would have the cache serve the
     // plaintext into the wrong container — the ratchet's scope binding
     // (decryptGroupMessage) would refuse, but the cache must not bypass it.
-    if (cached && cached.conversationId === message.conversationId && (cached.editedAt ?? null) === version) {
+    //
+    // Author-checked too: the entry records who wrote it, and decryptGroupMessage
+    // binds the session to its sender — a cache hit must not skip that binding
+    // for a row whose author the server relabelled.
+    if (
+      cached &&
+      cached.conversationId === message.conversationId &&
+      (cached.editedAt ?? null) === version &&
+      (cached.authorId === undefined || cached.authorId === message.authorId)
+    ) {
       return { text: cached.text, failed: cached.failed };
     }
     // cache miss OR a stale pre-edit entry: the edit is a fresh ciphertext, so

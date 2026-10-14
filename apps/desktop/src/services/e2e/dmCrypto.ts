@@ -23,16 +23,30 @@ function applyPlaintext(message: Message, raw: string): Message {
 }
 
 /**
- * `e2eAttachments` is a CLIENT field: it comes out of the decrypted payload
- * and nowhere else. One on the wire is the server choosing a file (blob, key
- * and IV) to render inside a contact's authenticated message — dropped before
- * anything else looks at the row.
+ * What the server asserts about an encrypted message that the crypto never
+ * vouched for, dropped before anything else looks at the row:
+ *  - `e2eAttachments` is a CLIENT field that comes out of the decrypted payload
+ *    and nowhere else; one on the wire is the server choosing a file (blob, key
+ *    and IV) to render inside a contact's authenticated message;
+ *  - `mentions` names the people an `@[id]` in the text resolves to — the
+ *    server never resolves mentions for encrypted rows, so a list on one is the
+ *    server renaming an authentic mention (and setting off a "mentioned you").
  */
-export function withoutWireE2EAttachments(message: Message): Message {
-  if (!('e2eAttachments' in message)) return message;
-  const rest: Message = { ...message };
+export function withoutServerAssertions(message: Message): Message {
+  if (!('e2eAttachments' in message) && !message.mentions?.length) return message;
+  const rest: Message = { ...message, mentions: [] };
   delete rest.e2eAttachments;
   return rest;
+}
+
+/**
+ * The quote on a message THIS client just sent, from the message it was
+ * replying to — already through the gate when it was displayed — never from
+ * the server's reply to the POST.
+ */
+export function ownReplyQuote(replyingTo: Message | null): Message['replyTo'] {
+  if (!replyingTo) return null;
+  return { id: replyingTo.id, author: replyingTo.author, content: replyingTo.content, encrypted: replyingTo.encrypted };
 }
 
 /**
@@ -43,7 +57,9 @@ export function withoutWireE2EAttachments(message: Message): Message {
  */
 export function refusedRow(message: Message): Message {
   return {
-    ...withoutWireE2EAttachments(message),
+    ...withoutServerAssertions(message),
+    // a refused "system" row must not render as a (blank) call notice
+    type: 'user',
     content: DECRYPT_FAILED_CONTENT,
     encrypted: true,
     attachments: [],
@@ -61,6 +77,7 @@ export const DECRYPT_FAILED_CONTENT = '';
 
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
   if (!message.replyTo) return message;
+  const scope = message.conversationId ?? '';
   if (!message.replyTo.encrypted) {
     // An unencrypted quote is trusted only when it is one of the server's call
     // notices; anything else renders as the lock placeholder
@@ -68,7 +85,12 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
       ? message
       : { ...message, replyTo: { ...message.replyTo, content: '', encrypted: true } };
   }
-  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id);
+  // The quote answers only from an entry of THIS conversation written by the
+  // quoted author (the server names both the id and the author)
+  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id, {
+    scope,
+    authorId: message.replyTo.author?.id,
+  });
   // cached entries hold raw plaintext — structured payloads carry the text field
   const preview = cached ? parseE2EPlaintext(cached).text : '';
   return { ...message, replyTo: { ...message.replyTo, content: preview } };
@@ -81,7 +103,7 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * messages are cache-only, so own messages fall back to retrying the cache.
  */
 export async function decryptMessageForDisplay(input: Message): Promise<Message> {
-  const message = withoutWireE2EAttachments(input);
+  const message = withoutServerAssertions(input);
   if (!message.encrypted) {
     // After the always-on cutover there is no plaintext DM path: conversations
     // are born encrypted, the enable route is gone, and the send side throws
@@ -137,8 +159,13 @@ export async function decryptMessageForDisplay(input: Message): Promise<Message>
     const attempts = Number.isFinite(ageMs) && ageMs < 10_000 ? 4 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempts > 1) await new Promise((r) => setTimeout(r, 150));
-      // version-checked: an edit echo must not serve the pre-edit cache entry
-      const cached = await service.getCachedPlaintext(message.id, message.editedAt ?? null);
+      // version-checked: an edit echo must not serve the pre-edit cache entry;
+      // and only our OWN entry of this conversation answers for "own"
+      const cached = await service.getCachedPlaintext(message.id, {
+        scope: message.conversationId ?? '',
+        authorId: userId,
+        editedAt: message.editedAt ?? null,
+      });
       if (cached !== null) {
         return resolveReplyPreview(applyPlaintext(message, cached), userId);
       }
@@ -286,9 +313,13 @@ export async function searchEncryptedHistory(
  * searchDecrypted); this one did not, and nothing in the display layer is the
  * right place to notice.
  */
-export async function resolveEncryptedPreview(messageId: string): Promise<string | null> {
+export async function resolveEncryptedPreview(
+  messageId: string,
+  conversationId: string,
+  authorId?: string,
+): Promise<string | null> {
   const userId = await currentUserId();
   if (!userId) return null;
-  const raw = await getE2EService(userId).getCachedPlaintext(messageId);
+  const raw = await getE2EService(userId).getCachedPlaintext(messageId, { scope: conversationId, authorId });
   return raw === null ? null : parseE2EPlaintext(raw).text;
 }

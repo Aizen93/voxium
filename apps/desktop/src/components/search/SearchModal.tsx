@@ -18,6 +18,15 @@ interface SearchModalProps {
   participantName?: string;
 }
 
+/** Server search results minus any hit from a channel the client knows is secure. */
+export function withoutSecureChannelHits<T extends { channelId?: string | null; encrypted?: boolean }>(
+  hits: T[],
+  channels: { id: string; secure?: boolean }[] | undefined,
+): T[] {
+  const secure = new Set((channels ?? []).filter((c) => c.secure === true).map((c) => c.id));
+  return hits.filter((h) => h.encrypted !== true && !(h.channelId && secure.has(h.channelId)));
+}
+
 export function SearchModal({ onClose, serverId, channels, conversationId, participantName }: SearchModalProps) {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
@@ -126,10 +135,13 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
 
       if (controller.signal.aborted) return;
 
+      // The server excludes secure channels from this search; a hit from one
+      // the client knows is secure is not something it may show as plaintext
+      const hits = withoutSecureChannelHits(data.data as SearchResult[], channels);
       if (beforeCursor) {
-        setResults((prev) => [...prev, ...data.data]);
+        setResults((prev) => [...prev, ...hits]);
       } else {
-        setResults(data.data);
+        setResults(hits);
       }
       setHasMore(data.hasMore);
       setHasSearched(true);

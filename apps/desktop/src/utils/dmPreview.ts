@@ -13,5 +13,6 @@ export function dmPreviewText(last: NonNullable<Conversation['lastMessage']>): s
   if (last.encrypted) {
     return !last.content || parseE2EEnvelope(last.content) !== null ? null : last.content;
   }
-  return last.type === 'system' && isDMSystemNotice(last.content) ? last.content : null;
+  // a 2.0 server sends no `type`; the notice text is what decides either way
+  return (last.type === 'system' || last.type === undefined) && isDMSystemNotice(last.content) ? last.content : null;
 }

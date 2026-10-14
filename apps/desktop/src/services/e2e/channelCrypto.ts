@@ -10,7 +10,7 @@
 import { buildE2EPlaintext, parseE2EPlaintext, e2eChannelScope } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError } from './e2eService';
-import { DECRYPT_FAILED_CONTENT, refusedRow, withoutWireE2EAttachments } from './dmCrypto';
+import { DECRYPT_FAILED_CONTENT, refusedRow, withoutServerAssertions } from './dmCrypto';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
@@ -30,7 +30,11 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
   // Every secure-channel message is encrypted: an unencrypted quote is the
   // server's word and renders as the lock placeholder
   if (!message.replyTo.encrypted) return { ...message, replyTo: { ...message.replyTo, content: '', encrypted: true } };
-  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id);
+  const scope = message.channelId ? e2eChannelScope(message.channelId) : '';
+  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id, {
+    scope,
+    authorId: message.replyTo.author?.id,
+  });
   const preview = cached ? parseE2EPlaintext(cached).text : '';
   return { ...message, replyTo: { ...message.replyTo, content: preview } };
 }
@@ -45,8 +49,9 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * not get to decide whether a message was end-to-end encrypted.
  */
 export async function decryptChannelMessageForDisplay(input: Message): Promise<Message> {
-  // e2eAttachments come out of the decrypted payload only (see dmCrypto)
-  const message = withoutWireE2EAttachments(input);
+  // e2eAttachments come out of the decrypted payload only, and mentions are
+  // never resolved for encrypted rows (see dmCrypto)
+  const message = withoutServerAssertions(input);
   if (!message.encrypted) {
     // Secure channels have no server notices at all: every unencrypted row is
     // refused, `type: 'system'` included (the type is the server's word)
@@ -82,7 +87,7 @@ export async function decryptChannelMessageForDisplay(input: Message): Promise<M
     const attempts = Number.isFinite(ageMs) && ageMs < 10_000 ? 4 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempts > 1) await new Promise((r) => setTimeout(r, 150));
-      const cached = await service.getCachedPlaintext(message.id, message.editedAt ?? null);
+      const cached = await service.getCachedPlaintext(message.id, { scope, authorId: userId, editedAt: message.editedAt ?? null });
       if (cached !== null) {
         return resolveReplyPreview(applyPlaintext(message, cached), userId);
       }

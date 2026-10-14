@@ -275,9 +275,12 @@ verification and shows a warning.
 |---|---|
 | Message timeline | decrypted before entering any store; lock placeholder on failure |
 | DM list preview | decrypted live; cache-hydrated on fetch; "🔒 Encrypted message" fallback |
-| Reply previews | resolved from plaintext cache; lock placeholder otherwise |
+| Reply previews | Encrypted quotes resolved from the plaintext cache (same conversation, quoted author); an unencrypted quote shows only when it is a listed call notice; lock placeholder otherwise |
 | Notifications | client decrypts first → body shows plaintext locally (never leaves device) |
 | Server search | None for DMs (route removed in 2.1); DM history is searched client-side over the local plaintext cache |
+| Display gate | Every DM row — fetched, pushed over the socket, or returned by the client's own POST — is shown only through `dmCrypto`. An unencrypted row passes only as a call notice: `type: 'system'` AND content exactly one of `DM_SYSTEM_NOTICES` (shared), shown with no attachments and no quote. Everything else unencrypted is refused: content `''`, `type: 'user'`, `encrypted: true` (the "unable to decrypt" marker), no attachments, quote blanked. Server-asserted fields the crypto never vouched for are always dropped: `e2eAttachments` (built only from the decrypted payload) and `mentions` (never resolved for encrypted rows). The sender's own row is built from local data, never from the POST reply. |
+| Plaintext cache | Answers only for the scope it was decrypted under and, when recorded, the author who wrote it — the cache must not vouch for a relabelled id or author that the ratchet's bindings refuse |
+| List preview | Encrypted: only plaintext from the local cache or the live decrypt path; the server's `content` is blanked on arrival. Unencrypted: only a listed call notice |
 | Reports | DMs: reporter's client attaches its decrypted plaintext (`reportedContent`); stored with `contentSource: "reporter"` — flagged unverifiable, ciphertext never copied. Secure channels: not reportable (§19.1) |
 | Attachments | encrypted client-side (AES-256-GCM in the binding); real metadata inside the message ciphertext; server stores opaque blobs (§13) |
 | Edits | fresh ratchet ciphertext under the same id; plaintext cache versioned by editedAt |
@@ -1102,8 +1105,9 @@ verbatim (never sanitized), mentions never resolved, excluded from server
 search (`encrypted: false` filter + secure channels dropped from the channel
 enumeration), edits are fresh ciphertexts under the same id, attachments
 presign only as opaque `application/octet-stream` blobs with server-forced
-names. The client refuses `encrypted: false` user rows in a secure channel —
-the same forgery rule as §9's DM table.
+names. The client refuses EVERY unencrypted row in a secure channel, `type: 'system'`
+included (channels never carry server notices) — the §9 display gate, with no
+notice exception.
 
 Client search over a secure channel runs on this device's plaintext cache,
 like encrypted DMs. Unlike encrypted DMs, secure-channel messages are NOT
