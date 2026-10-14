@@ -1,12 +1,16 @@
-// Display-layer glue between DM stores/components and the E2E service.
-// Plaintext messages pass through untouched; encrypted ones are decrypted (or
-// resolved from the local cache) before they reach any store or the DOM.
+// Display-layer gate between DM stores/components and the E2E service.
+// Encrypted messages are decrypted (or resolved from the local cache) before
+// they reach any store or the DOM. An unencrypted row passes only when it is
+// one of the server's own call notices (DM_SYSTEM_NOTICES); every other one is
+// refused and shown as "unable to decrypt". Whatever the server attaches that
+// the crypto did not vouch for — `e2eAttachments`, plaintext `attachments` on
+// a refused row, an unencrypted reply quote — is dropped here.
 //
 // NOTE: stores are imported DYNAMICALLY inside functions. resetStores.ts
 // captures every account store's initial state at module-eval time, so a
 // static store import from a service pulled in by chatStore would create an
 // eval-order cycle that crashes at boot.
-import { buildE2EPlaintext, parseE2EPlaintext } from '@voxium/shared';
+import { buildE2EPlaintext, parseE2EPlaintext, isDMSystemNotice } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError } from './e2eService';
 
@@ -18,6 +22,35 @@ function applyPlaintext(message: Message, raw: string): Message {
   return { ...message, content: text, ...(attachments.length > 0 && { e2eAttachments: attachments }) };
 }
 
+/**
+ * `e2eAttachments` is a CLIENT field: it comes out of the decrypted payload
+ * and nowhere else. One on the wire is the server choosing a file (blob, key
+ * and IV) to render inside a contact's authenticated message — dropped before
+ * anything else looks at the row.
+ */
+export function withoutWireE2EAttachments(message: Message): Message {
+  if (!('e2eAttachments' in message)) return message;
+  const rest: Message = { ...message };
+  delete rest.e2eAttachments;
+  return rest;
+}
+
+/**
+ * A row the gate refuses: no text, no server-asserted attachments, no quoted
+ * text, and flagged so the UI renders its "unable to decrypt" marker — an
+ * empty bubble under a contact's name, with a file the server chose, is the
+ * forgery the refusal exists to stop.
+ */
+export function refusedRow(message: Message): Message {
+  return {
+    ...withoutWireE2EAttachments(message),
+    content: DECRYPT_FAILED_CONTENT,
+    encrypted: true,
+    attachments: [],
+    replyTo: message.replyTo ? { ...message.replyTo, content: '', encrypted: true } : message.replyTo,
+  };
+}
+
 async function currentUserId(): Promise<string | null> {
   const { useAuthStore } = await import('../../stores/authStore');
   return useAuthStore.getState().user?.id ?? null;
@@ -27,7 +60,14 @@ async function currentUserId(): Promise<string | null> {
 export const DECRYPT_FAILED_CONTENT = '';
 
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
-  if (!message.replyTo?.encrypted) return message;
+  if (!message.replyTo) return message;
+  if (!message.replyTo.encrypted) {
+    // An unencrypted quote is trusted only when it is one of the server's call
+    // notices; anything else renders as the lock placeholder
+    return isDMSystemNotice(message.replyTo.content)
+      ? message
+      : { ...message, replyTo: { ...message.replyTo, content: '', encrypted: true } };
+  }
   const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id);
   // cached entries hold raw plaintext — structured payloads carry the text field
   const preview = cached ? parseE2EPlaintext(cached).text : '';
@@ -40,7 +80,8 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * Own echoes can still race the send path's cache write, and legacy olm1 own
  * messages are cache-only, so own messages fall back to retrying the cache.
  */
-export async function decryptMessageForDisplay(message: Message): Promise<Message> {
+export async function decryptMessageForDisplay(input: Message): Promise<Message> {
+  const message = withoutWireE2EAttachments(input);
   if (!message.encrypted) {
     // After the always-on cutover there is no plaintext DM path: conversations
     // are born encrypted, the enable route is gone, and the send side throws
@@ -56,11 +97,16 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
     // forgery, and it is strictly weaker than the "active key substitution is
     // detectable" property the spec claims. The flag is the server's word, so
     // it does not get to decide whether a message was end-to-end encrypted.
-    if (message.type === 'system') return message;
+    //
+    // The `type` field is the server's word too, so a "system" row is trusted
+    // only when its text is one of the notices the server actually writes.
+    if (message.type === 'system' && isDMSystemNotice(message.content)) {
+      return { ...message, attachments: [], replyTo: null };
+    }
     console.warn(
       `e2e: refusing an unencrypted DM message (${message.id}) — every DM is encrypted`
     );
-    return { ...message, content: DECRYPT_FAILED_CONTENT };
+    return refusedRow(message);
   }
   const userId = await currentUserId();
   if (!userId) return { ...message, content: DECRYPT_FAILED_CONTENT };
@@ -101,7 +147,7 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
   return resolveReplyPreview({ ...message, content: DECRYPT_FAILED_CONTENT }, userId);
 }
 
-/** Decrypt a fetched page of messages (order preserved; plaintext untouched). */
+/** Decrypt a fetched page of messages (order preserved; only the server's call notices pass unencrypted). */
 export async function decryptMessagesForDisplay(messages: Message[]): Promise<Message[]> {
   // No `some(m => m.encrypted)` short-circuit: a page of forged plaintext rows
   // would satisfy it and bypass the per-message check entirely, which is
@@ -120,7 +166,7 @@ export async function decryptMessagesForDisplay(messages: Message[]): Promise<Me
       // whole page into a "Failed to load messages" toast. Show the one
       // failure, keep the conversation.
       console.error(`e2e: decrypt pipeline failed for message ${m.id}:`, err);
-      out.push({ ...m, content: DECRYPT_FAILED_CONTENT });
+      out.push(refusedRow(m));
     }
   }
   return out;

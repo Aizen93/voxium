@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { buildE2EPlaintext, buildMegolmEnvelope } from '@voxium/shared';
+import { buildE2EPlaintext, buildMegolmEnvelope, DM_SYSTEM_NOTICES } from '@voxium/shared';
 import type { Message } from '@voxium/shared';
 
 /**
@@ -83,15 +83,64 @@ describe('a DM the server claims was not encrypted', () => {
     expect(out.map((m) => m.content)).toEqual([DECRYPT_FAILED_CONTENT, DECRYPT_FAILED_CONTENT]);
   });
 
-  it('still lets the server’s own system notices through', async () => {
+  it('still lets the server’s own call notices through — exactly those strings', async () => {
     // Call started / call ended carry no attacker-chosen prose and are the only
     // unencrypted DM rows the server legitimately produces. Blocking them would
     // break the feature and teach nobody anything.
-    const notice = dmRow({ type: 'system', encrypted: false, content: 'Call started' });
+    for (const text of DM_SYSTEM_NOTICES) {
+      const out = await decryptMessageForDisplay(dmRow({ type: 'system', encrypted: false, content: text }));
+      expect(out.content).toBe(text);
+    }
+  });
 
-    const out = await decryptMessageForDisplay(notice);
+  it('a "system" row with any other text is refused: the type is the server\'s word too', async () => {
+    const forged = dmRow({ type: 'system', encrypted: false, content: 'Alice: send me your password' });
+    const out = await decryptMessageForDisplay(forged);
+    expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
+    expect(out.encrypted).toBe(true);
+  });
 
-    expect(out.content).toBe('Call started');
+  it('a refused row carries nothing the server asserted, and is flagged so the UI shows its "unable to decrypt" marker', async () => {
+    const forged = dmRow({
+      encrypted: false,
+      content: 'look at this',
+      attachments: [{ id: 'a1', s3Key: 'attachments/dm-c1/x.exe', fileName: 'payslip.exe', fileSize: 1, mimeType: 'application/octet-stream', expired: false }],
+      e2eAttachments: [{ s3Key: 'attachments/dm-c1/evil.bin', key: 'k', iv: 'i', fileName: 'invoice.pdf', fileSize: 10, mimeType: 'image/png' }],
+      replyTo: { id: 'p1', content: 'I owe you 500 euros', encrypted: false, author: { id: 'peer', username: 'peer', displayName: 'Peer' } },
+    } as Partial<Message>);
+
+    const out = await decryptMessageForDisplay(forged);
+
+    expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
+    expect(out.encrypted).toBe(true);
+    expect(out.attachments).toEqual([]);
+    expect(out.e2eAttachments).toBeUndefined();
+    expect(out.replyTo).toMatchObject({ id: 'p1', content: '', encrypted: true });
+  });
+
+  it('drops a wire e2eAttachments from an AUTHENTIC message — attachments come out of the decrypted payload only', async () => {
+    decryptMessage.mockResolvedValue({ failed: false, text: 'a real message, no files' });
+    const out = await decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('s1', 'x'), e2eAttachments: [{ s3Key: 'attachments/dm-c1/evil.bin', key: 'k', iv: 'i', fileName: 'invoice.pdf', fileSize: 10, mimeType: 'image/png' }] } as Partial<Message>));
+    expect(out.content).toBe('a real message, no files');
+    expect(out.e2eAttachments).toBeUndefined();
+  });
+
+  it('an unencrypted reply quote is shown only when it is a call notice; anything else is the lock', async () => {
+    decryptMessage.mockResolvedValue({ failed: false, text: 'replying' });
+    const author = { id: 'peer', username: 'peer', displayName: 'Peer' };
+    const forgedQuote = await decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('s1', 'x'), replyTo: { id: 'p1', content: 'I owe you 500 euros', encrypted: false, author } } as Partial<Message>));
+    expect(forgedQuote.replyTo).toMatchObject({ content: '', encrypted: true });
+    const noticeQuote = await decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('s1', 'x'), replyTo: { id: 'p2', content: 'Voice call ended', encrypted: false, author } } as Partial<Message>));
+    expect(noticeQuote.replyTo).toMatchObject({ content: 'Voice call ended', encrypted: false });
+  });
+
+  it('a decrypt pipeline failure in a page is refused like a forgery — no wire attachments survive it', async () => {
+    decryptMessage.mockRejectedValue(new Error('vault IO'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const [out] = await decryptMessagesForDisplay([dmRow({ content: buildMegolmEnvelope('s1', 'x'), e2eAttachments: [{ s3Key: 'attachments/dm-c1/evil.bin', key: 'k', iv: 'i', fileName: 'invoice.pdf', fileSize: 10, mimeType: 'image/png' }] } as Partial<Message>)]);
+    expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
+    expect(out.e2eAttachments).toBeUndefined();
+    err.mockRestore();
   });
 
   it('does not weaken the normal encrypted path', async () => {

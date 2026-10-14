@@ -96,11 +96,28 @@ describe('channelCrypto — display boundary', () => {
     expect(decryptMessage).not.toHaveBeenCalled();
   });
 
-  it('passes system rows through untouched (the only legitimate plaintext)', async () => {
-    const row = channelRow({ encrypted: false, type: 'system', content: 'call started' });
+  it('refuses system rows too: channels have no server notices, and the type is the server\'s word', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const row = channelRow({ encrypted: false, type: 'system', content: 'Voice call started', attachments: [{ id: 'a1', s3Key: 'attachments/ch-x/y', fileName: 'y', fileSize: 1, mimeType: 'image/png', expired: false }] } as Partial<Message>);
     const result = await decryptChannelMessageForDisplay(row);
 
-    expect(result.content).toBe('call started');
+    expect(result.content).toBe(DECRYPT_FAILED_CONTENT);
+    expect(result.encrypted).toBe(true);
+    expect(result.attachments).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it('drops a wire e2eAttachments and locks an unencrypted reply quote on an authentic message', async () => {
+    decryptMessage.mockResolvedValue({ text: buildE2EPlaintext('hello') });
+    const author = { id: 'peer', username: 'peer', displayName: 'Peer' };
+    const result = await decryptChannelMessageForDisplay(channelRow({
+      e2eAttachments: [{ s3Key: 'attachments/ch-x/evil', key: 'k', iv: 'i', fileName: 'f', fileSize: 1, mimeType: 'image/png' }],
+      replyTo: { id: 'p1', content: 'forged quote', encrypted: false, author },
+    } as Partial<Message>));
+
+    expect(result.content).toBe('hello');
+    expect(result.e2eAttachments).toBeUndefined();
+    expect(result.replyTo).toMatchObject({ content: '', encrypted: true });
   });
 
   it('a page decrypts every row — no some(encrypted) short-circuit for forged pages', async () => {

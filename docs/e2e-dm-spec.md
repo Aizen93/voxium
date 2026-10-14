@@ -1,6 +1,6 @@
 # Voxium E2E DM Protocol Specification (v1 — "olm1")
 
-Status: **shipped (Phase B MVP)** · Engine: vodozemac `=0.10.0` · Envelope: `v1` / engine `olm1`
+Status: **shipped (Phase B MVP)** · Engine: vodozemac `=0.11.1` · Envelope: `v1` / engine `olm1`
 
 This document is normative for the client, the server, and the WASM binding
 layer. Anything ambiguous here is a spec bug — fix the doc, not just the code.
@@ -36,10 +36,14 @@ Double Ratchet messaging), as implemented by
 [vodozemac](https://github.com/matrix-org/vodozemac) — audited by Least
 Authority (2022), Apache-2.0.
 
-- **Version pin:** `vodozemac = "=0.10.0"` (Cargo.toml, `packages/crypto-engine`).
-  0.10.0 includes the defense-in-depth responses to the February 2026 report:
-  fallible `diffie_hellman()` (all-zero shared-secret check) and strict Ed25519
-  signature verification by default. Bumps are gated by the watch workflow (§10).
+- **Version pin:** `vodozemac = "=0.11.1"` (Cargo.toml, `packages/crypto-engine`).
+  Since 0.10.0 vodozemac carries the defense-in-depth responses to the February
+  2026 report: fallible `diffie_hellman()` (all-zero shared-secret check) and
+  strict Ed25519 signature verification by default; 0.11.1 keeps both. The
+  0.10.0 → 0.11.1 bump (2.1.0) changed neither the Olm/Megolm wire format nor
+  the pickle or backup formats — checked cross-version in both directions, so
+  2.0 and 2.1 clients interoperate and existing vaults open. Bumps are gated by
+  the watch workflow (§10).
 - **Session config:** `SessionConfig::version_1()` — the upstream default,
   set explicitly in the binding so an upstream default change cannot silently
   alter the wire format.
@@ -65,7 +69,7 @@ digest (§8), which operates exclusively on public keys. The one secret JS
 handles is the 32-byte pickle key (§7.3).
 
 The engine is versioned: envelopes carry `e: "olm1"`, and
-`engine_version()` reports `olm1/vodozemac-0.10.0`. A future engine (e.g.
+`engine_version()` reports `olm1/vodozemac-0.11.1` (diagnostics only; envelopes carry the scheme `olm1`, never this string). A future engine (e.g.
 post-quantum) is introduced as `e: "<new-id>"` — clients negotiate by
 re-establishing sessions; old envelopes remain decodable from the cache.
 
@@ -137,7 +141,7 @@ returns the (reusable) fallback key, marked `type: "fallback"`.
    that user (§4.4). Mismatch → hard `E2EIdentityChangedError`; nothing is
    sent until the user explicitly accepts the new identity.
 4. Only then: `Account::create_outbound_session` (vodozemac re-checks the DH
-   contribution; 0.10.0 rejects all-zero shared secrets).
+   contribution; vodozemac rejects all-zero shared secrets since 0.10.0).
 
 Inbound (`createInboundSession`) passes the **pinned** identity key to
 vodozemac, which rejects pre-key messages not created by that identity.
@@ -182,8 +186,9 @@ send messages"), never a silent downgrade. It is now the only path.
 - Server validation (`parseE2EEnvelope`, shared): strict JSON shape (exactly 4
   keys), engine/type whitelist, base64 charset, ≤ 32 768 chars. **Never
   sanitized** (sanitizeText would corrupt ciphertext), never mention-resolved,
-  **excluded from server search** (`encrypted: false` filter — the pg_trgm
-  index never matches ciphertext).
+  never searched server-side: DMs have no server search route since 2.1 (the
+  client searches its decrypted history), and secure-channel search filters on
+  `encrypted: false`.
 - Server-side enforcement in an encrypted conversation: `encrypted: true`
   required, valid envelope required, **attachments rejected**, **edits
   rejected** (an edit is a fresh ratchet ciphertext an offline peer could
@@ -272,7 +277,7 @@ verification and shows a warning.
 | DM list preview | decrypted live; cache-hydrated on fetch; "🔒 Encrypted message" fallback |
 | Reply previews | resolved from plaintext cache; lock placeholder otherwise |
 | Notifications | client decrypts first → body shows plaintext locally (never leaves device) |
-| Server search | E2E messages excluded server-side; client-side search is Phase C |
+| Server search | None for DMs (route removed in 2.1); DM history is searched client-side over the local plaintext cache |
 | Reports | DMs: reporter's client attaches its decrypted plaintext (`reportedContent`); stored with `contentSource: "reporter"` — flagged unverifiable, ciphertext never copied. Secure channels: not reportable (§19.1) |
 | Attachments | encrypted client-side (AES-256-GCM in the binding); real metadata inside the message ciphertext; server stores opaque blobs (§13) |
 | Edits | fresh ratchet ciphertext under the same id; plaintext cache versioned by editedAt |
@@ -280,10 +285,15 @@ verification and shows a warning.
 
 ## 10. Supply-chain policy
 
-- **Version pinning:** vodozemac pinned exactly (`=0.10.0`); the built WASM
+- **Version pinning:** vodozemac pinned exactly (`=0.11.1`); the built WASM
   artifact is vendored in-repo (`packages/crypto-engine/pkg`) so builds don't
   need a Rust toolchain. Rebuild: `pnpm --filter @voxium/crypto-engine build:wasm`
   (requires rustup target `wasm32-unknown-unknown` + wasm-pack).
+- **Entropy on wasm32:** every `getrandom` major in the tree is told to use the
+  runtime's `crypto.getRandomValues` — 0.2 with `js` (aes-gcm's `rand_core`)
+  and 0.4 with `wasm_js` (vodozemac 0.11, `rand`, `hpke`). Without the feature
+  the build FAILS; it never falls back to a weak source. A future bump that
+  pulls another major needs the same line, or the WASM build stops.
 - **Watch:** `.github/workflows/crypto-deps-watch.yml` runs weekly — checks
   crates.io for newer vodozemac releases and runs `cargo audit` (RustSec)
   against the lockfile; fails loudly so bumps are reviewed deliberately.

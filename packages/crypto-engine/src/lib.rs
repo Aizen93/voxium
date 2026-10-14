@@ -526,7 +526,7 @@ fn open_secret_internal(sealed_b64: &str, context: &str, pickle_key: &[u8]) -> R
 }
 
 /// Verify an Ed25519 signature over a UTF-8 message. Strict verification
-/// (vodozemac 0.10 default). Returns an error when invalid.
+/// (vodozemac's default, verify_strict). Returns an error when invalid.
 #[wasm_bindgen]
 pub fn verify_ed25519(key_b64: &str, message: &str, signature_b64: &str) -> Result<(), JsError> {
     let key = ed_key(key_b64)?;

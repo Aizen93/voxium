@@ -10,7 +10,7 @@
 import { buildE2EPlaintext, parseE2EPlaintext, e2eChannelScope } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError } from './e2eService';
-import { DECRYPT_FAILED_CONTENT } from './dmCrypto';
+import { DECRYPT_FAILED_CONTENT, refusedRow, withoutWireE2EAttachments } from './dmCrypto';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
@@ -26,7 +26,10 @@ async function currentUserId(): Promise<string | null> {
 }
 
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
-  if (!message.replyTo?.encrypted) return message;
+  if (!message.replyTo) return message;
+  // Every secure-channel message is encrypted: an unencrypted quote is the
+  // server's word and renders as the lock placeholder
+  if (!message.replyTo.encrypted) return { ...message, replyTo: { ...message.replyTo, content: '', encrypted: true } };
   const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id);
   const preview = cached ? parseE2EPlaintext(cached).text : '';
   return { ...message, replyTo: { ...message.replyTo, content: preview } };
@@ -41,13 +44,16 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * name with no decrypt-failure marker. The flag is the server's word; it does
  * not get to decide whether a message was end-to-end encrypted.
  */
-export async function decryptChannelMessageForDisplay(message: Message): Promise<Message> {
+export async function decryptChannelMessageForDisplay(input: Message): Promise<Message> {
+  // e2eAttachments come out of the decrypted payload only (see dmCrypto)
+  const message = withoutWireE2EAttachments(input);
   if (!message.encrypted) {
-    if (message.type === 'system') return message;
+    // Secure channels have no server notices at all: every unencrypted row is
+    // refused, `type: 'system'` included (the type is the server's word)
     console.warn(
       `e2e: refusing an unencrypted message (${message.id}) in a secure channel`
     );
-    return { ...message, content: DECRYPT_FAILED_CONTENT };
+    return refusedRow(message);
   }
   if (!message.channelId) return { ...message, content: DECRYPT_FAILED_CONTENT };
   const userId = await currentUserId();
@@ -96,7 +102,7 @@ export async function decryptChannelMessagesForDisplay(messages: Message[]): Pro
       out.push(await decryptChannelMessageForDisplay(m));
     } catch (err) {
       console.error(`e2e: decrypt pipeline failed for message ${m.id}:`, err);
-      out.push({ ...m, content: DECRYPT_FAILED_CONTENT });
+      out.push(refusedRow(m));
     }
   }
   return out;

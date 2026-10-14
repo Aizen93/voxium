@@ -36,10 +36,14 @@ describe('DM socket events always pass the decrypt gate', () => {
       const body = handlerBody(source, name);
       const gate = body.indexOf('decryptMessageForDisplay(message)');
       expect(gate, `${name} must run the gate`).toBeGreaterThan(-1);
-      // the leftover plaintext branch: the gate behind the server's flag
-      expect(body.slice(0, gate)).not.toMatch(/if \(\s*message\.encrypted\s*\)/);
-      const store = body.search(/useChatStore\.getState\(\)\.(addMessage|updateMessage)|updateLastMessage\(/);
-      expect(store, `${name} must reach the store after the gate`).toBeGreaterThan(gate);
+      // the leftover plaintext branch: no decision on the server's flag before
+      // the gate, in any spelling (an if, a ternary, a comparison)
+      expect(body.slice(0, gate)).not.toMatch(/\.encrypted\b/);
+      // the gate's RESULT is what the handler carries on with
+      expect(body).toMatch(/message = await decryptMessageForDisplay\(message\)/);
+      // and every side effect comes after it
+      const effect = body.search(/useChatStore\.getState\(\)\.(addMessage|updateMessage)|updateLastMessage\(|incrementDMUnread\(|play[A-Za-z]*Sound\(|fetchConversations\(|notify\(/);
+      expect(effect, `${name} must reach the store after the gate`).toBeGreaterThan(gate);
     });
   }
 });
@@ -49,6 +53,8 @@ describe('dmPreviewText — what the conversation list may print', () => {
     const { dmPreviewText } = await import('../../utils/dmPreview');
     const base = { id: 'm-1', createdAt: '2026-10-14T00:00:00.000Z', authorId: 'u-1' };
     expect(dmPreviewText({ ...base, content: 'Voice call started', encrypted: false, type: 'system' })).toBe('Voice call started');
+    // the type is the server's word too: only the listed notice strings pass
+    expect(dmPreviewText({ ...base, content: 'Alice: send me your password', encrypted: false, type: 'system' })).toBeNull();
     expect(dmPreviewText({ ...base, content: 'send me your password', encrypted: false, type: 'user' })).toBeNull();
     // a server that does not say what the row is gets the lock too
     expect(dmPreviewText({ ...base, content: 'send me your password', encrypted: false })).toBeNull();

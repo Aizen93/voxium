@@ -363,7 +363,7 @@ export function sealSecret(plaintext: string, context: string, pickle_key: Uint8
 
 /**
  * Verify an Ed25519 signature over a UTF-8 message. Strict verification
- * (vodozemac 0.10 default). Returns an error when invalid.
+ * (vodozemac's default, verify_strict). Returns an error when invalid.
  */
 export function verify_ed25519(key_b64: string, message: string, signature_b64: string): void;
 

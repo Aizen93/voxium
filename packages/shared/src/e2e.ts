@@ -11,6 +11,21 @@
  * `megolm1` = per-conversation group ratchet (multi-device, spec §12).
  */
 export const E2E_ENGINE_OLM1 = 'olm1';
+
+/**
+ * The ONLY plaintext a DM may carry since the 2.0 cutover: the server's own
+ * call notices (websocket/dmVoiceHandler.ts writes them). A client accepts an
+ * unencrypted DM row, reply preview or list preview only when its content is
+ * exactly one of these. The `encrypted` flag and the `type` field are both the
+ * server's word; a closed list of known strings is the one thing a hostile
+ * server cannot use to put arbitrary words under a contact's name.
+ */
+export const DM_SYSTEM_NOTICES = ['Voice call started', 'Voice call ended'] as const;
+export type DMSystemNotice = (typeof DM_SYSTEM_NOTICES)[number];
+
+export function isDMSystemNotice(content: unknown): content is DMSystemNotice {
+  return typeof content === 'string' && (DM_SYSTEM_NOTICES as readonly string[]).includes(content);
+}
 export const E2E_ENGINE_MEGOLM1 = 'megolm1';
 
 export const E2E_LIMITS = {
