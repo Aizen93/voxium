@@ -15,8 +15,10 @@ crate-type = ["cdylib", "rlib"]
 # default); 0.11.1 (reviewed 2026-10-14) keeps them and adds HPKE and a
 # libolm-import one-time-key fix. None of its breaking changes touch the
 # APIs this crate uses, and the Olm/Megolm wire and pickle formats are
-# unchanged (proven cross-version in the PR). Bump only after reviewing the
-# changelog + RustSec advisories (see .github/workflows/crypto-deps-watch.yml).
+# unchanged: fixtures written by 0.10.0 (apps/desktop/src/__tests__/e2e/
+# fixtures/vodozemac-0.10.0.json) must keep opening under the current pin.
+# Bump only after reviewing the changelog + RustSec advisories (see
+# .github/workflows/crypto-deps-watch.yml) and re-running that test.
 vodozemac = "=0.11.1"
 # E2E attachment file encryption (AES-256-GCM). RustCrypto, same family as
 # vodozemac's own internals; keeps file crypto out of JS entirely.
@@ -30,6 +32,9 @@ zeroize = "1"
 # the tree must be told to use the browser/runtime WebCrypto getRandomValues,
 # or the build fails (it never falls back to a weak source). 0.2 ("js") is
 # aes-gcm's, for the attachment cipher; 0.4 ("wasm_js") is vodozemac 0.11's.
+# Neither is called from this crate: both lines exist only to turn the
+# feature on for the whole tree (cargo unifies features), so an "unused
+# dependency" cleanup must leave them — without them the WASM build fails.
 getrandom = { version = "0.2", features = ["js"] }
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
