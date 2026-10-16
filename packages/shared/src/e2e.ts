@@ -11,6 +11,7 @@
  * `megolm1` = per-conversation group ratchet (multi-device, spec §12).
  */
 export const E2E_ENGINE_OLM1 = 'olm1';
+export const E2E_ENGINE_MEGOLM1 = 'megolm1';
 
 /**
  * The ONLY plaintext a DM may carry since the 2.0 cutover: the server's own
@@ -20,13 +21,14 @@ export const E2E_ENGINE_OLM1 = 'olm1';
  * server's word; a closed list of known strings is the one thing a hostile
  * server cannot use to put arbitrary words under a contact's name.
  */
-export const DM_SYSTEM_NOTICES = ['Voice call started', 'Voice call ended'] as const;
+export const DM_NOTICE_CALL_STARTED = 'Voice call started';
+export const DM_NOTICE_CALL_ENDED = 'Voice call ended';
+export const DM_SYSTEM_NOTICES = [DM_NOTICE_CALL_STARTED, DM_NOTICE_CALL_ENDED] as const;
 export type DMSystemNotice = (typeof DM_SYSTEM_NOTICES)[number];
 
 export function isDMSystemNotice(content: unknown): content is DMSystemNotice {
   return typeof content === 'string' && (DM_SYSTEM_NOTICES as readonly string[]).includes(content);
 }
-export const E2E_ENGINE_MEGOLM1 = 'megolm1';
 
 export const E2E_LIMITS = {
   /** Max length of the serialized envelope stored as message content. */

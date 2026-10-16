@@ -1055,6 +1055,11 @@ describe('E2EService (client crypto core)', () => {
       id: 'm1', conversationId: 'c1', authorId: bob.userId, content: edited, editedAt: '2026-07-12T10:00:00.000Z',
     });
     expect(relabelled.text).not.toBe('edited text');
+    // and a row served without a scope is refused, never decrypted "unscoped"
+    const unscoped = await bob.service.decryptMessage({
+      id: 'm1', conversationId: '', authorId: alice.userId, content: edited, editedAt: '2026-07-12T10:00:00.000Z',
+    });
+    expect(unscoped.failed).toBe(true);
 
     // sender side: own edit cached under the new version
     await alice.service.cachePlaintext('m1', 'c1', 'edited text', '2026-07-12T10:00:00.000Z');

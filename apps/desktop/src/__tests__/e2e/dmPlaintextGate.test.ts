@@ -2,6 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { dmPreviewText } from '../../utils/dmPreview';
 
 /**
  * Since the 2.0 cutover every user DM is end-to-end encrypted; the only
@@ -25,7 +26,10 @@ function handlerBody(source: string, name: string): string {
   const start = source.indexOf(`      ${name}: async (`);
   expect(start, `${name} not found in MainLayout`).toBeGreaterThan(-1);
   const next = source.slice(start + 1).search(/\n {6}[a-zA-Z]+: (async )?\(/);
-  return source.slice(start, next === -1 ? undefined : start + 1 + next);
+  // never fall back to "the rest of the file": a later handler's gate would
+  // then satisfy the checks for a handler that lost its own
+  expect(next, `end of ${name} not found in MainLayout`).toBeGreaterThan(-1);
+  return source.slice(start, start + 1 + next);
 }
 
 describe('DM socket events always pass the decrypt gate', () => {
@@ -49,8 +53,7 @@ describe('DM socket events always pass the decrypt gate', () => {
 });
 
 describe('dmPreviewText — what the conversation list may print', () => {
-  it('prints a system notice; locks an unencrypted user row (the server\'s word, not the sender\'s)', async () => {
-    const { dmPreviewText } = await import('../../utils/dmPreview');
+  it('prints a system notice; locks an unencrypted user row (the server\'s word, not the sender\'s)', () => {
     const base = { id: 'm-1', createdAt: '2026-10-14T00:00:00.000Z', authorId: 'u-1' };
     expect(dmPreviewText({ ...base, content: 'Voice call started', encrypted: false, type: 'system' })).toBe('Voice call started');
     // the type is the server's word too: only the listed notice strings pass
@@ -64,8 +67,7 @@ describe('dmPreviewText — what the conversation list may print', () => {
     expect(dmPreviewText({ ...base, content: 'Voice call ended', encrypted: false, type: 'user' })).toBeNull();
   });
 
-  it('prints hydrated plaintext of an encrypted message; locks the raw envelope and an empty preview', async () => {
-    const { dmPreviewText } = await import('../../utils/dmPreview');
+  it('prints hydrated plaintext of an encrypted message; locks the raw envelope and an empty preview', () => {
     const base = { id: 'm-1', createdAt: '2026-10-14T00:00:00.000Z', authorId: 'u-1', encrypted: true, type: 'user' as const };
     expect(dmPreviewText({ ...base, content: 'see you at 8' })).toBe('see you at 8');
     expect(dmPreviewText({ ...base, content: '' })).toBeNull();

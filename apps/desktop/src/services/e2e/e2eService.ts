@@ -2736,25 +2736,34 @@ export class E2EService {
   }
 
   /**
-   * Read cached plaintext for a message id the SERVER named. The entry answers
-   * only for the scope (conversation id, or `ch:{channelId}`) it was decrypted
-   * under and, when it recorded one, for the author who wrote it — otherwise a
-   * server that relabels an authentic message's author, or moves its id into
-   * another container, would have the cache vouch for the forgery that the
-   * ratchet's own bindings (decryptGroupMessage) refuse. Pass `editedAt` to
-   * require that exact version (edits produce new ciphertext under the same
-   * id); omit it to accept whichever version is cached (e.g. reply previews).
+   * Whether a plaintext-cache entry may answer for a message id the SERVER
+   * named. The entry answers only for the scope (conversation id, or
+   * `ch:{channelId}`) it was decrypted under and, when it recorded one, for
+   * the author who wrote it — otherwise a server that relabels an authentic
+   * message's author, or moves its id into another container, would have the
+   * cache vouch for the forgery that the ratchet's own bindings
+   * (decryptGroupMessage) refuse. `editedAt` given requires that exact version
+   * (edits produce new ciphertext under the same id); omitted, any version
+   * answers (e.g. reply previews).
    */
+  private cacheEntryAnswers(
+    cached: { conversationId: string; authorId?: string; editedAt?: string | null },
+    expected: { scope: string; authorId?: string; editedAt?: string | null },
+  ): boolean {
+    if (cached.conversationId !== expected.scope) return false;
+    if (expected.authorId !== undefined && cached.authorId !== undefined && cached.authorId !== expected.authorId) return false;
+    if (expected.editedAt !== undefined && (cached.editedAt ?? null) !== (expected.editedAt ?? null)) return false;
+    return true;
+  }
+
+  /** Read cached plaintext for a message id the SERVER named (see cacheEntryAnswers). */
   async getCachedPlaintext(
     messageId: string,
-    expect: { scope: string; authorId?: string; editedAt?: string | null },
+    expected: { scope: string; authorId?: string; editedAt?: string | null },
   ): Promise<string | null> {
     const cached = await this.vault.getPlaintext(messageId);
     if (!cached || cached.failed) return null;
-    if (cached.conversationId !== expect.scope) return null;
-    if (expect.authorId !== undefined && cached.authorId !== undefined && cached.authorId !== expect.authorId) return null;
-    if (expect.editedAt !== undefined && (cached.editedAt ?? null) !== (expect.editedAt ?? null)) return null;
-    return cached.text;
+    return this.cacheEntryAnswers(cached, expected) ? cached.text : null;
   }
 
   /**
@@ -2781,13 +2790,9 @@ export class E2EService {
     //
     // Author-checked too: the entry records who wrote it, and decryptGroupMessage
     // binds the session to its sender — a cache hit must not skip that binding
-    // for a row whose author the server relabelled.
-    if (
-      cached &&
-      cached.conversationId === message.conversationId &&
-      (cached.editedAt ?? null) === version &&
-      (cached.authorId === undefined || cached.authorId === message.authorId)
-    ) {
+    // for a row whose author the server relabelled. Version-checked always: an
+    // edit is a fresh ciphertext under the same id.
+    if (cached && this.cacheEntryAnswers(cached, { scope: message.conversationId, authorId: message.authorId, editedAt: version })) {
       return { text: cached.text, failed: cached.failed };
     }
     // cache miss OR a stale pre-edit entry: the edit is a fresh ciphertext, so
@@ -2851,7 +2856,10 @@ export class E2EService {
       console.warn(`e2e: message ${message.id} claims an author the group session does not belong to`);
       return null;
     }
-    if (message.conversationId && entry.record.conversationId !== message.conversationId) {
+    // The scope is required, never "unscoped": a row served without one would
+    // otherwise decrypt with any session its author ever shared, in whichever
+    // conversation the server chose to show it.
+    if (!message.conversationId || entry.record.conversationId !== message.conversationId) {
       console.warn(`e2e: message ${message.id} uses a session from another conversation`);
       return null;
     }

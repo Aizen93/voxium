@@ -98,13 +98,16 @@ describe('channelCrypto — display boundary', () => {
 
   it('refuses system rows too: channels have no server notices, and the type is the server\'s word', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const row = channelRow({ encrypted: false, type: 'system', content: 'Voice call started', attachments: [{ id: 'a1', s3Key: 'attachments/ch-x/y', fileName: 'y', fileSize: 1, mimeType: 'image/png', expired: false }] } as Partial<Message>);
-    const result = await decryptChannelMessageForDisplay(row);
+    try {
+      const row = channelRow({ encrypted: false, type: 'system', content: 'Voice call started', attachments: [{ id: 'a1', s3Key: 'attachments/ch-x/y', fileName: 'y', fileSize: 1, mimeType: 'image/png', expired: false }] } as Partial<Message>);
+      const result = await decryptChannelMessageForDisplay(row);
 
-    expect(result.content).toBe(DECRYPT_FAILED_CONTENT);
-    expect(result.encrypted).toBe(true);
-    expect(result.attachments).toEqual([]);
-    warn.mockRestore();
+      expect(result.content).toBe(DECRYPT_FAILED_CONTENT);
+      expect(result.encrypted).toBe(true);
+      expect(result.attachments).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('drops a wire e2eAttachments and locks an unencrypted reply quote on an authentic message', async () => {
@@ -118,6 +121,41 @@ describe('channelCrypto — display boundary', () => {
     expect(result.content).toBe('hello');
     expect(result.e2eAttachments).toBeUndefined();
     expect(result.replyTo).toMatchObject({ content: '', encrypted: true });
+  });
+
+  it('a row that fails to decrypt keeps no plaintext attachments either', async () => {
+    decryptMessage.mockResolvedValue({ failed: true, text: '' });
+    const result = await decryptChannelMessageForDisplay(channelRow({
+      attachments: [{ id: 'a1', s3Key: 'attachments/ch-x/y.exe', fileName: 'y.exe', fileSize: 1, mimeType: 'application/octet-stream', expired: false }],
+    } as Partial<Message>));
+    expect(result.content).toBe(DECRYPT_FAILED_CONTENT);
+    expect(result.attachments).toEqual([]);
+  });
+
+  it('a row without a channel id is refused outright — there is no scope to decrypt it under', async () => {
+    const result = await decryptChannelMessageForDisplay(channelRow({
+      channelId: null,
+      attachments: [{ id: 'a1', s3Key: 'attachments/ch-x/y.exe', fileName: 'y.exe', fileSize: 1, mimeType: 'application/octet-stream', expired: false }],
+      replyTo: { id: 'p1', content: 'quoted', encrypted: false, author: { id: 'peer', username: 'peer', displayName: 'Peer' } },
+    } as Partial<Message>));
+    expect(result.content).toBe(DECRYPT_FAILED_CONTENT);
+    expect(result.attachments).toEqual([]);
+    expect(result.replyTo).toMatchObject({ content: '', encrypted: true });
+    expect(decryptMessage).not.toHaveBeenCalled();
+  });
+
+  it('an encrypted row decrypts as a USER row whatever type the server put on it', async () => {
+    const result = await decryptChannelMessageForDisplay(channelRow({ type: 'system' }));
+    expect(result.content).toBe('decrypted!');
+    expect(result.type).toBe('user');
+  });
+
+  it('a quote without an author is dropped whole', async () => {
+    const result = await decryptChannelMessageForDisplay(channelRow({
+      replyTo: { id: 'p1', content: ENVELOPE, encrypted: true },
+    } as Partial<Message>));
+    expect(result.replyTo).toBeNull();
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
   });
 
   it('a page decrypts every row — no some(encrypted) short-circuit for forged pages', async () => {

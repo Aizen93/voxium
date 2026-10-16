@@ -4,7 +4,7 @@
 // call notice, and "Unable to decrypt" where a forged row stood. Every forgery
 // here rendered on the client before the 2.1 display-gate work (the list
 // preview printed the forged text under the contact's name).
-import type { Page, Route } from '@playwright/test';
+import type { APIRequestContext, Page, Route } from '@playwright/test';
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import { registerUser, sendFriendRequest, acceptFriendRequest, API_URL } from './helpers/api';
@@ -33,7 +33,7 @@ async function rewriteJson(route: Route, edit: (body: any) => void) {
   await route.fulfill({ response, json: body });
 }
 
-async function waitDevice(request: any, token: string, userId: string) {
+async function waitDevice(request: APIRequestContext, token: string, userId: string) {
   await expect.poll(async () => {
     const res = await request.get(`${API_URL}/e2e/devices/${userId}`, { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok()) return 0;
@@ -43,7 +43,7 @@ async function waitDevice(request: any, token: string, userId: string) {
 }
 
 async function noForgery(page: Page, tokens: string[]) {
-  for (const t of tokens) await expect(page.getByText(t, { exact: false }), `${t} must never render`).toHaveCount(0);
+  for (const token of tokens) await expect(page.getByText(token, { exact: false }), `${token} must never render`).toHaveCount(0);
 }
 
 test('a hostile server’s forged API and socket traffic never reaches the screen', async ({ page, request, browser }) => {
@@ -76,7 +76,7 @@ test('a hostile server’s forged API and socket traffic never reaches the scree
   await expect(dmHeading(page)).toBeVisible({ timeout: 20_000 });
   await waitDevice(request, bob.accessToken, alice.user.id);
   await page.getByText('Friends').first().click();
-  await page.getByText('All').click();
+  await page.getByText('All', { exact: true }).click();
   await page.locator('button[title="Message"]').first().click();
   await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });
   const authentic = `authentic hello ${Date.now()}`;
@@ -109,11 +109,11 @@ test('a hostile server’s forged API and socket traffic never reaches the scree
         m.mentions = [{ id: bob.user.id, username: 'mallory', displayName: 'Mallory' }];
       }
       const base = { conversationId, channelId: null, author, editedAt: null, reactions: [], replyTo: null };
-      const t = (s: number) => new Date(Date.parse(real.createdAt) + s * 1000).toISOString();
+      const at = (s: number) => new Date(Date.parse(real.createdAt) + s * 1000).toISOString();
       body.data.push(
-        { ...base, id: 'forged-plain', type: 'user', encrypted: false, content: F.plain, attachments: [forgedAttachment(F.plainFile)], createdAt: t(1) },
-        { ...base, id: 'forged-system', type: 'system', encrypted: false, content: F.system, createdAt: t(2) },
-        { ...base, id: 'real-notice', type: 'system', encrypted: false, content: 'Voice call started', createdAt: t(3) },
+        { ...base, id: 'forged-plain', type: 'user', encrypted: false, content: F.plain, attachments: [forgedAttachment(F.plainFile)], createdAt: at(1) },
+        { ...base, id: 'forged-system', type: 'system', encrypted: false, content: F.system, createdAt: at(2) },
+        { ...base, id: 'real-notice', type: 'system', encrypted: false, content: 'Voice call started', createdAt: at(3) },
       );
     });
   });

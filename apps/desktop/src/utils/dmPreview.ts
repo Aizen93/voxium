@@ -11,6 +11,8 @@ import type { Conversation } from '@voxium/shared';
  */
 export function dmPreviewText(last: NonNullable<Conversation['lastMessage']>): string | null {
   if (last.encrypted) {
+    // hydrated plaintext shows; a blank locks (the store blanks the server's
+    // text on arrival) — the envelope check is a backstop no current path needs
     return !last.content || parseE2EEnvelope(last.content) !== null ? null : last.content;
   }
   // a 2.0 server sends no `type`; the notice text is what decides either way

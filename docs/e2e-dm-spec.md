@@ -69,7 +69,8 @@ digest (§8), which operates exclusively on public keys. The one secret JS
 handles is the 32-byte pickle key (§7.3).
 
 The engine is versioned: envelopes carry `e: "olm1"`, and
-`engine_version()` reports `olm1/vodozemac-0.11.1` (diagnostics only; envelopes carry the scheme `olm1`, never this string). A future engine (e.g.
+`engine_version()` reports `olm1/vodozemac-0.11.1` (diagnostics only;
+envelopes carry the scheme `olm1`, never this string). A future engine (e.g.
 post-quantum) is introduced as `e: "<new-id>"` — clients negotiate by
 re-establishing sessions; old envelopes remain decodable from the cache.
 
@@ -187,8 +188,8 @@ send messages"), never a silent downgrade. It is now the only path.
   keys), engine/type whitelist, base64 charset, ≤ 32 768 chars. **Never
   sanitized** (sanitizeText would corrupt ciphertext), never mention-resolved,
   never searched server-side: DMs have no server search route since 2.1 (the
-  client searches its decrypted history), and secure-channel search filters on
-  `encrypted: false`.
+  client searches its decrypted history), and the server's channel search
+  excludes secure channels outright (§19.5).
 - Server-side enforcement in an encrypted conversation: `encrypted: true`
   required, valid envelope required, **attachments rejected**, **edits
   rejected** (an edit is a fresh ratchet ciphertext an offline peer could
@@ -273,18 +274,42 @@ verification and shows a warning.
 
 | Surface | Behavior |
 |---|---|
-| Message timeline | decrypted before entering any store; lock placeholder on failure |
-| DM list preview | decrypted live; cache-hydrated on fetch; "🔒 Encrypted message" fallback |
-| Reply previews | Encrypted quotes resolved from the plaintext cache (same conversation, quoted author); an unencrypted quote shows only when it is a listed call notice; lock placeholder otherwise |
+| Message timeline | decrypted before entering any store (the display gate, §9.1); lock placeholder on failure |
+| DM list preview | encrypted: decrypted live, cache-hydrated on fetch, the server's `content` blanked on arrival, "🔒 Encrypted message" fallback; unencrypted: only a listed call notice |
+| Reply previews | encrypted quotes resolved from the plaintext cache (same conversation, quoted author); an unencrypted quote shows only when it is a listed call notice; lock placeholder otherwise; a quote without an author is dropped |
 | Notifications | client decrypts first → body shows plaintext locally (never leaves device) |
-| Server search | None for DMs (route removed in 2.1); DM history is searched client-side over the local plaintext cache |
-| Display gate | Every DM row — fetched, pushed over the socket, or returned by the client's own POST — is shown only through `dmCrypto`. An unencrypted row passes only as a call notice: `type: 'system'` AND content exactly one of `DM_SYSTEM_NOTICES` (shared), shown with no attachments and no quote. Everything else unencrypted is refused: content `''`, `type: 'user'`, `encrypted: true` (the "unable to decrypt" marker), no attachments, quote blanked. Server-asserted fields the crypto never vouched for are always dropped: `e2eAttachments` (built only from the decrypted payload) and `mentions` (never resolved for encrypted rows). The sender's own row is built from local data, never from the POST reply. |
-| Plaintext cache | Answers only for the scope it was decrypted under and, when recorded, the author who wrote it — the cache must not vouch for a relabelled id or author that the ratchet's bindings refuse |
-| List preview | Encrypted: only plaintext from the local cache or the live decrypt path; the server's `content` is blanked on arrival. Unencrypted: only a listed call notice |
+| Server search | none for DMs (route removed in 2.1); DM history is searched client-side over the local plaintext cache |
+| Plaintext cache | answers only for the scope it was decrypted under and, when recorded, the author who wrote it — the cache must not vouch for a relabelled id or author that the ratchet's bindings refuse |
 | Reports | DMs: reporter's client attaches its decrypted plaintext (`reportedContent`); stored with `contentSource: "reporter"` — flagged unverifiable, ciphertext never copied. Secure channels: not reportable (§19.1) |
 | Attachments | encrypted client-side (AES-256-GCM in the binding); real metadata inside the message ciphertext; server stores opaque blobs (§13) |
 | Edits | fresh ratchet ciphertext under the same id; plaintext cache versioned by editedAt |
 | Logout | WASM objects freed, vault closed but **kept** (device keys persist like trusted-device tokens) |
+
+### 9.1 Display gate
+
+Every DM row — fetched or pushed over the socket — reaches a store only
+through `services/e2e/dmCrypto.ts` (secure channels: `channelCrypto.ts`; the
+shared shapes live in `displayGate.ts`). The gate trusts nothing the crypto
+did not vouch for:
+
+- **Unencrypted rows.** A DM row passes only as a call notice: `type:
+  'system'` AND content exactly one of `DM_SYSTEM_NOTICES` (shared), shown
+  with no attachments and no quote. Secure channels have no notices: every
+  unencrypted row is refused.
+- **The refused shape** (`refusedRow`): content `''`, `type: 'user'`,
+  `encrypted: true` (the "unable to decrypt" marker), no attachments, quote
+  locked. Every failure path returns it — unencrypted row, no conversation id,
+  no signed-in user, decrypt failure, pipeline error; after a decrypt failure
+  the quote may still resolve from the local cache.
+- **Decrypted rows** (`decryptedRow`): text and attachments come out of the
+  payload only; the type is pinned to `user` (a notice is never encrypted).
+- **Server-asserted fields** are always dropped (`withoutServerAssertions`):
+  `e2eAttachments` (built only from the decrypted payload) and `mentions`
+  (never resolved for encrypted rows).
+- **The sender's own row** (`ownSentRow`) is built from local data — the text
+  typed, the files attached, the message replied to, encrypted user row, no
+  plaintext attachment; only the id, timestamps and author block come from
+  the POST reply.
 
 ## 10. Supply-chain policy
 

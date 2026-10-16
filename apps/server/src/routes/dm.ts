@@ -80,7 +80,7 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
             content: c.messages[0].content,
             encrypted: c.messages[0].encrypted,
             // the client shows an unencrypted preview ONLY for a system notice
-            type: c.messages[0].type as Message['type'],
+            type: c.messages[0].type,
             createdAt: c.messages[0].createdAt.toISOString(),
             authorId: c.messages[0].authorId,
           }

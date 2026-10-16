@@ -91,8 +91,8 @@ export const useDMStore = create<DMState>((set, get) => ({
       isLoading: false,
     }));
 
-    // E2E previews arrive as ciphertext — hydrate them from the local
-    // plaintext cache (async; placeholders render until this lands).
+    // E2E previews arrive blanked (withLockedPreview) — hydrate them from the
+    // local plaintext cache (async; the lock renders until this lands).
     //
     // Best-effort by design: a preview that will not resolve costs a lock icon,
     // not a conversation. Failures are logged and the loop continues, so one

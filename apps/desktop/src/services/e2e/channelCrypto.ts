@@ -10,15 +10,11 @@
 import { buildE2EPlaintext, parseE2EPlaintext, e2eChannelScope } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError } from './e2eService';
-import { DECRYPT_FAILED_CONTENT, refusedRow, withoutServerAssertions } from './dmCrypto';
+import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
 /** Split raw decrypted plaintext into display fields on a message. */
-function applyPlaintext(message: Message, raw: string): Message {
-  const { text, attachments } = parseE2EPlaintext(raw);
-  return { ...message, content: text, ...(attachments.length > 0 && { e2eAttachments: attachments }) };
-}
 
 async function currentUserId(): Promise<string | null> {
   const { useAuthStore } = await import('../../stores/authStore');
@@ -27,9 +23,11 @@ async function currentUserId(): Promise<string | null> {
 
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
   if (!message.replyTo) return message;
+  // a quote names its author; one without is malformed and is dropped whole
+  if (!message.replyTo.author) return { ...message, replyTo: null };
   // Every secure-channel message is encrypted: an unencrypted quote is the
   // server's word and renders as the lock placeholder
-  if (!message.replyTo.encrypted) return { ...message, replyTo: { ...message.replyTo, content: '', encrypted: true } };
+  if (!message.replyTo.encrypted) return { ...message, replyTo: lockedQuote(message.replyTo) };
   const scope = message.channelId ? e2eChannelScope(message.channelId) : '';
   const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id, {
     scope,
@@ -60,9 +58,9 @@ export async function decryptChannelMessageForDisplay(input: Message): Promise<M
     );
     return refusedRow(message);
   }
-  if (!message.channelId) return { ...message, content: DECRYPT_FAILED_CONTENT };
+  if (!message.channelId) return refusedRow(message);
   const userId = await currentUserId();
-  if (!userId) return { ...message, content: DECRYPT_FAILED_CONTENT };
+  if (!userId) return refusedRow(message);
 
   const service = getE2EService(userId);
   const scope = e2eChannelScope(message.channelId);
@@ -77,7 +75,7 @@ export async function decryptChannelMessageForDisplay(input: Message): Promise<M
     createdAt: message.createdAt,
   });
   if (!result.failed) {
-    return resolveReplyPreview(applyPlaintext(message, result.text), userId);
+    return resolveReplyPreview(decryptedRow(message,result.text), userId);
   }
 
   if (own) {
@@ -89,11 +87,13 @@ export async function decryptChannelMessageForDisplay(input: Message): Promise<M
       if (attempts > 1) await new Promise((r) => setTimeout(r, 150));
       const cached = await service.getCachedPlaintext(message.id, { scope, authorId: userId, editedAt: message.editedAt ?? null });
       if (cached !== null) {
-        return resolveReplyPreview(applyPlaintext(message, cached), userId);
+        return resolveReplyPreview(decryptedRow(message,cached), userId);
       }
     }
   }
-  return resolveReplyPreview({ ...message, content: DECRYPT_FAILED_CONTENT }, userId);
+  // Nothing vouched for this row: the refused shape, its quote still resolvable
+  // from the local cache
+  return resolveReplyPreview(refusedRow(message), userId);
 }
 
 /** Decrypt a fetched page of secure-channel messages (order preserved). */

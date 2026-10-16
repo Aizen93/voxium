@@ -9,6 +9,7 @@ import { Avatar } from '../common/Avatar';
 import { Search, X, Hash, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import type { SearchResult, Channel } from '@voxium/shared';
+import { withoutSecureChannelHits } from '../../utils/searchHits';
 
 interface SearchModalProps {
   onClose: () => void;
@@ -16,15 +17,6 @@ interface SearchModalProps {
   channels?: Channel[];
   conversationId?: string;
   participantName?: string;
-}
-
-/** Server search results minus any hit from a channel the client knows is secure. */
-export function withoutSecureChannelHits<T extends { channelId?: string | null; encrypted?: boolean }>(
-  hits: T[],
-  channels: { id: string; secure?: boolean }[] | undefined,
-): T[] {
-  const secure = new Set((channels ?? []).filter((c) => c.secure === true).map((c) => c.id));
-  return hits.filter((h) => h.encrypted !== true && !(h.channelId && secure.has(h.channelId)));
 }
 
 export function SearchModal({ onClose, serverId, channels, conversationId, participantName }: SearchModalProps) {

@@ -7,7 +7,8 @@ import i18n from '../i18n';
 import { useDMStore } from './dmStore';
 import { useServerStore } from './serverStore';
 import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
-import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext, withoutServerAssertions, ownReplyQuote } from '../services/e2e/dmCrypto';
+import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
+import { ownSentRow } from '../services/e2e/displayGate';
 import {
   decryptChannelMessagesForDisplay,
   prepareOutgoingChannelMessage,
@@ -211,16 +212,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const { data } = await api.post(`/channels/${channelId}/messages`, body);
         const raw: Message = data.data;
         await cacheSentChannelPlaintext(raw.id, channelId, prepared.plaintext, null, raw.createdAt);
-        // Built from what this client knows, not from the server's reply: the
-        // gated socket echo is dropped by the id dedupe below, so anything the
-        // server put in the POST response (a quote, file metas, mentions)
-        // would otherwise stay on the sender's own message
-        const sent: Message = {
-          ...withoutServerAssertions(raw),
-          content,
-          replyTo: ownReplyQuote(replyingTo),
-          ...(e2eAttachments?.length && { e2eAttachments }),
-        };
+        // Built from what this client knows, not from the server's reply:
+        // whichever of this row and the gated socket echo lands first owns
+        // the id (the other is dropped by the dedupe here or in addMessage),
+        // so nothing the server put in the POST response may ride on it
+        const sent = ownSentRow(raw, { content, replyingTo, e2eAttachments });
         const exists = get().messages.some((m) => m.id === sent.id);
         if (!exists) {
           set((state) => ({ messages: [...state.messages, sent] }));
@@ -392,14 +388,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Cache the exact raw plaintext that was encrypted (Olm can't
       // decrypt-to-self); display fields come from the parsed payload
       await cacheSentPlaintext(raw.id, conversationId, prepared.plaintext, null, raw.createdAt);
-      // Built from what this client knows, not from the server's reply (see
-      // the secure-channel branch of sendMessage)
-      const sent: Message = {
-        ...withoutServerAssertions(raw),
-        content,
-        replyTo: ownReplyQuote(replyingTo),
-        ...(e2eAttachments?.length && { e2eAttachments }),
-      };
+      // Built from what this client knows, not from the server's reply (same
+      // rule as the secure-channel branch of sendMessage)
+      const sent = ownSentRow(raw, { content, replyingTo, e2eAttachments });
       const exists = get().messages.some((m) => m.id === sent.id);
       if (!exists) {
         set((state) => ({ messages: [...state.messages, sent] }));

@@ -360,8 +360,9 @@ export interface Conversation {
   user1Id: string;
   user2Id: string;
   participant: MessageAuthor; // the OTHER user (populated at query time)
-  /** `type` decides whether an unencrypted preview may be shown at all: only
-   *  a system notice can be plaintext since the 2.0 cutover. */
+  /** With the notice text, `type` decides whether an unencrypted preview may
+   *  be shown at all: only a listed system notice can be plaintext since the
+   *  2.0 cutover (a 2.0 server sends no `type`; the text still decides). */
   lastMessage: { id: string; content: string; encrypted?: boolean; type?: Message['type']; createdAt: string; authorId: string } | null;
   /** E2E DMs: when this conversation started being encrypted. Always set —
    *  conversations are born encrypted (docs/e2e-always-on-plan.md §4.2), so

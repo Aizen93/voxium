@@ -158,16 +158,8 @@ export function DMList() {
                 {conv.participant.isSupporter && <SupporterBadge tier={conv.participant.supporterTier} />}
                 {conv.lastMessage && (
                   <p className="truncate text-[11.5px] leading-tight text-vox-text-muted">
-                    {/* Ciphertext we could not hydrate from the local cache
-                        shows the lock rather than raw JSON. Asked of the
-                        parser, not of the string's first characters: a
-                        display-layer sniff for a payload format is the wrong
-                        layer, and it is what let a structured plaintext
-                        payload — file key and all — through to the DOM.
-                        An UNENCRYPTED preview is shown only for a system
-                        notice ("Voice call started"): every user DM is
-                        encrypted since the 2.0 cutover, so plaintext on a
-                        user row is the server's word, not the sender's. */}
+                    {/* dmPreviewText (utils/dmPreview.ts) decides what may print:
+                        hydrated plaintext or a listed call notice; null is the lock. */}
                     {dmPreviewText(conv.lastMessage) ?? `🔒 ${t('e2e.encryptedMessage')}`}
                   </p>
                 )}

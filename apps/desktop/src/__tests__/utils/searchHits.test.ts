@@ -1,9 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-
-// The modal imports the API client and stores; only the pure filter is under test
-vi.mock('../../services/api', () => ({ api: { get: vi.fn() } }));
-
-import { withoutSecureChannelHits } from '../../components/search/SearchModal';
+import { describe, it, expect } from 'vitest';
+import { withoutSecureChannelHits } from '../../utils/searchHits';
 
 describe('withoutSecureChannelHits — server search never shows a secure channel', () => {
   const channels = [{ id: 'open', secure: false }, { id: 'vault', secure: true }];

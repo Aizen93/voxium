@@ -4,7 +4,9 @@
 // one of the server's own call notices (DM_SYSTEM_NOTICES); every other one is
 // refused and shown as "unable to decrypt". Whatever the server attaches that
 // the crypto did not vouch for — `e2eAttachments`, plaintext `attachments` on
-// a refused row, an unencrypted reply quote — is dropped here.
+// a refused row, an unencrypted reply quote — is dropped here; the shapes
+// (refusedRow, lockedQuote, withoutServerAssertions) live in displayGate.ts,
+// shared with channelCrypto and the send path.
 //
 // NOTE: stores are imported DYNAMICALLY inside functions. resetStores.ts
 // captures every account store's initial state at module-eval time, so a
@@ -13,77 +15,26 @@
 import { buildE2EPlaintext, parseE2EPlaintext, isDMSystemNotice } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError } from './e2eService';
+import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
 
-export { E2EIdentityChangedError };
-
-/** Split raw decrypted plaintext into display fields on a message. */
-function applyPlaintext(message: Message, raw: string): Message {
-  const { text, attachments } = parseE2EPlaintext(raw);
-  return { ...message, content: text, ...(attachments.length > 0 && { e2eAttachments: attachments }) };
-}
-
-/**
- * What the server asserts about an encrypted message that the crypto never
- * vouched for, dropped before anything else looks at the row:
- *  - `e2eAttachments` is a CLIENT field that comes out of the decrypted payload
- *    and nowhere else; one on the wire is the server choosing a file (blob, key
- *    and IV) to render inside a contact's authenticated message;
- *  - `mentions` names the people an `@[id]` in the text resolves to — the
- *    server never resolves mentions for encrypted rows, so a list on one is the
- *    server renaming an authentic mention (and setting off a "mentioned you").
- */
-export function withoutServerAssertions(message: Message): Message {
-  if (!('e2eAttachments' in message) && !message.mentions?.length) return message;
-  const rest: Message = { ...message, mentions: [] };
-  delete rest.e2eAttachments;
-  return rest;
-}
-
-/**
- * The quote on a message THIS client just sent, from the message it was
- * replying to — already through the gate when it was displayed — never from
- * the server's reply to the POST.
- */
-export function ownReplyQuote(replyingTo: Message | null): Message['replyTo'] {
-  if (!replyingTo) return null;
-  return { id: replyingTo.id, author: replyingTo.author, content: replyingTo.content, encrypted: replyingTo.encrypted };
-}
-
-/**
- * A row the gate refuses: no text, no server-asserted attachments, no quoted
- * text, and flagged so the UI renders its "unable to decrypt" marker — an
- * empty bubble under a contact's name, with a file the server chose, is the
- * forgery the refusal exists to stop.
- */
-export function refusedRow(message: Message): Message {
-  return {
-    ...withoutServerAssertions(message),
-    // a refused "system" row must not render as a (blank) call notice
-    type: 'user',
-    content: DECRYPT_FAILED_CONTENT,
-    encrypted: true,
-    attachments: [],
-    replyTo: message.replyTo ? { ...message.replyTo, content: '', encrypted: true } : message.replyTo,
-  };
-}
+export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
 async function currentUserId(): Promise<string | null> {
   const { useAuthStore } = await import('../../stores/authStore');
   return useAuthStore.getState().user?.id ?? null;
 }
 
-/** Marker the UI renders as "unable to decrypt" (never shown as user text). */
-export const DECRYPT_FAILED_CONTENT = '';
-
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
   if (!message.replyTo) return message;
+  // a quote names its author; one without is malformed and is dropped whole
+  if (!message.replyTo.author) return { ...message, replyTo: null };
   const scope = message.conversationId ?? '';
   if (!message.replyTo.encrypted) {
     // An unencrypted quote is trusted only when it is one of the server's call
     // notices; anything else renders as the lock placeholder
     return isDMSystemNotice(message.replyTo.content)
       ? message
-      : { ...message, replyTo: { ...message.replyTo, content: '', encrypted: true } };
+      : { ...message, replyTo: lockedQuote(message.replyTo) };
   }
   // The quote answers only from an entry of THIS conversation written by the
   // quoted author (the server names both the id and the author)
@@ -130,22 +81,25 @@ export async function decryptMessageForDisplay(input: Message): Promise<Message>
     );
     return refusedRow(message);
   }
+  // A DM row belongs to a conversation; one without is nothing the crypto can
+  // scope a decrypt, or a cache read, to
+  if (!message.conversationId) return refusedRow(message);
   const userId = await currentUserId();
-  if (!userId) return { ...message, content: DECRYPT_FAILED_CONTENT };
+  if (!userId) return refusedRow(message);
 
   const service = getE2EService(userId);
   const own = message.author?.id === userId;
 
   const result = await service.decryptMessage({
     id: message.id,
-    conversationId: message.conversationId ?? '',
+    conversationId: message.conversationId,
     authorId: message.author?.id ?? '',
     content: message.content,
     editedAt: message.editedAt ?? null,
     createdAt: message.createdAt,
   });
   if (!result.failed) {
-    return resolveReplyPreview(applyPlaintext(message, result.text), userId);
+    return resolveReplyPreview(decryptedRow(message, result.text), userId);
   }
 
   if (own) {
@@ -162,16 +116,18 @@ export async function decryptMessageForDisplay(input: Message): Promise<Message>
       // version-checked: an edit echo must not serve the pre-edit cache entry;
       // and only our OWN entry of this conversation answers for "own"
       const cached = await service.getCachedPlaintext(message.id, {
-        scope: message.conversationId ?? '',
+        scope: message.conversationId,
         authorId: userId,
         editedAt: message.editedAt ?? null,
       });
       if (cached !== null) {
-        return resolveReplyPreview(applyPlaintext(message, cached), userId);
+        return resolveReplyPreview(decryptedRow(message, cached), userId);
       }
     }
   }
-  return resolveReplyPreview({ ...message, content: DECRYPT_FAILED_CONTENT }, userId);
+  // Nothing vouched for this row: the refused shape, its quote still resolvable
+  // from the local cache
+  return resolveReplyPreview(refusedRow(message), userId);
 }
 
 /** Decrypt a fetched page of messages (order preserved; only the server's call notices pass unencrypted). */
