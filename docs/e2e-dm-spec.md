@@ -209,7 +209,8 @@ Per account, IndexedDB `voxium-e2e-{userId}` (`services/e2e/vault.ts`):
 | `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5) |
 | `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
 | `igs:{sessionId}` | an inbound Megolm session + the attribution it arrived under |
-| `pt:{messageId}` | decrypted plaintext `{conversationId, text}` |
+| `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
+| `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 
 Only the `pickle` fields are encrypted (by vodozemac, under the pickle key).
 Everything else in a record — session ids, device ids, counters, and the
@@ -220,10 +221,12 @@ retries re-derive the key from the encrypted inbound session via
 
 ### 7.1 Why a plaintext cache is load-bearing
 
-Ratchet message keys are **one-shot**: a ciphertext can be decrypted exactly
-once. Every fetch from the server returns ciphertext, so the client decrypts
-each message once (socket event or history fetch) and serves every later
-render from the cache, keyed by server message id. Own sent messages are
+Olm ratchet message keys are **one-shot**: a pairwise ciphertext can be
+decrypted exactly once (a Megolm ciphertext decrypts again from the pickled
+session — which is exactly why §9.1 binds each ratchet position to one
+message). Every fetch from the server returns ciphertext, so the client
+decrypts each message once (socket event or history fetch) and serves every
+later render from the cache, keyed by server message id. Own sent messages are
 cached at send time (Olm does not encrypt-to-self). An encrypted message whose
 plaintext is not in the vault (new install, cleared storage) renders an honest
 "Unable to decrypt" placeholder — by design, history does not follow devices.
@@ -310,6 +313,48 @@ did not vouch for:
   typed, the files attached, the message replied to, encrypted user row, no
   plaintext attachment; only the id, timestamps and author block come from
   the POST reply.
+- **Ratchet positions are bound to one message.** A Megolm ciphertext
+  decrypts forever, and the session checks (§12.3) only say WHO wrote it and
+  WHERE — not WHICH message it is. So after a successful decrypt, and before
+  the plaintext is returned, `decryptGroupMessage` checks the position (S, i)
+  it decrypted at against the row's id and version (`editedAt ?? null`):
+  1. `mi:S:i` names another id, or the same id under another version →
+     **refused** (a replay under a new id; the original ciphertext labelled
+     as an edit that never happened).
+  2. The id's `pt:` entry records the newest version accepted for it; if
+     that is the same session S at a strictly higher index than an already
+     bound i, or at a higher-or-equal index than an unbound i → **refused**
+     (an older ciphertext served as the current version: an edit rolled
+     back, whether the server re-serves the original or an older ciphertext
+     with a fresh `editedAt`).
+  3. `mi:S:i` names this id and version and nothing newer is recorded →
+     accepted (a reload, a re-fetched page, a search jump).
+  4. Unbound and nothing newer → accepted, and `mi:S:i` is written.
+
+  A refusal is an ordinary refused row (above) — the server can always
+  withhold a message, it must never choose which of an author's past words
+  appear when — with a `console.warn` naming ids only; nothing is cached. A
+  refused edit over the socket blanks the row it targets. Rule 2 also
+  refuses a position already bound to the same id and version once a newer
+  version is recorded: a page fetched before an edit but applied after it
+  shows the marker for that row until the next fetch.
+
+  Own messages are read from the cache and never decrypted, so they are
+  bound at SEND time: `encryptMessage` / `encryptChannelMessage` read
+  `messageIndex()` before `encrypt()` and return the position with the
+  envelope; `cacheSentPlaintext` / `cacheSentChannelPlaintext` bind it to the
+  id (and, for an edit, the `editedAt`) the POST/PATCH answered with. That
+  write is serialised with the decrypt queue; if the socket echo already
+  bound the same binding it is left as it is, and if the position is bound
+  to ANOTHER id it is overwritten with a warning — the client's own POST /
+  PATCH answer is the send-time truth.
+
+  Residuals: bindings are per device (a wiped vault or a new device accepts
+  history as it is served, as Matrix clients do); rule 2 says nothing across
+  a session rotation (index spaces are unrelated, so a rollback to a version
+  sent under an earlier session is accepted); a message-key backup restore
+  (§16) brings sessions back, not bindings — restored history binds afresh.
+  Legacy `olm1` pairwise history carries no position and is cache-only.
 
 ## 10. Supply-chain policy
 
@@ -409,6 +454,10 @@ match the row, takes sender attribution from the **authenticated Olm session**
 (pinned per-device identity) rather than the share body, and re-derives the
 session id from the key. On Megolm decrypt, `message.authorId` must equal the
 inbound session's `senderUserId`, else the message is treated as undecryptable.
+And each message index of a session is bound, on this device, to the one
+(message id, version) it was first shown as (`mi:{sessionId}:{messageIndex}`
+in the vault, §7): an index served under another id or version, or below the
+newest version the id has shown in the same session, is refused (§9.1).
 
 ### 12.4 Rotation
 
@@ -484,6 +533,9 @@ read.
   by `rateLimitE2EDevice` (5/hour) and harmless (a 6th device is still fully
   authenticated).
 - History does not follow a new device (no key backup) — by design, §11.
+- Ratchet-position bindings (§9.1) are per device and per session: a new
+  device or wiped vault binds history as it is served, and an edit rolled
+  back to a version sent under an EARLIER session is not detected.
 - ~~Cross-signing~~ — shipped, see §14: one safety number per account, and
   device trust is now a signature check rather than a user judgement call.
 
@@ -1161,6 +1213,51 @@ DMs only.
   transfer (consistent with no-history-on-join).
 - ~~Voice is out of scope~~ — shipped as secure VOICE channels (§21):
   encoded-frame E2E audio through the SFU, audio-only in v1.
+- Replay and rollback of a secure-channel message share the DM rule (§9.1)
+  and its residuals: per device, and blind across a session rotation.
+- First contact (§19.7): a device that has never seen a channel as secure
+  has nothing to pin against.
+
+### 19.7 The client pin
+
+The server marks `secure` immutable at creation, but every client decision —
+the fetch gate, the socket gate, the encrypted send, the lock icon, the
+secure-voice join, search — used to read the flag off the server's channel
+list. A list that answered `secure: false` would have rendered forged
+plaintext unlocked and sent the user's next message in the clear. So the
+client pins: once this device has seen a channel as secure, it stays secure
+for that account (`utils/securePins.ts`, localStorage
+`vox:securePins:{userId}`, validated on load, never networked).
+
+- **Sources of a pin:** a channel record arriving with `secure: true`; the
+  secure-channel create response; a successful members fetch (that endpoint
+  answers only for secure channels); a key share for a `ch:{channelId}` scope
+  — `E2EService.pinSecureScope`, called when an inbound group session is
+  imported and when one decrypts, so a new device pins before it has ever
+  loaded the channel list.
+- **One normalisation point:** `withSecurePins` / `withSecurePin` in
+  `serverStore` is the only way a channel record enters the store (server
+  detail fetch, `addChannel`, `updateChannelData`). A pinned id arriving
+  without the flag is stored as `secure: true`. Consumers that may not have
+  the record (a `message:new` for a server not being viewed, the chat fetch
+  and send paths) ask `utils/secureChannelGate.ts`: store flag OR pin (OR, for
+  a message, its own `encrypted: true` — always a safe reason to decrypt,
+  never a reason to skip it).
+- **A downgrade is shown, not followed:** a one-time warning toast per
+  channel per activation (per login or page load) plus a `console.warn`
+  naming the id; the channel keeps its lock, plaintext rows render as the
+  refused row, sends are encrypted (a server that also withholds the device
+  list makes the send fail, never go out in the clear), and voice takes the
+  secure path.
+- **Lifetime:** never un-pinned — not on `channel:deleted` (delete-then-
+  recreate under the same id is the obvious bypass), not on leave, kick or
+  logout. Cleared only by self-service account deletion
+  (`forgetSecurePins`), alongside the E2E vault.
+- **Residual: first contact.** A fresh install that has never loaded the
+  channel as secure and never received one of its keys has nothing to pin
+  against; a server that withholds the key shares AND flips the flag still
+  wins on that device. Closing it needs a creator-signed channel manifest —
+  a later design.
 
 ## 20. E2E-authenticated DM call signaling (shipped)
 
