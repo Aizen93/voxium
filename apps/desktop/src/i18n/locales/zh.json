@@ -1357,7 +1357,8 @@
     "renaming": "重命名中…",
     "renamed": "频道已重命名",
     "failedToRename": "重命名频道失败",
-    "moderationNotSecure": "\"{{name}}\"是普通频道——请从侧边栏删除它"
+    "moderationNotSecure": "\"{{name}}\"是普通频道——请从侧边栏删除它",
+    "pinnedDowngrade": "此频道在本设备上已加密，但服务器现在将其列为未加密。"
   },
   "discovery": {
     "tier": {

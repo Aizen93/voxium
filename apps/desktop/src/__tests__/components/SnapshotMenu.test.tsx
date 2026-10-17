@@ -39,6 +39,7 @@ vi.mock('react-i18next', async (importOriginal) => {
 
 import { SnapshotMenu } from '../../components/voice/SnapshotMenu';
 import { useAnnotationStore } from '../../stores/annotationStore';
+import { activateSecurePins, deactivateSecurePins, forgetSecurePins, pinSecure } from '../../utils/securePins';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -120,6 +121,34 @@ describe('SnapshotMenu', () => {
     act(() => button().click());
     expect(snap.composeSnapshotCanvas).toHaveBeenCalledWith(videoRef.current, expect.anything(), masks, expect.anything());
     expect(socketEmit).not.toHaveBeenCalled(); // and tells nobody — they are the sharer
+  });
+
+  it('Send to channel: a channel PINNED as secure on this device is not a target, even listed without the flag', async () => {
+    activateSecurePins('viewer-1');
+    pinSecure('ch-flipped');
+    try {
+      apiMock.get.mockResolvedValue({
+        data: {
+          data: [
+            { id: 'ch-text', name: 'general', type: 'text' },
+            // The server downgraded it: a plaintext snapshot there would be a leak
+            { id: 'ch-flipped', name: 'vault', type: 'text', secure: false },
+          ],
+        },
+      });
+      render();
+      act(() => button().click());
+      await act(async () => {
+        (document.querySelector('[data-testid="snapshot-send-to"]') as HTMLButtonElement).click();
+      });
+      await flush();
+      const list = document.querySelector('[data-testid="snapshot-channel-list"]')!;
+      expect(list.querySelector('[data-channel-id="ch-flipped"]')).toBeNull();
+      expect(list.querySelector('[data-channel-id="ch-text"]')).not.toBeNull();
+    } finally {
+      deactivateSecurePins();
+      forgetSecurePins('viewer-1');
+    }
   });
 
   it('Send to channel: picker excludes secure and voice channels; the send reuses the attachment pipeline', async () => {

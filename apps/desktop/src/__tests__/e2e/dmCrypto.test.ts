@@ -13,12 +13,14 @@ import type { Message } from '@voxium/shared';
 
 const getCachedPlaintext = vi.fn();
 const decryptMessage = vi.fn();
+const encryptMessage = vi.fn();
+const cachePlaintext = vi.fn();
 
 vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/e2e/e2eService')>();
   return {
     ...actual,
-    getE2EService: () => ({ getCachedPlaintext, decryptMessage }),
+    getE2EService: () => ({ getCachedPlaintext, decryptMessage, encryptMessage, cachePlaintext }),
   };
 });
 
@@ -30,8 +32,11 @@ import {
   decryptMessageForDisplay,
   decryptMessagesForDisplay,
   resolveEncryptedPreview,
+  prepareOutgoingDM,
+  cacheSentPlaintext,
   DECRYPT_FAILED_CONTENT,
 } from '../../services/e2e/dmCrypto';
+import { useDMStore } from '../../stores/dmStore';
 
 function dmRow(over: Partial<Message> = {}): Message {
   return {
@@ -274,5 +279,40 @@ describe('conversation-list previews', () => {
     getCachedPlaintext.mockResolvedValue(null);
 
     expect(await resolveEncryptedPreview('m1', 'c1')).toBeNull();
+  });
+});
+
+describe('the outgoing path carries the ratchet position', () => {
+  const POSITION = { sessionId: 'sess-1', messageIndex: 7 };
+
+  beforeEach(() => {
+    encryptMessage.mockReset();
+    cachePlaintext.mockReset();
+    useDMStore.setState({ conversations: [{ id: 'c1', participant: { id: 'peer' } }] } as never);
+  });
+
+  it('prepare returns the envelope, the raw plaintext and the position it was encrypted at', async () => {
+    encryptMessage.mockResolvedValue({ envelope: 'ENV', position: POSITION });
+
+    const out = await prepareOutgoingDM('c1', 'hi');
+
+    expect(out).toEqual({ content: 'ENV', plaintext: buildE2EPlaintext('hi'), position: POSITION });
+    expect(encryptMessage).toHaveBeenCalledWith('c1', 'peer', buildE2EPlaintext('hi'));
+  });
+
+  it('the cache write binds that position to the id and version the server answered', async () => {
+    await cacheSentPlaintext('msg-1', 'c1', 'raw', '2026-10-17T10:00:00.000Z', '2026-10-17T09:00:00.000Z', POSITION);
+
+    expect(cachePlaintext).toHaveBeenCalledWith('msg-1', 'c1', 'raw', '2026-10-17T10:00:00.000Z', {
+      authorId: 'me',
+      createdAt: '2026-10-17T09:00:00.000Z',
+      position: POSITION,
+    });
+  });
+
+  it('a cache write without a position (legacy callers) binds nothing', async () => {
+    await cacheSentPlaintext('msg-1', 'c1', 'raw', null);
+
+    expect(cachePlaintext.mock.calls[0][4]).not.toHaveProperty('position');
   });
 });

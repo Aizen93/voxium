@@ -7,6 +7,7 @@
 // pickle persistence → plaintext cache.
 import 'fake-indexeddb/auto';
 import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { activateSecurePins, deactivateSecurePins, forgetSecurePins, isPinnedSecure } from '../../utils/securePins';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createPublicKey, verify as cryptoVerify } from 'node:crypto';
@@ -728,7 +729,7 @@ describe('E2EService (client crypto core)', () => {
 
     const bobDevice = server.deviceOf(bob.userId, bob.service.deviceId);
     const before = bobDevice.oneTimeKeys.length;
-    const envelope = await alice.service.encryptMessage('c1', bob.userId, 'hello bob 🔐');
+    const { envelope } = await alice.service.encryptMessage('c1', bob.userId, 'hello bob 🔐');
     expect(JSON.parse(envelope).e).toBe('megolm1');
     expect(bobDevice.oneTimeKeys.length).toBe(before - 1); // Olm session for the share
 
@@ -738,7 +739,7 @@ describe('E2EService (client crypto core)', () => {
     expect(result).toEqual({ text: 'hello bob 🔐' });
 
     // reply flows back over Bob's own group session
-    const reply = await bob.service.encryptMessage('c1', alice.userId, 'hey alice');
+    const { envelope: reply } = await bob.service.encryptMessage('c1', alice.userId, 'hey alice');
     const decrypted = await alice.service.decryptMessage({
       id: 'm2', conversationId: 'c1', authorId: bob.userId, content: reply,
     });
@@ -747,10 +748,10 @@ describe('E2EService (client crypto core)', () => {
     // several turns both ways, all on the same two group sessions
     const aliceSid = sidOf(envelope);
     for (let i = 0; i < 3; i++) {
-      const a = await alice.service.encryptMessage('c1', bob.userId, `a${i}`);
+      const { envelope: a } = await alice.service.encryptMessage('c1', bob.userId, `a${i}`);
       expect(sidOf(a)).toBe(aliceSid);
       expect((await bob.service.decryptMessage({ id: `ma${i}`, conversationId: 'c1', authorId: alice.userId, content: a })).text).toBe(`a${i}`);
-      const b = await bob.service.encryptMessage('c1', alice.userId, `b${i}`);
+      const { envelope: b } = await bob.service.encryptMessage('c1', alice.userId, `b${i}`);
       expect((await alice.service.decryptMessage({ id: `mb${i}`, conversationId: 'c1', authorId: bob.userId, content: b })).text).toBe(`b${i}`);
     }
     // no further bundle claims once the pairwise sessions exist
@@ -768,7 +769,7 @@ describe('E2EService (client crypto core)', () => {
     await phone.service.initialize();
     await bob.service.initialize();
 
-    const envelope = await laptop.service.encryptMessage('c1', bob.userId, 'sent from the laptop');
+    const { envelope } = await laptop.service.encryptMessage('c1', bob.userId, 'sent from the laptop');
 
     // the sending device reads it back from the session it imported for itself
     expect((await laptop.service.decryptMessage({
@@ -797,7 +798,7 @@ describe('E2EService (client crypto core)', () => {
     await bobPhone.service.initialize();
     await bobTablet.service.initialize();
 
-    const envelope = await alice.service.encryptMessage('c1', bobId, 'to all your devices');
+    const { envelope } = await alice.service.encryptMessage('c1', bobId, 'to all your devices');
     const message = { id: 'm1', conversationId: 'c1', authorId: alice.userId, content: envelope };
 
     expect((await bobPhone.service.decryptMessage(message)).text).toBe('to all your devices');
@@ -815,7 +816,7 @@ describe('E2EService (client crypto core)', () => {
     await alice.service.initialize();
     await bobPhone.service.initialize();
 
-    const first = await alice.service.encryptMessage('c1', bobId, 'before the new device');
+    const { envelope: first } = await alice.service.encryptMessage('c1', bobId, 'before the new device');
     expect((await bobPhone.service.decryptMessage({
       id: 'm1', conversationId: 'c1', authorId: alice.userId, content: first,
     })).text).toBe('before the new device');
@@ -824,7 +825,7 @@ describe('E2EService (client crypto core)', () => {
     const bobTablet = makeDevice(server, bobId);
     await bobTablet.service.initialize();
 
-    const second = await alice.service.encryptMessage('c1', bobId, 'after the new device');
+    const { envelope: second } = await alice.service.encryptMessage('c1', bobId, 'after the new device');
     expect(sidOf(second)).not.toBe(sidOf(first)); // rotation
 
     // the pre-existing device follows the new session
@@ -852,7 +853,7 @@ describe('E2EService (client crypto core)', () => {
     await bobPhone.service.initialize();
     await bobOldTablet.service.initialize();
 
-    const before = await alice.service.encryptMessage('c1', bobId, 'while both devices are active');
+    const { envelope: before } = await alice.service.encryptMessage('c1', bobId, 'while both devices are active');
     expect((await bobOldTablet.service.decryptMessage({
       id: 'm1', conversationId: 'c1', authorId: alice.userId, content: before,
     })).text).toBe('while both devices are active');
@@ -867,7 +868,7 @@ describe('E2EService (client crypto core)', () => {
     await bobPhone.service.revokeDevice(bobOldTablet.service.deviceId);
     expect(server.users.get(bobId)!.devices.has(bobOldTablet.service.deviceId)).toBe(false);
 
-    const after = await alice.service.encryptMessage('c1', bobId, 'after the revocation');
+    const { envelope: after } = await alice.service.encryptMessage('c1', bobId, 'after the revocation');
     expect(sidOf(after)).not.toBe(sidOf(before));
     expect((await bobPhone.service.decryptMessage({
       id: 'm2', conversationId: 'c1', authorId: alice.userId, content: after,
@@ -886,15 +887,15 @@ describe('E2EService (client crypto core)', () => {
     await alice.service.initialize();
     await bob.service.initialize();
 
-    const first = await alice.service.encryptMessage('c1', bob.userId, 'm0');
+    const { envelope: first } = await alice.service.encryptMessage('c1', bob.userId, 'm0');
     const sid = sidOf(first);
     let last = first;
     for (let i = 1; i < E2E_LIMITS.GROUP_SESSION_MAX_MESSAGES; i++) {
-      last = await alice.service.encryptMessage('c1', bob.userId, `m${i}`);
+      ({ envelope: last } = await alice.service.encryptMessage('c1', bob.userId, `m${i}`));
       expect(sidOf(last)).toBe(sid);
     }
     // the cap is reached → the next send re-keys and re-shares
-    const rotated = await alice.service.encryptMessage('c1', bob.userId, 'over the cap');
+    const { envelope: rotated } = await alice.service.encryptMessage('c1', bob.userId, 'over the cap');
     expect(sidOf(rotated)).not.toBe(sid);
 
     expect((await bob.service.decryptMessage({
@@ -914,7 +915,7 @@ describe('E2EService (client crypto core)', () => {
     await bob.service.initialize();
     await flushQueue();
 
-    const envelope = await alice.service.encryptMessage('c1', bob.userId, 'one shot');
+    const { envelope } = await alice.service.encryptMessage('c1', bob.userId, 'one shot');
     expect(server.shares.length).toBe(1);
 
     expect((await bob.service.decryptMessage({
@@ -922,10 +923,12 @@ describe('E2EService (client crypto core)', () => {
     })).text).toBe('one shot');
     expect(server.shares.length).toBe(0); // claim-and-delete
 
-    // re-decrypting the same ciphertext under a new id needs no new share
+    // the next message on the same session needs no new share
+    const { envelope: next } = await alice.service.encryptMessage('c1', bob.userId, 'and another');
+    expect(server.shares.length).toBe(0);
     expect((await bob.service.decryptMessage({
-      id: 'm1-again', conversationId: 'c1', authorId: alice.userId, content: envelope,
-    })).text).toBe('one shot');
+      id: 'm2', conversationId: 'c1', authorId: alice.userId, content: next,
+    })).text).toBe('and another');
     expect(server.shares.length).toBe(0);
   });
 
@@ -937,7 +940,8 @@ describe('E2EService (client crypto core)', () => {
     await alice.service.initialize();
     await bob.service.initialize();
 
-    const m1 = await alice.service.encryptMessage('c1', bob.userId, 'before restart');
+    const { envelope: m1 } = await alice.service.encryptMessage('c1', bob.userId, 'before restart');
+    const { envelope: m1b } = await alice.service.encryptMessage('c1', bob.userId, 'unread before restart');
     await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: m1 });
 
     // "restart" both clients: fresh service instances over the same vaults
@@ -950,13 +954,15 @@ describe('E2EService (client crypto core)', () => {
 
     const otksBefore = server.deviceOf(bob.userId, bob2.service.deviceId).oneTimeKeys.length;
 
-    const m2 = await alice2.service.encryptMessage('c1', bob.userId, 'after restart');
+    const { envelope: m2 } = await alice2.service.encryptMessage('c1', bob.userId, 'after restart');
     expect(sidOf(m2)).toBe(sidOf(m1)); // pickled group session continues
     expect((await bob2.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: alice.userId, content: m2 })).text).toBe('after restart');
     // no rotation, no new share, no bundle claim
     expect(server.deviceOf(bob.userId, bob2.service.deviceId).oneTimeKeys.length).toBe(otksBefore);
-    // history re-decrypts from the restored inbound pickle (fresh message id ⇒ no cache hit)
-    expect((await bob2.service.decryptMessage({ id: 'm1-fresh', conversationId: 'c1', authorId: alice.userId, content: m1 })).text).toBe('before restart');
+    // history decrypts from the restored inbound pickle (a message never read ⇒ no cache hit)
+    expect((await bob2.service.decryptMessage({ id: 'm1b', conversationId: 'c1', authorId: alice.userId, content: m1b })).text).toBe('unread before restart');
+    // and the position bindings survived the restart too: m1 under a fresh id is a replay
+    expect((await bob2.service.decryptMessage({ id: 'm1-fresh', conversationId: 'c1', authorId: alice.userId, content: m1 })).failed).toBe(true);
   });
 
   it('rejects a message whose author does not own the group session', async () => {
@@ -969,7 +975,7 @@ describe('E2EService (client crypto core)', () => {
     await bob.service.initialize();
     await mallory.service.initialize();
 
-    const envelope = await alice.service.encryptMessage('c1', bob.userId, 'from alice');
+    const { envelope } = await alice.service.encryptMessage('c1', bob.userId, 'from alice');
     await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: envelope });
 
     // same ciphertext, attributed to someone else → refused (D6)
@@ -992,7 +998,7 @@ describe('E2EService (client crypto core)', () => {
     await bob.service.initialize();
 
     // establishes the pairwise session both directions use for key shares
-    const envelope = await alice.service.encryptMessage('c1', bob.userId, 'megolm era');
+    const { envelope } = await alice.service.encryptMessage('c1', bob.userId, 'megolm era');
     await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: envelope });
 
     // an olm1 envelope, as Phase B produced them
@@ -1019,14 +1025,14 @@ describe('E2EService (client crypto core)', () => {
     await bob.service.initialize();
 
     // original message
-    const original = await alice.service.encryptMessage('c1', bob.userId, 'original text');
+    const { envelope: original } = await alice.service.encryptMessage('c1', bob.userId, 'original text');
     const first = await bob.service.decryptMessage({
       id: 'm1', conversationId: 'c1', authorId: alice.userId, content: original, editedAt: null,
     });
     expect(first.text).toBe('original text');
 
     // alice edits: fresh ciphertext, same id, new editedAt
-    const edited = await alice.service.encryptMessage('c1', bob.userId, 'edited text');
+    const { envelope: edited } = await alice.service.encryptMessage('c1', bob.userId, 'edited text');
     const second = await bob.service.decryptMessage({
       id: 'm1', conversationId: 'c1', authorId: alice.userId, content: edited, editedAt: '2026-07-12T10:00:00.000Z',
     });
@@ -1077,7 +1083,7 @@ describe('E2EService (client crypto core)', () => {
     await alice.service.initialize();
     await bob.service.initialize();
 
-    const envelope = await alice.service.encryptMessage('c1', bob.userId, 'once only');
+    const { envelope } = await alice.service.encryptMessage('c1', bob.userId, 'once only');
     const first = await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: envelope });
     const second = await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: envelope });
     expect(first.text).toBe('once only');
@@ -1115,7 +1121,7 @@ describe('E2EService (client crypto core)', () => {
     await alice.service.initialize();
     await bob.service.initialize();
 
-    const m1 = await alice.service.encryptMessage('c1', bob.userId, 'hi');
+    const { envelope: m1 } = await alice.service.encryptMessage('c1', bob.userId, 'hi');
     await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: m1 });
 
     // Bob loses his pickle key: same install (same device id), brand-new identity
@@ -1131,7 +1137,7 @@ describe('E2EService (client crypto core)', () => {
 
     // After explicitly accepting the new identity, messaging resumes
     await alice.service.acceptNewIdentity(bob.userId);
-    const m2 = await alice.service.encryptMessage('c1', bob.userId, 'welcome back');
+    const { envelope: m2 } = await alice.service.encryptMessage('c1', bob.userId, 'welcome back');
     expect((await bobReborn.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: alice.userId, content: m2 })).text).toBe('welcome back');
   });
 
@@ -1336,8 +1342,8 @@ describe('E2EService (client crypto core)', () => {
     const sessionIdOf = (envelope: string) => JSON.parse(envelope).sid as string;
 
     server.setKeyshareUploadFailure(true);
-    const first = await alice.service.encryptMessage('c1', bob.userId, 'one');
-    const second = await alice.service.encryptMessage('c1', bob.userId, 'two');
+    const { envelope: first } = await alice.service.encryptMessage('c1', bob.userId, 'one');
+    const { envelope: second } = await alice.service.encryptMessage('c1', bob.userId, 'two');
     server.setKeyshareUploadFailure(false);
     expect(sessionIdOf(second)).toBe(sessionIdOf(first)); // no rotation storm
 
@@ -1348,7 +1354,7 @@ describe('E2EService (client crypto core)', () => {
     const realNow = Date.now;
     Date.now = () => realNow() + 60_000;
     try {
-      const third = await alice.service.encryptMessage('c1', bob.userId, 'three');
+      const { envelope: third } = await alice.service.encryptMessage('c1', bob.userId, 'three');
       expect(sessionIdOf(third)).toBe(sessionIdOf(first));
       expect((await bob.service.decryptMessage({ id: 'm3', conversationId: 'c1', authorId: alice.userId, content: third })).text).toBe('three');
       // …and the earlier messages are recoverable because the retry shared the
@@ -1369,7 +1375,7 @@ describe('E2EService (client crypto core)', () => {
 
     server.deviceOf(bob.userId, bob.service.deviceId).oneTimeKeys = []; // drain
 
-    const envelope = await alice.service.encryptMessage('c1', bob.userId, 'via fallback');
+    const { envelope } = await alice.service.encryptMessage('c1', bob.userId, 'via fallback');
     expect((await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: envelope })).text).toBe('via fallback');
   });
 
@@ -1408,7 +1414,7 @@ describe('E2EService (client crypto core)', () => {
     await bob.service.initialize();
 
     const send = async (id: string, conversationId: string, text: string, createdAt: string) => {
-      const envelope = await alice.service.encryptMessage(conversationId, bob.userId, text);
+      const { envelope } = await alice.service.encryptMessage(conversationId, bob.userId, text);
       const result = await bob.service.decryptMessage({
         id, conversationId, authorId: alice.userId, content: envelope, createdAt,
       });
@@ -1668,7 +1674,7 @@ describe('E2EService (cross-signing)', () => {
     }
 
     // …but the session key still goes out (warn-not-block, spec §12.5)
-    const envelope = await alice.service.encryptMessage('c1', bobId, 'delivered anyway');
+    const { envelope } = await alice.service.encryptMessage('c1', bobId, 'delivered anyway');
     expect((await injected.service.decryptMessage({
       id: 'm1', conversationId: 'c1', authorId: alice.userId, content: envelope,
     })).text).toBe('delivered anyway');
@@ -1952,7 +1958,7 @@ describe('E2EService (cross-signing)', () => {
     expect(list.devices).toHaveLength(2);
     expect(list.devices.every((d) => !d.crossSigned)).toBe(true);
 
-    const envelope = await alice.service.encryptMessage('c1', bobId, 'still encrypted');
+    const { envelope } = await alice.service.encryptMessage('c1', bobId, 'still encrypted');
     expect((await bobPhone.service.decryptMessage({
       id: 'm1', conversationId: 'c1', authorId: alice.userId, content: envelope,
     })).text).toBe('still encrypted');
@@ -2095,7 +2101,7 @@ describe('E2EService (cross-signing)', () => {
     expect(restarted.service.hasMasterKeyConflict()).toBe(true);
 
     // still usable — the conflict is a warning, not a lockout
-    const envelope = await restarted.service.encryptMessage('c1', bob.userId, 'still sending');
+    const { envelope } = await restarted.service.encryptMessage('c1', bob.userId, 'still sending');
     expect(envelope).toBeTruthy();
 
     // and the user has an exit: a deliberate new account identity
@@ -2664,7 +2670,7 @@ describe('E2EService (cross-signing)', () => {
     await bob.service.initialize();
     await flushQueue();
 
-    const envelope = await bob.service.encryptMessage('c1', aliceId, 'said before the laptop existed');
+    const { envelope } = await bob.service.encryptMessage('c1', aliceId, 'said before the laptop existed');
     await phone.service.decryptMessage({
       id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope,
     });
@@ -2700,7 +2706,7 @@ describe('E2EService (cross-signing)', () => {
     await flushQueue();
 
     // Bob writes history that only Alice's phone can read
-    const envelope = await bob.service.encryptMessage('c1', aliceId, 'said before the laptop existed');
+    const { envelope } = await bob.service.encryptMessage('c1', aliceId, 'said before the laptop existed');
     await phone.service.decryptMessage({
       id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope,
     });
@@ -2814,7 +2820,7 @@ describe('E2EService (cross-signing)', () => {
     const envelopes: string[] = [];
     for (let i = 0; i < 5; i++) {
       // a fresh session per message: revoking forces the sender to rotate
-      const envelope = await bob.service.encryptMessage(`conv-${i}`, aliceId, `history ${i}`);
+      const { envelope } = await bob.service.encryptMessage(`conv-${i}`, aliceId, `history ${i}`);
       await phone.service.decryptMessage({
         id: `m${i}`, conversationId: `conv-${i}`, authorId: bob.userId, content: envelope,
       });
@@ -3277,6 +3283,204 @@ describe('E2EService — secure-channel group sessions', () => {
 // encryptToDevice/decryptFromDevice are the primitives under E2E-authenticated
 // call signaling: one Olm message per WebRTC signal, bound to ONE peer device.
 // These tests pin the binding properties with real crypto.
+
+describe.each([
+  { kind: 'DM' as const },
+  { kind: 'secure channel' as const },
+])('E2EService — ratchet positions are bound to one message ($kind)', ({ kind }) => {
+  const V1 = '2026-10-17T10:00:00.000Z';
+  const V2 = '2026-10-17T11:00:00.000Z';
+
+  /**
+   * Alice and Bob in one E2E scope. `send` is Alice's encrypt for that scope,
+   * `rotate` forces her next send onto a new group session (a new device of
+   * Bob's in a DM, a membership change in a channel — the real triggers).
+   */
+  async function harness() {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'pos-alice');
+    const bob = makeParty(server, 'pos-bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    let scope = 'c1';
+    let send = (text: string) => alice.service.encryptMessage('c1', bob.userId, text);
+    let rotate = async () => {
+      const tablet = makeDevice(server, bob.userId);
+      await tablet.service.initialize();
+    };
+    if (kind === 'secure channel') {
+      const channelId = `pos-chan-${uniq}`;
+      const charlie = makeParty(server, 'pos-charlie');
+      await charlie.service.initialize();
+      await flushQueue();
+      server.setChannelMembers(channelId, [alice.userId, bob.userId, charlie.userId]);
+      scope = `ch:${channelId}`;
+      send = (text: string) => alice.service.encryptChannelMessage(channelId, text);
+      rotate = async () => server.setChannelMembers(channelId, [alice.userId, bob.userId]);
+    }
+
+    const read = (reader: typeof alice, id: string, content: string, editedAt: string | null = null) =>
+      reader.service.decryptMessage({ id, conversationId: scope, authorId: alice.userId, content, editedAt });
+    return { alice, bob, scope, send, rotate, read };
+  }
+
+  it.runIf(kind === 'secure channel')('a key share for a channel scope pins the channel as secure on the reader\'s device', async () => {
+    const { bob, scope, send, read } = await harness();
+    const channelId = scope.slice('ch:'.length);
+    // node has no localStorage: the pin lives in memory here and the util warns about the missing store
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    activateSecurePins(bob.userId);
+    try {
+      expect(isPinnedSecure(channelId)).toBe(false);
+      const { envelope } = await send('hello');
+      // importing the share (and decrypting under it) is the first-contact pin source
+      expect((await read(bob, 'm1', envelope)).text).toBe('hello');
+      expect(isPinnedSecure(channelId)).toBe(true);
+    } finally {
+      forgetSecurePins(bob.userId);
+      deactivateSecurePins();
+      warn.mockRestore();
+    }
+  });
+
+  it('a contact ciphertext re-served under a new id is refused; the original still reads', async () => {
+    const { bob, scope, send, read } = await harness();
+    const { envelope } = await send('yes');
+
+    expect((await read(bob, 'm1', envelope)).text).toBe('yes');
+    const replay = await read(bob, 'm-replay', envelope);
+    expect(replay).toEqual({ text: '', failed: true });
+    // a refusal caches nothing the id could later be served from
+    expect(await bob.service.getCachedPlaintext('m-replay', { scope })).toBeNull();
+    expect((await read(bob, 'm1', envelope)).text).toBe('yes');
+  });
+
+  it('the original ciphertext re-served as an edit of the same id is refused', async () => {
+    const { bob, send, read } = await harness();
+    const { envelope } = await send('never edited');
+
+    expect((await read(bob, 'm1', envelope)).text).toBe('never edited');
+    expect((await read(bob, 'm1', envelope, V1)).failed).toBe(true);
+    // the unedited version is untouched by the refused one
+    expect((await read(bob, 'm1', envelope, null)).text).toBe('never edited');
+  });
+
+  it('an edit at a higher index re-binds; older ciphertexts served as current are refused', async () => {
+    const { bob, send, read } = await harness();
+    const original = await send('draft');
+    const unread = await send('something else entirely');
+    expect(unread.position.messageIndex).toBe(original.position.messageIndex + 1);
+
+    expect((await read(bob, 'm1', original.envelope)).text).toBe('draft');
+    const edit = await send('final');
+    expect((await read(bob, 'm1', edit.envelope, V1)).text).toBe('final');
+
+    // the pre-edit ciphertext under a fresh editedAt (it was shown unedited)
+    expect((await read(bob, 'm1', original.envelope, V2)).failed).toBe(true);
+    // ...and as the unedited original again: the edit would silently revert
+    expect((await read(bob, 'm1', original.envelope, null)).failed).toBe(true);
+    // an older position of the session this device never showed, as a newer version
+    expect((await read(bob, 'm1', unread.envelope, V2)).failed).toBe(true);
+    // the edit still reads, and a later edit still goes through
+    expect((await read(bob, 'm1', edit.envelope, V1)).text).toBe('final');
+    const again = await send('final, really');
+    expect((await read(bob, 'm1', again.envelope, V2)).text).toBe('final, really');
+  });
+
+  it('an edit under a new session (after a rotation) is accepted', async () => {
+    const { bob, send, rotate, read } = await harness();
+    const original = await send('before rotation');
+    expect((await read(bob, 'm1', original.envelope)).text).toBe('before rotation');
+
+    await rotate();
+    const edit = await send('after rotation');
+    expect(edit.position.sessionId).not.toBe(original.position.sessionId);
+    expect((await read(bob, 'm1', edit.envelope, V1)).text).toBe('after rotation');
+  });
+
+  it('own sends bind at send time: our old message under a new id is refused', async () => {
+    const { alice, bob, scope, send, read } = await harness();
+    const sent = await send('my own words');
+    expect(sent.position.sessionId).toBe(sidOf(sent.envelope));
+    // the send path: POST answered with the id, the plaintext cached with its position
+    await alice.service.cachePlaintext('m1', scope, 'my own words', null, {
+      authorId: alice.userId,
+      position: sent.position,
+    });
+
+    // our own copy is only ever read from the cache...
+    expect((await read(alice, 'm1', sent.envelope)).text).toBe('my own words');
+    // ...yet the position is bound: the same ciphertext under a new id is refused
+    expect((await read(alice, 'm-replay', sent.envelope)).failed).toBe(true);
+    // the receiver's position agrees with the sender's
+    expect((await read(bob, 'm1', sent.envelope)).text).toBe('my own words');
+    expect((await read(bob, 'm-replay', sent.envelope)).failed).toBe(true);
+
+    // own edit, bound with the PATCH's editedAt: the original is no longer current
+    const edit = await send('my edited words');
+    await alice.service.cachePlaintext('m1', scope, 'my edited words', V1, {
+      authorId: alice.userId,
+      position: edit.position,
+    });
+    expect((await read(alice, 'm1', edit.envelope, V1)).text).toBe('my edited words');
+    expect((await read(alice, 'm1', sent.envelope, V2)).failed).toBe(true);
+    expect((await read(alice, 'm1', sent.envelope, null)).failed).toBe(true);
+  });
+
+  it('the echo decrypted before the POST answers leaves one consistent binding', async () => {
+    const { alice, scope, send, read } = await harness();
+    const warn = vi.spyOn(console, 'warn');
+    try {
+      const sent = await send('raced');
+      // the socket echo lands first and binds the position
+      expect((await read(alice, 'm1', sent.envelope)).text).toBe('raced');
+      // then the POST answers: the same binding, left alone
+      await alice.service.cachePlaintext('m1', scope, 'raced', null, {
+        authorId: alice.userId,
+        position: sent.position,
+      });
+      expect((await read(alice, 'm1', sent.envelope)).text).toBe('raced');
+      expect(await alice.service.getCachedPlaintext('m1', { scope, editedAt: null })).toBe('raced');
+
+      // same race for an edit
+      const edit = await send('raced, edited');
+      expect((await read(alice, 'm1', edit.envelope, V1)).text).toBe('raced, edited');
+      await alice.service.cachePlaintext('m1', scope, 'raced, edited', V1, {
+        authorId: alice.userId,
+        position: edit.position,
+      });
+      expect((await read(alice, 'm1', edit.envelope, V1)).text).toBe('raced, edited');
+
+      expect(warn.mock.calls.some((args) => String(args[0]).includes('rebinds'))).toBe(false);
+      // and the binding still refuses a replay
+      expect((await read(alice, 'm-replay', sent.envelope)).failed).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a send-time binding that finds another id takes over, and says so', async () => {
+    const { alice, scope, send, read } = await harness();
+    const warn = vi.spyOn(console, 'warn');
+    try {
+      const sent = await send('shown twice');
+      // the server echoed our fresh ciphertext under an id the POST does not name
+      expect((await read(alice, 'm-echo', sent.envelope)).text).toBe('shown twice');
+      await alice.service.cachePlaintext('m1', scope, 'shown twice', null, {
+        authorId: alice.userId,
+        position: sent.position,
+      });
+      expect(warn.mock.calls.some((args) => String(args[0]).includes('rebinds'))).toBe(true);
+      expect((await read(alice, 'm1', sent.envelope)).text).toBe('shown twice');
+      expect((await read(alice, 'm-third', sent.envelope)).failed).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
 
 describe('E2EService — device-sealed payloads', () => {
   async function pair() {

@@ -9,7 +9,7 @@
 // eval-order cycle that crashes at boot (same rule as dmCrypto.ts).
 import { buildE2EPlaintext, parseE2EPlaintext, e2eChannelScope } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
-import { getE2EService, E2EIdentityChangedError } from './e2eService';
+import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
 import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
@@ -124,17 +124,17 @@ export async function prepareOutgoingChannelMessage(
   channelId: string,
   text: string,
   attachments?: E2EAttachmentMeta[]
-): Promise<{ content: string; plaintext: string; notReadyUserIds: string[] }> {
+): Promise<{ content: string; plaintext: string; position: E2EMessagePosition; notReadyUserIds: string[] }> {
   const userId = await currentUserId();
   if (!userId) throw new Error('Not authenticated');
 
   const plaintext = buildE2EPlaintext(text, attachments);
   try {
-    const { envelope, notReadyUserIds } = await getE2EService(userId).encryptChannelMessage(
+    const { envelope, position, notReadyUserIds } = await getE2EService(userId).encryptChannelMessage(
       channelId,
       plaintext
     );
-    return { content: envelope, plaintext, notReadyUserIds };
+    return { content: envelope, plaintext, position, notReadyUserIds };
   } catch (err) {
     if (err instanceof E2EIdentityChangedError) {
       const { useE2EStore } = await import('../../stores/e2eStore');
@@ -144,19 +144,25 @@ export async function prepareOutgoingChannelMessage(
   }
 }
 
-/** Store the sent plaintext under the server-assigned message id + version. */
+/**
+ * Store the sent plaintext under the server-assigned message id + version, and
+ * bind its ratchet `position` (prepareOutgoingChannelMessage) to them — see
+ * cacheSentPlaintext.
+ */
 export async function cacheSentChannelPlaintext(
   messageId: string,
   channelId: string,
   plaintext: string,
   editedAt?: string | null,
-  createdAt?: string
+  createdAt?: string,
+  position?: E2EMessagePosition
 ): Promise<void> {
   const userId = await currentUserId();
   if (!userId) return;
   await getE2EService(userId).cachePlaintext(messageId, e2eChannelScope(channelId), plaintext, editedAt, {
     authorId: userId,
     ...(createdAt && { createdAt }),
+    ...(position && { position }),
   });
 }
 

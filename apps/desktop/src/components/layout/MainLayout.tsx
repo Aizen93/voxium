@@ -41,6 +41,7 @@ import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { SharePreflightModal } from '../voice/SharePreflightModal';
 import { discoverySocketHandlers } from '../../services/discoverySocketHandlers';
+import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
@@ -172,16 +173,13 @@ export function MainLayout() {
       return !!serverState.activeServerId && !!channelId && channelId === serverState.activeChannelId;
     };
 
-    // Secure channels by the loaded channel list (the trustworthy signal), OR
-    // the message's own encrypted flag — the flag alone must never DOWNGRADE
-    // (that's channelCrypto's refusal rule) but it is always safe as a reason
-    // to decrypt-or-suppress, e.g. for servers whose channel list isn't loaded.
-    const isSecureChannelMessage = (message: Message): boolean => {
-      if (message.encrypted === true) return true;
-      return useServerStore
-        .getState()
-        .channels.some((c) => c.id === message.channelId && c.secure === true);
-    };
+    // Secure channels by the loaded channel list, this device's pin, OR the
+    // message's own encrypted flag (utils/secureChannelGate.ts). The pin is
+    // what keeps a server that flips `secure` to false — or a message:new for
+    // a server the user is not viewing — from routing a forged plaintext row
+    // past channelCrypto's refusal rule.
+    const isSecureChannelMessage = (message: Message): boolean =>
+      isSecureChannelMessageIn(message, useServerStore.getState().channels);
 
     // Store function references so cleanup actually works
     const handlers = {

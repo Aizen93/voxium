@@ -11,8 +11,13 @@ import type { Message } from '@voxium/shared';
  * a renamed mention.
  */
 
-const { apiPost, channels } = vi.hoisted(() => ({ apiPost: vi.fn(), channels: [] as { id: string; secure: boolean }[] }));
-vi.mock('../../services/api', () => ({ api: { post: apiPost, get: vi.fn(), patch: vi.fn(), delete: vi.fn() } }));
+const { apiPost, apiPatch, channels, POSITION } = vi.hoisted(() => ({
+  apiPost: vi.fn(),
+  apiPatch: vi.fn(),
+  channels: [] as { id: string; secure: boolean }[],
+  POSITION: { sessionId: 'sess-1', messageIndex: 4 },
+}));
+vi.mock('../../services/api', () => ({ api: { post: apiPost, get: vi.fn(), patch: apiPatch, delete: vi.fn() } }));
 vi.mock('../../services/socket', () => ({ getSocket: () => null }));
 vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
@@ -24,7 +29,7 @@ vi.mock('../../services/e2e/dmCrypto', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/e2e/dmCrypto')>();
   return {
     ...actual,
-    prepareOutgoingDM: vi.fn(async () => ({ content: '{"v":1,"e":"megolm1","sid":"s","b":"b"}', plaintext: 'raw' })),
+    prepareOutgoingDM: vi.fn(async () => ({ content: '{"v":1,"e":"megolm1","sid":"s","b":"b"}', plaintext: 'raw', position: POSITION })),
     cacheSentPlaintext: vi.fn(async () => undefined),
   };
 });
@@ -32,12 +37,14 @@ vi.mock('../../services/e2e/channelCrypto', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/e2e/channelCrypto')>();
   return {
     ...actual,
-    prepareOutgoingChannelMessage: vi.fn(async () => ({ content: '{"v":1,"e":"megolm1","sid":"s","b":"b"}', plaintext: 'raw', notReadyUserIds: [] })),
+    prepareOutgoingChannelMessage: vi.fn(async () => ({ content: '{"v":1,"e":"megolm1","sid":"s","b":"b"}', plaintext: 'raw', position: POSITION, notReadyUserIds: [] })),
     cacheSentChannelPlaintext: vi.fn(async () => undefined),
   };
 });
 
 import { useChatStore } from '../../stores/chatStore';
+import { cacheSentPlaintext } from '../../services/e2e/dmCrypto';
+import { cacheSentChannelPlaintext } from '../../services/e2e/channelCrypto';
 
 const me = { id: 'me', username: 'me', displayName: 'Me' };
 const peer = { id: 'peer', username: 'peer', displayName: 'Peer' };
@@ -56,6 +63,9 @@ function hostileReply(over: Partial<Message> = {}): Message {
 
 beforeEach(() => {
   apiPost.mockReset();
+  apiPatch.mockReset();
+  vi.mocked(cacheSentPlaintext).mockClear();
+  vi.mocked(cacheSentChannelPlaintext).mockClear();
   channels.length = 0;
   useChatStore.setState({ messages: [], replyingTo: null });
 });
@@ -156,5 +166,45 @@ describe('the sender\'s own row', () => {
     const rows = useChatStore.getState().messages;
     expect(rows).toHaveLength(1);
     expect(rows[0].content).toBe('hello');
+  });
+});
+
+describe('the ratchet position travels from prepare to the cache write', () => {
+  // Own messages are read from the cache and never decrypted: the cache write
+  // is the only place their position gets bound to the id the server assigned.
+  const EDITED_AT = '2026-10-17T10:05:00.000Z';
+
+  it('DM send', async () => {
+    apiPost.mockResolvedValue({ data: { data: hostileReply({ conversationId: 'c1' }) } });
+
+    await useChatStore.getState().sendDMMessage('c1', 'hello');
+
+    expect(cacheSentPlaintext).toHaveBeenCalledWith('sent-1', 'c1', 'raw', null, '2026-10-14T10:00:00.000Z', POSITION);
+  });
+
+  it('DM edit, under the editedAt the PATCH answered', async () => {
+    apiPatch.mockResolvedValue({ data: { data: { id: 'sent-1', editedAt: EDITED_AT, createdAt: '2026-10-14T10:00:00.000Z' } } });
+
+    await useChatStore.getState().editDMMessage('c1', 'sent-1', 'hello again');
+
+    expect(cacheSentPlaintext).toHaveBeenCalledWith('sent-1', 'c1', 'raw', EDITED_AT, '2026-10-14T10:00:00.000Z', POSITION);
+  });
+
+  it('secure-channel send', async () => {
+    channels.push({ id: 'ch1', secure: true });
+    apiPost.mockResolvedValue({ data: { data: hostileReply({ channelId: 'ch1' }) } });
+
+    await useChatStore.getState().sendMessage('ch1', 'hello');
+
+    expect(cacheSentChannelPlaintext).toHaveBeenCalledWith('sent-1', 'ch1', 'raw', null, '2026-10-14T10:00:00.000Z', POSITION);
+  });
+
+  it('secure-channel edit, under the editedAt the PATCH answered', async () => {
+    channels.push({ id: 'ch1', secure: true });
+    apiPatch.mockResolvedValue({ data: { data: { id: 'sent-1', editedAt: EDITED_AT, createdAt: '2026-10-14T10:00:00.000Z' } } });
+
+    await useChatStore.getState().editMessage('ch1', 'sent-1', 'hello again');
+
+    expect(cacheSentChannelPlaintext).toHaveBeenCalledWith('sent-1', 'ch1', 'raw', EDITED_AT, '2026-10-14T10:00:00.000Z', POSITION);
   });
 });

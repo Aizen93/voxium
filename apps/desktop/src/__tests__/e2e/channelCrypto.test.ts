@@ -195,11 +195,13 @@ describe('channelCrypto — outgoing path', () => {
   });
 
   it('returns the envelope, the raw plaintext for the cache, and who cannot read yet', async () => {
-    encryptChannelMessage.mockResolvedValue({ envelope: ENVELOPE, notReadyUserIds: ['dormant'] });
+    const position = { sessionId: 'sess-1', messageIndex: 3 };
+    encryptChannelMessage.mockResolvedValue({ envelope: ENVELOPE, position, notReadyUserIds: ['dormant'] });
 
     const out = await prepareOutgoingChannelMessage('sec-1', 'hi room');
 
     expect(out.content).toBe(ENVELOPE);
+    expect(out.position).toEqual(position);
     expect(out.plaintext).toBe(buildE2EPlaintext('hi room'));
     expect(out.notReadyUserIds).toEqual(['dormant']);
     expect(encryptChannelMessage).toHaveBeenCalledWith('sec-1', buildE2EPlaintext('hi room'));
@@ -223,6 +225,20 @@ describe('channelCrypto — outgoing path', () => {
       'raw',
       null,
       expect.objectContaining({ authorId: 'me' }),
+    );
+    expect(cachePlaintext.mock.calls[0][4]).not.toHaveProperty('position');
+  });
+
+  it('binds the ratchet position the message was encrypted at, under the CHANNEL scope', async () => {
+    const position = { sessionId: 'sess-1', messageIndex: 3 };
+    await cacheSentChannelPlaintext('msg-1', 'sec-1', 'raw', '2026-10-17T10:00:00.000Z', undefined, position);
+
+    expect(cachePlaintext).toHaveBeenCalledWith(
+      'msg-1',
+      e2eChannelScope('sec-1'),
+      'raw',
+      '2026-10-17T10:00:00.000Z',
+      { authorId: 'me', position },
     );
   });
 });
