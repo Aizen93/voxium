@@ -109,12 +109,12 @@ Keep them concise and descriptive. Use the imperative mood:
 
 A few things that are easy to get wrong:
 
-- **Never emit `channel:leave`** — sockets auto-subscribe to all text channels on connect for unread tracking
-- **Server membership must join socket rooms** — any code that makes a user a server member must also call `joinServerRoom()` or `broadcastMemberJoined()`
+- **Never emit `channel:leave`** — sockets auto-subscribe on connect to every channel room they can view (text and voice) for unread tracking
+- **Server membership must join socket rooms** — any code that makes a user a server member goes through `joinServerMember()` (`utils/serverJoin.ts`), which broadcasts the join and seeds the read state; `joinServerRoom()` is for server creation only
 - **`clearMessages()` ownership** — only `dmStore.setActiveConversation()` and `clearActiveConversation()` should call it, never UI components directly
 - **WebRTC uses Perfect Negotiation** — DM voice calls use polite/impolite roles for glare resolution
 
-See `CLAUDE.md` in the repo root for the full list of conventions and invariants.
+The end-to-end encryption invariants are specified in `docs/e2e-dm-spec.md`; the rest are pinned by the test suites next to the code, so read the tests of the area you change before changing it.
 
 ## Reporting Issues
 
