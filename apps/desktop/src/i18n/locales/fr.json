@@ -1360,7 +1360,8 @@
     "renaming": "Renommage…",
     "renamed": "Salon renommé",
     "failedToRename": "Échec du renommage du salon",
-    "moderationNotSecure": "« {{name}} » est un salon ordinaire — supprimez-le depuis la barre latérale"
+    "moderationNotSecure": "« {{name}} » est un salon ordinaire — supprimez-le depuis la barre latérale",
+    "pinnedDowngrade": "Ce salon est chiffré sur cet appareil ; le serveur l'indique désormais comme non chiffré."
   },
   "discovery": {
     "tier": {

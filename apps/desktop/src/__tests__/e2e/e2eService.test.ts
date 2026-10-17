@@ -7,6 +7,7 @@
 // pickle persistence → plaintext cache.
 import 'fake-indexeddb/auto';
 import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { activateSecurePins, deactivateSecurePins, forgetSecurePins, isPinnedSecure } from '../../utils/securePins';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createPublicKey, verify as cryptoVerify } from 'node:crypto';
@@ -3325,6 +3326,25 @@ describe.each([
       reader.service.decryptMessage({ id, conversationId: scope, authorId: alice.userId, content, editedAt });
     return { alice, bob, scope, send, rotate, read };
   }
+
+  it.runIf(kind === 'secure channel')('a key share for a channel scope pins the channel as secure on the reader\'s device', async () => {
+    const { bob, scope, send, read } = await harness();
+    const channelId = scope.slice('ch:'.length);
+    // node has no localStorage: the pin lives in memory here and the util warns about the missing store
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    activateSecurePins(bob.userId);
+    try {
+      expect(isPinnedSecure(channelId)).toBe(false);
+      const { envelope } = await send('hello');
+      // importing the share (and decrypting under it) is the first-contact pin source
+      expect((await read(bob, 'm1', envelope)).text).toBe('hello');
+      expect(isPinnedSecure(channelId)).toBe(true);
+    } finally {
+      forgetSecurePins(bob.userId);
+      deactivateSecurePins();
+      warn.mockRestore();
+    }
+  });
 
   it('a contact ciphertext re-served under a new id is refused; the original still reads', async () => {
     const { bob, scope, send, read } = await harness();

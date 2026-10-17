@@ -13,6 +13,7 @@ import type { User, RegistrationConsent } from '@voxium/shared';
 import { PowExpiredError, PowAbortedError } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../services/powSolver';
 import { forgetLocalE2EState } from '../services/e2e/e2eService';
+import { activateSecurePins, deactivateSecurePins, forgetSecurePins } from '../utils/securePins';
 
 interface AuthState {
   user: User | null;
@@ -327,7 +328,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // left is this device's copy of it. Same cleanup as logout, plus the E2E
     // vault logout deliberately keeps — every key it pairs with is gone.
     get().logout();
-    if (userId) forgetLocalE2EState(userId);
+    if (userId) {
+      forgetLocalE2EState(userId);
+      // The secure-channel pins pair with the same vanished account.
+      forgetSecurePins(userId);
+    }
     localStorage.removeItem('voxium_trusted_device');
   },
 
@@ -363,3 +368,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set((state) => ({ user: state.user ? { ...state.user, totpEnabled: false } : null }));
   },
 }));
+
+// Secure-channel pins (utils/securePins.ts) follow the signed-in account. One
+// subscription instead of a call per login path (password, TOTP, register,
+// session restore): every path ends in `set({ user })`, synchronously, before
+// any socket event or channel fetch can land — so no channel list is ever
+// normalised against the wrong account (or none). Logout only deactivates;
+// the pins stay for the same account's next login.
+useAuthStore.subscribe((state, prev) => {
+  const id = state.user?.id ?? null;
+  if (id === (prev.user?.id ?? null)) return;
+  if (id) activateSecurePins(id);
+  else deactivateSecurePins();
+});

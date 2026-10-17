@@ -1357,7 +1357,8 @@
     "renaming": "변경 중…",
     "renamed": "채널 이름이 변경되었습니다",
     "failedToRename": "채널 이름 변경에 실패했습니다",
-    "moderationNotSecure": "\"{{name}}\"은(는) 일반 채널입니다 — 사이드바에서 삭제하세요"
+    "moderationNotSecure": "\"{{name}}\"은(는) 일반 채널입니다 — 사이드바에서 삭제하세요",
+    "pinnedDowngrade": "이 채널은 이 기기에서 암호화되어 있지만, 서버는 현재 암호화되지 않은 채널로 표시하고 있습니다."
   },
   "discovery": {
     "tier": {

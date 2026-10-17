@@ -694,6 +694,135 @@ describe('secure channels', () => {
 });
 
 
+// ─── Secure-channel pins: once secure, always secure ────────────────────────
+
+import { toast } from '../../stores/toastStore';
+import { activateSecurePins, deactivateSecurePins, forgetSecurePins, isPinnedSecure, pinSecure } from '../../utils/securePins';
+
+describe('serverStore — secure-channel pins', () => {
+  const chan = (id: string, secure?: boolean, serverId = 'srv-1') =>
+    ({ id, serverId, name: id, type: 'text', ...(secure === undefined ? {} : { secure }) }) as unknown as Channel;
+  let warnToast: ReturnType<typeof vi.spyOn>;
+  let warnLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPost.mockResolvedValue({ data: { data: {} } });
+    mockGet.mockResolvedValue({ data: { data: { channels: [], categories: [], roles: [] } } });
+    deactivateSecurePins();
+    forgetSecurePins('me');
+    activateSecurePins('me');
+    resetMemberLookupState();
+    useServerStore.setState({ activeServerId: null, channels: [], activeChannelId: null, secureChannelMembers: {} });
+    warnToast = vi.spyOn(toast, 'warning').mockImplementation(() => {});
+    warnLog = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnToast.mockRestore();
+    warnLog.mockRestore();
+    deactivateSecurePins();
+    forgetSecurePins('me');
+  });
+
+  const fetchServer = async (channels: Channel[]) => {
+    mockGet.mockResolvedValueOnce({ data: { data: { channels, categories: [], roles: [] } } });
+    // A second GET (the People slice) is harmless
+    await useServerStore.getState().setActiveServer('srv-1');
+  };
+
+  it('a channel fetched as secure is pinned', async () => {
+    await fetchServer([chan('ch-sec', true), chan('ch-plain', false)]);
+    expect(isPinnedSecure('ch-sec')).toBe(true);
+    expect(isPinnedSecure('ch-plain')).toBe(false);
+  });
+
+  it('a pinned id listed as secure: false is stored as secure, with one warning and one toast per session', async () => {
+    pinSecure('ch-sec');
+    await fetchServer([chan('ch-sec', false), chan('ch-plain', false)]);
+    const stored = useServerStore.getState().channels;
+    expect(stored.find((c) => c.id === 'ch-sec')?.secure).toBe(true);
+    expect(stored.find((c) => c.id === 'ch-plain')?.secure).toBe(false);
+    expect(warnToast).toHaveBeenCalledTimes(1);
+    expect(warnToast.mock.calls[0][0]).toMatch(/encrypted on this device/);
+    expect(warnLog.mock.calls.filter((c: unknown[]) => String(c[0]).includes('ch-sec'))).toHaveLength(1);
+
+    // A refetch (reconnect, tab return) does not stack warnings
+    useServerStore.setState({ activeServerId: null });
+    await fetchServer([chan('ch-sec')]);
+    expect(useServerStore.getState().channels.find((c) => c.id === 'ch-sec')?.secure).toBe(true);
+    expect(warnToast).toHaveBeenCalledTimes(1);
+  });
+
+  it('addChannel of a new secure channel pins it, even for a server not being viewed', () => {
+    useServerStore.setState({ activeServerId: 'srv-other' });
+    useServerStore.getState().addChannel(chan('ch-new', true));
+    expect(isPinnedSecure('ch-new')).toBe(true);
+    expect(useServerStore.getState().channels).toHaveLength(0);
+  });
+
+  it('addChannel of a pinned id arriving without the flag stores it as secure', () => {
+    pinSecure('ch-sec');
+    useServerStore.setState({ activeServerId: 'srv-1' });
+    useServerStore.getState().addChannel(chan('ch-sec', false));
+    expect(useServerStore.getState().channels[0].secure).toBe(true);
+    expect(warnToast).toHaveBeenCalledTimes(1);
+  });
+
+  it('updateChannelData cannot clear the flag of a pinned channel', () => {
+    useServerStore.setState({ activeServerId: 'srv-1' });
+    useServerStore.getState().addChannel(chan('ch-sec', true));
+    useServerStore.getState().updateChannelData({ ...chan('ch-sec', false), name: 'renamed' } as Channel);
+    const ch = useServerStore.getState().channels[0];
+    expect(ch.secure).toBe(true);
+    expect(ch.name).toBe('renamed');
+    // Omitting the flag entirely is no different
+    useServerStore.getState().updateChannelData(chan('ch-sec'));
+    expect(useServerStore.getState().channels[0].secure).toBe(true);
+  });
+
+  it('a plaintext channel that was never pinned stays plaintext and raises nothing', () => {
+    useServerStore.setState({ activeServerId: 'srv-1' });
+    useServerStore.getState().addChannel(chan('ch-plain', false));
+    useServerStore.getState().updateChannelData({ ...chan('ch-plain', false), name: 'x' } as Channel);
+    expect(useServerStore.getState().channels[0].secure).toBe(false);
+    expect(warnToast).not.toHaveBeenCalled();
+  });
+
+  it('pins stay after channel removal (delete-then-recreate under the same id is the bypass)', () => {
+    useServerStore.setState({ activeServerId: 'srv-1' });
+    useServerStore.getState().addChannel(chan('ch-sec', true));
+    useServerStore.getState().removeChannel('ch-sec', 'srv-1');
+    expect(isPinnedSecure('ch-sec')).toBe(true);
+    useServerStore.getState().addChannel(chan('ch-sec', false));
+    expect(useServerStore.getState().channels[0].secure).toBe(true);
+  });
+
+  it('the secure-channel create response pins the new channel', async () => {
+    mockPost.mockResolvedValueOnce({ data: { data: { id: 'sec-created', name: 'covert', secure: true } } });
+    await useServerStore.getState().createSecureChannel('srv-1', 'covert', ['u2']);
+    expect(isPinnedSecure('sec-created')).toBe(true);
+  });
+
+  it('a successful secure-channel members fetch pins the channel; a failed one does not', async () => {
+    mockGet.mockResolvedValueOnce({ data: { data: [] } });
+    await useServerStore.getState().fetchSecureChannelMembers('srv-1', 'sec-members');
+    expect(isPinnedSecure('sec-members')).toBe(true);
+
+    mockGet.mockRejectedValueOnce(new Error('404'));
+    await expect(useServerStore.getState().fetchSecureChannelMembers('srv-1', 'sec-missing')).rejects.toThrow();
+    expect(isPinnedSecure('sec-missing')).toBe(false);
+  });
+
+  it('before an account is active nothing is pinned and nothing is upgraded', () => {
+    deactivateSecurePins();
+    useServerStore.setState({ activeServerId: 'srv-1' });
+    useServerStore.getState().addChannel(chan('ch-sec', true));
+    activateSecurePins('me');
+    expect(isPinnedSecure('ch-sec')).toBe(false);
+  });
+});
+
 // ─── Server discovery — the owner side ──────────────────────────────────────
 
 import type { ServerJoinRequest, ServerBan } from '@voxium/shared';

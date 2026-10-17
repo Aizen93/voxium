@@ -9,6 +9,7 @@ import { useVoiceStore } from '../../stores/voiceStore';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { composeSnapshotCanvas, encodeSnapshot, encodeSnapshotPng } from '../../utils/shareSnapshot';
+import { isSecureChannelId } from '../../utils/secureChannelGate';
 
 /**
  * Snapshot of the share (item 10): one button, three exits — copy to the
@@ -166,7 +167,11 @@ export function SnapshotMenu({
     }
     try {
       const { data } = await api.get(`/servers/${serverId}/channels`);
-      const list = (data.data as Channel[]).filter((c) => c.type === 'text' && c.secure !== true);
+      const fetched = data.data as Channel[];
+      // A snapshot is a PLAINTEXT upload: a channel this device has pinned as
+      // secure stays off the list even when the server now lists it without
+      // the flag (a flipped flag must not turn a secure channel into a target).
+      const list = fetched.filter((c) => c.type === 'text' && !isSecureChannelId(c.id, fetched));
       setChannels(list);
     } catch (err) {
       console.warn('[Snapshot] channel list failed:', err);

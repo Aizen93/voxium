@@ -27,6 +27,7 @@ import {
   buildMegolmEnvelope,
   parseE2EPlaintext,
   e2eChannelScope,
+  parseE2EScope,
 } from '@voxium/shared';
 import type {
   E2EDeviceEntry,
@@ -61,6 +62,7 @@ import {
   type PinnedIdentity,
   vaultDbName,
 } from './vault';
+import { pinSecure } from '../../utils/securePins';
 
 interface OneTimeKeyPair {
   keyId: string;
@@ -2175,6 +2177,7 @@ export class E2EService {
     };
     this.inbound.set(meta.sessionId, { session, record });
     await this.vault.putInboundGroupSession(meta.sessionId, record);
+    this.pinSecureScope(meta.conversationId);
     return true;
   }
 
@@ -2888,6 +2891,18 @@ export class E2EService {
   }
 
   /**
+   * A group session under a `ch:` scope is a member's device saying "this
+   * channel is end-to-end encrypted" — the one signal about a secure channel
+   * that does not come from the channel list. Pinned on this device
+   * (utils/securePins.ts) so a later list that drops the flag cannot downgrade
+   * the channel; for a new device this is the first-contact pin source.
+   */
+  private pinSecureScope(scope: string): void {
+    const parsed = parseE2EScope(scope);
+    if (parsed.kind === 'channel') pinSecure(parsed.channelId);
+  }
+
+  /**
    * Decrypt one megolm1 body and bind its ratchet position. The session checks
    * say WHO wrote it and WHERE; the position binding says WHICH message it is.
    * Every refusal returns null, so the caller renders the same "unable to
@@ -2934,6 +2949,7 @@ export class E2EService {
     result.free();
     entry.record.pickle = entry.session.pickle(this.vault.pickleKey());
     await this.vault.putInboundGroupSession(sessionId, entry.record);
+    this.pinSecureScope(entry.record.conversationId);
 
     // A Megolm ciphertext decrypts forever, so the checks above cannot tell a
     // new message from an authentic old one the server re-served: each

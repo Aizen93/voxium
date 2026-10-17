@@ -1360,7 +1360,8 @@
     "renaming": "Wird umbenannt…",
     "renamed": "Kanal umbenannt",
     "failedToRename": "Kanal konnte nicht umbenannt werden",
-    "moderationNotSecure": "„{{name}}“ ist ein regulärer Kanal — lösche ihn stattdessen über die Seitenleiste"
+    "moderationNotSecure": "„{{name}}“ ist ein regulärer Kanal — lösche ihn stattdessen über die Seitenleiste",
+    "pinnedDowngrade": "Dieser Kanal ist auf diesem Gerät verschlüsselt; der Server führt ihn jetzt als unverschlüsselt."
   },
   "discovery": {
     "tier": {

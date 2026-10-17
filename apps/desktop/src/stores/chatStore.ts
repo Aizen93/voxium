@@ -9,6 +9,7 @@ import { useServerStore } from './serverStore';
 import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
 import { ownSentRow } from '../services/e2e/displayGate';
+import { isSecureChannelId } from '../utils/secureChannelGate';
 import {
   decryptChannelMessagesForDisplay,
   prepareOutgoingChannelMessage,
@@ -20,9 +21,9 @@ import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMe
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** Secure channels are decided by the channel list the server already gave us. */
+/** Secure channels: the loaded channel list OR this device's pin (utils/secureChannelGate.ts) — never the server's flag alone. */
 function isSecureChannel(channelId: string): boolean {
-  return useServerStore.getState().channels.some((c) => c.id === channelId && c.secure === true);
+  return isSecureChannelId(channelId, useServerStore.getState().channels);
 }
 
 // Track current fetch to prevent duplicate requests
