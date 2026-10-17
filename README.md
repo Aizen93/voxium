@@ -30,13 +30,13 @@ Self-host it, audit the code, and own your conversations. No corporation sitting
 <td width="50%">
 
 ### Advanced Permission System
-Role-based access control with 20 granular permission flags, per-channel overrides (allow/deny/inherit), role hierarchy enforcement, and a permission calculator that resolves @everyone → role permissions → channel overrides. Admins manage roles, assign them to members, and configure channel-specific restrictions — all through the UI.
+Role-based access control with 21 granular permission flags, per-channel overrides (allow/deny/inherit), role hierarchy enforcement, and a permission calculator that resolves @everyone → role permissions → channel overrides. Admins manage roles, assign them to members, and configure channel-specific restrictions — all through the UI.
 
 </td>
 <td width="50%">
 
 ### Production-Ready Voice
-mediasoup SFU handles 25+ users per voice channel with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing with live annotations and source-composited privacy masks, and voice quality selector. DM calls use direct P2P WebRTC with Perfect Negotiation, routed through a private self-hosted STUN server (coturn) — no third-party relay.
+mediasoup SFU, load-tested with 25 users per voice channel, with AI noise suppression (RNNoise ML), silence detection (70-94% bandwidth savings), push-to-talk, screen sharing with live annotations and source-composited privacy masks, and voice quality selector. DM calls use direct P2P WebRTC with Perfect Negotiation, routed through a private self-hosted STUN server (coturn) — no third-party relay.
 
 </td>
 </tr>
@@ -78,7 +78,7 @@ All DMs are end-to-end encrypted by default — Olm/Megolm double-ratchet (vodoz
 <td width="50%">
 
 ### Built for Multi-Node Scale
-Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-node events, Redis-backed presence and voice state, channel-affinity voice relay so each voice channel lives on exactly one mediasoup node with automatic takeover when a node crashes, cross-node DM calls, and heartbeat-gated cleanup. Validated live: 35/35 cross-node scenarios including real RTP and hard owner-crash takeover.
+The code is multi-node capable: shared state lives in Redis, voice channels follow a node and survive a node crash, and DM calls work across nodes. Validated across nodes with the in-repo test script (`scripts/test-multi-node.ts`), including real voice media and a hard owner-crash takeover.
 
 </td>
 </tr>
@@ -93,10 +93,11 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | **Communication** | Servers & Channels | Create servers, organize with categories, text and voice channels, drag-and-drop reordering, single-use invite links |
 | | Real-Time Messaging | Instant delivery, typing indicators, cursor-based pagination, unread badges per channel and server |
 | | Message Replies | Reply with compact preview, click to scroll to original, graceful handling of deleted parents |
-| | Message Editing & Deletion | Edit inline, delete with confirmation; admins can delete any message |
+| | Message Editing & Deletion | Edit inline, delete with confirmation; members with Manage Messages can delete any message |
 | | Reactions | Emoji reactions with grouped display and toggle support (channels and DMs) |
 | | Direct Messages | 1-on-1 text with real-time delivery, typing indicators, reactions, persistent unread tracking, conversation deletion |
-| | Message Search | Full-text search across server channels and DM conversations with jump-to-message navigation; encrypted conversations search this device's decrypted history locally |
+| | Message Search | Case-insensitive search across server channels and DM conversations with jump-to-message navigation; encrypted conversations search this device's decrypted history locally |
+| | Server Discovery | Public server directory (Explore) with search, tags and transparent activity-based sorts; owners choose open joins or approval-based join requests and can hide their server from the directory |
 | **Encryption** | E2E Direct Messages | Always-on end-to-end encryption for every DM (Olm/Megolm via vodozemac WASM) — no opt-in, no plaintext fallback; the server stores only ciphertext |
 | | Multi-Device | Up to 5 devices per account with per-device key shares; link a new device with a short code; revoke any device and conversations re-key instantly |
 | | Cross-Signing & Safety Numbers | One safety number per account, verified out-of-band; key changes surface loud warnings that must be explicitly accepted |
@@ -104,7 +105,7 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | | E2E-Authenticated Calls | DM calls are P2P DTLS-SRTP with signaling sealed in Olm envelopes pinned to the peer's device — a compromised relay cannot substitute or inject call setup; plaintext signals abort the call |
 | | Encrypted Attachments | DM and secure-channel attachments are encrypted client-side; the server stores opaque blobs with forced generic names |
 | | Key & History Backup | Encrypted account-key backup with a recovery key, plus message-key backup so history follows the account to new devices |
-| **Voice** | Server Voice (SFU) | mediasoup Selective Forwarding Unit for scalable voice (25+ users per channel), speaking indicators, latency display |
+| **Voice** | Server Voice (SFU) | mediasoup Selective Forwarding Unit for scalable voice (load-tested with 25 users per channel; per-channel cap configurable by admins), speaking indicators, latency display |
 | | DM Voice Calls | 1-on-1 WebRTC P2P audio with Perfect Negotiation, E2E-authenticated signaling (Olm-enveloped, device-pinned), private STUN server (coturn), incoming call modal, ringtone, speaking indicators, call history as system messages |
 | | Screen Sharing | Share screen in voice channels with real-time video and system audio, inline/floating viewer modes |
 | | Screen Annotations & Overlays | Draw (pen/highlighter/shapes/text) and place movable image overlays (logos, promos) over a live share — rendered vector-crisp on every viewer, synced in real time, late joiners included |
@@ -116,7 +117,7 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | | Mute/Deaf Controls | Self mute/deaf persisted across sessions; server force-mute/deafen by moderators (persists via Redis, cannot be bypassed) |
 | | Voice Moderation | Server mute/deafen (persists across reconnect via Redis), cross-channel force-move, role hierarchy enforcement |
 | **Permissions** | Custom Roles | Create unlimited custom roles with names, colors, and granular permissions; role hierarchy enforcement prevents privilege escalation |
-| | 20 Permission Flags | VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, and 12 more |
+| | 21 Permission Flags | VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, and 13 more |
 | | Channel Overrides | Per-channel permission overrides with allow/deny/inherit tri-state per role — restrict #announcements to read-only, hide #staff channels |
 | | Permission Calculator | Layered resolution: @everyone base → OR all role permissions → channel overrides; ADMINISTRATOR bypasses everything |
 | | Voice Moderation | Server mute/deafen (persists across reconnect via Redis), cross-channel force-move, role hierarchy enforcement |
@@ -126,7 +127,7 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | | Presence | Real-time online/offline status for all server members and DM participants |
 | **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/server/ban management, storage management (avatars/icons/attachments with top uploaders and orphan cleanup), live metrics, audit log, moderation queue |
 | | Resource Limits | Dynamic limits (max channels, voice users, categories, members) — global defaults with per-server overrides |
-| | Feature Flags | Toggle registration, invites, server creation, voice, DM voice, support — Redis-backed, no redeploy needed |
+| | Feature Flags | Toggle registration, invites, server creation, voice, DM voice, support, server discovery and more — Redis-backed, no redeploy needed |
 | | Reports & Moderation | User/message reports, admin moderation queue with resolve/dismiss/ban workflows |
 | | Support Tickets | One-per-user real-time chat with staff, admin claim/close workflow, audit logging |
 | **Security** | Two-Factor Auth | TOTP 2FA with authenticator app support, QR code setup, 8 backup codes, 30-day trusted device tokens |
@@ -142,8 +143,8 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | **Platform** | File Uploads | S3-compatible storage for avatars, server icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
 | | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
 | | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with polished dark UI |
-| | Multi-Node Clustering | Socket.IO Redis adapter, Redis-backed presence/voice state, channel-affinity voice relay with automatic crash takeover, cross-node DM calls — validated live across nodes |
-| | Self-Hosted STUN | Private coturn STUN server for P2P WebRTC — STUN URL derived from your server hostname, zero reliance on Google or third-party STUN/TURN services |
+| | Multi-Node Capable | The code runs across several nodes with shared Redis state, voice channels that survive a node crash and cross-node DM calls — validated with `scripts/test-multi-node.ts` |
+| | Self-Hosted STUN | Private coturn STUN server for P2P WebRTC — STUN URL derived from your server hostname (or set explicitly with `VITE_STUN_URL`), zero reliance on Google or third-party STUN/TURN services |
 | | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |
 
 ---
@@ -152,8 +153,8 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 
 | Layer | Technologies |
 |-------|-------------|
-| Backend | Node.js, Express 5, Socket.IO, Prisma 7, PostgreSQL, Redis 5 |
-| Frontend | React 19, TypeScript, Vite 7, Zustand, Tailwind CSS 4 |
+| Backend | Node.js, Express 5, Socket.IO 4, Prisma 7, PostgreSQL, Redis 7 |
+| Frontend | React 19, TypeScript, Vite 8, Zustand 5, Tailwind CSS 4 |
 | Desktop | Tauri 2 (Rust) |
 | Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM, Web Audio API |
 | Testing | Vitest, Supertest, Playwright (E2E) |
@@ -168,9 +169,9 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 | Tool | Version | Purpose |
 |------|---------|---------|
 | **Node.js** | >= 20.x | JavaScript runtime |
-| **pnpm** | >= 9.x | Package manager |
+| **pnpm** | >= 10.x | Package manager |
 | **PostgreSQL** | >= 15.x | Database (local installation) |
-| **Docker** & **Docker Compose** | Latest | Redis container |
+| **Docker** & **Docker Compose** | Latest | Redis (and dev STUN) containers |
 | **Rust** | Latest stable | Required by Tauri for desktop builds |
 | **Git** | Latest | Version control |
 
@@ -223,6 +224,8 @@ psql -U postgres -c "CREATE DATABASE voxium;"
 docker compose up -d
 ```
 
+This starts Redis 7 and a self-hosted STUN server (coturn) for DM calls.
+
 ### 5. Configure Environment
 ```bash
 cp apps/server/.env.example apps/server/.env
@@ -254,7 +257,8 @@ pnpm run build:shared
 
 **Option A: Start everything together**
 ```bash
-pnpm run dev
+pnpm run dev       # backend + admin dashboard + Tauri desktop app (needs Rust; Tauri serves the web client on 8080 itself)
+pnpm run dev:web   # backend + browser client only — no admin, no Rust build
 ```
 
 **Option B: Start individually (recommended)**
@@ -359,6 +363,7 @@ JWT_SECRET=your_random_64_char_secret
 JWT_REFRESH_SECRET=another_random_64_char_secret
 
 # ── TOTP (generate with: openssl rand -hex 32) ───────────────────────────────
+# Required: the server refuses to start in production without it
 TOTP_ENCRYPTION_KEY=your_32_byte_hex_key
 
 # ── S3 / Object Storage (required for file uploads) ──────────────────────────
@@ -368,7 +373,7 @@ S3_ACCESS_KEY=your_access_key
 S3_SECRET_KEY=your_secret_key
 S3_ASSETS_BUCKET=your-bucket-name
 
-# ── SMTP (optional, for password reset emails) ───────────────────────────────
+# ── SMTP (required: email verification and password reset) ──────────────────
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_USER=your_smtp_user
@@ -379,20 +384,28 @@ SMTP_FROM=noreply@yourdomain.com
 PORT=3001
 # CORS_ORIGIN must match the URL where your frontend is hosted.
 # For local testing with the dev frontend, use: http://localhost:8080
-CORS_ORIGIN=https://yourdomain.com
+# Add the Tauri desktop origins so the native apps can connect too:
+# https://tauri.localhost (Windows), tauri://localhost (macOS), http://tauri.localhost (Linux)
+CORS_ORIGIN=https://yourdomain.com,https://tauri.localhost,tauri://localhost,http://tauri.localhost
 CLIENT_URL=https://yourdomain.com
+# Set to true when running behind a reverse proxy (nginx etc.)
+TRUST_PROXY=true
 
 # ── mediasoup (Voice) ────────────────────────────────────────────────────────
 # ANNOUNCED_IP must be your server's public IP for voice to work
+# One WebRtcServer per worker (one worker per CPU core, max 8) on MIN_PORT + slot,
+# udp+tcp — MIN..MIN+7 covers any host, and the compose file publishes exactly this range
 MEDIASOUP_LISTEN_IP=0.0.0.0
 MEDIASOUP_ANNOUNCED_IP=YOUR_SERVER_PUBLIC_IP
 MEDIASOUP_MIN_PORT=10000
-MEDIASOUP_MAX_PORT=10100
+MEDIASOUP_MAX_PORT=10007
 ```
+
+See `.env.production.example` for the full list of options (S3 encryption, proxy hops, logging).
 
 > **Important:** `MEDIASOUP_ANNOUNCED_IP` must be your server's public IP address. Voice channels will not work without this.
 
-> **Windows users:** If ports 10000-10100 conflict with Hyper-V reserved ranges, use a different range like `20000-20100`.
+> **Windows users:** If ports 10000-10007 conflict with Hyper-V reserved ranges, use a different range like `20000-20007`.
 
 ### 3. Start the Stack
 
@@ -404,11 +417,11 @@ This starts three services:
 
 | Service           | Description              | Port     |
 | ----------------- | ------------------------ | -------- |
-| `voxium-server`   | Backend API + WebSocket  | 3001     |
+| `voxium-server`   | Backend API + WebSocket  | 3001, plus the mediasoup range (UDP + TCP) |
 | `voxium-postgres` | PostgreSQL 16            | internal |
 | `voxium-redis`    | Redis 7                  | internal |
 
-Database migrations run **automatically** on first startup — no manual steps needed.
+Database migrations run **automatically** on every container start (`migrate deploy`) — no manual steps needed.
 
 ### 4. Verify It's Running
 
@@ -452,8 +465,8 @@ docker compose -f docker-compose.production.yml --env-file .env.production up -d
 ### Production Recommendations
 
 - Put **nginx** or another reverse proxy in front for TLS/SSL termination
-- Open UDP ports for the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall
-- For better reliability, use a managed PostgreSQL instance (override `DATABASE_URL` directly)
+- Open the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall — UDP, plus TCP as a fallback
+- For better reliability, use a managed PostgreSQL instance (change `DATABASE_URL` in `docker-compose.production.yml` — its `environment:` entry takes precedence over `.env.production`)
 - Set up regular database backups
 
 ---
@@ -464,7 +477,7 @@ docker compose -f docker-compose.production.yml --env-file .env.production up -d
 # Open Prisma Studio (visual database browser)
 pnpm run db:studio
 
-# Create a new migration
+# Create a new migration (Prisma 7 must run from apps/server)
 cd apps/server
 npx prisma migrate dev --name your_migration_name
 
@@ -480,6 +493,8 @@ Demo seed creates:
 - **Server:** "Voxium Community" with text and voice channels
 - **Messages:** Sample messages in #general
 
+> **Note:** usernames are kept case-insensitively unique by a functional index Prisma cannot express, so `prisma migrate dev` reports it as drift and may offer to reset the database or drop it. Do not accept — keep the index.
+
 ---
 
 ## Testing the API
@@ -490,22 +505,19 @@ curl http://localhost:3001/health
 ```
 
 ### Register a User
-```bash
-curl -X POST http://localhost:3001/api/v1/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"testuser","email":"test@example.com","password":"password123"}'
-```
+
+Registration cannot be done with a single `curl`: `POST /api/v1/auth/register` requires a solved proof-of-work (`GET /api/v1/auth/register-challenge`, solved with `solveRegistrationPow` from `@voxium/shared`) and explicit `acceptTerms: true` / `acceptPrivacy: true` consent, and a new account must verify its email before it can use the API. Register through the app, or log in with a seeded demo account as below.
 
 ### Login
 ```bash
 curl -X POST http://localhost:3001/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"test@example.com","password":"password123"}'
+  -d '{"email":"alice@example.com","password":"password123"}'
 ```
 
 ### Use the Token
 ```bash
-# Replace <TOKEN> with the accessToken from login response
+# Replace <TOKEN> with data.accessToken from the login response
 curl http://localhost:3001/api/v1/servers \
   -H "Authorization: Bearer <TOKEN>"
 ```
@@ -523,7 +535,7 @@ curl http://localhost:3001/api/v1/servers \
 | `JWT_SECRET` | — | **Required.** Secret for signing access tokens |
 | `JWT_REFRESH_SECRET` | — | **Required.** Secret for signing refresh tokens |
 | `JWT_EXPIRES_IN` | `15m` | Access token expiry |
-| `JWT_REFRESH_EXPIRES_IN` | `7d` | Refresh token expiry |
+| `JWT_REFRESH_EXPIRES_IN` | `30d` | Refresh token expiry for "remember me" sessions (otherwise 24h); `.env.example` sets `7d` |
 | `PORT` | `3001` | HTTP server port |
 | `NODE_ENV` | `development` | Environment mode |
 | `CORS_ORIGIN` | `http://localhost:8080` | Allowed CORS origin(s) |
@@ -532,6 +544,7 @@ curl http://localhost:3001/api/v1/servers \
 | `S3_ACCESS_KEY` | — | S3 access key |
 | `S3_SECRET_KEY` | — | S3 secret key |
 | `S3_ASSETS_BUCKET` | — | S3 bucket name |
+| `S3_SSE` | — | Optional bucket-default encryption at rest: `AES256` or `aws:kms` |
 | `SMTP_HOST` | `localhost` | SMTP server host |
 | `SMTP_PORT` | `1025` | SMTP server port |
 | `SMTP_USER` | — | SMTP auth username |
@@ -539,8 +552,12 @@ curl http://localhost:3001/api/v1/servers \
 | `SMTP_FROM` | `noreply@voxium.app` | Sender email address |
 | `CLIENT_URL` | `http://localhost:8080` | Frontend URL (used in emails) |
 | `CLEANUP_REPORT_EMAIL` | — | Email address for daily attachment cleanup reports. If not set, no report is sent. |
-| `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. Optional — if not set, TOTP secrets are stored unencrypted. |
-| `MEDIASOUP_ANNOUNCED_IP` | — | Public IP address announced to WebRTC clients for mediasoup SFU connectivity. Required for production. |
+| `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. **Required in production** (the server refuses to start without it); in development it is optional and TOTP secrets are stored unencrypted with a warning. |
+| `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` headers (always on when `NODE_ENV=production`) |
+| `TRUST_PROXY_HOPS` | `1` | Number of reverse proxies in front of the server — must match your setup exactly |
+| `MEDIASOUP_LISTEN_IP` | `0.0.0.0` | IP the mediasoup workers bind to |
+| `MEDIASOUP_ANNOUNCED_IP` | `127.0.0.1` | IP address announced to WebRTC clients for mediasoup SFU connectivity. Set it to the machine's LAN IP for cross-machine voice in development, and its public IP in production. |
+| `MEDIASOUP_MIN_PORT` / `MEDIASOUP_MAX_PORT` | `10000` / `59999` | mediasoup port range. Each worker (one per CPU core, max 8) binds one UDP + TCP port at `MIN_PORT + slot`, so only the first few ports are used |
 
 ### Frontend Environment Variables (`apps/desktop/.env`)
 
@@ -548,6 +565,7 @@ curl http://localhost:3001/api/v1/servers \
 |----------|---------|-------------|
 | `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
 | `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
+| `VITE_STUN_URL` | `stun:<VITE_WS_URL host>:3478` | Optional STUN server for DM calls (`stun:`/`stuns:` only). Compiled into the build. |
 
 ### Admin Dashboard Environment Variables (`apps/admin/.env`)
 
@@ -601,23 +619,25 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 
 ## Testing
 
-Voxium has a comprehensive test suite with 940 unit and integration tests covering API routes, middleware, utilities, voice handlers, permission system, themes, DM voice, and security edge cases.
+Voxium has three Vitest suites — over 2,000 server, 1,300 desktop and 25 admin unit and integration tests as of 2026-10-17 — plus a Playwright E2E suite.
 
 ### Running Tests
 
 ```bash
-# Run all tests (unit + integration, ~2s)
+# Run all unit + integration tests (server, then desktop, then admin)
 pnpm test
 
-# Watch mode (re-runs on file changes)
+# Server suite in watch mode (re-runs on file changes)
 pnpm test:watch
 
 # Run with coverage report
 pnpm --filter @voxium/server test:coverage
 
-# Run E2E tests (Playwright starts the backend, desktop and admin apps itself;
-# needs PostgreSQL + Redis, plus an SMTP catcher on :1025 for the
-# email-verification specs — e.g. docker run -p 1025:1025 axllent/mailpit)
+# Run E2E tests (Playwright starts the backend, desktop and admin apps itself,
+# or reuses ones already running on 3001/8080/8082; needs PostgreSQL + Redis,
+# plus an SMTP catcher on :1025 for the email-verification specs — e.g.
+# docker run -p 1025:1025 axllent/mailpit — and a working S3 bucket for the
+# encrypted-attachment upload in the quarantined spec)
 pnpm test:e2e               # Headless
 pnpm test:e2e:ui             # Interactive UI mode
 pnpm test:e2e:headed         # Visible browser
@@ -637,39 +657,17 @@ still run, but in a non-blocking step — see the note at the top of
 
 ### Test Coverage
 
-| Category | Tests | What's Covered |
-|----------|-------|----------------|
-| **Lazy Init Regression** | 44 | Prisma, S3, email, Redis, mediasoup, CORS — catches module-scope env var bugs |
-| **Auth Routes** | 25 | Register, login, refresh, me, change-password, forgot-password, TOTP flow |
-| **Auth Middleware** | 16 | JWT validation, HS256 algorithm pinning, token purpose rejection, email verification gate |
-| **Error Handler** | 16 | Error-to-HTTP mapping, all error classes, production mode |
-| **Server Routes** | 31 | CRUD, membership, permissions, feature flags, socket events |
-| **Channel Routes** | 24 | CRUD, resource limits, categories, socket events |
-| **Message Routes** | 26 | CRUD, IDOR prevention, sanitization, pagination, admin delete |
-| **Invite Routes** | 16 | Create, join (single-use), preview, expiry, member limits |
-| **DM Routes** | 18 | Conversations, messages, cascade delete, authorization |
-| **Upload Routes** | 19 | S3 redirect/proxy, Express 5 wildcards, path traversal prevention |
-| **Permission System** | 119 | Role CRUD, hierarchy enforcement, channel overrides, permission calculator, bitmask utilities |
-| **Voice Handler** | 118 | Transport ACK on all code paths, join validation, mute/deaf/speaking, moderation + deafen-implies-mute, screen-share slot protocol, annotation scene lifecycle/hydration, multi-node routing, secure voice |
-| **Screen Annotations** | 38 | Sharer-only authorization, op/geometry/text validation, scene & byte budgets, image-bomb rejection, restart snapshot + resync ack, shared reducer semantics |
-| **Image Header Parsing** | 4 | PNG/JPEG/WebP dimension extraction from container headers, fail-closed on malformed input |
-| **DM Voice Handler** | 81 | P2P call lifecycle, signal relay, atomic mute/deaf (Lua), call timeout, 1-on-1 capacity, decline auth, mutual exclusivity |
-| **Theme Routes** | 63 | CRUD, publish/unpublish marketplace, browse/search, install count, validation |
-| **Theme Colors** | 11 | Which keys may carry alpha (translucent layers vs opaque surfaces), rgba/hex acceptance, CSS injection rejection, every built-in palette parsed from themes.css and re-validated |
-| **Auth Service** | 22 | Registration, login, tokens, password reset, email normalization |
-| **TOTP Service** | 19 | Setup, enable, verify, disable, encrypt/decrypt roundtrip, backup codes |
-| **Pure Utilities** | 75 | Sanitization, error classes, mentions, reactions, rate limiting |
-| **Server Limits** | 10 | 3-tier resolution (server > global > hardcoded), fallthrough |
-| **Feature Flags** | 6 | Defaults, overrides, unknown flags |
-| **Attachment Cleanup** | 7 | 4 AM scheduling, timer lifecycle |
+- **Server** (`apps/server/src/__tests__/`) — API routes, middleware (auth, rate limiting, consent and email-verification gates), services (auth, TOTP), the permission system, voice and DM-voice socket handlers (including multi-node relay and secure voice), screen-share annotations, E2E key and secure-channel endpoints, registration abuse defenses, server discovery, scheduled cleanup jobs, migrations, and lazy-init regressions
+- **Desktop** (`apps/desktop/src/__tests__/`) — Zustand stores (voice, chat, DM, E2E, annotations, discovery), the socket service, E2E crypto (DMs, secure channels, calls, key backup, the plaintext display gate), hooks, components, i18n key parity across all 11 locales, themes, and SEO/licence guards
+- **Admin** (`apps/admin/src/__tests__/`) — admin dashboard components and store
 
 ### Test Architecture
 
 - **Framework:** [Vitest](https://vitest.dev/) — fast, TypeScript-native, ESM-compatible
 - **HTTP Testing:** [Supertest](https://github.com/ladjs/supertest) for Express route testing without starting a server
 - **Mocking:** Prisma, Redis, S3, Socket.IO, and rate limiters are mocked for isolation
-- **E2E:** [Playwright](https://playwright.dev/) with Chromium against the real dev stack
-- **Test location:** `apps/server/src/__tests__/` (excluded from production `tsc` and `eslint`)
+- **E2E:** [Playwright](https://playwright.dev/) with Chromium (plus Firefox for encrypted voice) against the real dev stack, in `tests/e2e/`
+- **Test location:** `apps/server/src/__tests__/`, `apps/desktop/src/__tests__/` and `apps/admin/src/__tests__/` (server tests are excluded from the production `tsc` build and from ESLint)
 
 ---
 
@@ -677,23 +675,26 @@ still run, but in a non-blocking step — see the note at the top of
 
 | Script | Description |
 |--------|-------------|
-| `pnpm dev` | Start backend and frontend in parallel |
+| `pnpm dev` | Start backend, admin dashboard and Tauri desktop app (which serves the web client on 8080) |
+| `pnpm dev:web` | Start backend and browser client only (no admin, no Rust build) |
 | `pnpm dev:server` | Start backend with hot reload |
 | `pnpm dev:desktop` | Start frontend Vite dev server (browser at localhost:8080) |
 | `pnpm dev:admin` | Start admin dashboard (browser at localhost:8082) |
-| `pnpm build` | Build all packages for production |
+| `pnpm build` | Build shared, server and desktop packages for production |
 | `pnpm build:shared` | Build shared types package |
 | `pnpm build:server` | Build backend TypeScript |
 | `pnpm build:desktop` | Build frontend for production |
+| `pnpm build:admin` | Build admin dashboard for production |
 | `pnpm typecheck` | Run TypeScript type checking across all packages |
 | `pnpm lint` | Run ESLint across all packages |
-| `pnpm test` | Run all server unit + integration tests |
-| `pnpm test:watch` | Run tests in watch mode |
-| `pnpm test:e2e` | Run Playwright E2E tests |
+| `pnpm test` | Run all unit + integration tests (server, desktop and admin suites) |
+| `pnpm test:watch` | Run server tests in watch mode |
+| `pnpm test:e2e` | Run Playwright E2E tests (`test:e2e:ui` / `test:e2e:headed` for UI mode / visible browser) |
 | `pnpm db:migrate` | Run Prisma migrations |
 | `pnpm db:seed` | Seed database with demo data |
 | `pnpm db:studio` | Open Prisma Studio |
-| `npx tsx scripts/test-permissions.ts` | Run permission system integration test (73 assertions, 11 phases) |
+| `npx tsx scripts/test-permissions.ts` | Run permission system integration test against a running backend (11 phases) |
+| `npx tsx scripts/test-multi-node.ts` | Spawn two server nodes and validate cross-node behavior, including real voice media and owner-crash takeover |
 | `npx tsx scripts/load-test-voice.ts` | Voice channel load test with real WebRTC media |
 
 ---

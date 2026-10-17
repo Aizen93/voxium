@@ -59,6 +59,9 @@ importers:
 
   apps/admin:
     dependencies:
+      '@fontsource/inter':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@voxium/shared':
         specifier: workspace:*
         version: link:../../packages/shared

@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.3.0",
     "@voxium/shared": "workspace:*",
     "axios": "^1.18.1",
     "clsx": "^2.1.1",
