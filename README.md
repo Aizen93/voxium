@@ -58,7 +58,7 @@ Fully translated interface with first-class support for English, French, Spanish
 <td width="50%">
 
 ### Privacy-First Architecture
-Zero third-party services in the client and server — no Google STUN, no analytics, no CDNs. Self-hosted STUN via coturn, all media stays on your infrastructure. STUN URL derived from your server hostname — no hardcoded external endpoints. No phone number or ID required to sign up.
+Zero third-party services — no Google STUN, no analytics, no CDNs. Self-hosted STUN via coturn, all media stays on your infrastructure. STUN URL derived from your server hostname — no hardcoded external endpoints. No phone number or ID required to sign up.
 
 </td>
 <td width="50%">
