@@ -60,7 +60,7 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
         messages: {
           orderBy: { createdAt: 'desc' },
           take: 1,
-          select: { id: true, content: true, encrypted: true, createdAt: true, authorId: true },
+          select: { id: true, content: true, encrypted: true, type: true, createdAt: true, authorId: true },
         },
       },
       orderBy: { updatedAt: 'desc' },
@@ -79,6 +79,8 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
             id: c.messages[0].id,
             content: c.messages[0].content,
             encrypted: c.messages[0].encrypted,
+            // the client shows an unencrypted preview ONLY for a system notice
+            type: c.messages[0].type,
             createdAt: c.messages[0].createdAt.toISOString(),
             authorId: c.messages[0].authorId,
           }

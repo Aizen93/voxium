@@ -63,10 +63,13 @@ struct JsEncrypted {
     body: String,
 }
 
-/// Engine/version identifier baked into envelopes and diagnostics.
+/// Engine/version identifier for diagnostics. Envelopes never carry it: they
+/// name the scheme ("e":"olm1"), which stays the same across vodozemac
+/// releases. Keep the version in step with the exact pin in Cargo.toml (a
+/// desktop test reads the pin and fails when they differ).
 #[wasm_bindgen]
 pub fn engine_version() -> String {
-    "olm1/vodozemac-0.10.0".to_string()
+    "olm1/vodozemac-0.11.1".to_string()
 }
 
 // ─── E2E attachment file encryption (spec §13) ───────────────────────────────
@@ -523,7 +526,7 @@ fn open_secret_internal(sealed_b64: &str, context: &str, pickle_key: &[u8]) -> R
 }
 
 /// Verify an Ed25519 signature over a UTF-8 message. Strict verification
-/// (vodozemac 0.10 default). Returns an error when invalid.
+/// (vodozemac's default, verify_strict). Returns an error when invalid.
 #[wasm_bindgen]
 pub fn verify_ed25519(key_b64: &str, message: &str, signature_b64: &str) -> Result<(), JsError> {
     let key = ed_key(key_b64)?;

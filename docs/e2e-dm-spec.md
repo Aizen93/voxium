@@ -1,6 +1,6 @@
 # Voxium E2E DM Protocol Specification (v1 — "olm1")
 
-Status: **shipped (Phase B MVP)** · Engine: vodozemac `=0.10.0` · Envelope: `v1` / engine `olm1`
+Status: **shipped (Phase B MVP)** · Engine: vodozemac `=0.11.1` · Envelope: `v1` / engine `olm1`
 
 This document is normative for the client, the server, and the WASM binding
 layer. Anything ambiguous here is a spec bug — fix the doc, not just the code.
@@ -36,10 +36,14 @@ Double Ratchet messaging), as implemented by
 [vodozemac](https://github.com/matrix-org/vodozemac) — audited by Least
 Authority (2022), Apache-2.0.
 
-- **Version pin:** `vodozemac = "=0.10.0"` (Cargo.toml, `packages/crypto-engine`).
-  0.10.0 includes the defense-in-depth responses to the February 2026 report:
-  fallible `diffie_hellman()` (all-zero shared-secret check) and strict Ed25519
-  signature verification by default. Bumps are gated by the watch workflow (§10).
+- **Version pin:** `vodozemac = "=0.11.1"` (Cargo.toml, `packages/crypto-engine`).
+  Since 0.10.0 vodozemac carries the defense-in-depth responses to the February
+  2026 report: fallible `diffie_hellman()` (all-zero shared-secret check) and
+  strict Ed25519 signature verification by default; 0.11.1 keeps both. The
+  0.10.0 → 0.11.1 bump (2.1.0) changed neither the Olm/Megolm wire format nor
+  the pickle or backup formats — checked cross-version in both directions, so
+  2.0 and 2.1 clients interoperate and existing vaults open. Bumps are gated by
+  the watch workflow (§10).
 - **Session config:** `SessionConfig::version_1()` — the upstream default,
   set explicitly in the binding so an upstream default change cannot silently
   alter the wire format.
@@ -65,7 +69,8 @@ digest (§8), which operates exclusively on public keys. The one secret JS
 handles is the 32-byte pickle key (§7.3).
 
 The engine is versioned: envelopes carry `e: "olm1"`, and
-`engine_version()` reports `olm1/vodozemac-0.10.0`. A future engine (e.g.
+`engine_version()` reports `olm1/vodozemac-0.11.1` (diagnostics only;
+envelopes carry the scheme `olm1`, never this string). A future engine (e.g.
 post-quantum) is introduced as `e: "<new-id>"` — clients negotiate by
 re-establishing sessions; old envelopes remain decodable from the cache.
 
@@ -137,7 +142,7 @@ returns the (reusable) fallback key, marked `type: "fallback"`.
    that user (§4.4). Mismatch → hard `E2EIdentityChangedError`; nothing is
    sent until the user explicitly accepts the new identity.
 4. Only then: `Account::create_outbound_session` (vodozemac re-checks the DH
-   contribution; 0.10.0 rejects all-zero shared secrets).
+   contribution; vodozemac rejects all-zero shared secrets since 0.10.0).
 
 Inbound (`createInboundSession`) passes the **pinned** identity key to
 vodozemac, which rejects pre-key messages not created by that identity.
@@ -182,8 +187,9 @@ send messages"), never a silent downgrade. It is now the only path.
 - Server validation (`parseE2EEnvelope`, shared): strict JSON shape (exactly 4
   keys), engine/type whitelist, base64 charset, ≤ 32 768 chars. **Never
   sanitized** (sanitizeText would corrupt ciphertext), never mention-resolved,
-  **excluded from server search** (`encrypted: false` filter — the pg_trgm
-  index never matches ciphertext).
+  never searched server-side: DMs have no server search route since 2.1 (the
+  client searches its decrypted history), and the server's channel search
+  excludes secure channels outright (§19.5).
 - Server-side enforcement in an encrypted conversation: `encrypted: true`
   required, valid envelope required, **attachments rejected**, **edits
   rejected** (an edit is a fresh ratchet ciphertext an offline peer could
@@ -203,7 +209,8 @@ Per account, IndexedDB `voxium-e2e-{userId}` (`services/e2e/vault.ts`):
 | `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5) |
 | `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
 | `igs:{sessionId}` | an inbound Megolm session + the attribution it arrived under |
-| `pt:{messageId}` | decrypted plaintext `{conversationId, text}` |
+| `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
+| `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 
 Only the `pickle` fields are encrypted (by vodozemac, under the pickle key).
 Everything else in a record — session ids, device ids, counters, and the
@@ -214,10 +221,12 @@ retries re-derive the key from the encrypted inbound session via
 
 ### 7.1 Why a plaintext cache is load-bearing
 
-Ratchet message keys are **one-shot**: a ciphertext can be decrypted exactly
-once. Every fetch from the server returns ciphertext, so the client decrypts
-each message once (socket event or history fetch) and serves every later
-render from the cache, keyed by server message id. Own sent messages are
+Olm ratchet message keys are **one-shot**: a pairwise ciphertext can be
+decrypted exactly once (a Megolm ciphertext decrypts again from the pickled
+session — which is exactly why §9.1 binds each ratchet position to one
+message). Every fetch from the server returns ciphertext, so the client
+decrypts each message once (socket event or history fetch) and serves every
+later render from the cache, keyed by server message id. Own sent messages are
 cached at send time (Olm does not encrypt-to-self). An encrypted message whose
 plaintext is not in the vault (new install, cleared storage) renders an honest
 "Unable to decrypt" placeholder — by design, history does not follow devices.
@@ -268,22 +277,96 @@ verification and shows a warning.
 
 | Surface | Behavior |
 |---|---|
-| Message timeline | decrypted before entering any store; lock placeholder on failure |
-| DM list preview | decrypted live; cache-hydrated on fetch; "🔒 Encrypted message" fallback |
-| Reply previews | resolved from plaintext cache; lock placeholder otherwise |
+| Message timeline | decrypted before entering any store (the display gate, §9.1); lock placeholder on failure |
+| DM list preview | encrypted: decrypted live, cache-hydrated on fetch, the server's `content` blanked on arrival, "🔒 Encrypted message" fallback; unencrypted: only a listed call notice |
+| Reply previews | encrypted quotes resolved from the plaintext cache (same conversation, quoted author); an unencrypted quote shows only when it is a listed call notice; lock placeholder otherwise; a quote without an author is dropped |
 | Notifications | client decrypts first → body shows plaintext locally (never leaves device) |
-| Server search | E2E messages excluded server-side; client-side search is Phase C |
+| Server search | none for DMs (route removed in 2.1); DM history is searched client-side over the local plaintext cache |
+| Plaintext cache | answers only for the scope it was decrypted under and, when recorded, the author who wrote it — the cache must not vouch for a relabelled id or author that the ratchet's bindings refuse |
 | Reports | DMs: reporter's client attaches its decrypted plaintext (`reportedContent`); stored with `contentSource: "reporter"` — flagged unverifiable, ciphertext never copied. Secure channels: not reportable (§19.1) |
 | Attachments | encrypted client-side (AES-256-GCM in the binding); real metadata inside the message ciphertext; server stores opaque blobs (§13) |
 | Edits | fresh ratchet ciphertext under the same id; plaintext cache versioned by editedAt |
 | Logout | WASM objects freed, vault closed but **kept** (device keys persist like trusted-device tokens) |
 
+### 9.1 Display gate
+
+Every DM row — fetched or pushed over the socket — reaches a store only
+through `services/e2e/dmCrypto.ts` (secure channels: `channelCrypto.ts`; the
+shared shapes live in `displayGate.ts`). The gate trusts nothing the crypto
+did not vouch for:
+
+- **Unencrypted rows.** A DM row passes only as a call notice: `type:
+  'system'` AND content exactly one of `DM_SYSTEM_NOTICES` (shared), shown
+  with no attachments and no quote. Secure channels have no notices: every
+  unencrypted row is refused.
+- **The refused shape** (`refusedRow`): content `''`, `type: 'user'`,
+  `encrypted: true` (the "unable to decrypt" marker), no attachments, quote
+  locked. Every failure path returns it — unencrypted row, no conversation id,
+  no signed-in user, decrypt failure, pipeline error; after a decrypt failure
+  the quote may still resolve from the local cache.
+- **Decrypted rows** (`decryptedRow`): text and attachments come out of the
+  payload only; the type is pinned to `user` (a notice is never encrypted).
+- **Server-asserted fields** are always dropped (`withoutServerAssertions`):
+  `e2eAttachments` (built only from the decrypted payload) and `mentions`
+  (never resolved for encrypted rows).
+- **The sender's own row** (`ownSentRow`) is built from local data — the text
+  typed, the files attached, the message replied to, encrypted user row, no
+  plaintext attachment; only the id, timestamps and author block come from
+  the POST reply.
+- **Ratchet positions are bound to one message.** A Megolm ciphertext
+  decrypts forever, and the session checks (§12.3) only say WHO wrote it and
+  WHERE — not WHICH message it is. So after a successful decrypt, and before
+  the plaintext is returned, `decryptGroupMessage` checks the position (S, i)
+  it decrypted at against the row's id and version (`editedAt ?? null`):
+  1. `mi:S:i` names another id, or the same id under another version →
+     **refused** (a replay under a new id; the original ciphertext labelled
+     as an edit that never happened).
+  2. The id's `pt:` entry records the newest version accepted for it; if
+     that is the same session S at a strictly higher index than an already
+     bound i, or at a higher-or-equal index than an unbound i → **refused**
+     (an older ciphertext served as the current version: an edit rolled
+     back, whether the server re-serves the original or an older ciphertext
+     with a fresh `editedAt`).
+  3. `mi:S:i` names this id and version and nothing newer is recorded →
+     accepted (a reload, a re-fetched page, a search jump).
+  4. Unbound and nothing newer → accepted, and `mi:S:i` is written.
+
+  A refusal is an ordinary refused row (above) — the server can always
+  withhold a message, it must never choose which of an author's past words
+  appear when — with a `console.warn` naming ids only; nothing is cached. A
+  refused edit over the socket blanks the row it targets. Rule 2 also
+  refuses a position already bound to the same id and version once a newer
+  version is recorded: a page fetched before an edit but applied after it
+  shows the marker for that row until the next fetch.
+
+  Own messages are read from the cache and never decrypted, so they are
+  bound at SEND time: `encryptMessage` / `encryptChannelMessage` read
+  `messageIndex()` before `encrypt()` and return the position with the
+  envelope; `cacheSentPlaintext` / `cacheSentChannelPlaintext` bind it to the
+  id (and, for an edit, the `editedAt`) the POST/PATCH answered with. That
+  write is serialised with the decrypt queue; if the socket echo already
+  bound the same binding it is left as it is, and if the position is bound
+  to ANOTHER id it is overwritten with a warning — the client's own POST /
+  PATCH answer is the send-time truth.
+
+  Residuals: bindings are per device (a wiped vault or a new device accepts
+  history as it is served, as Matrix clients do); rule 2 says nothing across
+  a session rotation (index spaces are unrelated, so a rollback to a version
+  sent under an earlier session is accepted); a message-key backup restore
+  (§16) brings sessions back, not bindings — restored history binds afresh.
+  Legacy `olm1` pairwise history carries no position and is cache-only.
+
 ## 10. Supply-chain policy
 
-- **Version pinning:** vodozemac pinned exactly (`=0.10.0`); the built WASM
+- **Version pinning:** vodozemac pinned exactly (`=0.11.1`); the built WASM
   artifact is vendored in-repo (`packages/crypto-engine/pkg`) so builds don't
   need a Rust toolchain. Rebuild: `pnpm --filter @voxium/crypto-engine build:wasm`
   (requires rustup target `wasm32-unknown-unknown` + wasm-pack).
+- **Entropy on wasm32:** every `getrandom` major in the tree is told to use the
+  runtime's `crypto.getRandomValues` — 0.2 with `js` (aes-gcm's `rand_core`)
+  and 0.4 with `wasm_js` (vodozemac 0.11, `rand`, `hpke`). Without the feature
+  the build FAILS; it never falls back to a weak source. A future bump that
+  pulls another major needs the same line, or the WASM build stops.
 - **Watch:** `.github/workflows/crypto-deps-watch.yml` runs weekly — checks
   crates.io for newer vodozemac releases and runs `cargo audit` (RustSec)
   against the lockfile; fails loudly so bumps are reviewed deliberately.
@@ -371,6 +454,10 @@ match the row, takes sender attribution from the **authenticated Olm session**
 (pinned per-device identity) rather than the share body, and re-derives the
 session id from the key. On Megolm decrypt, `message.authorId` must equal the
 inbound session's `senderUserId`, else the message is treated as undecryptable.
+And each message index of a session is bound, on this device, to the one
+(message id, version) it was first shown as (`mi:{sessionId}:{messageIndex}`
+in the vault, §7): an index served under another id or version, or below the
+newest version the id has shown in the same session, is refused (§9.1).
 
 ### 12.4 Rotation
 
@@ -446,6 +533,9 @@ read.
   by `rateLimitE2EDevice` (5/hour) and harmless (a 6th device is still fully
   authenticated).
 - History does not follow a new device (no key backup) — by design, §11.
+- Ratchet-position bindings (§9.1) are per device and per session: a new
+  device or wiped vault binds history as it is served, and an edit rolled
+  back to a version sent under an EARLIER session is not detected.
 - ~~Cross-signing~~ — shipped, see §14: one safety number per account, and
   device trust is now a signature check rather than a user judgement call.
 
@@ -1092,8 +1182,9 @@ verbatim (never sanitized), mentions never resolved, excluded from server
 search (`encrypted: false` filter + secure channels dropped from the channel
 enumeration), edits are fresh ciphertexts under the same id, attachments
 presign only as opaque `application/octet-stream` blobs with server-forced
-names. The client refuses `encrypted: false` user rows in a secure channel —
-the same forgery rule as §9's DM table.
+names. The client refuses EVERY unencrypted row in a secure channel, `type: 'system'`
+included (channels never carry server notices) — the §9 display gate, with no
+notice exception.
 
 Client search over a secure channel runs on this device's plaintext cache,
 like encrypted DMs. Unlike encrypted DMs, secure-channel messages are NOT
@@ -1122,6 +1213,51 @@ DMs only.
   transfer (consistent with no-history-on-join).
 - ~~Voice is out of scope~~ — shipped as secure VOICE channels (§21):
   encoded-frame E2E audio through the SFU, audio-only in v1.
+- Replay and rollback of a secure-channel message share the DM rule (§9.1)
+  and its residuals: per device, and blind across a session rotation.
+- First contact (§19.7): a device that has never seen a channel as secure
+  has nothing to pin against.
+
+### 19.7 The client pin
+
+The server marks `secure` immutable at creation, but every client decision —
+the fetch gate, the socket gate, the encrypted send, the lock icon, the
+secure-voice join, search — used to read the flag off the server's channel
+list. A list that answered `secure: false` would have rendered forged
+plaintext unlocked and sent the user's next message in the clear. So the
+client pins: once this device has seen a channel as secure, it stays secure
+for that account (`utils/securePins.ts`, localStorage
+`vox:securePins:{userId}`, validated on load, never networked).
+
+- **Sources of a pin:** a channel record arriving with `secure: true`; the
+  secure-channel create response; a successful members fetch (that endpoint
+  answers only for secure channels); a key share for a `ch:{channelId}` scope
+  — `E2EService.pinSecureScope`, called when an inbound group session is
+  imported and when one decrypts, so a new device pins before it has ever
+  loaded the channel list.
+- **One normalisation point:** `withSecurePins` / `withSecurePin` in
+  `serverStore` is the only way a channel record enters the store (server
+  detail fetch, `addChannel`, `updateChannelData`). A pinned id arriving
+  without the flag is stored as `secure: true`. Consumers that may not have
+  the record (a `message:new` for a server not being viewed, the chat fetch
+  and send paths) ask `utils/secureChannelGate.ts`: store flag OR pin (OR, for
+  a message, its own `encrypted: true` — always a safe reason to decrypt,
+  never a reason to skip it).
+- **A downgrade is shown, not followed:** a one-time warning toast per
+  channel per activation (per login or page load) plus a `console.warn`
+  naming the id; the channel keeps its lock, plaintext rows render as the
+  refused row, sends are encrypted (a server that also withholds the device
+  list makes the send fail, never go out in the clear), and voice takes the
+  secure path.
+- **Lifetime:** never un-pinned — not on `channel:deleted` (delete-then-
+  recreate under the same id is the obvious bypass), not on leave, kick or
+  logout. Cleared only by self-service account deletion
+  (`forgetSecurePins`), alongside the E2E vault.
+- **Residual: first contact.** A fresh install that has never loaded the
+  channel as secure and never received one of its keys has nothing to pin
+  against; a server that withholds the key shares AND flips the flag still
+  wins on that device. Closing it needs a creator-signed channel manifest —
+  a later design.
 
 ## 20. E2E-authenticated DM call signaling (shipped)
 

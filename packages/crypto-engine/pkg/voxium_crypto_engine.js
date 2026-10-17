@@ -1132,7 +1132,10 @@ export function encryptAttachment(bytes) {
 }
 
 /**
- * Engine/version identifier baked into envelopes and diagnostics.
+ * Engine/version identifier for diagnostics. Envelopes never carry it: they
+ * name the scheme ("e":"olm1"), which stays the same across vodozemac
+ * releases. Keep the version in step with the exact pin in Cargo.toml (a
+ * desktop test reads the pin and fails when they differ).
  * @returns {string}
  */
 export function engine_version() {
@@ -1433,7 +1436,7 @@ export function sealSecret(plaintext, context, pickle_key) {
 
 /**
  * Verify an Ed25519 signature over a UTF-8 message. Strict verification
- * (vodozemac 0.10 default). Returns an error when invalid.
+ * (vodozemac's default, verify_strict). Returns an error when invalid.
  * @param {string} key_b64
  * @param {string} message
  * @param {string} signature_b64
@@ -1487,6 +1490,9 @@ function __wbg_get_imports() {
         },
         __wbg_getRandomValues_c44a50d8cfdaebeb: function() { return handleError(function (arg0, arg1) {
             arg0.getRandomValues(arg1);
+        }, arguments); },
+        __wbg_getRandomValues_cc7f052a444bb2ce: function() { return handleError(function (arg0, arg1) {
+            globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
         }, arguments); },
         __wbg_length_1f0964f4a5e2c6d8: function(arg0) {
             const ret = arg0.length;

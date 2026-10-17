@@ -18,6 +18,8 @@ const SOURCES = [
   fileURLToPath(new URL('../../components/server/SecureChannelMembersModal.tsx', import.meta.url)),
   // membersNotReady toast lives in the store's send path, reached via i18n.t()
   fileURLToPath(new URL('../../stores/chatStore.ts', import.meta.url)),
+  // pinnedDowngrade toast: the store's channel normalisation (utils/securePins.ts)
+  fileURLToPath(new URL('../../stores/serverStore.ts', import.meta.url)),
 ];
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
 
@@ -65,6 +67,7 @@ describe('secure-channel translation keys', () => {
     expect(keys).toContain('secureChannel.createTitle');     // create modal
     expect(keys).toContain('secureChannel.members');         // members modal (and menu)
     expect(keys).toContain('secureChannel.membersNotReady'); // store toast
+    expect(keys).toContain('secureChannel.pinnedDowngrade'); // serverStore pin toast
     expect(locales.length).toBeGreaterThan(1);
   });
 

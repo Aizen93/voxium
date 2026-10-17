@@ -3,6 +3,8 @@ import axios from 'axios';
 import { api } from '../services/api';
 import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
+import i18n from '../i18n';
+import { pinSecure, isPinnedSecure, claimDowngradeWarning } from '../utils/securePins';
 import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST } from '@voxium/shared';
 import type { DiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
@@ -52,6 +54,33 @@ async function fetchAllPages<T>(url: string): Promise<{ rows: T[]; total: number
     if (!data.hasMore || chunk.length === 0) break;
   }
   return { rows, total: Math.max(total, rows.length) };
+}
+
+/**
+ * The one normalisation point for channel records entering the store: every
+ * consumer (send path, socket gate, lock icon, voice join, search) reads
+ * `channel.secure` from here, so this is where a server's downgrade is undone.
+ * A channel arriving `secure: true` is pinned on this device; a PINNED channel
+ * arriving without it is stored as secure anyway — the server marks the flag
+ * immutable at creation, so `secure: false` for a pinned id is a lie or a bug,
+ * and following it would let forged plaintext render unlocked and the user's
+ * next message leave unencrypted. Warned once per channel per session.
+ */
+export function withSecurePin(channel: Channel): Channel {
+  if (channel.secure === true) {
+    pinSecure(channel.id);
+    return channel;
+  }
+  if (!isPinnedSecure(channel.id)) return channel;
+  if (claimDowngradeWarning(channel.id)) {
+    console.warn(`[SecurePins] Server lists pinned secure channel ${channel.id} as unencrypted; keeping it secure`);
+    toast.warning(i18n.t('secureChannel.pinnedDowngrade'));
+  }
+  return { ...channel, secure: true };
+}
+
+export function withSecurePins(channels: readonly Channel[]): Channel[] {
+  return channels.map(withSecurePin);
 }
 
 /** Resolutions this client applied itself (approve / decline), so the socket
@@ -457,7 +486,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       // would render server A's channels under server B's header.
       if (get().activeServerId !== serverId) return;
 
-      const channels = data.data.channels || [];
+      const channels = withSecurePins(Array.isArray(data.data.channels) ? data.data.channels : []);
       const categories = data.data.categories || [];
       const roles = data.data.roles || [];
       const firstTextChannel = channels.find((c: Channel) => c.type === 'text');
@@ -617,10 +646,13 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   addChannel: (channel: Channel) => {
+    // Pin first, even for a server not being viewed: a member-scoped secure
+    // channel:created is a first-contact pin source this device should keep.
+    const normalized = withSecurePin(channel);
     if (get().activeServerId !== channel.serverId) return;
     set((state) => {
-      if (state.channels.some((c) => c.id === channel.id)) return state;
-      return { channels: [...state.channels, channel] };
+      if (state.channels.some((c) => c.id === normalized.id)) return state;
+      return { channels: [...state.channels, normalized] };
     });
   },
 
@@ -633,9 +665,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   updateChannelData: (channel: Channel) => {
+    const normalized = withSecurePin(channel);
     if (get().activeServerId !== channel.serverId) return;
     set((state) => ({
-      channels: state.channels.map((c) => (c.id === channel.id ? channel : c)),
+      channels: state.channels.map((c) => (c.id === normalized.id ? normalized : c)),
     }));
   },
 
@@ -1141,6 +1174,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   createSecureChannel: async (serverId: string, name: string, memberIds: string[], type: 'text' | 'voice' = 'text') => {
     const { data } = await api.post(`/servers/${serverId}/secure-channels`, { name, memberIds, type });
+    // Pin from the create response: the creator's device must never learn
+    // this channel's security from a later (possibly flipped) channel list.
+    const createdId = (data?.data as { id?: unknown } | undefined)?.id;
+    if (typeof createdId === 'string') pinSecure(createdId);
     // Sidebar entry arrives via the member-scoped channel:created event
     return data.data;
   },
@@ -1171,6 +1208,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
   fetchSecureChannelMembers: async (serverId: string, channelId: string) => {
     const { data } = await api.get(`/servers/${serverId}/secure-channels/${channelId}/members`);
     const members = data.data as SecureChannelMember[];
+    // This endpoint only answers for secure channels — a success is proof the
+    // channel is secure, so pin it.
+    pinSecure(channelId);
     set((state) => ({
       secureChannelMembers: { ...state.secureChannelMembers, [channelId]: members },
     }));

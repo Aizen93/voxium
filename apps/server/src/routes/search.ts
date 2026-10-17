@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { rateLimitSearch } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
+import { BadRequestError, ForbiddenError, parseDateParam } from '../utils/errors';
 import { validateSearchQuery, LIMITS } from '@voxium/shared';
 import { sanitizeText } from '../utils/sanitize';
 import { filterVisibleChannels } from '../utils/permissionCalculator';
@@ -113,65 +113,8 @@ searchRouter.get('/servers/:serverId/messages', async (req: Request<{ serverId: 
   }
 });
 
-// ─── Search DM messages ─────────────────────────────────────────────────────
-
-searchRouter.get('/dm/:conversationId/messages', async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
-  try {
-    const { conversationId } = req.params;
-    const userId = req.user!.userId;
-    const q = sanitizeText((req.query.q as string) ?? '');
-    const before = req.query.before as string | undefined;
-    const limit = Math.min(parseInt(req.query.limit as string, 10) || LIMITS.SEARCH_RESULTS_PER_PAGE, LIMITS.SEARCH_RESULTS_PER_PAGE);
-
-    const queryErr = validateSearchQuery(q);
-    if (queryErr) throw new BadRequestError(queryErr);
-
-    // Verify conversation participation
-    const conversation = await prisma.conversation.findUnique({
-      where: { id: conversationId },
-    });
-    if (!conversation) throw new NotFoundError('Conversation');
-    if (conversation.user1Id !== userId && conversation.user2Id !== userId) {
-      throw new ForbiddenError('Not a participant of this conversation');
-    }
-
-    const where: Record<string, unknown> = {
-      conversationId,
-      content: { contains: q, mode: 'insensitive' },
-      type: 'user',
-      // E2E messages store ciphertext — never match (or return) them in
-      // server search; encrypted history is searched client-side only
-      encrypted: false,
-    };
-    if (before) {
-      where.createdAt = { lt: parseDateParam(before, 'before') };
-    }
-
-    const messages = await prisma.message.findMany({
-      where,
-      include: {
-        author: authorSelect,
-      },
-      orderBy: { createdAt: 'desc' },
-      take: limit + 1,
-    });
-
-    const hasMore = messages.length > limit;
-    if (hasMore) messages.pop();
-
-    const data = messages.map((m) => ({
-      id: m.id,
-      content: m.content,
-      type: m.type,
-      channelId: m.channelId,
-      conversationId: m.conversationId,
-      author: m.author,
-      createdAt: m.createdAt,
-      editedAt: m.editedAt,
-    }));
-
-    res.json({ success: true, data, hasMore });
-  } catch (err) {
-    next(err);
-  }
-});
+// DM search is local-only: every DM is end-to-end encrypted since the 2.0
+// cutover, so the server holds nothing it could match. The desktop searches
+// its decrypted history (services/e2e/dmCrypto.ts searchEncryptedHistory);
+// the old GET /search/dm/:conversationId/messages route filtered on
+// `encrypted: false` user rows, which no longer exist, and no client calls it.

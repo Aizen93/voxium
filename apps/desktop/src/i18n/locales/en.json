@@ -1360,7 +1360,8 @@
     "renaming": "Renaming…",
     "renamed": "Channel renamed",
     "failedToRename": "Failed to rename channel",
-    "moderationNotSecure": "\"{{name}}\" is a regular channel — delete it from the sidebar instead"
+    "moderationNotSecure": "\"{{name}}\" is a regular channel — delete it from the sidebar instead",
+    "pinnedDowngrade": "This channel is encrypted on this device; the server now lists it as unencrypted."
   },
   "discovery": {
     "tier": {

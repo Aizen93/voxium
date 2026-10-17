@@ -41,6 +41,7 @@ import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { SharePreflightModal } from '../voice/SharePreflightModal';
 import { discoverySocketHandlers } from '../../services/discoverySocketHandlers';
+import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
@@ -172,16 +173,13 @@ export function MainLayout() {
       return !!serverState.activeServerId && !!channelId && channelId === serverState.activeChannelId;
     };
 
-    // Secure channels by the loaded channel list (the trustworthy signal), OR
-    // the message's own encrypted flag — the flag alone must never DOWNGRADE
-    // (that's channelCrypto's refusal rule) but it is always safe as a reason
-    // to decrypt-or-suppress, e.g. for servers whose channel list isn't loaded.
-    const isSecureChannelMessage = (message: Message): boolean => {
-      if (message.encrypted === true) return true;
-      return useServerStore
-        .getState()
-        .channels.some((c) => c.id === message.channelId && c.secure === true);
-    };
+    // Secure channels by the loaded channel list, this device's pin, OR the
+    // message's own encrypted flag (utils/secureChannelGate.ts). The pin is
+    // what keeps a server that flips `secure` to false — or a message:new for
+    // a server the user is not viewing — from routing a forged plaintext row
+    // past channelCrypto's refusal rule.
+    const isSecureChannelMessage = (message: Message): boolean =>
+      isSecureChannelMessageIn(message, useServerStore.getState().channels);
 
     // Store function references so cleanup actually works
     const handlers = {
@@ -390,12 +388,14 @@ export function MainLayout() {
         const dmStore = useDMStore.getState();
         const activeConvId = dmStore.activeConversationId;
 
-        // E2E DMs arrive as ciphertext — decrypt (or resolve from the local
-        // cache) before the message touches any store, preview, or notification
-        if (message.encrypted) {
-          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
-          message = await decryptMessageForDisplay(message);
-        }
+        // Every DM goes through the decrypt gate before it touches any store,
+        // preview or notification — never only the ones flagged encrypted. The
+        // flag is the server's word: an `encrypted: false` user row is the
+        // forgery the gate exists to refuse (only system notices are plaintext
+        // since the 2.0 cutover), and skipping the gate on it was the leftover
+        // plaintext branch.
+        const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+        message = await decryptMessageForDisplay(message);
 
         // Update last message in conversation list
         if (message.conversationId) {
@@ -408,6 +408,7 @@ export function MainLayout() {
               id: message.id,
               content: message.content,
               encrypted: message.encrypted,
+              type: message.type,
               createdAt: message.createdAt,
               authorId: message.author?.id,
             });
@@ -438,11 +439,10 @@ export function MainLayout() {
       },
       dmMessageUpdate: async (message: Message) => {
         // E2E edits arrive as fresh ciphertext — decrypt before the store
-        // (the plaintext cache is versioned by editedAt)
-        if (message.encrypted) {
-          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
-          message = await decryptMessageForDisplay(message);
-        }
+        // (the plaintext cache is versioned by editedAt). Same gate as a new
+        // message, whatever the flag says.
+        const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+        message = await decryptMessageForDisplay(message);
         const activeConvId = useDMStore.getState().activeConversationId;
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().updateMessage(message);

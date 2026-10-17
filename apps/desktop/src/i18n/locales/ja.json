@@ -1357,7 +1357,8 @@
     "renaming": "変更中…",
     "renamed": "チャンネル名を変更しました",
     "failedToRename": "チャンネル名の変更に失敗しました",
-    "moderationNotSecure": "「{{name}}」は通常のチャンネルです — サイドバーから削除してください"
+    "moderationNotSecure": "「{{name}}」は通常のチャンネルです — サイドバーから削除してください",
+    "pinnedDowngrade": "このチャンネルはこのデバイスでは暗号化されていますが、サーバーは現在、暗号化されていないチャンネルとして表示しています。"
   },
   "discovery": {
     "tier": {

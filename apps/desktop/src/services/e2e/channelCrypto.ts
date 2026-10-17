@@ -9,16 +9,12 @@
 // eval-order cycle that crashes at boot (same rule as dmCrypto.ts).
 import { buildE2EPlaintext, parseE2EPlaintext, e2eChannelScope } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
-import { getE2EService, E2EIdentityChangedError } from './e2eService';
-import { DECRYPT_FAILED_CONTENT } from './dmCrypto';
+import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
+import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
 /** Split raw decrypted plaintext into display fields on a message. */
-function applyPlaintext(message: Message, raw: string): Message {
-  const { text, attachments } = parseE2EPlaintext(raw);
-  return { ...message, content: text, ...(attachments.length > 0 && { e2eAttachments: attachments }) };
-}
 
 async function currentUserId(): Promise<string | null> {
   const { useAuthStore } = await import('../../stores/authStore');
@@ -26,8 +22,17 @@ async function currentUserId(): Promise<string | null> {
 }
 
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
-  if (!message.replyTo?.encrypted) return message;
-  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id);
+  if (!message.replyTo) return message;
+  // a quote names its author; one without is malformed and is dropped whole
+  if (!message.replyTo.author) return { ...message, replyTo: null };
+  // Every secure-channel message is encrypted: an unencrypted quote is the
+  // server's word and renders as the lock placeholder
+  if (!message.replyTo.encrypted) return { ...message, replyTo: lockedQuote(message.replyTo) };
+  const scope = message.channelId ? e2eChannelScope(message.channelId) : '';
+  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id, {
+    scope,
+    authorId: message.replyTo.author?.id,
+  });
   const preview = cached ? parseE2EPlaintext(cached).text : '';
   return { ...message, replyTo: { ...message.replyTo, content: preview } };
 }
@@ -41,17 +46,21 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * name with no decrypt-failure marker. The flag is the server's word; it does
  * not get to decide whether a message was end-to-end encrypted.
  */
-export async function decryptChannelMessageForDisplay(message: Message): Promise<Message> {
+export async function decryptChannelMessageForDisplay(input: Message): Promise<Message> {
+  // e2eAttachments come out of the decrypted payload only, and mentions are
+  // never resolved for encrypted rows (see dmCrypto)
+  const message = withoutServerAssertions(input);
   if (!message.encrypted) {
-    if (message.type === 'system') return message;
+    // Secure channels have no server notices at all: every unencrypted row is
+    // refused, `type: 'system'` included (the type is the server's word)
     console.warn(
       `e2e: refusing an unencrypted message (${message.id}) in a secure channel`
     );
-    return { ...message, content: DECRYPT_FAILED_CONTENT };
+    return refusedRow(message);
   }
-  if (!message.channelId) return { ...message, content: DECRYPT_FAILED_CONTENT };
+  if (!message.channelId) return refusedRow(message);
   const userId = await currentUserId();
-  if (!userId) return { ...message, content: DECRYPT_FAILED_CONTENT };
+  if (!userId) return refusedRow(message);
 
   const service = getE2EService(userId);
   const scope = e2eChannelScope(message.channelId);
@@ -66,7 +75,7 @@ export async function decryptChannelMessageForDisplay(message: Message): Promise
     createdAt: message.createdAt,
   });
   if (!result.failed) {
-    return resolveReplyPreview(applyPlaintext(message, result.text), userId);
+    return resolveReplyPreview(decryptedRow(message,result.text), userId);
   }
 
   if (own) {
@@ -76,13 +85,15 @@ export async function decryptChannelMessageForDisplay(message: Message): Promise
     const attempts = Number.isFinite(ageMs) && ageMs < 10_000 ? 4 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempts > 1) await new Promise((r) => setTimeout(r, 150));
-      const cached = await service.getCachedPlaintext(message.id, message.editedAt ?? null);
+      const cached = await service.getCachedPlaintext(message.id, { scope, authorId: userId, editedAt: message.editedAt ?? null });
       if (cached !== null) {
-        return resolveReplyPreview(applyPlaintext(message, cached), userId);
+        return resolveReplyPreview(decryptedRow(message,cached), userId);
       }
     }
   }
-  return resolveReplyPreview({ ...message, content: DECRYPT_FAILED_CONTENT }, userId);
+  // Nothing vouched for this row: the refused shape, its quote still resolvable
+  // from the local cache
+  return resolveReplyPreview(refusedRow(message), userId);
 }
 
 /** Decrypt a fetched page of secure-channel messages (order preserved). */
@@ -96,7 +107,7 @@ export async function decryptChannelMessagesForDisplay(messages: Message[]): Pro
       out.push(await decryptChannelMessageForDisplay(m));
     } catch (err) {
       console.error(`e2e: decrypt pipeline failed for message ${m.id}:`, err);
-      out.push({ ...m, content: DECRYPT_FAILED_CONTENT });
+      out.push(refusedRow(m));
     }
   }
   return out;
@@ -113,17 +124,17 @@ export async function prepareOutgoingChannelMessage(
   channelId: string,
   text: string,
   attachments?: E2EAttachmentMeta[]
-): Promise<{ content: string; plaintext: string; notReadyUserIds: string[] }> {
+): Promise<{ content: string; plaintext: string; position: E2EMessagePosition; notReadyUserIds: string[] }> {
   const userId = await currentUserId();
   if (!userId) throw new Error('Not authenticated');
 
   const plaintext = buildE2EPlaintext(text, attachments);
   try {
-    const { envelope, notReadyUserIds } = await getE2EService(userId).encryptChannelMessage(
+    const { envelope, position, notReadyUserIds } = await getE2EService(userId).encryptChannelMessage(
       channelId,
       plaintext
     );
-    return { content: envelope, plaintext, notReadyUserIds };
+    return { content: envelope, plaintext, position, notReadyUserIds };
   } catch (err) {
     if (err instanceof E2EIdentityChangedError) {
       const { useE2EStore } = await import('../../stores/e2eStore');
@@ -133,19 +144,25 @@ export async function prepareOutgoingChannelMessage(
   }
 }
 
-/** Store the sent plaintext under the server-assigned message id + version. */
+/**
+ * Store the sent plaintext under the server-assigned message id + version, and
+ * bind its ratchet `position` (prepareOutgoingChannelMessage) to them — see
+ * cacheSentPlaintext.
+ */
 export async function cacheSentChannelPlaintext(
   messageId: string,
   channelId: string,
   plaintext: string,
   editedAt?: string | null,
-  createdAt?: string
+  createdAt?: string,
+  position?: E2EMessagePosition
 ): Promise<void> {
   const userId = await currentUserId();
   if (!userId) return;
   await getE2EService(userId).cachePlaintext(messageId, e2eChannelScope(channelId), plaintext, editedAt, {
     authorId: userId,
     ...(createdAt && { createdAt }),
+    ...(position && { position }),
   });
 }
 

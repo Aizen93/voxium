@@ -1360,7 +1360,8 @@
     "renaming": "Renomeando…",
     "renamed": "Canal renomeado",
     "failedToRename": "Falha ao renomear o canal",
-    "moderationNotSecure": "\"{{name}}\" é um canal comum — exclua-o pela barra lateral"
+    "moderationNotSecure": "\"{{name}}\" é um canal comum — exclua-o pela barra lateral",
+    "pinnedDowngrade": "Este canal está criptografado neste dispositivo; o servidor agora o lista como não criptografado."
   },
   "discovery": {
     "tier": {

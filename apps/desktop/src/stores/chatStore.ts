@@ -8,6 +8,8 @@ import { useDMStore } from './dmStore';
 import { useServerStore } from './serverStore';
 import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
+import { ownSentRow } from '../services/e2e/displayGate';
+import { isSecureChannelId } from '../utils/secureChannelGate';
 import {
   decryptChannelMessagesForDisplay,
   prepareOutgoingChannelMessage,
@@ -19,9 +21,9 @@ import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMe
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** Secure channels are decided by the channel list the server already gave us. */
+/** Secure channels: the loaded channel list OR this device's pin (utils/secureChannelGate.ts) — never the server's flag alone. */
 function isSecureChannel(channelId: string): boolean {
-  return useServerStore.getState().channels.some((c) => c.id === channelId && c.secure === true);
+  return isSecureChannelId(channelId, useServerStore.getState().channels);
 }
 
 // Track current fetch to prevent duplicate requests
@@ -210,12 +212,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         const { data } = await api.post(`/channels/${channelId}/messages`, body);
         const raw: Message = data.data;
-        await cacheSentChannelPlaintext(raw.id, channelId, prepared.plaintext, null, raw.createdAt);
-        const sent: Message = {
-          ...raw,
-          content,
-          ...(e2eAttachments?.length && { e2eAttachments }),
-        };
+        await cacheSentChannelPlaintext(raw.id, channelId, prepared.plaintext, null, raw.createdAt, prepared.position);
+        // Built from what this client knows, not from the server's reply:
+        // whichever of this row and the gated socket echo lands first owns
+        // the id (the other is dropped by the dedupe here or in addMessage),
+        // so nothing the server put in the POST response may ride on it
+        const sent = ownSentRow(raw, { content, replyingTo, e2eAttachments });
         const exists = get().messages.some((m) => m.id === sent.id);
         if (!exists) {
           set((state) => ({ messages: [...state.messages, sent] }));
@@ -255,7 +257,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       // cache under the new editedAt version BEFORE the socket echo decrypts it
       await cacheSentChannelPlaintext(
-        messageId, channelId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt,
+        messageId, channelId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt, prepared.position,
       );
       return;
     }
@@ -386,12 +388,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const raw: Message = data.data;
       // Cache the exact raw plaintext that was encrypted (Olm can't
       // decrypt-to-self); display fields come from the parsed payload
-      await cacheSentPlaintext(raw.id, conversationId, prepared.plaintext, null, raw.createdAt);
-      const sent: Message = {
-        ...raw,
-        content,
-        ...(e2eAttachments?.length && { e2eAttachments }),
-      };
+      await cacheSentPlaintext(raw.id, conversationId, prepared.plaintext, null, raw.createdAt, prepared.position);
+      // Built from what this client knows, not from the server's reply (same
+      // rule as the secure-channel branch of sendMessage)
+      const sent = ownSentRow(raw, { content, replyingTo, e2eAttachments });
       const exists = get().messages.some((m) => m.id === sent.id);
       if (!exists) {
         set((state) => ({ messages: [...state.messages, sent] }));
@@ -429,7 +429,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       encrypted: true,
     });
     // cache under the new editedAt version BEFORE the socket echo decrypts it
-    await cacheSentPlaintext(messageId, conversationId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt);
+    await cacheSentPlaintext(
+      messageId, conversationId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt, prepared.position,
+    );
   },
 
   requestDeleteDMMessage: async (conversationId: string, messageId: string) => {

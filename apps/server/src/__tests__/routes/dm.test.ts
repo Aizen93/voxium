@@ -215,6 +215,27 @@ describe('DM routes — GET /conversations', () => {
     expect(res.body.data[0].participant.id).toBe('user-2');
   });
 
+  it('the preview carries the row type (the client prints an unencrypted preview only for a system notice)', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([
+      {
+        ...mockConversation,
+        user1: { id: 'user-1', username: 'alice', displayName: 'Alice', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null },
+        user2: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null },
+        messages: [{ id: 'm-1', content: 'Voice call started', encrypted: false, type: 'system', createdAt: new Date('2024-01-01'), authorId: 'user-1' }],
+      },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].lastMessage).toMatchObject({ id: 'm-1', content: 'Voice call started', encrypted: false, type: 'system' });
+    expect(prisma.conversation.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        messages: expect.objectContaining({ select: expect.objectContaining({ type: true, encrypted: true }) }),
+      }),
+    }));
+  });
+
   it('returns empty array when no conversations', async () => {
     vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([]);
 
