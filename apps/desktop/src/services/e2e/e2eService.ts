@@ -55,6 +55,7 @@ import {
 import {
   E2EVault,
   type InboundGroupSessionRecord,
+  type MessagePosition,
   type OutboundGroupSessionRecord,
   type PickleKeyProvider,
   type PinnedIdentity,
@@ -70,6 +71,9 @@ export interface DecryptResult {
   text: string;
   failed?: boolean;
 }
+
+/** Where a message sits in its group session's ratchet. */
+export type E2EMessagePosition = MessagePosition;
 
 /** One published device of a user, after signature verification + TOFU pinning. */
 export interface E2EDeviceIdentity {
@@ -2639,14 +2643,26 @@ export class E2EService {
    * Encrypt one DM under the conversation's group session, re-keying (and
    * re-sharing) first whenever a rotation trigger fired (D9).
    */
-  async encryptMessage(conversationId: string, peerUserId: string, plaintext: string): Promise<string> {
+  async encryptMessage(
+    conversationId: string,
+    peerUserId: string,
+    plaintext: string
+  ): Promise<{ envelope: string; position: E2EMessagePosition }> {
     return this.enqueue(async () => {
       const { session, record } = await this.ensureGroupSession(conversationId, peerUserId);
+      // Read BEFORE encrypt(), which advances the ratchet: this is the index a
+      // receiver's decrypt reports. The send path binds it to the id the POST
+      // returns (cachePlaintext) — our own sends are read from the cache, never
+      // decrypted, so nothing else would stop a replay of our own old message.
+      const messageIndex = session.messageIndex();
       const body = session.encrypt(plaintext);
       record.messageCount += 1;
       record.pickle = session.pickle(this.vault.pickleKey());
       await this.vault.putOutboundGroupSession(conversationId, record);
-      return buildMegolmEnvelope(record.sessionId, body);
+      return {
+        envelope: buildMegolmEnvelope(record.sessionId, body),
+        position: { sessionId: record.sessionId, messageIndex },
+      };
     });
   }
 
@@ -2658,15 +2674,21 @@ export class E2EService {
   async encryptChannelMessage(
     channelId: string,
     plaintext: string
-  ): Promise<{ envelope: string; notReadyUserIds: string[] }> {
+  ): Promise<{ envelope: string; position: E2EMessagePosition; notReadyUserIds: string[] }> {
     return this.enqueue(async () => {
       const scope = e2eChannelScope(channelId);
       const { session, record, notReadyUserIds } = await this.ensureChannelGroupSession(channelId);
+      // before encrypt(): see encryptMessage
+      const messageIndex = session.messageIndex();
       const body = session.encrypt(plaintext);
       record.messageCount += 1;
       record.pickle = session.pickle(this.vault.pickleKey());
       await this.vault.putOutboundGroupSession(scope, record);
-      return { envelope: buildMegolmEnvelope(record.sessionId, body), notReadyUserIds };
+      return {
+        envelope: buildMegolmEnvelope(record.sessionId, body),
+        position: { sessionId: record.sessionId, messageIndex },
+        notReadyUserIds,
+      };
     });
   }
 
@@ -2718,20 +2740,53 @@ export class E2EService {
     });
   }
 
-  /** Cache plaintext under the server-assigned message id (spec §7.2). */
+  /**
+   * Cache plaintext under the server-assigned message id (spec §7.2). With a
+   * `position` (an own send or edit, from encryptMessage/encryptChannelMessage)
+   * the ratchet position is bound to this id + version as well: own messages
+   * are read from this cache and never decrypted, so nothing else would bind
+   * them, and the server could re-serve our own old ciphertext under a new id.
+   */
   async cachePlaintext(
     messageId: string,
     conversationId: string,
     text: string,
     editedAt?: string | null,
-    meta?: { authorId?: string; createdAt?: string }
+    meta?: { authorId?: string; createdAt?: string; position?: E2EMessagePosition }
   ): Promise<void> {
-    await this.vault.putPlaintext(messageId, {
-      conversationId,
-      text,
-      editedAt: editedAt ?? null,
-      ...(meta?.authorId && { authorId: meta.authorId }),
-      ...(meta?.createdAt && { createdAt: meta.createdAt }),
+    const version = editedAt ?? null;
+    const position = meta?.position;
+    // Serialised with the decrypt path: the socket echo of this very message
+    // can be mid-decrypt, and its position check must see either none of this
+    // write or all of it — half of it reads as an older version of itself.
+    return this.enqueue(async () => {
+      if (position) {
+        const bound = await this.vault.getMessagePosition(position.sessionId, position.messageIndex);
+        // The socket echo may have been decrypted (and bound) before the POST
+        // answered: the same binding, left as it is.
+        if (!bound || bound.messageId !== messageId || bound.editedAt !== version) {
+          if (bound) {
+            // A position produced moments ago already names another message: the
+            // server showed our ciphertext under two ids. Our own POST/PATCH
+            // answer is the send-time truth.
+            console.warn(
+              `e2e: own message ${messageId} rebinds a ratchet position the server showed as ${bound.messageId}`
+            );
+          }
+          await this.vault.putMessagePosition(position.sessionId, position.messageIndex, {
+            messageId,
+            editedAt: version,
+          });
+        }
+      }
+      await this.vault.putPlaintext(messageId, {
+        conversationId,
+        text,
+        editedAt: version,
+        ...(meta?.authorId && { authorId: meta.authorId }),
+        ...(meta?.createdAt && { createdAt: meta.createdAt }),
+        ...(position && { sessionId: position.sessionId, messageIndex: position.messageIndex }),
+      });
     });
   }
 
@@ -2808,11 +2863,13 @@ export class E2EService {
 
     return this.enqueue(async () => {
       try {
-        const text =
+        // olm1 (legacy pairwise) carries no ratchet position to bind
+        const decrypted =
           envelope.e === E2E_ENGINE_MEGOLM1
             ? await this.decryptGroupMessage(message, envelope.sid, envelope.b)
-            : await this.olmDecryptFromUser(message.authorId, envelope);
-        if (text === null) return { text: '', failed: true };
+            : { text: await this.olmDecryptFromUser(message.authorId, envelope), position: undefined };
+        if (decrypted === null || decrypted.text === null) return { text: '', failed: true };
+        const { text, position } = decrypted;
 
         await this.vault.putPlaintext(message.id, {
           conversationId: message.conversationId,
@@ -2820,6 +2877,7 @@ export class E2EService {
           editedAt: version,
           authorId: message.authorId,
           ...(message.createdAt && { createdAt: message.createdAt }),
+          ...(position && { sessionId: position.sessionId, messageIndex: position.messageIndex }),
         });
         return { text };
       } catch (err) {
@@ -2829,11 +2887,17 @@ export class E2EService {
     });
   }
 
+  /**
+   * Decrypt one megolm1 body and bind its ratchet position. The session checks
+   * say WHO wrote it and WHERE; the position binding says WHICH message it is.
+   * Every refusal returns null, so the caller renders the same "unable to
+   * decrypt" marker as for a failed decrypt.
+   */
   private async decryptGroupMessage(
-    message: { id: string; conversationId: string; authorId: string },
+    message: { id: string; conversationId: string; authorId: string; editedAt?: string | null },
     sessionId: string,
     body: string
-  ): Promise<string | null> {
+  ): Promise<{ text: string; position: E2EMessagePosition } | null> {
     let entry = await this.loadInbound(sessionId);
     if (!entry) {
       // The key share may still be sitting in this device's inbox. One drain
@@ -2866,10 +2930,45 @@ export class E2EService {
 
     const result = entry.session.decrypt(body);
     const text = result.plaintext;
+    const messageIndex = result.messageIndex;
     result.free();
     entry.record.pickle = entry.session.pickle(this.vault.pickleKey());
     await this.vault.putInboundGroupSession(sessionId, entry.record);
-    return text;
+
+    // A Megolm ciphertext decrypts forever, so the checks above cannot tell a
+    // new message from an authentic old one the server re-served: each
+    // position is shown as exactly one version of one message.
+    const version = message.editedAt ?? null;
+    const bound = await this.vault.getMessagePosition(sessionId, messageIndex);
+    if (bound && (bound.messageId !== message.id || bound.editedAt !== version)) {
+      // a replay under a new id, or the original ciphertext labelled as an edit
+      console.warn(
+        bound.messageId === message.id
+          ? `e2e: message ${message.id} is served under a version its ciphertext was never shown as`
+          : `e2e: message ${message.id} re-serves the ciphertext of message ${bound.messageId}`
+      );
+      return null;
+    }
+    // The id's cache entry holds the position of the newest version accepted.
+    // An older position of the SAME session served as the current one reverts
+    // an edit the author made — bound (the original re-served as unedited) or
+    // not (an older ciphertext with a fresh editedAt). Across a session
+    // rotation the index spaces are unrelated: a documented residual.
+    const latest = await this.vault.getPlaintext(message.id);
+    if (
+      latest &&
+      !latest.failed &&
+      latest.sessionId === sessionId &&
+      typeof latest.messageIndex === 'number' &&
+      (bound ? latest.messageIndex > messageIndex : latest.messageIndex >= messageIndex)
+    ) {
+      console.warn(`e2e: message ${message.id} is served as an older version than this device has shown`);
+      return null;
+    }
+    if (!bound) {
+      await this.vault.putMessagePosition(sessionId, messageIndex, { messageId: message.id, editedAt: version });
+    }
+    return { text, position: { sessionId, messageIndex } };
   }
 
   /**
