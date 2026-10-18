@@ -274,7 +274,8 @@
       "members": "Membros",
       "roles": "Cargos",
       "limits": "Limites",
-      "discovery": "Descoberta"
+      "discovery": "Descoberta",
+      "integrations": "Integrações"
     },
     "general": {
       "serverName": "Nome do servidor",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "Máximo de categorias de canais neste servidor",
       "maxMembers": "Máx. de membros",
       "maxMembersDesc": "Máximo de membros que podem entrar neste servidor",
+      "maxWebhooks": "Máx. de webhooks",
+      "maxWebhooksDesc": "Máximo de webhooks de entrada neste servidor (0 bloqueia a criação)",
       "unlimited": "Ilimitado",
       "failedToLoad": "Não foi possível carregar os limites do servidor"
     }
@@ -544,7 +547,9 @@
     "report": "Denunciar",
     "editHint": "esc para cancelar · enter para salvar",
     "originalDeleted": "A mensagem original foi excluída",
-    "failedToToggleReaction": "Não foi possível alterar a reação"
+    "failedToToggleReaction": "Não foi possível alterar a reação",
+    "appTag": "APP",
+    "deletedWebhook": "Webhook excluído"
   },
   "messageInput": {
     "emojiPicker": "Seletor de emoji",
@@ -1180,7 +1185,21 @@
     "joinMessageUnsupportedChars": "A mensagem contém caracteres não suportados",
     "joinMessageTooLong": "A mensagem não pode ter mais de {{max}} caracteres",
     "refineSearch": "Resultados demais — refine sua pesquisa",
-    "serverNotFound": "Espaço não encontrado"
+    "serverNotFound": "Espaço não encontrado",
+    "webhooksDisabled": "Os webhooks estão desativados no momento",
+    "webhookDisabled": "Este webhook está desativado",
+    "webhookNotFound": "Webhook não encontrado",
+    "webhookNoPermission": "Você não tem permissão para gerenciar webhooks",
+    "webhookTextOnly": "Webhooks só podem publicar em canais de texto",
+    "webhookInvalidType": "Tipo de webhook inválido",
+    "webhookGithubUnavailable": "Webhooks do GitHub ainda não estão disponíveis",
+    "webhookChannelRequired": "Escolha um canal para o webhook",
+    "webhookNoFields": "Nada para atualizar",
+    "webhookEnabledBoolean": "Valor inválido para a ativação",
+    "webhookNameEmpty": "O nome do webhook não pode ficar vazio",
+    "webhookNameTooLong": "O nome do webhook pode ter no máximo {{max}} caracteres",
+    "webhookCap": "Este servidor atingiu o limite de webhooks (máximo {{max}})",
+    "channelNotFound": "Canal não encontrado"
   },
   "e2e": {
     "badgeTitle": "Criptografia de ponta a ponta — ver número de segurança",
@@ -1499,6 +1518,82 @@
       "declined": "Seu pedido para entrar em {{name}} foi recusado",
       "newRequest": "{{user}} pediu para entrar em {{server}}",
       "unknownSpace": "um espaço"
+    }
+  },
+  "webhooks": {
+    "title": "Integrações",
+    "hint": "Webhooks de entrada permitem que scripts, jobs de CI e outros apps publiquem em um canal de texto.",
+    "usage": "{{used}} de {{max}}",
+    "newWebhook": "Novo webhook",
+    "atCap": "Limite de webhooks atingido (máximo {{max}})",
+    "frozen": "A criação de webhooks está bloqueada neste servidor",
+    "empty": "Nenhum webhook ainda.",
+    "emptyHint": "Crie um para que um script, um job de CI ou outro app publique em um canal.",
+    "failedToLoad": "Falha ao carregar os webhooks",
+    "retry": "Tentar novamente",
+    "toggleFailed": "Falha ao atualizar o webhook",
+    "typeGeneric": "Genérico",
+    "typeGithub": "GitHub",
+    "disabledChip": "Desativado",
+    "channelMissing": "canal desconhecido",
+    "createdBy": "criado por {{name}}",
+    "createdByUnknown": "criador desconhecido",
+    "lastUsed": "último uso {{when}}",
+    "neverUsed": "nunca usado",
+    "actions": {
+      "rotate": "Renovar URL",
+      "enable": "Ativar",
+      "disable": "Desativar",
+      "delete": "Excluir"
+    },
+    "create": {
+      "title": "Novo webhook",
+      "description": "As mensagens dele aparecem com este nome, marcadas como um app.",
+      "name": "Nome",
+      "namePlaceholder": "ex.: Build noturno",
+      "channel": "Canal",
+      "noChannels": "Este servidor não tem nenhum canal de texto em que um webhook possa publicar.",
+      "type": "Tipo",
+      "typeGenericHint": "JSON no estilo do Discord: content, username, embeds",
+      "typeGithubHint": "Eventos do GitHub, verificados com um segredo de assinatura",
+      "submit": "Criar webhook",
+      "creating": "Criando…",
+      "failed": "Falha ao criar o webhook"
+    },
+    "reveal": {
+      "title": "{{name}} está pronto",
+      "rotatedTitle": "Nova URL para {{name}}",
+      "copyNow": "Copie agora. A URL é exibida uma única vez; renove-a para obter uma nova.",
+      "url": "URL do webhook",
+      "copyUrl": "Copiar URL",
+      "worksWith": "Funciona em qualquer ferramenta que peça uma URL de webhook do Discord.",
+      "curlHint": "Teste em um terminal",
+      "copyCurl": "Copiar comando",
+      "secret": "Segredo de assinatura",
+      "copySecret": "Copiar segredo",
+      "copied": "Copiado para a área de transferência",
+      "copyFailed": "Não foi possível copiar para a área de transferência",
+      "done": "Concluído"
+    },
+    "rotate": {
+      "title": "Renovar a URL do webhook",
+      "body": "{{name}} recebe uma nova URL. A atual para de funcionar imediatamente, então atualize todas as ferramentas que a usam.",
+      "confirm": "Renovar",
+      "rotating": "Renovando…",
+      "failed": "Falha ao renovar a URL do webhook"
+    },
+    "delete": {
+      "title": "Excluir webhook",
+      "body": "Excluir {{name}}? Tudo o que ainda usa a URL dele vai parar de funcionar.",
+      "alsoDeleteMessages": "Excluir também todas as mensagens que ele publicou",
+      "deleted": "{{name}} excluído",
+      "deletedMessages_one": "{{name}} excluído, junto com {{count}} mensagem",
+      "deletedMessages_other": "{{name}} excluído, junto com {{count}} mensagens",
+      "failed": "Falha ao excluir o webhook"
+    },
+    "off": {
+      "title": "Os webhooks estão desativados no momento.",
+      "hint": "Um administrador desativou os webhooks de entrada. Nada pode ser publicado por eles até que voltem."
     }
   }
 }

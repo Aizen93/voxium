@@ -150,6 +150,15 @@ export const EMPTY_DIRECTORY: DirectoryState = { serverId: null, rows: [], total
 
 /** How long unknown ids are collected before one lookup request goes out. */
 export const MEMBER_LOOKUP_DEBOUNCE_MS = 300;
+/**
+ * The shape `/members/lookup` accepts for every id (identical to the
+ * server's OPAQUE_ID_RE, routes/servers.ts). Anything else never enters the
+ * queue: one bad id 400s the WHOLE batch, and three failures in a row drop
+ * the queue for every human author in it. A webhook-authored message carries
+ * `webhook:<id>` / `webhook:deleted` — the colon is there on purpose so it can
+ * never be a user id — and it must not cost the real authors their rows.
+ */
+const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** After a failed lookup, how long before the next one may go out. */
 const MEMBER_LOOKUP_BACKOFF_MS = 10_000;
 /** Known rows past this many: offline rows are dropped, oldest first (the viewer is online while here). */
@@ -741,7 +750,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
     const known = new Set(get().members.map((m) => m.userId));
     let queued = false;
     for (const id of userIds) {
-      if (!id || known.has(id) || lookupMisses.has(id) || lookupPending.has(id) || lookupInFlight.has(id)) continue;
+      // Not an id the server could answer for (a webhook author): dropped
+      // here, the one choke point every lookup goes through (OPAQUE_ID_RE)
+      if (typeof id !== 'string' || !OPAQUE_ID_RE.test(id)) continue;
+      if (known.has(id) || lookupMisses.has(id) || lookupPending.has(id) || lookupInFlight.has(id)) continue;
       lookupPending.add(id);
       queued = true;
     }

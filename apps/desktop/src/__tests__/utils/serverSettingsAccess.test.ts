@@ -10,10 +10,11 @@ import { canOpenServerSettings, SERVER_SETTINGS_PERMISSIONS } from '../../utils/
  */
 describe('canOpenServerSettings', () => {
   it('opens for each permission that has a surface inside the modal', () => {
-    expect(SERVER_SETTINGS_PERMISSIONS).toEqual([Permissions.MANAGE_SERVER, Permissions.KICK_MEMBERS, Permissions.MANAGE_ROLES]);
+    expect(SERVER_SETTINGS_PERMISSIONS).toEqual([Permissions.MANAGE_SERVER, Permissions.KICK_MEMBERS, Permissions.MANAGE_ROLES, Permissions.MANAGE_WEBHOOKS]);
     expect(canOpenServerSettings(Permissions.KICK_MEMBERS)).toBe(true);      // join requests + bans
     expect(canOpenServerSettings(Permissions.MANAGE_SERVER)).toBe(true);     // general + discovery
     expect(canOpenServerSettings(Permissions.MANAGE_ROLES)).toBe(true);      // roles
+    expect(canOpenServerSettings(Permissions.MANAGE_WEBHOOKS)).toBe(true);   // integrations
     expect(canOpenServerSettings(Permissions.ADMINISTRATOR)).toBe(true);     // implies everything
   });
 
@@ -21,5 +22,16 @@ describe('canOpenServerSettings', () => {
     expect(canOpenServerSettings(0n)).toBe(false);
     expect(canOpenServerSettings(Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_MESSAGES)).toBe(false);
     expect(canOpenServerSettings(Permissions.MANAGE_CHANNELS | Permissions.CREATE_INVITES)).toBe(false);
+  });
+});
+
+describe('canOpenServerSettings — integrations', () => {
+  it('MANAGE_WEBHOOKS alone opens settings (the Integrations tab is its only surface)', () => {
+    expect(canOpenServerSettings(Permissions.MANAGE_WEBHOOKS)).toBe(true);
+    expect(canOpenServerSettings(Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_WEBHOOKS)).toBe(true);
+  });
+
+  it('no neighbouring bit stands in for it', () => {
+    expect(canOpenServerSettings(Permissions.MANAGE_CHANNELS | Permissions.MANAGE_MESSAGES | Permissions.CREATE_INVITES)).toBe(false);
   });
 });

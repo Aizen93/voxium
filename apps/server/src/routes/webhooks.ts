@@ -176,6 +176,14 @@ function emitChanged(serverId: string): void {
 
 // List the server's webhooks on channels the caller can VIEW. Inherently
 // bounded by the per-server cap (admin maximum 100).
+//
+// `total` is EVERY webhook of the server, hidden channels included: the cap
+// the create route enforces counts them all, so the tab's "N of M" and its
+// "New webhook" gate must too (a moderator who cannot see some channels would
+// otherwise read "3 of 10" on a full server). A count reveals no channel id
+// or name, only how many exist. It is the length of the unfiltered read
+// below, which IS `count({ where: { serverId } })` from the same snapshot,
+// without a second query; that read must therefore stay unpaginated.
 webhookRouter.get('/', rateLimitWebhookRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
@@ -194,7 +202,7 @@ webhookRouter.get('/', rateLimitWebhookRead, async (req: Request<{ serverId: str
       );
       data = rows.filter((r) => visible.has(r.channelId)).map(toWebhook);
     }
-    res.json({ success: true, data });
+    res.json({ success: true, data, total: rows.length });
   } catch (err) {
     next(err);
   }

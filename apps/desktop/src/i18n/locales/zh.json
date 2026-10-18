@@ -274,7 +274,8 @@
       "members": "成员",
       "roles": "角色",
       "limits": "限制",
-      "discovery": "发现"
+      "discovery": "发现",
+      "integrations": "集成"
     },
     "general": {
       "serverName": "服务器名称",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "此服务器中频道分类的最大数量",
       "maxMembers": "最大成员数",
       "maxMembersDesc": "可加入此服务器的最大成员数",
+      "maxWebhooks": "最大 Webhook 数",
+      "maxWebhooksDesc": "此服务器中传入 Webhook 的最大数量（为 0 时禁止创建）",
       "unlimited": "无限制",
       "failedToLoad": "服务器限制加载失败"
     }
@@ -544,7 +547,9 @@
     "report": "举报",
     "editHint": "按 Esc 取消 · 按 Enter 保存",
     "originalDeleted": "原始消息已被删除",
-    "failedToToggleReaction": "表情更改失败"
+    "failedToToggleReaction": "表情更改失败",
+    "appTag": "应用",
+    "deletedWebhook": "已删除的 Webhook"
   },
   "messageInput": {
     "emojiPicker": "表情符号选择器",
@@ -1179,7 +1184,21 @@
     "joinMessageUnsupportedChars": "消息包含不支持的字符",
     "joinMessageTooLong": "消息最多 {{max}} 个字符",
     "refineSearch": "结果过多，请缩小搜索范围",
-    "serverNotFound": "未找到该空间"
+    "serverNotFound": "未找到该空间",
+    "webhooksDisabled": "Webhook 目前已禁用",
+    "webhookDisabled": "此 Webhook 已停用",
+    "webhookNotFound": "未找到 Webhook",
+    "webhookNoPermission": "你没有管理 Webhook 的权限",
+    "webhookTextOnly": "Webhook 只能发布到文字频道",
+    "webhookInvalidType": "无效的 Webhook 类型",
+    "webhookGithubUnavailable": "GitHub Webhook 暂不可用",
+    "webhookChannelRequired": "请为 Webhook 选择一个频道",
+    "webhookNoFields": "没有要更新的内容",
+    "webhookEnabledBoolean": "启用状态的值无效",
+    "webhookNameEmpty": "Webhook 名称不能为空",
+    "webhookNameTooLong": "Webhook 名称最多 {{max}} 个字符",
+    "webhookCap": "此服务器已达到 Webhook 数量上限（最多 {{max}} 个）",
+    "channelNotFound": "未找到频道"
   },
   "e2e": {
     "badgeTitle": "已端到端加密 — 查看安全码",
@@ -1492,6 +1511,81 @@
       "declined": "你加入 {{name}} 的申请被拒绝了",
       "newRequest": "{{user}} 申请加入 {{server}}",
       "unknownSpace": "某个空间"
+    }
+  },
+  "webhooks": {
+    "title": "集成",
+    "hint": "传入 Webhook 可让脚本、CI 任务和其他应用向文字频道发布消息。",
+    "usage": "{{used}} / {{max}}",
+    "newWebhook": "新建 Webhook",
+    "atCap": "已达到 Webhook 数量上限（最多 {{max}} 个）",
+    "frozen": "此服务器已冻结 Webhook 创建",
+    "empty": "还没有 Webhook。",
+    "emptyHint": "创建一个，让脚本、CI 任务或其他应用向频道发布消息。",
+    "failedToLoad": "无法加载 Webhook",
+    "retry": "重试",
+    "toggleFailed": "无法更新 Webhook",
+    "typeGeneric": "通用",
+    "typeGithub": "GitHub",
+    "disabledChip": "已停用",
+    "channelMissing": "未知频道",
+    "createdBy": "创建者：{{name}}",
+    "createdByUnknown": "创建者未知",
+    "lastUsed": "上次使用：{{when}}",
+    "neverUsed": "从未使用",
+    "actions": {
+      "rotate": "重新生成 URL",
+      "enable": "启用",
+      "disable": "停用",
+      "delete": "删除"
+    },
+    "create": {
+      "title": "新建 Webhook",
+      "description": "它发布的消息会以此名称显示，并标记为应用。",
+      "name": "名称",
+      "namePlaceholder": "例如：夜间构建",
+      "channel": "频道",
+      "noChannels": "此服务器没有可供 Webhook 发布的文字频道。",
+      "type": "类型",
+      "typeGenericHint": "Discord 格式的 JSON：content、username、embeds",
+      "typeGithubHint": "GitHub 事件，使用签名密钥验证",
+      "submit": "创建 Webhook",
+      "creating": "创建中…",
+      "failed": "无法创建 Webhook"
+    },
+    "reveal": {
+      "title": "{{name}} 已就绪",
+      "rotatedTitle": "{{name}} 的新 URL",
+      "copyNow": "请立即复制。URL 仅显示一次；如需新的 URL，请重新生成。",
+      "url": "Webhook URL",
+      "copyUrl": "复制 URL",
+      "worksWith": "适用于任何要求填写 Discord Webhook URL 的工具。",
+      "curlHint": "在终端中试用",
+      "copyCurl": "复制命令",
+      "secret": "签名密钥",
+      "copySecret": "复制密钥",
+      "copied": "已复制到剪贴板",
+      "copyFailed": "无法复制到剪贴板",
+      "done": "完成"
+    },
+    "rotate": {
+      "title": "重新生成 Webhook URL",
+      "body": "{{name}} 将获得新的 URL。当前 URL 会立即失效，请更新所有使用它的工具。",
+      "confirm": "重新生成",
+      "rotating": "正在重新生成…",
+      "failed": "无法重新生成 Webhook URL"
+    },
+    "delete": {
+      "title": "删除 Webhook",
+      "body": "要删除 {{name}} 吗？所有仍在使用其 URL 的工具都将停止工作。",
+      "alsoDeleteMessages": "同时删除它发布的所有消息",
+      "deleted": "已删除 {{name}}",
+      "deletedMessages_other": "已删除 {{name}} 及其 {{count}} 条消息",
+      "failed": "无法删除 Webhook"
+    },
+    "off": {
+      "title": "Webhook 目前已关闭。",
+      "hint": "管理员已禁用传入 Webhook。在重新启用之前，无法通过它们发布任何内容。"
     }
   }
 }

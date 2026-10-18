@@ -56,6 +56,9 @@ const ERROR_MAP: Record<string, string> = {
   'You do not have permission to manage channels': 'noPermissionManageChannels',
   'Cannot send messages to a voice channel': 'cannotSendToVoice',
   'Channel type must be "text" or "voice"': 'invalidChannelType',
+  // The opacity answer of the webhook routes too: missing, another server's,
+  // secure, or a channel the caller cannot view all read the same
+  'Channel not found': 'channelNotFound',
 
   // ─── Categories ────────────────────────────────────────────────────────
   'You do not have permission to manage categories': 'noPermissionManageCategories',
@@ -155,6 +158,23 @@ const ERROR_MAP: Record<string, string> = {
   // The opacity answer: a hidden, blocked or deleted server on join / request / report
   'Server not found': 'serverNotFound',
 
+  // ─── Webhooks ──────────────────────────────────────────────────────────
+  // The flag-off answer is a STATE in the Integrations tab (services/webhooks.ts
+  // isWebhooksOff), mapped here for any other surface that meets it.
+  'Webhooks are currently disabled': 'webhooksDisabled',
+  'Webhook is disabled': 'webhookDisabled',
+  'Webhook not found': 'webhookNotFound',
+  'You do not have permission to manage webhooks': 'webhookNoPermission',
+  'Webhooks can only post to text channels': 'webhookTextOnly',
+  'Invalid webhook type': 'webhookInvalidType',
+  'GitHub webhooks are not available yet': 'webhookGithubUnavailable',
+  'channelId is required': 'webhookChannelRequired',
+  'No fields to update': 'webhookNoFields',
+  'enabled must be a boolean': 'webhookEnabledBoolean',
+  // Shared validator (validateWebhookName) — client-side AND server-side
+  'Webhook name cannot be empty': 'webhookNameEmpty',
+  [`Webhook name must be at most ${LIMITS.WEBHOOK_NAME_MAX} characters`]: 'webhookNameTooLong',
+
   // ─── Admin ─────────────────────────────────────────────────────────────
   'Cannot ban yourself': 'cannotBanSelf',
   'Cannot ban a super admin': 'cannotBanSuperAdmin',
@@ -171,7 +191,17 @@ const ERROR_VARS: Record<string, Record<string, unknown>> = {
   reasonTooLong: { max: LIMITS.SERVER_BAN_REASON_MAX },
   tooManyTags: { max: LIMITS.DISCOVERY_MAX_TAGS },
   joinMessageTooLong: { max: LIMITS.JOIN_REQUEST_MESSAGE_MAX },
+  webhookNameTooLong: { max: LIMITS.WEBHOOK_NAME_MAX },
 };
+
+/**
+ * Messages that carry a value the SERVER picks at runtime (an admin-tunable
+ * cap), so no exact string can be mapped: matched by pattern, the captured
+ * number travels as `{{max}}`.
+ */
+const ERROR_PATTERNS: ReadonlyArray<{ re: RegExp; key: string }> = [
+  { re: /^Server can have at most (\d+) webhooks$/, key: 'webhookCap' },
+];
 
 /** The server-discovery subset of the map, for the locale parity test. */
 export const DISCOVERY_ERROR_KEYS: readonly string[] = [
@@ -179,6 +209,13 @@ export const DISCOVERY_ERROR_KEYS: readonly string[] = [
   'banNotFound', 'cannotTransferToBanned', 'cannotReportOwnServer', 'noPermissionManageMembers', 'noPermissionKickMembers',
   'cannotKickHigherRole', 'serverNameUnsupportedChars', 'descriptionUnsupportedChars', 'descriptionTooLong', 'reasonUnsupportedChars', 'reasonTooLong',
   'tagsNotSupported', 'tooManyTags', 'joinMessageUnsupportedChars', 'joinMessageTooLong', 'refineSearch', 'serverNotFound',
+];
+
+/** The incoming-webhooks subset (exact strings AND patterns), for the locale parity test. */
+export const WEBHOOK_ERROR_KEYS: readonly string[] = [
+  'webhooksDisabled', 'webhookDisabled', 'webhookNotFound', 'webhookNoPermission', 'webhookTextOnly', 'webhookInvalidType',
+  'webhookGithubUnavailable', 'webhookChannelRequired', 'webhookNoFields', 'webhookEnabledBoolean', 'webhookNameEmpty',
+  'webhookNameTooLong', 'webhookCap', 'channelNotFound',
 ];
 
 /**
@@ -196,8 +233,13 @@ export function translateServerError(
   const key = ERROR_MAP[serverMessage];
   if (key) return t(`serverErrors.${key}`, { defaultValue: serverMessage, ...ERROR_VARS[key] });
 
-  // Handle dynamic messages with variables (e.g., "Server can have at most 20 channels")
-  // Return raw message as fallback — at least it's informative
+  for (const { re, key: patternKey } of ERROR_PATTERNS) {
+    const match = re.exec(serverMessage);
+    if (match) return t(`serverErrors.${patternKey}`, { defaultValue: serverMessage, max: Number(match[1]) });
+  }
+
+  // Other dynamic messages (e.g., "Server can have at most 20 channels"):
+  // return the raw message as fallback — at least it's informative
   return serverMessage;
 }
 

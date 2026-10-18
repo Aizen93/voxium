@@ -171,6 +171,34 @@ describe('channelCrypto — display boundary', () => {
     expect(out[1].content).toBe(DECRYPT_FAILED_CONTENT);
   });
 
+  it('drops a webhook claim from a secure-channel row — a webhook never posts an encrypted row', async () => {
+    // `author.isWebhook` / `webhookId` / `webhookName` would relabel a member's
+    // authentic message as an app (APP tag, no profile, no Edit on one's own)
+    const claim = {
+      author: { id: 'peer', username: 'peer', displayName: 'Peer', avatarUrl: null, isWebhook: true },
+      webhookId: 'x',
+      webhookName: 'CI Bot',
+    } as Partial<Message>;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const decrypted = await decryptChannelMessageForDisplay(channelRow(claim));
+      const forged = await decryptChannelMessageForDisplay(channelRow({ ...claim, encrypted: false, content: 'forged' }));
+      decryptMessage.mockResolvedValue({ failed: true, text: '' });
+      const undecryptable = await decryptChannelMessageForDisplay(channelRow({ ...claim, createdAt: '2020-01-01T00:00:00.000Z' }));
+      expect(decrypted.content).toBe('decrypted!');
+      expect(forged.content).toBe(DECRYPT_FAILED_CONTENT);
+      expect(undecryptable.content).toBe(DECRYPT_FAILED_CONTENT);
+      for (const out of [decrypted, forged, undecryptable]) {
+        expect(out.author).not.toHaveProperty('isWebhook');
+        expect(out).not.toHaveProperty('webhookId');
+        expect(out).not.toHaveProperty('webhookName');
+        expect(out.author.id).toBe('peer');
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('surfaces attachment metas from structured plaintext', async () => {
     const meta = {
       s3Key: 'attachments/ch-sec-1/aa-encrypted.bin',

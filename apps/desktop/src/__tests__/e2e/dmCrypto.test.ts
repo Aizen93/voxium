@@ -36,6 +36,7 @@ import {
   cacheSentPlaintext,
   DECRYPT_FAILED_CONTENT,
 } from '../../services/e2e/dmCrypto';
+import { decryptedRow, ownSentRow, refusedRow, withoutServerAssertions } from '../../services/e2e/displayGate';
 import { useDMStore } from '../../stores/dmStore';
 
 function dmRow(over: Partial<Message> = {}): Message {
@@ -314,5 +315,91 @@ describe('the outgoing path carries the ratchet position', () => {
     await cacheSentPlaintext('msg-1', 'c1', 'raw', null);
 
     expect(cachePlaintext.mock.calls[0][4]).not.toHaveProperty('position');
+  });
+});
+
+describe('a webhook claim on an encrypted row is the server’s word, and the gate drops it', () => {
+  // Webhooks never post encrypted rows nor into DMs. `author.isWebhook`,
+  // `webhookId` or `webhookName` on such a row is the server relabelling an
+  // authentic message as an app: an APP tag, a "deleted webhook" dimmed name,
+  // no profile, no Report on a DM (which must stay reportable), no Edit on the
+  // user's own row. Every shape the gate produces comes out without them.
+  const claimed = (over: Partial<Message> = {}): Message => dmRow({
+    content: buildMegolmEnvelope('s1', 'x'),
+    author: { id: 'peer', username: 'peer', displayName: 'Peer', avatarUrl: null, isWebhook: true },
+    webhookId: 'x',
+    webhookName: 'CI Bot',
+    ...over,
+  } as Partial<Message>);
+
+  function expectNoWebhookClaim(out: Message, authorId = 'peer') {
+    expect(out.author).not.toHaveProperty('isWebhook');
+    expect(out).not.toHaveProperty('webhookId');
+    expect(out).not.toHaveProperty('webhookName');
+    // the rest of the author is untouched
+    expect(out.author).toEqual(expect.objectContaining({ id: authorId, avatarUrl: null }));
+  }
+
+  it('withoutServerAssertions strips them', () => {
+    expectNoWebhookClaim(withoutServerAssertions(claimed()));
+  });
+
+  it('withoutServerAssertions strips a bare `isWebhook: false` and `webhookId: null` too — the key, not just a truthy value', () => {
+    const out = withoutServerAssertions(claimed({
+      author: { id: 'peer', username: 'peer', displayName: 'Peer', avatarUrl: null, isWebhook: false },
+      webhookId: null,
+    }));
+    expectNoWebhookClaim(out);
+  });
+
+  it('withoutServerAssertions does not mutate the row it was handed', () => {
+    const input = claimed();
+    withoutServerAssertions(input);
+    expect(input.author.isWebhook).toBe(true);
+    expect(input.webhookId).toBe('x');
+  });
+
+  it('decryptedRow strips them, even handed the row exactly as it came off the wire', () => {
+    const out = decryptedRow(claimed(), buildE2EPlaintext('a real message'));
+    expect(out.content).toBe('a real message');
+    expectNoWebhookClaim(out);
+  });
+
+  it('refusedRow strips them', () => {
+    const out = refusedRow(claimed());
+    expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
+    expectNoWebhookClaim(out);
+  });
+
+  it('ownSentRow strips them from the server’s reply to the POST', () => {
+    const raw = claimed({ author: { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null, isWebhook: true } });
+    const out = ownSentRow(raw, { content: 'typed', replyingTo: null });
+    expect(out.content).toBe('typed');
+    expectNoWebhookClaim(out, 'me');
+  });
+
+  it('an authentic DM through decryptMessageForDisplay comes out without them', async () => {
+    decryptMessage.mockResolvedValue({ failed: false, text: 'a real message' });
+    const out = await decryptMessageForDisplay(claimed());
+    expect(out.content).toBe('a real message');
+    expectNoWebhookClaim(out);
+  });
+
+  it('a DM that fails to decrypt comes out without them', async () => {
+    decryptMessage.mockResolvedValue({ failed: true, text: '' });
+    getCachedPlaintext.mockResolvedValue(null);
+    const out = await decryptMessageForDisplay(claimed());
+    expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
+    expectNoWebhookClaim(out);
+  });
+
+  it('a forged unencrypted DM comes out without them, and so does the call-notice path', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expectNoWebhookClaim(await decryptMessageForDisplay(claimed({ encrypted: false, content: 'forged' })));
+      expectNoWebhookClaim(await decryptMessageForDisplay(claimed({ encrypted: false, type: 'system', content: DM_SYSTEM_NOTICES[0] })));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

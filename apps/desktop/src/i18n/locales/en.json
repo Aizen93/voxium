@@ -274,7 +274,8 @@
       "members": "Members",
       "roles": "Roles",
       "limits": "Limits",
-      "discovery": "Discovery"
+      "discovery": "Discovery",
+      "integrations": "Integrations"
     },
     "general": {
       "serverName": "Server Name",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "Maximum channel categories in this server",
       "maxMembers": "Max Members",
       "maxMembersDesc": "Maximum members that can join this server",
+      "maxWebhooks": "Max Webhooks",
+      "maxWebhooksDesc": "Maximum incoming webhooks in this server (0 freezes creation)",
       "unlimited": "Unlimited",
       "failedToLoad": "Failed to load server limits"
     }
@@ -544,7 +547,9 @@
     "report": "Report",
     "editHint": "escape to cancel · enter to save",
     "originalDeleted": "Original message was deleted",
-    "failedToToggleReaction": "Failed to toggle reaction"
+    "failedToToggleReaction": "Failed to toggle reaction",
+    "appTag": "APP",
+    "deletedWebhook": "Deleted webhook"
   },
   "messageInput": {
     "replyingTo": "Replying to",
@@ -1180,7 +1185,21 @@
     "joinMessageUnsupportedChars": "Message contains unsupported characters",
     "joinMessageTooLong": "Message must be at most {{max}} characters",
     "refineSearch": "Too many results — refine your search",
-    "serverNotFound": "Space not found"
+    "serverNotFound": "Space not found",
+    "webhooksDisabled": "Webhooks are currently disabled",
+    "webhookDisabled": "This webhook is disabled",
+    "webhookNotFound": "Webhook not found",
+    "webhookNoPermission": "You do not have permission to manage webhooks",
+    "webhookTextOnly": "Webhooks can only post to text channels",
+    "webhookInvalidType": "Invalid webhook type",
+    "webhookGithubUnavailable": "GitHub webhooks are not available yet",
+    "webhookChannelRequired": "Choose a channel for the webhook",
+    "webhookNoFields": "Nothing to update",
+    "webhookEnabledBoolean": "Invalid value for enabled",
+    "webhookNameEmpty": "Webhook name cannot be empty",
+    "webhookNameTooLong": "Webhook name must be at most {{max}} characters",
+    "webhookCap": "This server has reached its webhook limit (maximum {{max}})",
+    "channelNotFound": "Channel not found"
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",
@@ -1499,6 +1518,82 @@
       "declined": "Your request to join {{name}} was declined",
       "newRequest": "{{user}} asked to join {{server}}",
       "unknownSpace": "a space"
+    }
+  },
+  "webhooks": {
+    "title": "Integrations",
+    "hint": "Incoming webhooks let scripts, CI jobs and other apps post into a text channel.",
+    "usage": "{{used}} of {{max}}",
+    "newWebhook": "New webhook",
+    "atCap": "Webhook limit reached (maximum {{max}})",
+    "frozen": "Webhook creation is frozen for this server",
+    "empty": "No webhooks yet.",
+    "emptyHint": "Create one to let a script, a CI job or another app post into a channel.",
+    "failedToLoad": "Failed to load webhooks",
+    "retry": "Try again",
+    "toggleFailed": "Failed to update the webhook",
+    "typeGeneric": "Generic",
+    "typeGithub": "GitHub",
+    "disabledChip": "Disabled",
+    "channelMissing": "unknown channel",
+    "createdBy": "created by {{name}}",
+    "createdByUnknown": "creator unknown",
+    "lastUsed": "last used {{when}}",
+    "neverUsed": "never used",
+    "actions": {
+      "rotate": "Rotate URL",
+      "enable": "Enable",
+      "disable": "Disable",
+      "delete": "Delete"
+    },
+    "create": {
+      "title": "New webhook",
+      "description": "Its messages appear under this name, marked as an app.",
+      "name": "Name",
+      "namePlaceholder": "e.g. Nightly build",
+      "channel": "Channel",
+      "noChannels": "This server has no text channel a webhook can post to.",
+      "type": "Type",
+      "typeGenericHint": "Discord-style JSON: content, username, embeds",
+      "typeGithubHint": "GitHub event payloads, verified with a signing secret",
+      "submit": "Create webhook",
+      "creating": "Creating…",
+      "failed": "Failed to create the webhook"
+    },
+    "reveal": {
+      "title": "{{name}} is ready",
+      "rotatedTitle": "New URL for {{name}}",
+      "copyNow": "Copy this now. The URL is shown once; rotate to get a new one.",
+      "url": "Webhook URL",
+      "copyUrl": "Copy URL",
+      "worksWith": "Works anywhere a tool asks for a Discord webhook URL.",
+      "curlHint": "Try it from a terminal",
+      "copyCurl": "Copy command",
+      "secret": "Signing secret",
+      "copySecret": "Copy secret",
+      "copied": "Copied to clipboard",
+      "copyFailed": "Could not copy to the clipboard",
+      "done": "Done"
+    },
+    "rotate": {
+      "title": "Rotate webhook URL",
+      "body": "{{name}} gets a new URL. The current one stops working immediately, so update every tool that uses it.",
+      "confirm": "Rotate",
+      "rotating": "Rotating…",
+      "failed": "Failed to rotate the webhook URL"
+    },
+    "delete": {
+      "title": "Delete webhook",
+      "body": "Delete {{name}}? Anything still using its URL will stop working.",
+      "alsoDeleteMessages": "Also delete every message it posted",
+      "deleted": "{{name}} deleted",
+      "deletedMessages_one": "{{name}} deleted, along with {{count}} message",
+      "deletedMessages_other": "{{name}} deleted, along with {{count}} messages",
+      "failed": "Failed to delete the webhook"
+    },
+    "off": {
+      "title": "Webhooks are turned off right now.",
+      "hint": "An administrator has disabled incoming webhooks. Nothing can post through them until they are back."
     }
   }
 }

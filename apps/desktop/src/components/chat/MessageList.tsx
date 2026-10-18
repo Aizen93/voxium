@@ -6,6 +6,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from './MessageItem';
 import { isNewDay, daySeparatorFor } from '../../utils/dateSeparator';
+import { startsMessageGroup } from '../../utils/messageGrouping';
 import { ArrowDown } from 'lucide-react';
 
 /** Virtual index of the oldest loadable message; leaves room to page upward. */
@@ -181,16 +182,10 @@ export function MessageList() {
     setShowScrollButton(!bottom);
   }, []);
 
-  // Group messages by author for compact display
-  const shouldShowHeader = (index: number) => {
-    if (index === 0) return true;
-    const prev = messages[index - 1];
-    const curr = messages[index];
-    if (curr.replyToId) return true;
-    if (prev.author.id !== curr.author.id) return true;
-    const timeDiff = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();
-    return timeDiff > 5 * 60 * 1000;
-  };
+  // Group messages by author for compact display (a webhook author's name is
+  // part of the key: utils/messageGrouping.ts)
+  const shouldShowHeader = (index: number) =>
+    index === 0 || startsMessageGroup(messages[index - 1], messages[index]);
 
   const typingText = (() => {
     const names = Array.from(typingUsers.values());

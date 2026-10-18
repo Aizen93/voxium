@@ -274,7 +274,8 @@
       "members": "الأعضاء",
       "roles": "الأدوار",
       "limits": "الحدود",
-      "discovery": "الاستكشاف"
+      "discovery": "الاستكشاف",
+      "integrations": "التكاملات"
     },
     "general": {
       "serverName": "اسم الخادم",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "الحد الأقصى لفئات القنوات في هذا الخادم",
       "maxMembers": "الحد الأقصى للأعضاء",
       "maxMembersDesc": "الحد الأقصى للأعضاء الذين يمكنهم الانضمام إلى هذا الخادم",
+      "maxWebhooks": "الحد الأقصى لخطافات الويب",
+      "maxWebhooksDesc": "الحد الأقصى لخطافات الويب الواردة في هذا الخادم (0 يوقف الإنشاء)",
       "unlimited": "غير محدود",
       "failedToLoad": "فشل تحميل حدود الخادم"
     }
@@ -544,7 +547,9 @@
     "report": "إبلاغ",
     "editHint": "Escape للإلغاء · Enter للحفظ",
     "originalDeleted": "تم حذف الرسالة الأصلية",
-    "failedToToggleReaction": "فشل تغيير التفاعل"
+    "failedToToggleReaction": "فشل تغيير التفاعل",
+    "appTag": "تطبيق",
+    "deletedWebhook": "خطاف ويب محذوف"
   },
   "messageInput": {
     "emojiPicker": "منتقي الرموز التعبيرية",
@@ -1184,7 +1189,21 @@
     "joinMessageUnsupportedChars": "تحتوي الرسالة على أحرف غير مدعومة",
     "joinMessageTooLong": "يجب ألا تتجاوز الرسالة {{max}} حرفًا",
     "refineSearch": "نتائج كثيرة جدًا — حدّد بحثك",
-    "serverNotFound": "المساحة غير موجودة"
+    "serverNotFound": "المساحة غير موجودة",
+    "webhooksDisabled": "خطافات الويب معطّلة حاليًا",
+    "webhookDisabled": "خطاف الويب هذا معطّل",
+    "webhookNotFound": "لم يُعثر على خطاف الويب",
+    "webhookNoPermission": "ليس لديك صلاحية إدارة خطافات الويب",
+    "webhookTextOnly": "يمكن لخطافات الويب النشر في القنوات النصية فقط",
+    "webhookInvalidType": "نوع خطاف الويب غير صالح",
+    "webhookGithubUnavailable": "خطافات ويب GitHub غير متاحة بعد",
+    "webhookChannelRequired": "اختر قناة لخطاف الويب",
+    "webhookNoFields": "لا يوجد ما يُحدَّث",
+    "webhookEnabledBoolean": "قيمة التفعيل غير صالحة",
+    "webhookNameEmpty": "لا يمكن أن يكون اسم خطاف الويب فارغًا",
+    "webhookNameTooLong": "يجب ألا يتجاوز اسم خطاف الويب {{max}} حرفًا",
+    "webhookCap": "بلغ هذا الخادم الحد الأقصى لخطافات الويب ({{max}} كحد أقصى)",
+    "channelNotFound": "لم يُعثر على القناة"
   },
   "e2e": {
     "badgeTitle": "مشفَّر تشفيرًا تامًا بين الطرفين — عرض رقم الأمان",
@@ -1527,6 +1546,86 @@
       "declined": "رُفض طلبك للانضمام إلى {{name}}",
       "newRequest": "طلب {{user}} الانضمام إلى {{server}}",
       "unknownSpace": "مساحة"
+    }
+  },
+  "webhooks": {
+    "title": "التكاملات",
+    "hint": "تتيح خطافات الويب الواردة للسكربتات ومهام CI والتطبيقات الأخرى النشر في قناة نصية.",
+    "usage": "{{used}} من {{max}}",
+    "newWebhook": "خطاف ويب جديد",
+    "atCap": "تم بلوغ الحد الأقصى لخطافات الويب ({{max}} كحد أقصى)",
+    "frozen": "إنشاء خطافات الويب موقوف في هذا الخادم",
+    "empty": "لا توجد خطافات ويب بعد.",
+    "emptyHint": "أنشئ واحدًا ليتمكن سكربت أو مهمة CI أو تطبيق آخر من النشر في قناة.",
+    "failedToLoad": "تعذّر تحميل خطافات الويب",
+    "retry": "إعادة المحاولة",
+    "toggleFailed": "تعذّر تحديث خطاف الويب",
+    "typeGeneric": "عام",
+    "typeGithub": "GitHub",
+    "disabledChip": "معطّل",
+    "channelMissing": "قناة غير معروفة",
+    "createdBy": "أنشأه {{name}}",
+    "createdByUnknown": "المنشئ غير معروف",
+    "lastUsed": "آخر استخدام: {{when}}",
+    "neverUsed": "لم يُستخدم قط",
+    "actions": {
+      "rotate": "تجديد الرابط",
+      "enable": "تفعيل",
+      "disable": "تعطيل",
+      "delete": "حذف"
+    },
+    "create": {
+      "title": "خطاف ويب جديد",
+      "description": "تظهر رسائله بهذا الاسم مع علامة تطبيق.",
+      "name": "الاسم",
+      "namePlaceholder": "مثال: البناء الليلي",
+      "channel": "القناة",
+      "noChannels": "لا توجد في هذا الخادم قناة نصية يمكن لخطاف ويب النشر فيها.",
+      "type": "النوع",
+      "typeGenericHint": "JSON بصيغة Discord: content وusername وembeds",
+      "typeGithubHint": "أحداث GitHub، يُتحقق منها بسرّ توقيع",
+      "submit": "إنشاء خطاف الويب",
+      "creating": "جارٍ الإنشاء…",
+      "failed": "تعذّر إنشاء خطاف الويب"
+    },
+    "reveal": {
+      "title": "{{name}} جاهز",
+      "rotatedTitle": "رابط جديد لـ {{name}}",
+      "copyNow": "انسخه الآن. يُعرض الرابط مرة واحدة فقط؛ جدّده للحصول على رابط جديد.",
+      "url": "رابط خطاف الويب",
+      "copyUrl": "نسخ الرابط",
+      "worksWith": "يعمل في أي مكان تطلب فيه أداة رابط خطاف ويب Discord.",
+      "curlHint": "جرّبه من الطرفية",
+      "copyCurl": "نسخ الأمر",
+      "secret": "سرّ التوقيع",
+      "copySecret": "نسخ السرّ",
+      "copied": "تم النسخ إلى الحافظة",
+      "copyFailed": "تعذّر النسخ إلى الحافظة",
+      "done": "تم"
+    },
+    "rotate": {
+      "title": "تجديد رابط خطاف الويب",
+      "body": "سيحصل {{name}} على رابط جديد. سيتوقف الرابط الحالي عن العمل فورًا، لذا حدّث كل أداة تستخدمه.",
+      "confirm": "تجديد",
+      "rotating": "جارٍ التجديد…",
+      "failed": "تعذّر تجديد رابط خطاف الويب"
+    },
+    "delete": {
+      "title": "حذف خطاف الويب",
+      "body": "هل تريد حذف {{name}}؟ سيتوقف كل ما لا يزال يستخدم رابطه عن العمل.",
+      "alsoDeleteMessages": "احذف أيضًا كل الرسائل التي نشرها",
+      "deleted": "تم حذف {{name}}",
+      "deletedMessages_zero": "تم حذف {{name}}، ولم تكن له رسائل",
+      "deletedMessages_one": "تم حذف {{name}} مع رسالة واحدة",
+      "deletedMessages_two": "تم حذف {{name}} مع رسالتين",
+      "deletedMessages_few": "تم حذف {{name}} مع {{count}} رسائل",
+      "deletedMessages_many": "تم حذف {{name}} مع {{count}} رسالة",
+      "deletedMessages_other": "تم حذف {{name}} مع {{count}} رسالة",
+      "failed": "تعذّر حذف خطاف الويب"
+    },
+    "off": {
+      "title": "خطافات الويب متوقفة حاليًا.",
+      "hint": "عطّل أحد المسؤولين خطافات الويب الواردة. لا يمكن النشر عبرها حتى تُعاد."
     }
   }
 }

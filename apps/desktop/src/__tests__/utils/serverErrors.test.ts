@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { TFunction } from 'i18next';
 import { LIMITS } from '@voxium/shared';
-import { translateServerError, getTranslatedError, DISCOVERY_ERROR_KEYS } from '../../utils/serverErrors';
+import { translateServerError, getTranslatedError, DISCOVERY_ERROR_KEYS, WEBHOOK_ERROR_KEYS } from '../../utils/serverErrors';
 
 /**
  * The shared validators build their messages from LIMITS; the client maps
@@ -40,5 +40,43 @@ describe('translateServerError', () => {
     for (const key of ['descriptionUnsupportedChars', 'descriptionTooLong', 'reasonUnsupportedChars', 'reasonTooLong', 'tagsNotSupported', 'tooManyTags', 'bannedFromServer', 'cannotKickHigherRole']) {
       expect(DISCOVERY_ERROR_KEYS).toContain(key);
     }
+  });
+});
+
+describe('translateServerError — incoming webhooks', () => {
+  it('maps every exact string the webhook routes answer with', () => {
+    const cases: Array<[string, string]> = [
+      ['Webhooks are currently disabled', 'webhooksDisabled'],
+      ['Webhook is disabled', 'webhookDisabled'],
+      ['Webhook not found', 'webhookNotFound'],
+      ['You do not have permission to manage webhooks', 'webhookNoPermission'],
+      ['Webhooks can only post to text channels', 'webhookTextOnly'],
+      ['Invalid webhook type', 'webhookInvalidType'],
+      ['GitHub webhooks are not available yet', 'webhookGithubUnavailable'],
+      ['channelId is required', 'webhookChannelRequired'],
+      ['No fields to update', 'webhookNoFields'],
+      ['enabled must be a boolean', 'webhookEnabledBoolean'],
+      ['Webhook name cannot be empty', 'webhookNameEmpty'],
+      ['Channel not found', 'channelNotFound'],
+    ];
+    for (const [message, key] of cases) {
+      expect(translateServerError(message, t).startsWith(`serverErrors.${key}|`), message).toBe(true);
+      expect(WEBHOOK_ERROR_KEYS).toContain(key);
+    }
+  });
+
+  it('the shared name validator: the length message carries the limit as {{max}}', () => {
+    expect(translateServerError(`Webhook name must be at most ${LIMITS.WEBHOOK_NAME_MAX} characters`, t))
+      .toBe(`serverErrors.webhookNameTooLong|${JSON.stringify({ defaultValue: `Webhook name must be at most ${LIMITS.WEBHOOK_NAME_MAX} characters`, max: LIMITS.WEBHOOK_NAME_MAX })}`);
+  });
+
+  it("the per-server cap is admin-tunable: matched by pattern, the SERVER's number travels as {{max}}", () => {
+    expect(translateServerError('Server can have at most 3 webhooks', t))
+      .toBe(`serverErrors.webhookCap|${JSON.stringify({ defaultValue: 'Server can have at most 3 webhooks', max: 3 })}`);
+    expect(translateServerError('Server can have at most 0 webhooks', t)).toContain('"max":0');
+    expect(WEBHOOK_ERROR_KEYS).toContain('webhookCap');
+    // anchored: a lookalike is not rewritten, and the channel cap stays raw
+    expect(translateServerError('Server can have at most 3 webhooks!', t)).toBe('Server can have at most 3 webhooks!');
+    expect(translateServerError('Server can have at most many webhooks', t)).toBe('Server can have at most many webhooks');
   });
 });

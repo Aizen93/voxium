@@ -59,6 +59,8 @@ interface ChatState {
   updateMessage: (message: Message) => void;
   updateMessageReactions: (messageId: string, reactions: ReactionGroup[]) => void;
   deleteMessage: (messageId: string) => void;
+  /** Drops every loaded row a webhook posted in a channel (`message:bulk_deleted`, a webhook deleted with purge). */
+  removeWebhookMessages: (channelId: string, webhookId: string) => void;
   clearMessages: () => void;
   clearTargetMessage: () => void;
   setTypingUser: (userId: string, username: string) => void;
@@ -471,6 +473,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   deleteMessage: (messageId: string) => {
     set((state) => ({
       messages: state.messages.filter((m) => m.id !== messageId),
+    }));
+  },
+
+  removeWebhookMessages: (channelId: string, webhookId: string) => {
+    // BOTH ids must match: chatStore is shared with DMs, and another
+    // webhook's rows (or a human's) in the same channel stay
+    set((state) => ({
+      messages: state.messages.filter((m) => !(m.channelId === channelId && m.webhookId === webhookId)),
     }));
   },
 

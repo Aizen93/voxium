@@ -41,6 +41,7 @@ import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { SharePreflightModal } from '../voice/SharePreflightModal';
 import { discoverySocketHandlers } from '../../services/discoverySocketHandlers';
+import { handleMessageBulkDeleted } from '../../services/webhookSocketHandlers';
 import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
@@ -724,6 +725,9 @@ export function MainLayout() {
       ['message:new', handlers.messageNew],
       ['message:update', handlers.messageUpdate],
       ['message:delete', handlers.messageDelete],
+      // A webhook deleted with purge (services/webhookSocketHandlers.ts):
+      // acts only on the channel on screen, validates its payload
+      ['message:bulk_deleted', (data: unknown) => handleMessageBulkDeleted(data, isViewingChannel)],
       ['typing:start', handlers.typingStart],
       ['typing:stop', handlers.typingStop],
       ['presence:update', handlers.presenceUpdate],

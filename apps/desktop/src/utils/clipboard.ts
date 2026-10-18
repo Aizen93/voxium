@@ -19,9 +19,18 @@ export async function copyToClipboard(text: string): Promise<void> {
   field.style.position = 'fixed';
   field.style.left = '-9999px';
   document.body.appendChild(field);
-  field.focus();
-  field.select();
-  const ok = document.execCommand('copy');
-  document.body.removeChild(field);
+  let ok = false;
+  try {
+    field.focus();
+    field.select();
+    // execCommand can throw (a webview that blocks it) as well as answer false;
+    // both are the same failure to the caller
+    ok = document.execCommand('copy');
+  } catch (err) {
+    console.warn('[Clipboard] execCommand copy threw:', err instanceof Error ? err.message : err);
+  } finally {
+    // Never leave the text (a webhook token, a recovery key) in the DOM
+    field.remove();
+  }
   if (!ok) throw new Error('copy rejected');
 }

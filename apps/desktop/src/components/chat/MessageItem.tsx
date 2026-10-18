@@ -141,12 +141,20 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   const isSystemMessage = message.type === 'system';
   const currentUserId = useAuthStore((s) => s.user?.id);
   const isMentioned = !!(message.mentions && currentUserId && message.mentions.some((m) => m.id === currentUserId));
+  // A webhook posted this: the author id is `webhook:<id>` / `webhook:deleted`,
+  // never a user. It has no profile, no membership row, no DM and nothing to
+  // report — so it reaches no member lookup, no hover target and no Report.
+  // Webhooks never post into DMs or encrypted channels: the display gate strips
+  // the flag from those rows, and this is the second lock.
+  const isWebhook = message.author.isWebhook === true && !message.encrypted && !conversationId;
+  // The webhook was deleted since (its rows keep the name they were posted under)
+  const isDeletedWebhook = isWebhook && message.webhookId == null;
 
   // The author's membership row, for the nickname and the role color (server
   // context only). On a big server the client may not hold it: the hook asks
   // for it, batched, and the message renders with the author it carries
-  // until the row lands.
-  const authorMember = useMember(channelId ? message.author.id : undefined) ?? null;
+  // until the row lands. A webhook author has none: the hook gets undefined.
+  const authorMember = useMember(channelId && !isWebhook ? message.author.id : undefined) ?? null;
   // Messages in a SECURE channel cannot be reported: their content is not
   // the server's to read, so there is nothing a platform moderator could act
   // on — the members deal with each other, and a member who wants the channel
@@ -196,6 +204,8 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
           className="ml-13 mb-0.5 flex items-center gap-1.5 cursor-pointer text-xs text-vox-text-muted hover:text-vox-text-secondary border-l-2 border-vox-text-muted/40 pl-2"
         >
           <Reply size={12} className="shrink-0 rotate-180" />
+          {/* Plain text, never a hover target: the quoted author may be a
+              webhook (`webhook:` id, no profile), and the quote shows no badges */}
           <span className="font-semibold text-vox-text-secondary">{message.replyTo.author.displayName}</span>
           <span className="truncate">{truncated}</span>
         </div>
@@ -256,7 +266,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 onClose={() => setShowReactionPicker(false)}
               />
             )}
-            {isOwn && (
+            {isOwn && !isWebhook && (
               <button
                 onClick={handleStartEdit}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
@@ -276,7 +286,9 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 <Trash2 size={14} />
               </button>
             )}
-            {!isOwn && !isSystemMessage && !inSecureChannel && (
+            {/* A webhook author is not a user: there is no one to report (a
+                moderator deletes the message or the webhook instead) */}
+            {!isOwn && !isSystemMessage && !inSecureChannel && !isWebhook && (
               <button
                 onClick={() => setShowReportModal(true)}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-accent-warning hover:bg-vox-accent-warning/10 transition-colors"
@@ -292,26 +304,53 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
         {showHeader ? (
           <>
             <div className="flex items-start gap-3">
-              {/* Avatar + Name hover target */}
-              <UserHoverTarget userId={message.author.id} className="mt-0.5 shrink-0 cursor-pointer">
-                <Avatar avatarUrl={message.author.avatarUrl} displayName={message.author.displayName} size="md" />
-              </UserHoverTarget>
+              {/* Avatar + Name hover target — plain for a webhook author (no profile to open) */}
+              {isWebhook ? (
+                <div className="mt-0.5 shrink-0">
+                  <Avatar avatarUrl={message.author.avatarUrl} displayName={message.author.displayName} size="md" />
+                </div>
+              ) : (
+                <UserHoverTarget userId={message.author.id} className="mt-0.5 shrink-0 cursor-pointer">
+                  <Avatar avatarUrl={message.author.avatarUrl} displayName={message.author.displayName} size="md" />
+                </UserHoverTarget>
+              )}
 
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
-                  <UserHoverTarget userId={message.author.id} className="inline">
+                  {isWebhook ? (
                     <span
-                      className={clsx(
-                        'text-[14px] font-semibold cursor-pointer hover:underline',
-                        !authorRoleColor && (isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary')
-                      )}
-                      style={authorRoleColor ? { color: authorRoleColor } : undefined}
+                      data-testid="webhook-author-name"
+                      className={clsx('text-[14px] font-semibold', isDeletedWebhook ? 'text-vox-text-muted' : 'text-vox-text-primary')}
+                      title={isDeletedWebhook ? t('messageItem.deletedWebhook') : undefined}
                     >
-                      {authorDisplayName}
+                      {message.author.displayName}
                     </span>
-                  </UserHoverTarget>
-                  {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}
-                  {message.author.isSupporter && <SupporterBadge tier={message.author.supporterTier} />}
+                  ) : (
+                    <UserHoverTarget userId={message.author.id} className="inline">
+                      <span
+                        className={clsx(
+                          'text-[14px] font-semibold cursor-pointer hover:underline',
+                          !authorRoleColor && (isOwn ? 'text-vox-accent-primary' : 'text-vox-text-primary')
+                        )}
+                        style={authorRoleColor ? { color: authorRoleColor } : undefined}
+                      >
+                        {authorDisplayName}
+                      </span>
+                    </UserHoverTarget>
+                  )}
+                  {isWebhook ? (
+                    <span
+                      data-testid="app-tag"
+                      className="inline-flex items-center px-1 py-0.5 rounded text-[10px] font-semibold bg-vox-accent-primary/20 text-vox-accent-primary"
+                    >
+                      {t('messageItem.appTag')}
+                    </span>
+                  ) : (
+                    <>
+                      {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}
+                      {message.author.isSupporter && <SupporterBadge tier={message.author.supporterTier} />}
+                    </>
+                  )}
                   <span className="font-mono text-[10.5px] text-vox-text-muted/80">
                     {formatMessageTime(message.createdAt, t)}
                   </span>
@@ -411,7 +450,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
         />
       )}
 
-      {showReportModal && (
+      {showReportModal && !isWebhook && (
         <ReportModal
           type="message"
           reportedUserId={message.author.id}

@@ -2,7 +2,8 @@ import axios from 'axios';
 import { connectSocket } from './socket';
 import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './tokenStorage';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
+/** The REST base every request is relative to; also the root the incoming-webhook URL is composed on (services/webhooks.ts). */
+export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
 
 export const api = axios.create({
   baseURL: API_BASE,

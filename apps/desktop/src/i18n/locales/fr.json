@@ -274,7 +274,8 @@
       "members": "Membres",
       "roles": "Rôles",
       "limits": "Limites",
-      "discovery": "Découverte"
+      "discovery": "Découverte",
+      "integrations": "Intégrations"
     },
     "general": {
       "serverName": "Nom du serveur",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "Nombre maximum de catégories de salons dans ce serveur",
       "maxMembers": "Nombre max de membres",
       "maxMembersDesc": "Nombre maximum de membres pouvant rejoindre ce serveur",
+      "maxWebhooks": "Nombre max de webhooks",
+      "maxWebhooksDesc": "Nombre maximum de webhooks entrants dans ce serveur (0 bloque la création)",
       "unlimited": "Illimité",
       "failedToLoad": "Impossible de charger les limites du serveur"
     }
@@ -544,7 +547,9 @@
     "report": "Signaler",
     "editHint": "Échap pour annuler · Entrée pour enregistrer",
     "originalDeleted": "Le message original a été supprimé",
-    "failedToToggleReaction": "Impossible de basculer la réaction"
+    "failedToToggleReaction": "Impossible de basculer la réaction",
+    "appTag": "APP",
+    "deletedWebhook": "Webhook supprimé"
   },
   "messageInput": {
     "emojiPicker": "Sélecteur d'emoji",
@@ -1180,7 +1185,21 @@
     "joinMessageUnsupportedChars": "Le message contient des caractères non pris en charge",
     "joinMessageTooLong": "Le message ne peut pas dépasser {{max}} caractères",
     "refineSearch": "Trop de résultats — affinez votre recherche",
-    "serverNotFound": "Espace introuvable"
+    "serverNotFound": "Espace introuvable",
+    "webhooksDisabled": "Les webhooks sont actuellement désactivés",
+    "webhookDisabled": "Ce webhook est désactivé",
+    "webhookNotFound": "Webhook introuvable",
+    "webhookNoPermission": "Vous n'avez pas l'autorisation de gérer les webhooks",
+    "webhookTextOnly": "Les webhooks ne peuvent publier que dans des salons textuels",
+    "webhookInvalidType": "Type de webhook invalide",
+    "webhookGithubUnavailable": "Les webhooks GitHub ne sont pas encore disponibles",
+    "webhookChannelRequired": "Choisissez un salon pour le webhook",
+    "webhookNoFields": "Rien à mettre à jour",
+    "webhookEnabledBoolean": "Valeur invalide pour l'activation",
+    "webhookNameEmpty": "Le nom du webhook ne peut pas être vide",
+    "webhookNameTooLong": "Le nom du webhook ne peut pas dépasser {{max}} caractères",
+    "webhookCap": "Ce serveur a atteint sa limite de webhooks (maximum {{max}})",
+    "channelNotFound": "Salon introuvable"
   },
   "e2e": {
     "badgeTitle": "Chiffré de bout en bout — voir le numéro de sécurité",
@@ -1499,6 +1518,82 @@
       "declined": "Votre demande pour rejoindre {{name}} a été refusée",
       "newRequest": "{{user}} demande à rejoindre {{server}}",
       "unknownSpace": "un espace"
+    }
+  },
+  "webhooks": {
+    "title": "Intégrations",
+    "hint": "Les webhooks entrants permettent à des scripts, des jobs de CI et d’autres applications de publier dans un salon textuel.",
+    "usage": "{{used}} sur {{max}}",
+    "newWebhook": "Nouveau webhook",
+    "atCap": "Limite de webhooks atteinte (maximum {{max}})",
+    "frozen": "La création de webhooks est bloquée sur ce serveur",
+    "empty": "Aucun webhook pour l’instant.",
+    "emptyHint": "Créez-en un pour qu’un script, un job de CI ou une autre application publie dans un salon.",
+    "failedToLoad": "Impossible de charger les webhooks",
+    "retry": "Réessayer",
+    "toggleFailed": "Impossible de mettre à jour le webhook",
+    "typeGeneric": "Générique",
+    "typeGithub": "GitHub",
+    "disabledChip": "Désactivé",
+    "channelMissing": "salon inconnu",
+    "createdBy": "créé par {{name}}",
+    "createdByUnknown": "créateur inconnu",
+    "lastUsed": "dernière utilisation {{when}}",
+    "neverUsed": "jamais utilisé",
+    "actions": {
+      "rotate": "Renouveler l’URL",
+      "enable": "Activer",
+      "disable": "Désactiver",
+      "delete": "Supprimer"
+    },
+    "create": {
+      "title": "Nouveau webhook",
+      "description": "Ses messages s’affichent sous ce nom, marqués comme provenant d’une application.",
+      "name": "Nom",
+      "namePlaceholder": "ex. Build nocturne",
+      "channel": "Salon",
+      "noChannels": "Ce serveur n’a aucun salon textuel où un webhook peut publier.",
+      "type": "Type",
+      "typeGenericHint": "JSON au format Discord : content, username, embeds",
+      "typeGithubHint": "Événements GitHub, vérifiés par un secret de signature",
+      "submit": "Créer le webhook",
+      "creating": "Création…",
+      "failed": "Impossible de créer le webhook"
+    },
+    "reveal": {
+      "title": "{{name}} est prêt",
+      "rotatedTitle": "Nouvelle URL pour {{name}}",
+      "copyNow": "Copiez-la maintenant. L’URL n’est affichée qu’une fois ; renouvelez-la pour en obtenir une nouvelle.",
+      "url": "URL du webhook",
+      "copyUrl": "Copier l’URL",
+      "worksWith": "Fonctionne partout où un outil demande une URL de webhook Discord.",
+      "curlHint": "Essayez-la depuis un terminal",
+      "copyCurl": "Copier la commande",
+      "secret": "Secret de signature",
+      "copySecret": "Copier le secret",
+      "copied": "Copié dans le presse-papiers",
+      "copyFailed": "Impossible de copier dans le presse-papiers",
+      "done": "Terminé"
+    },
+    "rotate": {
+      "title": "Renouveler l’URL du webhook",
+      "body": "{{name}} reçoit une nouvelle URL. L’actuelle cesse de fonctionner immédiatement : mettez à jour tous les outils qui l’utilisent.",
+      "confirm": "Renouveler",
+      "rotating": "Renouvellement…",
+      "failed": "Impossible de renouveler l’URL du webhook"
+    },
+    "delete": {
+      "title": "Supprimer le webhook",
+      "body": "Supprimer {{name}} ? Tout ce qui utilise encore son URL cessera de fonctionner.",
+      "alsoDeleteMessages": "Supprimer aussi tous les messages qu’il a publiés",
+      "deleted": "{{name}} supprimé",
+      "deletedMessages_one": "{{name}} supprimé, ainsi que {{count}} message",
+      "deletedMessages_other": "{{name}} supprimé, ainsi que {{count}} messages",
+      "failed": "Impossible de supprimer le webhook"
+    },
+    "off": {
+      "title": "Les webhooks sont désactivés pour le moment.",
+      "hint": "Un administrateur a désactivé les webhooks entrants. Rien ne peut être publié par leur biais tant qu’ils ne sont pas réactivés."
     }
   }
 }

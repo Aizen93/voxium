@@ -274,7 +274,8 @@
       "members": "Mitglieder",
       "roles": "Rollen",
       "limits": "Limits",
-      "discovery": "Entdecken"
+      "discovery": "Entdecken",
+      "integrations": "Integrationen"
     },
     "general": {
       "serverName": "Servername",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "Maximale Anzahl an Kanalkategorien in diesem Server",
       "maxMembers": "Max. Mitglieder",
       "maxMembersDesc": "Maximale Anzahl an Mitgliedern, die diesem Server beitreten können",
+      "maxWebhooks": "Max. Webhooks",
+      "maxWebhooksDesc": "Maximale Anzahl eingehender Webhooks in diesem Server (0 sperrt das Erstellen)",
       "unlimited": "Unbegrenzt",
       "failedToLoad": "Serverlimits konnten nicht geladen werden"
     }
@@ -544,7 +547,9 @@
     "report": "Melden",
     "editHint": "Escape zum Abbrechen · Enter zum Speichern",
     "originalDeleted": "Originalnachricht wurde gelöscht",
-    "failedToToggleReaction": "Reaktion konnte nicht geändert werden"
+    "failedToToggleReaction": "Reaktion konnte nicht geändert werden",
+    "appTag": "APP",
+    "deletedWebhook": "Gelöschter Webhook"
   },
   "messageInput": {
     "emojiPicker": "Emoji-Auswahl",
@@ -1180,7 +1185,21 @@
     "joinMessageUnsupportedChars": "Die Nachricht enthält nicht unterstützte Zeichen",
     "joinMessageTooLong": "Die Nachricht darf höchstens {{max}} Zeichen lang sein",
     "refineSearch": "Zu viele Ergebnisse — grenze deine Suche ein",
-    "serverNotFound": "Space nicht gefunden"
+    "serverNotFound": "Space nicht gefunden",
+    "webhooksDisabled": "Webhooks sind derzeit deaktiviert",
+    "webhookDisabled": "Dieser Webhook ist deaktiviert",
+    "webhookNotFound": "Webhook nicht gefunden",
+    "webhookNoPermission": "Du hast keine Berechtigung, Webhooks zu verwalten",
+    "webhookTextOnly": "Webhooks können nur in Textkanälen posten",
+    "webhookInvalidType": "Ungültiger Webhook-Typ",
+    "webhookGithubUnavailable": "GitHub-Webhooks sind noch nicht verfügbar",
+    "webhookChannelRequired": "Wähle einen Kanal für den Webhook",
+    "webhookNoFields": "Nichts zu aktualisieren",
+    "webhookEnabledBoolean": "Ungültiger Wert für „aktiviert“",
+    "webhookNameEmpty": "Der Webhook-Name darf nicht leer sein",
+    "webhookNameTooLong": "Der Webhook-Name darf höchstens {{max}} Zeichen lang sein",
+    "webhookCap": "Dieser Server hat sein Webhook-Limit erreicht (maximal {{max}})",
+    "channelNotFound": "Kanal nicht gefunden"
   },
   "e2e": {
     "badgeTitle": "Ende-zu-Ende-verschlüsselt — Sicherheitsnummer anzeigen",
@@ -1499,6 +1518,82 @@
       "declined": "Deine Beitrittsanfrage an {{name}} wurde abgelehnt",
       "newRequest": "{{user}} möchte {{server}} beitreten",
       "unknownSpace": "ein Space"
+    }
+  },
+  "webhooks": {
+    "title": "Integrationen",
+    "hint": "Mit eingehenden Webhooks können Skripte, CI-Jobs und andere Apps in einen Textkanal posten.",
+    "usage": "{{used}} von {{max}}",
+    "newWebhook": "Neuer Webhook",
+    "atCap": "Webhook-Limit erreicht (maximal {{max}})",
+    "frozen": "Das Erstellen von Webhooks ist auf diesem Server gesperrt",
+    "empty": "Noch keine Webhooks.",
+    "emptyHint": "Erstelle einen, damit ein Skript, ein CI-Job oder eine andere App in einen Kanal posten kann.",
+    "failedToLoad": "Webhooks konnten nicht geladen werden",
+    "retry": "Erneut versuchen",
+    "toggleFailed": "Webhook konnte nicht aktualisiert werden",
+    "typeGeneric": "Allgemein",
+    "typeGithub": "GitHub",
+    "disabledChip": "Deaktiviert",
+    "channelMissing": "unbekannter Kanal",
+    "createdBy": "erstellt von {{name}}",
+    "createdByUnknown": "Ersteller unbekannt",
+    "lastUsed": "zuletzt verwendet {{when}}",
+    "neverUsed": "nie verwendet",
+    "actions": {
+      "rotate": "URL erneuern",
+      "enable": "Aktivieren",
+      "disable": "Deaktivieren",
+      "delete": "Löschen"
+    },
+    "create": {
+      "title": "Neuer Webhook",
+      "description": "Seine Nachrichten erscheinen unter diesem Namen und sind als App gekennzeichnet.",
+      "name": "Name",
+      "namePlaceholder": "z. B. Nightly-Build",
+      "channel": "Kanal",
+      "noChannels": "Dieser Server hat keinen Textkanal, in den ein Webhook posten kann.",
+      "type": "Typ",
+      "typeGenericHint": "JSON im Discord-Format: content, username, embeds",
+      "typeGithubHint": "GitHub-Ereignisse, geprüft mit einem Signatur-Secret",
+      "submit": "Webhook erstellen",
+      "creating": "Wird erstellt…",
+      "failed": "Webhook konnte nicht erstellt werden"
+    },
+    "reveal": {
+      "title": "{{name}} ist bereit",
+      "rotatedTitle": "Neue URL für {{name}}",
+      "copyNow": "Kopiere sie jetzt. Die URL wird nur einmal angezeigt; erneuere sie, um eine neue zu erhalten.",
+      "url": "Webhook-URL",
+      "copyUrl": "URL kopieren",
+      "worksWith": "Funktioniert überall, wo ein Tool nach einer Discord-Webhook-URL fragt.",
+      "curlHint": "Im Terminal ausprobieren",
+      "copyCurl": "Befehl kopieren",
+      "secret": "Signatur-Secret",
+      "copySecret": "Secret kopieren",
+      "copied": "In die Zwischenablage kopiert",
+      "copyFailed": "Kopieren in die Zwischenablage fehlgeschlagen",
+      "done": "Fertig"
+    },
+    "rotate": {
+      "title": "Webhook-URL erneuern",
+      "body": "{{name}} erhält eine neue URL. Die aktuelle funktioniert sofort nicht mehr – aktualisiere alle Tools, die sie verwenden.",
+      "confirm": "Erneuern",
+      "rotating": "Wird erneuert…",
+      "failed": "Webhook-URL konnte nicht erneuert werden"
+    },
+    "delete": {
+      "title": "Webhook löschen",
+      "body": "{{name}} löschen? Alles, was seine URL noch verwendet, funktioniert dann nicht mehr.",
+      "alsoDeleteMessages": "Auch alle Nachrichten löschen, die er gepostet hat",
+      "deleted": "{{name}} gelöscht",
+      "deletedMessages_one": "{{name}} gelöscht, zusammen mit {{count}} Nachricht",
+      "deletedMessages_other": "{{name}} gelöscht, zusammen mit {{count}} Nachrichten",
+      "failed": "Webhook konnte nicht gelöscht werden"
+    },
+    "off": {
+      "title": "Webhooks sind gerade ausgeschaltet.",
+      "hint": "Ein Administrator hat eingehende Webhooks deaktiviert. Bis sie wieder aktiv sind, kann nichts über sie gepostet werden."
     }
   }
 }

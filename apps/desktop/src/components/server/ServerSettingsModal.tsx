@@ -9,6 +9,7 @@ import type { ResourceLimits } from '@voxium/shared';
 import { Permissions, permissionsFromString, hasPermission } from '@voxium/shared';
 import { RoleEditor } from './RoleEditor';
 import { DiscoveryTab } from './DiscoveryTab';
+import { IntegrationsTab } from './IntegrationsTab';
 import { JoinRequestsSection } from './JoinRequestsSection';
 import { BannedSection } from './BannedSection';
 import { MembersDirectory } from './MembersDirectory';
@@ -20,13 +21,14 @@ interface Props {
   onClose: () => void;
 }
 
-type Tab = 'general' | 'members' | 'roles' | 'limits' | 'discovery';
+type Tab = 'general' | 'members' | 'roles' | 'limits' | 'discovery' | 'integrations';
 
 export function ServerSettingsModal({ serverId, onClose }: Props) {
   const { t } = useTranslation();
   // No tab until the viewer picks one: the default is derived below from
   // what they may do (General is a MANAGE_SERVER tab; a role-only moderator
-  // reaches the modal through the gear too and lands on Members).
+  // reaches the modal through the gear too and lands on Members; a member
+  // holding only MANAGE_WEBHOOKS lands on Integrations).
   const [activeTab, setActiveTab] = useState<Tab | null>(null);
 
   const { servers, roles, fetchEffectivePermissions, fetchJoinRequests } = useServerStore();
@@ -45,7 +47,15 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   // Discovery tab: MANAGE_SERVER. Join requests + Banned: KICK_MEMBERS ("Manage members").
   const canManageServer = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_SERVER));
   const canModerateMembers = isOwner || (perms !== null && hasPermission(perms, Permissions.KICK_MEMBERS));
-  const tab: Tab = activeTab ?? (canManageServer ? 'general' : 'members');
+  // Integrations tab: MANAGE_WEBHOOKS (server-level only; ADMINISTRATOR implies it).
+  const canManageWebhooks = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_WEBHOOKS));
+  // Default tab: General for MANAGE_SERVER; Integrations when webhooks are the
+  // viewer's only surface beyond the read-only tabs (no moderation, no roles);
+  // otherwise Members. Members and Limits stay visible to everyone in here.
+  const defaultTab: Tab = canManageServer
+    ? 'general'
+    : canManageWebhooks && !canModerateMembers && !canManageRoles ? 'integrations' : 'members';
+  const tab: Tab = activeTab ?? defaultTab;
 
   // The Members tab badge is fed by the socket events and by the list fetch;
   // until step 4 wires the events, and on the first open of a session, the
@@ -120,6 +130,19 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
               {t('serverSettings.tabs.discovery')}
             </button>
           )}
+          {canManageWebhooks && (
+            <button
+              onClick={() => setActiveTab('integrations')}
+              className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                tab === 'integrations'
+                  ? 'text-vox-text-primary border-vox-accent-primary'
+                  : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+              }`}
+              data-testid="tab-integrations"
+            >
+              {t('serverSettings.tabs.integrations')}
+            </button>
+          )}
           {canManageRoles && (
             <button
               onClick={() => setActiveTab('roles')}
@@ -152,6 +175,8 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
             <MembersTab serverId={serverId} canModerateMembers={canModerateMembers} />
           ) : tab === 'discovery' ? (
             <DiscoveryTab key={serverId} serverId={serverId} onGoToGeneral={() => setActiveTab('general')} />
+          ) : tab === 'integrations' ? (
+            <IntegrationsTab key={serverId} serverId={serverId} />
           ) : tab === 'roles' ? (
             <RoleEditor serverId={serverId} roles={roles} canManageRoles={canManageRoles} />
           ) : (
@@ -489,6 +514,8 @@ function LimitsTab({ serverId }: { serverId: string }) {
     { label: t('serverSettings.limits.maxVoiceUsers'), value: limits.maxVoiceUsersPerChannel, description: t('serverSettings.limits.maxVoiceUsersDesc') },
     { label: t('serverSettings.limits.maxCategories'), value: limits.maxCategoriesPerServer, description: t('serverSettings.limits.maxCategoriesDesc') },
     { label: t('serverSettings.limits.maxMembers'), value: limits.maxMembersPerServer, description: t('serverSettings.limits.maxMembersDesc'), formatZero: t('serverSettings.limits.unlimited') },
+    // No formatZero: a webhook cap of 0 freezes creation, it is not "unlimited"
+    { label: t('serverSettings.limits.maxWebhooks'), value: limits.maxWebhooksPerServer, description: t('serverSettings.limits.maxWebhooksDesc') },
   ];
 
   return (

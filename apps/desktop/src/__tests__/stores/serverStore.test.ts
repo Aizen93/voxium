@@ -357,6 +357,48 @@ describe('serverStore — member lookups (ensureMembers)', () => {
     await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
     expect(useServerStore.getState().people.onlineCount).toBe(900);
   });
+
+  // Webhook-authored messages carry `webhook:<id>` / `webhook:deleted`; the
+  // server 400s the WHOLE lookup batch on one id outside its opaque shape, and
+  // three failures drop the queue for every human author in it.
+  describe('ids the server could never answer for (webhook authors)', () => {
+    it('queues only the opaque id of a mixed list', async () => {
+      mockGet.mockResolvedValueOnce({ data: { data: [row('user1')] } });
+      useServerStore.getState().ensureMembers(['webhook:abc', 'user1']);
+      await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+      expect(mockGet).toHaveBeenCalledTimes(1);
+      expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/members/lookup', { params: { ids: 'user1' } });
+    });
+
+    it('a list of webhook ids alone makes no request at all', async () => {
+      useServerStore.getState().ensureMembers(['webhook:deleted']);
+      useServerStore.getState().ensureMembers(['webhook:w-1', 'webhook:deleted']);
+      await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS * 4);
+      expect(mockGet).not.toHaveBeenCalled();
+    });
+
+    it('drops every other shape the server refuses too (too long, spaces, other punctuation)', async () => {
+      mockGet.mockResolvedValueOnce({ data: { data: [] } });
+      useServerStore.getState().ensureMembers(['x'.repeat(65), 'a b', 'a.b', 'a/b', 'ok_ID-9']);
+      await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+      expect(mockGet).toHaveBeenCalledTimes(1);
+      expect(mockGet).toHaveBeenCalledWith('/servers/srv-1/members/lookup', { params: { ids: 'ok_ID-9' } });
+    });
+
+    it('a human author asked alongside webhook ids, again and again, still gets their row', async () => {
+      mockGet.mockResolvedValueOnce({ data: { data: [row('u-2')] } });
+      for (let i = 0; i < 3; i++) {
+        useServerStore.getState().ensureMembers(['webhook:w-1', 'u-2', 'webhook:deleted']);
+      }
+      await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+      useServerStore.getState().ensureMembers(['webhook:w-2', 'u-3']);
+      mockGet.mockResolvedValueOnce({ data: { data: [row('u-3')] } });
+      await vi.advanceTimersByTimeAsync(MEMBER_LOOKUP_DEBOUNCE_MS);
+      expect(mockGet).toHaveBeenCalledTimes(2);
+      expect(mockGet.mock.calls.map((c) => (c[1] as { params: { ids: string } }).params.ids)).toEqual(['u-2', 'u-3']);
+      expect(ids(useServerStore.getState().members)).toEqual(['me', 'u-2', 'u-3']);
+    });
+  });
 });
 
 describe('serverStore — presence on the slice', () => {

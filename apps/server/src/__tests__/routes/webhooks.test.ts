@@ -300,6 +300,10 @@ describe('GET /servers/:serverId/webhooks', () => {
     expect(args.select.createdBy).toEqual({ select: { id: true, username: true, displayName: true } });
     // The visibility filter fails open without `secure`
     expect(args.select.channel).toEqual({ select: { id: true, secure: true } });
+    // Unpaginated: its length is the `total` the response reports
+    expect(args).not.toHaveProperty('take');
+    expect(args).not.toHaveProperty('skip');
+    expect(args).not.toHaveProperty('cursor');
   });
 
   it('maps rows to the shared Webhook shape (ISO dates, createdBy null tolerated, no channel object)', async () => {
@@ -322,6 +326,7 @@ describe('GET /servers/:serverId/webhooks', () => {
           createdAt: CREATED_AT.toISOString(), lastUsedAt: USED_AT.toISOString(),
         },
       ],
+      total: 2,
     });
   });
 
@@ -357,6 +362,8 @@ describe('GET /servers/:serverId/webhooks', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.map((w: { id: string }) => w.id)).toEqual(['wh-1', 'wh-3']);
     expect(JSON.stringify(res.body)).not.toContain('ch-staff');
+    // ...but the hidden one still counts toward the total (the cap counts it)
+    expect(res.body.total).toBe(3);
 
     const [userId, serverId, channels] = h.filterVisibleChannels.mock.calls[0];
     expect(userId).toBe('user-1');
@@ -370,8 +377,26 @@ describe('GET /servers/:serverId/webhooks', () => {
 
   it('an empty list skips the visibility filter', async () => {
     const res = await request(app).get(BASE);
-    expect(res.body).toEqual({ success: true, data: [] });
+    expect(res.body).toEqual({ success: true, data: [], total: 0 });
     expect(h.filterVisibleChannels).not.toHaveBeenCalled();
+  });
+
+  it('total is EVERY webhook of the server, the hidden ones included: the number the create cap counts', async () => {
+    prismaMock.webhook.findMany.mockResolvedValue([
+      listRow({ id: 'wh-1', channelId: 'ch-staff' }),
+      listRow({ id: 'wh-2', channelId: 'ch-staff' }),
+      listRow({ id: 'wh-3', channelId: 'ch-mods' }),
+    ]);
+    h.filterVisibleChannels.mockResolvedValue([]);
+
+    const res = await request(app).get(BASE);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: [], total: 3 });
+    // the same server scope as the cap's count({ where: { serverId } })
+    expect(prismaMock.webhook.findMany.mock.calls[0][0].where).toEqual({ serverId: 'srv-1' });
+    // a count only: no hidden channel id or name rides along
+    expect(JSON.stringify(res.body)).not.toContain('ch-staff');
+    expect(JSON.stringify(res.body)).not.toContain('ch-mods');
   });
 });
 
