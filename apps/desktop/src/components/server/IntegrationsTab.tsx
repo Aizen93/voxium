@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Hash, Plus, Power, PowerOff, RefreshCw, Trash2, Webhook as WebhookIcon, X } from 'lucide-react';
-import type { ResourceLimits, Webhook, WebhookCreated, WebhookType } from '@voxium/shared';
+import { AlertTriangle, Hash, Plus, Power, PowerOff, RefreshCw, Trash2, Webhook as WebhookIcon, X } from 'lucide-react';
+import type { ResourceLimits, Webhook, WebhookCreated, WebhookTarget, WebhookType } from '@voxium/shared';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { api } from '../../services/api';
@@ -9,6 +9,7 @@ import { getSocket, onSocketReconnect } from '../../services/socket';
 import {
   createWebhook,
   deleteWebhook,
+  fetchWebhookTargets,
   isWebhooksOff,
   listWebhooks,
   rotateWebhook,
@@ -37,6 +38,13 @@ interface Reveal {
 const NO_BUSY: ReadonlySet<string> = new Set();
 
 /**
+ * The create picker's channels: the server's answer (what its create check
+ * accepts for THIS caller), the store-derived fallback after a failed fetch,
+ * or still loading.
+ */
+type Targets = { state: 'loading' } | { state: 'ready'; list: WebhookTarget[] } | { state: 'fallback' };
+
+/**
  * Server settings → Integrations: the server's incoming webhooks (needs
  * MANAGE_WEBHOOKS). The list is the SERVER's: fetched on mount, refetched
  * after every local mutation and on `webhook:changed` for this server (a
@@ -44,6 +52,7 @@ const NO_BUSY: ReadonlySet<string> = new Set();
  * hint); the cap reloads with it. Mutation responses are never written into the
  * list — the create and rotate answers are read ONCE, for the token shown in
  * the copy-once panel, and dropped with it. No store: nothing outlives the tab.
+ * The create picker's channels are the server's too (`/webhooks/targets`).
  */
 export function IntegrationsTab({ serverId }: Props) {
   const { t, i18n } = useTranslation();
@@ -59,6 +68,7 @@ export function IntegrationsTab({ serverId }: Props) {
   const [max, setMax] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
+  const [targets, setTargets] = useState<Targets>({ state: 'loading' });
   const [reveal, setReveal] = useState<Reveal | null>(null);
   const [confirmRotate, setConfirmRotate] = useState<Webhook | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Webhook | null>(null);
@@ -120,6 +130,38 @@ export function IntegrationsTab({ serverId }: Props) {
 
   useEffect(() => { void refetch(); }, [refetch]);
 
+  // The create picker's list, from the server: only the channels this caller
+  // can VIEW and SEND in, which no client-side filter can know (role and
+  // channel overrides). Fetched each time the dialog opens; numbered like the
+  // list. A failure falls back to the visible text channels: the server's
+  // check on the create stays the authority, and its refusal is toasted.
+  const targetsSeq = useRef(0);
+  const loadTargets = useCallback(async () => {
+    const seq = ++targetsSeq.current;
+    try {
+      const list = await fetchWebhookTargets(serverId);
+      if (!mounted.current || seq !== targetsSeq.current) return;
+      setTargets({ state: 'ready', list });
+    } catch (err) {
+      if (!mounted.current || seq !== targetsSeq.current) return;
+      // The flag went off: the tab shows its off state, and the dialog must
+      // not stay open on a spinner that nothing will ever resolve
+      if (isWebhooksOff(err)) { setOff(true); setCreating(false); return; }
+      console.warn('[Integrations] Failed to load webhook targets, offering the visible text channels:', err instanceof Error ? err.message : err);
+      setTargets({ state: 'fallback' });
+    }
+  }, [serverId]);
+
+  const openCreate = () => {
+    setTargets({ state: 'loading' });
+    setCreating(true);
+    void loadTargets();
+  };
+
+  // Read by the socket handlers below without re-subscribing on every open
+  const creatingRef = useRef(false);
+  useEffect(() => { creatingRef.current = creating; }, [creating]);
+
   // `webhook:changed` is the refetch hint; it reaches the whole server room,
   // so it is filtered to THIS server. Deleting a channel deletes its webhooks
   // by cascade and emits no `webhook:changed`: `channel:deleted` for this
@@ -130,7 +172,11 @@ export function IntegrationsTab({ serverId }: Props) {
       if (data && data.serverId === serverId) void refetch();
     };
     const onChannelDeleted = (data: { channelId: string; serverId: string }) => {
-      if (data && data.serverId === serverId) void refetch();
+      if (!data || data.serverId !== serverId) return;
+      void refetch();
+      // The open picker's list is the server's: ask again rather than offer a
+      // dead channel (the dialog keeps the current list until the answer)
+      if (creatingRef.current) void loadTargets();
     };
     let attached: ReturnType<typeof getSocket> = null;
     const attach = () => {
@@ -143,17 +189,23 @@ export function IntegrationsTab({ serverId }: Props) {
       attached = socket;
     };
     attach();
-    const unsubscribe = onSocketReconnect(() => { attach(); void refetch(); });
+    const unsubscribe = onSocketReconnect(() => {
+      attach();
+      void refetch();
+      if (creatingRef.current) void loadTargets();
+    });
     return () => {
       attached?.off('webhook:changed', onChanged);
       attached?.off('channel:deleted', onChannelDeleted);
       unsubscribe();
     };
-  }, [serverId, refetch]);
+  }, [serverId, refetch, loadTargets]);
 
   const serverChannels = useMemo(() => allChannels.filter((c) => c.serverId === serverId), [allChannels, serverId]);
   // A webhook posts to a plaintext text channel only (the server answers
-  // "Channel not found" for a secure one, by design)
+  // "Channel not found" for a secure one, by design). The picker's fallback
+  // when the targets fetch fails: it cannot know SEND_MESSAGES, the server's
+  // check does.
   const eligibleChannels = useMemo(
     () => serverChannels.filter((c) => c.type === 'text' && c.secure !== true),
     [serverChannels],
@@ -184,6 +236,16 @@ export function IntegrationsTab({ serverId }: Props) {
       if (Math.abs(diff) >= seconds) return fmt.format(Math.round(diff / seconds), unit);
     }
     return fmt.format(Math.round(diff), 'second');
+  };
+
+  /**
+   * A calendar date in the UI language. `null` for an unparsable one:
+   * Intl.DateTimeFormat throws on NaN too.
+   */
+  const day = (iso: string): string | null => {
+    const at = new Date(iso).getTime();
+    if (!Number.isFinite(at)) return null;
+    return new Intl.DateTimeFormat(i18n?.language, { dateStyle: 'medium' }).format(at);
   };
 
   const typeLabel = (type: WebhookType) => (type === 'github' ? t('webhooks.typeGithub') : t('webhooks.typeGeneric'));
@@ -264,6 +326,9 @@ export function IntegrationsTab({ serverId }: Props) {
   };
 
   const handleToggle = async (webhook: Webhook) => {
+    // An administrator's disable is sticky: the server refuses the owner's
+    // enable (403), so the control is disabled and this never sends it
+    if (webhook.adminDisabledAt && !webhook.enabled) return;
     markBusy(webhook.id);
     try {
       await updateWebhook(serverId, webhook.id, { enabled: !webhook.enabled });
@@ -346,7 +411,7 @@ export function IntegrationsTab({ serverId }: Props) {
           </div>
           <button
             type="button"
-            onClick={() => setCreating(true)}
+            onClick={openCreate}
             disabled={webhooks === null || atCap}
             title={capReason}
             className="btn-primary flex shrink-0 items-center gap-1.5 text-sm disabled:opacity-50"
@@ -383,6 +448,15 @@ export function IntegrationsTab({ serverId }: Props) {
               const channel = channelName(w.channelId);
               const busy = busyIds.has(w.id);
               const lastUsed = w.lastUsedAt ? relative(w.lastUsedAt) : null;
+              const rotatedWhen = w.lastRotatedAt ? relative(w.lastRotatedAt) : null;
+              // Truthiness, not `!== null`: an older server sends neither field
+              const adminDisabled = Boolean(w.adminDisabledAt);
+              // An administrator's disable says more than the creator's removal:
+              // enabling is not the owner's call then, so the rotate-then-enable
+              // advice would be wrong
+              const creatorRemoved = !adminDisabled && Boolean(w.creatorRemovedAt);
+              const removedOn = creatorRemoved && w.creatorRemovedAt ? day(w.creatorRemovedAt) : null;
+              const enableLocked = adminDisabled && !w.enabled;
               return (
                 <li
                   key={w.id}
@@ -397,7 +471,15 @@ export function IntegrationsTab({ serverId }: Props) {
                         <span className="rounded-full border border-vox-border px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-vox-text-secondary" data-testid="webhook-type">
                           {typeLabel(w.type)}
                         </span>
-                        {!w.enabled && (
+                        {adminDisabled ? (
+                          <span
+                            className="rounded-full bg-vox-accent-danger/15 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-vox-accent-danger"
+                            title={t('webhooks.adminDisabledHint')}
+                            data-testid="webhook-admin-disabled"
+                          >
+                            {t('webhooks.adminDisabledChip')}
+                          </span>
+                        ) : !w.enabled && (
                           <span className="rounded-full bg-vox-accent-danger/15 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-vox-accent-danger" data-testid="webhook-disabled">
                             {t('webhooks.disabledChip')}
                           </span>
@@ -421,6 +503,17 @@ export function IntegrationsTab({ serverId }: Props) {
                         <span data-testid="webhook-last-used">
                           {lastUsed !== null ? t('webhooks.lastUsed', { when: lastUsed }) : t('webhooks.neverUsed')}
                         </span>
+                        {rotatedWhen !== null && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            {/* The rotator's account may be gone: the time alone then */}
+                            <span data-testid="webhook-rotated">
+                              {w.lastRotatedBy
+                                ? t('webhooks.rotatedBy', { when: rotatedWhen, name: w.lastRotatedBy.displayName })
+                                : t('webhooks.rotated', { when: rotatedWhen })}
+                            </span>
+                          </>
+                        )}
                       </p>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
@@ -429,7 +522,9 @@ export function IntegrationsTab({ serverId }: Props) {
                       </RowAction>
                       <RowAction
                         label={w.enabled ? t('webhooks.actions.disable') : t('webhooks.actions.enable')}
-                        disabled={busy}
+                        // Shown, not hidden: the tooltip says why it cannot be enabled
+                        title={enableLocked ? t('webhooks.adminDisabledHint') : undefined}
+                        disabled={busy || enableLocked}
                         onClick={() => void handleToggle(w)}
                         testId="webhook-toggle"
                       >
@@ -440,6 +535,32 @@ export function IntegrationsTab({ serverId }: Props) {
                       </RowAction>
                     </div>
                   </div>
+                  {creatorRemoved && (
+                    // The URL may have left with the removed creator: rotate first.
+                    // Enabling stays allowed (it clears the mark server-side).
+                    <div
+                      className="mt-2 flex flex-wrap items-start justify-between gap-2 rounded-md border border-vox-accent-warning/30 bg-vox-accent-warning/10 px-3 py-2 text-xs text-vox-text-secondary"
+                      role="note"
+                      data-testid="webhook-creator-removed"
+                    >
+                      <p className="flex min-w-0 flex-1 items-start gap-1.5">
+                        <AlertTriangle size={14} className="mt-px shrink-0 text-vox-accent-warning" aria-hidden="true" />
+                        <span data-testid="webhook-creator-removed-text">
+                          {removedOn !== null ? t('webhooks.creatorRemoved', { date: removedOn }) : t('webhooks.creatorRemovedUndated')}
+                        </span>
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmRotate(w)}
+                        disabled={busy}
+                        className="flex shrink-0 items-center gap-1 rounded-md border border-vox-border px-2 py-1 text-xs text-vox-text-primary transition-colors hover:bg-vox-bg-hover disabled:opacity-50"
+                        data-testid="webhook-creator-removed-rotate"
+                      >
+                        <RefreshCw size={12} aria-hidden="true" />
+                        {t('webhooks.actions.rotate')}
+                      </button>
+                    </div>
+                  )}
                 </li>
               );
             })}
@@ -448,7 +569,7 @@ export function IntegrationsTab({ serverId }: Props) {
 
         {creating && (
           <WebhookCreateDialog
-            channels={eligibleChannels}
+            channels={targets.state === 'ready' ? targets.list : targets.state === 'fallback' ? eligibleChannels : null}
             busy={createBusy}
             onCreate={(input) => void handleCreate(input)}
             onClose={() => setCreating(false)}
@@ -501,8 +622,10 @@ export function IntegrationsTab({ serverId }: Props) {
   );
 }
 
-function RowAction({ label, disabled, danger = false, onClick, testId, children }: {
+function RowAction({ label, title, disabled, danger = false, onClick, testId, children }: {
   label: string;
+  /** The tooltip, when it must say more than the label (why the action is disabled). */
+  title?: string;
   disabled: boolean;
   danger?: boolean;
   onClick: () => void;
@@ -515,7 +638,7 @@ function RowAction({ label, disabled, danger = false, onClick, testId, children 
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
-      title={label}
+      title={title ?? label}
       className={`rounded-md p-1.5 transition-colors disabled:opacity-50 ${
         danger
           ? 'text-vox-text-muted hover:bg-vox-accent-danger/10 hover:text-vox-accent-danger'

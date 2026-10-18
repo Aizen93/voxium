@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { WEBHOOKS_DISABLED_MESSAGE } from '@voxium/shared';
-import type { Webhook, WebhookCreated, WebhookType } from '@voxium/shared';
+import type { Webhook, WebhookCreated, WebhookTarget, WebhookType } from '@voxium/shared';
 import { api, API_BASE } from './api';
 
 /**
@@ -57,6 +57,20 @@ export async function createWebhook(serverId: string, input: CreateWebhookInput)
 
 export async function updateWebhook(serverId: string, webhookId: string, patch: UpdateWebhookInput): Promise<Webhook> {
   const { data } = await api.patch<{ success: boolean; data: Webhook }>(`${base(serverId)}/${webhookId}`, patch);
+  return data.data;
+}
+
+/**
+ * The channels THIS caller may bind a webhook to (create, or move): the
+ * server's own create/move check run over the server's channels (text, not
+ * secure, VIEW and SEND_MESSAGES), sorted by position. The create picker
+ * offers exactly this list; the check on the write stays the authority.
+ * Anything but an array throws, so the caller falls back instead of offering
+ * nothing.
+ */
+export async function fetchWebhookTargets(serverId: string): Promise<WebhookTarget[]> {
+  const { data } = await api.get<{ success: boolean; data: WebhookTarget[] }>(`${base(serverId)}/targets`);
+  if (!Array.isArray(data?.data)) throw new Error('Malformed webhook targets answer');
   return data.data;
 }
 

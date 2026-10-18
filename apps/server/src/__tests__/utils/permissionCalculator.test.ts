@@ -36,6 +36,7 @@ import {
   getHighestRolePosition,
   getEffectivePermissions,
   filterVisibleChannels,
+  filterChannelsWithPermissions,
   filterVisibleChannelsMulti,
   filterVisibleChannelsForUsers,
   SECURE_MEMBER_PERMISSIONS,
@@ -987,5 +988,61 @@ describe('filterVisibleChannelsForUsers', () => {
     const result = await filterVisibleChannelsForUsers(['member'], 'srv', [CH_PUB]);
 
     expect([...result.get('member')!]).toEqual([]);
+  });
+  // ── filterChannelsWithPermissions (one batched pass for a required mask) ──
+  describe('filterChannelsWithPermissions', () => {
+    const everyone = (bits: bigint) => ({ id: 'ev', permissions: permissionsToString(bits) });
+    const deny = (channelId: string, bits: bigint) => ({ channelId, roleId: 'ev', allow: permissionsToString(0n), deny: permissionsToString(bits) });
+    const BIND = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES;
+
+    beforeEach(() => {
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'someone-else' });
+      prismaMock.memberRole.findMany.mockResolvedValue([]);
+      prismaMock.channelMember.findMany.mockResolvedValue([]);
+    });
+
+    it('keeps the channels where EVERY bit of the mask holds: a SEND deny drops a channel for VIEW | SEND but not for VIEW alone', async () => {
+      prismaMock.role.findFirst.mockResolvedValue(everyone(BIND));
+      prismaMock.channelPermissionOverride.findMany.mockResolvedValue([
+        deny('ro', Permissions.SEND_MESSAGES),
+        deny('hidden', Permissions.VIEW_CHANNEL),
+      ]);
+      const channels = [{ id: 'general' }, { id: 'ro' }, { id: 'hidden' }];
+
+      expect(await filterChannelsWithPermissions('user1', 'srv1', channels, BIND)).toEqual([{ id: 'general' }]);
+      expect(await filterChannelsWithPermissions('user1', 'srv1', channels, Permissions.VIEW_CHANNEL)).toEqual([{ id: 'general' }, { id: 'ro' }]);
+      // the VIEW-only answer IS filterVisibleChannels
+      expect(await filterVisibleChannels('user1', 'srv1', channels)).toEqual([{ id: 'general' }, { id: 'ro' }]);
+    });
+
+    it('costs the same fixed queries whatever the channel count (no per-channel permission computation)', async () => {
+      prismaMock.role.findFirst.mockResolvedValue(everyone(BIND));
+      prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
+      const channels = Array.from({ length: 40 }, (_v, i) => ({ id: `ch-${i}` }));
+      const result = await filterChannelsWithPermissions('user1', 'srv1', channels, BIND);
+      expect(result).toHaveLength(40);
+      expect(prismaMock.channelPermissionOverride.findMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.memberRole.findMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.channel.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('the owner and an ADMINISTRATOR pass every plaintext channel for any mask', async () => {
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'user1' });
+      expect(await filterChannelsWithPermissions('user1', 'srv1', [{ id: 'a' }, { id: 'b' }], BIND | Permissions.MANAGE_WEBHOOKS)).toEqual([{ id: 'a' }, { id: 'b' }]);
+
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'someone-else' });
+      prismaMock.role.findFirst.mockResolvedValue(everyone(0n));
+      prismaMock.memberRole.findMany.mockResolvedValue([{ roleId: 'adm', role: { id: 'adm', permissions: permissionsToString(Permissions.ADMINISTRATOR) } }]);
+      expect(await filterChannelsWithPermissions('user1', 'srv1', [{ id: 'a' }], BIND)).toEqual([{ id: 'a' }]);
+    });
+
+    it('a secure channel needs membership, and a mask within what a secure member holds: VIEW | SEND passes, MANAGE_MESSAGES does not', async () => {
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'user1' });
+      prismaMock.channelMember.findMany.mockResolvedValue([{ channelId: 'vault' }]);
+      const channels = [{ id: 'vault', secure: true }, { id: 'locked', secure: true }, { id: 'plain', secure: false }];
+
+      expect(await filterChannelsWithPermissions('user1', 'srv1', channels, BIND)).toEqual([{ id: 'vault', secure: true }, { id: 'plain', secure: false }]);
+      expect(await filterChannelsWithPermissions('user1', 'srv1', channels, Permissions.MANAGE_MESSAGES)).toEqual([{ id: 'plain', secure: false }]);
+    });
   });
 });

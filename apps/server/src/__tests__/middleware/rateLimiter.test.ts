@@ -5,18 +5,52 @@ import { RateLimiterRedis } from 'rate-limiter-flexible';
 import { getRedis } from '../../utils/redis';
 
 // Minimal Redis mock — getAllRateLimits and socketRateLimit never touch Redis,
-// so the client getters can simply throw if anything reaches for them.
+// so the client getters can simply throw if anything reaches for them. The
+// mocks are hoisted so that every instance of the mocked module (each
+// freshRateLimiter() below re-imports it) hands out the SAME functions: the
+// `getRedis` imported here is the one every fresh limiter module calls.
+const redisMock = vi.hoisted(() => {
+  const unavailable = (): never => { throw new Error('Redis not available in unit tests'); };
+  return {
+    unavailable,
+    getRedis: vi.fn(unavailable),
+    getRedisPubSub: vi.fn(unavailable),
+    getRedisConfigSub: vi.fn(unavailable),
+  };
+});
 vi.mock('../../utils/redis', () => ({
-  getRedis: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
-  getRedisPubSub: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
-  getRedisConfigSub: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
+  getRedis: redisMock.getRedis,
+  getRedisPubSub: redisMock.getRedisPubSub,
+  getRedisConfigSub: redisMock.getRedisConfigSub,
 }));
 
 import {
-  socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, consumeMailCap,
+  socketRateLimit, getAllRateLimits, subnetOf, normalizeIp,
   rateLimitWebhookExecute, rateLimitWebhookExecuteIp, rateLimitWebhookManage, rateLimitWebhookRead, rateLimitByKey,
-  refundRateLimit,
 } from '../../middleware/rateLimiter';
+
+/**
+ * A fresh instance of the module under test. It caches one limiter per name
+ * for its whole lifetime, built on whatever client getRedis returned at that
+ * moment: a test that builds one on a working client would otherwise decide
+ * what every later test gets (a cached limiter instead of a build failure, a
+ * once-value nobody consumes), and the order the tests run in would matter.
+ * Every test that builds a limiter does it on its own instance.
+ */
+async function freshRateLimiter() {
+  vi.resetModules();
+  return import('../../middleware/rateLimiter');
+}
+type RateLimiterModule = Awaited<ReturnType<typeof freshRateLimiter>>;
+
+// Nothing one test arranges reaches the next, whatever order they run in: the
+// store goes back to unreachable (an unconsumed once-value included), and a
+// prototype or console spy a failed assertion skipped restoring is restored.
+afterEach(() => {
+  vi.mocked(getRedis).mockReset();
+  vi.mocked(getRedis).mockImplementation(redisMock.unavailable);
+  vi.restoreAllMocks();
+});
 
 describe('normalizeIp — one spelling of an address for every keyed control', () => {
   it.each([
@@ -98,6 +132,7 @@ describe('subnetOf — the range key the slow-drip counters group by', () => {
 
 describe('consumeMailCap', () => {
   it('FAILS OPEN when the store is unreachable — a broken counter must not block verification mail', async () => {
+    const { consumeMailCap } = await freshRateLimiter();
     // The module-level getRedis mock throws, so limiter construction fails
     await expect(consumeMailCap('verifyMail', 'someone@example.com')).resolves.toBe(true);
     await expect(consumeMailCap('resetMail', 'someone@example.com')).resolves.toBe(true);
@@ -175,10 +210,11 @@ describe('incoming-webhook limiters', () => {
   });
 
   it('fails OPEN like every other limiter when the store is unreachable (the module-level Redis mock throws)', async () => {
+    const rl = await freshRateLimiter();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const req = { params: { webhookId: 'wh-1' }, ip: '203.0.113.7', socket: {} } as any;
     const res = { set: vi.fn(), status: vi.fn(() => ({ json: vi.fn() })) } as any;
-    for (const mw of [rateLimitWebhookExecuteIp, rateLimitWebhookExecute]) {
+    for (const mw of [rl.rateLimitWebhookExecuteIp, rl.rateLimitWebhookExecute]) {
       const next = vi.fn();
       await mw(req, res, next);
       expect(next).toHaveBeenCalledWith();
@@ -189,6 +225,11 @@ describe('incoming-webhook limiters', () => {
 });
 
 describe('refundRateLimit — give a charged point back, fail-open', () => {
+  let rl: RateLimiterModule;
+  beforeEach(async () => {
+    rl = await freshRateLimiter();
+  });
+
   it("rewards ONE point of the named limiter's bucket for the key", async () => {
     // A store client the limiter can be built on (the module-level mock throws)
     vi.mocked(getRedis).mockReturnValueOnce({} as ReturnType<typeof getRedis>);
@@ -198,7 +239,7 @@ describe('refundRateLimit — give a charged point back, fail-open', () => {
       return undefined as never;
     });
 
-    await expect(refundRateLimit('webhookExecute', 'wh-1')).resolves.toBeUndefined();
+    await expect(rl.refundRateLimit('webhookExecute', 'wh-1')).resolves.toBeUndefined();
 
     // no points argument: the limiter's default, one point
     expect(seen).toEqual([{ prefix: 'rl:whexec', key: 'wh-1', points: undefined }]);
@@ -209,35 +250,33 @@ describe('refundRateLimit — give a charged point back, fail-open', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const reward = vi.spyOn(RateLimiterRedis.prototype, 'reward').mockRejectedValueOnce(new Error('ECONNREFUSED'));
 
-    // A limiter built on a store whose reward fails (webhookRead: built
-    // nowhere else in this file, so it is created here, on this client)
+    // A limiter built on a store whose reward fails (this test's own module
+    // has built none yet, so webhookRead is created here, on this client)
     vi.mocked(getRedis).mockReturnValueOnce({} as ReturnType<typeof getRedis>);
-    await expect(refundRateLimit('webhookRead', 'user-1')).resolves.toBeUndefined();
+    await expect(rl.refundRateLimit('webhookRead', 'user-1')).resolves.toBeUndefined();
     expect(reward).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith('[RateLimit] webhookRead refund failed:', 'ECONNREFUSED');
 
     // No store at all (the module-level mock throws while building the limiter)
-    await expect(refundRateLimit('webhookExecuteIp', '203.0.113.7')).resolves.toBeUndefined();
+    await expect(rl.refundRateLimit('webhookExecuteIp', '203.0.113.7')).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledWith('[RateLimit] webhookExecuteIp refund failed:', 'Redis not available in unit tests');
 
     // An unknown limiter name is a warning too, not a throw
-    await expect(refundRateLimit('noSuchLimiter', 'k')).resolves.toBeUndefined();
+    await expect(rl.refundRateLimit('noSuchLimiter', 'k')).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledWith('[RateLimit] noSuchLimiter refund failed:', 'Unknown rate limiter: noSuchLimiter');
     reward.mockRestore();
     warn.mockRestore();
   });
 });
 
-// AFTER the refund block on purpose: limiter instances are cached per name for
-// the whole file, and the refund block relies on webhookExecuteIp never having
-// been built (and on webhookRead being built there, on its own client).
 describe('incoming-webhook limiters — the bucket each one charges, and its KEY', () => {
-  const THROWING_REDIS = () => { throw new Error('Redis not available in unit tests'); };
   const TOKEN = 'SECRET-TOKEN-zM9vYmFy';
+  let rl: RateLimiterModule;
   let seen: Array<{ prefix: string; key: string }>;
   let consume: ReturnType<typeof vi.spyOn>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    rl = await freshRateLimiter();
     // A store client the limiters can be built on (the module-level mock throws)
     vi.mocked(getRedis).mockImplementation(() => ({}) as ReturnType<typeof getRedis>);
     seen = [];
@@ -249,7 +288,6 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
 
   afterEach(() => {
     consume.mockRestore();
-    vi.mocked(getRedis).mockImplementation(THROWING_REDIS);
   });
 
   /** One request carrying every key a limiter could wrongly pick: the URL's
@@ -267,15 +305,15 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
   }
 
   it('rateLimitWebhookExecute charges rl:whexec keyed on the webhook id: never the IP, never the token', async () => {
-    await charge(rateLimitWebhookExecute, executeRequest());
+    await charge(rl.rateLimitWebhookExecute, executeRequest());
 
     expect(seen).toEqual([{ prefix: 'rl:whexec', key: 'wh-1' }]);
     expect(JSON.stringify(seen)).not.toContain(TOKEN);
   });
 
   it('rateLimitWebhookExecuteIp charges rl:whexecip keyed on the (normalised) address: never the id, never the token', async () => {
-    await charge(rateLimitWebhookExecuteIp, executeRequest());
-    await charge(rateLimitWebhookExecuteIp, executeRequest({ ip: '::FFFF:203.0.113.7' }));
+    await charge(rl.rateLimitWebhookExecuteIp, executeRequest());
+    await charge(rl.rateLimitWebhookExecuteIp, executeRequest({ ip: '::FFFF:203.0.113.7' }));
 
     expect(seen).toEqual([
       { prefix: 'rl:whexecip', key: '203.0.113.7' },
@@ -287,8 +325,8 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
   it('rateLimitWebhookManage and rateLimitWebhookRead charge rl:whmanage / rl:whread keyed on the user id', async () => {
     const req = executeRequest({ params: { serverId: 'srv-1', webhookId: 'wh-1', token: TOKEN }, user: { userId: 'user-9' } });
 
-    await charge(rateLimitWebhookManage, req);
-    await charge(rateLimitWebhookRead, req);
+    await charge(rl.rateLimitWebhookManage, req);
+    await charge(rl.rateLimitWebhookRead, req);
 
     expect(seen).toEqual([
       { prefix: 'rl:whmanage', key: 'user-9' },

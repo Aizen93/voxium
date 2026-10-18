@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   hasServerPermission: vi.fn(),
   hasChannelPermission: vi.fn(),
   filterVisibleChannels: vi.fn(),
+  filterChannelsWithPermissions: vi.fn(),
   requireVerifiedEmail: vi.fn(),
   requireConsent: vi.fn(),
   limiterCalls: [] as string[],
@@ -45,6 +46,7 @@ vi.mock('../../utils/permissionCalculator', () => ({
   hasServerPermission: (...args: unknown[]) => h.hasServerPermission(...args),
   hasChannelPermission: (...args: unknown[]) => h.hasChannelPermission(...args),
   filterVisibleChannels: (...args: unknown[]) => h.filterVisibleChannels(...args),
+  filterChannelsWithPermissions: (...args: unknown[]) => h.filterChannelsWithPermissions(...args),
 }));
 
 vi.mock('../../middleware/rateLimiter', () => ({
@@ -80,7 +82,8 @@ const prismaMock: Record<string, any> = {
     // model: the delete and the capped create must run on the transaction
     // client, never on the root client.
   },
-  channel: { findUnique: vi.fn() },
+  // findMany: GET /targets
+  channel: { findUnique: vi.fn(), findMany: vi.fn() },
   globalConfig: { findUnique: vi.fn() },
   serverLimits: { findUnique: vi.fn() },
   $transaction: vi.fn(),
@@ -135,12 +138,26 @@ function webhookRow(overrides: Record<string, unknown> = {}) {
     name: 'CI',
     type: 'generic',
     enabled: true,
+    adminDisabledAt: null,
+    creatorRemovedAt: null,
     createdAt: CREATED_AT,
     lastUsedAt: null,
+    lastRotatedAt: null,
     createdBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
+    lastRotatedBy: null,
     ...overrides,
   };
 }
+
+/** The owner-decision fields of a webhook nobody locked, removed or rotated. */
+const UNTOUCHED = { adminDisabledAt: null, creatorRemovedAt: null, lastRotatedAt: null, lastRotatedBy: null };
+
+/** What loadOwnWebhook selects: ownership, type, and the admin lock (the
+ *  creator-removal mark is never read: an enable or a rotate clears it unconditionally). */
+const OWN_SELECT = { id: true, serverId: true, channelId: true, type: true, adminDisabledAt: true };
+
+const ADMIN_DISABLED = { success: false, error: 'This webhook was disabled by an administrator' };
+const NO_SEND = { success: false, error: 'You do not have permission to send messages in this channel' };
 
 /** A list row as GET selects it: the row plus its channel's { id, secure }. */
 function listRow(overrides: Record<string, unknown> = {}) {
@@ -208,6 +225,7 @@ beforeEach(() => {
   h.hasServerPermission.mockResolvedValue(true);
   h.hasChannelPermission.mockResolvedValue(true);
   h.filterVisibleChannels.mockImplementation(async (_u: unknown, _s: unknown, channels: unknown[]) => channels);
+  h.filterChannelsWithPermissions.mockImplementation(async (_u: unknown, _s: unknown, channels: unknown[]) => channels);
 
   prismaMock.webhook.findMany.mockResolvedValue([]);
   prismaMock.webhook.findUnique.mockResolvedValue({ id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1' });
@@ -222,6 +240,7 @@ beforeEach(() => {
     ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
   }));
   prismaMock.channel.findUnique.mockResolvedValue(textChannel);
+  prismaMock.channel.findMany.mockResolvedValue([]);
   prismaMock.globalConfig.findUnique.mockResolvedValue(null);
   prismaMock.serverLimits.findUnique.mockResolvedValue(null);
   prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof txMock) => unknown) => cb(txMock));
@@ -249,6 +268,7 @@ const ROUTES: { label: string; send: () => request.Test }[] = [
   { label: 'PATCH /:id', send: () => request(app).patch(`${BASE}/wh-1`).send({ enabled: false }) },
   { label: 'POST /:id/rotate', send: () => request(app).post(`${BASE}/wh-1/rotate`) },
   { label: 'DELETE /:id', send: () => request(app).delete(`${BASE}/wh-1?purge=1`) },
+  { label: 'GET /targets', send: () => request(app).get(`${BASE}/targets`) },
 ];
 
 describe('router guards', () => {
@@ -353,11 +373,13 @@ describe('GET /servers/:serverId/webhooks', () => {
           id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: true,
           createdBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
           createdAt: CREATED_AT.toISOString(), lastUsedAt: null,
+          ...UNTOUCHED,
         },
         {
           id: 'wh-2', serverId: 'srv-1', channelId: 'ch-1', name: 'Kuma', type: 'generic', enabled: false,
           createdBy: null,
           createdAt: CREATED_AT.toISOString(), lastUsedAt: USED_AT.toISOString(),
+          ...UNTOUCHED,
         },
       ],
       total: 2,
@@ -462,6 +484,7 @@ describe('POST /servers/:serverId/webhooks', () => {
         id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: true,
         createdBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
         createdAt: CREATED_AT.toISOString(), lastUsedAt: null,
+        ...UNTOUCHED,
         token,
       },
     });
@@ -526,6 +549,7 @@ describe('POST /servers/:serverId/webhooks', () => {
           id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'GH', type: 'github', enabled: true,
           createdBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
           createdAt: CREATED_AT.toISOString(), lastUsedAt: null,
+          ...UNTOUCHED,
           token, secret,
         },
       });
@@ -963,14 +987,14 @@ describe('PATCH /servers/:serverId/webhooks/:webhookId', () => {
     expect(h.limiterCalls).toEqual(['webhookManage']);
   });
 
-  it('disables and enables', async () => {
+  it('disables and enables (an enable also clears the creator-removal mark)', async () => {
     const off = await patch({ enabled: false });
     expect(off.status).toBe(200);
     expect(prismaMock.webhook.update.mock.calls[0][0].data).toEqual({ enabled: false });
     expect(off.body.data.enabled).toBe(false);
 
     const on = await patch({ enabled: true });
-    expect(prismaMock.webhook.update.mock.calls[1][0].data).toEqual({ enabled: true });
+    expect(prismaMock.webhook.update.mock.calls[1][0].data).toEqual({ enabled: true, creatorRemovedAt: null });
     expect(on.body.data.enabled).toBe(true);
   });
 
@@ -1146,10 +1170,22 @@ describe('PATCH /servers/:serverId/webhooks/:webhookId', () => {
     expect(h.emitted).toHaveLength(0);
   });
 
-  it('a rename or toggle never asks SEND_MESSAGES (only a move binds a channel)', async () => {
+  it('a rename or a DISABLE never asks SEND_MESSAGES (neither binds nor reopens a channel)', async () => {
     await patch({ name: 'New', enabled: false });
+    await patch({ name: 'Newer' });
+    await patch({ enabled: false });
     const asked = h.hasChannelPermission.mock.calls.map((c: unknown[]) => c[3]);
-    expect(asked).toEqual([Permissions.VIEW_CHANNEL]);
+    expect(asked).toEqual([Permissions.VIEW_CHANNEL, Permissions.VIEW_CHANNEL, Permissions.VIEW_CHANNEL]);
+    expect(prismaMock.webhook.update).toHaveBeenCalledTimes(3);
+  });
+
+  it('an ENABLE asks SEND_MESSAGES on the webhook\'s own channel, after VIEW', async () => {
+    const res = await patch({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(h.hasChannelPermission.mock.calls).toEqual([
+      ['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL],
+      ['user-1', 'ch-1', 'srv-1', Permissions.SEND_MESSAGES],
+    ]);
   });
 });
 
@@ -1189,7 +1225,10 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
 
     const args = prismaMock.webhook.update.mock.calls[0][0];
     expect(args.where).toEqual({ id: 'wh-1', channelId: 'ch-1' });
-    expect(args.data).toEqual({ tokenHash: sha256(token) });
+    expect(args.data).toEqual({
+      tokenHash: sha256(token),
+      lastRotatedAt: expect.any(Date), lastRotatedById: 'user-1', creatorRemovedAt: null,
+    });
     expect(args.data.tokenHash).toMatch(HEX64_RE);
     expect(args.data.tokenHash).not.toBe(oldHash);
     expect(JSON.stringify(args)).not.toContain(token);
@@ -1202,12 +1241,9 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
     expect(args.data).not.toHaveProperty('secretEnc');
   });
 
-  it("loads the webhook's type with its ownership fields, never a credential", async () => {
+  it("loads the webhook's type with its ownership fields and marks, never a credential", async () => {
     await rotate();
-    expect(prismaMock.webhook.findUnique).toHaveBeenCalledWith({
-      where: { id: 'wh-1' },
-      select: { id: true, serverId: true, channelId: true, type: true },
-    });
+    expect(prismaMock.webhook.findUnique).toHaveBeenCalledWith({ where: { id: 'wh-1' }, select: OWN_SELECT });
   });
 
   describe('a GitHub webhook: rotation renews both the token and the secret', () => {
@@ -1237,7 +1273,10 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
       expect(prismaMock.webhook.update).toHaveBeenCalledTimes(1);
       const args = prismaMock.webhook.update.mock.calls[0][0];
       expect(args.where).toEqual({ id: 'wh-1', channelId: 'ch-1' });
-      expect(args.data).toEqual({ tokenHash: sha256(token), secretEnc: expect.stringMatching(/^enc:/) });
+      expect(args.data).toEqual({
+        tokenHash: sha256(token), secretEnc: expect.stringMatching(/^enc:/),
+        lastRotatedAt: expect.any(Date), lastRotatedById: 'user-1', creatorRemovedAt: null,
+      });
       expect(openSecret(args.data.secretEnc)).toBe(secret);
       expect(JSON.stringify(args)).not.toContain(secret);
       expect(args.select).not.toHaveProperty('secretEnc');
@@ -1347,10 +1386,7 @@ describe('DELETE /servers/:serverId/webhooks/:webhookId', () => {
     const res = await del();
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: { deletedMessages: 0 } });
-    expect(prismaMock.webhook.findUnique).toHaveBeenCalledWith({
-      where: { id: 'wh-1' },
-      select: { id: true, serverId: true, channelId: true, type: true },
-    });
+    expect(prismaMock.webhook.findUnique).toHaveBeenCalledWith({ where: { id: 'wh-1' }, select: OWN_SELECT });
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(txMock.webhook.delete).toHaveBeenCalledWith({ where: { id: 'wh-1' } });
     expect(txMock.message.groupBy).not.toHaveBeenCalled();
@@ -1533,6 +1569,17 @@ describe('a webhook on a channel the caller cannot VIEW does not exist for them'
     expect(h.emitted).toHaveLength(0);
   });
 
+  it('an ENABLE is the same 404, never the SEND 403 nor the admin-lock 403 (VIEW decides first)', async () => {
+    prismaMock.webhook.findUnique.mockResolvedValue({
+      id: 'wh-1', serverId: 'srv-1', channelId: 'ch-staff', adminDisabledAt: new Date(),
+    });
+    const res = await request(app).patch(`${BASE}/wh-1`).send({ enabled: true });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual(NOT_FOUND);
+    expect(h.hasChannelPermission.mock.calls).toEqual([['user-1', 'ch-staff', 'srv-1', Permissions.VIEW_CHANNEL]]);
+    expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+  });
+
   it('rotate answers 404 and mints no credential for the hidden channel', async () => {
     const res = await request(app).post(`${BASE}/wh-1/rotate`);
     expect(res.status).toBe(404);
@@ -1564,5 +1611,383 @@ describe('a webhook on a channel the caller cannot VIEW does not exist for them'
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ success: false, error: 'Channel not found' });
     expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Owner decisions (2026-10-19): the admin lock, enable asks SEND, the ───
+// ─── creator-removal mark, the rotation trace ───────────────────────────────
+
+const LOCKED_AT = new Date('2026-10-19T08:00:00.000Z');
+const REMOVED_AT = new Date('2026-10-19T08:30:00.000Z');
+
+/** The row loadOwnWebhook reads: ownership, type and the admin lock. */
+function ownRow(overrides: Record<string, unknown> = {}) {
+  return { id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', type: 'generic', adminDisabledAt: null, ...overrides };
+}
+
+describe('PATCH: a platform admin\'s disable is sticky', () => {
+  const patch = (body: unknown) => request(app).patch(`${BASE}/wh-1`).send(body as object);
+
+  beforeEach(() => {
+    prismaMock.webhook.findUnique.mockResolvedValue(ownRow({ enabled: false, adminDisabledAt: LOCKED_AT }));
+  });
+
+  it('an enable answers 403 with the exact sentence: nothing written, nothing emitted, SEND never asked', async () => {
+    const res = await patch({ enabled: true });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(ADMIN_DISABLED);
+    expect(prismaMock.webhook.findUnique).toHaveBeenCalledWith({ where: { id: 'wh-1' }, select: OWN_SELECT });
+    // VIEW first (opacity), then the lock: SEND is never reached
+    expect(h.hasChannelPermission.mock.calls).toEqual([['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL]]);
+    expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('an enable riding with a rename or a move is refused whole: the rename is not applied, the target never looked up', async () => {
+    const renamed = await patch({ enabled: true, name: 'Back' });
+    expect(renamed.status).toBe(403);
+    expect(renamed.body).toEqual(ADMIN_DISABLED);
+
+    const moved = await patch({ enabled: true, channelId: 'ch-2' });
+    expect(moved.status).toBe(403);
+    expect(moved.body).toEqual(ADMIN_DISABLED);
+    expect(prismaMock.channel.findUnique).not.toHaveBeenCalled();
+
+    expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('the lock is decided before SEND: a locked webhook on a read-only channel answers the lock sentence', async () => {
+    h.hasChannelPermission.mockImplementation(async (...args: unknown[]) => args[3] !== Permissions.SEND_MESSAGES);
+    const res = await patch({ enabled: true });
+    expect(res.body).toEqual(ADMIN_DISABLED);
+  });
+
+  it.each([
+    ['a rename', { name: 'Renamed' }, { name: 'Renamed' }],
+    ['a disable', { enabled: false }, { enabled: false }],
+  ])('%s of the locked webhook is still allowed, and leaves the lock alone', async (_label, body, data) => {
+    prismaMock.webhook.update.mockImplementationOnce(async ({ data: d }: any) => webhookRow({ enabled: false, adminDisabledAt: LOCKED_AT, ...d }));
+    const res = await patch(body);
+    expect(res.status).toBe(200);
+    const args = prismaMock.webhook.update.mock.calls[0][0];
+    expect(args.where).toEqual({ id: 'wh-1', channelId: 'ch-1' });
+    expect(args.data).toEqual(data);
+    expect(res.body.data.adminDisabledAt).toBe(LOCKED_AT.toISOString());
+    expectChangedOnce();
+  });
+
+  it('a move of the locked webhook is still allowed (through the target checks), and leaves the lock alone', async () => {
+    prismaMock.channel.findUnique.mockResolvedValue({ ...textChannel, id: 'ch-2' });
+    const res = await patch({ channelId: 'ch-2' });
+    expect(res.status).toBe(200);
+    const args = prismaMock.webhook.update.mock.calls[0][0];
+    expect(args.where).toEqual({ id: 'wh-1', channelId: 'ch-1' });
+    expect(args.data).toEqual({ channelId: 'ch-2' });
+  });
+
+  it('the owner cannot lift the lock through the body: adminDisabledAt is not a PATCH field', async () => {
+    const res = await patch({ name: 'x', adminDisabledAt: null, creatorRemovedAt: null });
+    expect(res.status).toBe(200);
+    expect(prismaMock.webhook.update.mock.calls[0][0].data).toEqual({ name: 'x' });
+
+    const only = await patch({ adminDisabledAt: null });
+    expect(only.status).toBe(400);
+    expect(only.body.error).toBe('No fields to update');
+  });
+
+  it('an enable is written only while the lock is still absent: an admin disable racing it makes the write match nothing (404), never an enabled locked row', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.webhook.findUnique.mockResolvedValue(ownRow({ enabled: false }));
+    // The admin's disable committed after the read: the conditional write finds no row
+    prismaMock.webhook.update.mockImplementationOnce(async ({ where }: any) => {
+      if (where.adminDisabledAt === null) throw recordNotFound();
+      return webhookRow({ enabled: true });
+    });
+    const res = await patch({ enabled: true });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
+    expect(prismaMock.webhook.update.mock.calls[0][0].where).toEqual({ id: 'wh-1', channelId: 'ch-1', adminDisabledAt: null });
+    expect(spy).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('an unlocked webhook enables normally, conditional on the lock being absent', async () => {
+    prismaMock.webhook.findUnique.mockResolvedValue(ownRow({ enabled: false }));
+    const res = await patch({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(prismaMock.webhook.update.mock.calls[0][0].where).toEqual({ id: 'wh-1', channelId: 'ch-1', adminDisabledAt: null });
+    expect(res.body.data.enabled).toBe(true);
+    expectChangedOnce();
+  });
+});
+
+describe('PATCH: an enable asks SEND_MESSAGES (it turns the URL back into write access)', () => {
+  const patch = (body: unknown) => request(app).patch(`${BASE}/wh-1`).send(body as object);
+
+  /** VIEW everywhere; SEND refused in the listed channels. */
+  function noSendIn(...channelIds: string[]) {
+    h.hasChannelPermission.mockImplementation(async (...args: unknown[]) =>
+      !(args[3] === Permissions.SEND_MESSAGES && channelIds.includes(args[1] as string)));
+  }
+
+  beforeEach(() => {
+    prismaMock.webhook.findUnique.mockResolvedValue(ownRow({ enabled: false }));
+  });
+
+  it('without SEND on the webhook\'s channel: 403 with the messages.ts sentence, nothing updated, nothing emitted', async () => {
+    noSendIn('ch-1');
+    const res = await patch({ enabled: true });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(NO_SEND);
+    expect(h.hasChannelPermission.mock.calls).toEqual([
+      ['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL],
+      ['user-1', 'ch-1', 'srv-1', Permissions.SEND_MESSAGES],
+    ]);
+    expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('an enable riding with a rename is refused whole without SEND', async () => {
+    noSendIn('ch-1');
+    const res = await patch({ enabled: true, name: 'Back' });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(NO_SEND);
+    expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+  });
+
+  it('an enable that also MOVES is asked on the TARGET (by the move checks), never on the old channel', async () => {
+    // The old channel is read-only for the caller; the target is not
+    noSendIn('ch-1');
+    prismaMock.channel.findUnique.mockResolvedValue({ ...textChannel, id: 'ch-2' });
+    const res = await patch({ enabled: true, channelId: 'ch-2' });
+    expect(res.status).toBe(200);
+    expect(h.hasChannelPermission.mock.calls).toEqual([
+      ['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL],
+      ['user-1', 'ch-2', 'srv-1', Permissions.VIEW_CHANNEL],
+      ['user-1', 'ch-2', 'srv-1', Permissions.SEND_MESSAGES],
+    ]);
+    expect(prismaMock.webhook.update.mock.calls[0][0].data).toEqual({ enabled: true, channelId: 'ch-2', creatorRemovedAt: null });
+  });
+
+  it('an enable that moves to a target without SEND is the 403, nothing updated', async () => {
+    noSendIn('ch-2');
+    prismaMock.channel.findUnique.mockResolvedValue({ ...textChannel, id: 'ch-2' });
+    const res = await patch({ enabled: true, channelId: 'ch-2' });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(NO_SEND);
+    expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+  });
+
+  it('a disable on a read-only channel is still allowed (it reopens nothing)', async () => {
+    noSendIn('ch-1');
+    const res = await patch({ enabled: false });
+    expect(res.status).toBe(200);
+    expect(prismaMock.webhook.update.mock.calls[0][0].data).toEqual({ enabled: false });
+  });
+});
+
+describe('PATCH: the creator-removal mark', () => {
+  const patch = (body: unknown) => request(app).patch(`${BASE}/wh-1`).send(body as object);
+
+  beforeEach(() => {
+    // Disabled by its creator's kick. The mark lives in the row the write
+    // answers (below): loadOwnWebhook never reads it
+    prismaMock.webhook.findUnique.mockResolvedValue(ownRow({ enabled: false }));
+    prismaMock.webhook.update.mockImplementation(async ({ data }: any) => webhookRow({
+      enabled: data.enabled ?? false,
+      creatorRemovedAt: data.creatorRemovedAt === null ? null : REMOVED_AT,
+      ...(data.name !== undefined ? { name: data.name } : {}),
+    }));
+  });
+
+  it('the owner\'s enable clears it (they reviewed the webhook); the response carries null', async () => {
+    const res = await patch({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(prismaMock.webhook.update.mock.calls[0][0].data).toEqual({ enabled: true, creatorRemovedAt: null });
+    expect(res.body.data.enabled).toBe(true);
+    expect(res.body.data.creatorRemovedAt).toBeNull();
+  });
+
+  it('a rename or a disable keeps it (only an enable or a rotate is the review)', async () => {
+    const renamed = await patch({ name: 'Renamed' });
+    expect(prismaMock.webhook.update.mock.calls[0][0].data).toEqual({ name: 'Renamed' });
+    expect(renamed.body.data.creatorRemovedAt).toBe(REMOVED_AT.toISOString());
+
+    await patch({ enabled: false });
+    expect(prismaMock.webhook.update.mock.calls[1][0].data).toEqual({ enabled: false });
+  });
+});
+
+describe('POST rotate: the rotation trace', () => {
+  const rotate = () => request(app).post(`${BASE}/wh-1/rotate`);
+
+  beforeEach(() => {
+    prismaMock.webhook.update.mockImplementation(async ({ data }: any) => webhookRow({
+      enabled: false,
+      lastRotatedAt: data.lastRotatedAt,
+      lastRotatedBy: { id: data.lastRotatedById, username: 'tester', displayName: 'Tester' },
+      creatorRemovedAt: data.creatorRemovedAt === null ? null : REMOVED_AT,
+    }));
+  });
+
+  it('records who rotated and when, and the response carries it', async () => {
+    const before = Date.now();
+    const res = await rotate();
+    expect(res.status).toBe(200);
+
+    const { data } = prismaMock.webhook.update.mock.calls[0][0];
+    expect(data.lastRotatedById).toBe('user-1');
+    expect(data.lastRotatedAt).toBeInstanceOf(Date);
+    expect(data.lastRotatedAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(res.body.data.lastRotatedAt).toBe(data.lastRotatedAt.toISOString());
+    expect(res.body.data.lastRotatedBy).toEqual({ id: 'user-1', username: 'tester', displayName: 'Tester' });
+  });
+
+  it('clears the creator-removal mark but never enables: a webhook disabled by the kick stays disabled', async () => {
+    // A webhook its creator's kick disabled (the update mock answers the mark)
+    prismaMock.webhook.findUnique.mockResolvedValue(ownRow({ enabled: false }));
+    const res = await rotate();
+    expect(res.status).toBe(200);
+    const { data } = prismaMock.webhook.update.mock.calls[0][0];
+    expect(data.creatorRemovedAt).toBeNull();
+    expect(data).not.toHaveProperty('enabled');
+    expect(res.body.data.creatorRemovedAt).toBeNull();
+    expect(res.body.data.enabled).toBe(false);
+  });
+
+  it('a rotate of an admin-locked webhook is allowed and leaves the lock alone (it reopens nothing)', async () => {
+    prismaMock.webhook.findUnique.mockResolvedValue(ownRow({ enabled: false, adminDisabledAt: LOCKED_AT }));
+    const res = await rotate();
+    expect(res.status).toBe(200);
+    const { data } = prismaMock.webhook.update.mock.calls[0][0];
+    expect(data).not.toHaveProperty('enabled');
+    expect(data).not.toHaveProperty('adminDisabledAt');
+  });
+
+  it('the trace comes from the authenticated caller, never from the body', async () => {
+    await request(app).post(`${BASE}/wh-1/rotate`).send({ lastRotatedById: 'user-evil', lastRotatedAt: '2000-01-01T00:00:00.000Z' });
+    const { data } = prismaMock.webhook.update.mock.calls[0][0];
+    expect(data.lastRotatedById).toBe('user-1');
+    expect(data.lastRotatedAt.getFullYear()).toBeGreaterThan(2000);
+  });
+});
+
+// ─── GET /targets ───────────────────────────────────────────────────────────
+
+describe('GET /servers/:serverId/webhooks/targets', () => {
+  const targets = (serverId = 'srv-1') => request(app).get(`/api/v1/servers/${serverId}/webhooks/targets`);
+  const BIND = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES;
+
+  function channelRow(id: string, overrides: Record<string, unknown> = {}) {
+    return { id, name: id, categoryId: null, position: 0, type: 'text', secure: false, ...overrides };
+  }
+
+  it('answers the text channels the batched filter allows for VIEW | SEND, as { id, name, categoryId, position }, in query order', async () => {
+    prismaMock.channel.findMany.mockResolvedValue([
+      channelRow('general', { categoryId: 'cat-1', position: 0 }),
+      channelRow('announcements', { categoryId: 'cat-1', position: 1 }),
+      channelRow('staff', { categoryId: 'cat-2', position: 2 }),
+      channelRow('random', { position: 3 }),
+    ]);
+    // a hidden channel (staff) and a read-only one (announcements) both fail the mask
+    h.filterChannelsWithPermissions.mockImplementation(async (_u: unknown, _s: unknown, channels: { id: string }[]) =>
+      channels.filter((c) => c.id !== 'staff' && c.id !== 'announcements'));
+
+    const res = await targets();
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      success: true,
+      data: [
+        { id: 'general', name: 'general', categoryId: 'cat-1', position: 0 },
+        { id: 'random', name: 'random', categoryId: null, position: 3 },
+      ],
+    });
+    // a hidden channel is never named, a read-only one never offered
+    expect(res.text).not.toContain('staff');
+    expect(res.text).not.toContain('announcements');
+  });
+
+  it('ONE batched pass with VIEW_CHANNEL | SEND_MESSAGES over the candidates, never a permission computation per channel', async () => {
+    prismaMock.channel.findMany.mockResolvedValue([channelRow('a'), channelRow('b'), channelRow('c')]);
+    await targets();
+    expect(h.filterChannelsWithPermissions).toHaveBeenCalledTimes(1);
+    expect(h.filterChannelsWithPermissions).toHaveBeenCalledWith('user-1', 'srv-1', [channelRow('a'), channelRow('b'), channelRow('c')], BIND);
+    expect(h.hasChannelPermission).not.toHaveBeenCalled();
+    expect(h.filterVisibleChannels).not.toHaveBeenCalled();
+  });
+
+  it('queries the server\'s non-secure text channels by position then name, selecting `secure` for the filter', async () => {
+    await targets();
+    expect(prismaMock.channel.findMany).toHaveBeenCalledWith({
+      where: { serverId: 'srv-1', type: 'text', secure: false },
+      orderBy: [{ position: 'asc' }, { name: 'asc' }],
+      select: { id: true, name: true, categoryId: true, position: true, type: true, secure: true },
+    });
+  });
+
+  it('never answers a voice or a secure channel, even should the query return one (decided again in code)', async () => {
+    prismaMock.channel.findMany.mockResolvedValue([
+      channelRow('voice-1', { type: 'voice' }),
+      channelRow('vault', { secure: true }),
+      channelRow('general'),
+    ]);
+    const res = await targets();
+    expect(res.body.data).toEqual([{ id: 'general', name: 'general', categoryId: null, position: 0 }]);
+    // only the candidate reaches the filter
+    expect(h.filterChannelsWithPermissions).toHaveBeenCalledWith('user-1', 'srv-1', [channelRow('general')], BIND);
+  });
+
+  it('keeps the order the query answered (position, then name)', async () => {
+    prismaMock.channel.findMany.mockResolvedValue([
+      channelRow('alpha', { position: 0 }),
+      channelRow('beta', { position: 0 }),
+      channelRow('zeta', { position: 1 }),
+    ]);
+    const res = await targets();
+    expect(res.body.data.map((c: { id: string }) => c.id)).toEqual(['alpha', 'beta', 'zeta']);
+  });
+
+  it('no text channel: an empty list and no permission pass at all', async () => {
+    const res = await targets();
+    expect(res.body).toEqual({ success: true, data: [] });
+    expect(h.filterChannelsWithPermissions).not.toHaveBeenCalled();
+    expect(h.hasChannelPermission).not.toHaveBeenCalled();
+  });
+
+  it('nothing allowed: an empty list', async () => {
+    prismaMock.channel.findMany.mockResolvedValue([channelRow('a'), channelRow('b')]);
+    h.filterChannelsWithPermissions.mockResolvedValue([]);
+    const res = await targets();
+    expect(res.body).toEqual({ success: true, data: [] });
+  });
+
+  it('is guarded by the read limiter, emits nothing, and never reads a webhook (it is not a /:webhookId route)', async () => {
+    const res = await targets();
+    expect(res.status).toBe(200);
+    expect(h.limiterCalls).toEqual(['webhookRead']);
+    expect(h.emitted).toHaveLength(0);
+    expect(prismaMock.webhook.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.webhook.findMany).not.toHaveBeenCalled();
+  });
+
+  it('without MANAGE_WEBHOOKS: 403 from the router guard, no channel read', async () => {
+    h.hasServerPermission.mockResolvedValue(false);
+    const res = await targets('srv-9');
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ success: false, error: 'You do not have permission to manage webhooks' });
+    expect(h.hasServerPermission).toHaveBeenCalledWith('user-1', 'srv-9', Permissions.MANAGE_WEBHOOKS);
+    expect(prismaMock.channel.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a permission-calculator failure is a 500, never a partial list', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.channel.findMany.mockResolvedValue([channelRow('a'), channelRow('b')]);
+    h.filterChannelsWithPermissions.mockRejectedValue(new Error('db down'));
+    const res = await targets();
+    expect(res.status).toBe(500);
+    expect(res.body).not.toHaveProperty('data');
+    spy.mockRestore();
   });
 });

@@ -308,9 +308,30 @@ export interface Webhook {
   name: string;
   type: WebhookType;
   enabled: boolean;
+  /** Set while a platform admin's disable is in force: `enabled` is false and
+   *  the owner's PATCH { enabled: true } answers 403 until an admin re-enables. */
+  adminDisabledAt: string | null;
+  /** Set when a kick or ban of the member who held the live URL (the creator,
+   *  or whoever rotated it last) disabled the webhook: the URL may have left
+   *  with them. Cleared by any enable (owner or admin) or a rotate. */
+  creatorRemovedAt: string | null;
   createdBy: { id: string; username: string; displayName: string } | null;
   createdAt: string;
   lastUsedAt: string | null;
+  /** The last rotation of the credential, and who did it (null before the first). */
+  lastRotatedAt: string | null;
+  lastRotatedBy: { id: string; username: string; displayName: string } | null;
+}
+
+/** A channel a webhook may be bound to by THIS caller (GET
+ *  /servers/:serverId/webhooks/targets): a non-secure text channel of the
+ *  server the caller can VIEW and SEND_MESSAGES in, as the create and move
+ *  checks decide it. */
+export interface WebhookTarget {
+  id: string;
+  name: string;
+  categoryId: string | null;
+  position: number;
 }
 
 /** The create/rotate answer: the plaintext token (and, for "github", the
@@ -1045,7 +1066,8 @@ export type AuditAction =
   | 'support.claim' | 'support.close'
   | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user'
   | 'feature_flag.update' | 'feature_flag.reset'
-  | 'webhook.disable' | 'webhook.enable' | 'webhook.delete';
+  | 'webhook.disable' | 'webhook.enable' | 'webhook.delete'
+  | 'limits.update_global' | 'limits.update_server' | 'limits.reset_server';
 
 // ─── Announcements ─────────────────────────────────────────────────────────
 

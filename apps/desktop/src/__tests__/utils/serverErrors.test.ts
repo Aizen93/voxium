@@ -50,6 +50,8 @@ describe('translateServerError — incoming webhooks', () => {
     const cases: Array<[string, string]> = [
       ['Webhooks are currently disabled', 'webhooksDisabled'],
       ['Webhook is disabled', 'webhookDisabled'],
+      // the sticky administrator disable, answered to the owner's enable
+      ['This webhook was disabled by an administrator', 'webhookAdminDisabled'],
       ['Webhook not found', 'webhookNotFound'],
       ['You do not have permission to manage webhooks', 'webhookNoPermission'],
       ['Webhooks can only post to text channels', 'webhookTextOnly'],
@@ -65,6 +67,17 @@ describe('translateServerError — incoming webhooks', () => {
       expect(translateServerError(message, t).startsWith(`serverErrors.${key}|`), message).toBe(true);
       expect(WEBHOOK_ERROR_KEYS).toContain(key);
     }
+  });
+
+  it('the sticky administrator disable is its own key, exact; the no-SEND answer is in the parity list', () => {
+    expect(translateServerError('This webhook was disabled by an administrator', t))
+      .toBe(`serverErrors.webhookAdminDisabled|${JSON.stringify({ defaultValue: 'This webhook was disabled by an administrator' })}`);
+    // not the generic execute-side "disabled", and a lookalike stays raw
+    expect(translateServerError('Webhook is disabled', t)).toMatch(/^serverErrors\.webhookDisabled\|/);
+    expect(translateServerError('This webhook was disabled by an administrator.', t)).toBe('This webhook was disabled by an administrator.');
+    // what the enable, create and rotate routes answer without SEND_MESSAGES on the channel
+    expect(translateServerError('You do not have permission to send messages in this channel', t)).toMatch(/^serverErrors\.noPermissionSendMessages\|/);
+    expect(WEBHOOK_ERROR_KEYS).toEqual(expect.arrayContaining(['webhookAdminDisabled', 'noPermissionSendMessages']));
   });
 
   it('GitHub: the no-encryption-key 503 is mapped; the step-2 refusal is gone with its key', () => {

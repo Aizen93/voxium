@@ -11,12 +11,32 @@ import type { AdminWebhook, WebhookType } from '@voxium/shared';
  * AdminConfirmModal first, like the server list's Feature and Block; each is
  * audited server-side and the list refetches after it. No token or secret appears
  * here: the API never sends one (only a hash and a sealed copy exist).
+ *
+ * An admin's Disable is a LOCK (`adminDisabledAt`): the owner's own enable
+ * answers 403 until an admin enables the webhook again, so the row says so and
+ * the Enable button says it lifts the lock. "URL holder removed" marks a
+ * webhook a kick or ban disabled because the member who held its live URL (its
+ * creator, or whoever rotated it last) is gone: the URL may have left with
+ * them, which is why the Enable confirm points at a rotation.
  */
 
 const TYPE_LABELS: Record<WebhookType, string> = { generic: 'Generic', github: 'GitHub' };
 
 function formatDate(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : 'Never';
+}
+
+function RotatedNote({ webhook }: { webhook: AdminWebhook }) {
+  if (!webhook.lastRotatedAt) return null;
+  const when = formatDate(webhook.lastRotatedAt);
+  // The rotator's account may be gone (SET NULL): the date alone still says
+  // the URL changed since creation
+  const who = webhook.lastRotatedBy ? webhook.lastRotatedBy.displayName || webhook.lastRotatedBy.username : null;
+  return (
+    <div className="text-[10px] text-vox-text-muted whitespace-normal" data-testid="webhook-rotated">
+      {who ? `Rotated ${when} by ${who}` : `Rotated ${when}`}
+    </div>
+  );
 }
 
 export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { serverId: string; serverName: string; onClose: () => void }) {
@@ -69,8 +89,10 @@ export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { se
 
         <div className="px-5 py-4 overflow-y-auto">
           <p className="text-xs text-vox-text-muted mb-3">
-            Every incoming webhook of this server. A disabled webhook stops posting until it is enabled again; its owner can
-            re-enable it. Delete is permanent and can take every message the webhook posted with it.
+            Every incoming webhook of this server. A webhook you disable stops posting and stays locked: its owner cannot
+            re-enable it until an admin enables it again (the owner can still delete it and create another one; to stop
+            that, set the server&apos;s webhook limit to 0 in Limits). Delete is permanent and can take every message the
+            webhook posted with it.
           </p>
 
           {firstLoad ? (
@@ -120,14 +142,37 @@ export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { se
                           ? webhook.createdBy.username
                           : <span className="text-vox-text-muted italic">Deleted user</span>}
                       </td>
-                      <td className="px-3 py-2 text-xs text-vox-text-secondary whitespace-nowrap">{formatDate(webhook.createdAt)}</td>
+                      <td className="px-3 py-2 text-xs text-vox-text-secondary whitespace-nowrap">
+                        <div>{formatDate(webhook.createdAt)}</div>
+                        <RotatedNote webhook={webhook} />
+                      </td>
                       <td className="px-3 py-2 text-xs text-vox-text-secondary whitespace-nowrap">{formatDate(webhook.lastUsedAt)}</td>
                       <td className="px-3 py-2">
-                        {webhook.enabled ? (
-                          <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-green-500/20 text-green-400" data-testid="webhook-status">Enabled</span>
-                        ) : (
-                          <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-orange-500/20 text-orange-400" data-testid="webhook-status">Disabled</span>
-                        )}
+                        <div className="flex flex-wrap gap-1">
+                          {webhook.enabled ? (
+                            <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-green-500/20 text-green-400" data-testid="webhook-status">Enabled</span>
+                          ) : (
+                            <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-orange-500/20 text-orange-400" data-testid="webhook-status">Disabled</span>
+                          )}
+                          {webhook.adminDisabledAt && (
+                            <span
+                              className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-red-500/20 text-red-400 whitespace-nowrap"
+                              title={`Disabled by a platform admin on ${formatDate(webhook.adminDisabledAt)}; the owner cannot re-enable it`}
+                              data-testid="webhook-admin-disabled"
+                            >
+                              Admin-disabled
+                            </span>
+                          )}
+                          {webhook.creatorRemovedAt && (
+                            <span
+                              className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-yellow-500/20 text-yellow-400 whitespace-nowrap"
+                              title={`The member who held its URL was kicked or banned on ${formatDate(webhook.creatorRemovedAt)}, which disabled the webhook`}
+                              data-testid="webhook-creator-removed"
+                            >
+                              URL holder removed
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-3 py-2">
                         <div className="flex gap-1 justify-end">
@@ -135,7 +180,9 @@ export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { se
                             onClick={() => setToggleTarget(webhook)}
                             disabled={busyId === webhook.id}
                             className={`p-1 rounded text-vox-text-muted disabled:opacity-30 ${webhook.enabled ? 'hover:text-orange-400' : 'hover:text-green-400'}`}
-                            title={webhook.enabled ? 'Disable webhook' : 'Enable webhook'}
+                            title={webhook.enabled
+                              ? 'Disable webhook'
+                              : webhook.adminDisabledAt ? 'Enable webhook (lifts the admin lock)' : 'Enable webhook'}
                             data-testid={webhook.enabled ? 'webhook-disable' : 'webhook-enable'}
                           >
                             {webhook.enabled ? <PowerOff size={14} /> : <Power size={14} />}
@@ -171,11 +218,13 @@ export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { se
           message={toggleTarget.enabled ? (
             <p data-testid="webhook-toggle-confirm">
               Disable the webhook &quot;{toggleTarget.name}&quot;? Deliveries to its URL answer 403 until it is re-enabled;
-              its messages stay. The server owner can re-enable it.
+              its messages stay. The server owner cannot re-enable it: only an admin&apos;s Enable lifts the lock.
             </p>
           ) : (
             <p data-testid="webhook-toggle-confirm">
               Enable the webhook &quot;{toggleTarget.name}&quot;? Deliveries to its URL are accepted and posted again.
+              {toggleTarget.adminDisabledAt && ' This lifts the admin lock: the server owner can disable or enable it again.'}
+              {toggleTarget.creatorRemovedAt && ' The member who held its URL was removed from the server and may still hold the URL; the owner can rotate it.'}
             </p>
           )}
           confirmLabel={toggleTarget.enabled ? 'Disable Webhook' : 'Enable Webhook'}

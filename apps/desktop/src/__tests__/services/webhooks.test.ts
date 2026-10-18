@@ -18,6 +18,7 @@ import { api } from '../../services/api';
 import {
   createWebhook,
   deleteWebhook,
+  fetchWebhookTargets,
   isWebhooksOff,
   listWebhooks,
   rotateWebhook,
@@ -210,5 +211,25 @@ describe('management calls', () => {
     const off = axiosError(403, 'Webhooks are currently disabled');
     mock(api.get).mockRejectedValue(off);
     await expect(listWebhooks('srv-1')).rejects.toBe(off);
+    await expect(fetchWebhookTargets('srv-1')).rejects.toBe(off);
+  });
+
+  it('fetches the bindable channels from GET /:serverId/webhooks/targets, as the server sorted them', async () => {
+    const targets = [
+      { id: 'ch-2', name: 'deploys', categoryId: null, position: 0 },
+      { id: 'ch-1', name: 'general', categoryId: 'cat-1', position: 1 },
+    ];
+    mock(api.get).mockResolvedValue({ data: { success: true, data: targets } });
+    await expect(fetchWebhookTargets('srv-1')).resolves.toEqual(targets);
+    expect(api.get).toHaveBeenCalledWith('/servers/srv-1/webhooks/targets');
+  });
+
+  it('an answer that is not a list throws (the caller falls back), never an empty picker', async () => {
+    for (const data of [undefined, null, {}, 'ch-1', { data: [] }]) {
+      mock(api.get).mockResolvedValue({ data: { success: true, data } });
+      await expect(fetchWebhookTargets('srv-1'), JSON.stringify(data) ?? 'undefined').rejects.toThrow('Malformed webhook targets answer');
+    }
+    mock(api.get).mockResolvedValue({ data: undefined });
+    await expect(fetchWebhookTargets('srv-1')).rejects.toThrow('Malformed webhook targets answer');
   });
 });

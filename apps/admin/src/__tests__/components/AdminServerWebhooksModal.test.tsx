@@ -7,7 +7,7 @@ import type { AdminWebhook } from '@voxium/shared';
  * The admin's webhooks modal for one server: the list (every webhook, with
  * its channel, creator and dates), Disable / Enable and Delete (with an
  * opt-in purge of its messages), each behind a confirm; loading, empty and
- * error states.
+ * error states; the admin lock, creator-removed and rotation marks.
  */
 
 const store = vi.hoisted(() => ({
@@ -28,8 +28,10 @@ import { AdminServerWebhooksModal } from '../../components/AdminServerWebhooksMo
 function webhook(over: Partial<AdminWebhook>): AdminWebhook {
   return {
     id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: true,
+    adminDisabledAt: null, creatorRemovedAt: null,
     createdBy: { id: 'u-1', username: 'alice', displayName: 'Alice' },
-    createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: null, channelName: 'general', ...over,
+    createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: null, lastRotatedAt: null, lastRotatedBy: null,
+    channelName: 'general', ...over,
   };
 }
 const CI = webhook({});
@@ -164,14 +166,16 @@ describe('AdminServerWebhooksModal — actions', () => {
     expect(store.setServerWebhookEnabled).toHaveBeenLastCalledWith('wh-2', true);
   });
 
-  it('Disable opens a danger confirm naming the webhook (403 until re-enabled, the owner can re-enable) and sends nothing yet', async () => {
+  it('Disable opens a danger confirm naming the webhook (403 until re-enabled, a lock the owner cannot lift) and sends nothing yet', async () => {
     await render();
     await clickIn('CI', 'webhook-disable');
     expect(store.setServerWebhookEnabled).not.toHaveBeenCalled();
     const body = toggleConfirm()!.textContent!;
     expect(body).toContain('"CI"');
     expect(body).toContain('403 until it is re-enabled');
-    expect(body).toContain('The server owner can re-enable it');
+    // the admin disable is sticky: promising the owner a re-enable would be false
+    expect(body).toContain('The server owner cannot re-enable it');
+    expect(body).not.toContain('The server owner can re-enable it');
     expect(buttonByText('Disable Webhook')!.className).toContain('bg-vox-accent-danger');
 
     await clickButton('Disable Webhook');
@@ -253,5 +257,78 @@ describe('AdminServerWebhooksModal — actions', () => {
 
     await act(async () => { (rowNamed('CI').querySelector('[data-testid="webhook-delete"]') as HTMLButtonElement).click(); });
     expect((q('[data-testid="webhook-delete-purge"]') as HTMLInputElement).checked).toBe(false);
+  });
+});
+
+describe('AdminServerWebhooksModal — admin lock, creator removal, rotation', () => {
+  const LOCKED_AT = '2026-10-19T08:00:00.000Z';
+  const REMOVED_AT = '2026-10-19T09:15:00.000Z';
+  const ROTATED_AT = '2026-10-19T10:30:00.000Z';
+  const when = (iso: string) => new Date(iso).toLocaleString();
+  const LOCKED = webhook({ id: 'wh-3', name: 'Alerts', enabled: false, adminDisabledAt: LOCKED_AT });
+  const ORPHANED = webhook({ id: 'wh-4', name: 'Builds', enabled: false, creatorRemovedAt: REMOVED_AT });
+  const badge = (name: string, testId: string) => rowNamed(name).querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+  it('an admin-disabled row says so, with the date of the lock in the title', async () => {
+    store.serverWebhooks = [LOCKED, DEPLOYS];
+    await render();
+    const lock = badge('Alerts', 'webhook-admin-disabled')!;
+    expect(lock.textContent).toBe('Admin-disabled');
+    expect(lock.title).toContain(when(LOCKED_AT));
+    expect(lock.title).toContain('the owner cannot re-enable it');
+    expect(badge('Alerts', 'webhook-status')!.textContent).toBe('Disabled');
+    // a webhook its owner disabled carries no lock
+    expect(badge('Deploys', 'webhook-admin-disabled')).toBeNull();
+  });
+
+  it('a webhook a kick disabled says "URL holder removed", with the date in the title', async () => {
+    store.serverWebhooks = [ORPHANED, CI];
+    await render();
+    const mark = badge('Builds', 'webhook-creator-removed')!;
+    expect(mark.textContent).toBe('URL holder removed');
+    expect(mark.title).toContain(when(REMOVED_AT));
+    expect(badge('Builds', 'webhook-admin-disabled')).toBeNull();
+    expect(badge('CI', 'webhook-creator-removed')).toBeNull();
+  });
+
+  it('a rotated webhook says when and by whom; a vanished rotator leaves the date; never rotated, nothing', async () => {
+    store.serverWebhooks = [
+      webhook({ id: 'wh-5', name: 'Rotated', lastRotatedAt: ROTATED_AT, lastRotatedBy: { id: 'u-2', username: 'bob', displayName: 'Bob the Owner' } }),
+      webhook({ id: 'wh-6', name: 'Orphan rotation', lastRotatedAt: ROTATED_AT, lastRotatedBy: null }),
+      CI,
+    ];
+    await render();
+    expect(badge('Rotated', 'webhook-rotated')!.textContent).toBe(`Rotated ${when(ROTATED_AT)} by Bob the Owner`);
+    expect(badge('Orphan rotation', 'webhook-rotated')!.textContent).toBe(`Rotated ${when(ROTATED_AT)}`);
+    expect(badge('CI', 'webhook-rotated')).toBeNull();
+  });
+
+  it('Enable on an admin-locked row says it lifts the lock; confirming sends the same enable', async () => {
+    store.serverWebhooks = [LOCKED, DEPLOYS];
+    await render();
+    const lifted = badge('Alerts', 'webhook-enable') as HTMLButtonElement;
+    expect(lifted.title).toBe('Enable webhook (lifts the admin lock)');
+    expect((badge('Deploys', 'webhook-enable') as HTMLButtonElement).title).toBe('Enable webhook');
+
+    await clickIn('Alerts', 'webhook-enable');
+    expect(toggleConfirm()!.textContent).toContain('This lifts the admin lock');
+    await clickButton('Enable Webhook');
+    expect(store.setServerWebhookEnabled).toHaveBeenCalledTimes(1);
+    expect(store.setServerWebhookEnabled).toHaveBeenCalledWith('wh-3', true);
+  });
+
+  it('the Enable confirm of an unlocked row mentions no lock; a creator-removed row points at a rotation', async () => {
+    store.serverWebhooks = [ORPHANED, DEPLOYS];
+    await render();
+    await clickIn('Deploys', 'webhook-enable');
+    expect(toggleConfirm()!.textContent).not.toContain('admin lock');
+    expect(toggleConfirm()!.textContent).not.toContain('rotate');
+    await clickButton('Cancel');
+
+    await clickIn('Builds', 'webhook-enable');
+    const body = toggleConfirm()!.textContent!;
+    expect(body).toContain('may still hold the URL');
+    expect(body).toContain('rotate');
+    expect(body).not.toContain('admin lock');
   });
 });

@@ -1071,6 +1071,15 @@ adminRouter.get('/servers/:serverId/webhooks', async (req: Request<{ serverId: s
 
 // Disable / enable. The execute route answers a disabled webhook 403
 // `Webhook is disabled`; its messages stay.
+//
+// An admin's disable is STICKY: `adminDisabledAt` makes the owner's
+// PATCH { enabled: true } answer 403 (routes/webhooks.ts), so an incident
+// response cannot be undone by the server it targets. Only an admin's enable
+// clears it. A repeated disable refreshes the timestamp (the latest decision).
+//
+// An enable also clears `creatorRemovedAt`, exactly like the owner's: any
+// enable means the row was reviewed, and an enabled webhook must never carry
+// a "disabled because its creator was removed" note.
 adminRouter.patch('/webhooks/:webhookId', async (req: Request<{ webhookId: string }>, res: Response, next: NextFunction) => {
   try {
     const { webhookId } = req.params;
@@ -1081,7 +1090,13 @@ adminRouter.patch('/webhooks/:webhookId', async (req: Request<{ webhookId: strin
 
     let row;
     try {
-      row = await prisma.webhook.update({ where: { id: webhookId }, data: { enabled }, select: webhookSelect });
+      row = await prisma.webhook.update({
+        where: { id: webhookId },
+        data: enabled
+          ? { enabled: true, adminDisabledAt: null, creatorRemovedAt: null }
+          : { enabled: false, adminDisabledAt: new Date() },
+        select: webhookSelect,
+      });
     } catch (err) {
       if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Webhook');
       throw err;
@@ -1168,6 +1183,30 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
 });
 
 // ─── Resource Limits ────────────────────────────────────────────────────────
+// Every write is audited with the five limit fields before and after it, and
+// nothing else in the metadata: a limit is a platform-wide lever (0 webhooks
+// freezes creation, a low member cap closes every server's door), so who
+// moved it and from what must be on the record.
+
+interface ServerLimitOverrides {
+  maxChannelsPerServer: number | null;
+  maxVoiceUsersPerChannel: number | null;
+  maxCategoriesPerServer: number | null;
+  maxMembersPerServer: number | null;
+  maxWebhooksPerServer: number | null;
+}
+
+/** The five override fields of a ServerLimits row; no row is all null (every
+ *  limit falls back to the global value). */
+function serverLimitOverrides(row: ServerLimitOverrides | null): ServerLimitOverrides {
+  return {
+    maxChannelsPerServer: row ? row.maxChannelsPerServer : null,
+    maxVoiceUsersPerChannel: row ? row.maxVoiceUsersPerChannel : null,
+    maxCategoriesPerServer: row ? row.maxCategoriesPerServer : null,
+    maxMembersPerServer: row ? row.maxMembersPerServer : null,
+    maxWebhooksPerServer: row ? row.maxWebhooksPerServer : null,
+  };
+}
 
 // Get global resource limits
 adminRouter.get('/limits/global', async (_req: Request, res: Response, next: NextFunction) => {
@@ -1182,35 +1221,50 @@ adminRouter.put('/limits/global', async (req: Request, res: Response, next: Next
   try {
     const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer } = req.body;
     const data: Record<string, number> = {};
-    if (maxChannelsPerServer !== undefined) data.maxChannelsPerServer = Math.max(1, Math.min(500, Number(maxChannelsPerServer)));
-    if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = Math.max(1, Math.min(500, Number(maxVoiceUsersPerChannel)));
-    if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = Math.max(1, Math.min(200, Number(maxCategoriesPerServer)));
-    if (maxMembersPerServer !== undefined) data.maxMembersPerServer = Math.max(0, Math.min(100000, Number(maxMembersPerServer)));
-    // 0 is a real value here: it freezes webhook creation (existing ones keep
-    // working). So, unlike the four fields above (whose floor of 1 masks it),
-    // nothing may coerce to 0 by accident: null, '' or text is a 400, never a
-    // platform-wide freeze; a fraction is refused rather than handed to Prisma
-    if (maxWebhooksPerServer !== undefined) {
-      const n = typeof maxWebhooksPerServer === 'number'
-        ? maxWebhooksPerServer
-        : typeof maxWebhooksPerServer === 'string' && maxWebhooksPerServer.trim() !== '' ? Number(maxWebhooksPerServer) : NaN;
-      if (!Number.isInteger(n)) throw new BadRequestError('maxWebhooksPerServer must be an integer');
-      data.maxWebhooksPerServer = Math.max(0, Math.min(100, n));
-    }
+    // Every field is a whole number or a 400. A bare Number() turned null, ''
+    // or text into 0 or NaN: the floor of 1 masked it for four fields, and for
+    // webhooks (where 0 is a real value: it freezes creation) it was a
+    // platform-wide freeze by accident; a fraction is refused rather than
+    // handed to Prisma (a 500 with a stack)
+    const limit = (name: string, value: unknown, min: number, max: number): number => {
+      const n = typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+      if (!Number.isInteger(n)) throw new BadRequestError(`${name} must be an integer`);
+      return Math.max(min, Math.min(max, n));
+    };
+    if (maxChannelsPerServer !== undefined) data.maxChannelsPerServer = limit('maxChannelsPerServer', maxChannelsPerServer, 1, 500);
+    if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = limit('maxVoiceUsersPerChannel', maxVoiceUsersPerChannel, 1, 500);
+    if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = limit('maxCategoriesPerServer', maxCategoriesPerServer, 1, 200);
+    if (maxMembersPerServer !== undefined) data.maxMembersPerServer = limit('maxMembersPerServer', maxMembersPerServer, 0, 100000);
+    if (maxWebhooksPerServer !== undefined) data.maxWebhooksPerServer = limit('maxWebhooksPerServer', maxWebhooksPerServer, 0, 100);
 
+    // The values in force before this write (a missing row is created with
+    // the defaults, which is what was in force), read after the validation
+    // so a refused body touches nothing
+    const before = await getGlobalLimits();
     const config = await prisma.globalConfig.upsert({
       where: { id: 'global' },
       create: { id: 'global', ...data },
       update: data,
     });
-
-    res.json({ success: true, data: {
+    const after = {
       maxChannelsPerServer: config.maxChannelsPerServer,
       maxVoiceUsersPerChannel: config.maxVoiceUsersPerChannel,
       maxCategoriesPerServer: config.maxCategoriesPerServer,
       maxMembersPerServer: config.maxMembersPerServer,
       maxWebhooksPerServer: config.maxWebhooksPerServer,
-    }});
+    };
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'limits.update_global',
+      targetType: 'global_config',
+      targetId: 'global',
+      metadata: { before, after },
+    });
+
+    res.json({ success: true, data: after });
   } catch (err) { next(err); }
 });
 
@@ -1241,10 +1295,14 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
     if (!server) throw new NotFoundError('Server');
 
     const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer } = req.body;
+    // null, '' or text means "use the global value"; a fraction is refused
+    // rather than handed to Prisma (a 500 with a stack)
     const toInt = (v: unknown): number | null => {
       if (v === null || v === undefined || v === '') return null;
       const n = Number(v);
-      return isNaN(n) ? null : n;
+      if (isNaN(n)) return null;
+      if (!Number.isInteger(n)) throw new BadRequestError('Limits must be whole numbers');
+      return n;
     };
 
     const data = {
@@ -1259,26 +1317,43 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
     // Remove undefined keys
     const cleanData = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
 
+    const before = serverLimitOverrides(
+      await prisma.serverLimits.findUnique({ where: { serverId: req.params.serverId } }),
+    );
     const limits = await prisma.serverLimits.upsert({
       where: { serverId: req.params.serverId },
       create: { serverId: req.params.serverId, ...cleanData },
       update: cleanData,
     });
+    const after = serverLimitOverrides(limits);
 
-    res.json({ success: true, data: {
-      maxChannelsPerServer: limits.maxChannelsPerServer,
-      maxVoiceUsersPerChannel: limits.maxVoiceUsersPerChannel,
-      maxCategoriesPerServer: limits.maxCategoriesPerServer,
-      maxMembersPerServer: limits.maxMembersPerServer,
-      maxWebhooksPerServer: limits.maxWebhooksPerServer,
-    }});
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'limits.update_server',
+      targetType: 'server',
+      targetId: req.params.serverId,
+      metadata: { before, after },
+    });
+
+    res.json({ success: true, data: after });
   } catch (err) { next(err); }
 });
 
 // Reset per-server limits (remove all overrides)
 adminRouter.delete('/limits/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
-    await prisma.serverLimits.deleteMany({ where: { serverId: req.params.serverId } });
+    const { serverId } = req.params;
+    const before = serverLimitOverrides(await prisma.serverLimits.findUnique({ where: { serverId } }));
+    await prisma.serverLimits.deleteMany({ where: { serverId } });
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'limits.reset_server',
+      targetType: 'server',
+      targetId: serverId,
+      metadata: { before },
+    });
+
     res.json({ success: true, message: 'Server limits reset to global defaults' });
   } catch (err) { next(err); }
 });

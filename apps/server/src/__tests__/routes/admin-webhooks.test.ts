@@ -111,6 +111,8 @@ function createApp() {
 
 const CREATED_AT = new Date('2026-10-18T10:00:00.000Z');
 const USED_AT = new Date('2026-10-18T11:30:00.000Z');
+const ROTATED_AT = new Date('2026-10-18T12:00:00.000Z');
+const REMOVED_AT = new Date('2026-10-18T12:30:00.000Z');
 
 /** A row as the mock returns it. It deliberately carries the two secret
  *  columns: the response must be built by a whitelist, not by the select alone. */
@@ -122,14 +124,21 @@ function webhookRow(overrides: Record<string, unknown> = {}) {
     name: 'CI',
     type: 'generic',
     enabled: true,
+    adminDisabledAt: null,
+    creatorRemovedAt: null,
     createdAt: CREATED_AT,
     lastUsedAt: null,
+    lastRotatedAt: null,
     createdBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
+    lastRotatedBy: null,
     tokenHash: 'a'.repeat(64),
     secretEnc: 'sealed-secret',
     ...overrides,
   };
 }
+
+/** The owner-decision fields of a webhook nobody locked, removed or rotated. */
+const UNTOUCHED = { adminDisabledAt: null, creatorRemovedAt: null, lastRotatedAt: null, lastRotatedBy: null };
 
 /** No key anywhere in the body may name a credential. */
 function expectNoCredentials(body: unknown) {
@@ -239,7 +248,12 @@ describe('GET /admin/servers/:serverId/webhooks', () => {
       { ...webhookRow(), channel: { name: 'general', secure: false } },
       // a staff-only channel: an owner's moderator might not see it, an admin does
       {
-        ...webhookRow({ id: 'wh-2', channelId: 'ch-staff', name: 'Deploys', type: 'github', enabled: false, lastUsedAt: USED_AT, createdBy: null }),
+        // its creator was kicked (disabled + marked), and a moderator rotated it since
+        ...webhookRow({
+          id: 'wh-2', channelId: 'ch-staff', name: 'Deploys', type: 'github', enabled: false, lastUsedAt: USED_AT, createdBy: null,
+          creatorRemovedAt: REMOVED_AT, lastRotatedAt: ROTATED_AT,
+          lastRotatedBy: { id: 'user-2', username: 'bob', displayName: 'Bob' },
+        }),
         channel: { name: 'staff-only', secure: false },
       },
     ]);
@@ -261,10 +275,13 @@ describe('GET /admin/servers/:serverId/webhooks', () => {
           id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: true,
           createdBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
           createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: null, channelName: 'general',
+          ...UNTOUCHED,
         },
         {
           id: 'wh-2', serverId: 'srv-1', channelId: 'ch-staff', name: 'Deploys', type: 'github', enabled: false,
           createdBy: null, createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: '2026-10-18T11:30:00.000Z', channelName: 'staff-only',
+          adminDisabledAt: null, creatorRemovedAt: '2026-10-18T12:30:00.000Z',
+          lastRotatedAt: '2026-10-18T12:00:00.000Z', lastRotatedBy: { id: 'user-2', username: 'bob', displayName: 'Bob' },
         },
       ],
     });
@@ -324,12 +341,19 @@ describe('PATCH /admin/webhooks/:webhookId', () => {
     expect(h.emitted).toHaveLength(0);
   });
 
-  it('disable: updates enabled only, audits webhook.disable, emits webhook:changed, answers the Webhook', async () => {
+  it('disable: sets enabled false and the sticky admin lock only, audits webhook.disable, emits webhook:changed, answers the Webhook', async () => {
+    const before = Date.now();
     const res = await patch({ enabled: false, name: 'ignored', channelId: 'ch-evil' });
 
     expect(res.status).toBe(200);
     expect(prismaMock.webhook.update).toHaveBeenCalledTimes(1);
-    expect(prismaMock.webhook.update).toHaveBeenCalledWith({ where: { id: 'wh-1' }, data: { enabled: false }, select: webhookSelect });
+    expect(prismaMock.webhook.update).toHaveBeenCalledWith({
+      where: { id: 'wh-1' },
+      data: { enabled: false, adminDisabledAt: expect.any(Date) },
+      select: webhookSelect,
+    });
+    const lockedAt: Date = prismaMock.webhook.update.mock.calls[0][0].data.adminDisabledAt;
+    expect(lockedAt.getTime()).toBeGreaterThanOrEqual(before);
     expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
     expect(mockLogAuditEvent).toHaveBeenCalledWith({
       actorId: 'admin-1',
@@ -346,17 +370,25 @@ describe('PATCH /admin/webhooks/:webhookId', () => {
         id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: false,
         createdBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
         createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: null,
+        ...UNTOUCHED,
+        // the lock travels to the tab, which shows why the owner cannot re-enable
+        adminDisabledAt: lockedAt.toISOString(),
       },
     });
     expectNoCredentials(res.body);
   });
 
-  it('enable: audits webhook.enable with the row it updated', async () => {
+  it('enable: lifts the admin lock (adminDisabledAt null) and audits webhook.enable with the row it updated', async () => {
     prismaMock.webhook.update.mockResolvedValueOnce(webhookRow({ id: 'wh-7', serverId: 'srv-9', channelId: 'ch-9', name: 'Alerts', enabled: true }));
     const res = await patch({ enabled: true }, 'wh-7');
 
     expect(res.status).toBe(200);
-    expect(prismaMock.webhook.update).toHaveBeenCalledWith({ where: { id: 'wh-7' }, data: { enabled: true }, select: webhookSelect });
+    expect(prismaMock.webhook.update).toHaveBeenCalledWith({
+      where: { id: 'wh-7' },
+      data: { enabled: true, adminDisabledAt: null, creatorRemovedAt: null },
+      select: webhookSelect,
+    });
+    expect(res.body.data.adminDisabledAt).toBeNull();
     expect(mockLogAuditEvent).toHaveBeenCalledWith({
       actorId: 'admin-1',
       action: 'webhook.enable',
@@ -367,6 +399,24 @@ describe('PATCH /admin/webhooks/:webhookId', () => {
     // the refetch hint goes to the webhook's own server, from the row
     expectChangedOnce('srv-9');
     expect(res.body.data.enabled).toBe(true);
+  });
+
+  it('enable also clears the creator-removal mark (any enable is a review); a disable leaves it alone', async () => {
+    // The stored row: disabled by its creator's kick, then locked by an admin.
+    // The write applies its data to it, as the database would
+    const stored = { enabled: false, adminDisabledAt: USED_AT, creatorRemovedAt: REMOVED_AT };
+    prismaMock.webhook.update.mockImplementation(async ({ where, data }: any) => webhookRow({ id: where.id, ...stored, ...data }));
+
+    const on = await patch({ enabled: true });
+    expect(on.status).toBe(200);
+    expect(prismaMock.webhook.update.mock.calls[0][0].data).toEqual({ enabled: true, adminDisabledAt: null, creatorRemovedAt: null });
+    // an enabled webhook never carries a "disabled because its creator was removed" note
+    expect(on.body.data).toMatchObject({ enabled: true, adminDisabledAt: null, creatorRemovedAt: null });
+
+    const off = await patch({ enabled: false });
+    expect(off.status).toBe(200);
+    expect(prismaMock.webhook.update.mock.calls[1][0].data).not.toHaveProperty('creatorRemovedAt');
+    expect(off.body.data.creatorRemovedAt).toBe(REMOVED_AT.toISOString());
   });
 
   it('an unknown id is 404 "Webhook not found": no audit, no event', async () => {

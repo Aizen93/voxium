@@ -18,9 +18,13 @@ export const webhookSelect = {
   name: true,
   type: true,
   enabled: true,
+  adminDisabledAt: true,
+  creatorRemovedAt: true,
   createdAt: true,
   lastUsedAt: true,
+  lastRotatedAt: true,
   createdBy: { select: { id: true, username: true, displayName: true } },
+  lastRotatedBy: { select: { id: true, username: true, displayName: true } },
 } as const;
 
 export interface WebhookRow {
@@ -30,9 +34,13 @@ export interface WebhookRow {
   name: string;
   type: string;
   enabled: boolean;
+  adminDisabledAt: Date | null;
+  creatorRemovedAt: Date | null;
   createdAt: Date;
   lastUsedAt: Date | null;
+  lastRotatedAt: Date | null;
   createdBy: { id: string; username: string; displayName: string } | null;
+  lastRotatedBy: { id: string; username: string; displayName: string } | null;
 }
 
 export function toWebhook(row: WebhookRow): WebhookDto {
@@ -44,11 +52,17 @@ export function toWebhook(row: WebhookRow): WebhookDto {
     // Only the management router writes the column, and only WEBHOOK_TYPES values
     type: row.type as WebhookType,
     enabled: row.enabled,
+    adminDisabledAt: row.adminDisabledAt ? row.adminDisabledAt.toISOString() : null,
+    creatorRemovedAt: row.creatorRemovedAt ? row.creatorRemovedAt.toISOString() : null,
     createdBy: row.createdBy
       ? { id: row.createdBy.id, username: row.createdBy.username, displayName: row.createdBy.displayName }
       : null,
     createdAt: row.createdAt.toISOString(),
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
+    lastRotatedAt: row.lastRotatedAt ? row.lastRotatedAt.toISOString() : null,
+    lastRotatedBy: row.lastRotatedBy
+      ? { id: row.lastRotatedBy.id, username: row.lastRotatedBy.username, displayName: row.lastRotatedBy.displayName }
+      : null,
   };
 }
 

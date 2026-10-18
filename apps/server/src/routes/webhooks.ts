@@ -9,7 +9,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { newWebhookToken, hashWebhookTokenHex } from '../utils/webhookToken';
 import { isSecretBoxConfigured, sealSecret } from '../utils/secretBox';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { hasServerPermission, hasChannelPermission, filterVisibleChannels } from '../utils/permissionCalculator';
+import { hasServerPermission, hasChannelPermission, filterVisibleChannels, filterChannelsWithPermissions } from '../utils/permissionCalculator';
 import {
   webhookSelect,
   toWebhook,
@@ -28,6 +28,7 @@ import {
   // model type of the same name.
   type Webhook as WebhookDto,
   type WebhookCreated,
+  type WebhookTarget,
 } from '@voxium/shared';
 
 /**
@@ -39,6 +40,20 @@ import {
  * behind the api router's rateLimitGeneral. Every route needs MANAGE_WEBHOOKS
  * (server-level only; owner and ADMINISTRATOR pass through the calculator),
  * and a webhook exists for the caller only if they can VIEW its channel.
+ *
+ * Whatever turns the URL into write access to a channel also asks
+ * SEND_MESSAGES there, after VIEW (so a hidden channel stays a 404): create,
+ * a move, a rotate and an ENABLE. A rename or a disable asks neither. The
+ * create/move check is assertChannel; `GET /targets` lists exactly the
+ * channels it would accept, so the picker never offers a refused one.
+ *
+ * A platform admin's disable is sticky (`adminDisabledAt`, set by
+ * routes/admin.ts): while it is set the owner's enable answers 403 and only an
+ * admin's enable lifts it. A rename, a move or a disable stays allowed. A
+ * kick or ban disables the webhooks whose live URL the member holds (created
+ * by them and never rotated by another, or last rotated by them) and marks
+ * them (`creatorRemovedAt`, utils/removeMember.ts): any enable, the owner's
+ * or an admin's, or a rotate clears the mark, as having reviewed it.
  *
  * The token is the credential: 256 random bits, only its SHA-256 is stored,
  * and the plaintext leaves the server exactly twice: in the create and in the
@@ -78,6 +93,9 @@ webhookRouter.use(async (req: Request<{ serverId: string }>, _res: Response, nex
 // utils/webhookToken.ts, shared with the execute route's check.
 
 const GITHUB_UNCONFIGURED = 'GitHub webhooks are not configured on this server';
+// routes/messages.ts answers the same sentence for a refused SEND_MESSAGES
+const NO_SEND = 'You do not have permission to send messages in this channel';
+const ADMIN_DISABLED = 'This webhook was disabled by an administrator';
 
 /** 503 unless a GitHub secret can be sealed: checked BEFORE anything is written. */
 function assertSecretBox(): void {
@@ -129,7 +147,7 @@ async function assertChannel(userId: string, serverId: string, channelId: string
     throw new NotFoundError('Channel');
   }
   if (!await hasChannelPermission(userId, channelId, serverId, Permissions.SEND_MESSAGES)) {
-    throw new ForbiddenError('You do not have permission to send messages in this channel');
+    throw new ForbiddenError(NO_SEND);
   }
   if (channel.type !== 'text') throw new BadRequestError('Webhooks can only post to text channels');
 }
@@ -138,17 +156,18 @@ async function assertChannel(userId: string, serverId: string, channelId: string
  * The webhook, if it belongs to this server AND posts to a channel the caller
  * can VIEW. Anything else answers exactly like a missing id: the list below
  * omits webhooks of hidden channels, and rotate would otherwise hand out a
- * working credential for a channel the caller cannot see (rotate then asks
- * SEND_MESSAGES on its own, as create and a move do).
+ * working credential for a channel the caller cannot see (rotate and an
+ * enable then ask SEND_MESSAGES on their own, as create and a move do).
+ * `adminDisabledAt` is the sticky admin lock the PATCH enforces.
  */
 async function loadOwnWebhook(
   userId: string,
   serverId: string,
   webhookId: string,
-): Promise<{ id: string; serverId: string; channelId: string; type: string }> {
+): Promise<{ id: string; serverId: string; channelId: string; type: string; adminDisabledAt: Date | null }> {
   const webhook = await prisma.webhook.findUnique({
     where: { id: webhookId },
-    select: { id: true, serverId: true, channelId: true, type: true },
+    select: { id: true, serverId: true, channelId: true, type: true, adminDisabledAt: true },
   });
   if (!webhook || webhook.serverId !== serverId) throw new NotFoundError('Webhook');
   if (!await hasChannelPermission(userId, webhook.channelId, serverId, Permissions.VIEW_CHANNEL)) {
@@ -225,6 +244,39 @@ webhookRouter.get('/', rateLimitWebhookRead, async (req: Request<{ serverId: str
   }
 });
 
+// The channels THIS caller may bind a webhook to, decided as assertChannel
+// decides for a create or a move: a non-secure TEXT channel of the server
+// that the caller can VIEW and SEND_MESSAGES in. The picker offers these and
+// nothing else, so it never offers a channel the write would refuse, nor
+// names one the caller cannot see. Registered BEFORE the `/:webhookId` routes.
+//
+// One batched permission pass for the whole list (VIEW and SEND together),
+// never a permission computation per channel: at the admin's channel cap a
+// per-channel check would be thousands of queries per call.
+webhookRouter.get('/targets', rateLimitWebhookRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const userId = req.user!.userId;
+    const channels = await prisma.channel.findMany({
+      where: { serverId, type: 'text', secure: false },
+      orderBy: [{ position: 'asc' }, { name: 'asc' }],
+      // `secure` MUST be selected for the visibility filter (it fails open
+      // without it), although the query already excludes secure channels
+      select: { id: true, name: true, categoryId: true, position: true, type: true, secure: true },
+    });
+    // The where clause again, in code: what this route answers must never
+    // rest on a query filter alone (secure-channel opacity)
+    const candidates = channels.filter((c) => c.type === 'text' && c.secure === false);
+    const allowed = candidates.length > 0
+      ? await filterChannelsWithPermissions(userId, serverId, candidates, Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES)
+      : [];
+    const data: WebhookTarget[] = allowed.map((c) => ({ id: c.id, name: c.name, categoryId: c.categoryId, position: c.position }));
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Create a webhook. Besides rotate, the ONLY response that carries the token.
 webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
@@ -294,6 +346,17 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
 
 // Edit name / target channel / enabled. Moving a webhook moves nothing it
 // already posted: its old messages stay where they are.
+//
+// Order: loadOwnWebhook (VIEW) -> the admin lock -> SEND for an enable in
+// place -> assertChannel for a move -> the write.
+// - An enable while a platform admin's disable is in force is a 403, and
+//   nothing is written: only an admin's enable lifts it. Renaming, moving or
+//   disabling the locked webhook stays allowed (none of them reopens it).
+// - An enable turns the URL back into write access to the webhook's channel,
+//   so it asks SEND_MESSAGES there, as a rotate does. An enable that also
+//   moves is asked on the TARGET, by assertChannel.
+// - An enable clears `creatorRemovedAt`: the owner reviewed the webhook the
+//   creator's removal disabled.
 webhookRouter.patch('/:webhookId', rateLimitWebhookManage, async (req: Request<{ serverId: string; webhookId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId, webhookId } = req.params;
@@ -320,12 +383,24 @@ webhookRouter.patch('/:webhookId', rateLimitWebhookManage, async (req: Request<{
     if (Object.keys(data).length === 0) throw new BadRequestError('No fields to update');
 
     const webhook = await loadOwnWebhook(userId, serverId, webhookId);
+    const enabling = data.enabled === true;
+    if (enabling && webhook.adminDisabledAt) throw new ForbiddenError(ADMIN_DISABLED);
+    if (enabling && data.channelId === undefined
+      && !await hasChannelPermission(userId, webhook.channelId, serverId, Permissions.SEND_MESSAGES)) {
+      throw new ForbiddenError(NO_SEND);
+    }
     if (data.channelId !== undefined) await assertChannel(userId, serverId, data.channelId);
 
-    // Only if it still posts to the channel loadOwnWebhook checked VIEW on
+    // Only if it still posts to the channel loadOwnWebhook checked VIEW on.
+    // An enable is also conditional on the admin lock still being absent: an
+    // admin disable landing after the check above makes the write match
+    // nothing (the 404 of any row that changed under the caller), so the lock
+    // never ends up set on an enabled webhook.
     const row = await updateOrMissing(prisma.webhook.update({
-      where: { id: webhookId, channelId: webhook.channelId },
-      data,
+      where: enabling
+        ? { id: webhookId, channelId: webhook.channelId, adminDisabledAt: null }
+        : { id: webhookId, channelId: webhook.channelId },
+      data: enabling ? { ...data, creatorRemovedAt: null } : data,
       select: webhookSelect,
     }));
 
@@ -349,9 +424,9 @@ webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Req
     // asks what create and a move ask: that the caller may SEND there (a
     // read-only announcements channel a moderator can see but not post in).
     // After VIEW (loadOwnWebhook), so a hidden channel's opacity is unchanged;
-    // a rename or a toggle asks neither (they mint nothing).
+    // a rename or a disable asks neither (they mint nothing, reopen nothing).
     if (!await hasChannelPermission(req.user!.userId, webhook.channelId, serverId, Permissions.SEND_MESSAGES)) {
-      throw new ForbiddenError('You do not have permission to send messages in this channel');
+      throw new ForbiddenError(NO_SEND);
     }
     const isGitHub = webhook.type === 'github';
     // Before the update: without a key nothing is rotated, the old pair stays
@@ -359,14 +434,19 @@ webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Req
 
     const token = newWebhookToken();
     const signing = isGitHub ? newSecret() : null;
+    // Who rotated and when (shown on the tab), and the creator-removal mark
+    // cleared: a rotate is the owner's answer to a URL that may have left with
+    // a kicked creator. It never touches `enabled` nor the admin lock: a
+    // webhook the kick disabled stays disabled until the owner enables it.
+    const trace = { lastRotatedAt: new Date(), lastRotatedById: req.user!.userId, creatorRemovedAt: null };
     // Only if it still posts to the channel loadOwnWebhook checked VIEW on:
     // a webhook moved meanwhile into a channel this caller cannot see must
     // not hand them a working token for it
     const row = await updateOrMissing(prisma.webhook.update({
       where: { id: webhookId, channelId: webhook.channelId },
       data: signing
-        ? { tokenHash: hashWebhookTokenHex(token), secretEnc: signing.secretEnc }
-        : { tokenHash: hashWebhookTokenHex(token) },
+        ? { tokenHash: hashWebhookTokenHex(token), secretEnc: signing.secretEnc, ...trace }
+        : { tokenHash: hashWebhookTokenHex(token), ...trace },
       select: webhookSelect,
     }));
 

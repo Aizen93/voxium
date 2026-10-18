@@ -7,7 +7,9 @@ import type { AdminServer, AdminWebhook, ResourceLimits, ServerResourceLimits } 
 /**
  * Directory curation from the admin server list: the Directory column, the
  * "Listed only" filter, and Feature / Unfeature / Block / Unblock through the
- * confirm modal — with the server's own refusal shown when it says no.
+ * confirm modal — with the server's own refusal shown when it says no. Then
+ * the webhooks entry point and the two limits editors (a cleared field is
+ * never sent as 0; text that is not a whole number is refused).
  */
 
 const store = vi.hoisted(() => ({
@@ -212,15 +214,19 @@ describe('AdminServerList — directory column and curation', () => {
   });
 });
 
+const GLOBAL: ResourceLimits = {
+  maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: 10,
+};
+const NO_OVERRIDES: ServerResourceLimits = {
+  maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: null,
+};
+const inputUnder = (labelText: string) => {
+  const label = qa('label').find((l) => l.textContent?.startsWith(labelText))!;
+  expect(label).toBeTruthy();
+  return label.parentElement!.querySelector('input') as HTMLInputElement;
+};
+
 describe('AdminServerList — webhooks and the webhook limit', () => {
-  const GLOBAL: ResourceLimits = {
-    maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: 10,
-  };
-  const inputUnder = (labelText: string) => {
-    const label = qa('label').find((l) => l.textContent?.startsWith(labelText))!;
-    expect(label).toBeTruthy();
-    return label.parentElement!.querySelector('input') as HTMLInputElement;
-  };
 
   it('every row has a Webhooks button that opens the webhooks modal of that server; Close closes it', async () => {
     await render();
@@ -254,9 +260,7 @@ describe('AdminServerList — webhooks and the webhook limit', () => {
 
   it('the per-server limits modal offers the webhook override and sends it (empty = global)', async () => {
     store.globalLimits = GLOBAL;
-    store.serverLimits = {
-      maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: 0,
-    };
+    store.serverLimits = { ...NO_OVERRIDES, maxWebhooksPerServer: 0 };
     store.serverLimitsServerId = 'listed';
     store.updateServerLimits.mockResolvedValue(undefined);
     await render();
@@ -269,5 +273,138 @@ describe('AdminServerList — webhooks and the webhook limit', () => {
 
     await act(async () => { buttonByText('Save').click(); });
     expect(store.updateServerLimits).toHaveBeenCalledWith('listed', expect.objectContaining({ maxWebhooksPerServer: 0, maxChannelsPerServer: null }));
+  });
+});
+
+describe('AdminServerList — the limits editors take whole numbers only', () => {
+  const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+  /**
+   * Types into a number input the way a browser hands it to React: text it
+   * cannot parse reads as '' with `validity.badInput` set (Firefox lets letters
+   * in). jsdom empties the value but never raises the flag, so it is raised
+   * here. Like the browser, typing such text into an empty field fires no
+   * change event: the value did not change.
+   */
+  async function typeInto(input: HTMLInputElement, text: string) {
+    await act(async () => {
+      setInputValue.call(input, text);
+      const badInput = text.trim() !== '' && input.value === '';
+      Object.defineProperty(input, 'validity', { configurable: true, get: () => ({ badInput }) });
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+  const refusal = (error: string) => new AxiosError('Request failed', '400', undefined, undefined, {
+    status: 400, statusText: 'Bad Request', headers: {}, config: {} as never, data: { success: false, error },
+  });
+
+  describe('global', () => {
+    async function openGlobal() {
+      store.globalLimits = GLOBAL;
+      store.updateGlobalLimits.mockResolvedValue(undefined);
+      await render();
+      await act(async () => { qa('button').find((b) => b.textContent?.includes('Global Resource Limits'))!.click(); });
+    }
+    const save = async () => { await act(async () => { buttonByText('Save Global Limits').click(); }); };
+
+    it('Save appears only when a parsed value differs from the saved one; Cancel puts the saved text back', async () => {
+      await openGlobal();
+      const input = inputUnder('Max Webhooks / Server');
+      expect(buttonByText('Save Global Limits')).toBeUndefined();
+      // the same number written differently is no change
+      await typeInto(input, '010');
+      expect(buttonByText('Save Global Limits')).toBeUndefined();
+      await typeInto(input, '7');
+      expect(buttonByText('Save Global Limits')).toBeDefined();
+      await act(async () => { buttonByText('Cancel').click(); });
+      expect(input.value).toBe('10');
+      expect(buttonByText('Save Global Limits')).toBeUndefined();
+    });
+
+    it('a cleared field stays empty and Save refuses it: nothing is sent, least of all 0', async () => {
+      await openGlobal();
+      const input = inputUnder('Max Webhooks / Server');
+      await typeInto(input, '');
+      expect(input.value).toBe('');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('Every limit needs a whole number');
+      expect(store.updateGlobalLimits).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
+    });
+
+    it('"abc" and a fraction are refused', async () => {
+      await openGlobal();
+      await typeInto(inputUnder('Max Webhooks / Server'), 'abc');
+      await save();
+      expect(toast.error).toHaveBeenLastCalledWith('Every limit needs a whole number');
+
+      await typeInto(inputUnder('Max Webhooks / Server'), '10');
+      await typeInto(inputUnder('Max Channels / Server'), '2.5');
+      await save();
+      expect(toast.error).toHaveBeenCalledTimes(2);
+      expect(store.updateGlobalLimits).not.toHaveBeenCalled();
+    });
+
+    it('0 typed on purpose is sent, with every other limit as saved', async () => {
+      await openGlobal();
+      await typeInto(inputUnder('Max Webhooks / Server'), '0');
+      await save();
+      expect(store.updateGlobalLimits).toHaveBeenCalledWith({ ...GLOBAL, maxWebhooksPerServer: 0 });
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it('a server refusal shows its own reason', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      await openGlobal();
+      store.updateGlobalLimits.mockRejectedValueOnce(refusal('maxWebhooksPerServer must be an integer'));
+      await typeInto(inputUnder('Max Webhooks / Server'), '5');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('maxWebhooksPerServer must be an integer');
+    });
+  });
+
+  describe('per server', () => {
+    async function openServer(overrides: ServerResourceLimits) {
+      store.globalLimits = GLOBAL;
+      store.serverLimits = overrides;
+      store.serverLimitsServerId = 'listed';
+      store.updateServerLimits.mockResolvedValue(undefined);
+      await render();
+      await act(async () => { (rowOf('listed').querySelector('[title="Configure limits"]') as HTMLButtonElement).click(); });
+    }
+    const save = async () => { await act(async () => { buttonByText('Save').click(); }); };
+
+    it('a cleared override is sent as null ("use global"), never 0', async () => {
+      await openServer({ ...NO_OVERRIDES, maxWebhooksPerServer: 4 });
+      await typeInto(inputUnder('Max Webhooks / Server'), '');
+      await save();
+      expect(store.updateServerLimits).toHaveBeenCalledWith('listed', NO_OVERRIDES);
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it('"abc" typed into an empty override is refused, not read as "use global"', async () => {
+      await openServer(NO_OVERRIDES);
+      const input = inputUnder('Max Webhooks / Server');
+      await typeInto(input, 'abc');
+      // the field still reads empty, exactly like a cleared one
+      expect(input.value).toBe('');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('Every limit needs a whole number');
+      expect(store.updateServerLimits).not.toHaveBeenCalled();
+    });
+
+    it('a fraction is refused', async () => {
+      await openServer(NO_OVERRIDES);
+      await typeInto(inputUnder('Max Voice Users / Channel'), '1.5');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('Every limit needs a whole number');
+      expect(store.updateServerLimits).not.toHaveBeenCalled();
+    });
+
+    it('0 typed on purpose is sent', async () => {
+      await openServer(NO_OVERRIDES);
+      await typeInto(inputUnder('Max Webhooks / Server'), '0');
+      await save();
+      expect(store.updateServerLimits).toHaveBeenCalledWith('listed', { ...NO_OVERRIDES, maxWebhooksPerServer: 0 });
+    });
   });
 });

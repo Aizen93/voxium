@@ -1,15 +1,18 @@
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X } from 'lucide-react';
+import { Loader2, X } from 'lucide-react';
 import { LIMITS, WEBHOOK_TYPES, validateWebhookName } from '@voxium/shared';
-import type { Channel, WebhookType } from '@voxium/shared';
+import type { WebhookTarget, WebhookType } from '@voxium/shared';
 import { translateServerError } from '../../utils/serverErrors';
 import type { CreateWebhookInput } from '../../services/webhooks';
 import { WebhookDialog } from './WebhookDialog';
 
 interface Props {
-  /** The channels a webhook may post to: this server's plaintext TEXT channels. */
-  channels: Channel[];
+  /**
+   * The channels this caller may bind a webhook to (GET …/webhooks/targets;
+   * the visible plaintext text channels when that fails); `null` while it loads.
+   */
+  channels: ReadonlyArray<Pick<WebhookTarget, 'id' | 'name'>> | null;
   busy: boolean;
   /** The caller sends the request, toasts a refusal and closes the dialog on success. */
   onCreate: (input: CreateWebhookInput) => void;
@@ -27,16 +30,18 @@ interface Props {
 export function WebhookCreateDialog({ channels, busy, onCreate, onClose }: Props) {
   const { t } = useTranslation();
   const [name, setName] = useState('');
-  const [channelId, setChannelId] = useState(channels[0]?.id ?? '');
+  const [channelId, setChannelId] = useState('');
   const [type, setType] = useState<WebhookType>('generic');
   const [error, setError] = useState<string | null>(null);
   // Focused by the dialog shell AFTER it records the opener (an `autoFocus`
   // would beat it to it, and Cancel/Escape would then drop focus to <body>)
   const nameRef = useRef<HTMLInputElement>(null);
 
-  // The picked channel can vanish while the dialog is open (deleted): fall
-  // back to the first one left instead of posting a dead id.
-  const selected = channels.some((c) => c.id === channelId) ? channelId : (channels[0]?.id ?? '');
+  // The list arrives after the dialog opens, and the picked channel can leave
+  // it while it is open (deleted, then refetched): fall back to the first one
+  // left instead of posting a dead id. Nothing is selectable while it loads.
+  const list = channels ?? [];
+  const selected = list.some((c) => c.id === channelId) ? channelId : (list[0]?.id ?? '');
 
   const submit = () => {
     if (busy) return;
@@ -88,7 +93,12 @@ export function WebhookCreateDialog({ channels, busy, onCreate, onClose }: Props
         <label htmlFor="webhook-channel" className="mb-1.5 mt-3 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
           {t('webhooks.create.channel')}
         </label>
-        {channels.length > 0 ? (
+        {channels === null ? (
+          <p className="flex items-center gap-1.5 text-xs text-vox-text-muted" role="status" data-testid="webhook-channels-loading">
+            <Loader2 size={12} className="animate-spin" />
+            {t('webhooks.create.loadingChannels')}
+          </p>
+        ) : channels.length > 0 ? (
           <select
             id="webhook-channel"
             value={selected}

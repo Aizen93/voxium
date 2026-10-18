@@ -163,6 +163,9 @@ const ERROR_MAP: Record<string, string> = {
   // isWebhooksOff), mapped here for any other surface that meets it.
   'Webhooks are currently disabled': 'webhooksDisabled',
   'Webhook is disabled': 'webhookDisabled',
+  // An administrator's disable is sticky: the owner's enable is refused
+  // until an administrator lifts it (the tab never sends it, another client may)
+  'This webhook was disabled by an administrator': 'webhookAdminDisabled',
   'Webhook not found': 'webhookNotFound',
   'You do not have permission to manage webhooks': 'webhookNoPermission',
   'Webhooks can only post to text channels': 'webhookTextOnly',
@@ -220,9 +223,12 @@ export const DISCOVERY_ERROR_KEYS: readonly string[] = [
 
 /** The incoming-webhooks subset (exact strings AND patterns), for the locale parity test. */
 export const WEBHOOK_ERROR_KEYS: readonly string[] = [
-  'webhooksDisabled', 'webhookDisabled', 'webhookNotFound', 'webhookNoPermission', 'webhookTextOnly', 'webhookInvalidType',
-  'webhookGithubNotConfigured', 'webhookChannelRequired', 'webhookNoFields', 'webhookEnabledBoolean', 'webhookNameEmpty',
-  'webhookNameTooLong', 'webhookNameInvalid', 'webhookCap', 'channelNotFound',
+  'webhooksDisabled', 'webhookDisabled', 'webhookAdminDisabled', 'webhookNotFound', 'webhookNoPermission', 'webhookTextOnly',
+  'webhookInvalidType', 'webhookGithubNotConfigured', 'webhookChannelRequired', 'webhookNoFields', 'webhookEnabledBoolean',
+  'webhookNameEmpty', 'webhookNameTooLong', 'webhookNameInvalid', 'webhookCap', 'channelNotFound',
+  // Shared with the message routes: what create, move, rotate and enable answer
+  // for a channel the caller can see but not send in
+  'noPermissionSendMessages',
 ];
 
 /**

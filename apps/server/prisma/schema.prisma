@@ -88,6 +88,7 @@ model User {
   joinRequests          ServerJoinRequest[] @relation("JoinRequestUser")
   joinRequestsDecided   ServerJoinRequest[] @relation("JoinRequestDecider")
   createdWebhooks       Webhook[]           @relation("WebhookCreator")
+  rotatedWebhooks       Webhook[]           @relation("WebhookRotator")
 
   @@map("users")
 }
@@ -454,12 +455,24 @@ model Webhook {
   enabled     Boolean   @default(true)
   createdById String?   @map("created_by_id")
   lastUsedAt  DateTime? @map("last_used_at")
+  // Owner decisions of 2026-10-19 (release 2.1.0 A.4):
+  // - a platform admin's disable is STICKY while this is set (the owner's
+  //   PATCH { enabled: true } answers 403; the admin's enable clears it)
+  adminDisabledAt  DateTime? @map("admin_disabled_at")
+  // - a kick/ban of the member who held the live URL (the creator, or whoever
+  //   rotated it last) disabled the webhook and left this mark; any enable,
+  //   the owner's or an admin's, or a rotate clears it
+  creatorRemovedAt DateTime? @map("creator_removed_at")
+  // - who rotated the credential last, and when (SET NULL when the account goes)
+  lastRotatedAt    DateTime? @map("last_rotated_at")
+  lastRotatedById  String?   @map("last_rotated_by_id")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
   server    Server    @relation(fields: [serverId], references: [id], onDelete: Cascade)
   channel   Channel   @relation(fields: [channelId], references: [id], onDelete: Cascade)
   createdBy User?     @relation("WebhookCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  lastRotatedBy User? @relation("WebhookRotator", fields: [lastRotatedById], references: [id], onDelete: SetNull)
   messages  Message[]
 
   @@index([serverId])

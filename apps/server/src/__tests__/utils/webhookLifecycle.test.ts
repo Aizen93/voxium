@@ -59,33 +59,65 @@ beforeEach(() => {
 
 describe('webhookSelect / toWebhook', () => {
   it('selects exactly the public columns: never the token hash nor the sealed secret', () => {
-    expect(Object.keys(webhookSelect).sort()).toEqual(
-      ['channelId', 'createdAt', 'createdBy', 'enabled', 'id', 'lastUsedAt', 'name', 'serverId', 'type'],
-    );
+    expect(Object.keys(webhookSelect).sort()).toEqual([
+      'adminDisabledAt', 'channelId', 'createdAt', 'createdBy', 'creatorRemovedAt', 'enabled', 'id',
+      'lastRotatedAt', 'lastRotatedBy', 'lastUsedAt', 'name', 'serverId', 'type',
+    ]);
     expect(webhookSelect.createdBy).toEqual({ select: { id: true, username: true, displayName: true } });
+    // the rotator is a user shape like the creator: never the raw lastRotatedById
+    expect(webhookSelect.lastRotatedBy).toEqual({ select: { id: true, username: true, displayName: true } });
+    expect(webhookSelect).not.toHaveProperty('lastRotatedById');
   });
 
   it('maps a row to the shared Webhook shape by whitelist (extra columns never pass)', () => {
     const row = {
       id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: false,
-      createdAt: CREATED_AT, lastUsedAt: USED_AT,
+      adminDisabledAt: null, creatorRemovedAt: null,
+      createdAt: CREATED_AT, lastUsedAt: USED_AT, lastRotatedAt: null,
       createdBy: { id: 'u-1', username: 'alice', displayName: 'Alice', email: 'leak@example.test' },
-      tokenHash: 'f'.repeat(64), secretEnc: 'sealed',
+      lastRotatedBy: null,
+      tokenHash: 'f'.repeat(64), secretEnc: 'sealed', lastRotatedById: 'u-2',
     };
     expect(toWebhook(row)).toEqual({
       id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: false,
+      adminDisabledAt: null, creatorRemovedAt: null,
       createdBy: { id: 'u-1', username: 'alice', displayName: 'Alice' },
       createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: '2026-10-18T11:30:00.000Z',
+      lastRotatedAt: null, lastRotatedBy: null,
     });
   });
 
-  it('keeps a deleted creator and a never-used webhook as null', () => {
+  it('maps the owner-decision columns: the admin lock, the creator-removal mark and the rotation trace as ISO dates', () => {
+    const ADMIN_AT = new Date('2026-10-19T08:00:00.000Z');
+    const REMOVED_AT = new Date('2026-10-19T08:30:00.000Z');
+    const ROTATED_AT = new Date('2026-10-19T09:00:00.000Z');
+    const row = {
+      id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: false,
+      adminDisabledAt: ADMIN_AT, creatorRemovedAt: REMOVED_AT,
+      createdAt: CREATED_AT, lastUsedAt: null, lastRotatedAt: ROTATED_AT,
+      createdBy: null,
+      lastRotatedBy: { id: 'u-2', username: 'bob', displayName: 'Bob', email: 'leak@example.test' },
+    };
+    const out = toWebhook(row);
+    expect(out.adminDisabledAt).toBe('2026-10-19T08:00:00.000Z');
+    expect(out.creatorRemovedAt).toBe('2026-10-19T08:30:00.000Z');
+    expect(out.lastRotatedAt).toBe('2026-10-19T09:00:00.000Z');
+    // whitelisted like createdBy: nothing but the three public fields
+    expect(out.lastRotatedBy).toEqual({ id: 'u-2', username: 'bob', displayName: 'Bob' });
+  });
+
+  it('keeps a deleted creator, a never-used and a never-rotated webhook as null', () => {
     const out = toWebhook({
       id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'github', enabled: true,
-      createdAt: CREATED_AT, lastUsedAt: null, createdBy: null,
+      adminDisabledAt: null, creatorRemovedAt: null,
+      createdAt: CREATED_AT, lastUsedAt: null, lastRotatedAt: null, createdBy: null, lastRotatedBy: null,
     });
     expect(out.createdBy).toBeNull();
     expect(out.lastUsedAt).toBeNull();
+    expect(out.lastRotatedAt).toBeNull();
+    expect(out.lastRotatedBy).toBeNull();
+    expect(out.adminDisabledAt).toBeNull();
+    expect(out.creatorRemovedAt).toBeNull();
   });
 });
 

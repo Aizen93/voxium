@@ -3,7 +3,7 @@ import type { Mock } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { AxiosError, type AxiosResponse } from 'axios';
-import type { Channel, Webhook } from '@voxium/shared';
+import type { Channel, Webhook, WebhookTarget } from '@voxium/shared';
 
 /**
  * Server settings → Integrations. The list is the SERVER's: fetched on
@@ -66,8 +66,10 @@ const SECRET = 'a3f1'.repeat(16);
 const SECRET_ROTATED = '9e0c'.repeat(16);
 const hook = (id: string, extra: Partial<Webhook> = {}): Webhook => ({
   id, serverId: 'srv-1', channelId: 'ch-1', name: id === 'wh-1' ? 'CI' : 'Deploy bot', type: 'generic', enabled: true,
-  createdBy: { id: 'u-1', username: 'alice', displayName: 'Alice' }, createdAt: '2026-10-01T00:00:00.000Z', lastUsedAt: null, ...extra,
+  createdBy: { id: 'u-1', username: 'alice', displayName: 'Alice' }, createdAt: '2026-10-01T00:00:00.000Z', lastUsedAt: null,
+  adminDisabledAt: null, creatorRemovedAt: null, lastRotatedAt: null, lastRotatedBy: null, ...extra,
 });
+const target = (id: string, name: string, position = 0): WebhookTarget => ({ id, name, categoryId: null, position });
 
 function axiosError(status: number, error: string): AxiosError {
   return new AxiosError('Request failed', String(status), undefined, undefined, {
@@ -83,6 +85,10 @@ let maxWebhooks: number;
 let listAnswer: (() => Promise<unknown>) | null;
 const listBody = () => ({ success: true, data: list, ...(listTotal === 'absent' ? {} : { total: listTotal ?? list.length }) });
 const listCalls = () => mockGet.mock.calls.filter(([url]) => url === '/servers/srv-1/webhooks').length;
+// The create picker's list (GET …/webhooks/targets): what the server's create check accepts for this caller
+let targets: WebhookTarget[];
+let targetsAnswer: (() => Promise<unknown>) | null;
+const targetsCalls = () => mockGet.mock.calls.filter(([url]) => url === '/servers/srv-1/webhooks/targets').length;
 
 let container: HTMLDivElement;
 let root: Root;
@@ -136,8 +142,11 @@ beforeEach(() => {
   listTotal = null;
   maxWebhooks = 10;
   listAnswer = null;
+  targets = [target('ch-1', 'general', 0), target('ch-2', 'deploys', 1)];
+  targetsAnswer = null;
   mockGet.mockImplementation((url: string) => {
     if (url === '/servers/srv-1/webhooks') return listAnswer ? listAnswer() : Promise.resolve({ data: listBody() });
+    if (url === '/servers/srv-1/webhooks/targets') return targetsAnswer ? targetsAnswer() : Promise.resolve({ data: { success: true, data: targets } });
     if (url === '/servers/srv-1/limits') {
       return Promise.resolve({ data: { success: true, data: { maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: maxWebhooks } } });
     }
@@ -311,6 +320,7 @@ describe('IntegrationsTab — create and the copy-once panel', () => {
 
   it('with no eligible channel the dialog says so and cannot submit', async () => {
     channels = [channel('ch-sec', 'vault', { secure: true }), channel('ch-voice', 'Lounge', { type: 'voice' })];
+    targets = [];
     await render();
     await click(q('[data-testid="webhook-new"]'));
     expect(q('[data-testid="webhook-no-channels"]')!.textContent).toBe('webhooks.create.noChannels');
@@ -1048,5 +1058,311 @@ describe('IntegrationsTab — channel:deleted (a cascade deletes the webhooks, n
     act(() => root.unmount());
     expect(socket.off).toHaveBeenCalledWith('channel:deleted', handler);
     root = createRoot(container);
+  });
+});
+
+describe('IntegrationsTab — the create picker asks the server (/webhooks/targets)', () => {
+  const pickerOptions = () => [...(q('[data-testid="webhook-create-channel"]') as HTMLSelectElement).options].map((o) => [o.value, o.textContent]);
+  const deletedHandler = () => socket.on.mock.calls.filter(([e]) => e === 'channel:deleted').map(([, h]) => h as (d: { channelId: string; serverId: string }) => void)[0];
+
+  it('fetches when the dialog opens (not before) and offers exactly the answer, in its order, with no filter of its own', async () => {
+    // the store would offer ch-1 and ch-2; the server says this caller can bind
+    // ch-2 only, plus a channel the store has not loaded: the answer wins
+    targets = [target('ch-2', 'deploys', 0), target('ch-ops', 'ops', 1)];
+    await render();
+    expect(targetsCalls()).toBe(0);
+    await click(q('[data-testid="webhook-new"]'));
+    expect(targetsCalls()).toBe(1);
+    expect(pickerOptions()).toEqual([['ch-2', '#deploys'], ['ch-ops', '#ops']]);
+  });
+
+  it('the POST carries the picked target; the first one by default', async () => {
+    targets = [target('ch-2', 'deploys', 0), target('ch-ops', 'ops', 1)];
+    mockPost.mockResolvedValue({ data: { success: true, data: { ...hook('wh-new'), token: 'tok-1' } } });
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    await type(q('#webhook-name') as HTMLInputElement, 'CI');
+    await click(q('[data-testid="webhook-create-submit"]'));
+    expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/webhooks', { channelId: 'ch-2', name: 'CI', type: 'generic' });
+  });
+
+  it('loading: a status line instead of the select, and nothing to submit until the answer', async () => {
+    let answer!: (v: unknown) => void;
+    targetsAnswer = () => new Promise((r) => { answer = r; });
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    const loading = q('[data-testid="webhook-channels-loading"]')!;
+    expect(loading.textContent).toBe('webhooks.create.loadingChannels');
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(q('[data-testid="webhook-create-channel"]')).toBeNull();
+    expect(q('[data-testid="webhook-no-channels"]')).toBeNull();
+    expect((q('[data-testid="webhook-create-submit"]') as HTMLButtonElement).disabled).toBe(true);
+    // Enter in the name field cannot post either
+    await type(q('#webhook-name') as HTMLInputElement, 'CI');
+    await act(async () => { (q('[data-testid="webhook-create-dialog"] form') as HTMLFormElement).requestSubmit(); });
+    expect(mockPost).not.toHaveBeenCalled();
+
+    await act(async () => { answer({ data: { success: true, data: [target('ch-2', 'deploys')] } }); });
+    await flush();
+    expect(q('[data-testid="webhook-channels-loading"]')).toBeNull();
+    expect(pickerOptions()).toEqual([['ch-2', '#deploys']]);
+    expect((q('[data-testid="webhook-create-submit"]') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a failed fetch falls back to the visible plaintext text channels (logged, not toasted); the server\'s refusal stays the authority', async () => {
+    targetsAnswer = () => Promise.reject(axiosError(500, 'boom'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    expect(pickerOptions()).toEqual([['ch-1', '#general'], ['ch-2', '#deploys']]);
+    expect(warn).toHaveBeenCalledWith('[Integrations] Failed to load webhook targets, offering the visible text channels:', 'Request failed');
+    expect(toastError).not.toHaveBeenCalled();
+
+    // the fallback cannot know SEND_MESSAGES: the create check answers, translated
+    mockPost.mockRejectedValue(axiosError(403, 'You do not have permission to send messages in this channel'));
+    await type(q('#webhook-name') as HTMLInputElement, 'CI');
+    await click(q('[data-testid="webhook-create-submit"]'));
+    expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/^serverErrors\.noPermissionSendMessages\{/));
+    expect(q('[data-testid="webhook-create-dialog"]')).not.toBeNull();
+    warn.mockRestore();
+  });
+
+  it('a malformed answer (not a list) falls back the same way', async () => {
+    targetsAnswer = () => Promise.resolve({ data: { success: true, data: { channels: [] } } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    expect(pickerOptions()).toEqual([['ch-1', '#general'], ['ch-2', '#deploys']]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('the flag-off 403 on the fetch flips the tab off, with no toast and nothing logged', async () => {
+    targetsAnswer = () => Promise.reject(axiosError(403, 'Webhooks are currently disabled'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    expect(q('[data-testid="integrations-off"]')).not.toBeNull();
+    expect(q('[data-testid="webhook-create-dialog"]')).toBeNull();
+    expect(toastError).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('every opening asks again (a role change in between moves the list)', async () => {
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    await key('Escape');
+    targets = [target('ch-2', 'deploys')];
+    await click(q('[data-testid="webhook-new"]'));
+    expect(targetsCalls()).toBe(2);
+    expect(pickerOptions()).toEqual([['ch-2', '#deploys']]);
+  });
+
+  it('a stale answer (from an earlier opening) never lands on a newer one', async () => {
+    const answers: Array<(v: unknown) => void> = [];
+    targetsAnswer = () => new Promise((r) => { answers.push(r); });
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    await key('Escape');
+    await click(q('[data-testid="webhook-new"]'));
+    expect(answers).toHaveLength(2);
+    await act(async () => { answers[1]({ data: { success: true, data: [target('ch-2', 'deploys')] } }); });
+    await flush();
+    await act(async () => { answers[0]({ data: { success: true, data: [target('ch-1', 'general')] } }); });
+    await flush();
+    expect(pickerOptions()).toEqual([['ch-2', '#deploys']]);
+  });
+
+  it('channel:deleted for this server while it is open asks again: the deleted channel leaves the picker, the choice falls back', async () => {
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    await pick(q('[data-testid="webhook-create-channel"]') as HTMLSelectElement, 'ch-2');
+    targets = [target('ch-1', 'general')];
+    await act(async () => { deletedHandler()({ channelId: 'ch-2', serverId: 'srv-1' }); });
+    await flush();
+    expect(targetsCalls()).toBe(2);
+    expect(pickerOptions()).toEqual([['ch-1', '#general']]);
+    expect((q('[data-testid="webhook-create-channel"]') as HTMLSelectElement).value).toBe('ch-1');
+  });
+
+  it('with the dialog closed, channel:deleted and a reconnect refetch the list only', async () => {
+    await render();
+    await act(async () => { deletedHandler()({ channelId: 'ch-2', serverId: 'srv-1' }); });
+    await act(async () => { reconnect.callbacks[0](); });
+    await flush();
+    expect(listCalls()).toBe(3);
+    expect(targetsCalls()).toBe(0);
+  });
+
+  it('a reconnect while it is open asks again too', async () => {
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    await act(async () => { reconnect.callbacks[0](); });
+    await flush();
+    expect(targetsCalls()).toBe(2);
+  });
+});
+
+describe('IntegrationsTab — a webhook an administrator disabled', () => {
+  const AT = '2026-10-18T09:00:00.000Z';
+
+  it('a badge says so (with why on hover); the Enable control is shown but disabled, with the reason as its tooltip', async () => {
+    list = [hook('wh-1', { enabled: false, adminDisabledAt: AT })];
+    await render();
+    const chip = inRow('wh-1', 'webhook-admin-disabled')!;
+    expect(chip.textContent).toBe('webhooks.adminDisabledChip');
+    expect(chip.title).toBe('webhooks.adminDisabledHint');
+    // the badge replaces the plain "Disabled" chip
+    expect(inRow('wh-1', 'webhook-disabled')).toBeNull();
+    const toggle = inRow('wh-1', 'webhook-toggle') as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.getAttribute('aria-label')).toBe('webhooks.actions.enable');
+    expect(toggle.title).toBe('webhooks.adminDisabledHint');
+    // rotate and delete stay the owner's
+    expect((inRow('wh-1', 'webhook-rotate') as HTMLButtonElement).disabled).toBe(false);
+    expect((inRow('wh-1', 'webhook-delete') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a click on the disabled control sends no PATCH, even dispatched past the disabled attribute', async () => {
+    list = [hook('wh-1', { enabled: false, adminDisabledAt: AT })];
+    await render();
+    const toggle = inRow('wh-1', 'webhook-toggle') as HTMLButtonElement;
+    await click(toggle);
+    expect(mockPatch).not.toHaveBeenCalled();
+    // the handler refuses on its own, should the attribute ever be lost
+    toggle.disabled = false;
+    await click(toggle);
+    expect(mockPatch).not.toHaveBeenCalled();
+    expect(listCalls()).toBe(1);
+  });
+
+  it('the administrator wins over a removed creator: no rotate-then-enable advice', async () => {
+    list = [hook('wh-1', { enabled: false, adminDisabledAt: AT, creatorRemovedAt: AT })];
+    await render();
+    expect(inRow('wh-1', 'webhook-admin-disabled')).not.toBeNull();
+    expect(inRow('wh-1', 'webhook-creator-removed')).toBeNull();
+  });
+
+  it("an enable refused because an administrator disabled it meanwhile: translated toast, and the refetch shows the badge", async () => {
+    list = [hook('wh-1', { enabled: false })];
+    await render();
+    mockPatch.mockRejectedValue(axiosError(403, 'This webhook was disabled by an administrator'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    list = [hook('wh-1', { enabled: false, adminDisabledAt: AT })];
+    await click(inRow('wh-1', 'webhook-toggle'));
+    expect(mockPatch).toHaveBeenCalledWith('/servers/srv-1/webhooks/wh-1', { enabled: true });
+    expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/^serverErrors\.webhookAdminDisabled\{/));
+    expect(inRow('wh-1', 'webhook-admin-disabled')).not.toBeNull();
+    expect((inRow('wh-1', 'webhook-toggle') as HTMLButtonElement).disabled).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('an enable without SEND_MESSAGES on the channel is the server\'s refusal, translated', async () => {
+    list = [hook('wh-1', { enabled: false })];
+    mockPatch.mockRejectedValue(axiosError(403, 'You do not have permission to send messages in this channel'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(inRow('wh-1', 'webhook-toggle'));
+    expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/^serverErrors\.noPermissionSendMessages\{/));
+    warn.mockRestore();
+  });
+});
+
+describe('IntegrationsTab — a webhook whose creator was removed', () => {
+  const AT = '2026-10-18T12:00:00.000Z';
+  const onDay = (iso: string) => new Intl.DateTimeFormat('en', { dateStyle: 'medium' }).format(new Date(iso));
+
+  it('a notice with the date says why it is off and to rotate first; the row is plainly disabled, enabling stays allowed', async () => {
+    list = [hook('wh-1', { enabled: false, creatorRemovedAt: AT })];
+    await render();
+    const notice = inRow('wh-1', 'webhook-creator-removed')!;
+    expect(notice.getAttribute('role')).toBe('note');
+    expect(inRow('wh-1', 'webhook-creator-removed-text')!.textContent).toBe(`webhooks.creatorRemoved${JSON.stringify({ date: onDay(AT) })}`);
+    expect(inRow('wh-1', 'webhook-disabled')!.textContent).toBe('webhooks.disabledChip');
+    expect(inRow('wh-1', 'webhook-admin-disabled')).toBeNull();
+
+    mockPatch.mockResolvedValue({ data: { success: true, data: hook('wh-1') } });
+    const toggle = inRow('wh-1', 'webhook-toggle') as HTMLButtonElement;
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.title).toBe('webhooks.actions.enable');
+    await click(toggle);
+    expect(mockPatch).toHaveBeenCalledWith('/servers/srv-1/webhooks/wh-1', { enabled: true });
+  });
+
+  it('its Rotate is the usual flow: the confirm, POST /rotate, then the copy-once panel', async () => {
+    list = [hook('wh-1', { enabled: false, creatorRemovedAt: AT })];
+    mockPost.mockResolvedValue({ data: { success: true, data: { ...hook('wh-1'), token: 'tok-fresh' } } });
+    await render();
+    const rotate = inRow('wh-1', 'webhook-creator-removed-rotate')!;
+    expect(rotate.tagName).toBe('BUTTON');
+    expect(rotate.textContent).toBe('webhooks.actions.rotate');
+    await click(rotate);
+    expect(q('[data-testid="webhook-rotate-dialog"]')!.textContent).toContain('webhooks.rotate.body{"name":"CI"}');
+    expect(mockPost).not.toHaveBeenCalled();
+    await click(q('[data-testid="webhook-rotate-dialog-confirm"]'));
+    expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/webhooks/wh-1/rotate');
+    expect(q('[data-testid="webhook-reveal"]')!.textContent).toContain('webhooks.reveal.rotatedTitle{"name":"CI"}');
+    expect(q('[data-testid="webhook-reveal-url"]')!.textContent).toBe('http://api.test/api/v1/webhooks/wh-1/tok-fresh');
+    expect(listCalls()).toBe(2);
+  });
+
+  it('its Rotate is disabled while the row has a request in flight', async () => {
+    list = [hook('wh-1', { enabled: false, creatorRemovedAt: AT })];
+    mockPatch.mockImplementation(() => new Promise(() => {}));
+    await render();
+    await click(inRow('wh-1', 'webhook-toggle'));
+    expect((inRow('wh-1', 'webhook-creator-removed-rotate') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('an unparsable date still renders the notice, without the date', async () => {
+    list = [hook('wh-1', { enabled: false, creatorRemovedAt: 'garbage' })];
+    await render();
+    expect(inRow('wh-1', 'webhook-creator-removed-text')!.textContent).toBe('webhooks.creatorRemovedUndated');
+  });
+
+  it('no mark, no notice (and none for an older server that sends no such field)', async () => {
+    const legacy = { ...hook('wh-2', { enabled: false }) } as Partial<Webhook>;
+    delete legacy.adminDisabledAt;
+    delete legacy.creatorRemovedAt;
+    delete legacy.lastRotatedAt;
+    delete legacy.lastRotatedBy;
+    list = [hook('wh-1'), legacy as Webhook];
+    await render();
+    for (const id of ['wh-1', 'wh-2']) {
+      expect(inRow(id, 'webhook-creator-removed')).toBeNull();
+      expect(inRow(id, 'webhook-admin-disabled')).toBeNull();
+      expect(inRow(id, 'webhook-rotated')).toBeNull();
+    }
+    expect((inRow('wh-2', 'webhook-toggle') as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('IntegrationsTab — the last rotation', () => {
+  const twoHoursAgo = () => new Date(Date.now() - 2 * 3_600_000).toISOString();
+
+  it('"rotated <when> by <name>" next to the last use', async () => {
+    list = [hook('wh-1', { lastRotatedAt: twoHoursAgo(), lastRotatedBy: { id: 'u-2', username: 'bob', displayName: 'Bob' } })];
+    await render();
+    const rotated = inRow('wh-1', 'webhook-rotated')!;
+    expect(rotated.textContent).toBe('webhooks.rotatedBy{"when":"2 hours ago","name":"Bob"}');
+    // after the last-use line, in the same meta line
+    expect(inRow('wh-1', 'webhook-last-used')!.parentElement).toBe(rotated.parentElement);
+    expect(inRow('wh-1', 'webhook-last-used')!.compareDocumentPosition(rotated) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('the rotator\'s account is gone: the time alone', async () => {
+    list = [hook('wh-1', { lastRotatedAt: twoHoursAgo(), lastRotatedBy: null })];
+    await render();
+    expect(inRow('wh-1', 'webhook-rotated')!.textContent).toBe('webhooks.rotated{"when":"2 hours ago"}');
+  });
+
+  it('never rotated, or an unparsable date: no line, and the row still renders', async () => {
+    list = [hook('wh-1'), hook('wh-2', { lastRotatedAt: 'garbage', lastRotatedBy: { id: 'u-2', username: 'bob', displayName: 'Bob' } })];
+    await render();
+    expect(inRow('wh-1', 'webhook-rotated')).toBeNull();
+    expect(inRow('wh-2', 'webhook-rotated')).toBeNull();
+    expect(inRow('wh-2', 'webhook-name')!.textContent).toBe('Deploy bot');
   });
 });

@@ -127,11 +127,34 @@ describe('neutraliseAutolinks', () => {
     expect(bareLinkRuns(out)).toEqual([]);
   });
 
-  it('stays linear on a long run of address characters without an @', () => {
-    const started = Date.now();
-    neutraliseAutolinks('a'.repeat(200_000));
-    neutraliseAutolinks(`https://${')'.repeat(200_000)}`);
-    expect(Date.now() - started).toBeLessThan(1000);
+  /** The fastest of `rounds` timings of one call, each round averaged over `batch` calls. */
+  function fastestPerCallMs(text: string, batch: number, rounds = 5): number {
+    neutraliseAutolinks(text); // warm-up: the first call also pays for compilation
+    let fastest = Infinity;
+    for (let round = 0; round < rounds; round++) {
+      const started = performance.now();
+      for (let i = 0; i < batch; i++) neutraliseAutolinks(text);
+      fastest = Math.min(fastest, (performance.now() - started) / batch);
+    }
+    return fastest;
+  }
+
+  // A growth ratio, not a wall-clock bound: a slow or busy runner slows both
+  // sizes alike, so only how the cost grows is compared. Ten times the input
+  // costs about ten times the time when the scan is linear and about a
+  // hundred times when it backtracks quadratically; 30x sits between them
+  // with margin on both sides. Each timing is the fastest round (GC pauses and
+  // other workers only ever add time), and the short input is timed over a
+  // batch of calls so the timer's resolution cannot dominate it.
+  it.each([
+    ['a long run of address characters without an @', (n: number) => 'a'.repeat(n)],
+    ['a URL followed by a long run of closing parentheses', (n: number) => `https://${')'.repeat(n)}`],
+  ])('stays linear on %s', (_label, input) => {
+    const small = fastestPerCallMs(input(20_000), 10);
+    const large = fastestPerCallMs(input(200_000), 1);
+    expect(large).toBeLessThan(small * 30);
+    // a sanity ceiling only: a hang still fails, a slow runner does not
+    expect(large).toBeLessThan(5000);
   });
 });
 

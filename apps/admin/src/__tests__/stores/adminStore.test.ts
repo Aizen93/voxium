@@ -119,7 +119,8 @@ describe('adminStore — servers and directory curation', () => {
 describe('adminStore — server webhooks (moderation)', () => {
   const WH: AdminWebhook = {
     id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: true,
-    createdBy: null, createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: null, channelName: 'general',
+    adminDisabledAt: null, creatorRemovedAt: null,
+    createdBy: null, createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: null, lastRotatedAt: null, lastRotatedBy: null, channelName: 'general',
   };
   const refusal = (status: number, error: string) => new AxiosError('Request failed', String(status), undefined, undefined, {
     status, statusText: '', headers: {}, config: {} as never, data: { success: false, error },
