@@ -5,6 +5,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
+import { AppTag } from '../common/AppTag';
 import { MentionAutocomplete, getMentionQuery, handleMentionKeyDown } from './MentionAutocomplete';
 import { api } from '../../services/api';
 import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME } from '@voxium/shared';
@@ -404,6 +405,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           <div className="min-w-0 flex-1 text-xs text-vox-text-secondary">
             <span className="text-vox-text-muted">{t('messageInput.replyingTo')} </span>
             <span className="font-semibold text-vox-text-primary">{replyingTo.author.displayName}</span>
+            {/* A webhook names itself on every post: the APP tag tells it from a
+                member here as in the quote and the header (MessageItem); on an
+                encrypted or DM row the claim is the server's, so it is ignored */}
+            {replyingTo.author.isWebhook === true && !replyingTo.encrypted && !replyingTo.conversationId && <AppTag />}
             <span className="ml-2 truncate text-vox-text-muted">
               {replyingTo.content.length > 80 ? replyingTo.content.slice(0, 80) + '...' : replyingTo.content}
             </span>

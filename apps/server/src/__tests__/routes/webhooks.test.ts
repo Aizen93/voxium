@@ -1158,6 +1158,25 @@ describe('PATCH /servers/:serverId/webhooks/:webhookId', () => {
 describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
   const rotate = (id = 'wh-1') => request(app).post(`${BASE}/${id}/rotate`);
 
+  it('on a channel the caller can see but not SEND in: 403, nothing rotated, no token, nothing emitted', async () => {
+    // A read-only announcements channel: VIEW granted, SEND_MESSAGES refused by an override
+    h.hasChannelPermission.mockImplementation(async (...args: unknown[]) => args[3] !== Permissions.SEND_MESSAGES);
+    const res = await rotate();
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ success: false, error: 'You do not have permission to send messages in this channel' });
+    expect(res.body).not.toHaveProperty('data');
+    expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('asks VIEW first (a hidden channel stays a 404), then SEND_MESSAGES on the webhook\'s own channel, before minting', async () => {
+    await rotate();
+    const calls = h.hasChannelPermission.mock.calls as unknown[][];
+    expect(calls.map((c) => c[3])).toEqual([Permissions.VIEW_CHANNEL, Permissions.SEND_MESSAGES]);
+    expect(calls[1][1]).toBe(calls[0][1]);
+    expect(prismaMock.webhook.update).toHaveBeenCalledTimes(1);
+  });
+
   it('mints a new token and stores only its hash, replacing the old one', async () => {
     // The stored row carries a known hash: the update must replace it, never copy it
     const oldHash = sha256('the-old-token');

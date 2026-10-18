@@ -150,14 +150,6 @@ export const EMPTY_DIRECTORY: DirectoryState = { serverId: null, rows: [], total
 
 /** How long unknown ids are collected before one lookup request goes out. */
 export const MEMBER_LOOKUP_DEBOUNCE_MS = 300;
-/**
- * The shape `/members/lookup` accepts for every id (identical to the
- * server's, both from @voxium/shared's OPAQUE_ID_RE). Anything else never enters the
- * queue: one bad id 400s the WHOLE batch, and three failures in a row drop
- * the queue for every human author in it. A webhook-authored message carries
- * `webhook:<id>` / `webhook:deleted` — the colon is there on purpose so it can
- * never be a user id — and it must not cost the real authors their rows.
- */
 /** After a failed lookup, how long before the next one may go out. */
 const MEMBER_LOOKUP_BACKOFF_MS = 10_000;
 /** Known rows past this many: offline rows are dropped, oldest first (the viewer is online while here). */

@@ -1198,6 +1198,7 @@
     "webhookEnabledBoolean": "Ungültiger Wert für „aktiviert“",
     "webhookNameEmpty": "Der Webhook-Name darf nicht leer sein",
     "webhookNameTooLong": "Der Webhook-Name darf höchstens {{max}} Zeichen lang sein",
+    "webhookNameInvalid": "Der Webhook-Name enthält nicht unterstützte Zeichen",
     "webhookCap": "Dieser Server hat sein Webhook-Limit erreicht (maximal {{max}})",
     "channelNotFound": "Kanal nicht gefunden",
     "tooManyRequests": "Zu viele Anfragen. Bitte versuche es später erneut."

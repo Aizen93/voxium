@@ -11,20 +11,7 @@ import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
 import { extractMentionIds, resolveMentionsForServer, batchResolveMentions, attachMentions } from '../utils/mentions';
 import { hasChannelPermission } from '../utils/permissionCalculator';
 import { shapeMessageRow, isWebhookRow } from '../utils/messageAuthor';
-
-const attachmentSelect = {
-  select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
-} as const;
-
-const authorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
-} as const;
-
-// webhookId/webhookName: a quoted webhook message has no user author, and
-// shapeMessageRow() needs both to synthesise one (utils/messageAuthor.ts)
-const replyToSelect = {
-  select: { id: true, content: true, webhookId: true, webhookName: true, author: authorSelect },
-} as const;
+import { authorSelect, attachmentSelect, replyToSelect } from '../utils/messageSelect';
 
 export const messageRouter = Router({ mergeParams: true });
 

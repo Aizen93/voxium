@@ -15,7 +15,7 @@ import {
   prepareOutgoingChannelMessage,
   cacheSentChannelPlaintext,
 } from '../services/e2e/channelCrypto';
-import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
+import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, WEBHOOK_AUTHOR_ID_PREFIX } from '@voxium/shared';
 import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMeta } from '@voxium/shared';
 
 // Track typing timers per user to prevent leaks
@@ -479,7 +479,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   removeWebhookMessages: (channelId: string, webhookId: string) => {
     // BOTH ids must match: chatStore is shared with DMs, and another
     // webhook's rows (or a human's) in the same channel stay
-    const quotedAuthorId = `webhook:${webhookId}`;
+    const quotedAuthorId = WEBHOOK_AUTHOR_ID_PREFIX + webhookId;
     set((state) => ({
       messages: state.messages
         .filter((m) => !(m.channelId === channelId && m.webhookId === webhookId))

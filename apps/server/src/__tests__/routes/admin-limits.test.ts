@@ -158,6 +158,13 @@ describe('PUT /admin/limits/global', () => {
     expect(prismaMock.globalConfig.upsert.mock.calls[0][0].update).toEqual({ maxChannelsPerServer: 30 });
     expect(res.body.data.maxWebhooksPerServer).toBe(10);
   });
+
+  it.each([[null], [''], ['abc'], [2.5], [true]])('refuses %s with a 400: never a silent 0, which would freeze creation platform-wide', async (input) => {
+    const res = await put({ maxWebhooksPerServer: input });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'maxWebhooksPerServer must be an integer' });
+    expect(prismaMock.globalConfig.upsert).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /admin/limits/servers/:serverId', () => {

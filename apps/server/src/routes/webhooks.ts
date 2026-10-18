@@ -4,8 +4,9 @@ import { authenticate, requireVerifiedEmail, requireConsent } from '../middlewar
 import { requireFeature } from '../middleware/requireFeature';
 import { rateLimitWebhookManage, rateLimitWebhookRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, ServiceUnavailableError, prismaErrorCode } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
+import { newWebhookToken, hashWebhookTokenHex } from '../utils/webhookToken';
 import { isSecretBoxConfigured, sealSecret } from '../utils/secretBox';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission, hasChannelPermission, filterVisibleChannels } from '../utils/permissionCalculator';
@@ -73,16 +74,8 @@ webhookRouter.use(async (req: Request<{ serverId: string }>, _res: Response, nex
 // delete transaction live in utils/webhookLifecycle.ts: the platform-admin
 // routes (routes/admin.ts) share them.
 
-/** 32 random bytes = 43 base64url characters (URL-safe, no padding). */
-function newToken(): string {
-  return crypto.randomBytes(32).toString('base64url');
-}
-
-/** What the database stores (sha256, hex), and what the execute route
- *  compares the presented token's hash against. */
-function hashToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
+// The token (32 random bytes, base64url) and its stored SHA-256 come from
+// utils/webhookToken.ts, shared with the execute route's check.
 
 const GITHUB_UNCONFIGURED = 'GitHub webhooks are not configured on this server';
 
@@ -145,7 +138,8 @@ async function assertChannel(userId: string, serverId: string, channelId: string
  * The webhook, if it belongs to this server AND posts to a channel the caller
  * can VIEW. Anything else answers exactly like a missing id: the list below
  * omits webhooks of hidden channels, and rotate would otherwise hand out a
- * working credential for a channel the caller cannot see.
+ * working credential for a channel the caller cannot see (rotate then asks
+ * SEND_MESSAGES on its own, as create and a move do).
  */
 async function loadOwnWebhook(
   userId: string,
@@ -163,18 +157,13 @@ async function loadOwnWebhook(
   return webhook;
 }
 
-/** Prisma's error code, when the error carries one. */
-function prismaCode(err: unknown): unknown {
-  return typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
-}
-
 /**
  * P2003 on a write that sets a channel id: the target channel was deleted
  * between assertChannel and the write (the webhook FK). Answer the missing
  * channel it now is, never a 500 with a logged stack.
  */
 function channelGoneAsNotFound(err: unknown): never {
-  if (prismaCode(err) === 'P2003') throw new NotFoundError('Channel');
+  if (prismaErrorCode(err) === 'P2003') throw new NotFoundError('Channel');
   throw err;
 }
 
@@ -195,7 +184,7 @@ async function updateOrMissing<T>(write: Promise<T>): Promise<T> {
   try {
     return await write;
   } catch (err) {
-    if (prismaCode(err) === 'P2025') throw new NotFoundError('Webhook');
+    if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Webhook');
     return channelGoneAsNotFound(err);
   }
 }
@@ -260,7 +249,7 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
     await assertChannel(userId, serverId, channelId);
 
     const limits = await getEffectiveLimits(serverId);
-    const token = newToken();
+    const token = newWebhookToken();
     // A generic webhook has no secret; a GitHub one stores only the sealed form
     const signing = type === 'github' ? newSecret() : null;
 
@@ -281,7 +270,7 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
           channelId,
           name,
           type,
-          tokenHash: hashToken(token),
+          tokenHash: hashWebhookTokenHex(token),
           secretEnc: signing ? signing.secretEnc : null,
           createdById: userId,
         },
@@ -356,11 +345,19 @@ webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Req
   try {
     const { serverId, webhookId } = req.params;
     const webhook = await loadOwnWebhook(req.user!.userId, serverId, webhookId);
+    // Rotate hands out a working credential for the webhook's channel, so it
+    // asks what create and a move ask: that the caller may SEND there (a
+    // read-only announcements channel a moderator can see but not post in).
+    // After VIEW (loadOwnWebhook), so a hidden channel's opacity is unchanged;
+    // a rename or a toggle asks neither (they mint nothing).
+    if (!await hasChannelPermission(req.user!.userId, webhook.channelId, serverId, Permissions.SEND_MESSAGES)) {
+      throw new ForbiddenError('You do not have permission to send messages in this channel');
+    }
     const isGitHub = webhook.type === 'github';
     // Before the update: without a key nothing is rotated, the old pair stays
     if (isGitHub) assertSecretBox();
 
-    const token = newToken();
+    const token = newWebhookToken();
     const signing = isGitHub ? newSecret() : null;
     // Only if it still posts to the channel loadOwnWebhook checked VIEW on:
     // a webhook moved meanwhile into a channel this caller cannot see must
@@ -368,8 +365,8 @@ webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Req
     const row = await updateOrMissing(prisma.webhook.update({
       where: { id: webhookId, channelId: webhook.channelId },
       data: signing
-        ? { tokenHash: hashToken(token), secretEnc: signing.secretEnc }
-        : { tokenHash: hashToken(token) },
+        ? { tokenHash: hashWebhookTokenHex(token), secretEnc: signing.secretEnc }
+        : { tokenHash: hashWebhookTokenHex(token) },
       select: webhookSelect,
     }));
 

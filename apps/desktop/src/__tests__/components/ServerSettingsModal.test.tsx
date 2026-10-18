@@ -38,6 +38,7 @@ vi.mock('../../components/server/MembersDirectory', () => ({ MembersDirectory: (
 
 import { api } from '../../services/api';
 import { useServerStore } from '../../stores/serverStore';
+import { resetServerPermissionsCache } from '../../hooks/useServerPermissions';
 import { ServerSettingsModal } from '../../components/server/ServerSettingsModal';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -85,6 +86,8 @@ async function render() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The hook caches an answer per account, server and fingerprint: a test must never see the previous one's
+  resetServerPermissionsCache();
   useServerStore.setState({
     servers: [server('owner-1')], members: [member('owner-1', 'owner'), member('me', 'member')], roles: [],
     joinRequestCounts: {}, joinRequests: [], joinRequestsServerId: null, bans: [], bansServerId: null,

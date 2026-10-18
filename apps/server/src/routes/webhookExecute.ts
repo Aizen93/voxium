@@ -14,8 +14,11 @@ import {
   ServiceUnavailableError,
   UnauthorizedError,
   UnsupportedMediaTypeError,
+  prismaErrorCode,
 } from '../utils/errors';
 import { shapeMessageRow } from '../utils/messageAuthor';
+import { authorSelect, attachmentSelect } from '../utils/messageSelect';
+import { hashWebhookToken } from '../utils/webhookToken';
 import { openSecret } from '../utils/secretBox';
 import { renderDiscordPayload, type RenderedWebhookMessage } from '../utils/webhooks/discordPayload';
 import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/githubFormatter';
@@ -85,19 +88,11 @@ import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/gith
 
 type ExecuteParams = { webhookId: string; token: string };
 
-// The same author/attachment shapes routes/messages.ts selects, so a webhook
-// row and a human row reach the client in one shape
-const authorSelect = {
-  select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
-} as const;
-
-const attachmentSelect = {
-  select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
-} as const;
-
-// Scalars only, so the token check costs exactly one query on a hit and on a
-// miss; the channel is read only once the token has matched
-const webhookSelect = {
+// What the token check reads: scalars only, so it costs exactly one query on
+// a hit and on a miss (the channel is read only once the token has matched),
+// and the CREDENTIAL columns among them (tokenHash, secretEnc). Never a shape a
+// response may carry: that is utils/webhookLifecycle.ts's webhookSelect.
+const credentialSelect = {
   id: true,
   tokenHash: true,
   enabled: true,
@@ -116,11 +111,11 @@ const channelSelect = {
   server: { select: { name: true } },
 } as const satisfies Prisma.ChannelSelect;
 
-type WebhookRow = Prisma.WebhookGetPayload<{ select: typeof webhookSelect }>;
+type CredentialRow = Prisma.WebhookGetPayload<{ select: typeof credentialSelect }>;
 type WebhookChannel = Prisma.ChannelGetPayload<{ select: typeof channelSelect }>;
 
 /** What res.locals.webhook carries past the token check: the row and its channel. */
-export type ExecutableWebhook = WebhookRow & { channel: WebhookChannel };
+type ExecutableWebhook = CredentialRow & { channel: WebhookChannel };
 
 /** What the route's guards leave on res.locals for the ones after them. */
 interface ExecuteLocals {
@@ -173,7 +168,7 @@ function executeRequestsOnly(req: Request, _res: Response, next: NextFunction): 
 
 /** A foreign-key failure: the webhook (or its channel) was deleted meanwhile. */
 function isForeignKeyViolation(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2003';
+  return prismaErrorCode(err) === 'P2003';
 }
 
 /**
@@ -182,7 +177,7 @@ function isForeignKeyViolation(err: unknown): boolean {
  * tampered with), is the server's fault, never the sender's. Logs the
  * webhook id and the error message only.
  */
-function openGitHubSecret(row: WebhookRow): string {
+function openGitHubSecret(row: CredentialRow): string {
   if (row.secretEnc === null) {
     console.error('[Webhooks] GitHub webhook has no secret', { webhookId: row.id });
     throw new ServiceUnavailableError('Webhook secret is not configured');
@@ -200,7 +195,7 @@ function openGitHubSecret(row: WebhookRow): string {
 
 /**
  * The body parser's verify hook: runs on the exact request bytes BEFORE they
- * are parsed. Keeps them on req.rawBody; for a GitHub row, checks
+ * are parsed, and keeps no copy of them. For a GitHub row, checks
  * X-Hub-Signature-256 over them and throws the 401 on a mismatch, so nothing
  * a sender without the secret sends is ever parsed. body-parser hands the
  * thrown error on as the same instance (http-errors keeps it and its 401
@@ -210,7 +205,6 @@ function openGitHubSecret(row: WebhookRow): string {
  */
 function verifyRawBody(req: IncomingMessage, res: ServerResponse, buf: Buffer): void {
   const request = req as Request;
-  request.rawBody = buf;
   const locals = localsOf(res);
   const webhook = locals.webhook;
   if (webhook?.type !== 'github') return;
@@ -271,10 +265,10 @@ function chargeGitHubWebhookAfterSignature(req: Request, res: Response, next: Ne
 async function loadWebhook(req: Request<ExecuteParams>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { webhookId, token } = req.params;
-    const presented = crypto.createHash('sha256').update(token, 'utf8').digest();
+    const presented = hashWebhookToken(token);
 
     const row = OPAQUE_ID_RE.test(webhookId)
-      ? await prisma.webhook.findUnique({ where: { id: webhookId }, select: webhookSelect })
+      ? await prisma.webhook.findUnique({ where: { id: webhookId }, select: credentialSelect })
       : null;
 
     // A stored hash of an unexpected shape counts as a miss, never a throw
@@ -380,7 +374,9 @@ async function recordLastUsed(webhookId: string): Promise<void> {
 
 async function executeWebhook(req: Request<ExecuteParams>, res: Response, next: NextFunction): Promise<void> {
   try {
-    const webhook = res.locals.webhook as ExecutableWebhook;
+    const webhook = localsOf(res).webhook;
+    // loadWebhook ran before this handler: the chain guarantees it, the type does not
+    if (!webhook) throw new NotFoundError('Webhook');
 
     // The delivery id helps support match a GitHub delivery log; nothing else
     // from the request headers is ever logged

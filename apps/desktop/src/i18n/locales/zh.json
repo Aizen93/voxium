@@ -1197,6 +1197,7 @@
     "webhookEnabledBoolean": "启用状态的值无效",
     "webhookNameEmpty": "Webhook 名称不能为空",
     "webhookNameTooLong": "Webhook 名称最多 {{max}} 个字符",
+    "webhookNameInvalid": "Webhook 名称包含不支持的字符",
     "webhookCap": "此服务器已达到 Webhook 数量上限（最多 {{max}} 个）",
     "channelNotFound": "未找到频道",
     "tooManyRequests": "请求过多，请稍后再试。"

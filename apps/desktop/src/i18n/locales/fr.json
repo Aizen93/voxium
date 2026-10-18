@@ -1198,6 +1198,7 @@
     "webhookEnabledBoolean": "Valeur invalide pour l'activation",
     "webhookNameEmpty": "Le nom du webhook ne peut pas être vide",
     "webhookNameTooLong": "Le nom du webhook ne peut pas dépasser {{max}} caractères",
+    "webhookNameInvalid": "Le nom du webhook contient des caractères non pris en charge",
     "webhookCap": "Ce serveur a atteint sa limite de webhooks (maximum {{max}})",
     "channelNotFound": "Salon introuvable",
     "tooManyRequests": "Trop de requêtes. Veuillez réessayer plus tard."

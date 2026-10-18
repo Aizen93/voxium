@@ -274,6 +274,9 @@ export interface Message {
   /** Set when an incoming webhook posted the message (null once the webhook
    *  is deleted: the message stays, labelled with the name it posted under). */
   webhookId?: string | null;
+  /** The name the webhook posted under, frozen at post time: what labels the
+   *  row once the webhook is deleted. Only on webhook-authored rows. */
+  webhookName?: string | null;
   mentions?: MessageAuthor[];
   attachments?: Attachment[];
   createdAt: string;

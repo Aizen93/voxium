@@ -92,6 +92,15 @@ export const WEBHOOKS_DISABLED_MESSAGE = 'Webhooks are currently disabled';
 export const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
+ * The prefix of the author id the server synthesises for a webhook-posted
+ * message (`webhook:{webhookId}`, or `webhook:deleted` once the webhook is
+ * gone; utils/messageAuthor.ts). The colon keeps it out of OPAQUE_ID_RE, so
+ * it is never looked up as a user id; the desktop matches reply quotes on it
+ * (chatStore.removeWebhookMessages).
+ */
+export const WEBHOOK_AUTHOR_ID_PREFIX = 'webhook:';
+
+/**
  * Max serialized dm:voice:signal payload the server will relay (UTF-16 chars,
  * matching the JSON.stringify length check). Signals are opaque olm1 envelopes
  * after the E2E cutover — the cap must fit a base64-inflated audio SDP with

@@ -13,7 +13,7 @@ const MARKDOWN_SPECIAL_RE = /[\\*_~`[\]()#>|]/g;
 
 // LF, VT, FF, CR, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR — built from code
 // points so no raw line-separator character sits in the source
-const LINE_BREAK_CHARS = [0x0a, 0x0b, 0x0c, 0x0d, 0x85, 0x2028, 0x2029]
+export const LINE_BREAK_CHARS = [0x0a, 0x0b, 0x0c, 0x0d, 0x85, 0x2028, 0x2029]
   .map((cp) => String.fromCharCode(cp))
   .join('');
 const LINE_BREAKS_RE = new RegExp(`[${LINE_BREAK_CHARS}]+`, 'g');
@@ -43,6 +43,23 @@ export function escapeMarkdown(text: string): string {
  */
 export function encodeHtmlEntities(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * A single-line field inside a link label: `&`, `<` and `>` as entities
+ * (rendered as the characters as typed, so a title keeps its `Option<T>` and no
+ * raw angle bracket of a field reaches a later tag-stripping pass over the
+ * whole content), then the markdown escape, so the label cannot close its link
+ * early. GFM never autolinks inside a link. Shared by both formatters: an
+ * escaping rule fixed in one must hold in the other.
+ */
+export function labelText(raw: string): string {
+  return escapeMarkdown(encodeHtmlEntities(raw));
+}
+
+/** A JSON object (not null, not an array): what a payload field must be to be read. */
+export function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // A run remark-gfm would turn into a link on its own (a GFM autolink

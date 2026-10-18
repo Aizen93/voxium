@@ -175,6 +175,7 @@ const ERROR_MAP: Record<string, string> = {
   // Shared validator (validateWebhookName) — client-side AND server-side
   'Webhook name cannot be empty': 'webhookNameEmpty',
   [`Webhook name must be at most ${LIMITS.WEBHOOK_NAME_MAX} characters`]: 'webhookNameTooLong',
+  'Webhook name contains unsupported characters': 'webhookNameInvalid',
 
   // ─── Rate limits ───────────────────────────────────────────────────────
   // The one body every limiter answers its 429 with (middleware/rateLimiter.ts),
@@ -221,7 +222,7 @@ export const DISCOVERY_ERROR_KEYS: readonly string[] = [
 export const WEBHOOK_ERROR_KEYS: readonly string[] = [
   'webhooksDisabled', 'webhookDisabled', 'webhookNotFound', 'webhookNoPermission', 'webhookTextOnly', 'webhookInvalidType',
   'webhookGithubNotConfigured', 'webhookChannelRequired', 'webhookNoFields', 'webhookEnabledBoolean', 'webhookNameEmpty',
-  'webhookNameTooLong', 'webhookCap', 'channelNotFound',
+  'webhookNameTooLong', 'webhookNameInvalid', 'webhookCap', 'channelNotFound',
 ];
 
 /**

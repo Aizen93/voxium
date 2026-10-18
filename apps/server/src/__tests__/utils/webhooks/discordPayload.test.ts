@@ -500,3 +500,16 @@ describe('formatEmbedTimestamp', () => {
     expect(err({ embeds: [{ timestamp: 'not a date' }] })).toBe('content or embeds required');
   });
 });
+
+describe('renderDiscordPayload — U+0000 (PostgreSQL refuses it: a 500 otherwise)', () => {
+  const NUL = String.fromCharCode(0);
+
+  it('drops NUL from the content and from the username override', () => {
+    expect(ok({ content: `a${NUL}b` }).content).toBe('ab');
+    expect(ok({ content: 'x', username: `CI${NUL}` }).nameOverride).toBe('CI');
+  });
+
+  it('a content of nothing but NUL is "nothing to post", never an insert that fails', () => {
+    expect(renderDiscordPayload({ content: NUL })).toEqual({ error: 'content or embeds required' });
+  });
+});

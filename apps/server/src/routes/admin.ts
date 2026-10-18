@@ -16,7 +16,7 @@ import { getGlobalLimits } from '../utils/serverLimits';
 import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { emitToModerators } from '../utils/moderatorAudience';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
@@ -1083,7 +1083,7 @@ adminRouter.patch('/webhooks/:webhookId', async (req: Request<{ webhookId: strin
     try {
       row = await prisma.webhook.update({ where: { id: webhookId }, data: { enabled }, select: webhookSelect });
     } catch (err) {
-      if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Webhook');
+      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Webhook');
       throw err;
     }
 
@@ -1186,8 +1186,17 @@ adminRouter.put('/limits/global', async (req: Request, res: Response, next: Next
     if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = Math.max(1, Math.min(500, Number(maxVoiceUsersPerChannel)));
     if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = Math.max(1, Math.min(200, Number(maxCategoriesPerServer)));
     if (maxMembersPerServer !== undefined) data.maxMembersPerServer = Math.max(0, Math.min(100000, Number(maxMembersPerServer)));
-    // 0 is a real value here: it freezes webhook creation (existing ones keep working)
-    if (maxWebhooksPerServer !== undefined) data.maxWebhooksPerServer = Math.max(0, Math.min(100, Number(maxWebhooksPerServer)));
+    // 0 is a real value here: it freezes webhook creation (existing ones keep
+    // working). So, unlike the four fields above (whose floor of 1 masks it),
+    // nothing may coerce to 0 by accident: null, '' or text is a 400, never a
+    // platform-wide freeze; a fraction is refused rather than handed to Prisma
+    if (maxWebhooksPerServer !== undefined) {
+      const n = typeof maxWebhooksPerServer === 'number'
+        ? maxWebhooksPerServer
+        : typeof maxWebhooksPerServer === 'string' && maxWebhooksPerServer.trim() !== '' ? Number(maxWebhooksPerServer) : NaN;
+      if (!Number.isInteger(n)) throw new BadRequestError('maxWebhooksPerServer must be an integer');
+      data.maxWebhooksPerServer = Math.max(0, Math.min(100, n));
+    }
 
     const config = await prisma.globalConfig.upsert({
       where: { id: 'global' },

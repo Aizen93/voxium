@@ -1202,6 +1202,7 @@
     "webhookEnabledBoolean": "قيمة التفعيل غير صالحة",
     "webhookNameEmpty": "لا يمكن أن يكون اسم خطاف الويب فارغًا",
     "webhookNameTooLong": "يجب ألا يتجاوز اسم خطاف الويب {{max}} حرفًا",
+    "webhookNameInvalid": "يحتوي اسم خطاف الويب على أحرف غير مدعومة",
     "webhookCap": "بلغ هذا الخادم الحد الأقصى لخطافات الويب ({{max}} كحد أقصى)",
     "channelNotFound": "لم يُعثر على القناة",
     "tooManyRequests": "طلبات كثيرة جدًا. يرجى المحاولة لاحقًا."

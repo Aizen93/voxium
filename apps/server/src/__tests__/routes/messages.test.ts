@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { buildMegolmEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME } from '@voxium/shared';
+import { buildMegolmEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, Permissions } from '@voxium/shared';
 import { extractMentionIds, batchResolveMentions, attachMentions, resolveMentionsForServer } from '../../utils/mentions';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -1126,6 +1126,35 @@ describe('Message Routes', () => {
       vi.mocked(batchResolveMentions).mockResolvedValue(new Map());
       vi.mocked(attachMentions).mockReturnValue([]);
       vi.mocked(extractMentionIds).mockReturnValue([]);
+    });
+
+    it('DELETE: a plain member is not the author of a webhook row (authorId null) and gets the 403; nothing deleted, nothing emitted', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeWebhookMessage());
+      mockHasChannelPermission.mockImplementation(async (...args: unknown[]) => args[3] !== Permissions.MANAGE_MESSAGES);
+
+      const res = await request(app)
+        .delete('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('You can only delete your own messages');
+      expect(prismaMock.message.delete).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalledWith('message:delete', expect.anything());
+    });
+
+    it('DELETE: MANAGE_MESSAGES deletes a webhook row (the only way to remove one post) and emits message:delete', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeWebhookMessage());
+      prismaMock.message.delete.mockResolvedValue({});
+
+      const res = await request(app)
+        .delete('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.message.delete).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
+      expect(mockEmit).toHaveBeenCalledWith('message:delete', expect.anything());
     });
 
     it('GET (standard page): synthesises the author and resolves no mentions for a webhook row, while a human row on the same page still does', async () => {

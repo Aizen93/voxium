@@ -1198,6 +1198,7 @@
     "webhookEnabledBoolean": "Valor inválido para a ativação",
     "webhookNameEmpty": "O nome do webhook não pode ficar vazio",
     "webhookNameTooLong": "O nome do webhook pode ter no máximo {{max}} caracteres",
+    "webhookNameInvalid": "O nome do webhook contém caracteres não suportados",
     "webhookCap": "Este servidor atingiu o limite de webhooks (máximo {{max}})",
     "channelNotFound": "Canal não encontrado",
     "tooManyRequests": "Muitas solicitações. Tente novamente mais tarde."

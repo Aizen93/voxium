@@ -60,6 +60,15 @@ describe('validateWebhookName', () => {
     expect(validateWebhookName('  GitHub  ')).toBeNull();
   });
 
+  it('rejects a line break or a bidi / zero-width character inside the name (one line, as a server name: it labels every post)', () => {
+    const refused = 'Webhook name contains unsupported characters';
+    expect(validateWebhookName('Alice' + String.fromCharCode(10) + 'Admin')).toBe(refused);
+    expect(validateWebhookName('Alice' + String.fromCharCode(13) + 'Admin')).toBe(refused);
+    expect(validateWebhookName('Ali' + String.fromCharCode(0x202e) + 'ce')).toBe(refused);
+    expect(validateWebhookName('Al' + String.fromCharCode(0x200b) + 'ice')).toBe(refused);
+    expect(validateWebhookName('Deploy bot (prod) #2')).toBeNull();
+  });
+
   it('accepts an ordinary name', () => {
     expect(validateWebhookName('Deploy bot')).toBeNull();
   });

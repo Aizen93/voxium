@@ -8,16 +8,24 @@ describe('redactUrl', () => {
     expect(redactUrl('/api/v1/invites/SUPERSECRET?x=1')).toBe('/api/v1/invites/[redacted]?x=1');
   });
 
-  it('redacts the token segment of the public webhook execute URL, keeping the id', () => {
+  it('redacts everything after the id of the public webhook execute URL, keeping the id', () => {
     expect(redactUrl('/api/v1/webhooks/wh_abc/SECRETTOKEN')).toBe('/api/v1/webhooks/wh_abc/[redacted]');
     expect(redactUrl('/api/v1/webhooks/wh_abc/SECRETTOKEN?wait=true')).toBe('/api/v1/webhooks/wh_abc/[redacted]?wait=true');
-    expect(redactUrl('/api/v1/webhooks/wh_abc/SECRETTOKEN/extra')).toBe('/api/v1/webhooks/wh_abc/[redacted]/extra');
+    // a trailing path goes too: the token is what matters, and over-redacting costs nothing
+    expect(redactUrl('/api/v1/webhooks/wh_abc/SECRETTOKEN/extra')).toBe('/api/v1/webhooks/wh_abc/[redacted]');
+  });
+
+  it('redacts a mis-composed sender URL too: an empty id, a dot segment, a longer path (a 404, but logged)', () => {
+    expect(redactUrl('/api/v1/webhooks//SECRETTOKEN')).toBe('/api/v1/webhooks//[redacted]');
+    expect(redactUrl('/api/v1/webhooks/wh_abc/./SECRETTOKEN')).toBe('/api/v1/webhooks/wh_abc/[redacted]');
+    expect(redactUrl('/api/v1/webhooks/wh_abc/SECRETTOKEN/more/SECRET2?x=1')).toBe('/api/v1/webhooks/wh_abc/[redacted]?x=1');
+    expect(redactedPath('/api/v1/webhooks//SECRETTOKEN?wait=true')).toBe('/api/v1/webhooks//[redacted]');
   });
 
   it('redacts upper- and mixed-case variants (Express routes case-insensitively)', () => {
     expect(redactUrl('/API/V1/WEBHOOKS/wh_abc/SECRETTOKEN')).toBe('/API/V1/WEBHOOKS/wh_abc/[redacted]');
     expect(redactUrl('/Api/v1/Webhooks/wh_abc/SECRETTOKEN?wait=true')).toBe('/Api/v1/Webhooks/wh_abc/[redacted]?wait=true');
-    expect(redactUrl('/api/V1/webHooks/wh_abc/SECRETTOKEN/extra')).toBe('/api/V1/webHooks/wh_abc/[redacted]/extra');
+    expect(redactUrl('/api/V1/webHooks/wh_abc/SECRETTOKEN/extra')).toBe('/api/V1/webHooks/wh_abc/[redacted]');
     expect(redactUrl('/API/V1/INVITES/SUPERSECRET')).toBe('/API/V1/INVITES/[redacted]');
     expect(redactUrl('/api/v1/Invites/SUPERSECRET/join')).toBe('/api/v1/Invites/[redacted]/join');
     expect(redactedPath('/API/v1/Webhooks/wh_abc/SECRETTOKEN?token=Q')).toBe('/API/v1/Webhooks/wh_abc/[redacted]');

@@ -146,3 +146,17 @@ describe('sanitizeText', () => {
     expect(sanitizeText('   ')).toBe('');
   });
 });
+
+describe('sanitizeText — U+0000', () => {
+  const NUL = String.fromCharCode(0);
+
+  it('drops NUL bytes (PostgreSQL refuses them in text: the insert would be a 500)', () => {
+    expect(sanitizeText(`a${NUL}b`)).toBe('ab');
+    expect(sanitizeText(`${NUL}${NUL}`)).toBe('');
+    expect(sanitizeText(`<b>${NUL}</b> x `)).toBe('x');
+  });
+
+  it('stripHtml itself leaves NUL alone (it strips tags only)', () => {
+    expect(stripHtml(`a${NUL}b`)).toBe(`a${NUL}b`);
+  });
+});

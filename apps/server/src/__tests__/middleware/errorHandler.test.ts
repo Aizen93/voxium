@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import { inspect } from 'util';
 import { errorHandler } from '../../middleware/errorHandler';
 import {
   AppError,
@@ -283,7 +284,7 @@ describe('errorHandler middleware — exposed client http-errors', () => {
 
     expect(res.text).not.toContain('BODYFRAGMENT');
     expect(res.text).not.toContain('Unexpected token');
-    const logged = JSON.stringify(warnSpy.mock.calls);
+    const logged = inspect(warnSpy.mock.calls, { depth: 10 });
     expect(logged).not.toContain('BODYFRAGMENT');
   });
 
@@ -305,7 +306,7 @@ describe('errorHandler middleware — exposed client http-errors', () => {
 
     await request(app).post('/api/v1/webhooks/wh_abc/SECRETTOKEN?wait=true&token=QUERYSECRET');
 
-    const logged = JSON.stringify(warnSpy.mock.calls);
+    const logged = inspect(warnSpy.mock.calls, { depth: 10 });
     expect(logged).toContain('/api/v1/webhooks/wh_abc/[redacted]');
     expect(logged).not.toContain('SECRETTOKEN');
     expect(logged).not.toContain('QUERYSECRET');
@@ -410,7 +411,7 @@ describe('errorHandler middleware — malformed URL (router param decoding)', ()
 
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0]).toEqual(['[HTTP] Malformed URL', { method: 'GET', path: '/test', status: 400 }]);
-    const logged = JSON.stringify(warnSpy.mock.calls);
+    const logged = inspect(warnSpy.mock.calls, { depth: 10 });
     expect(logged).not.toContain('SECRETSEGMENT');
     expect(logged).not.toContain('Failed to decode');
     expect(logged).not.toContain('at ');
@@ -464,7 +465,7 @@ describe('errorHandler middleware — malformed URL (router param decoding)', ()
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ success: false, error: 'Malformed URL' });
     expect(errorSpy).not.toHaveBeenCalled();
-    const logged = JSON.stringify(warnSpy.mock.calls);
+    const logged = inspect(warnSpy.mock.calls, { depth: 10 });
     expect(logged).toContain('/api/v1/webhooks/wh_abc/[redacted]');
     expect(logged).not.toContain('SECRETTOKEN');
   });

@@ -25,8 +25,14 @@ export function stripHtml(str: string): string {
   return out + str.slice(from);
 }
 
-/** Strip HTML tags and trim whitespace. Coerces non-strings to empty string. */
+// U+0000 cannot be stored in a PostgreSQL text column: the insert fails and
+// the caller gets a 500 with a logged stack. Dropped here, so neither a member's
+// message nor an incoming-webhook body (an unauthenticated caller) can turn one
+// byte into that. Built from the code point: no raw NUL in the source.
+const NUL_RE = new RegExp(String.fromCharCode(0), 'g');
+
+/** Strip HTML tags, drop NUL bytes and trim whitespace. Coerces non-strings to empty string. */
 export function sanitizeText(str: unknown): string {
   if (typeof str !== 'string') return '';
-  return stripHtml(str).trim();
+  return stripHtml(str).replace(NUL_RE, '').trim();
 }

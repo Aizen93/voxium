@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import http from 'http';
 import path from 'path';
+import { inspect } from 'util';
 import express, { type Request } from 'express';
 import request from 'supertest';
 import { LIMITS } from '@voxium/shared';
@@ -249,9 +250,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // The token is a credential: whatever a test did, it never reached a log line
+  // The token is a credential: whatever a test did, it never reached a log line.
+  // util.inspect, not JSON.stringify: a logged Error keeps its message and stack
+  // out of JSON (non-enumerable), and those are exactly where a URL would hide
   for (const spy of consoleSpies) {
-    expect(JSON.stringify(spy.mock.calls)).not.toContain(TOKEN);
+    expect(inspect(spy.mock.calls, { depth: 10 })).not.toContain(TOKEN);
   }
   vi.restoreAllMocks();
 });
@@ -449,6 +452,27 @@ describe('POST /webhooks/:id/:token — token check', () => {
     expect(prismaMock.channel.findUnique).not.toHaveBeenCalled();
   });
 
+  it('hashes the presented token and compares in constant time on EVERY miss: the dummy digest for an unknown or malformed id, the stored hash for a wrong token', async () => {
+    const compare = vi.spyOn(crypto, 'timingSafeEqual');
+
+    prismaMock.webhook.findUnique.mockResolvedValueOnce(null);
+    await post(`/api/v1/webhooks/wh_missing/${TOKEN}`).send({ content: 'x' });
+    await post(`/api/v1/webhooks/not%20a%20cuid/${TOKEN}`).send({ content: 'x' });
+    await post(`/api/v1/webhooks/${WEBHOOK_ID}/not-the-token`).send({ content: 'x' });
+
+    expect(compare).toHaveBeenCalledTimes(3);
+    const [unknownId, malformedId, wrongToken] = compare.mock.calls;
+    // what is compared is always the sha256 of the token in the URL ...
+    expect(unknownId[0]).toEqual(Buffer.from(sha256(TOKEN), 'hex'));
+    expect(wrongToken[0]).toEqual(Buffer.from(sha256('not-the-token'), 'hex'));
+    // ... against 32 zero bytes when there is no row, the stored hash when there is
+    expect(unknownId[1]).toEqual(Buffer.alloc(32));
+    expect(malformedId[1]).toEqual(Buffer.alloc(32));
+    expect(wrongToken[1]).toEqual(Buffer.from(sha256(TOKEN), 'hex'));
+    // the malformed id never reached the database
+    expect(prismaMock.webhook.findUnique).toHaveBeenCalledTimes(2);
+  });
+
   it('a valid token loads the channel AFTER the match, by the row\'s channelId', async () => {
     await post().send({ content: 'x' });
 
@@ -486,8 +510,7 @@ describe('POST /webhooks/:id/:token — token check', () => {
 
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
-    // the parser never ran: no raw bytes kept, no body
-    expect(captured?.rawBody).toBeUndefined();
+    // the parser never ran: no body
     expect(captured?.body).toBeUndefined();
   });
 
@@ -598,7 +621,7 @@ describe('POST /webhooks/:id/:token — middleware order', () => {
     const bodyUnreadWhenCharged: boolean[] = [];
     limiters.perWebhook.mockImplementationOnce((req: any, _res: any, next: any) => {
       order.push(`webhookLimiter:${req.params.webhookId}`);
-      bodyUnreadWhenCharged.push(req.body === undefined && req.rawBody === undefined);
+      bodyUnreadWhenCharged.push(req.body === undefined);
       next();
     });
 
@@ -630,7 +653,6 @@ describe('POST /webhooks/:id/:token — middleware order', () => {
     const res = await request(capturingApp).post(URL_OK).set('Content-Type', 'application/json').send('{"content":"hello"}');
 
     expect(res.status).toBe(429);
-    expect(captured?.rawBody).toBeUndefined();
     expect(captured?.body).toBeUndefined();
   });
 
@@ -693,7 +715,7 @@ describe('POST /webhooks/:id/:token — body parsing', () => {
     expect(prismaMock.message.create.mock.calls[0][0].data.content).toBe('big delivery');
   });
 
-  it('keeps the raw request bytes on req.rawBody (for the GitHub signature check)', async () => {
+  it('keeps no copy of the request bytes on the request once parsed (only req.body survives the parser)', async () => {
     let captured: Request | undefined;
     const capturingApp = createApp((req) => {
       captured = req;
@@ -703,8 +725,8 @@ describe('POST /webhooks/:id/:token — body parsing', () => {
     const res = await request(capturingApp).post(URL_OK).set('Content-Type', 'application/json').send(raw);
 
     expect(res.status).toBe(204);
-    expect(Buffer.isBuffer(captured?.rawBody)).toBe(true);
-    expect(captured?.rawBody?.toString('utf8')).toBe(raw);
+    expect(captured?.body).toEqual({ content: 'exact bytes' });
+    expect((captured as unknown as { rawBody?: unknown } | undefined)?.rawBody).toBeUndefined();
   });
 
   it('answers 400 with the renderer\'s error for a body with nothing to post', async () => {
@@ -747,7 +769,7 @@ describe('POST /webhooks/:id/:token — webhook types', () => {
 
     expect(console.debug).toHaveBeenCalledWith('[Webhooks] GitHub delivery', { webhookId: WEBHOOK_ID, delivery: 'delivery-guid-2' });
     for (const method of ['log', 'info', 'warn', 'error', 'debug'] as const) {
-      expect(JSON.stringify(vi.mocked(console[method]).mock.calls)).not.toContain('BODY_VALUE');
+      expect(inspect(vi.mocked(console[method]).mock.calls, { depth: 10 })).not.toContain('BODY_VALUE');
     }
   });
 
@@ -815,7 +837,7 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
   afterEach(() => {
     // The secret and the signatures are credentials too: never on a log line
     for (const method of ['log', 'info', 'warn', 'error', 'debug'] as const) {
-      const logged = JSON.stringify(vi.mocked(console[method]).mock.calls);
+      const logged = inspect(vi.mocked(console[method]).mock.calls, { depth: 10 });
       expect(logged).not.toContain(GH_SECRET);
       expect(logged).not.toContain(sign(PUSH_RAW).slice(7));
       expect(logged).not.toContain('acme/rocket');
@@ -943,7 +965,6 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     // JSON.parse never saw the request bytes (supertest parses only the reply)
     expect(parse.mock.calls.some(([text]) => text === raw)).toBe(false);
     expect(captured?.body).toBeUndefined();
-    expect(Buffer.isBuffer(captured?.rawBody)).toBe(true);
     expect(res.text).not.toContain('SECRET_FRAGMENT');
     expectNothingPosted();
   });
@@ -1037,10 +1058,10 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
   });
 
   it('a valid signature is charged exactly once, AFTER the parser (body parsed, signature verified) and before the insert', async () => {
-    const stateWhenCharged: Array<{ parsed: boolean; raw: boolean; verified: unknown }> = [];
+    const stateWhenCharged: Array<{ parsed: boolean; verified: unknown }> = [];
     limiters.perWebhook.mockImplementationOnce((req: any, res: any, next: any) => {
       order.push(`webhookLimiter:${req.params.webhookId}`);
-      stateWhenCharged.push({ parsed: req.body !== undefined, raw: Buffer.isBuffer(req.rawBody), verified: res.locals.signatureVerified });
+      stateWhenCharged.push({ parsed: req.body !== undefined, verified: res.locals.signatureVerified });
       next();
     });
 
@@ -1048,7 +1069,7 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
 
     expect(res.status).toBe(204);
     expect(limiters.perWebhook).toHaveBeenCalledTimes(1);
-    expect(stateWhenCharged).toEqual([{ parsed: true, raw: true, verified: true }]);
+    expect(stateWhenCharged).toEqual([{ parsed: true, verified: true }]);
     expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `webhookLimiter:${WEBHOOK_ID}`, 'create']);
     expect(limiters.refund).not.toHaveBeenCalled();
   });

@@ -2,9 +2,9 @@ import { LIMITS, validateMessageContent } from '@voxium/shared';
 import { sanitizeText } from '../sanitize';
 import {
   collapseLineBreaks,
-  encodeHtmlEntities,
   escapeLinkDestination,
-  escapeMarkdown,
+  isObject,
+  labelText,
   neutraliseAutolinks,
   safeHttpUrl,
 } from './markdown';
@@ -20,8 +20,12 @@ import {
  * IGNORED, never an error — that is what keeps every tool's payload working.
  *
  * Nothing here may make a reader's client fetch a third-party URL: avatar_url,
- * embed images/thumbnails/videos, author/footer icons are dropped. A link stays
- * a plain anchor (http/https only) the reader chooses to click.
+ * embed images/thumbnails/videos, author/footer icons are dropped. A link is a
+ * plain anchor the reader chooses to click: the embed url is pinned to http(s)
+ * here (safeHttpUrl); free text (content, description, field values) keeps its
+ * markdown links as a member's message would, and the desktop renderer
+ * (MessageContent.tsx, react-markdown's urlTransform) is what filters their
+ * schemes, exactly as for a member's message.
  *
  * Pure function: no I/O, no clock.
  */
@@ -72,10 +76,6 @@ const asIs: Encode = (text) => text;
 // displays as '<'. (Single-line fields never carry a raw '<': see labelText.)
 const encodeLt: Encode = (text) => text.replace(/</g, '&lt;');
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 /** Free text, as a human message stores it: autolinks unwrapped, tags stripped, trimmed. */
 function freeText(value: unknown): string {
   if (typeof value !== 'string') return '';
@@ -88,16 +88,8 @@ function inlineRaw(value: unknown): string {
   return collapseLineBreaks(value.replace(ANGLE_AUTOLINK_RE, '$1')).trim();
 }
 
-/**
- * A single-line field inside a link label (an embed title with a url): `&`,
- * `<` and `>` as entities — rendered as the characters as typed, so nothing
- * is stripped out of `CPU > 90% on <host>` and no raw angle bracket reaches
- * the final pass over the content — then the markdown escape, so the label
- * cannot close its link early. GFM never autolinks inside a link.
- */
-function labelText(raw: string): string {
-  return escapeMarkdown(encodeHtmlEntities(raw));
-}
+// A single-line field inside a link label (an embed title with a url) is
+// written through labelText() (./markdown): entities, then the markdown escape.
 
 /**
  * A single-line field anywhere else (a title without a url, the author name,

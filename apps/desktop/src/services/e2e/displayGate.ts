@@ -52,8 +52,7 @@ export function withoutServerAssertions(message: Message): Message {
   if (message.e2eAttachments === undefined && !message.mentions?.length && !authorClaimsWebhook && !rowClaimsWebhook) {
     return message;
   }
-  // `webhookName` is a wire field the shared type does not declare
-  const rest: Message & { webhookName?: unknown } = { ...message, mentions: [] };
+  const rest: Message = { ...message, mentions: [] };
   delete rest.e2eAttachments;
   delete rest.webhookId;
   delete rest.webhookName;

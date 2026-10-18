@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -6,7 +6,7 @@ import { toast } from '../../stores/toastStore';
 import { ImageUploadButton } from '../common/ImageUploadButton';
 import { X, Lock, Unlock } from 'lucide-react';
 import type { ResourceLimits } from '@voxium/shared';
-import { Permissions, permissionsFromString, hasPermission } from '@voxium/shared';
+import { Permissions, hasPermission } from '@voxium/shared';
 import { RoleEditor } from './RoleEditor';
 import { DiscoveryTab } from './DiscoveryTab';
 import { IntegrationsTab } from './IntegrationsTab';
@@ -15,7 +15,7 @@ import { BannedSection } from './BannedSection';
 import { MembersDirectory } from './MembersDirectory';
 import { api } from '../../services/api';
 import { getTranslatedError } from '../../utils/serverErrors';
-import { permissionsFingerprint } from '../../hooks/useServerPermissions';
+import { useServerPermissions } from '../../hooks/useServerPermissions';
 
 interface Props {
   serverId: string;
@@ -32,32 +32,16 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   // holding only MANAGE_WEBHOOKS lands on Integrations).
   const [activeTab, setActiveTab] = useState<Tab | null>(null);
 
-  const { servers, roles, fetchEffectivePermissions, fetchJoinRequests } = useServerStore();
+  const { servers, roles, fetchJoinRequests } = useServerStore();
   const pendingRequests = useServerStore((s) => s.joinRequestCounts[serverId] ?? 0);
   const currentUser = useAuthStore((s) => s.user);
   const server = servers.find((s) => s.id === serverId);
   const isOwner = server?.ownerId === currentUser?.id;
-  // Tagged with the server they were fetched for: after a switch, the previous
-  // server's bits must not open (or keep open) a tab on this one while the
-  // new answer is on its way
-  const [effectivePerms, setEffectivePerms] = useState<{ serverId: string; bits: string } | null>(null);
-
-  // Everything that can change the viewer's own permissions here (legacy
-  // role, assigned roles, those roles' bitmasks): a live role edit refetches,
-  // so a revoked bit closes its tab (see `tab` below)
-  const allMembers = useServerStore((s) => s.members);
-  const viewerMember = allMembers.find((m) => m.userId === currentUser?.id);
-  const permsKey = useMemo(() => permissionsFingerprint(viewerMember, roles), [viewerMember, roles]);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchEffectivePermissions(serverId)
-      .then((bits) => { if (!cancelled) setEffectivePerms({ serverId, bits }); })
-      .catch((err) => { console.warn('[ServerSettings] Failed to fetch permissions:', err); });
-    return () => { cancelled = true; };
-  }, [serverId, permsKey, fetchEffectivePermissions]);
-
-  const perms = effectivePerms !== null && effectivePerms.serverId === serverId ? permissionsFromString(effectivePerms.bits) : null;
+  // The viewer's effective server permissions (hooks/useServerPermissions):
+  // null until known, never another server's bits after a switch, and cached
+  // per permission fingerprint, so a live role edit refetches and a revoked
+  // bit closes its tab (see `tab` below)
+  const perms = useServerPermissions(serverId, currentUser?.id);
   const canManageRoles = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_ROLES));
   // Discovery tab: MANAGE_SERVER. Join requests + Banned: KICK_MEMBERS ("Manage members").
   const canManageServer = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_SERVER));

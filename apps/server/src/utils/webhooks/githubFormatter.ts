@@ -2,10 +2,11 @@ import crypto from 'crypto';
 import { LIMITS, validateMessageContent } from '@voxium/shared';
 import { sanitizeText } from '../sanitize';
 import {
+  LINE_BREAK_CHARS,
   collapseLineBreaks,
-  encodeHtmlEntities,
   escapeLinkDestination,
-  escapeMarkdown,
+  isObject,
+  labelText,
   neutraliseAutolinks,
   safeHttpUrl,
 } from './markdown';
@@ -63,11 +64,8 @@ const SIGNATURE_RE = /^sha256=([0-9a-fA-F]{64})$/;
 // A git object id: SHA-1 (40) or SHA-256 (64) hex; 7+ so a short id passes
 const SHA_RE = /^[0-9a-fA-F]{7,64}$/;
 const REF_PREFIX_RE = /^refs\/(?:heads|tags)\//;
-// The first line break of a commit message (LF, VT, FF, CR, NEL, U+2028,
-// U+2029 — the set collapseLineBreaks() knows), built from code points
-const LINE_BREAK_RE = new RegExp(
-  `[${[0x0a, 0x0b, 0x0c, 0x0d, 0x85, 0x2028, 0x2029].map((cp) => String.fromCharCode(cp)).join('')}]`,
-);
+// The first line break of a commit message: the set collapseLineBreaks() knows
+const LINE_BREAK_RE = new RegExp(`[${LINE_BREAK_CHARS}]`);
 // Block syntax escapeMarkdown() leaves alone and that only matters at the
 // start of a line: a list item (`- x`, `+ x`, `1. x`, `1) x`) or a setext
 // underline (`===`, `---`) would restructure the message
@@ -89,10 +87,6 @@ export function verifyGitHubSignature(rawBody: Buffer, header: string | undefine
   const presented = Buffer.from(match[1], 'hex');
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest();
   return presented.length === expected.length && crypto.timingSafeEqual(presented, expected);
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function str(value: unknown): string {
@@ -117,12 +111,8 @@ function oneLine(value: unknown, max: number): string {
 /** How a sender string is written into the markup: inside a link label, or anywhere else. */
 type Format = (raw: string) => string;
 
-/**
- * Inside a link label: `&`, `<` and `>` as entities (rendered as the
- * characters, so a title keeps its `Option<T>`), then the markdown escape —
- * the label cannot close its link early. GFM never autolinks inside a link.
- */
-const labelText: Format = (raw) => escapeMarkdown(encodeHtmlEntities(raw));
+// Inside a link label: labelText() (./markdown) — entities, then the markdown
+// escape, so the label cannot close its link early.
 
 /**
  * Anywhere else: like a label, except that every run GFM would autolink by

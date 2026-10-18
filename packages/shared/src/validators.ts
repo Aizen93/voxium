@@ -76,6 +76,11 @@ export function validateWebhookName(name: string): string | null {
   const trimmed = name.trim();
   if (trimmed.length === 0) return 'Webhook name cannot be empty';
   if (trimmed.length > LIMITS.WEBHOOK_NAME_MAX) return `Webhook name must be at most ${LIMITS.WEBHOOK_NAME_MAX} characters`;
+  // The author label of every message it posts, shown next to members' names:
+  // one line, and none of the bidi / zero-width characters that could make it
+  // read as another member's name (the same rule as a server name; the
+  // per-message username override collapses line breaks on its own path).
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(trimmed) || /[\r\n]/.test(trimmed)) return 'Webhook name contains unsupported characters';
   return null;
 }
 

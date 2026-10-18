@@ -60,6 +60,12 @@ export class ServiceUnavailableError extends AppError {
 }
 
 /** Parse a date string query parameter, throwing BadRequestError if invalid. */
+/** Prisma's error code (`P2025`, `P2003`, ...) when the error carries one. */
+export function prismaErrorCode(err: unknown): string | undefined {
+  const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
+  return typeof code === 'string' ? code : undefined;
+}
+
 export function parseDateParam(value: string, name = 'date'): Date {
   const date = new Date(value);
   if (isNaN(date.getTime())) throw new BadRequestError(`Invalid ${name} parameter`);

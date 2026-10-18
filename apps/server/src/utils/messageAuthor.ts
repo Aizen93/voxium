@@ -1,3 +1,5 @@
+import { WEBHOOK_AUTHOR_ID_PREFIX } from '@voxium/shared';
+
 /**
  * The one place a Message row's author is shaped for the wire.
  *
@@ -13,7 +15,8 @@
  * for — or looked up as — a user id.
  */
 
-export const WEBHOOK_AUTHOR_ID_PREFIX = 'webhook:';
+// From @voxium/shared: the desktop matches reply quotes on the same prefix
+export { WEBHOOK_AUTHOR_ID_PREFIX };
 /** Only reached if a row breaks the write invariant (webhook row without a name). */
 export const WEBHOOK_AUTHOR_FALLBACK_NAME = 'Webhook';
 

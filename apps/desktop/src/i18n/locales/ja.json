@@ -1197,6 +1197,7 @@
     "webhookEnabledBoolean": "有効化の値が無効です",
     "webhookNameEmpty": "ウェブフック名を入力してください",
     "webhookNameTooLong": "ウェブフック名は{{max}}文字以内にしてください",
+    "webhookNameInvalid": "ウェブフック名に使用できない文字が含まれています",
     "webhookCap": "このサーバーはウェブフックの上限に達しました（最大{{max}}）",
     "channelNotFound": "チャンネルが見つかりません",
     "tooManyRequests": "リクエストが多すぎます。しばらくしてからもう一度お試しください。"

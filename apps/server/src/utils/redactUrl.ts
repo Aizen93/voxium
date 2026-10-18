@@ -4,9 +4,13 @@
  *
  * - Invite codes: single-use bearer credentials (`/invites/:code`).
  * - Incoming-webhook tokens: `/api/v1/webhooks/:webhookId/:token` is the
- *   public execute route; the id stays (support needs it), the token segment
- *   is redacted. The management routes (`/api/v1/servers/:id/webhooks/...`)
- *   never contain `/api/v1/webhooks/`, so they are left untouched.
+ *   public execute route; the id stays (support needs it), EVERYTHING after it
+ *   is redacted: the token, and whatever a mis-composed sender URL put around
+ *   it (a dot segment, a trailing path, an empty id as in
+ *   `/api/v1/webhooks//<token>`). Such a request matches no route and is a
+ *   404, but it is still logged, with the token in it. The management routes
+ *   (`/api/v1/servers/:id/webhooks/...`) never contain `/api/v1/webhooks/`,
+ *   so they are left untouched.
  *
  * The webhook rule is deliberately NOT anchored at the start of the URL: an
  * absolute-form request target (`POST http://host/api/v1/webhooks/<id>/<token>`,
@@ -25,7 +29,7 @@
 export function redactUrl(url: string | undefined): string | undefined {
   return url
     ?.replace(/(\/invites\/)[^/?]+/i, '$1[redacted]')
-    .replace(/(\/api\/+v1\/+webhooks\/+[^/?]+\/+)[^/?]+/i, '$1[redacted]');
+    .replace(/(\/api\/+v1\/+webhooks\/+[^/?]*\/+)[^?]*/i, '$1[redacted]');
 }
 
 /** The redacted path of a URL, query string dropped (it may carry `?token=`). */
